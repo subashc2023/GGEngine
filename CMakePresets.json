@@ -1,0 +1,119 @@
+{
+  "version": 4,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 20,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "windows-clang-mingw64",
+      "displayName": "Windows Clang + MinGW-w64 (Ninja)",
+      "description": "Build with clang/clang++ targeting MinGW-w64 using a shared sysroot.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchains/clang-mingw64.cmake",
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++"
+      }
+    },
+    {
+      "name": "linux-clang-ninja",
+      "displayName": "Linux Clang (Ninja)",
+      "description": "Build with clang/clang++ on Linux using Ninja.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/linux",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++"
+      }
+    },
+    {
+      "name": "linux-clang-ninja-release-static",
+      "displayName": "Linux Clang (Ninja, Release, Static)",
+      "description": "Release build with a static Engine (no DLL) on Linux.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/linux",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "GGENGINE_BUILD_SHARED": "OFF"
+      }
+    },
+    {
+      "name": "macos-clang-ninja",
+      "displayName": "macOS Clang (Ninja)",
+      "description": "Build with clang/clang++ on macOS using Ninja.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/macos",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++"
+      }
+    },
+    {
+      "name": "macos-clang-ninja-release-static",
+      "displayName": "macOS Clang (Ninja, Release, Static)",
+      "description": "Release build with a static Engine (no DLL) on macOS.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/macos",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "GGENGINE_BUILD_SHARED": "OFF"
+      }
+    },
+    {
+      "name": "windows-clang-mingw64-release-static",
+      "displayName": "Windows Clang + MinGW-w64 (Ninja, Release, Static)",
+      "description": "Release build with a static Engine (no DLL).",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchains/clang-mingw64.cmake",
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "GGENGINE_BUILD_SHARED": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "windows-clang-mingw64-debug",
+      "displayName": "Build (Debug)",
+      "configurePreset": "windows-clang-mingw64"
+    },
+    {
+      "name": "linux-clang-ninja-debug",
+      "displayName": "Build (Linux, Debug)",
+      "configurePreset": "linux-clang-ninja"
+    },
+    {
+      "name": "linux-clang-ninja-release-static",
+      "displayName": "Build (Linux, Release, Static)",
+      "configurePreset": "linux-clang-ninja-release-static"
+    },
+    {
+      "name": "macos-clang-ninja-debug",
+      "displayName": "Build (macOS, Debug)",
+      "configurePreset": "macos-clang-ninja"
+    },
+    {
+      "name": "macos-clang-ninja-release-static",
+      "displayName": "Build (macOS, Release, Static)",
+      "configurePreset": "macos-clang-ninja-release-static"
+    },
+    {
+      "name": "windows-clang-mingw64-release-static",
+      "displayName": "Build (Release, Static)",
+      "configurePreset": "windows-clang-mingw64-release-static"
+    }
+  ]
+}

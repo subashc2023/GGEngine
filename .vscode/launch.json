@@ -1,0 +1,61 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Launch Sandbox (GDB)",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/bin/Debug-x64/Sandbox/Sandbox",
+      "args": [],
+      "cwd": "${workspaceFolder}/bin/Debug-x64/Sandbox",
+      "stopAtEntry": false,
+      "externalConsole": true,
+      "MIMode": "gdb",
+      "preLaunchTask": "Build Sandbox",
+      "windows": {
+        "program": "${workspaceFolder}\\bin\\Debug-x64\\Sandbox\\Sandbox.exe",
+        "cwd": "${workspaceFolder}\\bin\\Debug-x64\\Sandbox",
+        "MIMode": "gdb",
+        "miDebuggerPath": "C:\\msys64\\mingw64\\bin\\gdb.exe"
+      },
+      "linux": {
+        "program": "${workspaceFolder}/bin/Debug-x64/Sandbox/Sandbox",
+        "cwd": "${workspaceFolder}/bin/Debug-x64/Sandbox",
+        "MIMode": "gdb"
+      },
+      "osx": {
+        "program": "${workspaceFolder}/bin/Debug-x64/Sandbox/Sandbox",
+        "cwd": "${workspaceFolder}/bin/Debug-x64/Sandbox",
+        "MIMode": "lldb"
+      }
+    },
+    {
+      "name": "Launch Editor (GDB)",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/bin/Debug-x64/Editor/Editor",
+      "args": [],
+      "cwd": "${workspaceFolder}/bin/Debug-x64/Editor",
+      "stopAtEntry": false,
+      "externalConsole": true,
+      "MIMode": "gdb",
+      "preLaunchTask": "Build Editor",
+      "windows": {
+        "program": "${workspaceFolder}\\bin\\Debug-x64\\Editor\\Editor.exe",
+        "cwd": "${workspaceFolder}\\bin\\Debug-x64\\Editor",
+        "MIMode": "gdb",
+        "miDebuggerPath": "C:\\msys64\\mingw64\\bin\\gdb.exe"
+      },
+      "linux": {
+        "program": "${workspaceFolder}/bin/Debug-x64/Editor/Editor",
+        "cwd": "${workspaceFolder}/bin/Debug-x64/Editor",
+        "MIMode": "gdb"
+      },
+      "osx": {
+        "program": "${workspaceFolder}/bin/Debug-x64/Editor/Editor",
+        "cwd": "${workspaceFolder}/bin/Debug-x64/Editor",
+        "MIMode": "lldb"
+      }
+    }
+  ]
+}

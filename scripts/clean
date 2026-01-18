@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+os="$(uname -s 2>/dev/null || echo "")"
+
+case "$os" in
+  Linux*|Darwin*)
+    exec "$script_dir/clean.sh" "$@"
+    ;;
+  *)
+    exec "$script_dir/clean.bat" "$@"
+    ;;
+esac
