@@ -1,0 +1,53 @@
+#pragma once
+
+#include <iostream>
+#include <memory>
+#include <utility>
+#include <functional>
+#include <mutex>
+#include <condition_variable>
+#include <thread>
+#include <string>
+#include <sstream>
+#include <vector>
+#include <unordered_map>
+#include <unordered_set>
+#include <set>
+#include <map>
+#include <list>
+#include <queue>
+#include <deque>
+#include <stack>
+#include <bitset>
+#include <array>
+#include <tuple>
+#include <optional>
+#include <variant>
+#include <any>
+#include <expected>
+#include <span>
+#include <format>
+#include <source_location>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <string>
+#include <vector>
+#include <unordered_map>
+#include <sstream>
+#include <mutex>
+#include <condition_variable>
+#include <thread>
+#include <atomic>
+#include <chrono>
+#include <string>
+#include <string_view>
+#include <span>
+#include <format>
+#include <source_location>
+#include <filesystem>
+#include <fstream>
+
+#ifdef GG_PLATFORM_WINDOWS
+    #include <Windows.h>
+#endif

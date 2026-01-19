@@ -39,6 +39,8 @@ if(GGENGINE_BUILD_DLL)
         Engine/src/GGEngine/Events/ApplicationEvent.h
         Engine/src/GGEngine/Events/KeyEvent.h
         Engine/src/GGEngine/Events/MouseEvent.h
+        Engine/src/ggpch.h
+        Engine/src/ggpch.cpp
     )
     target_compile_definitions(Engine PRIVATE GG_BUILD_DLL)
 else()
@@ -53,6 +55,8 @@ else()
         Engine/src/GGEngine/Events/ApplicationEvent.h
         Engine/src/GGEngine/Events/KeyEvent.h
         Engine/src/GGEngine/Events/MouseEvent.h
+        Engine/src/ggpch.h
+        Engine/src/ggpch.cpp
     )
 endif()
 
@@ -65,6 +69,8 @@ target_link_libraries(Engine PUBLIC spdlog::spdlog)
 target_include_directories(Engine PUBLIC
     ${CMAKE_SOURCE_DIR}/Engine/src
 )
+
+target_precompile_headers(Engine PRIVATE Engine/src/ggpch.h)
 
 set_target_properties(Engine PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${BIN_ROOT}/Engine"
