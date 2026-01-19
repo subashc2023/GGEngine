@@ -1,7 +1,8 @@
 #include "Application.h"
 
-#include "GGEngine/Window.h"
+
 #include "GGEngine/Events/ApplicationEvent.h"
+#include "GGEngine/Window.h"
 #include "GGEngine/Log.h"
 
 namespace GGEngine {
@@ -15,7 +16,18 @@ namespace GGEngine {
     }
     Application::~Application() 
     {
+    }
 
+    void Application::PushLayer(Layer* layer)
+    {
+        m_LayerStack.PushLayer(layer);
+        layer->OnAttach();
+    }
+
+    void Application::PushOverlay(Layer* layer)
+    {
+        m_LayerStack.PushOverlay(layer);
+        layer->OnAttach();
     }
 
     void Application::OnEvent(Event& e)
@@ -23,6 +35,15 @@ namespace GGEngine {
         EventDispatcher dispatcher(e);
         dispatcher.Dispatch<WindowCloseEvent>(BIND_EVENT_FN(OnWindowClose));
         GG_CORE_INFO("{0}", e);
+
+        for (auto it = m_LayerStack.end(); it != m_LayerStack.begin(); )
+        {
+            (*--it)->OnEvent(e);
+            if (e.Handled())
+            {
+                break;
+            }
+        }
     }
 
    
@@ -31,6 +52,11 @@ namespace GGEngine {
     {
         while (m_Running) 
         {
+            for (Layer* layer : m_LayerStack)
+            {
+                layer->OnUpdate();
+            }
+            
             m_Window->OnUpdate();
         }
     }

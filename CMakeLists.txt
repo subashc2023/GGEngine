@@ -39,6 +39,10 @@ if(GGENGINE_BUILD_DLL)
         Engine/src/GGEngine/Events/ApplicationEvent.h
         Engine/src/GGEngine/Events/KeyEvent.h
         Engine/src/GGEngine/Events/MouseEvent.h
+        Engine/src/GGEngine/Layer.cpp
+        Engine/src/GGEngine/Layer.h
+        Engine/src/GGEngine/LayerStack.cpp
+        Engine/src/GGEngine/LayerStack.h
         Engine/src/GGEngine/Window.h
         Engine/src/Platform/Windows/WindowsWindow.h
         Engine/src/Platform/Windows/WindowsWindow.cpp
@@ -58,6 +62,10 @@ else()
         Engine/src/GGEngine/Events/ApplicationEvent.h
         Engine/src/GGEngine/Events/KeyEvent.h
         Engine/src/GGEngine/Events/MouseEvent.h
+        Engine/src/GGEngine/Layer.cpp
+        Engine/src/GGEngine/Layer.h
+        Engine/src/GGEngine/LayerStack.cpp
+        Engine/src/GGEngine/LayerStack.h
         Engine/src/GGEngine/Window.h
         Engine/src/Platform/Windows/WindowsWindow.h
         Engine/src/Platform/Windows/WindowsWindow.cpp

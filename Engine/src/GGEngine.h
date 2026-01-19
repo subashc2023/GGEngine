@@ -4,6 +4,7 @@
 
 
 #include "GGEngine/Application.h"
+#include "GGEngine/Layer.h"
 #include "GGEngine/Log.h"
 
 //-----Application entry point-----

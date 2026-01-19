@@ -1,10 +1,31 @@
 #include "GGEngine.h"
 
-class Sandbox : public GGEngine::Application {
+class ExampleLayer : public GGEngine::Layer
+{
 public:
-    Sandbox() {
+    ExampleLayer() : Layer("ExampleLayer") 
+    {
+
     }
-    ~Sandbox() {
+    void OnUpdate() override
+    {
+        GG_INFO("ExampleLayer::OnUpdate");
+    }
+    void OnEvent(GGEngine::Event& event) override
+    {
+        GG_INFO("{0}", event);
+    }
+};
+
+class Sandbox : public GGEngine::Application 
+{
+public:
+    Sandbox() 
+    {
+        PushLayer(new ExampleLayer());
+    }
+    ~Sandbox() 
+    {
     }
 };
 
