@@ -1,8 +1,19 @@
+#include "GGEngine.h"
 #include <iostream>
 
-#include "test.h"
+class Sandbox : public GGEngine::Application {
+public:
+    Sandbox() {
+        std::cout << "Sandbox created" << std::endl;
+    }
+    ~Sandbox() {
+        std::cout << "Sandbox destroyed" << std::endl;
+    }
+};
 
 int main() {
-    std::cout << "Sandbox Add(2, 3) = " << Add(2, 3) << std::endl;
+    Sandbox* sandbox = new Sandbox();
+    sandbox->Run();
+    delete sandbox;
     return 0;
 }

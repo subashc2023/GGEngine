@@ -15,19 +15,26 @@ else()
 endif()
 set(BIN_ROOT "${CMAKE_SOURCE_DIR}/bin/${BIN_CONFIG}")
 
-option(GGENGINE_BUILD_SHARED "Build Engine as a shared library" ON)
+option(GGENGINE_BUILD_DLL "Build Engine as a shared library" ON)
 
-if(GGENGINE_BUILD_SHARED)
+if(GGENGINE_BUILD_DLL)
     add_library(Engine SHARED
-        Engine/src/test.cpp
-        Engine/src/test.h
+        Engine/src/GGEngine.h
+        Engine/src/GGEngine/Application.h
+        Engine/src/GGEngine/Application.cpp
+        Engine/src/GGEngine/Core.h
     )
+    target_compile_definitions(Engine PRIVATE GG_BUILD_DLL)
 else()
     add_library(Engine STATIC
-        Engine/src/test.cpp
-        Engine/src/test.h
+        Engine/src/GGEngine.h
+        Engine/src/GGEngine/Application.h
+        Engine/src/GGEngine/Application.cpp
+        Engine/src/GGEngine/Core.h
     )
 endif()
+
+target_compile_definitions(Engine PUBLIC GG_PLATFORM_WINDOWS)
 
 target_include_directories(Engine PUBLIC
     ${CMAKE_SOURCE_DIR}/Engine/src
@@ -41,7 +48,7 @@ set_target_properties(Engine PROPERTIES
     PREFIX ""
 )
 
-if(GGENGINE_BUILD_SHARED)
+if(GGENGINE_BUILD_DLL)
     set_target_properties(Engine PROPERTIES
         WINDOWS_EXPORT_ALL_SYMBOLS ON
     )
@@ -67,7 +74,7 @@ set_target_properties(Editor PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${BIN_ROOT}/Editor"
 )
 
-if(GGENGINE_BUILD_SHARED)
+if(GGENGINE_BUILD_DLL)
     # Copy Engine DLL to Sandbox and Editor output dirs post-build
     add_custom_command(TARGET Sandbox POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
