@@ -1,5 +1,6 @@
 #include "EditorLayer.h"
 #include "Platform/Vulkan/VulkanContext.h"
+#include "GGEngine/Renderer/Pipeline.h"
 
 #include <imgui.h>
 #include <vulkan/vulkan.h>
@@ -51,10 +52,10 @@ void EditorLayer::OnRenderOffscreen()
     m_ViewportFramebuffer->BeginRenderPass(cmd);
 
     // Render triangle to framebuffer
-    VkPipeline pipeline = vkContext.GetTrianglePipeline();
-    if (pipeline != VK_NULL_HANDLE)
+    auto* pipeline = vkContext.GetTrianglePipeline();
+    if (pipeline)
     {
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        pipeline->Bind(cmd);
 
         VkViewport viewport{};
         viewport.x = 0.0f;

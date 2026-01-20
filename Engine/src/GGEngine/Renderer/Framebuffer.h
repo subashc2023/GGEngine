@@ -2,6 +2,7 @@
 
 #include "GGEngine/Core.h"
 #include <vulkan/vulkan.h>
+#include <vk_mem_alloc.h>
 #include <cstdint>
 
 namespace GGEngine {
@@ -33,12 +34,11 @@ namespace GGEngine {
         void CreateRenderPass();
         void DestroyRenderPass();
         void TransitionImageLayout(VkImageLayout oldLayout, VkImageLayout newLayout);
-        uint32_t FindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties);
 
         FramebufferSpecification m_Specification;
 
         VkImage m_Image = VK_NULL_HANDLE;
-        VkDeviceMemory m_ImageMemory = VK_NULL_HANDLE;
+        VmaAllocation m_ImageAllocation = VK_NULL_HANDLE;
         VkImageView m_ImageView = VK_NULL_HANDLE;
         VkSampler m_Sampler = VK_NULL_HANDLE;
         VkFramebuffer m_Framebuffer = VK_NULL_HANDLE;

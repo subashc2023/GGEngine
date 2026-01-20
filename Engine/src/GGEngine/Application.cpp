@@ -5,6 +5,8 @@
 #include "GGEngine/Window.h"
 #include "GGEngine/Log.h"
 #include "GGEngine/ImGui/ImGuiLayer.h"
+#include "GGEngine/Asset/ShaderLibrary.h"
+#include "GGEngine/Asset/AssetManager.h"
 #include "Platform/Vulkan/VulkanContext.h"
 
 #include <GLFW/glfw3.h>
@@ -38,6 +40,10 @@ namespace GGEngine {
         {
             layer->OnDetach();
         }
+
+        // Shutdown asset system before Vulkan (assets may hold GPU resources)
+        ShaderLibrary::Get().Shutdown();
+        AssetManager::Get().Shutdown();
 
         VulkanContext::Get().Shutdown();
     }

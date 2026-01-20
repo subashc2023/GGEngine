@@ -10,6 +10,12 @@
 #include "GGEngine/KeyCodes.h"
 #include "GGEngine/MouseButtonCodes.h"
 
+#include "GGEngine/Asset/AssetManager.h"
+#include "GGEngine/Asset/Shader.h"
+#include "GGEngine/Asset/ShaderLibrary.h"
+
+#include "GGEngine/Renderer/Pipeline.h"
+
 #include "GGEngine/ImGui/ImGuiLayer.h"
 
 //-----Application entry point-----

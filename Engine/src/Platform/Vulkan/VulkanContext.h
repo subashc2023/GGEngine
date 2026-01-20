@@ -1,11 +1,15 @@
 #pragma once
 
 #include <vulkan/vulkan.h>
+#include <vk_mem_alloc.h>
 #include <vector>
+#include <memory>
 
 struct GLFWwindow;
 
 namespace GGEngine {
+
+    class Pipeline;
 
     class VulkanContext
     {
@@ -36,8 +40,9 @@ namespace GGEngine {
         uint32_t GetSwapchainImageCount() const { return static_cast<uint32_t>(m_SwapchainImages.size()); }
         VkExtent2D GetSwapchainExtent() const { return m_SwapchainExtent; }
 
-        VkPipeline GetTrianglePipeline() const { return m_TrianglePipeline; }
-        VkPipelineLayout GetTrianglePipelineLayout() const { return m_TrianglePipelineLayout; }
+        Pipeline* GetTrianglePipeline() const { return m_TrianglePipeline.get(); }
+
+        VmaAllocator GetAllocator() const { return m_Allocator; }
 
     private:
         VulkanContext() = default;
@@ -45,6 +50,7 @@ namespace GGEngine {
 
         void CreateInstance();
         void SetupDebugMessenger();
+        void PopulateDebugMessengerCreateInfo(VkDebugUtilsMessengerCreateInfoEXT& createInfo);
         void CreateSurface();
         void PickPhysicalDevice();
         void CreateLogicalDevice();
@@ -55,6 +61,8 @@ namespace GGEngine {
         void CreateCommandPool();
         void CreateCommandBuffers();
         void CreateSyncObjects();
+        void CreateAllocator();
+        void DestroyAllocator();
         void CreateDescriptorPool();
         void CreateTrianglePipeline();
         void DestroyTrianglePipeline();
@@ -120,9 +128,9 @@ namespace GGEngine {
         std::vector<VkFence> m_ImagesInFlight;
 
         VkDescriptorPool m_DescriptorPool = VK_NULL_HANDLE;
+        VmaAllocator m_Allocator = VK_NULL_HANDLE;
 
-        VkPipeline m_TrianglePipeline = VK_NULL_HANDLE;
-        VkPipelineLayout m_TrianglePipelineLayout = VK_NULL_HANDLE;
+        std::unique_ptr<Pipeline> m_TrianglePipeline;
 
         uint32_t m_CurrentFrameIndex = 0;
         uint32_t m_CurrentImageIndex = 0;

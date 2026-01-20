@@ -125,9 +125,9 @@ namespace GGEngine {
     void Framebuffer::CreateResources()
     {
         auto device = VulkanContext::Get().GetDevice();
-        auto physicalDevice = VulkanContext::Get().GetPhysicalDevice();
+        auto allocator = VulkanContext::Get().GetAllocator();
 
-        // Create Image
+        // Create Image with VMA
         VkImageCreateInfo imageInfo{};
         imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         imageInfo.imageType = VK_IMAGE_TYPE_2D;
@@ -143,29 +143,15 @@ namespace GGEngine {
         imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
         imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-        if (vkCreateImage(device, &imageInfo, nullptr, &m_Image) != VK_SUCCESS)
+        VmaAllocationCreateInfo allocCreateInfo{};
+        allocCreateInfo.usage = VMA_MEMORY_USAGE_AUTO;
+        allocCreateInfo.flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+
+        if (vmaCreateImage(allocator, &imageInfo, &allocCreateInfo, &m_Image, &m_ImageAllocation, nullptr) != VK_SUCCESS)
         {
-            GG_CORE_ERROR("Failed to create framebuffer image!");
+            GG_CORE_ERROR("Failed to create framebuffer image with VMA!");
             return;
         }
-
-        // Allocate memory
-        VkMemoryRequirements memRequirements;
-        vkGetImageMemoryRequirements(device, m_Image, &memRequirements);
-
-        VkMemoryAllocateInfo allocInfo{};
-        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        allocInfo.allocationSize = memRequirements.size;
-        allocInfo.memoryTypeIndex = FindMemoryType(memRequirements.memoryTypeBits,
-            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-
-        if (vkAllocateMemory(device, &allocInfo, nullptr, &m_ImageMemory) != VK_SUCCESS)
-        {
-            GG_CORE_ERROR("Failed to allocate framebuffer image memory!");
-            return;
-        }
-
-        vkBindImageMemory(device, m_Image, m_ImageMemory, 0);
 
         // Create Image View
         VkImageViewCreateInfo viewInfo{};
@@ -342,34 +328,10 @@ namespace GGEngine {
 
         if (m_Image != VK_NULL_HANDLE)
         {
-            vkDestroyImage(device, m_Image, nullptr);
+            auto allocator = VulkanContext::Get().GetAllocator();
+            vmaDestroyImage(allocator, m_Image, m_ImageAllocation);
             m_Image = VK_NULL_HANDLE;
+            m_ImageAllocation = VK_NULL_HANDLE;
         }
-
-        if (m_ImageMemory != VK_NULL_HANDLE)
-        {
-            vkFreeMemory(device, m_ImageMemory, nullptr);
-            m_ImageMemory = VK_NULL_HANDLE;
-        }
-    }
-
-    uint32_t Framebuffer::FindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties)
-    {
-        auto physicalDevice = VulkanContext::Get().GetPhysicalDevice();
-
-        VkPhysicalDeviceMemoryProperties memProperties;
-        vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
-
-        for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++)
-        {
-            if ((typeFilter & (1 << i)) &&
-                (memProperties.memoryTypes[i].propertyFlags & properties) == properties)
-            {
-                return i;
-            }
-        }
-
-        GG_CORE_ERROR("Failed to find suitable memory type!");
-        return 0;
     }
 }

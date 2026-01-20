@@ -1,5 +1,6 @@
 #include "TriangleLayer.h"
 #include "Platform/Vulkan/VulkanContext.h"
+#include "GGEngine/Renderer/Pipeline.h"
 
 #include <vulkan/vulkan.h>
 
@@ -22,13 +23,14 @@ void TriangleLayer::OnUpdate()
 {
     auto& vkContext = GGEngine::VulkanContext::Get();
     VkCommandBuffer cmd = vkContext.GetCurrentCommandBuffer();
+    auto* pipeline = vkContext.GetTrianglePipeline();
 
     // Check if we have a valid command buffer and pipeline
-    if (cmd == VK_NULL_HANDLE || vkContext.GetTrianglePipeline() == VK_NULL_HANDLE)
+    if (cmd == VK_NULL_HANDLE || !pipeline)
         return;
 
     // Bind the triangle pipeline
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vkContext.GetTrianglePipeline());
+    pipeline->Bind(cmd);
 
     // Set dynamic viewport and scissor
     VkExtent2D extent = vkContext.GetSwapchainExtent();

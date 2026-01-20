@@ -1,5 +1,7 @@
 #include "ggpch.h"
 #include "VulkanContext.h"
+#include "GGEngine/Asset/ShaderLibrary.h"
+#include "GGEngine/Renderer/Pipeline.h"
 
 #include <GLFW/glfw3.h>
 #include <set>
@@ -56,6 +58,7 @@ namespace GGEngine {
         CreateSurface();
         PickPhysicalDevice();
         CreateLogicalDevice();
+        CreateAllocator();
         CreateSwapchain();
         CreateImageViews();
         CreateRenderPass();
@@ -92,6 +95,7 @@ namespace GGEngine {
         }
 
         vkDestroyCommandPool(m_Device, m_CommandPool, nullptr);
+        DestroyAllocator();
         vkDestroyDevice(m_Device, nullptr);
 
         if (m_EnableValidationLayers)
@@ -265,16 +269,8 @@ namespace GGEngine {
             createInfo.enabledLayerCount = static_cast<uint32_t>(m_ValidationLayers.size());
             createInfo.ppEnabledLayerNames = m_ValidationLayers.data();
 
-            debugCreateInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
-            debugCreateInfo.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT |
-                VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
-                VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
-            debugCreateInfo.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
-                VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
-                VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
-            debugCreateInfo.pfnUserCallback = DebugCallback;
-
-            createInfo.pNext = (VkDebugUtilsMessengerCreateInfoEXT*)&debugCreateInfo;
+            PopulateDebugMessengerCreateInfo(debugCreateInfo);
+            createInfo.pNext = &debugCreateInfo;
         }
         else
         {
@@ -288,11 +284,8 @@ namespace GGEngine {
         }
     }
 
-    void VulkanContext::SetupDebugMessenger()
+    void VulkanContext::PopulateDebugMessengerCreateInfo(VkDebugUtilsMessengerCreateInfoEXT& createInfo)
     {
-        if (!m_EnableValidationLayers) return;
-
-        VkDebugUtilsMessengerCreateInfoEXT createInfo{};
         createInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
         createInfo.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT |
             VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
@@ -301,6 +294,15 @@ namespace GGEngine {
             VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
             VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
         createInfo.pfnUserCallback = DebugCallback;
+        createInfo.pUserData = nullptr;
+    }
+
+    void VulkanContext::SetupDebugMessenger()
+    {
+        if (!m_EnableValidationLayers) return;
+
+        VkDebugUtilsMessengerCreateInfoEXT createInfo{};
+        PopulateDebugMessengerCreateInfo(createInfo);
 
         if (CreateDebugUtilsMessengerEXT(m_Instance, &createInfo, nullptr, &m_DebugMessenger) != VK_SUCCESS)
         {
@@ -620,6 +622,38 @@ namespace GGEngine {
         }
     }
 
+    void VulkanContext::CreateAllocator()
+    {
+        VmaVulkanFunctions vulkanFunctions{};
+        vulkanFunctions.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
+        vulkanFunctions.vkGetDeviceProcAddr = vkGetDeviceProcAddr;
+
+        VmaAllocatorCreateInfo allocatorInfo{};
+        allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_4;
+        allocatorInfo.physicalDevice = m_PhysicalDevice;
+        allocatorInfo.device = m_Device;
+        allocatorInfo.instance = m_Instance;
+        allocatorInfo.pVulkanFunctions = &vulkanFunctions;
+
+        if (vmaCreateAllocator(&allocatorInfo, &m_Allocator) != VK_SUCCESS)
+        {
+            GG_CORE_ERROR("Failed to create VMA allocator!");
+        }
+        else
+        {
+            GG_CORE_INFO("VMA allocator created");
+        }
+    }
+
+    void VulkanContext::DestroyAllocator()
+    {
+        if (m_Allocator != VK_NULL_HANDLE)
+        {
+            vmaDestroyAllocator(m_Allocator);
+            m_Allocator = VK_NULL_HANDLE;
+        }
+    }
+
     void VulkanContext::CreateDescriptorPool()
     {
         VkDescriptorPoolSize poolSizes[] = {
@@ -929,150 +963,29 @@ namespace GGEngine {
 
     void VulkanContext::CreateTrianglePipeline()
     {
-        // Load shader modules
-        auto vertCode = ReadFile("assets/shaders/triangle.vert.spv");
-        auto fragCode = ReadFile("assets/shaders/triangle.frag.spv");
+        // Load shader via asset system
+        auto shaderHandle = ShaderLibrary::Get().Load("triangle", "assets/shaders/compiled/triangle");
 
-        if (vertCode.empty() || fragCode.empty())
+        if (!shaderHandle.IsValid() || !shaderHandle->IsLoaded())
         {
-            GG_CORE_ERROR("Failed to load shader files!");
+            GG_CORE_ERROR("Failed to load triangle shader!");
             return;
         }
 
-        VkShaderModule vertModule = CreateShaderModule(vertCode);
-        VkShaderModule fragModule = CreateShaderModule(fragCode);
+        // Create pipeline using the new Pipeline abstraction
+        PipelineSpecification spec;
+        spec.shader = shaderHandle.Get();
+        spec.renderPass = m_RenderPass;
+        spec.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        spec.cullMode = VK_CULL_MODE_NONE;
+        spec.debugName = "triangle";
 
-        if (vertModule == VK_NULL_HANDLE || fragModule == VK_NULL_HANDLE)
-        {
-            GG_CORE_ERROR("Failed to create shader modules!");
-            return;
-        }
-
-        // Shader stage create infos
-        VkPipelineShaderStageCreateInfo shaderStages[2] = {};
-
-        shaderStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        shaderStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-        shaderStages[0].module = vertModule;
-        shaderStages[0].pName = "main";
-
-        shaderStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        shaderStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-        shaderStages[1].module = fragModule;
-        shaderStages[1].pName = "main";
-
-        // Vertex input (empty - hardcoded in shader)
-        VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
-        vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-        vertexInputInfo.vertexBindingDescriptionCount = 0;
-        vertexInputInfo.vertexAttributeDescriptionCount = 0;
-
-        // Input assembly
-        VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
-        inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-        inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-        inputAssembly.primitiveRestartEnable = VK_FALSE;
-
-        // Dynamic viewport/scissor
-        VkDynamicState dynamicStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
-        VkPipelineDynamicStateCreateInfo dynamicState{};
-        dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-        dynamicState.dynamicStateCount = 2;
-        dynamicState.pDynamicStates = dynamicStates;
-
-        VkPipelineViewportStateCreateInfo viewportState{};
-        viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-        viewportState.viewportCount = 1;
-        viewportState.scissorCount = 1;
-
-        // Rasterizer
-        VkPipelineRasterizationStateCreateInfo rasterizer{};
-        rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-        rasterizer.depthClampEnable = VK_FALSE;
-        rasterizer.rasterizerDiscardEnable = VK_FALSE;
-        rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
-        rasterizer.lineWidth = 1.0f;
-        rasterizer.cullMode = VK_CULL_MODE_NONE;  // No culling for initial triangle
-        rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
-        rasterizer.depthBiasEnable = VK_FALSE;
-
-        // Multisampling (disabled)
-        VkPipelineMultisampleStateCreateInfo multisampling{};
-        multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-        multisampling.sampleShadingEnable = VK_FALSE;
-        multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-
-        // Color blending (no blending)
-        VkPipelineColorBlendAttachmentState colorBlendAttachment{};
-        colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                                              VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-        colorBlendAttachment.blendEnable = VK_FALSE;
-
-        VkPipelineColorBlendStateCreateInfo colorBlending{};
-        colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-        colorBlending.logicOpEnable = VK_FALSE;
-        colorBlending.attachmentCount = 1;
-        colorBlending.pAttachments = &colorBlendAttachment;
-
-        // Pipeline layout (empty - no descriptors)
-        VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
-        pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-        pipelineLayoutInfo.setLayoutCount = 0;
-        pipelineLayoutInfo.pushConstantRangeCount = 0;
-
-        if (vkCreatePipelineLayout(m_Device, &pipelineLayoutInfo, nullptr, &m_TrianglePipelineLayout) != VK_SUCCESS)
-        {
-            GG_CORE_ERROR("Failed to create pipeline layout!");
-            vkDestroyShaderModule(m_Device, fragModule, nullptr);
-            vkDestroyShaderModule(m_Device, vertModule, nullptr);
-            return;
-        }
-
-        // Create pipeline
-        VkGraphicsPipelineCreateInfo pipelineInfo{};
-        pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-        pipelineInfo.stageCount = 2;
-        pipelineInfo.pStages = shaderStages;
-        pipelineInfo.pVertexInputState = &vertexInputInfo;
-        pipelineInfo.pInputAssemblyState = &inputAssembly;
-        pipelineInfo.pViewportState = &viewportState;
-        pipelineInfo.pRasterizationState = &rasterizer;
-        pipelineInfo.pMultisampleState = &multisampling;
-        pipelineInfo.pDepthStencilState = nullptr;
-        pipelineInfo.pColorBlendState = &colorBlending;
-        pipelineInfo.pDynamicState = &dynamicState;
-        pipelineInfo.layout = m_TrianglePipelineLayout;
-        pipelineInfo.renderPass = m_RenderPass;
-        pipelineInfo.subpass = 0;
-        pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
-
-        if (vkCreateGraphicsPipelines(m_Device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_TrianglePipeline) != VK_SUCCESS)
-        {
-            GG_CORE_ERROR("Failed to create graphics pipeline!");
-        }
-        else
-        {
-            GG_CORE_INFO("Triangle pipeline created successfully");
-        }
-
-        // Cleanup shader modules
-        vkDestroyShaderModule(m_Device, fragModule, nullptr);
-        vkDestroyShaderModule(m_Device, vertModule, nullptr);
+        m_TrianglePipeline = std::make_unique<Pipeline>(spec);
     }
 
     void VulkanContext::DestroyTrianglePipeline()
     {
-        if (m_TrianglePipeline != VK_NULL_HANDLE)
-        {
-            vkDestroyPipeline(m_Device, m_TrianglePipeline, nullptr);
-            m_TrianglePipeline = VK_NULL_HANDLE;
-        }
-
-        if (m_TrianglePipelineLayout != VK_NULL_HANDLE)
-        {
-            vkDestroyPipelineLayout(m_Device, m_TrianglePipelineLayout, nullptr);
-            m_TrianglePipelineLayout = VK_NULL_HANDLE;
-        }
+        m_TrianglePipeline.reset();
     }
 
 }

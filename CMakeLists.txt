@@ -90,16 +90,27 @@ set(ENGINE_SOURCES
     Engine/src/GGEngine/LayerStack.h
     Engine/src/GGEngine/Window.h
     Engine/src/GGEngine/Input.h
+    Engine/src/GGEngine/Asset/Asset.h
+    Engine/src/GGEngine/Asset/AssetHandle.h
+    Engine/src/GGEngine/Asset/AssetManager.h
+    Engine/src/GGEngine/Asset/AssetManager.cpp
+    Engine/src/GGEngine/Asset/Shader.h
+    Engine/src/GGEngine/Asset/Shader.cpp
+    Engine/src/GGEngine/Asset/ShaderLibrary.h
+    Engine/src/GGEngine/Asset/ShaderLibrary.cpp
     Engine/src/Platform/Windows/WindowsWindow.h
     Engine/src/Platform/Windows/WindowsWindow.cpp
     Engine/src/Platform/Windows/WindowsInput.h
     Engine/src/Platform/Windows/WindowsInput.cpp
     Engine/src/Platform/Vulkan/VulkanContext.h
     Engine/src/Platform/Vulkan/VulkanContext.cpp
+    Engine/src/Platform/Vulkan/vma.cpp
     Engine/src/GGEngine/ImGui/ImGuiLayer.h
     Engine/src/GGEngine/ImGui/ImGuiLayer.cpp
     Engine/src/GGEngine/Renderer/Framebuffer.h
     Engine/src/GGEngine/Renderer/Framebuffer.cpp
+    Engine/src/GGEngine/Renderer/Pipeline.h
+    Engine/src/GGEngine/Renderer/Pipeline.cpp
     Engine/src/ggpch.h
     Engine/src/ggpch.cpp
     ${IMGUI_SOURCES}
@@ -132,6 +143,7 @@ target_link_libraries(Engine PRIVATE Vulkan::Vulkan)
 
 target_include_directories(Engine PUBLIC
     ${CMAKE_SOURCE_DIR}/Engine/src
+    ${CMAKE_SOURCE_DIR}/Vendor/VulkanMemoryAllocator/include
 )
 
 target_include_directories(Engine PRIVATE
@@ -169,14 +181,16 @@ set_target_properties(Sandbox PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${BIN_ROOT}/Sandbox"
 )
 
-# Copy compiled shaders to Sandbox output directory
-add_custom_command(TARGET Sandbox POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:Sandbox>/assets/shaders
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        ${SHADER_OUTPUT_DIR}
-        $<TARGET_FILE_DIR:Sandbox>/assets/shaders
-    COMMENT "Copying shaders to Sandbox output directory"
-)
+# Copy compiled shaders to output directories (Dist builds only - Debug/Release read from source)
+if(CMAKE_BUILD_TYPE STREQUAL "Dist")
+    add_custom_command(TARGET Sandbox POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:Sandbox>/assets/shaders/compiled
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${SHADER_OUTPUT_DIR}
+            $<TARGET_FILE_DIR:Sandbox>/assets/shaders/compiled
+        COMMENT "Copying shaders to Sandbox output directory"
+    )
+endif()
 
 add_executable(Editor
     Editor/src/main.cpp
@@ -195,14 +209,16 @@ set_target_properties(Editor PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${BIN_ROOT}/Editor"
 )
 
-# Copy compiled shaders to Editor output directory
-add_custom_command(TARGET Editor POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:Editor>/assets/shaders
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        ${SHADER_OUTPUT_DIR}
-        $<TARGET_FILE_DIR:Editor>/assets/shaders
-    COMMENT "Copying shaders to Editor output directory"
-)
+# Copy compiled shaders to Editor output directory (Dist builds only)
+if(CMAKE_BUILD_TYPE STREQUAL "Dist")
+    add_custom_command(TARGET Editor POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:Editor>/assets/shaders/compiled
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${SHADER_OUTPUT_DIR}
+            $<TARGET_FILE_DIR:Editor>/assets/shaders/compiled
+        COMMENT "Copying shaders to Editor output directory"
+    )
+endif()
 
 if(GGENGINE_BUILD_DLL)
     # Copy Engine DLL to Sandbox and Editor output dirs post-build

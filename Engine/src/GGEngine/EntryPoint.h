@@ -7,6 +7,7 @@ extern GGEngine::Application* GGEngine::CreateApplication();
 int main(int argc, char** argv)
 {
     GGEngine::Log::Init();
+    GGEngine::AssetManager::Get().Init();
     GG_CORE_INFO("GGEngine initialized");
 
     auto app = GGEngine::CreateApplication();
