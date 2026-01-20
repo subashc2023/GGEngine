@@ -16,6 +16,7 @@ namespace GGEngine {
         void Shutdown();
 
         void BeginFrame();
+        void BeginSwapchainRenderPass();
         void EndFrame();
 
         void OnWindowResize(uint32_t width, uint32_t height);
@@ -31,8 +32,12 @@ namespace GGEngine {
         VkRenderPass GetRenderPass() const { return m_RenderPass; }
         VkCommandBuffer GetCurrentCommandBuffer() const { return m_CommandBuffers[m_CurrentFrameIndex]; }
         VkDescriptorPool GetDescriptorPool() const { return m_DescriptorPool; }
+        VkCommandPool GetCommandPool() const { return m_CommandPool; }
         uint32_t GetSwapchainImageCount() const { return static_cast<uint32_t>(m_SwapchainImages.size()); }
         VkExtent2D GetSwapchainExtent() const { return m_SwapchainExtent; }
+
+        VkPipeline GetTrianglePipeline() const { return m_TrianglePipeline; }
+        VkPipelineLayout GetTrianglePipelineLayout() const { return m_TrianglePipelineLayout; }
 
     private:
         VulkanContext() = default;
@@ -51,6 +56,11 @@ namespace GGEngine {
         void CreateCommandBuffers();
         void CreateSyncObjects();
         void CreateDescriptorPool();
+        void CreateTrianglePipeline();
+        void DestroyTrianglePipeline();
+
+        VkShaderModule CreateShaderModule(const std::vector<char>& code);
+        static std::vector<char> ReadFile(const std::string& filename);
 
         void CleanupSwapchain();
         void RecreateSwapchain();
@@ -110,6 +120,9 @@ namespace GGEngine {
         std::vector<VkFence> m_ImagesInFlight;
 
         VkDescriptorPool m_DescriptorPool = VK_NULL_HANDLE;
+
+        VkPipeline m_TrianglePipeline = VK_NULL_HANDLE;
+        VkPipelineLayout m_TrianglePipelineLayout = VK_NULL_HANDLE;
 
         uint32_t m_CurrentFrameIndex = 0;
         uint32_t m_CurrentImageIndex = 0;

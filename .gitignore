@@ -3,3 +3,6 @@ build/
 .vscode/settings.json
 .claude/
 CLAUDE.md
+
+# Compiled shaders (generated during build)
+Engine/assets/shaders/compiled/

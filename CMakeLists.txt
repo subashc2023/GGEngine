@@ -30,6 +30,36 @@ option(GGENGINE_BUILD_DLL "Build Engine as a shared library" ON)
 # Find Vulkan SDK
 find_package(Vulkan REQUIRED)
 
+# Shader compilation
+find_program(GLSLC glslc HINTS $ENV{VULKAN_SDK}/Bin)
+if(NOT GLSLC)
+    message(FATAL_ERROR "glslc not found! Make sure Vulkan SDK is installed and VULKAN_SDK environment variable is set.")
+endif()
+
+set(SHADER_SOURCE_DIR ${CMAKE_SOURCE_DIR}/Engine/assets/shaders)
+set(SHADER_OUTPUT_DIR ${CMAKE_SOURCE_DIR}/Engine/assets/shaders/compiled)
+
+file(MAKE_DIRECTORY ${SHADER_OUTPUT_DIR})
+
+set(SHADER_SOURCES
+    ${SHADER_SOURCE_DIR}/triangle.vert
+    ${SHADER_SOURCE_DIR}/triangle.frag
+)
+
+foreach(SHADER ${SHADER_SOURCES})
+    get_filename_component(SHADER_NAME ${SHADER} NAME)
+    set(SHADER_OUTPUT ${SHADER_OUTPUT_DIR}/${SHADER_NAME}.spv)
+    add_custom_command(
+        OUTPUT ${SHADER_OUTPUT}
+        COMMAND ${GLSLC} ${SHADER} -o ${SHADER_OUTPUT}
+        DEPENDS ${SHADER}
+        COMMENT "Compiling shader ${SHADER_NAME}"
+    )
+    list(APPEND SHADER_OUTPUTS ${SHADER_OUTPUT})
+endforeach()
+
+add_custom_target(Shaders ALL DEPENDS ${SHADER_OUTPUTS})
+
 # ImGui source files
 set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/Vendor/imgui)
 set(IMGUI_SOURCES
@@ -68,6 +98,8 @@ set(ENGINE_SOURCES
     Engine/src/Platform/Vulkan/VulkanContext.cpp
     Engine/src/GGEngine/ImGui/ImGuiLayer.h
     Engine/src/GGEngine/ImGui/ImGuiLayer.cpp
+    Engine/src/GGEngine/Renderer/Framebuffer.h
+    Engine/src/GGEngine/Renderer/Framebuffer.cpp
     Engine/src/ggpch.h
     Engine/src/ggpch.cpp
     ${IMGUI_SOURCES}
@@ -123,24 +155,53 @@ if(GGENGINE_BUILD_DLL)
     )
 endif()
 
+add_dependencies(Engine Shaders)
+
 add_executable(Sandbox
     Sandbox/src/main.cpp
+    Sandbox/src/TriangleLayer.h
+    Sandbox/src/TriangleLayer.cpp
 )
 
-target_link_libraries(Sandbox PRIVATE Engine)
+target_link_libraries(Sandbox PRIVATE Engine Vulkan::Headers)
 
 set_target_properties(Sandbox PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${BIN_ROOT}/Sandbox"
 )
 
-add_executable(Editor
-    Editor/src/main.cpp
+# Copy compiled shaders to Sandbox output directory
+add_custom_command(TARGET Sandbox POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:Sandbox>/assets/shaders
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${SHADER_OUTPUT_DIR}
+        $<TARGET_FILE_DIR:Sandbox>/assets/shaders
+    COMMENT "Copying shaders to Sandbox output directory"
 )
 
-target_link_libraries(Editor PRIVATE Engine)
+add_executable(Editor
+    Editor/src/main.cpp
+    Editor/src/EditorLayer.h
+    Editor/src/EditorLayer.cpp
+)
+
+target_link_libraries(Editor PRIVATE Engine Vulkan::Headers)
+
+target_include_directories(Editor PRIVATE
+    ${IMGUI_DIR}
+    ${IMGUI_DIR}/backends
+)
 
 set_target_properties(Editor PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${BIN_ROOT}/Editor"
+)
+
+# Copy compiled shaders to Editor output directory
+add_custom_command(TARGET Editor POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:Editor>/assets/shaders
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${SHADER_OUTPUT_DIR}
+        $<TARGET_FILE_DIR:Editor>/assets/shaders
+    COMMENT "Copying shaders to Editor output directory"
 )
 
 if(GGENGINE_BUILD_DLL)

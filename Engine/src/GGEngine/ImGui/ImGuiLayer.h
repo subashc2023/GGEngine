@@ -1,9 +1,7 @@
 #pragma once
 
 #include "GGEngine/Layer.h"
-#include "GGEngine/Events/ApplicationEvent.h"
-#include "GGEngine/Events/KeyEvent.h"
-#include "GGEngine/Events/MouseEvent.h"
+#include "GGEngine/Events/Event.h"
 
 namespace GGEngine {
 
@@ -21,18 +19,11 @@ namespace GGEngine {
         void Begin();
         void End();
 
-    private:
-        bool OnMouseButtonPressedEvent(MouseButtonPressedEvent& e);
-        bool OnMouseButtonReleasedEvent(MouseButtonReleasedEvent& e);
-        bool OnMouseMovedEvent(MouseMovedEvent& e);
-        bool OnMouseScrolledEvent(MouseScrolledEvent& e);
-        bool OnKeyPressedEvent(KeyPressedEvent& e);
-        bool OnKeyReleasedEvent(KeyReleasedEvent& e);
-        bool OnKeyTypedEvent(KeyTypedEvent& e);
-        bool OnWindowResizeEvent(WindowResizeEvent& e);
+        void SetBlockEvents(bool block) { m_BlockEvents = block; }
+        bool IsBlockingEvents() const { return m_BlockEvents; }
 
     private:
-        float m_Time = 0.0f;
+        bool m_BlockEvents = true;
     };
 
 }

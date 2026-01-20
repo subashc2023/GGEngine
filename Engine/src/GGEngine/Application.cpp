@@ -30,8 +30,14 @@ namespace GGEngine {
 
     Application::~Application()
     {
-        // Detach ImGui layer first to clean up its Vulkan resources
-        m_ImGuiLayer->OnDetach();
+        // Wait for GPU to finish before cleanup
+        vkDeviceWaitIdle(VulkanContext::Get().GetDevice());
+
+        // Detach all layers to clean up their Vulkan resources before destroying the device
+        for (Layer* layer : m_LayerStack)
+        {
+            layer->OnDetach();
+        }
 
         VulkanContext::Get().Shutdown();
     }
@@ -69,6 +75,15 @@ namespace GGEngine {
         while (m_Running)
         {
             VulkanContext::Get().BeginFrame();
+
+            // Offscreen rendering phase - layers render to their framebuffers
+            for (Layer* layer : m_LayerStack)
+            {
+                layer->OnRenderOffscreen();
+            }
+
+            // Begin swapchain render pass for ImGui and direct swapchain rendering
+            VulkanContext::Get().BeginSwapchainRenderPass();
 
             m_ImGuiLayer->Begin();
             for (Layer* layer : m_LayerStack)

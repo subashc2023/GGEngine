@@ -1,8 +1,10 @@
 #include "GGEngine.h"
+#include "EditorLayer.h"
 
 class Editor : public GGEngine::Application {
 public:
     Editor() {
+        PushLayer(new EditorLayer());
     }
     ~Editor() {
     }
