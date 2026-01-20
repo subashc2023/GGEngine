@@ -76,6 +76,7 @@ set(ENGINE_SOURCES
 if(GGENGINE_BUILD_DLL)
     add_library(Engine SHARED ${ENGINE_SOURCES})
     target_compile_definitions(Engine PRIVATE GG_BUILD_DLL)
+    target_compile_definitions(Engine PUBLIC GG_DLL)
 else()
     add_library(Engine STATIC ${ENGINE_SOURCES})
 endif()
@@ -83,7 +84,7 @@ endif()
 target_compile_definitions(Engine PUBLIC GG_PLATFORM_WINDOWS)
 
 # Dependencies
-add_subdirectory(Vendor/spdlog)
+add_subdirectory(${CMAKE_SOURCE_DIR}/Vendor/spdlog)
 target_link_libraries(Engine PUBLIC spdlog::spdlog)
 
 # GLFW

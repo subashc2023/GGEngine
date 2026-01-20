@@ -3,8 +3,10 @@
 #ifdef GG_PLATFORM_WINDOWS
     #ifdef GG_BUILD_DLL
         #define GG_API __declspec(dllexport)
-    #else
+    #elif defined(GG_DLL)
         #define GG_API __declspec(dllimport)
+    #else
+        #define GG_API
     #endif
 #else
     #error "GGEngine only supports Windows platform"

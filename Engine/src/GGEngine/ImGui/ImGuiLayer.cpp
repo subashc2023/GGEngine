@@ -25,16 +25,23 @@ namespace GGEngine {
         ImGuiIO& io = ImGui::GetIO();
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
         io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-        // Viewports disabled - they require ImGui's native GLFW callbacks
-        // which bypasses our event system
-        // io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+        io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
 
         ImGui::StyleColorsDark();
+
+        // When viewports are enabled, tweak WindowRounding/WindowBg so platform windows look identical to regular ones
+        ImGuiStyle& style = ImGui::GetStyle();
+        if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+        {
+            style.WindowRounding = 0.0f;
+            style.Colors[ImGuiCol_WindowBg].w = 1.0f;
+        }
 
         Application& app = Application::Get();
         GLFWwindow* window = static_cast<GLFWwindow*>(app.GetWindow().GetNativeWindow());
 
-        // false = don't install GLFW callbacks, our event system handles all input
+        // false = don't install GLFW callbacks on main window, our event system handles input there
+        // Note: viewport windows still get native callbacks automatically for their input
         ImGui_ImplGlfw_InitForVulkan(window, false);
 
         VulkanContext& vkContext = VulkanContext::Get();
@@ -277,6 +284,14 @@ namespace GGEngine {
     {
         ImGui::Render();
         ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), VulkanContext::Get().GetCurrentCommandBuffer());
+
+        // Update and render additional platform windows (viewports)
+        ImGuiIO& io = ImGui::GetIO();
+        if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+        {
+            ImGui::UpdatePlatformWindows();
+            ImGui::RenderPlatformWindowsDefault();
+        }
     }
 
 }
