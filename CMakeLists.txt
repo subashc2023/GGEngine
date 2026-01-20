@@ -27,51 +27,57 @@ set(BIN_ROOT "${CMAKE_SOURCE_DIR}/bin/${BIN_CONFIG}")
 
 option(GGENGINE_BUILD_DLL "Build Engine as a shared library" ON)
 
+# Find Vulkan SDK
+find_package(Vulkan REQUIRED)
+
+# ImGui source files
+set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/Vendor/imgui)
+set(IMGUI_SOURCES
+    ${IMGUI_DIR}/imgui.cpp
+    ${IMGUI_DIR}/imgui_demo.cpp
+    ${IMGUI_DIR}/imgui_draw.cpp
+    ${IMGUI_DIR}/imgui_tables.cpp
+    ${IMGUI_DIR}/imgui_widgets.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_vulkan.cpp
+)
+
+# Engine source files
+set(ENGINE_SOURCES
+    Engine/src/GGEngine.h
+    Engine/src/GGEngine/Application.h
+    Engine/src/GGEngine/Application.cpp
+    Engine/src/GGEngine/Core.h
+    Engine/src/GGEngine/Log.h
+    Engine/src/GGEngine/Log.cpp
+    Engine/src/GGEngine/Events/Event.h
+    Engine/src/GGEngine/Events/ApplicationEvent.h
+    Engine/src/GGEngine/Events/KeyEvent.h
+    Engine/src/GGEngine/Events/MouseEvent.h
+    Engine/src/GGEngine/Layer.cpp
+    Engine/src/GGEngine/Layer.h
+    Engine/src/GGEngine/LayerStack.cpp
+    Engine/src/GGEngine/LayerStack.h
+    Engine/src/GGEngine/Window.h
+    Engine/src/GGEngine/Input.h
+    Engine/src/Platform/Windows/WindowsWindow.h
+    Engine/src/Platform/Windows/WindowsWindow.cpp
+    Engine/src/Platform/Windows/WindowsInput.h
+    Engine/src/Platform/Windows/WindowsInput.cpp
+    Engine/src/Platform/Vulkan/VulkanContext.h
+    Engine/src/Platform/Vulkan/VulkanContext.cpp
+    Engine/src/GGEngine/ImGui/ImGuiLayer.h
+    Engine/src/GGEngine/ImGui/ImGuiLayer.cpp
+    Engine/src/ggpch.h
+    Engine/src/ggpch.cpp
+    ${IMGUI_SOURCES}
+)
+
 if(GGENGINE_BUILD_DLL)
-    add_library(Engine SHARED
-        Engine/src/GGEngine.h
-        Engine/src/GGEngine/Application.h
-        Engine/src/GGEngine/Application.cpp
-        Engine/src/GGEngine/Core.h
-        Engine/src/GGEngine/Log.h
-        Engine/src/GGEngine/Log.cpp
-        Engine/src/GGEngine/Events/Event.h
-        Engine/src/GGEngine/Events/ApplicationEvent.h
-        Engine/src/GGEngine/Events/KeyEvent.h
-        Engine/src/GGEngine/Events/MouseEvent.h
-        Engine/src/GGEngine/Layer.cpp
-        Engine/src/GGEngine/Layer.h
-        Engine/src/GGEngine/LayerStack.cpp
-        Engine/src/GGEngine/LayerStack.h
-        Engine/src/GGEngine/Window.h
-        Engine/src/Platform/Windows/WindowsWindow.h
-        Engine/src/Platform/Windows/WindowsWindow.cpp
-        Engine/src/ggpch.h
-        Engine/src/ggpch.cpp
-    )
+    add_library(Engine SHARED ${ENGINE_SOURCES})
     target_compile_definitions(Engine PRIVATE GG_BUILD_DLL)
 else()
-    add_library(Engine STATIC
-        Engine/src/GGEngine.h
-        Engine/src/GGEngine/Application.h
-        Engine/src/GGEngine/Application.cpp
-        Engine/src/GGEngine/Core.h
-        Engine/src/GGEngine/Log.h
-        Engine/src/GGEngine/Log.cpp
-        Engine/src/GGEngine/Events/Event.h
-        Engine/src/GGEngine/Events/ApplicationEvent.h
-        Engine/src/GGEngine/Events/KeyEvent.h
-        Engine/src/GGEngine/Events/MouseEvent.h
-        Engine/src/GGEngine/Layer.cpp
-        Engine/src/GGEngine/Layer.h
-        Engine/src/GGEngine/LayerStack.cpp
-        Engine/src/GGEngine/LayerStack.h
-        Engine/src/GGEngine/Window.h
-        Engine/src/Platform/Windows/WindowsWindow.h
-        Engine/src/Platform/Windows/WindowsWindow.cpp
-        Engine/src/ggpch.h
-        Engine/src/ggpch.cpp
-    )
+    add_library(Engine STATIC ${ENGINE_SOURCES})
 endif()
 
 target_compile_definitions(Engine PUBLIC GG_PLATFORM_WINDOWS)
@@ -88,8 +94,16 @@ set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 add_subdirectory(Vendor/glfw)
 target_link_libraries(Engine PRIVATE glfw)
 
+# Vulkan
+target_link_libraries(Engine PRIVATE Vulkan::Vulkan)
+
 target_include_directories(Engine PUBLIC
     ${CMAKE_SOURCE_DIR}/Engine/src
+)
+
+target_include_directories(Engine PRIVATE
+    ${IMGUI_DIR}
+    ${IMGUI_DIR}/backends
 )
 
 target_precompile_headers(Engine PUBLIC Engine/src/ggpch.h)

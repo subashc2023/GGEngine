@@ -9,7 +9,10 @@ public:
     }
     void OnUpdate() override
     {
-        GG_INFO("ExampleLayer::OnUpdate");
+        if (GGEngine::Input::IsKeyPressed(GG_KEY_TAB))
+        {
+            GG_TRACE("Tab key is pressed!");
+        }
     }
     void OnEvent(GGEngine::Event& event) override
     {

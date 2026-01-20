@@ -44,7 +44,7 @@ namespace GGEngine {
     public:
         KeyReleasedEvent(int keycode)
         : KeyEvent(keycode) {}
-        
+
         std::string ToString() const override
         {
             std::stringstream ss;
@@ -53,6 +53,22 @@ namespace GGEngine {
         }
 
         EVENT_CLASS_TYPE(KeyReleased)
+    };
+
+    class GG_API KeyTypedEvent : public KeyEvent
+    {
+    public:
+        KeyTypedEvent(int keycode)
+        : KeyEvent(keycode) {}
+
+        std::string ToString() const override
+        {
+            std::stringstream ss;
+            ss << "KeyTypedEvent: " << m_KeyCode;
+            return ss.str();
+        }
+
+        EVENT_CLASS_TYPE(KeyTyped)
     };
 
 }

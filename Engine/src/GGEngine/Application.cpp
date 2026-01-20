@@ -1,21 +1,39 @@
+#include "ggpch.h"
 #include "Application.h"
-
 
 #include "GGEngine/Events/ApplicationEvent.h"
 #include "GGEngine/Window.h"
 #include "GGEngine/Log.h"
+#include "GGEngine/ImGui/ImGuiLayer.h"
+#include "Platform/Vulkan/VulkanContext.h"
+
+#include <GLFW/glfw3.h>
 
 namespace GGEngine {
 
 #define BIND_EVENT_FN(x) std::bind(&Application::x, this, std::placeholders::_1)
 
-    Application::Application() 
+    Application* Application::s_Instance = nullptr;
+
+    Application::Application()
     {
+        s_Instance = this;
+
         m_Window = std::unique_ptr<Window>(Window::Create());
         m_Window->SetEventCallback(BIND_EVENT_FN(OnEvent));
+
+        VulkanContext::Get().Init(static_cast<GLFWwindow*>(m_Window->GetNativeWindow()));
+
+        m_ImGuiLayer = new ImGuiLayer();
+        PushOverlay(m_ImGuiLayer);
     }
-    Application::~Application() 
+
+    Application::~Application()
     {
+        // Detach ImGui layer first to clean up its Vulkan resources
+        m_ImGuiLayer->OnDetach();
+
+        VulkanContext::Get().Shutdown();
     }
 
     void Application::PushLayer(Layer* layer)
@@ -34,7 +52,7 @@ namespace GGEngine {
     {
         EventDispatcher dispatcher(e);
         dispatcher.Dispatch<WindowCloseEvent>(BIND_EVENT_FN(OnWindowClose));
-        GG_CORE_INFO("{0}", e);
+        dispatcher.Dispatch<WindowResizeEvent>(BIND_EVENT_FN(OnWindowResize));
 
         for (auto it = m_LayerStack.end(); it != m_LayerStack.begin(); )
         {
@@ -46,17 +64,21 @@ namespace GGEngine {
         }
     }
 
-   
-
-    void Application::Run() 
+    void Application::Run()
     {
-        while (m_Running) 
+        while (m_Running)
         {
+            VulkanContext::Get().BeginFrame();
+
+            m_ImGuiLayer->Begin();
             for (Layer* layer : m_LayerStack)
             {
                 layer->OnUpdate();
             }
-            
+            m_ImGuiLayer->End();
+
+            VulkanContext::Get().EndFrame();
+
             m_Window->OnUpdate();
         }
     }
@@ -65,5 +87,16 @@ namespace GGEngine {
     {
         m_Running = false;
         return true;
+    }
+
+    bool Application::OnWindowResize(WindowResizeEvent& e)
+    {
+        if (e.GetWidth() == 0 || e.GetHeight() == 0)
+        {
+            return false;
+        }
+
+        VulkanContext::Get().OnWindowResize(e.GetWidth(), e.GetHeight());
+        return false;
     }
 }

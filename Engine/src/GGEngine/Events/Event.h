@@ -13,7 +13,7 @@ namespace GGEngine {
         None = 0,
         WindowClose, WindowResize, WindowFocus, WindowLostFocus, WindowMoved,
         AppTick, AppUpdate, AppRender,
-        KeyPressed, KeyReleased,
+        KeyPressed, KeyReleased, KeyTyped,
         MouseButtonPressed, MouseButtonReleased, MouseMoved, MouseScrolled
     };
 
@@ -32,9 +32,12 @@ namespace GGEngine {
 
 #define EVENT_CLASS_CATEGORY(category) virtual int GetCategoryFlags() const override { return category; }
 
+    class ImGuiLayer;
+
     class GG_API Event
     {
         friend class EventDispatcher;
+        friend class ImGuiLayer;
     public:
         virtual ~Event() = default;
         bool Handled() const { return m_Handled; }

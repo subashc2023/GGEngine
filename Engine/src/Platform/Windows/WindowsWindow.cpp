@@ -3,6 +3,7 @@
 #include "GGEngine/Events/ApplicationEvent.h"
 #include "GGEngine/Events/KeyEvent.h"
 #include "GGEngine/Events/MouseEvent.h"
+#include "Platform/Vulkan/VulkanContext.h"
 
 namespace GGEngine {
 
@@ -44,11 +45,13 @@ namespace GGEngine {
             glfwSetErrorCallback(GLFWErrorCallback);
             s_GLFWInitialized = true;
         }
+
+        // Disable OpenGL context creation for Vulkan
+        glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+
         m_Window = glfwCreateWindow((int)props.Width, (int)props.Height, m_Data.Title.c_str(), nullptr, nullptr);
         GG_CORE_ASSERT(m_Window, "Failed to create GLFW window");
-        glfwMakeContextCurrent(m_Window);
         glfwSetWindowUserPointer(m_Window, &m_Data);
-        SetVSync(true);
 
 
         // GLFW CALLBACKS SETUP
@@ -97,6 +100,13 @@ namespace GGEngine {
             }
         });
 
+        glfwSetCharCallback(m_Window, [](GLFWwindow* window, unsigned int keycode)
+        {
+            WindowData& data = *(WindowData*)glfwGetWindowUserPointer(window);
+            KeyTypedEvent event(keycode);
+            data.EventCallback(event);
+        });
+
         glfwSetMouseButtonCallback(m_Window, [](GLFWwindow* window, int button, int action, int mods)
         {
             WindowData& data = *(WindowData*)glfwGetWindowUserPointer(window);
@@ -143,25 +153,18 @@ namespace GGEngine {
     void WindowsWindow::OnUpdate()
     {
         glfwPollEvents();
-        glfwSwapBuffers(m_Window);
+        // Note: Buffer swap handled by Vulkan swapchain presentation
     }
 
     void WindowsWindow::SetVSync(bool enabled)
     {
-        if (enabled)
-        {
-            glfwSwapInterval(1);
-        }
-        else
-        {
-            glfwSwapInterval(0);
-        }
+        VulkanContext::Get().SetVSync(enabled);
         m_Data.VSync = enabled;
     }
 
     bool WindowsWindow::IsVSync() const
     {
-        return m_Data.VSync;
+        return VulkanContext::Get().IsVSync();
     }
     
 }
