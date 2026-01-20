@@ -147,6 +147,7 @@ namespace GGEngine {
     void WindowsWindow::Shutdown()
     {
         glfwDestroyWindow(m_Window);
+        glfwTerminate();
         s_GLFWInitialized = false;
     }
 

@@ -2,11 +2,15 @@
 
 #include "Core.h"
 
+#include <memory>
+
 namespace GGEngine {
 
     class GG_API Input
     {
     public:
+        virtual ~Input() = default;
+
         static bool IsKeyPressed(int keycode) { return s_Instance->IsKeyPressedImpl(keycode); }
         static bool IsMouseButtonPressed(int button) { return s_Instance->IsMouseButtonPressedImpl(button); }
         static float GetMouseX() { return s_Instance->GetMouseXImpl(); }
@@ -21,7 +25,7 @@ namespace GGEngine {
         virtual std::pair<float, float> GetMousePositionImpl() = 0;
 
     private:
-        static Input* s_Instance;
+        static std::unique_ptr<Input> s_Instance;
     };
 
 }

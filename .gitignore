@@ -6,3 +6,5 @@ CLAUDE.md
 
 # Compiled shaders (generated during build)
 Engine/assets/shaders/compiled/
+
+nul
