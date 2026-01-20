@@ -1,5 +1,6 @@
 #include "ggpch.h"
 #include "Pipeline.h"
+#include "VertexLayout.h"
 #include "GGEngine/Asset/Shader.h"
 #include "Platform/Vulkan/VulkanContext.h"
 #include "GGEngine/Log.h"
@@ -45,11 +46,28 @@ namespace GGEngine {
             return;
         }
 
-        // Vertex input (empty - hardcoded in shader for now)
+        // Vertex input - use layout if provided, otherwise empty (hardcoded in shader)
         VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
         vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-        vertexInputInfo.vertexBindingDescriptionCount = 0;
-        vertexInputInfo.vertexAttributeDescriptionCount = 0;
+
+        VkVertexInputBindingDescription bindingDesc{};
+        std::vector<VkVertexInputAttributeDescription> attributeDescs;
+
+        if (m_Specification.vertexLayout && !m_Specification.vertexLayout->IsEmpty())
+        {
+            bindingDesc = m_Specification.vertexLayout->GetBindingDescription();
+            attributeDescs = m_Specification.vertexLayout->GetAttributeDescriptions();
+
+            vertexInputInfo.vertexBindingDescriptionCount = 1;
+            vertexInputInfo.pVertexBindingDescriptions = &bindingDesc;
+            vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescs.size());
+            vertexInputInfo.pVertexAttributeDescriptions = attributeDescs.data();
+        }
+        else
+        {
+            vertexInputInfo.vertexBindingDescriptionCount = 0;
+            vertexInputInfo.vertexAttributeDescriptionCount = 0;
+        }
 
         // Input assembly
         VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
@@ -133,11 +151,24 @@ namespace GGEngine {
         colorBlending.attachmentCount = 1;
         colorBlending.pAttachments = &colorBlendAttachment;
 
-        // Pipeline layout (empty for now - will add descriptor sets later)
+        // Push constant ranges
+        std::vector<VkPushConstantRange> vkPushConstantRanges;
+        for (const auto& range : m_Specification.pushConstantRanges)
+        {
+            VkPushConstantRange vkRange{};
+            vkRange.stageFlags = range.stageFlags;
+            vkRange.offset = range.offset;
+            vkRange.size = range.size;
+            vkPushConstantRanges.push_back(vkRange);
+        }
+
+        // Pipeline layout
         VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
         pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-        pipelineLayoutInfo.setLayoutCount = 0;
-        pipelineLayoutInfo.pushConstantRangeCount = 0;
+        pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(m_Specification.descriptorSetLayouts.size());
+        pipelineLayoutInfo.pSetLayouts = m_Specification.descriptorSetLayouts.empty() ? nullptr : m_Specification.descriptorSetLayouts.data();
+        pipelineLayoutInfo.pushConstantRangeCount = static_cast<uint32_t>(vkPushConstantRanges.size());
+        pipelineLayoutInfo.pPushConstantRanges = vkPushConstantRanges.empty() ? nullptr : vkPushConstantRanges.data();
 
         if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &m_PipelineLayout) != VK_SUCCESS)
         {

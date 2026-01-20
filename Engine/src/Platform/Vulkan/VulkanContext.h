@@ -1,5 +1,7 @@
 #pragma once
 
+#include "GGEngine/Core.h"
+
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 #include <vector>
@@ -11,7 +13,7 @@ namespace GGEngine {
 
     class Pipeline;
 
-    class VulkanContext
+    class GG_API VulkanContext
     {
     public:
         static VulkanContext& Get();

@@ -3,7 +3,15 @@
 #include "GGEngine/Layer.h"
 #include "GGEngine/Log.h"
 #include "GGEngine/Events/Event.h"
+#include "GGEngine/Events/MouseEvent.h"
 #include "GGEngine/Renderer/Framebuffer.h"
+#include "GGEngine/Renderer/Pipeline.h"
+#include "GGEngine/Renderer/VertexBuffer.h"
+#include "GGEngine/Renderer/IndexBuffer.h"
+#include "GGEngine/Renderer/VertexLayout.h"
+#include "GGEngine/Renderer/UniformBuffer.h"
+#include "GGEngine/Renderer/DescriptorSet.h"
+#include "GGEngine/Renderer/OrthographicCameraController.h"
 
 #include <memory>
 
@@ -15,12 +23,25 @@ public:
 
     void OnAttach() override;
     void OnDetach() override;
-    void OnUpdate() override;
-    void OnRenderOffscreen() override;
+    void OnUpdate(GGEngine::Timestep ts) override;
+    void OnRenderOffscreen(GGEngine::Timestep ts) override;
     void OnEvent(GGEngine::Event& event) override;
 
 private:
+    void CreatePipeline();
+
     std::unique_ptr<GGEngine::Framebuffer> m_ViewportFramebuffer;
+    std::unique_ptr<GGEngine::Pipeline> m_Pipeline;
+    std::unique_ptr<GGEngine::VertexBuffer> m_VertexBuffer;
+    std::unique_ptr<GGEngine::IndexBuffer> m_IndexBuffer;
+    GGEngine::VertexLayout m_VertexLayout;
+
+    // Camera system
+    GGEngine::OrthographicCameraController m_CameraController;
+    std::unique_ptr<GGEngine::DescriptorSetLayout> m_CameraDescriptorLayout;
+    std::unique_ptr<GGEngine::DescriptorSet> m_CameraDescriptorSet;
+    std::unique_ptr<GGEngine::UniformBuffer> m_CameraUniformBuffer;
+
     float m_ViewportWidth = 0.0f;
     float m_ViewportHeight = 0.0f;
     float m_PendingViewportWidth = 0.0f;
@@ -28,4 +49,7 @@ private:
     bool m_ViewportFocused = false;
     bool m_ViewportHovered = false;
     bool m_NeedsResize = false;
+
+    // Push constants data
+    float m_ColorMultiplier[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
 };

@@ -4,10 +4,12 @@
 #include <vulkan/vulkan.h>
 #include <string>
 #include <memory>
+#include <vector>
 
 namespace GGEngine {
 
     class Shader;
+    class VertexLayout;
 
     // Pipeline blend mode presets
     enum class BlendMode
@@ -17,12 +19,23 @@ namespace GGEngine {
         Additive    // Additive blending
     };
 
+    // Push constant range specification
+    struct GG_API PushConstantRange
+    {
+        VkShaderStageFlags stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS;
+        uint32_t offset = 0;
+        uint32_t size = 0;
+    };
+
     // Pipeline specification for graphics pipelines
     struct GG_API PipelineSpecification
     {
         Shader* shader = nullptr;
         VkRenderPass renderPass = VK_NULL_HANDLE;
         uint32_t subpass = 0;
+
+        // Vertex input
+        const VertexLayout* vertexLayout = nullptr;  // nullptr = no vertex input (hardcoded in shader)
 
         // Input assembly
         VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -43,6 +56,12 @@ namespace GGEngine {
 
         // Blending
         BlendMode blendMode = BlendMode::None;
+
+        // Push constants
+        std::vector<PushConstantRange> pushConstantRanges;
+
+        // Descriptor set layouts (in order: set 0, set 1, etc.)
+        std::vector<VkDescriptorSetLayout> descriptorSetLayouts;
 
         // Name for debugging
         std::string debugName;

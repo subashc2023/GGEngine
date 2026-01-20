@@ -8,6 +8,10 @@
 #include <algorithm>
 #include <fstream>
 
+#ifdef _WIN32
+#include <dwmapi.h>
+#endif
+
 namespace GGEngine {
 
     static VKAPI_ATTR VkBool32 VKAPI_CALL DebugCallback(
@@ -211,6 +215,16 @@ namespace GGEngine {
 
         VkResult result = vkQueuePresentKHR(m_PresentQueue, &presentInfo);
 
+        // On Windows, Vulkan FIFO doesn't actually block in windowed mode because
+        // DWM (Desktop Window Manager) accepts frames immediately into its compositor.
+        // DwmFlush() blocks until DWM's next VSync, providing proper frame pacing.
+#ifdef _WIN32
+        if (m_VSync)
+        {
+            DwmFlush();
+        }
+#endif
+
         if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || m_FramebufferResized)
         {
             m_FramebufferResized = false;
@@ -235,7 +249,9 @@ namespace GGEngine {
         if (m_VSync != enabled)
         {
             m_VSync = enabled;
-            RecreateSwapchain();
+            // Defer swapchain recreation until the end of the current frame
+            // to avoid destroying framebuffers while command buffers are recording
+            m_FramebufferResized = true;
             GG_CORE_INFO("VSync {0}", enabled ? "enabled" : "disabled");
         }
     }
@@ -457,6 +473,12 @@ namespace GGEngine {
 
         m_SwapchainImageFormat = surfaceFormat.format;
         m_SwapchainExtent = extent;
+
+        GG_CORE_INFO("Swapchain created: {}x{}, {} images, present mode: {}",
+            m_SwapchainExtent.width, m_SwapchainExtent.height, imageCount,
+            presentMode == VK_PRESENT_MODE_FIFO_KHR ? "FIFO" :
+            presentMode == VK_PRESENT_MODE_MAILBOX_KHR ? "MAILBOX" :
+            presentMode == VK_PRESENT_MODE_IMMEDIATE_KHR ? "IMMEDIATE" : "OTHER");
     }
 
     void VulkanContext::CreateImageViews()
@@ -700,6 +722,8 @@ namespace GGEngine {
 
     void VulkanContext::RecreateSwapchain()
     {
+        GG_CORE_INFO("Recreating swapchain...");
+
         int width = 0, height = 0;
         glfwGetFramebufferSize(m_Window, &width, &height);
         while (width == 0 || height == 0)
@@ -718,6 +742,8 @@ namespace GGEngine {
 
         // Reset images in flight tracking
         m_ImagesInFlight.resize(m_SwapchainImages.size(), VK_NULL_HANDLE);
+
+        GG_CORE_INFO("Swapchain recreated: {}x{}", m_SwapchainExtent.width, m_SwapchainExtent.height);
     }
 
     bool VulkanContext::CheckValidationLayerSupport()
@@ -873,10 +899,14 @@ namespace GGEngine {
 
     VkPresentModeKHR VulkanContext::ChooseSwapPresentMode(const std::vector<VkPresentModeKHR>& availablePresentModes)
     {
+        VkPresentModeKHR selectedMode = VK_PRESENT_MODE_FIFO_KHR;
+
         // FIFO is guaranteed to be available and provides VSync
         if (m_VSync)
         {
-            return VK_PRESENT_MODE_FIFO_KHR;
+            selectedMode = VK_PRESENT_MODE_FIFO_KHR;
+            GG_CORE_INFO("Present mode: FIFO (VSync ON)");
+            return selectedMode;
         }
 
         // When VSync is off, prefer MAILBOX (triple buffering) for low latency
@@ -884,7 +914,8 @@ namespace GGEngine {
         {
             if (availablePresentMode == VK_PRESENT_MODE_MAILBOX_KHR)
             {
-                return availablePresentMode;
+                GG_CORE_INFO("Present mode: MAILBOX (VSync OFF)");
+                return VK_PRESENT_MODE_MAILBOX_KHR;
             }
         }
 
@@ -893,11 +924,13 @@ namespace GGEngine {
         {
             if (availablePresentMode == VK_PRESENT_MODE_IMMEDIATE_KHR)
             {
-                return availablePresentMode;
+                GG_CORE_INFO("Present mode: IMMEDIATE (VSync OFF)");
+                return VK_PRESENT_MODE_IMMEDIATE_KHR;
             }
         }
 
         // FIFO is always available as fallback
+        GG_CORE_INFO("Present mode: FIFO (fallback)");
         return VK_PRESENT_MODE_FIFO_KHR;
     }
 

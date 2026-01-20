@@ -4,6 +4,7 @@
 #include "GGEngine/Events/ApplicationEvent.h"
 #include "GGEngine/Window.h"
 #include "GGEngine/Log.h"
+#include "GGEngine/Core/Timestep.h"
 #include "GGEngine/ImGui/ImGuiLayer.h"
 #include "GGEngine/Asset/ShaderLibrary.h"
 #include "GGEngine/Asset/AssetManager.h"
@@ -82,10 +83,16 @@ namespace GGEngine {
         {
             VulkanContext::Get().BeginFrame();
 
+            // Measure time AFTER BeginFrame to include VSync blocking time
+            // (vkAcquireNextImageKHR blocks when VSync is enabled and CPU runs ahead)
+            float time = static_cast<float>(glfwGetTime());
+            Timestep timestep = time - m_LastFrameTime;
+            m_LastFrameTime = time;
+
             // Offscreen rendering phase - layers render to their framebuffers
             for (Layer* layer : m_LayerStack)
             {
-                layer->OnRenderOffscreen();
+                layer->OnRenderOffscreen(timestep);
             }
 
             // Begin swapchain render pass for ImGui and direct swapchain rendering
@@ -94,7 +101,7 @@ namespace GGEngine {
             m_ImGuiLayer->Begin();
             for (Layer* layer : m_LayerStack)
             {
-                layer->OnUpdate();
+                layer->OnUpdate(timestep);
             }
             m_ImGuiLayer->End();
 

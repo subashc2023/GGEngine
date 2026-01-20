@@ -44,6 +44,8 @@ file(MAKE_DIRECTORY ${SHADER_OUTPUT_DIR})
 set(SHADER_SOURCES
     ${SHADER_SOURCE_DIR}/triangle.vert
     ${SHADER_SOURCE_DIR}/triangle.frag
+    ${SHADER_SOURCE_DIR}/basic.vert
+    ${SHADER_SOURCE_DIR}/basic.frag
 )
 
 foreach(SHADER ${SHADER_SOURCES})
@@ -60,9 +62,16 @@ endforeach()
 
 add_custom_target(Shaders ALL DEPENDS ${SHADER_OUTPUTS})
 
-# ImGui source files
+# GLFW (before ImGui since ImGui needs it)
+set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+add_subdirectory(Vendor/glfw)
+
+# ImGui as a static library
 set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/Vendor/imgui)
-set(IMGUI_SOURCES
+add_library(ImGui STATIC
     ${IMGUI_DIR}/imgui.cpp
     ${IMGUI_DIR}/imgui_demo.cpp
     ${IMGUI_DIR}/imgui_draw.cpp
@@ -71,6 +80,11 @@ set(IMGUI_SOURCES
     ${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
     ${IMGUI_DIR}/backends/imgui_impl_vulkan.cpp
 )
+target_include_directories(ImGui PUBLIC
+    ${IMGUI_DIR}
+    ${IMGUI_DIR}/backends
+)
+target_link_libraries(ImGui PUBLIC Vulkan::Headers glfw)
 
 # Engine source files
 set(ENGINE_SOURCES
@@ -107,13 +121,32 @@ set(ENGINE_SOURCES
     Engine/src/Platform/Vulkan/vma.cpp
     Engine/src/GGEngine/ImGui/ImGuiLayer.h
     Engine/src/GGEngine/ImGui/ImGuiLayer.cpp
+    Engine/src/GGEngine/ImGui/DebugUI.h
+    Engine/src/GGEngine/ImGui/DebugUI.cpp
     Engine/src/GGEngine/Renderer/Framebuffer.h
     Engine/src/GGEngine/Renderer/Framebuffer.cpp
     Engine/src/GGEngine/Renderer/Pipeline.h
     Engine/src/GGEngine/Renderer/Pipeline.cpp
+    Engine/src/GGEngine/Renderer/VertexLayout.h
+    Engine/src/GGEngine/Renderer/VertexLayout.cpp
+    Engine/src/GGEngine/Renderer/Buffer.h
+    Engine/src/GGEngine/Renderer/Buffer.cpp
+    Engine/src/GGEngine/Renderer/VertexBuffer.h
+    Engine/src/GGEngine/Renderer/VertexBuffer.cpp
+    Engine/src/GGEngine/Renderer/IndexBuffer.h
+    Engine/src/GGEngine/Renderer/IndexBuffer.cpp
+    Engine/src/GGEngine/Renderer/RenderCommand.h
+    Engine/src/GGEngine/Renderer/RenderCommand.cpp
+    Engine/src/GGEngine/Renderer/UniformBuffer.h
+    Engine/src/GGEngine/Renderer/UniformBuffer.cpp
+    Engine/src/GGEngine/Renderer/DescriptorSet.h
+    Engine/src/GGEngine/Renderer/DescriptorSet.cpp
+    Engine/src/GGEngine/Renderer/Camera.h
+    Engine/src/GGEngine/Renderer/Camera.cpp
+    Engine/src/GGEngine/Renderer/OrthographicCameraController.h
+    Engine/src/GGEngine/Renderer/OrthographicCameraController.cpp
     Engine/src/ggpch.h
     Engine/src/ggpch.cpp
-    ${IMGUI_SOURCES}
 )
 
 if(GGENGINE_BUILD_DLL)
@@ -128,27 +161,22 @@ target_compile_definitions(Engine PUBLIC GG_PLATFORM_WINDOWS)
 
 # Dependencies
 add_subdirectory(${CMAKE_SOURCE_DIR}/Vendor/spdlog)
-target_link_libraries(Engine PUBLIC spdlog::spdlog)
+target_link_libraries(Engine PUBLIC spdlog::spdlog ImGui)
 
-# GLFW
-set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
-set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
-set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-add_subdirectory(Vendor/glfw)
+# GLFW (defined earlier, just link here)
 target_link_libraries(Engine PRIVATE glfw)
 
-# Vulkan
-target_link_libraries(Engine PRIVATE Vulkan::Vulkan)
+# Vulkan - PUBLIC so apps can use VulkanContext
+target_link_libraries(Engine PUBLIC Vulkan::Vulkan)
+
+# Windows-specific libraries
+if(WIN32)
+    target_link_libraries(Engine PRIVATE dwmapi)
+endif()
 
 target_include_directories(Engine PUBLIC
     ${CMAKE_SOURCE_DIR}/Engine/src
     ${CMAKE_SOURCE_DIR}/Vendor/VulkanMemoryAllocator/include
-)
-
-target_include_directories(Engine PRIVATE
-    ${IMGUI_DIR}
-    ${IMGUI_DIR}/backends
 )
 
 target_precompile_headers(Engine PUBLIC Engine/src/ggpch.h)
@@ -175,7 +203,7 @@ add_executable(Sandbox
     Sandbox/src/TriangleLayer.cpp
 )
 
-target_link_libraries(Sandbox PRIVATE Engine Vulkan::Headers)
+target_link_libraries(Sandbox PRIVATE Engine)
 
 set_target_properties(Sandbox PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${BIN_ROOT}/Sandbox"
@@ -198,12 +226,7 @@ add_executable(Editor
     Editor/src/EditorLayer.cpp
 )
 
-target_link_libraries(Editor PRIVATE Engine Vulkan::Headers)
-
-target_include_directories(Editor PRIVATE
-    ${IMGUI_DIR}
-    ${IMGUI_DIR}/backends
-)
+target_link_libraries(Editor PRIVATE Engine)
 
 set_target_properties(Editor PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${BIN_ROOT}/Editor"

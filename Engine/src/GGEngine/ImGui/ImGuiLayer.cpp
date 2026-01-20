@@ -80,7 +80,7 @@ namespace GGEngine {
         ImGui::DestroyContext();
     }
 
-    void ImGuiLayer::OnUpdate()
+    void ImGuiLayer::OnUpdate(Timestep ts)
     {
         ImGui::ShowDemoWindow();
     }
