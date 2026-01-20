@@ -36,7 +36,10 @@ namespace GGEngine {
         // Wait for GPU to finish before cleanup
         vkDeviceWaitIdle(VulkanContext::Get().GetDevice());
 
-        // Detach all layers to clean up their Vulkan resources before destroying the device
+        // Manually call OnDetach() on all layers before VulkanContext shutdown.
+        // This ensures layers can clean up their GPU resources (pipelines, buffers, etc.)
+        // while the Vulkan device is still valid. LayerStack destructor will then delete
+        // the layer objects, but their GPU resources are already released.
         for (Layer* layer : m_LayerStack)
         {
             layer->OnDetach();

@@ -120,8 +120,10 @@ namespace GGEngine {
 
     void AssetManager::UnloadAll()
     {
+        // Explicitly unload all assets while Vulkan is still valid
         for (auto& [path, asset] : m_Assets)
         {
+            asset->Unload();
             m_Generations[asset->GetID()]++;
         }
         m_Assets.clear();
@@ -140,8 +142,7 @@ namespace GGEngine {
 
         if (!file.is_open())
         {
-            // Trace level - callers should log errors if file was required
-            GG_CORE_TRACE("File not found: {}", absolutePath.string());
+            // Silent - callers should log errors if file was required
             return {};
         }
 

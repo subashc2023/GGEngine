@@ -3,7 +3,7 @@
 #include "VertexLayout.h"
 #include "GGEngine/Asset/Shader.h"
 #include "Platform/Vulkan/VulkanContext.h"
-#include "GGEngine/Log.h"
+#include "Platform/Vulkan/VulkanUtils.h"
 
 namespace GGEngine {
 
@@ -170,11 +170,9 @@ namespace GGEngine {
         pipelineLayoutInfo.pushConstantRangeCount = static_cast<uint32_t>(vkPushConstantRanges.size());
         pipelineLayoutInfo.pPushConstantRanges = vkPushConstantRanges.empty() ? nullptr : vkPushConstantRanges.data();
 
-        if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &m_PipelineLayout) != VK_SUCCESS)
-        {
-            GG_CORE_ERROR("Failed to create pipeline layout!");
-            return;
-        }
+        VK_CHECK_RETURN(
+            vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &m_PipelineLayout),
+            "Failed to create pipeline layout");
 
         // Create pipeline
         VkGraphicsPipelineCreateInfo pipelineInfo{};
@@ -194,11 +192,9 @@ namespace GGEngine {
         pipelineInfo.subpass = m_Specification.subpass;
         pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
 
-        if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_Pipeline) != VK_SUCCESS)
-        {
-            GG_CORE_ERROR("Failed to create graphics pipeline!");
-            return;
-        }
+        VK_CHECK_RETURN(
+            vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_Pipeline),
+            "Failed to create graphics pipeline");
 
         if (!m_Specification.debugName.empty())
         {

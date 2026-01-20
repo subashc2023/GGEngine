@@ -11,6 +11,7 @@
 #include "GGEngine/Renderer/UniformBuffer.h"
 #include "GGEngine/Renderer/DescriptorSet.h"
 #include "GGEngine/Renderer/OrthographicCameraController.h"
+#include "GGEngine/Renderer/Camera.h"
 
 #include <memory>
 
@@ -37,6 +38,6 @@ private:
     std::unique_ptr<GGEngine::DescriptorSet> m_CameraDescriptorSet;
     std::unique_ptr<GGEngine::UniformBuffer> m_CameraUniformBuffer;
 
-    // Push constants
-    float m_Color[4] = { 0.2f, 0.6f, 1.0f, 1.0f };  // Nice blue color
+    // Color multiplier
+    float m_ColorMultiplier[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
 };

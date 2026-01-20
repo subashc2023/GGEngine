@@ -47,7 +47,7 @@ namespace GGEngine {
         virtual int GetCategoryFlags() const = 0;
         virtual std::string ToString() const { return GetName(); }
 
-        inline bool IsInCategory(EventCategory category)
+        inline bool IsInCategory(EventCategory category) const
         {
             return GetCategoryFlags() & category;
         }
@@ -76,7 +76,7 @@ namespace GGEngine {
         {
             if (m_Event.GetEventType() == T::GetStaticType())
             {
-                m_Event.m_Handled = func(static_cast<T&>(m_Event));
+                m_Event.m_Handled |= func(static_cast<T&>(m_Event));
                 return true;
             }
             return false;

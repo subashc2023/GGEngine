@@ -5,13 +5,11 @@
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 #include <vector>
-#include <memory>
+#include <functional>
 
 struct GLFWwindow;
 
 namespace GGEngine {
-
-    class Pipeline;
 
     class GG_API VulkanContext
     {
@@ -42,9 +40,10 @@ namespace GGEngine {
         uint32_t GetSwapchainImageCount() const { return static_cast<uint32_t>(m_SwapchainImages.size()); }
         VkExtent2D GetSwapchainExtent() const { return m_SwapchainExtent; }
 
-        Pipeline* GetTrianglePipeline() const { return m_TrianglePipeline.get(); }
-
         VmaAllocator GetAllocator() const { return m_Allocator; }
+
+        // Execute a one-time command buffer synchronously (blocks until complete)
+        void ImmediateSubmit(const std::function<void(VkCommandBuffer)>& func);
 
     private:
         VulkanContext() = default;
@@ -66,8 +65,6 @@ namespace GGEngine {
         void CreateAllocator();
         void DestroyAllocator();
         void CreateDescriptorPool();
-        void CreateTrianglePipeline();
-        void DestroyTrianglePipeline();
 
         VkShaderModule CreateShaderModule(const std::vector<char>& code);
         static std::vector<char> ReadFile(const std::string& filename);
@@ -131,8 +128,6 @@ namespace GGEngine {
 
         VkDescriptorPool m_DescriptorPool = VK_NULL_HANDLE;
         VmaAllocator m_Allocator = VK_NULL_HANDLE;
-
-        std::unique_ptr<Pipeline> m_TrianglePipeline;
 
         uint32_t m_CurrentFrameIndex = 0;
         uint32_t m_CurrentImageIndex = 0;

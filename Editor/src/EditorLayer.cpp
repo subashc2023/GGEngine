@@ -45,11 +45,11 @@ void EditorLayer::OnAttach()
     m_VertexLayout.Push("aPosition", GGEngine::VertexAttributeType::Float3)
                   .Push("aColor", GGEngine::VertexAttributeType::Float3);
 
-    // Create triangle vertex data (pointing up)
+    // Create triangle vertex data (pointing up, white base color)
     std::vector<Vertex> vertices = {
-        {{ 0.0f,  0.5f, 0.0f}, {1.0f, 0.0f, 0.0f}},  // Top (point) - Red
-        {{ 0.5f, -0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}},  // Bottom right - Green
-        {{-0.5f, -0.5f, 0.0f}, {0.0f, 0.0f, 1.0f}}   // Bottom left - Blue
+        {{ 0.0f,  0.5f, 0.0f}, {1.0f, 1.0f, 1.0f}},  // Top
+        {{ 0.5f, -0.5f, 0.0f}, {1.0f, 1.0f, 1.0f}},  // Bottom right
+        {{-0.5f, -0.5f, 0.0f}, {1.0f, 1.0f, 1.0f}}   // Bottom left
     };
 
     std::vector<uint32_t> indices = { 0, 1, 2 };
@@ -94,12 +94,19 @@ void EditorLayer::CreatePipeline()
     pipelineSpec.cullMode = VK_CULL_MODE_NONE;
     pipelineSpec.debugName = "basic_triangle";
 
-    // Push constant for color multiplier (vec4 = 16 bytes)
-    GGEngine::PushConstantRange pushConstantRange;
-    pushConstantRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-    pushConstantRange.offset = 0;
-    pushConstantRange.size = sizeof(float) * 4;
-    pipelineSpec.pushConstantRanges.push_back(pushConstantRange);
+    // Push constant for model matrix (mat4 = 64 bytes) in vertex shader
+    GGEngine::PushConstantRange vertexPushConstant;
+    vertexPushConstant.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    vertexPushConstant.offset = 0;
+    vertexPushConstant.size = sizeof(GGEngine::Mat4);
+    pipelineSpec.pushConstantRanges.push_back(vertexPushConstant);
+
+    // Push constant for color multiplier (vec4 = 16 bytes) in fragment shader
+    GGEngine::PushConstantRange fragmentPushConstant;
+    fragmentPushConstant.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    fragmentPushConstant.offset = sizeof(GGEngine::Mat4);  // offset 64
+    fragmentPushConstant.size = sizeof(float) * 4;
+    pipelineSpec.pushConstantRanges.push_back(fragmentPushConstant);
 
     // Descriptor set layout for camera UBO
     pipelineSpec.descriptorSetLayouts.push_back(m_CameraDescriptorLayout->GetVkLayout());
@@ -147,12 +154,25 @@ void EditorLayer::OnRenderOffscreen(GGEngine::Timestep ts)
         // Bind camera descriptor set
         m_CameraDescriptorSet->Bind(cmd, m_Pipeline->GetLayout(), 0);
 
-        // Push color multiplier constant
+        // Build and push model matrix (Scale * Rotate * Translate order for TRS)
+        float rotationRadians = m_Rotation * 3.14159265359f / 180.0f;
+        GGEngine::Mat4 modelMatrix = GGEngine::Mat4::Translate(m_Position[0], m_Position[1], m_Position[2])
+                                   * GGEngine::Mat4::RotateZ(rotationRadians)
+                                   * GGEngine::Mat4::Scale(m_Scale[0], m_Scale[1], m_Scale[2]);
+
+        GGEngine::RenderCommand::PushConstants(
+            cmd,
+            m_Pipeline->GetLayout(),
+            VK_SHADER_STAGE_VERTEX_BIT,
+            modelMatrix);
+
+        // Push color multiplier (offset 64, after model matrix)
         GGEngine::RenderCommand::PushConstants(
             cmd,
             m_Pipeline->GetLayout(),
             VK_SHADER_STAGE_FRAGMENT_BIT,
-            m_ColorMultiplier);
+            m_ColorMultiplier,
+            sizeof(GGEngine::Mat4));  // offset = 64
 
         GGEngine::RenderCommand::SetViewport(cmd, m_ViewportFramebuffer->GetWidth(), m_ViewportFramebuffer->GetHeight());
         GGEngine::RenderCommand::SetScissor(cmd, m_ViewportFramebuffer->GetWidth(), m_ViewportFramebuffer->GetHeight());
@@ -257,9 +277,16 @@ void EditorLayer::OnUpdate(GGEngine::Timestep ts)
         ImGui::Text("Controls: RMB drag to pan, scroll to zoom");
     }
 
+    if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        ImGui::DragFloat3("Position", m_Position, 0.01f);
+        ImGui::DragFloat("Rotation", &m_Rotation, 1.0f, -360.0f, 360.0f, "%.1f deg");
+        ImGui::DragFloat3("Scale", m_Scale, 0.01f, 0.01f, 10.0f);
+    }
+
     if (ImGui::CollapsingHeader("Rendering", ImGuiTreeNodeFlags_DefaultOpen))
     {
-        ImGui::ColorEdit4("Color", m_ColorMultiplier);
+        ImGui::ColorEdit4("Color Tint", m_ColorMultiplier);
     }
 
     if (ImGui::CollapsingHeader("Stats", ImGuiTreeNodeFlags_DefaultOpen))

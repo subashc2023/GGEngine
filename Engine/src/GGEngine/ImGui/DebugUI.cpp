@@ -6,6 +6,10 @@
 
 namespace GGEngine {
 
+    // Smoothed frame time for stable FPS display (EMA with ~20 frame response)
+    static float s_SmoothedFrameTime = 0.0f;
+    constexpr float EMA_ALPHA = 0.05f;
+
     void DebugUI::ShowStats(Timestep ts)
     {
         ImGui::Begin("Stats");
@@ -15,11 +19,18 @@ namespace GGEngine {
 
     void DebugUI::ShowStatsContent(Timestep ts)
     {
-        ImGuiIO& io = ImGui::GetIO();
+        float rawFrameTime = ts.GetSeconds();
 
-        // Use ImGui's built-in framerate (calculated from its own delta time)
-        ImGui::Text("ImGui FPS: %.1f (%.3f ms)", io.Framerate, 1000.0f / io.Framerate);
-        ImGui::Text("Engine FPS: %.1f (%.3f ms)", 1.0f / ts.GetSeconds(), ts.GetMilliseconds());
+        // Initialize on first frame, then apply EMA
+        if (s_SmoothedFrameTime == 0.0f)
+            s_SmoothedFrameTime = rawFrameTime;
+        else
+            s_SmoothedFrameTime = EMA_ALPHA * rawFrameTime + (1.0f - EMA_ALPHA) * s_SmoothedFrameTime;
+
+        float smoothedFPS = (s_SmoothedFrameTime > 0.0f) ? 1.0f / s_SmoothedFrameTime : 0.0f;
+        float smoothedMs = s_SmoothedFrameTime * 1000.0f;
+
+        ImGui::Text("FPS: %.1f (%.2f ms)", smoothedFPS, smoothedMs);
 
         ImGui::Separator();
 

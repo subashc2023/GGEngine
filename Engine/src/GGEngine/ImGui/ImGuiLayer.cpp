@@ -65,6 +65,11 @@ namespace GGEngine {
         initInfo.PipelineInfoMain.Subpass = 0;
         initInfo.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
 
+        // For secondary viewports (multi-viewport support)
+        initInfo.PipelineInfoForViewports.RenderPass = vkContext.GetRenderPass();
+        initInfo.PipelineInfoForViewports.Subpass = 0;
+        initInfo.PipelineInfoForViewports.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+
         ImGui_ImplVulkan_Init(&initInfo);
 
         GG_CORE_INFO("ImGui layer initialized with docking and viewports enabled");
@@ -82,7 +87,8 @@ namespace GGEngine {
 
     void ImGuiLayer::OnUpdate(Timestep ts)
     {
-        ImGui::ShowDemoWindow();
+        // Demo window disabled - enable for ImGui reference
+        // ImGui::ShowDemoWindow();
     }
 
     void ImGuiLayer::OnEvent(Event& e)
@@ -92,7 +98,13 @@ namespace GGEngine {
         if (m_BlockEvents)
         {
             ImGuiIO& io = ImGui::GetIO();
-            e.m_Handled |= e.IsInCategory(EventCategoryMouse) && io.WantCaptureMouse;
+
+            // Don't block scroll events - let them reach viewport camera controllers
+            bool isScrollEvent = e.GetEventType() == EventType::MouseScrolled;
+            if (!isScrollEvent)
+            {
+                e.m_Handled |= e.IsInCategory(EventCategoryMouse) && io.WantCaptureMouse;
+            }
             e.m_Handled |= e.IsInCategory(EventCategoryKeyboard) && io.WantCaptureKeyboard;
         }
     }

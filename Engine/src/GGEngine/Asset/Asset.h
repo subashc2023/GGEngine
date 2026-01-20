@@ -29,6 +29,7 @@ namespace GGEngine {
         virtual ~Asset() = default;
 
         virtual AssetType GetType() const = 0;
+        virtual void Unload() {}  // Override to release GPU/external resources
 
         const std::filesystem::path& GetPath() const { return m_Path; }
         AssetID GetID() const { return m_ID; }

@@ -12,6 +12,7 @@
 #include "GGEngine/Renderer/UniformBuffer.h"
 #include "GGEngine/Renderer/DescriptorSet.h"
 #include "GGEngine/Renderer/OrthographicCameraController.h"
+#include "GGEngine/Renderer/Camera.h"
 
 #include <memory>
 
@@ -50,6 +51,11 @@ private:
     bool m_ViewportHovered = false;
     bool m_NeedsResize = false;
 
-    // Push constants data
+    // Triangle transform
+    float m_Position[3] = { 0.0f, 0.0f, 0.0f };
+    float m_Rotation = 0.0f;  // Rotation around Z in degrees
+    float m_Scale[3] = { 1.0f, 1.0f, 1.0f };
+
+    // Color multiplier
     float m_ColorMultiplier[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
 };

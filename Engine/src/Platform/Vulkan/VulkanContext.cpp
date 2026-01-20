@@ -1,7 +1,5 @@
 #include "ggpch.h"
 #include "VulkanContext.h"
-#include "GGEngine/Asset/ShaderLibrary.h"
-#include "GGEngine/Renderer/Pipeline.h"
 
 #include <GLFW/glfw3.h>
 #include <set>
@@ -71,7 +69,6 @@ namespace GGEngine {
         CreateCommandBuffers();
         CreateSyncObjects();
         CreateDescriptorPool();
-        CreateTrianglePipeline();
 
         GG_CORE_INFO("Vulkan context initialized successfully");
     }
@@ -79,8 +76,6 @@ namespace GGEngine {
     void VulkanContext::Shutdown()
     {
         vkDeviceWaitIdle(m_Device);
-
-        DestroyTrianglePipeline();
 
         CleanupSwapchain();
 
@@ -994,31 +989,40 @@ namespace GGEngine {
         return shaderModule;
     }
 
-    void VulkanContext::CreateTrianglePipeline()
+    void VulkanContext::ImmediateSubmit(const std::function<void(VkCommandBuffer)>& func)
     {
-        // Load shader via asset system
-        auto shaderHandle = ShaderLibrary::Get().Load("triangle", "assets/shaders/compiled/triangle");
+        VkCommandBufferAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocInfo.commandPool = m_CommandPool;
+        allocInfo.commandBufferCount = 1;
 
-        if (!shaderHandle.IsValid() || !shaderHandle->IsLoaded())
+        VkCommandBuffer commandBuffer;
+        if (vkAllocateCommandBuffers(m_Device, &allocInfo, &commandBuffer) != VK_SUCCESS)
         {
-            GG_CORE_ERROR("Failed to load triangle shader!");
+            GG_CORE_ERROR("Failed to allocate command buffer for immediate submit!");
             return;
         }
 
-        // Create pipeline using the new Pipeline abstraction
-        PipelineSpecification spec;
-        spec.shader = shaderHandle.Get();
-        spec.renderPass = m_RenderPass;
-        spec.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-        spec.cullMode = VK_CULL_MODE_NONE;
-        spec.debugName = "triangle";
+        VkCommandBufferBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 
-        m_TrianglePipeline = std::make_unique<Pipeline>(spec);
-    }
+        vkBeginCommandBuffer(commandBuffer, &beginInfo);
 
-    void VulkanContext::DestroyTrianglePipeline()
-    {
-        m_TrianglePipeline.reset();
+        func(commandBuffer);
+
+        vkEndCommandBuffer(commandBuffer);
+
+        VkSubmitInfo submitInfo{};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &commandBuffer;
+
+        vkQueueSubmit(m_GraphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+        vkQueueWaitIdle(m_GraphicsQueue);
+
+        vkFreeCommandBuffers(m_Device, m_CommandPool, 1, &commandBuffer);
     }
 
 }

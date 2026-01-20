@@ -86,7 +86,14 @@ namespace GGEngine {
         if (m_Stages.empty())
             return;
 
+        // Check if VulkanContext is still valid (may be destroyed during static destruction)
         VkDevice device = VulkanContext::Get().GetDevice();
+        if (device == VK_NULL_HANDLE)
+        {
+            m_Stages.clear();
+            m_Loaded = false;
+            return;
+        }
 
         for (auto& stage : m_Stages)
         {

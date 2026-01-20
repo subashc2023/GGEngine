@@ -69,7 +69,7 @@ set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 add_subdirectory(Vendor/glfw)
 
-# ImGui as a static library
+# ImGui as a static library (linked into Engine DLL, symbols exported)
 set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/Vendor/imgui)
 add_library(ImGui STATIC
     ${IMGUI_DIR}/imgui.cpp
@@ -85,6 +85,12 @@ target_include_directories(ImGui PUBLIC
     ${IMGUI_DIR}/backends
 )
 target_link_libraries(ImGui PUBLIC Vulkan::Headers glfw)
+
+# ImGui DLL export/import - use same pattern as GG_API
+if(WIN32 AND GGENGINE_BUILD_DLL)
+    # ImGui static lib itself exports (will be linked into Engine.dll)
+    target_compile_definitions(ImGui PRIVATE IMGUI_API=__declspec\(dllexport\))
+endif()
 
 # Engine source files
 set(ENGINE_SOURCES
@@ -153,6 +159,8 @@ if(GGENGINE_BUILD_DLL)
     add_library(Engine SHARED ${ENGINE_SOURCES})
     target_compile_definitions(Engine PRIVATE GG_BUILD_DLL)
     target_compile_definitions(Engine PUBLIC GG_DLL)
+    # Engine sources that include imgui.h need to see export definition
+    target_compile_definitions(Engine PRIVATE IMGUI_API=__declspec\(dllexport\))
 else()
     add_library(Engine STATIC ${ENGINE_SOURCES})
 endif()
@@ -205,6 +213,11 @@ add_executable(Sandbox
 
 target_link_libraries(Sandbox PRIVATE Engine)
 
+# Import ImGui symbols from Engine DLL
+if(WIN32 AND GGENGINE_BUILD_DLL)
+    target_compile_definitions(Sandbox PRIVATE IMGUI_API=__declspec\(dllimport\))
+endif()
+
 set_target_properties(Sandbox PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${BIN_ROOT}/Sandbox"
 )
@@ -227,6 +240,11 @@ add_executable(Editor
 )
 
 target_link_libraries(Editor PRIVATE Engine)
+
+# Import ImGui symbols from Engine DLL
+if(WIN32 AND GGENGINE_BUILD_DLL)
+    target_compile_definitions(Editor PRIVATE IMGUI_API=__declspec\(dllimport\))
+endif()
 
 set_target_properties(Editor PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${BIN_ROOT}/Editor"

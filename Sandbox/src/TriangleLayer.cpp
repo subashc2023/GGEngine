@@ -4,6 +4,7 @@
 #include "GGEngine/Renderer/RenderCommand.h"
 #include "GGEngine/ImGui/DebugUI.h"
 
+#include <imgui.h>
 #include <vulkan/vulkan.h>
 #include <vector>
 
@@ -39,11 +40,11 @@ void TriangleLayer::OnAttach()
     m_VertexLayout.Push("aPosition", GGEngine::VertexAttributeType::Float3)
                   .Push("aColor", GGEngine::VertexAttributeType::Float3);
 
-    // Create triangle vertex data (pointing up)
+    // Create triangle vertex data (pointing up, white base color)
     std::vector<Vertex> vertices = {
-        {{ 0.0f,  0.5f, 0.0f}, {1.0f, 0.0f, 0.0f}},  // Top (point)
-        {{ 0.5f, -0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}},  // Bottom right
-        {{-0.5f, -0.5f, 0.0f}, {0.0f, 0.0f, 1.0f}}   // Bottom left
+        {{ 0.0f,  0.5f, 0.0f}, {1.0f, 1.0f, 1.0f}},  // Top
+        {{ 0.5f, -0.5f, 0.0f}, {1.0f, 1.0f, 1.0f}},  // Bottom right
+        {{-0.5f, -0.5f, 0.0f}, {1.0f, 1.0f, 1.0f}}   // Bottom left
     };
 
     std::vector<uint32_t> indices = { 0, 1, 2 };
@@ -69,12 +70,19 @@ void TriangleLayer::OnAttach()
     pipelineSpec.cullMode = VK_CULL_MODE_NONE;
     pipelineSpec.debugName = "sandbox_triangle";
 
-    // Push constant for color
-    GGEngine::PushConstantRange pushConstantRange;
-    pushConstantRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-    pushConstantRange.offset = 0;
-    pushConstantRange.size = sizeof(float) * 4;
-    pipelineSpec.pushConstantRanges.push_back(pushConstantRange);
+    // Push constant for model matrix (vertex shader)
+    GGEngine::PushConstantRange vertexPushConstant;
+    vertexPushConstant.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    vertexPushConstant.offset = 0;
+    vertexPushConstant.size = sizeof(GGEngine::Mat4);
+    pipelineSpec.pushConstantRanges.push_back(vertexPushConstant);
+
+    // Push constant for color multiplier (fragment shader)
+    GGEngine::PushConstantRange fragmentPushConstant;
+    fragmentPushConstant.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    fragmentPushConstant.offset = sizeof(GGEngine::Mat4);  // offset 64
+    fragmentPushConstant.size = sizeof(float) * 4;
+    pipelineSpec.pushConstantRanges.push_back(fragmentPushConstant);
 
     // Descriptor set layout for camera UBO
     pipelineSpec.descriptorSetLayouts.push_back(m_CameraDescriptorLayout->GetVkLayout());
@@ -116,12 +124,21 @@ void TriangleLayer::OnUpdate(GGEngine::Timestep ts)
     // Bind camera descriptor set
     m_CameraDescriptorSet->Bind(cmd, m_Pipeline->GetLayout(), 0);
 
-    // Push color constant
+    // Push identity model matrix (no transform)
+    GGEngine::Mat4 modelMatrix = GGEngine::Mat4::Identity();
+    GGEngine::RenderCommand::PushConstants(
+        cmd,
+        m_Pipeline->GetLayout(),
+        VK_SHADER_STAGE_VERTEX_BIT,
+        modelMatrix);
+
+    // Push color multiplier (offset 64, after model matrix)
     GGEngine::RenderCommand::PushConstants(
         cmd,
         m_Pipeline->GetLayout(),
         VK_SHADER_STAGE_FRAGMENT_BIT,
-        m_Color);
+        m_ColorMultiplier,
+        sizeof(GGEngine::Mat4));  // offset = 64
 
     // Set viewport and scissor
     VkExtent2D extent = vkContext.GetSwapchainExtent();
@@ -135,8 +152,12 @@ void TriangleLayer::OnUpdate(GGEngine::Timestep ts)
     // Draw
     GGEngine::RenderCommand::DrawIndexed(cmd, m_IndexBuffer->GetCount());
 
-    // Debug stats window
-    GGEngine::DebugUI::ShowStats(ts);
+    // Debug panel with color picker and stats
+    ImGui::Begin("Debug");
+    ImGui::ColorEdit4("Color Tint", m_ColorMultiplier);
+    ImGui::Separator();
+    GGEngine::DebugUI::ShowStatsContent(ts);
+    ImGui::End();
 }
 
 void TriangleLayer::OnEvent(GGEngine::Event& event)

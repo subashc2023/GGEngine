@@ -17,6 +17,36 @@ namespace GGEngine {
 
         static Mat4 Identity() { return Mat4{}; }
 
+        static Mat4 Translate(float x, float y, float z)
+        {
+            Mat4 m{};
+            m.data[12] = x;
+            m.data[13] = y;
+            m.data[14] = z;
+            return m;
+        }
+
+        static Mat4 Scale(float x, float y, float z)
+        {
+            Mat4 m{};
+            m.data[0] = x;
+            m.data[5] = y;
+            m.data[10] = z;
+            return m;
+        }
+
+        static Mat4 RotateZ(float angleRadians)
+        {
+            Mat4 m{};
+            float c = std::cos(angleRadians);
+            float s = std::sin(angleRadians);
+            m.data[0] = c;
+            m.data[1] = s;
+            m.data[4] = -s;
+            m.data[5] = c;
+            return m;
+        }
+
         static Mat4 Perspective(float fovY, float aspect, float nearPlane, float farPlane)
         {
             Mat4 m{};

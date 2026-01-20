@@ -38,7 +38,7 @@ namespace GGEngine {
         bool LoadStage(VkShaderStageFlagBits stage, const std::vector<char>& spirvCode);
         bool LoadStageFromFile(VkShaderStageFlagBits stage, const std::string& path);
 
-        void Unload();
+        void Unload() override;
 
         const std::vector<ShaderStage>& GetStages() const { return m_Stages; }
         bool HasStage(VkShaderStageFlagBits stage) const;
