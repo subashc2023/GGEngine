@@ -1,6 +1,7 @@
 #include "ggpch.h"
 #include "DescriptorSet.h"
 #include "UniformBuffer.h"
+#include "GGEngine/Asset/Texture.h"
 #include "Platform/Vulkan/VulkanContext.h"
 #include "GGEngine/Core/Log.h"
 
@@ -90,6 +91,24 @@ namespace GGEngine {
         write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         write.descriptorCount = 1;
         write.pBufferInfo = &bufferInfo;
+
+        vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    }
+
+    void DescriptorSet::SetTexture(uint32_t binding, const Texture& texture)
+    {
+        auto device = VulkanContext::Get().GetDevice();
+
+        VkDescriptorImageInfo imageInfo = texture.GetDescriptorInfo();
+
+        VkWriteDescriptorSet write{};
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = m_DescriptorSet;
+        write.dstBinding = binding;
+        write.dstArrayElement = 0;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.descriptorCount = 1;
+        write.pImageInfo = &imageInfo;
 
         vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
     }

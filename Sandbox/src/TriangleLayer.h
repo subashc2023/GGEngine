@@ -12,6 +12,8 @@
 #include "GGEngine/Renderer/DescriptorSet.h"
 #include "GGEngine/Renderer/OrthographicCameraController.h"
 #include "GGEngine/Renderer/Camera.h"
+#include "GGEngine/Asset/Texture.h"
+#include "GGEngine/Asset/AssetHandle.h"
 
 class TriangleLayer : public GGEngine::Layer
 {
@@ -33,6 +35,15 @@ private:
     // Grid geometry
     GGEngine::Scope<GGEngine::VertexBuffer> m_QuadVertexBuffer;
     GGEngine::Scope<GGEngine::IndexBuffer> m_QuadIndexBuffer;
+
+    // Textured quad
+    GGEngine::Scope<GGEngine::Material> m_TextureMaterial;
+    GGEngine::Scope<GGEngine::VertexBuffer> m_TexturedQuadVertexBuffer;
+    GGEngine::Scope<GGEngine::IndexBuffer> m_TexturedQuadIndexBuffer;
+    GGEngine::VertexLayout m_TexturedVertexLayout;
+    GGEngine::AssetHandle<GGEngine::Texture> m_CheckerboardTexture;
+    GGEngine::Scope<GGEngine::DescriptorSetLayout> m_TextureDescriptorLayout;
+    GGEngine::Scope<GGEngine::DescriptorSet> m_TextureDescriptorSet;
 
     // Camera system
     GGEngine::OrthographicCameraController m_CameraController;

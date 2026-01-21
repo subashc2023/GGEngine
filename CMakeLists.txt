@@ -46,6 +46,8 @@ set(SHADER_SOURCES
     ${SHADER_SOURCE_DIR}/triangle.frag
     ${SHADER_SOURCE_DIR}/basic.vert
     ${SHADER_SOURCE_DIR}/basic.frag
+    ${SHADER_SOURCE_DIR}/texture.vert
+    ${SHADER_SOURCE_DIR}/texture.frag
 )
 
 foreach(SHADER ${SHADER_SOURCES})
@@ -118,6 +120,9 @@ set(ENGINE_SOURCES
     Engine/src/GGEngine/Asset/Shader.cpp
     Engine/src/GGEngine/Asset/ShaderLibrary.h
     Engine/src/GGEngine/Asset/ShaderLibrary.cpp
+    Engine/src/GGEngine/Asset/Texture.h
+    Engine/src/GGEngine/Asset/Texture.cpp
+    Engine/src/GGEngine/Asset/stb_image.cpp
     Engine/src/Platform/Windows/WindowsWindow.h
     Engine/src/Platform/Windows/WindowsWindow.cpp
     Engine/src/Platform/Windows/WindowsInput.h
@@ -189,6 +194,7 @@ endif()
 target_include_directories(Engine PUBLIC
     ${CMAKE_SOURCE_DIR}/Engine/src
     ${CMAKE_SOURCE_DIR}/Vendor/VulkanMemoryAllocator/include
+    ${CMAKE_SOURCE_DIR}/Vendor/stb_image
 )
 
 target_precompile_headers(Engine PUBLIC Engine/src/ggpch.h)

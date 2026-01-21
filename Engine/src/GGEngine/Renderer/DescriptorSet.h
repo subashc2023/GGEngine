@@ -8,6 +8,7 @@
 namespace GGEngine {
 
     class UniformBuffer;
+    class Texture;
 
     // Descriptor binding specification
     struct GG_API DescriptorBinding
@@ -48,7 +49,7 @@ namespace GGEngine {
 
         // Update bindings
         void SetUniformBuffer(uint32_t binding, const UniformBuffer& buffer);
-        // Future: SetTexture, SetStorageBuffer, etc.
+        void SetTexture(uint32_t binding, const Texture& texture);
 
         // Bind to command buffer
         void Bind(VkCommandBuffer cmd, VkPipelineLayout pipelineLayout, uint32_t setIndex = 0) const;

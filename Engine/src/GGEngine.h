@@ -13,6 +13,7 @@
 #include "GGEngine/Asset/AssetManager.h"
 #include "GGEngine/Asset/Shader.h"
 #include "GGEngine/Asset/ShaderLibrary.h"
+#include "GGEngine/Asset/Texture.h"
 
 #include "GGEngine/Renderer/Pipeline.h"
 #include "GGEngine/Renderer/Material.h"

@@ -16,6 +16,12 @@ namespace {
         float position[3];
         float color[3];
     };
+
+    struct TexturedVertex
+    {
+        float position[3];
+        float texCoord[2];
+    };
 }
 
 TriangleLayer::TriangleLayer()
@@ -129,11 +135,86 @@ void TriangleLayer::OnAttach()
 
     m_Material->Create(materialSpec);
 
-    GG_INFO("TriangleLayer attached - using Material system");
+    // --- Textured Quad Setup ---
+
+    // Load texture
+    m_CheckerboardTexture = GGEngine::Texture::Create("Sandbox/assets/textures/checkerboard.png");
+    if (!m_CheckerboardTexture.IsValid())
+    {
+        GG_ERROR("Failed to load checkerboard texture!");
+    }
+
+    // Create textured vertex layout: position (vec3) + texCoord (vec2)
+    m_TexturedVertexLayout.Push("aPosition", GGEngine::VertexAttributeType::Float3)
+                          .Push("aTexCoord", GGEngine::VertexAttributeType::Float2);
+
+    // Create textured quad vertices (positioned to the right of the grid)
+    std::vector<TexturedVertex> texturedQuadVertices = {
+        {{ 1.5f, -0.5f, 0.0f }, { 0.0f, 0.0f }},  // Bottom-left
+        {{ 2.5f, -0.5f, 0.0f }, { 1.0f, 0.0f }},  // Bottom-right
+        {{ 2.5f,  0.5f, 0.0f }, { 1.0f, 1.0f }},  // Top-right
+        {{ 1.5f,  0.5f, 0.0f }, { 0.0f, 1.0f }}   // Top-left
+    };
+
+    std::vector<uint32_t> texturedQuadIndices = {
+        0, 1, 2,
+        2, 3, 0
+    };
+
+    m_TexturedQuadVertexBuffer = GGEngine::VertexBuffer::Create(texturedQuadVertices, m_TexturedVertexLayout);
+    m_TexturedQuadIndexBuffer = GGEngine::IndexBuffer::Create(texturedQuadIndices);
+
+    // Create descriptor set layout for camera UBO + texture sampler
+    std::vector<GGEngine::DescriptorBinding> textureBindings = {
+        { 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT, 1 },
+        { 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT, 1 }
+    };
+    m_TextureDescriptorLayout = GGEngine::CreateScope<GGEngine::DescriptorSetLayout>(textureBindings);
+
+    // Create descriptor set and bind resources
+    m_TextureDescriptorSet = GGEngine::CreateScope<GGEngine::DescriptorSet>(*m_TextureDescriptorLayout);
+    m_TextureDescriptorSet->SetUniformBuffer(0, *m_CameraUniformBuffer);
+    if (m_CheckerboardTexture.IsValid())
+    {
+        m_TextureDescriptorSet->SetTexture(1, *m_CheckerboardTexture.Get());
+    }
+
+    // Load texture shader
+    auto textureShaderHandle = GGEngine::Shader::Create("texture", "assets/shaders/compiled/texture");
+    if (!textureShaderHandle)
+    {
+        GG_ERROR("Failed to load texture shader!");
+    }
+    else
+    {
+        // Create texture material
+        m_TextureMaterial = GGEngine::CreateScope<GGEngine::Material>();
+        m_TextureMaterial->RegisterProperty("model", GGEngine::PropertyType::Mat4, VK_SHADER_STAGE_VERTEX_BIT, 0);
+        m_TextureMaterial->RegisterProperty("colorMultiplier", GGEngine::PropertyType::Vec4, VK_SHADER_STAGE_FRAGMENT_BIT, 64);
+
+        GGEngine::MaterialSpecification textureMaterialSpec;
+        textureMaterialSpec.shader = textureShaderHandle.Get();
+        textureMaterialSpec.renderPass = GGEngine::VulkanContext::Get().GetRenderPass();
+        textureMaterialSpec.vertexLayout = &m_TexturedVertexLayout;
+        textureMaterialSpec.cullMode = VK_CULL_MODE_NONE;
+        textureMaterialSpec.descriptorSetLayouts.push_back(m_TextureDescriptorLayout->GetVkLayout());
+        textureMaterialSpec.name = "sandbox_textured";
+
+        m_TextureMaterial->Create(textureMaterialSpec);
+    }
+
+    GG_INFO("TriangleLayer attached - using Material system with textures");
 }
 
 void TriangleLayer::OnDetach()
 {
+    m_TextureMaterial.reset();
+    m_TextureDescriptorSet.reset();
+    m_TextureDescriptorLayout.reset();
+    m_TexturedQuadVertexBuffer.reset();
+    m_TexturedQuadIndexBuffer.reset();
+    // Texture is managed by AssetManager, no need to manually reset
+
     m_Material.reset();
     m_CameraDescriptorSet.reset();
     m_CameraDescriptorLayout.reset();
@@ -197,6 +278,20 @@ void TriangleLayer::OnUpdate(GGEngine::Timestep ts)
     m_VertexBuffer->Bind(cmd);
     m_IndexBuffer->Bind(cmd);
     GGEngine::RenderCommand::DrawIndexed(cmd, m_IndexBuffer->GetCount());
+
+    // --- Render Textured Quad ---
+    if (m_TextureMaterial && m_TexturedQuadVertexBuffer && m_TexturedQuadIndexBuffer && m_CheckerboardTexture.IsValid())
+    {
+        m_TextureDescriptorSet->Bind(cmd, m_TextureMaterial->GetPipelineLayout(), 0);
+
+        m_TextureMaterial->SetMat4("model", GGEngine::Mat4::Identity());
+        m_TextureMaterial->SetVec4("colorMultiplier", 1.0f, 1.0f, 1.0f, 1.0f);
+        m_TextureMaterial->Bind(cmd);
+
+        m_TexturedQuadVertexBuffer->Bind(cmd);
+        m_TexturedQuadIndexBuffer->Bind(cmd);
+        GGEngine::RenderCommand::DrawIndexed(cmd, m_TexturedQuadIndexBuffer->GetCount());
+    }
 
     // Debug panel
     ImGui::Begin("Debug");
