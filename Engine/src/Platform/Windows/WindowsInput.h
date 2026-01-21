@@ -1,6 +1,6 @@
 #pragma once
 
-#include "GGEngine/Input.h"
+#include "GGEngine/Core/Input.h"
 
 namespace GGEngine {
 

@@ -1,8 +1,8 @@
 #include "ggpch.h"
 #include "OrthographicCameraController.h"
-#include "GGEngine/Input.h"
-#include "GGEngine/KeyCodes.h"
-#include "GGEngine/MouseButtonCodes.h"
+#include "GGEngine/Core/Input.h"
+#include "GGEngine/Core/KeyCodes.h"
+#include "GGEngine/Core/MouseButtonCodes.h"
 
 namespace GGEngine {
 

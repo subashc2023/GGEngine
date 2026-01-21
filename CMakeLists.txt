@@ -113,7 +113,9 @@ set(ENGINE_SOURCES
     Engine/src/GGEngine/Core/LayerStack.cpp
     Engine/src/GGEngine/Core/LayerStack.h
     Engine/src/GGEngine/Core/Window.h
-    Engine/src/GGEngine/Input.h
+    Engine/src/GGEngine/Core/Input.h
+    Engine/src/GGEngine/Core/KeyCodes.h
+    Engine/src/GGEngine/Core/MouseButtonCodes.h
     Engine/src/GGEngine/Asset/Asset.h
     Engine/src/GGEngine/Asset/AssetHandle.h
     Engine/src/GGEngine/Asset/AssetManager.h

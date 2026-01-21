@@ -53,10 +53,12 @@ namespace GGEngine {
         Scope<Pipeline> QuadPipeline;
         VkRenderPass CurrentRenderPass = VK_NULL_HANDLE;
 
-        // Camera UBO and descriptors
-        Scope<UniformBuffer> CameraUniformBuffer;
+        // Camera UBO and descriptors (per-frame to avoid updating in-flight descriptors)
+        static constexpr uint32_t MaxFramesInFlight = 2;
+        Scope<UniformBuffer> CameraUniformBuffers[MaxFramesInFlight];
         Scope<DescriptorSetLayout> DescriptorLayout;
-        Scope<DescriptorSet> DescriptorSet;
+        Scope<DescriptorSet> DescriptorSets[MaxFramesInFlight];
+        uint32_t CurrentFrameIndex = 0;
 
         // Current render state
         VkCommandBuffer CurrentCommandBuffer = VK_NULL_HANDLE;
@@ -295,9 +297,6 @@ namespace GGEngine {
             return;
         }
 
-        // Create camera UBO
-        s_Data.CameraUniformBuffer = CreateScope<UniformBuffer>(sizeof(CameraUBO));
-
         // Create descriptor set layout (camera UBO + texture sampler)
         std::vector<DescriptorBinding> bindings = {
             { 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT, 1 },
@@ -305,14 +304,18 @@ namespace GGEngine {
         };
         s_Data.DescriptorLayout = CreateScope<DescriptorSetLayout>(bindings);
 
-        // Create descriptor set
-        s_Data.DescriptorSet = CreateScope<DescriptorSet>(*s_Data.DescriptorLayout);
-        s_Data.DescriptorSet->SetUniformBuffer(0, *s_Data.CameraUniformBuffer);
+        // Create per-frame camera UBOs and descriptor sets
+        for (uint32_t i = 0; i < Renderer2DData::MaxFramesInFlight; i++)
+        {
+            s_Data.CameraUniformBuffers[i] = CreateScope<UniformBuffer>(sizeof(CameraUBO));
+            s_Data.DescriptorSets[i] = CreateScope<DescriptorSet>(*s_Data.DescriptorLayout);
+            s_Data.DescriptorSets[i]->SetUniformBuffer(0, *s_Data.CameraUniformBuffers[i]);
+            // Set initial texture to fallback (acts as white texture)
+            s_Data.DescriptorSets[i]->SetTexture(1, *Texture::GetFallbackPtr());
+        }
 
-        // Set initial texture to fallback (acts as white texture)
-        s_Data.DescriptorSet->SetTexture(1, *Texture::GetFallbackPtr());
-
-        GG_CORE_INFO("Renderer2D: Initialized (max {} quads per batch)", Renderer2DData::MaxQuads);
+        GG_CORE_INFO("Renderer2D: Initialized (max {} quads per batch, {} frames in flight)",
+                     Renderer2DData::MaxQuads, Renderer2DData::MaxFramesInFlight);
     }
 
     void Renderer2D::Shutdown()
@@ -324,9 +327,12 @@ namespace GGEngine {
         s_Data.QuadVertexBufferPtr = nullptr;
 
         s_Data.QuadPipeline.reset();
-        s_Data.DescriptorSet.reset();
+        for (uint32_t i = 0; i < Renderer2DData::MaxFramesInFlight; i++)
+        {
+            s_Data.DescriptorSets[i].reset();
+            s_Data.CameraUniformBuffers[i].reset();
+        }
         s_Data.DescriptorLayout.reset();
-        s_Data.CameraUniformBuffer.reset();
         s_Data.QuadIndexBuffer.reset();
         s_Data.QuadVertexBuffer.reset();
         s_Data.WhiteTexture.reset();
@@ -345,9 +351,12 @@ namespace GGEngine {
     void Renderer2D::BeginScene(const Camera& camera, VkRenderPass renderPass, VkCommandBuffer cmd,
                                 uint32_t viewportWidth, uint32_t viewportHeight)
     {
-        // Update camera UBO
+        // Get current frame index for per-frame resources
+        s_Data.CurrentFrameIndex = VulkanContext::Get().GetCurrentFrameIndex();
+
+        // Update camera UBO for current frame
         CameraUBO cameraUBO = camera.GetUBO();
-        s_Data.CameraUniformBuffer->SetData(cameraUBO);
+        s_Data.CameraUniformBuffers[s_Data.CurrentFrameIndex]->SetData(cameraUBO);
 
         // Create or recreate pipeline if render pass changed
         if (!s_Data.QuadPipeline || s_Data.CurrentRenderPass != renderPass)
@@ -411,8 +420,8 @@ namespace GGEngine {
         // Bind pipeline
         s_Data.QuadPipeline->Bind(cmd);
 
-        // Bind descriptor set (camera UBO + current texture)
-        s_Data.DescriptorSet->Bind(cmd, s_Data.QuadPipeline->GetLayout(), 0);
+        // Bind descriptor set (camera UBO + current texture) for current frame
+        s_Data.DescriptorSets[s_Data.CurrentFrameIndex]->Bind(cmd, s_Data.QuadPipeline->GetLayout(), 0);
 
         // Bind vertex and index buffers
         s_Data.QuadVertexBuffer->Bind(cmd);
@@ -448,7 +457,7 @@ namespace GGEngine {
         {
             Renderer2D::Flush();
             s_Data.CurrentTexture = tex;
-            s_Data.DescriptorSet->SetTexture(1, *tex);
+            s_Data.DescriptorSets[s_Data.CurrentFrameIndex]->SetTexture(1, *tex);
         }
 
         // Flush if batch is full

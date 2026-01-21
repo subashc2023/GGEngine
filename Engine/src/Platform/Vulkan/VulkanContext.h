@@ -39,6 +39,8 @@ namespace GGEngine {
         VkCommandPool GetCommandPool() const { return m_CommandPool; }
         uint32_t GetSwapchainImageCount() const { return static_cast<uint32_t>(m_SwapchainImages.size()); }
         VkExtent2D GetSwapchainExtent() const { return m_SwapchainExtent; }
+        uint32_t GetCurrentFrameIndex() const { return m_CurrentFrameIndex; }
+        static constexpr uint32_t GetMaxFramesInFlight() { return MAX_FRAMES_IN_FLIGHT; }
 
         VmaAllocator GetAllocator() const { return m_Allocator; }
 

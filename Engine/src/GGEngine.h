@@ -6,9 +6,9 @@
 #include "GGEngine/Core/Application.h"
 #include "GGEngine/Core/Layer.h"
 #include "GGEngine/Core/Log.h"
-#include "GGEngine/Input.h"
-#include "GGEngine/KeyCodes.h"
-#include "GGEngine/MouseButtonCodes.h"
+#include "GGEngine/Core/Input.h"
+#include "GGEngine/Core/KeyCodes.h"
+#include "GGEngine/Core/MouseButtonCodes.h"
 
 #include "GGEngine/Asset/AssetManager.h"
 #include "GGEngine/Asset/Shader.h"
