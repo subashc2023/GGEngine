@@ -1,5 +1,6 @@
 #include "ggpch.h"
 #include "AssetManager.h"
+#include "Texture.h"
 
 #ifdef GG_PLATFORM_WINDOWS
     #include <Windows.h>
@@ -21,6 +22,9 @@ namespace GGEngine {
 
     void AssetManager::Shutdown()
     {
+        // Shutdown fallback textures before unloading assets
+        Texture::ShutdownFallback();
+
         UnloadAll();
         GG_CORE_INFO("AssetManager shutdown");
     }

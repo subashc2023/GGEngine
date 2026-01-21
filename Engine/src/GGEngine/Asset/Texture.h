@@ -36,6 +36,11 @@ namespace GGEngine {
         // Factory method - create texture via asset system
         static AssetHandle<Texture> Create(const std::string& path);
 
+        // Fallback texture (magenta/black checkerboard for missing textures)
+        static void InitFallback();
+        static void ShutdownFallback();
+        static Texture* GetFallbackPtr();
+
         AssetType GetType() const override { return AssetType::Texture; }
 
         // Load from image file (PNG, JPG, BMP, TGA supported)
@@ -66,6 +71,9 @@ namespace GGEngine {
         VmaAllocation m_ImageAllocation = VK_NULL_HANDLE;
         VkImageView m_ImageView = VK_NULL_HANDLE;
         VkSampler m_Sampler = VK_NULL_HANDLE;
+
+        // Fallback texture (owned directly, not through AssetManager)
+        static Scope<Texture> s_FallbackTexture;
     };
 
 }

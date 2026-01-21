@@ -14,7 +14,14 @@ namespace GGEngine {
 
     void ShaderLibrary::Init()
     {
-        GG_CORE_TRACE("ShaderLibrary initialized");
+        GG_CORE_TRACE("ShaderLibrary initializing...");
+
+        // Load built-in shaders that ship with the engine
+        Load("basic", "assets/shaders/compiled/basic");
+        Load("texture", "assets/shaders/compiled/texture");
+        Load("quad2d", "assets/shaders/compiled/quad2d");
+
+        GG_CORE_INFO("ShaderLibrary initialized with {} built-in shaders", m_Shaders.size());
     }
 
     void ShaderLibrary::Shutdown()
@@ -54,6 +61,43 @@ namespace GGEngine {
         std::filesystem::path fsPath(path);
         std::string name = fsPath.stem().string();
         return Load(name, path);
+    }
+
+    void ShaderLibrary::Add(const std::string& name, AssetHandle<Shader> shader)
+    {
+        if (!shader.IsValid())
+        {
+            GG_CORE_ERROR("Cannot add invalid shader with name '{}'", name);
+            return;
+        }
+
+        auto it = m_Shaders.find(name);
+        if (it != m_Shaders.end())
+        {
+            GG_CORE_WARN("Overwriting existing shader '{}'", name);
+        }
+
+        m_Shaders[name] = shader;
+        shader.Get()->SetName(name);
+        GG_CORE_TRACE("Added shader '{}' to library", name);
+    }
+
+    void ShaderLibrary::Add(AssetHandle<Shader> shader)
+    {
+        if (!shader.IsValid())
+        {
+            GG_CORE_ERROR("Cannot add invalid shader");
+            return;
+        }
+
+        const std::string& name = shader.Get()->GetName();
+        if (name.empty())
+        {
+            GG_CORE_ERROR("Cannot add shader without a name - use Add(name, shader) instead");
+            return;
+        }
+
+        Add(name, shader);
     }
 
     AssetHandle<Shader> ShaderLibrary::Get(const std::string& name) const

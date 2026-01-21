@@ -4,6 +4,8 @@
 #include "ShaderLibrary.h"
 #include "Platform/Vulkan/VulkanContext.h"
 
+#include <filesystem>
+
 namespace GGEngine {
 
     AssetHandle<Shader> Shader::Create(const std::string& path)
@@ -34,6 +36,13 @@ namespace GGEngine {
         bool loadedAny = hasVertex || hasFragment || !m_Stages.empty();
         m_Loaded = loadedAny;
         m_Path = basePath;
+
+        // Extract name from path if not already set
+        if (m_Name.empty())
+        {
+            std::filesystem::path fsPath(basePath);
+            m_Name = fsPath.stem().string();
+        }
 
         if (loadedAny)
         {

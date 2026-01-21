@@ -52,8 +52,13 @@ namespace GGEngine {
         // Create pipeline shader stage create infos - ready for VkGraphicsPipelineCreateInfo
         std::vector<VkPipelineShaderStageCreateInfo> GetPipelineStageCreateInfos() const;
 
+        // Name accessors
+        const std::string& GetName() const { return m_Name; }
+        void SetName(const std::string& name) { m_Name = name; }
+
     private:
         std::vector<ShaderStage> m_Stages;
+        std::string m_Name;
     };
 
 }

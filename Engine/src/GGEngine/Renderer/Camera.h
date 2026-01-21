@@ -159,6 +159,11 @@ namespace GGEngine {
         float GetOrthoWidth() const { return m_OrthoWidth; }
         float GetOrthoHeight() const { return m_OrthoHeight; }
 
+        // Rotation (for 2D orthographic cameras)
+        void SetRotation(float rotationRadians);
+        float GetRotation() const { return m_Rotation; }
+        void Rotate(float deltaRadians);
+
         // Orbit camera controls (perspective)
         void SetOrbitTarget(float x, float y, float z);
         void SetOrbitDistance(float distance);
@@ -208,6 +213,9 @@ namespace GGEngine {
         float m_Aspect = 16.0f / 9.0f;
         float m_Near = -100.0f;
         float m_Far = 100.0f;
+
+        // 2D rotation (for orthographic cameras)
+        float m_Rotation = 0.0f;  // Radians
 
         // Cached matrices
         Mat4 m_ViewMatrix;

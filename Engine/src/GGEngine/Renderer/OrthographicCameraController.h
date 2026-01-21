@@ -11,7 +11,7 @@ namespace GGEngine {
     class GG_API OrthographicCameraController
     {
     public:
-        OrthographicCameraController(float aspectRatio, float zoomLevel = 1.0f);
+        OrthographicCameraController(float aspectRatio, float zoomLevel = 1.0f, bool enableRotation = false);
 
         void OnUpdate(Timestep ts);
         void OnEvent(Event& e);
@@ -30,6 +30,12 @@ namespace GGEngine {
         float GetZoomSpeed() const { return m_ZoomSpeed; }
         void SetZoomSpeed(float speed) { m_ZoomSpeed = speed; }
 
+        float GetRotationSpeed() const { return m_RotationSpeed; }
+        void SetRotationSpeed(float speed) { m_RotationSpeed = speed; }
+
+        bool IsRotationEnabled() const { return m_RotationEnabled; }
+        void SetRotationEnabled(bool enabled) { m_RotationEnabled = enabled; }
+
     private:
         bool OnMouseScrolled(MouseScrolledEvent& e);
 
@@ -41,6 +47,8 @@ namespace GGEngine {
 
         float m_MoveSpeed = 2.0f;
         float m_ZoomSpeed = 0.1f;
+        float m_RotationSpeed = 1.5f;  // Radians per second
+        bool m_RotationEnabled = false;
 
         // Mouse drag state
         bool m_IsDragging = false;

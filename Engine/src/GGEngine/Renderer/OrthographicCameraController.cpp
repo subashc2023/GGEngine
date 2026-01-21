@@ -6,8 +6,8 @@
 
 namespace GGEngine {
 
-    OrthographicCameraController::OrthographicCameraController(float aspectRatio, float zoomLevel)
-        : m_AspectRatio(aspectRatio), m_ZoomLevel(zoomLevel)
+    OrthographicCameraController::OrthographicCameraController(float aspectRatio, float zoomLevel, bool enableRotation)
+        : m_AspectRatio(aspectRatio), m_ZoomLevel(zoomLevel), m_RotationEnabled(enableRotation)
     {
         UpdateProjection();
         m_Camera.SetPosition(0.0f, 0.0f, 0.0f);
@@ -27,6 +27,16 @@ namespace GGEngine {
             m_Camera.Translate(-velocity, 0.0f, 0.0f);
         if (Input::IsKeyPressed(GG_KEY_D))
             m_Camera.Translate(velocity, 0.0f, 0.0f);
+
+        // Q/E rotation (if enabled)
+        if (m_RotationEnabled)
+        {
+            float rotationVelocity = m_RotationSpeed * ts;
+            if (Input::IsKeyPressed(GG_KEY_Q))
+                m_Camera.Rotate(rotationVelocity);
+            if (Input::IsKeyPressed(GG_KEY_E))
+                m_Camera.Rotate(-rotationVelocity);
+        }
 
         // Right mouse drag to pan
         if (Input::IsMouseButtonPressed(GG_MOUSE_BUTTON_RIGHT))

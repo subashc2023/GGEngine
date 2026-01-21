@@ -17,6 +17,7 @@ namespace GGEngine {
         virtual void OnUpdate(Timestep ts) {}
         virtual void OnRenderOffscreen(Timestep ts) {}
         virtual void OnEvent(Event& event) {}
+        virtual void OnWindowResize(uint32_t width, uint32_t height) {}
 
         inline const std::string& GetName() const { return m_DebugName; }
     protected:

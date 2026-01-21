@@ -77,6 +77,16 @@ namespace GGEngine {
         m_OrthoHeight = height;
     }
 
+    void Camera::SetRotation(float rotationRadians)
+    {
+        m_Rotation = rotationRadians;
+    }
+
+    void Camera::Rotate(float deltaRadians)
+    {
+        m_Rotation += deltaRadians;
+    }
+
     void Camera::LookAt(float targetX, float targetY, float targetZ)
     {
         m_TargetX = targetX;
@@ -143,11 +153,11 @@ namespace GGEngine {
             float halfHeight = m_OrthoHeight * 0.5f;
             m_ProjectionMatrix = Mat4::Orthographic(-halfWidth, halfWidth, -halfHeight, halfHeight, m_Near, m_Far);
 
-            // Simple 2D view matrix - just translation
-            m_ViewMatrix = Mat4::Identity();
-            m_ViewMatrix.data[12] = -m_PositionX;
-            m_ViewMatrix.data[13] = -m_PositionY;
-            m_ViewMatrix.data[14] = 0.0f;
+            // 2D view matrix: rotation then translation
+            // V = R * T (rotate first, then translate in rotated space)
+            Mat4 translation = Mat4::Translate(-m_PositionX, -m_PositionY, 0.0f);
+            Mat4 rotation = Mat4::RotateZ(-m_Rotation);  // Negative to rotate world opposite to camera
+            m_ViewMatrix = rotation * translation;
         }
         else
         {

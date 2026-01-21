@@ -5,8 +5,80 @@
 #include "GGEngine/Renderer/Buffer.h"
 
 #include <stb_image.h>
+#include <vector>
 
 namespace GGEngine {
+
+    // Static member initialization
+    Scope<Texture> Texture::s_FallbackTexture;
+
+    void Texture::InitFallback()
+    {
+        if (s_FallbackTexture)
+            return; // Already initialized
+
+        // Create 8x8 magenta/black checkerboard
+        const uint32_t size = 8;
+        const uint32_t checkerSize = 2; // 2x2 pixel squares
+        std::vector<uint8_t> pixels(size * size * 4);
+
+        for (uint32_t y = 0; y < size; y++)
+        {
+            for (uint32_t x = 0; x < size; x++)
+            {
+                uint32_t index = (y * size + x) * 4;
+
+                // Determine if this pixel is magenta or black based on checker pattern
+                bool isMagenta = ((x / checkerSize) + (y / checkerSize)) % 2 == 0;
+
+                if (isMagenta)
+                {
+                    pixels[index + 0] = 255; // R
+                    pixels[index + 1] = 0;   // G
+                    pixels[index + 2] = 255; // B
+                    pixels[index + 3] = 255; // A
+                }
+                else
+                {
+                    pixels[index + 0] = 0;   // R
+                    pixels[index + 1] = 0;   // G
+                    pixels[index + 2] = 0;   // B
+                    pixels[index + 3] = 255; // A
+                }
+            }
+        }
+
+        // Create texture directly without going through AssetManager
+        s_FallbackTexture = CreateScope<Texture>();
+        s_FallbackTexture->m_Width = size;
+        s_FallbackTexture->m_Height = size;
+        s_FallbackTexture->m_Channels = 4;
+        s_FallbackTexture->m_Path = "__fallback__";
+        s_FallbackTexture->m_Loaded = true;
+
+        s_FallbackTexture->CreateVulkanResources(pixels.data());
+
+        GG_CORE_INFO("Fallback texture initialized ({}x{} magenta/black checkerboard)", size, size);
+    }
+
+    void Texture::ShutdownFallback()
+    {
+        if (s_FallbackTexture)
+        {
+            s_FallbackTexture->Unload();
+            s_FallbackTexture.reset();
+        }
+        GG_CORE_TRACE("Fallback texture shutdown");
+    }
+
+    Texture* Texture::GetFallbackPtr()
+    {
+        if (!s_FallbackTexture)
+        {
+            InitFallback();
+        }
+        return s_FallbackTexture.get();
+    }
 
     AssetHandle<Texture> Texture::Create(const std::string& path)
     {

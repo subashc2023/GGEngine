@@ -24,6 +24,12 @@ namespace GGEngine {
         // Load shader using filename as name (extracts last component of path)
         AssetHandle<Shader> Load(const std::string& path);
 
+        // Add a pre-loaded shader with a specific name
+        void Add(const std::string& name, AssetHandle<Shader> shader);
+
+        // Add a pre-loaded shader using its internal name
+        void Add(AssetHandle<Shader> shader);
+
         // Get shader by name
         AssetHandle<Shader> Get(const std::string& name) const;
 

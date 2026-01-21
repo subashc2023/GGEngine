@@ -9,6 +9,7 @@
 #include "GGEngine/Asset/ShaderLibrary.h"
 #include "GGEngine/Asset/AssetManager.h"
 #include "GGEngine/Renderer/MaterialLibrary.h"
+#include "GGEngine/Renderer/Renderer2D.h"
 #include "Platform/Vulkan/VulkanContext.h"
 
 #include <GLFW/glfw3.h>
@@ -28,6 +29,12 @@ namespace GGEngine {
 
         VulkanContext::Get().Init(static_cast<GLFWwindow*>(m_Window->GetNativeWindow()));
 
+        // Initialize asset libraries (requires VulkanContext to be ready)
+        ShaderLibrary::Get().Init();
+
+        // Initialize Renderer2D (requires ShaderLibrary to be ready)
+        Renderer2D::Init();
+
         m_ImGuiLayer = new ImGuiLayer();
         PushOverlay(m_ImGuiLayer);
     }
@@ -45,6 +52,9 @@ namespace GGEngine {
         {
             layer->OnDetach();
         }
+
+        // Shutdown Renderer2D before materials/shaders (it uses both)
+        Renderer2D::Shutdown();
 
         // Shutdown asset system before Vulkan (assets may hold GPU resources)
         // Materials depend on shaders, so shut down materials first
@@ -87,6 +97,12 @@ namespace GGEngine {
     {
         while (m_Running)
         {
+            m_Window->OnUpdate();
+
+            // Skip rendering when minimized to save resources
+            if (m_Minimized)
+                continue;
+
             VulkanContext::Get().BeginFrame();
 
             // Measure time AFTER BeginFrame to include VSync blocking time
@@ -112,8 +128,6 @@ namespace GGEngine {
             m_ImGuiLayer->End();
 
             VulkanContext::Get().EndFrame();
-
-            m_Window->OnUpdate();
         }
     }
 
@@ -127,10 +141,19 @@ namespace GGEngine {
     {
         if (e.GetWidth() == 0 || e.GetHeight() == 0)
         {
+            m_Minimized = true;
             return false;
         }
 
+        m_Minimized = false;
         VulkanContext::Get().OnWindowResize(e.GetWidth(), e.GetHeight());
+
+        // Notify all layers of the resize
+        for (Layer* layer : m_LayerStack)
+        {
+            layer->OnWindowResize(e.GetWidth(), e.GetHeight());
+        }
+
         return false;
     }
 }

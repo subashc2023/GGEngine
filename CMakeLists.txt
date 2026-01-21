@@ -48,6 +48,8 @@ set(SHADER_SOURCES
     ${SHADER_SOURCE_DIR}/basic.frag
     ${SHADER_SOURCE_DIR}/texture.vert
     ${SHADER_SOURCE_DIR}/texture.frag
+    ${SHADER_SOURCE_DIR}/quad2d.vert
+    ${SHADER_SOURCE_DIR}/quad2d.frag
 )
 
 foreach(SHADER ${SHADER_SOURCES})
@@ -160,6 +162,8 @@ set(ENGINE_SOURCES
     Engine/src/GGEngine/Renderer/Material.cpp
     Engine/src/GGEngine/Renderer/MaterialLibrary.h
     Engine/src/GGEngine/Renderer/MaterialLibrary.cpp
+    Engine/src/GGEngine/Renderer/Renderer2D.h
+    Engine/src/GGEngine/Renderer/Renderer2D.cpp
     Engine/src/ggpch.h
     Engine/src/ggpch.cpp
 )
