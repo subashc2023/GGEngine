@@ -3,7 +3,6 @@
 #include "GGEngine/Core/Core.h"
 #include "Buffer.h"
 #include <vulkan/vulkan.h>
-#include <memory>
 
 namespace GGEngine {
 
@@ -33,7 +32,7 @@ namespace GGEngine {
         VkDescriptorBufferInfo GetDescriptorInfo() const;
 
     private:
-        std::unique_ptr<Buffer> m_Buffer;
+        Scope<Buffer> m_Buffer;
     };
 
 }

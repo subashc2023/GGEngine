@@ -11,7 +11,7 @@ namespace GGEngine {
         spec.usage = BufferUsage::Vertex;
         spec.cpuVisible = false;
 
-        m_Buffer = std::make_unique<Buffer>(spec);
+        m_Buffer = CreateScope<Buffer>(spec);
 
         if (vertices)
         {
@@ -27,12 +27,12 @@ namespace GGEngine {
         spec.usage = BufferUsage::Vertex;
         spec.cpuVisible = false;
 
-        m_Buffer = std::make_unique<Buffer>(spec);
+        m_Buffer = CreateScope<Buffer>(spec);
     }
 
-    std::unique_ptr<VertexBuffer> VertexBuffer::Create(const void* data, uint64_t size, const VertexLayout& layout)
+    Scope<VertexBuffer> VertexBuffer::Create(const void* data, uint64_t size, const VertexLayout& layout)
     {
-        return std::make_unique<VertexBuffer>(data, size, layout);
+        return CreateScope<VertexBuffer>(data, size, layout);
     }
 
     void VertexBuffer::Bind(VkCommandBuffer cmd, uint32_t binding) const

@@ -151,6 +151,10 @@ set(ENGINE_SOURCES
     Engine/src/GGEngine/Renderer/Camera.cpp
     Engine/src/GGEngine/Renderer/OrthographicCameraController.h
     Engine/src/GGEngine/Renderer/OrthographicCameraController.cpp
+    Engine/src/GGEngine/Renderer/Material.h
+    Engine/src/GGEngine/Renderer/Material.cpp
+    Engine/src/GGEngine/Renderer/MaterialLibrary.h
+    Engine/src/GGEngine/Renderer/MaterialLibrary.cpp
     Engine/src/ggpch.h
     Engine/src/ggpch.cpp
 )

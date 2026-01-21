@@ -1,9 +1,20 @@
 #include "ggpch.h"
 #include "Shader.h"
 #include "AssetManager.h"
+#include "ShaderLibrary.h"
 #include "Platform/Vulkan/VulkanContext.h"
 
 namespace GGEngine {
+
+    AssetHandle<Shader> Shader::Create(const std::string& path)
+    {
+        return AssetManager::Get().Load<Shader>(path);
+    }
+
+    AssetHandle<Shader> Shader::Create(const std::string& name, const std::string& path)
+    {
+        return ShaderLibrary::Get().Load(name, path);
+    }
 
     Shader::~Shader()
     {

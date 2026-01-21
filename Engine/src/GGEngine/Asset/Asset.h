@@ -19,7 +19,8 @@ namespace GGEngine {
         Shader,
         Texture,
         Mesh,
-        Audio
+        Audio,
+        Material
     };
 
     // Base class for all assets

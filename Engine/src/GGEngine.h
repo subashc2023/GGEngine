@@ -15,6 +15,8 @@
 #include "GGEngine/Asset/ShaderLibrary.h"
 
 #include "GGEngine/Renderer/Pipeline.h"
+#include "GGEngine/Renderer/Material.h"
+#include "GGEngine/Renderer/MaterialLibrary.h"
 
 #include "GGEngine/ImGui/ImGuiLayer.h"
 

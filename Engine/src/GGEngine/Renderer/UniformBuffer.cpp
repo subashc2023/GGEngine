@@ -10,7 +10,7 @@ namespace GGEngine {
         spec.usage = BufferUsage::Uniform;
         spec.cpuVisible = true;  // Uniforms are updated frequently from CPU
 
-        m_Buffer = std::make_unique<Buffer>(spec);
+        m_Buffer = CreateScope<Buffer>(spec);
     }
 
     void UniformBuffer::SetData(const void* data, uint64_t size, uint64_t offset)

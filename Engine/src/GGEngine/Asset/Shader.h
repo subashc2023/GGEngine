@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Asset.h"
+#include "AssetManager.h"
 #include "GGEngine/Core/Core.h"
 
 #include <vulkan/vulkan.h>
@@ -28,6 +29,10 @@ namespace GGEngine {
     public:
         Shader() = default;
         ~Shader();
+
+        // Factory methods - create shader via asset system
+        static AssetHandle<Shader> Create(const std::string& path);
+        static AssetHandle<Shader> Create(const std::string& name, const std::string& path);
 
         AssetType GetType() const override { return AssetType::Shader; }
 

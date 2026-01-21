@@ -3,7 +3,6 @@
 #include "GGEngine/Core/Core.h"
 #include "Buffer.h"
 #include <vulkan/vulkan.h>
-#include <memory>
 #include <vector>
 
 namespace GGEngine {
@@ -23,8 +22,8 @@ namespace GGEngine {
         IndexBuffer& operator=(const IndexBuffer&) = delete;
 
         // Factory methods
-        static std::unique_ptr<IndexBuffer> Create(const std::vector<uint32_t>& indices);
-        static std::unique_ptr<IndexBuffer> Create(const std::vector<uint16_t>& indices);
+        static Scope<IndexBuffer> Create(const std::vector<uint32_t>& indices);
+        static Scope<IndexBuffer> Create(const std::vector<uint16_t>& indices);
 
         // Bind to command buffer
         void Bind(VkCommandBuffer cmd) const;
@@ -35,7 +34,7 @@ namespace GGEngine {
         VkIndexType GetIndexType() const { return m_IndexType; }
 
     private:
-        std::unique_ptr<Buffer> m_Buffer;
+        Scope<Buffer> m_Buffer;
         uint32_t m_Count = 0;
         VkIndexType m_IndexType = VK_INDEX_TYPE_UINT32;
     };

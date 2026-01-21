@@ -4,7 +4,6 @@
 #include "Buffer.h"
 #include "VertexLayout.h"
 #include <vulkan/vulkan.h>
-#include <memory>
 #include <vector>
 
 namespace GGEngine {
@@ -25,12 +24,12 @@ namespace GGEngine {
 
         // Factory methods
         template<typename T>
-        static std::unique_ptr<VertexBuffer> Create(const std::vector<T>& vertices, const VertexLayout& layout)
+        static Scope<VertexBuffer> Create(const std::vector<T>& vertices, const VertexLayout& layout)
         {
-            return std::make_unique<VertexBuffer>(vertices.data(), vertices.size() * sizeof(T), layout);
+            return CreateScope<VertexBuffer>(vertices.data(), vertices.size() * sizeof(T), layout);
         }
 
-        static std::unique_ptr<VertexBuffer> Create(const void* data, uint64_t size, const VertexLayout& layout);
+        static Scope<VertexBuffer> Create(const void* data, uint64_t size, const VertexLayout& layout);
 
         // Bind to command buffer
         void Bind(VkCommandBuffer cmd, uint32_t binding = 0) const;
@@ -45,7 +44,7 @@ namespace GGEngine {
         uint32_t GetVertexCount() const;
 
     private:
-        std::unique_ptr<Buffer> m_Buffer;
+        Scope<Buffer> m_Buffer;
         VertexLayout m_Layout;
     };
 

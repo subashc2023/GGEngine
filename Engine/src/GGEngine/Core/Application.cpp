@@ -8,6 +8,7 @@
 #include "GGEngine/ImGui/ImGuiLayer.h"
 #include "GGEngine/Asset/ShaderLibrary.h"
 #include "GGEngine/Asset/AssetManager.h"
+#include "GGEngine/Renderer/MaterialLibrary.h"
 #include "Platform/Vulkan/VulkanContext.h"
 
 #include <GLFW/glfw3.h>
@@ -22,7 +23,7 @@ namespace GGEngine {
     {
         s_Instance = this;
 
-        m_Window = std::unique_ptr<Window>(Window::Create());
+        m_Window = Scope<Window>(Window::Create());
         m_Window->SetEventCallback(BIND_EVENT_FN(OnEvent));
 
         VulkanContext::Get().Init(static_cast<GLFWwindow*>(m_Window->GetNativeWindow()));
@@ -46,6 +47,8 @@ namespace GGEngine {
         }
 
         // Shutdown asset system before Vulkan (assets may hold GPU resources)
+        // Materials depend on shaders, so shut down materials first
+        MaterialLibrary::Get().Shutdown();
         ShaderLibrary::Get().Shutdown();
         AssetManager::Get().Shutdown();
 

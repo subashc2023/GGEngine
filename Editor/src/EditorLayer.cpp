@@ -1,9 +1,11 @@
 #include "EditorLayer.h"
 #include "Platform/Vulkan/VulkanContext.h"
 #include "GGEngine/Asset/AssetManager.h"
-#include "GGEngine/Asset/ShaderLibrary.h"
+#include "GGEngine/Asset/Shader.h"
 #include "GGEngine/Renderer/RenderCommand.h"
 #include "GGEngine/ImGui/DebugUI.h"
+#include "GGEngine/Input.h"
+#include "GGEngine/KeyCodes.h"
 
 #include <imgui.h>
 #include <vulkan/vulkan.h>
@@ -26,19 +28,19 @@ void EditorLayer::OnAttach()
     GGEngine::FramebufferSpecification spec;
     spec.Width = 1280;
     spec.Height = 720;
-    m_ViewportFramebuffer = std::make_unique<GGEngine::Framebuffer>(spec);
+    m_ViewportFramebuffer = GGEngine::CreateScope<GGEngine::Framebuffer>(spec);
 
     // Create camera uniform buffer
-    m_CameraUniformBuffer = std::make_unique<GGEngine::UniformBuffer>(sizeof(GGEngine::CameraUBO));
+    m_CameraUniformBuffer = GGEngine::CreateScope<GGEngine::UniformBuffer>(sizeof(GGEngine::CameraUBO));
 
     // Create descriptor set layout for camera UBO
     std::vector<GGEngine::DescriptorBinding> bindings = {
         { 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT, 1 }
     };
-    m_CameraDescriptorLayout = std::make_unique<GGEngine::DescriptorSetLayout>(bindings);
+    m_CameraDescriptorLayout = GGEngine::CreateScope<GGEngine::DescriptorSetLayout>(bindings);
 
     // Create descriptor set and bind the uniform buffer
-    m_CameraDescriptorSet = std::make_unique<GGEngine::DescriptorSet>(*m_CameraDescriptorLayout);
+    m_CameraDescriptorSet = GGEngine::CreateScope<GGEngine::DescriptorSet>(*m_CameraDescriptorLayout);
     m_CameraDescriptorSet->SetUniformBuffer(0, *m_CameraUniformBuffer);
 
     // Define vertex layout: position (vec3) + color (vec3)
@@ -58,6 +60,54 @@ void EditorLayer::OnAttach()
     m_VertexBuffer = GGEngine::VertexBuffer::Create(vertices, m_VertexLayout);
     m_IndexBuffer = GGEngine::IndexBuffer::Create(indices);
 
+    // Create 10x10 grid of quads with gradient colors
+    {
+        const int gridSize = 10;
+        const float quadSize = 0.1f;
+        const float spacing = 0.11f;  // Slight gap between quads
+        const float offset = (gridSize - 1) * spacing * 0.5f;  // Center the grid
+
+        std::vector<Vertex> quadVertices;
+        std::vector<uint32_t> quadIndices;
+        quadVertices.reserve(gridSize * gridSize * 4);  // 4 vertices per quad
+        quadIndices.reserve(gridSize * gridSize * 6);   // 6 indices per quad (2 triangles)
+
+        for (int y = 0; y < gridSize; y++)
+        {
+            for (int x = 0; x < gridSize; x++)
+            {
+                // Calculate quad center position
+                float posX = x * spacing - offset;
+                float posY = y * spacing - offset;
+
+                // Gradient color: red from left to right, green from bottom to top
+                float r = static_cast<float>(x) / (gridSize - 1);
+                float g = static_cast<float>(y) / (gridSize - 1);
+                float b = 0.5f;  // Fixed blue for visual interest
+
+                float halfSize = quadSize * 0.5f;
+                uint32_t baseIndex = static_cast<uint32_t>(quadVertices.size());
+
+                // 4 vertices for this quad (all same color)
+                quadVertices.push_back({{ posX - halfSize, posY - halfSize, 0.0f }, { r, g, b }});  // Bottom-left
+                quadVertices.push_back({{ posX + halfSize, posY - halfSize, 0.0f }, { r, g, b }});  // Bottom-right
+                quadVertices.push_back({{ posX + halfSize, posY + halfSize, 0.0f }, { r, g, b }});  // Top-right
+                quadVertices.push_back({{ posX - halfSize, posY + halfSize, 0.0f }, { r, g, b }});  // Top-left
+
+                // 6 indices for 2 triangles (counter-clockwise winding)
+                quadIndices.push_back(baseIndex + 0);
+                quadIndices.push_back(baseIndex + 1);
+                quadIndices.push_back(baseIndex + 2);
+                quadIndices.push_back(baseIndex + 2);
+                quadIndices.push_back(baseIndex + 3);
+                quadIndices.push_back(baseIndex + 0);
+            }
+        }
+
+        m_QuadVertexBuffer = GGEngine::VertexBuffer::Create(quadVertices, m_VertexLayout);
+        m_QuadIndexBuffer = GGEngine::IndexBuffer::Create(quadIndices);
+    }
+
     // Create pipeline with vertex layout
     CreatePipeline();
 
@@ -72,14 +122,16 @@ void EditorLayer::OnDetach()
     m_CameraUniformBuffer.reset();
     m_VertexBuffer.reset();
     m_IndexBuffer.reset();
+    m_QuadVertexBuffer.reset();
+    m_QuadIndexBuffer.reset();
     m_ViewportFramebuffer.reset();
     GG_INFO("EditorLayer detached");
 }
 
 void EditorLayer::CreatePipeline()
 {
-    // Load shader that accepts vertex input
-    auto shaderHandle = GGEngine::ShaderLibrary::Get().Load("basic", "assets/shaders/compiled/basic");
+    // Load shader using factory
+    auto shaderHandle = GGEngine::Shader::Create("basic", "assets/shaders/compiled/basic");
     if (!shaderHandle)
     {
         GG_ERROR("Failed to load basic shader!");
@@ -111,7 +163,7 @@ void EditorLayer::CreatePipeline()
     // Descriptor set layout for camera UBO
     pipelineSpec.descriptorSetLayouts.push_back(m_CameraDescriptorLayout->GetVkLayout());
 
-    m_Pipeline = std::make_unique<GGEngine::Pipeline>(pipelineSpec);
+    m_Pipeline = GGEngine::CreateScope<GGEngine::Pipeline>(pipelineSpec);
 }
 
 void EditorLayer::OnRenderOffscreen(GGEngine::Timestep ts)
@@ -146,27 +198,53 @@ void EditorLayer::OnRenderOffscreen(GGEngine::Timestep ts)
     GGEngine::CameraUBO cameraUBO = m_CameraController.GetCamera().GetUBO();
     m_CameraUniformBuffer->SetData(cameraUBO);
 
-    // Render triangle using vertex buffers
-    if (m_Pipeline && m_VertexBuffer && m_IndexBuffer)
+    // Render scene
+    if (m_Pipeline && m_VertexBuffer && m_IndexBuffer && m_QuadVertexBuffer && m_QuadIndexBuffer)
     {
         m_Pipeline->Bind(cmd);
 
         // Bind camera descriptor set
         m_CameraDescriptorSet->Bind(cmd, m_Pipeline->GetLayout(), 0);
 
+        GGEngine::RenderCommand::SetViewport(cmd, m_ViewportFramebuffer->GetWidth(), m_ViewportFramebuffer->GetHeight());
+        GGEngine::RenderCommand::SetScissor(cmd, m_ViewportFramebuffer->GetWidth(), m_ViewportFramebuffer->GetHeight());
+
+        // --- Render Grid First (background) ---
+        // Grid positions are baked into vertices, so use identity transform
+        GGEngine::Mat4 gridModelMatrix = GGEngine::Mat4::Identity();
+        GGEngine::RenderCommand::PushConstants(
+            cmd,
+            m_Pipeline->GetLayout(),
+            VK_SHADER_STAGE_VERTEX_BIT,
+            gridModelMatrix);
+
+        // White color multiplier for grid (show vertex colors as-is)
+        float gridColor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+        GGEngine::RenderCommand::PushConstants(
+            cmd,
+            m_Pipeline->GetLayout(),
+            VK_SHADER_STAGE_FRAGMENT_BIT,
+            gridColor,
+            sizeof(GGEngine::Mat4));  // offset = 64
+
+        m_QuadVertexBuffer->Bind(cmd);
+        m_QuadIndexBuffer->Bind(cmd);
+        GGEngine::RenderCommand::DrawIndexed(cmd, m_QuadIndexBuffer->GetCount());
+
+        // --- Render Triangle On Top ---
         // Build and push model matrix (Scale * Rotate * Translate order for TRS)
         float rotationRadians = m_Rotation * 3.14159265359f / 180.0f;
-        GGEngine::Mat4 modelMatrix = GGEngine::Mat4::Translate(m_Position[0], m_Position[1], m_Position[2])
-                                   * GGEngine::Mat4::RotateZ(rotationRadians)
-                                   * GGEngine::Mat4::Scale(m_Scale[0], m_Scale[1], m_Scale[2]);
+        GGEngine::Mat4 triangleModelMatrix = GGEngine::Mat4::Translate(m_Position[0], m_Position[1], m_Position[2])
+                                           * GGEngine::Mat4::RotateZ(rotationRadians)
+                                           * GGEngine::Mat4::Scale(m_Scale[0], m_Scale[1], m_Scale[2]);
 
         GGEngine::RenderCommand::PushConstants(
             cmd,
             m_Pipeline->GetLayout(),
             VK_SHADER_STAGE_VERTEX_BIT,
-            modelMatrix);
+            triangleModelMatrix);
 
-        // Push color multiplier (offset 64, after model matrix)
+        // Push triangle color multiplier (offset 64, after model matrix)
         GGEngine::RenderCommand::PushConstants(
             cmd,
             m_Pipeline->GetLayout(),
@@ -174,14 +252,8 @@ void EditorLayer::OnRenderOffscreen(GGEngine::Timestep ts)
             m_ColorMultiplier,
             sizeof(GGEngine::Mat4));  // offset = 64
 
-        GGEngine::RenderCommand::SetViewport(cmd, m_ViewportFramebuffer->GetWidth(), m_ViewportFramebuffer->GetHeight());
-        GGEngine::RenderCommand::SetScissor(cmd, m_ViewportFramebuffer->GetWidth(), m_ViewportFramebuffer->GetHeight());
-
-        // Bind vertex and index buffers
         m_VertexBuffer->Bind(cmd);
         m_IndexBuffer->Bind(cmd);
-
-        // Draw indexed
         GGEngine::RenderCommand::DrawIndexed(cmd, m_IndexBuffer->GetCount());
     }
 
@@ -266,6 +338,17 @@ void EditorLayer::OnUpdate(GGEngine::Timestep ts)
     if (m_ViewportHovered)
     {
         m_CameraController.OnUpdate(ts);
+
+        // IJKL to move the triangle independently
+        float velocity = m_TriangleMoveSpeed * ts;
+        if (GGEngine::Input::IsKeyPressed(GG_KEY_I))
+            m_Position[1] += velocity;
+        if (GGEngine::Input::IsKeyPressed(GG_KEY_K))
+            m_Position[1] -= velocity;
+        if (GGEngine::Input::IsKeyPressed(GG_KEY_J))
+            m_Position[0] -= velocity;
+        if (GGEngine::Input::IsKeyPressed(GG_KEY_L))
+            m_Position[0] += velocity;
     }
 
     // Properties panel
@@ -274,7 +357,14 @@ void EditorLayer::OnUpdate(GGEngine::Timestep ts)
     if (ImGui::CollapsingHeader("Camera", ImGuiTreeNodeFlags_DefaultOpen))
     {
         ImGui::Text("Orthographic 2D Camera");
-        ImGui::Text("Controls: RMB drag to pan, scroll to zoom");
+        ImGui::Text("WASD: Move camera");
+        ImGui::Text("RMB drag: Pan, Scroll: Zoom");
+    }
+
+    if (ImGui::CollapsingHeader("Controls", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        ImGui::Text("IJKL: Move triangle");
+        ImGui::Text("(I=up, K=down, J=left, L=right)");
     }
 
     if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen))

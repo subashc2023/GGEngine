@@ -6,7 +6,6 @@
 
 #include <filesystem>
 #include <unordered_map>
-#include <memory>
 #include <string>
 #include <vector>
 
@@ -64,8 +63,8 @@ namespace GGEngine {
         void DetectAssetRoot();
 
         std::filesystem::path m_AssetRoot;
-        std::unordered_map<std::string, std::shared_ptr<Asset>> m_Assets;
-        std::unordered_map<AssetID, std::shared_ptr<Asset>> m_AssetsByID;
+        std::unordered_map<std::string, Ref<Asset>> m_Assets;
+        std::unordered_map<AssetID, Ref<Asset>> m_AssetsByID;
         std::unordered_map<AssetID, uint32_t> m_Generations;
         AssetID m_NextID = 1;
     };
@@ -84,7 +83,7 @@ namespace GGEngine {
         }
 
         // Create new asset
-        auto asset = std::make_shared<T>();
+        auto asset = CreateRef<T>();
         asset->m_ID = m_NextID++;
         asset->m_Path = path;
         m_Generations[asset->m_ID] = 1;

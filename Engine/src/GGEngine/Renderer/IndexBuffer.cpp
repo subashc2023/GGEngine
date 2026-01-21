@@ -11,7 +11,7 @@ namespace GGEngine {
         spec.usage = BufferUsage::Index;
         spec.cpuVisible = false;
 
-        m_Buffer = std::make_unique<Buffer>(spec);
+        m_Buffer = CreateScope<Buffer>(spec);
         m_Buffer->SetData(indices, spec.size);
     }
 
@@ -23,18 +23,18 @@ namespace GGEngine {
         spec.usage = BufferUsage::Index;
         spec.cpuVisible = false;
 
-        m_Buffer = std::make_unique<Buffer>(spec);
+        m_Buffer = CreateScope<Buffer>(spec);
         m_Buffer->SetData(indices, spec.size);
     }
 
-    std::unique_ptr<IndexBuffer> IndexBuffer::Create(const std::vector<uint32_t>& indices)
+    Scope<IndexBuffer> IndexBuffer::Create(const std::vector<uint32_t>& indices)
     {
-        return std::make_unique<IndexBuffer>(indices.data(), static_cast<uint32_t>(indices.size()));
+        return CreateScope<IndexBuffer>(indices.data(), static_cast<uint32_t>(indices.size()));
     }
 
-    std::unique_ptr<IndexBuffer> IndexBuffer::Create(const std::vector<uint16_t>& indices)
+    Scope<IndexBuffer> IndexBuffer::Create(const std::vector<uint16_t>& indices)
     {
-        return std::make_unique<IndexBuffer>(indices.data(), static_cast<uint32_t>(indices.size()));
+        return CreateScope<IndexBuffer>(indices.data(), static_cast<uint32_t>(indices.size()));
     }
 
     void IndexBuffer::Bind(VkCommandBuffer cmd) const

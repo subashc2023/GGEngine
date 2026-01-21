@@ -14,8 +14,6 @@
 #include "GGEngine/Renderer/OrthographicCameraController.h"
 #include "GGEngine/Renderer/Camera.h"
 
-#include <memory>
-
 class EditorLayer : public GGEngine::Layer
 {
 public:
@@ -31,17 +29,21 @@ public:
 private:
     void CreatePipeline();
 
-    std::unique_ptr<GGEngine::Framebuffer> m_ViewportFramebuffer;
-    std::unique_ptr<GGEngine::Pipeline> m_Pipeline;
-    std::unique_ptr<GGEngine::VertexBuffer> m_VertexBuffer;
-    std::unique_ptr<GGEngine::IndexBuffer> m_IndexBuffer;
+    GGEngine::Scope<GGEngine::Framebuffer> m_ViewportFramebuffer;
+    GGEngine::Scope<GGEngine::Pipeline> m_Pipeline;
+    GGEngine::Scope<GGEngine::VertexBuffer> m_VertexBuffer;
+    GGEngine::Scope<GGEngine::IndexBuffer> m_IndexBuffer;
     GGEngine::VertexLayout m_VertexLayout;
+
+    // Grid geometry
+    GGEngine::Scope<GGEngine::VertexBuffer> m_QuadVertexBuffer;
+    GGEngine::Scope<GGEngine::IndexBuffer> m_QuadIndexBuffer;
 
     // Camera system
     GGEngine::OrthographicCameraController m_CameraController;
-    std::unique_ptr<GGEngine::DescriptorSetLayout> m_CameraDescriptorLayout;
-    std::unique_ptr<GGEngine::DescriptorSet> m_CameraDescriptorSet;
-    std::unique_ptr<GGEngine::UniformBuffer> m_CameraUniformBuffer;
+    GGEngine::Scope<GGEngine::DescriptorSetLayout> m_CameraDescriptorLayout;
+    GGEngine::Scope<GGEngine::DescriptorSet> m_CameraDescriptorSet;
+    GGEngine::Scope<GGEngine::UniformBuffer> m_CameraUniformBuffer;
 
     float m_ViewportWidth = 0.0f;
     float m_ViewportHeight = 0.0f;
@@ -55,6 +57,7 @@ private:
     float m_Position[3] = { 0.0f, 0.0f, 0.0f };
     float m_Rotation = 0.0f;  // Rotation around Z in degrees
     float m_Scale[3] = { 1.0f, 1.0f, 1.0f };
+    float m_TriangleMoveSpeed = 2.0f;
 
     // Color multiplier
     float m_ColorMultiplier[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
