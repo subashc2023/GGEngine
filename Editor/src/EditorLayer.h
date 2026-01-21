@@ -1,7 +1,7 @@
 #pragma once
 
-#include "GGEngine/Layer.h"
-#include "GGEngine/Log.h"
+#include "GGEngine/Core/Layer.h"
+#include "GGEngine/Core/Log.h"
 #include "GGEngine/Events/Event.h"
 #include "GGEngine/Events/MouseEvent.h"
 #include "GGEngine/Renderer/Framebuffer.h"

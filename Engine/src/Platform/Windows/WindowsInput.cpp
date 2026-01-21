@@ -1,7 +1,7 @@
 #include "ggpch.h"
 #include "WindowsInput.h"
 
-#include "GGEngine/Application.h"
+#include "GGEngine/Core/Application.h"
 
 #include <GLFW/glfw3.h>
 

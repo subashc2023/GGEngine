@@ -1,6 +1,6 @@
 #pragma once
 
-#include "GGEngine/Core.h"
+#include "GGEngine/Core/Core.h"
 #include "GGEngine/Core/Timestep.h"
 
 namespace GGEngine {

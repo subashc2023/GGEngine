@@ -1,6 +1,6 @@
 #pragma once
 
-#include "GGEngine/Log.h"
+#include "GGEngine/Core/Log.h"
 #include <vulkan/vulkan.h>
 
 namespace GGEngine {

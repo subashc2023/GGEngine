@@ -1,6 +1,6 @@
 #include "ggpch.h"
 #include "DebugUI.h"
-#include "GGEngine/Application.h"
+#include "GGEngine/Core/Application.h"
 
 #include <imgui.h>
 

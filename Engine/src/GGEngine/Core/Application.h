@@ -4,8 +4,8 @@
 
 #include "Window.h"
 #include "LayerStack.h"
-#include "Events/Event.h"
-#include "Events/ApplicationEvent.h"
+#include "GGEngine/Events/Event.h"
+#include "GGEngine/Events/ApplicationEvent.h"
 
 namespace GGEngine {
 

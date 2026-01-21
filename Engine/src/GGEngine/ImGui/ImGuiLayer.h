@@ -1,6 +1,6 @@
 #pragma once
 
-#include "GGEngine/Layer.h"
+#include "GGEngine/Core/Layer.h"
 #include "GGEngine/Events/Event.h"
 
 namespace GGEngine {

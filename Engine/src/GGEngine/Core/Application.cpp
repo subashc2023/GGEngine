@@ -2,9 +2,9 @@
 #include "Application.h"
 
 #include "GGEngine/Events/ApplicationEvent.h"
-#include "GGEngine/Window.h"
-#include "GGEngine/Log.h"
-#include "GGEngine/Core/Timestep.h"
+#include "Window.h"
+#include "Log.h"
+#include "Timestep.h"
 #include "GGEngine/ImGui/ImGuiLayer.h"
 #include "GGEngine/Asset/ShaderLibrary.h"
 #include "GGEngine/Asset/AssetManager.h"

@@ -1,7 +1,7 @@
 #pragma once
 
 #include "Core.h"
-#include "Events/Event.h"
+#include "GGEngine/Events/Event.h"
 
 namespace GGEngine {
 

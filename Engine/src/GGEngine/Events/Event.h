@@ -1,6 +1,6 @@
 #pragma once
 
-#include "GGEngine/Core.h"
+#include "GGEngine/Core/Core.h"
 
 #include <string>
 #include <functional>

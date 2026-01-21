@@ -1,6 +1,6 @@
 #pragma once
 
-#include "GGEngine/Core.h"
+#include "GGEngine/Core/Core.h"
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 #include <cstdint>

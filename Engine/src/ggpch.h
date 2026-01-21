@@ -52,4 +52,4 @@
     #include <Windows.h>
 #endif
 
-#include "GGEngine/Log.h"
+#include "GGEngine/Core/Log.h"

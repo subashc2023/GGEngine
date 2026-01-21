@@ -1,7 +1,7 @@
 #include "ggpch.h"
 #include "ImGuiLayer.h"
 
-#include "GGEngine/Application.h"
+#include "GGEngine/Core/Application.h"
 #include "Platform/Vulkan/VulkanContext.h"
 
 #include <imgui.h>

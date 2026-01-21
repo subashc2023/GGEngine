@@ -2,7 +2,7 @@
 #include "DescriptorSet.h"
 #include "UniformBuffer.h"
 #include "Platform/Vulkan/VulkanContext.h"
-#include "GGEngine/Log.h"
+#include "GGEngine/Core/Log.h"
 
 namespace GGEngine {
 

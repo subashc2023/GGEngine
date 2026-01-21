@@ -95,20 +95,20 @@ endif()
 # Engine source files
 set(ENGINE_SOURCES
     Engine/src/GGEngine.h
-    Engine/src/GGEngine/Application.h
-    Engine/src/GGEngine/Application.cpp
-    Engine/src/GGEngine/Core.h
-    Engine/src/GGEngine/Log.h
-    Engine/src/GGEngine/Log.cpp
+    Engine/src/GGEngine/Core/Application.h
+    Engine/src/GGEngine/Core/Application.cpp
+    Engine/src/GGEngine/Core/Core.h
+    Engine/src/GGEngine/Core/Log.h
+    Engine/src/GGEngine/Core/Log.cpp
     Engine/src/GGEngine/Events/Event.h
     Engine/src/GGEngine/Events/ApplicationEvent.h
     Engine/src/GGEngine/Events/KeyEvent.h
     Engine/src/GGEngine/Events/MouseEvent.h
-    Engine/src/GGEngine/Layer.cpp
-    Engine/src/GGEngine/Layer.h
-    Engine/src/GGEngine/LayerStack.cpp
-    Engine/src/GGEngine/LayerStack.h
-    Engine/src/GGEngine/Window.h
+    Engine/src/GGEngine/Core/Layer.cpp
+    Engine/src/GGEngine/Core/Layer.h
+    Engine/src/GGEngine/Core/LayerStack.cpp
+    Engine/src/GGEngine/Core/LayerStack.h
+    Engine/src/GGEngine/Core/Window.h
     Engine/src/GGEngine/Input.h
     Engine/src/GGEngine/Asset/Asset.h
     Engine/src/GGEngine/Asset/AssetHandle.h

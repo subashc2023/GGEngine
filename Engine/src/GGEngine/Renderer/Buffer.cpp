@@ -1,7 +1,7 @@
 #include "ggpch.h"
 #include "Buffer.h"
 #include "Platform/Vulkan/VulkanContext.h"
-#include "GGEngine/Log.h"
+#include "GGEngine/Core/Log.h"
 #include <cstring>
 
 namespace GGEngine {

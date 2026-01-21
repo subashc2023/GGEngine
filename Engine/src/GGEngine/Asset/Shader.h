@@ -1,7 +1,7 @@
 #pragma once
 
 #include "Asset.h"
-#include "GGEngine/Core.h"
+#include "GGEngine/Core/Core.h"
 
 #include <vulkan/vulkan.h>
 #include <string>

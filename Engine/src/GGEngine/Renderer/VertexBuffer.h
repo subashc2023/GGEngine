@@ -1,6 +1,6 @@
 #pragma once
 
-#include "GGEngine/Core.h"
+#include "GGEngine/Core/Core.h"
 #include "Buffer.h"
 #include "VertexLayout.h"
 #include <vulkan/vulkan.h>

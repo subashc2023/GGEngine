@@ -1,7 +1,7 @@
 #include "ggpch.h"
 #include "Framebuffer.h"
 #include "Platform/Vulkan/VulkanContext.h"
-#include "GGEngine/Log.h"
+#include "GGEngine/Core/Log.h"
 
 #include <imgui.h>
 #include <backends/imgui_impl_vulkan.h>
