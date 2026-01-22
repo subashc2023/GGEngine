@@ -1,6 +1,7 @@
 #include "ggpch.h"
 #include "DebugUI.h"
 #include "GGEngine/Core/Application.h"
+#include "GGEngine/Core/Profiler.h"
 
 #include <imgui.h>
 
@@ -39,6 +40,46 @@ namespace GGEngine {
         if (ImGui::Checkbox("VSync", &vsync))
         {
             window.SetVSync(vsync);
+        }
+    }
+
+    void DebugUI::ShowProfiler()
+    {
+        ImGui::Begin("Profiler");
+        ShowProfilerContent();
+        ImGui::End();
+    }
+
+    void DebugUI::ShowProfilerContent()
+    {
+        const auto& results = Profiler::GetResults();
+
+        ImGui::Text("Profile Results (%zu scopes)", results.size());
+        ImGui::Separator();
+
+        if (results.empty())
+        {
+            ImGui::TextDisabled("No profiling data");
+            return;
+        }
+
+        // Find max time for bar scaling
+        float maxTime = 0.001f;
+        for (const auto& result : results)
+        {
+            if (result.DurationMs > maxTime)
+                maxTime = result.DurationMs;
+        }
+
+        // Display each result
+        for (const auto& result : results)
+        {
+            // Format: "0.123 ms  FunctionName"
+            char label[256];
+            snprintf(label, sizeof(label), "%.3f ms  %s", result.DurationMs, result.Name);
+
+            float fraction = result.DurationMs / maxTime;
+            ImGui::ProgressBar(fraction, ImVec2(-1, 0), label);
         }
     }
 

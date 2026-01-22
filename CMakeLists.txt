@@ -104,6 +104,10 @@ set(ENGINE_SOURCES
     Engine/src/GGEngine/Core/Core.h
     Engine/src/GGEngine/Core/Log.h
     Engine/src/GGEngine/Core/Log.cpp
+    Engine/src/GGEngine/Core/Profiler.h
+    Engine/src/GGEngine/Core/Profiler.cpp
+    Engine/src/GGEngine/Debug/Instrumentor.h
+    Engine/src/GGEngine/Debug/Instrumentor.cpp
     Engine/src/GGEngine/Events/Event.h
     Engine/src/GGEngine/Events/ApplicationEvent.h
     Engine/src/GGEngine/Events/KeyEvent.h

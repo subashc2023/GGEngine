@@ -45,3 +45,10 @@ On Linux/macOS:
 ```
 
 For release builds, alternate outputs, presets, and tool paths, see `AGENTS.md`.
+
+## Planned Optimizations
+
+Future rendering improvements on the roadmap:
+- **Persistent mapped buffers** - Eliminate per-frame vertex buffer uploads
+- **Texture atlases** - Reduce texture switches and batch more draw calls
+- **GPU-driven rendering** - Dynamic/indirect rendering for large scenes

@@ -1,5 +1,6 @@
 #include "ggpch.h"
 #include "VulkanContext.h"
+#include "GGEngine/Core/Profiler.h"
 
 #include <GLFW/glfw3.h>
 #include <set>
@@ -52,6 +53,7 @@ namespace GGEngine {
 
     void VulkanContext::Init(GLFWwindow* window)
     {
+        GG_PROFILE_FUNCTION();
         m_Window = window;
 
         CreateInstance();
@@ -74,6 +76,7 @@ namespace GGEngine {
 
     void VulkanContext::Shutdown()
     {
+        GG_PROFILE_FUNCTION();
         vkDeviceWaitIdle(m_Device);
 
         CleanupSwapchain();
@@ -108,6 +111,7 @@ namespace GGEngine {
 
     void VulkanContext::BeginFrame()
     {
+        GG_PROFILE_FUNCTION();
         vkWaitForFences(m_Device, 1, &m_InFlightFences[m_CurrentFrameIndex], VK_TRUE, UINT64_MAX);
 
         VkResult result = vkAcquireNextImageKHR(m_Device, m_Swapchain, UINT64_MAX,
@@ -168,6 +172,7 @@ namespace GGEngine {
 
     void VulkanContext::EndFrame()
     {
+        GG_PROFILE_FUNCTION();
         if (!m_FrameStarted)
             return;
 

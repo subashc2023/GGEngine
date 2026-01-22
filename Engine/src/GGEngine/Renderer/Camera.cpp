@@ -1,5 +1,6 @@
 #include "ggpch.h"
 #include "Camera.h"
+#include "GGEngine/Core/Profiler.h"
 
 namespace GGEngine {
 
@@ -147,6 +148,7 @@ namespace GGEngine {
 
     void Camera::UpdateMatrices()
     {
+        GG_PROFILE_FUNCTION();
         if (m_IsOrthographic)
         {
             float halfWidth = m_OrthoWidth * 0.5f;

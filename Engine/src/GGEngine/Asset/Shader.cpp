@@ -1,5 +1,6 @@
 #include "ggpch.h"
 #include "Shader.h"
+#include "GGEngine/Core/Profiler.h"
 #include "AssetManager.h"
 #include "ShaderLibrary.h"
 #include "Platform/Vulkan/VulkanContext.h"
@@ -25,6 +26,7 @@ namespace GGEngine {
 
     bool Shader::Load(const std::string& basePath)
     {
+        GG_PROFILE_FUNCTION();
         // basePath like "assets/shaders/compiled/triangle" -> loads triangle.vert.spv, triangle.frag.spv
         bool hasVertex = LoadStageFromFile(VK_SHADER_STAGE_VERTEX_BIT, basePath + ".vert.spv");
         bool hasFragment = LoadStageFromFile(VK_SHADER_STAGE_FRAGMENT_BIT, basePath + ".frag.spv");
@@ -58,6 +60,7 @@ namespace GGEngine {
 
     bool Shader::LoadStage(VkShaderStageFlagBits stage, const std::vector<char>& spirvCode)
     {
+        GG_PROFILE_FUNCTION();
         if (spirvCode.empty())
             return false;
 

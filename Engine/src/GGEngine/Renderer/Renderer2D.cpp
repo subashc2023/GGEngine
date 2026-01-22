@@ -1,5 +1,6 @@
 #include "ggpch.h"
 #include "Renderer2D.h"
+#include "GGEngine/Core/Profiler.h"
 #include "VertexBuffer.h"
 #include "IndexBuffer.h"
 #include "VertexLayout.h"
@@ -98,6 +99,7 @@ namespace GGEngine {
 
     void Renderer2D::Init()
     {
+        GG_PROFILE_FUNCTION();
         GG_CORE_INFO("Renderer2D: Initializing...");
 
         // Create vertex layout: position (vec3) + texCoord (vec2) + color (vec4) + tilingFactor (float)
@@ -174,6 +176,7 @@ namespace GGEngine {
 
     void Renderer2D::Shutdown()
     {
+        GG_PROFILE_FUNCTION();
         GG_CORE_INFO("Renderer2D: Shutting down...");
 
         delete[] s_Data.QuadVertexBufferBase;
@@ -209,6 +212,7 @@ namespace GGEngine {
     void Renderer2D::BeginScene(const Camera& camera, VkRenderPass renderPass, VkCommandBuffer cmd,
                                 uint32_t viewportWidth, uint32_t viewportHeight)
     {
+        GG_PROFILE_FUNCTION();
         // Get current frame index for per-frame resources
         s_Data.CurrentFrameIndex = VulkanContext::Get().GetCurrentFrameIndex();
 
@@ -253,6 +257,7 @@ namespace GGEngine {
 
     void Renderer2D::EndScene()
     {
+        GG_PROFILE_FUNCTION();
         Flush();
         s_Data.SceneStarted = false;
         s_Data.CurrentCommandBuffer = VK_NULL_HANDLE;
@@ -260,6 +265,7 @@ namespace GGEngine {
 
     void Renderer2D::Flush()
     {
+        GG_PROFILE_FUNCTION();
         if (s_Data.QuadIndexCount == 0)
             return;
 

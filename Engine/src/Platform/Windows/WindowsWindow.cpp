@@ -1,5 +1,7 @@
+#include "ggpch.h"
 #include "WindowsWindow.h"
 
+#include "GGEngine/Core/Profiler.h"
 #include "GGEngine/Events/ApplicationEvent.h"
 #include "GGEngine/Events/KeyEvent.h"
 #include "GGEngine/Events/MouseEvent.h"
@@ -32,6 +34,7 @@ namespace GGEngine {
 
     void WindowsWindow::Init(const WindowProps& props)
     {
+        GG_PROFILE_FUNCTION();
         m_Data.Title = props.Title;
         m_Data.Width = props.Width;
         m_Data.Height = props.Height;
@@ -146,6 +149,7 @@ namespace GGEngine {
 
     void WindowsWindow::Shutdown()
     {
+        GG_PROFILE_FUNCTION();
         glfwDestroyWindow(m_Window);
         glfwTerminate();
         s_GLFWInitialized = false;
@@ -153,6 +157,7 @@ namespace GGEngine {
 
     void WindowsWindow::OnUpdate()
     {
+        GG_PROFILE_FUNCTION();
         glfwPollEvents();
         // Note: Buffer swap handled by Vulkan swapchain presentation
     }

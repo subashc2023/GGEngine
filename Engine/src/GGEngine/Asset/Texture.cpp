@@ -1,5 +1,6 @@
 #include "ggpch.h"
 #include "Texture.h"
+#include "GGEngine/Core/Profiler.h"
 #include "AssetManager.h"
 #include "Platform/Vulkan/VulkanContext.h"
 #include "Platform/Vulkan/VulkanUtils.h"
@@ -111,6 +112,7 @@ namespace GGEngine {
 
     bool Texture::Load(const std::string& path)
     {
+        GG_PROFILE_SCOPE("Texture::Load");
         // Resolve path through asset manager
         auto resolvedPath = AssetManager::Get().ResolvePath(path);
         std::string pathStr = resolvedPath.string();
@@ -119,7 +121,11 @@ namespace GGEngine {
         int width, height, channels;
         stbi_set_flip_vertically_on_load(1);  // Vulkan expects bottom-left origin like OpenGL
 
-        unsigned char* pixels = stbi_load(pathStr.c_str(), &width, &height, &channels, STBI_rgb_alpha);
+        unsigned char* pixels;
+        {
+            GG_PROFILE_SCOPE("stbi_load");
+            pixels = stbi_load(pathStr.c_str(), &width, &height, &channels, STBI_rgb_alpha);
+        }
 
         if (!pixels)
         {

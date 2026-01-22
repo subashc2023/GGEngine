@@ -11,6 +11,7 @@
 #include "GGEngine/Asset/AssetManager.h"
 #include "GGEngine/Renderer/MaterialLibrary.h"
 #include "GGEngine/Renderer/Renderer2D.h"
+#include "GGEngine/Core/Profiler.h"
 #include "Platform/Vulkan/VulkanContext.h"
 
 #include <GLFW/glfw3.h>
@@ -23,6 +24,7 @@ namespace GGEngine {
 
     Application::Application()
     {
+        GG_PROFILE_FUNCTION();
         s_Instance = this;
 
         m_Window = Scope<Window>(Window::Create());
@@ -43,6 +45,7 @@ namespace GGEngine {
 
     Application::~Application()
     {
+        GG_PROFILE_FUNCTION();
         // Wait for GPU to finish before cleanup
         vkDeviceWaitIdle(VulkanContext::Get().GetDevice());
 
@@ -70,18 +73,21 @@ namespace GGEngine {
 
     void Application::PushLayer(Layer* layer)
     {
+        GG_PROFILE_FUNCTION();
         m_LayerStack.PushLayer(layer);
         layer->OnAttach();
     }
 
     void Application::PushOverlay(Layer* layer)
     {
+        GG_PROFILE_FUNCTION();
         m_LayerStack.PushOverlay(layer);
         layer->OnAttach();
     }
 
     void Application::OnEvent(Event& e)
     {
+        GG_PROFILE_FUNCTION();
         EventDispatcher dispatcher(e);
         dispatcher.Dispatch<WindowCloseEvent>(BIND_EVENT_FN(OnWindowClose));
         dispatcher.Dispatch<WindowResizeEvent>(BIND_EVENT_FN(OnWindowResize));
@@ -100,11 +106,14 @@ namespace GGEngine {
     {
         while (m_Running)
         {
+            GG_PROFILE_SCOPE("RunLoop");
             m_Window->OnUpdate();
 
             // Skip rendering when minimized to save resources
             if (m_Minimized)
                 continue;
+
+            GG_PROFILE_BEGIN_FRAME();
 
             VulkanContext::Get().BeginFrame();
 
@@ -136,12 +145,14 @@ namespace GGEngine {
 
     bool Application::OnWindowClose(WindowCloseEvent& e)
     {
+        GG_PROFILE_FUNCTION();
         m_Running = false;
         return true;
     }
 
     bool Application::OnWindowResize(WindowResizeEvent& e)
     {
+        GG_PROFILE_FUNCTION();
         if (e.GetWidth() == 0 || e.GetHeight() == 0)
         {
             m_Minimized = true;

@@ -3,6 +3,7 @@
 #include "GGEngine/ImGui/DebugUI.h"
 #include "GGEngine/Core/Input.h"
 #include "GGEngine/Core/KeyCodes.h"
+#include "GGEngine/Core/Profiler.h"
 
 #include <imgui.h>
 
@@ -24,8 +25,12 @@ void TriangleLayer::OnDetach()
 
 void TriangleLayer::OnUpdate(GGEngine::Timestep ts)
 {
-    // Update camera controller
-    m_CameraController.OnUpdate(ts);
+    GG_PROFILE_FUNCTION();
+
+    {
+        GG_PROFILE_SCOPE("CameraController::OnUpdate");
+        m_CameraController.OnUpdate(ts);
+    }
 
     // IJKL to move the quad
     float velocity = m_TriangleMoveSpeed * ts;
@@ -45,43 +50,47 @@ void TriangleLayer::OnUpdate(GGEngine::Timestep ts)
     if (GGEngine::Input::IsKeyPressed(GG_KEY_O))
         m_Rotation -= rotationSpeed;
 
-    // Begin 2D rendering
-    GGEngine::Renderer2D::ResetStats();
-    GGEngine::Renderer2D::BeginScene(m_CameraController.GetCamera());
-
-    // Draw 10x10 grid of colored quads
-    const int gridSize = 10;
-    const float quadSize = 0.1f;
-    const float spacing = 0.11f;
-    const float offset = (gridSize - 1) * spacing * 0.5f;
-
-    for (int y = 0; y < gridSize; y++)
     {
-        for (int x = 0; x < gridSize; x++)
+        GG_PROFILE_SCOPE("Renderer2D::Draw");
+
+        // Begin 2D rendering
+        GGEngine::Renderer2D::ResetStats();
+        GGEngine::Renderer2D::BeginScene(m_CameraController.GetCamera());
+
+        // Draw 10x10 grid of colored quads
+        const int gridSize = 10;
+        const float quadSize = 0.1f;
+        const float spacing = 0.11f;
+        const float offset = (gridSize - 1) * spacing * 0.5f;
+
+        for (int y = 0; y < gridSize; y++)
         {
-            float posX = x * spacing - offset;
-            float posY = y * spacing - offset;
+            for (int x = 0; x < gridSize; x++)
+            {
+                float posX = x * spacing - offset;
+                float posY = y * spacing - offset;
 
-            // Gradient color: red from left to right, green from bottom to top
-            float r = static_cast<float>(x) / (gridSize - 1);
-            float g = static_cast<float>(y) / (gridSize - 1);
-            float b = 0.5f;
+                // Gradient color: red from left to right, green from bottom to top
+                float r = static_cast<float>(x) / (gridSize - 1);
+                float g = static_cast<float>(y) / (gridSize - 1);
+                float b = 0.5f;
 
-            GGEngine::Renderer2D::DrawQuad(posX, posY, quadSize, quadSize, r, g, b);
+                GGEngine::Renderer2D::DrawQuad(posX, posY, quadSize, quadSize, r, g, b);
+            }
         }
+
+        // Draw movable/rotatable quad on top (z=0.0f specified to avoid overload ambiguity)
+        GGEngine::Renderer2D::DrawRotatedQuad(
+            m_Position[0], m_Position[1], 0.0f, 0.5f, 0.5f,
+            m_Rotation,
+            m_Color[0], m_Color[1], m_Color[2], m_Color[3]);
+
+        // Draw textured quad using fallback texture (magenta/black checkerboard)
+        GGEngine::Renderer2D::DrawQuad(1.5f, 0.0f, 1.0f, 1.0f,
+            GGEngine::Texture::GetFallbackPtr());
+
+        GGEngine::Renderer2D::EndScene();
     }
-
-    // Draw movable/rotatable quad on top (z=0.0f specified to avoid overload ambiguity)
-    GGEngine::Renderer2D::DrawRotatedQuad(
-        m_Position[0], m_Position[1], 0.0f, 0.5f, 0.5f,
-        m_Rotation,
-        m_Color[0], m_Color[1], m_Color[2], m_Color[3]);
-
-    // Draw textured quad using fallback texture (magenta/black checkerboard)
-    GGEngine::Renderer2D::DrawQuad(1.5f, 0.0f, 1.0f, 1.0f,
-        GGEngine::Texture::GetFallbackPtr());
-
-    GGEngine::Renderer2D::EndScene();
 
     // Debug panel
     ImGui::Begin("Debug");
@@ -99,6 +108,10 @@ void TriangleLayer::OnUpdate(GGEngine::Timestep ts)
     ImGui::Separator();
 
     GGEngine::DebugUI::ShowStatsContent(ts);
+
+    ImGui::Separator();
+    GGEngine::DebugUI::ShowProfilerContent();
+
     ImGui::End();
 }
 

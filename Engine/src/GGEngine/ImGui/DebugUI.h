@@ -14,6 +14,12 @@ namespace GGEngine {
 
         // Renders just the stats content (no window) - use inside your own ImGui::Begin/End
         static void ShowStatsContent(Timestep ts);
+
+        // Renders a profiler window with all timing results
+        static void ShowProfiler();
+
+        // Renders just the profiler content (no window) - use inside your own ImGui::Begin/End
+        static void ShowProfilerContent();
     };
 
 }
