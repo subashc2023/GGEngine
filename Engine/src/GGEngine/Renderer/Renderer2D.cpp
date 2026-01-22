@@ -16,6 +16,7 @@
 #include "GGEngine/RHI/RHIDevice.h"
 #include "GGEngine/RHI/RHICommandBuffer.h"
 
+#include <glm/glm.hpp>
 #include <cmath>
 #include <array>
 
@@ -608,6 +609,119 @@ namespace GGEngine {
     {
         DrawQuadInternal(x, y, z, width, height, subTexture->GetTexture(),
                         tintR, tintG, tintB, tintA, rotationRadians, 1.0f, subTexture->GetTexCoords());
+    }
+
+    // Internal helper for matrix-based quad rendering
+    static void DrawQuadWithMatrix(const glm::mat4& transform,
+                                   const Texture* texture, float r, float g, float b, float a,
+                                   float tilingFactor = 1.0f,
+                                   const float* texCoords = nullptr)
+    {
+        if (!s_Data.SceneStarted)
+        {
+            GG_CORE_WARN("Renderer2D::DrawQuad called outside BeginScene/EndScene");
+            return;
+        }
+
+        // Get bindless texture index
+        uint32_t textureIndex = s_Data.WhiteTextureIndex;
+        if (texture != nullptr)
+        {
+            BindlessTextureIndex bindlessIdx = texture->GetBindlessIndex();
+            if (bindlessIdx != InvalidBindlessIndex)
+            {
+                textureIndex = bindlessIdx;
+            }
+        }
+
+        // Flush if batch is full
+        if (s_Data.QuadIndexCount >= s_Data.MaxIndices)
+        {
+            Renderer2D::Flush();
+        }
+
+        // Check buffer capacity
+        uint32_t currentBatchVertices = static_cast<uint32_t>(s_Data.QuadVertexBufferPtr - s_Data.QuadVertexBufferBase);
+        uint32_t totalVerticesAfterThisQuad = s_Data.QuadVertexOffset + currentBatchVertices + 4;
+        if (totalVerticesAfterThisQuad > s_Data.MaxVertices)
+        {
+            if (!s_Data.NeedsBufferGrowth && s_Data.MaxQuads < Renderer2DData::AbsoluteMaxQuads)
+            {
+                s_Data.NeedsBufferGrowth = true;
+                GG_CORE_INFO("Renderer2D: Buffer capacity exceeded - will grow on next frame");
+            }
+            return;
+        }
+
+        // Unit quad positions (centered at origin, 1x1 size)
+        static constexpr glm::vec4 quadPositions[4] = {
+            { -0.5f, -0.5f, 0.0f, 1.0f },  // Bottom-left
+            {  0.5f, -0.5f, 0.0f, 1.0f },  // Bottom-right
+            {  0.5f,  0.5f, 0.0f, 1.0f },  // Top-right
+            { -0.5f,  0.5f, 0.0f, 1.0f }   // Top-left
+        };
+
+        // Write 4 vertices, transforming by the matrix
+        for (int i = 0; i < 4; i++)
+        {
+            glm::vec4 worldPos = transform * quadPositions[i];
+
+            s_Data.QuadVertexBufferPtr->position[0] = worldPos.x;
+            s_Data.QuadVertexBufferPtr->position[1] = worldPos.y;
+            s_Data.QuadVertexBufferPtr->position[2] = worldPos.z;
+
+            // Texture coordinates
+            if (texCoords)
+            {
+                s_Data.QuadVertexBufferPtr->texCoord[0] = texCoords[i * 2 + 0];
+                s_Data.QuadVertexBufferPtr->texCoord[1] = texCoords[i * 2 + 1];
+            }
+            else
+            {
+                s_Data.QuadVertexBufferPtr->texCoord[0] = Renderer2DData::QuadTexCoords[i][0];
+                s_Data.QuadVertexBufferPtr->texCoord[1] = Renderer2DData::QuadTexCoords[i][1];
+            }
+
+            // Color
+            s_Data.QuadVertexBufferPtr->color[0] = r;
+            s_Data.QuadVertexBufferPtr->color[1] = g;
+            s_Data.QuadVertexBufferPtr->color[2] = b;
+            s_Data.QuadVertexBufferPtr->color[3] = a;
+
+            // Tiling factor and texture index
+            s_Data.QuadVertexBufferPtr->tilingFactor = tilingFactor;
+            s_Data.QuadVertexBufferPtr->texIndex = textureIndex;
+
+            s_Data.QuadVertexBufferPtr++;
+        }
+
+        s_Data.QuadIndexCount += 6;
+        s_Data.Stats.QuadCount++;
+    }
+
+    // Matrix-based quads (colored)
+    void Renderer2D::DrawQuad(const glm::mat4& transform,
+                             float r, float g, float b, float a)
+    {
+        DrawQuadWithMatrix(transform, nullptr, r, g, b, a);
+    }
+
+    // Matrix-based quads (textured)
+    void Renderer2D::DrawQuad(const glm::mat4& transform,
+                             const Texture* texture,
+                             float tilingFactor,
+                             float tintR, float tintG, float tintB, float tintA)
+    {
+        DrawQuadWithMatrix(transform, texture, tintR, tintG, tintB, tintA, tilingFactor);
+    }
+
+    // Matrix-based quads (sub-textured)
+    void Renderer2D::DrawQuad(const glm::mat4& transform,
+                             const SubTexture2D* subTexture,
+                             float tintR, float tintG, float tintB, float tintA)
+    {
+        DrawQuadWithMatrix(transform, subTexture->GetTexture(),
+                          tintR, tintG, tintB, tintA, 1.0f, subTexture->GetTexCoords());
     }
 
     // Statistics

@@ -270,6 +270,19 @@ add_executable(Sandbox
     Sandbox/src/main.cpp
     Sandbox/src/TriangleLayer.h
     Sandbox/src/TriangleLayer.cpp
+    Sandbox/src/ExamplesLayer.h
+    Sandbox/src/ExamplesLayer.cpp
+    Sandbox/src/Examples/Example.h
+    Sandbox/src/Examples/Renderer2DBasicsExample.h
+    Sandbox/src/Examples/Renderer2DBasicsExample.cpp
+    Sandbox/src/Examples/Renderer2DTexturesExample.h
+    Sandbox/src/Examples/Renderer2DTexturesExample.cpp
+    Sandbox/src/Examples/ECSExample.h
+    Sandbox/src/Examples/ECSExample.cpp
+    Sandbox/src/Examples/InputExample.h
+    Sandbox/src/Examples/InputExample.cpp
+    Sandbox/src/Examples/ParticleExample.h
+    Sandbox/src/Examples/ParticleExample.cpp
 )
 
 target_link_libraries(Sandbox PRIVATE Engine)

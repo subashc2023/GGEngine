@@ -3,6 +3,7 @@
 #include "GGEngine/Core/Core.h"
 #include "GGEngine/Renderer/Camera.h"
 #include "GGEngine/RHI/RHITypes.h"
+#include <glm/glm.hpp>
 #include <cstdint>
 
 namespace GGEngine {
@@ -95,6 +96,21 @@ namespace GGEngine {
                                    const SubTexture2D* subTexture,
                                    float tintR = 1.0f, float tintG = 1.0f,
                                    float tintB = 1.0f, float tintA = 1.0f);
+
+        // Matrix-based quads (for pre-computed transforms)
+        static void DrawQuad(const glm::mat4& transform,
+                            float r, float g, float b, float a = 1.0f);
+
+        static void DrawQuad(const glm::mat4& transform,
+                            const Texture* texture,
+                            float tilingFactor = 1.0f,
+                            float tintR = 1.0f, float tintG = 1.0f,
+                            float tintB = 1.0f, float tintA = 1.0f);
+
+        static void DrawQuad(const glm::mat4& transform,
+                            const SubTexture2D* subTexture,
+                            float tintR = 1.0f, float tintG = 1.0f,
+                            float tintB = 1.0f, float tintA = 1.0f);
 
         // Statistics
         struct Statistics
