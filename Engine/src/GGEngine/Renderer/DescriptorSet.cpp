@@ -3,6 +3,7 @@
 #include "UniformBuffer.h"
 #include "GGEngine/Asset/Texture.h"
 #include "Platform/Vulkan/VulkanContext.h"
+#include "Platform/Vulkan/VulkanRHI.h"
 #include "GGEngine/Core/Log.h"
 
 namespace GGEngine {
@@ -20,9 +21,9 @@ namespace GGEngine {
         {
             VkDescriptorSetLayoutBinding vkBinding{};
             vkBinding.binding = binding.binding;
-            vkBinding.descriptorType = binding.type;
+            vkBinding.descriptorType = ToVulkan(binding.type);
             vkBinding.descriptorCount = binding.count;
-            vkBinding.stageFlags = binding.stageFlags;
+            vkBinding.stageFlags = ToVulkan(binding.stageFlags);
             vkBinding.pImmutableSamplers = nullptr;
             vkBindings.push_back(vkBinding);
         }
@@ -32,17 +33,28 @@ namespace GGEngine {
         layoutInfo.bindingCount = static_cast<uint32_t>(vkBindings.size());
         layoutInfo.pBindings = vkBindings.data();
 
-        if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &m_Layout) != VK_SUCCESS)
+        VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+        if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &layout) != VK_SUCCESS)
         {
             GG_CORE_ERROR("Failed to create descriptor set layout!");
+            return;
         }
+
+        // Register with resource registry
+        m_Handle = VulkanResourceRegistry::Get().RegisterDescriptorSetLayout(layout);
     }
 
     DescriptorSetLayout::~DescriptorSetLayout()
     {
-        if (m_Layout != VK_NULL_HANDLE)
+        if (m_Handle.IsValid())
         {
-            vkDestroyDescriptorSetLayout(VulkanContext::Get().GetDevice(), m_Layout, nullptr);
+            auto& registry = VulkanResourceRegistry::Get();
+            VkDescriptorSetLayout layout = registry.GetDescriptorSetLayout(m_Handle);
+            if (layout != VK_NULL_HANDLE)
+            {
+                vkDestroyDescriptorSetLayout(VulkanContext::Get().GetDevice(), layout, nullptr);
+            }
+            registry.UnregisterDescriptorSetLayout(m_Handle);
         }
     }
 
@@ -54,7 +66,7 @@ namespace GGEngine {
         auto device = vkContext.GetDevice();
         auto pool = vkContext.GetDescriptorPool();
 
-        VkDescriptorSetLayout vkLayout = layout.GetVkLayout();
+        VkDescriptorSetLayout vkLayout = VulkanResourceRegistry::Get().GetDescriptorSetLayout(layout.GetHandle());
 
         VkDescriptorSetAllocateInfo allocInfo{};
         allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -62,30 +74,46 @@ namespace GGEngine {
         allocInfo.descriptorSetCount = 1;
         allocInfo.pSetLayouts = &vkLayout;
 
-        if (vkAllocateDescriptorSets(device, &allocInfo, &m_DescriptorSet) != VK_SUCCESS)
+        VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+        if (vkAllocateDescriptorSets(device, &allocInfo, &descriptorSet) != VK_SUCCESS)
         {
             GG_CORE_ERROR("Failed to allocate descriptor set!");
+            return;
         }
+
+        // Register with resource registry
+        m_Handle = VulkanResourceRegistry::Get().RegisterDescriptorSet(descriptorSet, layout.GetHandle());
     }
 
     DescriptorSet::~DescriptorSet()
     {
-        if (m_DescriptorSet != VK_NULL_HANDLE)
+        if (m_Handle.IsValid())
         {
-            auto& vkContext = VulkanContext::Get();
-            vkFreeDescriptorSets(vkContext.GetDevice(), vkContext.GetDescriptorPool(), 1, &m_DescriptorSet);
+            auto& registry = VulkanResourceRegistry::Get();
+            VkDescriptorSet descriptorSet = registry.GetDescriptorSet(m_Handle);
+            if (descriptorSet != VK_NULL_HANDLE)
+            {
+                auto& vkContext = VulkanContext::Get();
+                vkFreeDescriptorSets(vkContext.GetDevice(), vkContext.GetDescriptorPool(), 1, &descriptorSet);
+            }
+            registry.UnregisterDescriptorSet(m_Handle);
         }
     }
 
     void DescriptorSet::SetUniformBuffer(uint32_t binding, const UniformBuffer& buffer)
     {
         auto device = VulkanContext::Get().GetDevice();
+        auto& registry = VulkanResourceRegistry::Get();
 
-        VkDescriptorBufferInfo bufferInfo = buffer.GetDescriptorInfo();
+        // Build descriptor buffer info from handle
+        VkDescriptorBufferInfo bufferInfo{};
+        bufferInfo.buffer = registry.GetBuffer(buffer.GetHandle());
+        bufferInfo.offset = 0;
+        bufferInfo.range = buffer.GetSize();
 
         VkWriteDescriptorSet write{};
         write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        write.dstSet = m_DescriptorSet;
+        write.dstSet = registry.GetDescriptorSet(m_Handle);
         write.dstBinding = binding;
         write.dstArrayElement = 0;
         write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -98,12 +126,18 @@ namespace GGEngine {
     void DescriptorSet::SetTexture(uint32_t binding, const Texture& texture)
     {
         auto device = VulkanContext::Get().GetDevice();
+        auto& registry = VulkanResourceRegistry::Get();
 
-        VkDescriptorImageInfo imageInfo = texture.GetDescriptorInfo();
+        // Build descriptor image info from texture handle
+        auto textureData = registry.GetTextureData(texture.GetHandle());
+        VkDescriptorImageInfo imageInfo{};
+        imageInfo.sampler = textureData.sampler;
+        imageInfo.imageView = textureData.imageView;
+        imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
         VkWriteDescriptorSet write{};
         write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        write.dstSet = m_DescriptorSet;
+        write.dstSet = registry.GetDescriptorSet(m_Handle);
         write.dstBinding = binding;
         write.dstArrayElement = 0;
         write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -113,10 +147,25 @@ namespace GGEngine {
         vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
     }
 
-    void DescriptorSet::Bind(VkCommandBuffer cmd, VkPipelineLayout pipelineLayout, uint32_t setIndex) const
+    void DescriptorSet::Bind(RHICommandBufferHandle cmd, RHIPipelineLayoutHandle pipelineLayout, uint32_t setIndex) const
     {
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
-                                setIndex, 1, &m_DescriptorSet, 0, nullptr);
+        auto& registry = VulkanResourceRegistry::Get();
+        VkCommandBuffer vkCmd = registry.GetCommandBuffer(cmd);
+        VkPipelineLayout vkLayout = registry.GetPipelineLayout(pipelineLayout);
+        VkDescriptorSet vkSet = registry.GetDescriptorSet(m_Handle);
+
+        vkCmdBindDescriptorSets(vkCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vkLayout,
+                                setIndex, 1, &vkSet, 0, nullptr);
+    }
+
+    void DescriptorSet::BindVk(void* vkCmd, void* vkPipelineLayout, uint32_t setIndex) const
+    {
+        auto& registry = VulkanResourceRegistry::Get();
+        VkDescriptorSet vkSet = registry.GetDescriptorSet(m_Handle);
+
+        vkCmdBindDescriptorSets(static_cast<VkCommandBuffer>(vkCmd), VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                static_cast<VkPipelineLayout>(vkPipelineLayout),
+                                setIndex, 1, &vkSet, 0, nullptr);
     }
 
 }

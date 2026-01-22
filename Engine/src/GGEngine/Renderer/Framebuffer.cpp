@@ -2,16 +2,33 @@
 #include "Framebuffer.h"
 #include "Platform/Vulkan/VulkanContext.h"
 #include "Platform/Vulkan/VulkanUtils.h"
+#include "Platform/Vulkan/VulkanRHI.h"
 #include "GGEngine/Core/Log.h"
 
 #include <imgui.h>
 #include <backends/imgui_impl_vulkan.h>
+#include <unordered_map>
 
 namespace GGEngine {
+
+    // Internal Vulkan-specific data storage
+    struct VulkanFramebufferData
+    {
+        VkImage image = VK_NULL_HANDLE;
+        VmaAllocation imageAllocation = VK_NULL_HANDLE;
+        VkImageView imageView = VK_NULL_HANDLE;
+        VkSampler sampler = VK_NULL_HANDLE;
+        VkFramebuffer framebuffer = VK_NULL_HANDLE;
+        VkRenderPass renderPass = VK_NULL_HANDLE;
+    };
+
+    // Map to store Vulkan data for each framebuffer instance
+    static std::unordered_map<const Framebuffer*, VulkanFramebufferData> s_VulkanData;
 
     Framebuffer::Framebuffer(const FramebufferSpecification& spec)
         : m_Specification(spec)
     {
+        s_VulkanData[this] = {};
         CreateRenderPass();
         CreateResources();
     }
@@ -23,6 +40,14 @@ namespace GGEngine {
 
         DestroyResources();
         DestroyRenderPass();
+
+        // Unregister render pass from registry
+        if (m_RenderPassHandle.IsValid())
+        {
+            VulkanResourceRegistry::Get().UnregisterRenderPass(m_RenderPassHandle);
+        }
+
+        s_VulkanData.erase(this);
     }
 
     void Framebuffer::Resize(uint32_t width, uint32_t height)
@@ -46,12 +71,28 @@ namespace GGEngine {
         CreateResources();
     }
 
-    void Framebuffer::BeginRenderPass(VkCommandBuffer cmd)
+    void Framebuffer::BeginRenderPass(RHICommandBufferHandle cmd)
     {
+        auto& registry = VulkanResourceRegistry::Get();
+        VkCommandBuffer vkCmd = registry.GetCommandBuffer(cmd);
+        BeginRenderPassVk(vkCmd);
+    }
+
+    void Framebuffer::EndRenderPass(RHICommandBufferHandle cmd)
+    {
+        auto& registry = VulkanResourceRegistry::Get();
+        VkCommandBuffer vkCmd = registry.GetCommandBuffer(cmd);
+        EndRenderPassVk(vkCmd);
+    }
+
+    void Framebuffer::BeginRenderPassVk(void* vkCmd)
+    {
+        auto& data = s_VulkanData[this];
+
         VkRenderPassBeginInfo renderPassInfo{};
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        renderPassInfo.renderPass = m_RenderPass;
-        renderPassInfo.framebuffer = m_Framebuffer;
+        renderPassInfo.renderPass = data.renderPass;
+        renderPassInfo.framebuffer = data.framebuffer;
         renderPassInfo.renderArea.offset = { 0, 0 };
         renderPassInfo.renderArea.extent = { m_Specification.Width, m_Specification.Height };
 
@@ -59,20 +100,22 @@ namespace GGEngine {
         renderPassInfo.clearValueCount = 1;
         renderPassInfo.pClearValues = &clearColor;
 
-        vkCmdBeginRenderPass(cmd, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBeginRenderPass(static_cast<VkCommandBuffer>(vkCmd), &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
     }
 
-    void Framebuffer::EndRenderPass(VkCommandBuffer cmd)
+    void Framebuffer::EndRenderPassVk(void* vkCmd)
     {
-        vkCmdEndRenderPass(cmd);
+        vkCmdEndRenderPass(static_cast<VkCommandBuffer>(vkCmd));
     }
 
     void Framebuffer::CreateRenderPass()
     {
         auto device = VulkanContext::Get().GetDevice();
+        auto& data = s_VulkanData[this];
+        VkFormat vkFormat = ToVulkan(m_Specification.Format);
 
         VkAttachmentDescription colorAttachment{};
-        colorAttachment.format = m_Specification.Format;
+        colorAttachment.format = vkFormat;
         colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
         colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
         colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -107,19 +150,26 @@ namespace GGEngine {
         renderPassInfo.dependencyCount = 1;
         renderPassInfo.pDependencies = &dependency;
 
-        if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &m_RenderPass) != VK_SUCCESS)
+        if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &data.renderPass) != VK_SUCCESS)
         {
             GG_CORE_ERROR("Failed to create offscreen render pass!");
+            return;
         }
+
+        // Register with VulkanResourceRegistry
+        m_RenderPassHandle = VulkanResourceRegistry::Get().RegisterRenderPass(
+            data.renderPass, data.framebuffer, m_Specification.Width, m_Specification.Height);
     }
 
     void Framebuffer::DestroyRenderPass()
     {
         auto device = VulkanContext::Get().GetDevice();
-        if (m_RenderPass != VK_NULL_HANDLE)
+        auto& data = s_VulkanData[this];
+
+        if (data.renderPass != VK_NULL_HANDLE)
         {
-            vkDestroyRenderPass(device, m_RenderPass, nullptr);
-            m_RenderPass = VK_NULL_HANDLE;
+            vkDestroyRenderPass(device, data.renderPass, nullptr);
+            data.renderPass = VK_NULL_HANDLE;
         }
     }
 
@@ -127,6 +177,8 @@ namespace GGEngine {
     {
         auto device = VulkanContext::Get().GetDevice();
         auto allocator = VulkanContext::Get().GetAllocator();
+        auto& data = s_VulkanData[this];
+        VkFormat vkFormat = ToVulkan(m_Specification.Format);
 
         // Create Image with VMA
         VkImageCreateInfo imageInfo{};
@@ -137,7 +189,7 @@ namespace GGEngine {
         imageInfo.extent.depth = 1;
         imageInfo.mipLevels = 1;
         imageInfo.arrayLayers = 1;
-        imageInfo.format = m_Specification.Format;
+        imageInfo.format = vkFormat;
         imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
         imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         imageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -148,33 +200,33 @@ namespace GGEngine {
         allocCreateInfo.usage = VMA_MEMORY_USAGE_AUTO;
         allocCreateInfo.flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
 
-        if (vmaCreateImage(allocator, &imageInfo, &allocCreateInfo, &m_Image, &m_ImageAllocation, nullptr) != VK_SUCCESS)
+        if (vmaCreateImage(allocator, &imageInfo, &allocCreateInfo, &data.image, &data.imageAllocation, nullptr) != VK_SUCCESS)
         {
             GG_CORE_ERROR("Failed to create framebuffer image with VMA!");
             return;
         }
 
         // Create Image View
-        m_ImageView = VulkanUtils::CreateImageView2D(device, m_Image, m_Specification.Format);
-        if (m_ImageView == VK_NULL_HANDLE)
+        data.imageView = VulkanUtils::CreateImageView2D(device, data.image, vkFormat);
+        if (data.imageView == VK_NULL_HANDLE)
             return;
 
         // Create Sampler (linear filtering, clamp to edge for framebuffer)
-        m_Sampler = VulkanUtils::CreateSampler(device, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
-        if (m_Sampler == VK_NULL_HANDLE)
+        data.sampler = VulkanUtils::CreateSampler(device, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+        if (data.sampler == VK_NULL_HANDLE)
             return;
 
         // Create Framebuffer
         VkFramebufferCreateInfo framebufferInfo{};
         framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-        framebufferInfo.renderPass = m_RenderPass;
+        framebufferInfo.renderPass = data.renderPass;
         framebufferInfo.attachmentCount = 1;
-        framebufferInfo.pAttachments = &m_ImageView;
+        framebufferInfo.pAttachments = &data.imageView;
         framebufferInfo.width = m_Specification.Width;
         framebufferInfo.height = m_Specification.Height;
         framebufferInfo.layers = 1;
 
-        if (vkCreateFramebuffer(device, &framebufferInfo, nullptr, &m_Framebuffer) != VK_SUCCESS)
+        if (vkCreateFramebuffer(device, &framebufferInfo, nullptr, &data.framebuffer) != VK_SUCCESS)
         {
             GG_CORE_ERROR("Failed to create framebuffer!");
             return;
@@ -185,52 +237,55 @@ namespace GGEngine {
 
         // Register with ImGui
         m_ImGuiDescriptorSet = ImGui_ImplVulkan_AddTexture(
-            m_Sampler, m_ImageView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            data.sampler, data.imageView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
         GG_CORE_INFO("Framebuffer created: {}x{}", m_Specification.Width, m_Specification.Height);
     }
 
-    void Framebuffer::TransitionImageLayout(VkImageLayout oldLayout, VkImageLayout newLayout)
+    void Framebuffer::TransitionImageLayout(int oldLayout, int newLayout)
     {
-        VulkanContext::Get().ImmediateSubmit([=](VkCommandBuffer cmd) {
-            VulkanUtils::TransitionImageLayout(cmd, m_Image, oldLayout, newLayout);
+        auto& data = s_VulkanData[this];
+        VulkanContext::Get().ImmediateSubmit([&](VkCommandBuffer cmd) {
+            VulkanUtils::TransitionImageLayout(cmd, data.image,
+                static_cast<VkImageLayout>(oldLayout), static_cast<VkImageLayout>(newLayout));
         });
     }
 
     void Framebuffer::DestroyResources()
     {
         auto device = VulkanContext::Get().GetDevice();
+        auto& data = s_VulkanData[this];
 
-        if (m_ImGuiDescriptorSet != VK_NULL_HANDLE)
+        if (m_ImGuiDescriptorSet != nullptr)
         {
-            ImGui_ImplVulkan_RemoveTexture(m_ImGuiDescriptorSet);
-            m_ImGuiDescriptorSet = VK_NULL_HANDLE;
+            ImGui_ImplVulkan_RemoveTexture(static_cast<VkDescriptorSet>(m_ImGuiDescriptorSet));
+            m_ImGuiDescriptorSet = nullptr;
         }
 
-        if (m_Framebuffer != VK_NULL_HANDLE)
+        if (data.framebuffer != VK_NULL_HANDLE)
         {
-            vkDestroyFramebuffer(device, m_Framebuffer, nullptr);
-            m_Framebuffer = VK_NULL_HANDLE;
+            vkDestroyFramebuffer(device, data.framebuffer, nullptr);
+            data.framebuffer = VK_NULL_HANDLE;
         }
 
-        if (m_Sampler != VK_NULL_HANDLE)
+        if (data.sampler != VK_NULL_HANDLE)
         {
-            vkDestroySampler(device, m_Sampler, nullptr);
-            m_Sampler = VK_NULL_HANDLE;
+            vkDestroySampler(device, data.sampler, nullptr);
+            data.sampler = VK_NULL_HANDLE;
         }
 
-        if (m_ImageView != VK_NULL_HANDLE)
+        if (data.imageView != VK_NULL_HANDLE)
         {
-            vkDestroyImageView(device, m_ImageView, nullptr);
-            m_ImageView = VK_NULL_HANDLE;
+            vkDestroyImageView(device, data.imageView, nullptr);
+            data.imageView = VK_NULL_HANDLE;
         }
 
-        if (m_Image != VK_NULL_HANDLE)
+        if (data.image != VK_NULL_HANDLE)
         {
             auto allocator = VulkanContext::Get().GetAllocator();
-            vmaDestroyImage(allocator, m_Image, m_ImageAllocation);
-            m_Image = VK_NULL_HANDLE;
-            m_ImageAllocation = VK_NULL_HANDLE;
+            vmaDestroyImage(allocator, data.image, data.imageAllocation);
+            data.image = VK_NULL_HANDLE;
+            data.imageAllocation = VK_NULL_HANDLE;
         }
     }
 }

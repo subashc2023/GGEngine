@@ -12,6 +12,7 @@
 #include "GGEngine/Asset/ShaderLibrary.h"
 #include "GGEngine/Asset/Texture.h"
 #include "Platform/Vulkan/VulkanContext.h"
+#include "Platform/Vulkan/VulkanRHI.h"
 
 #include <cmath>
 #include <array>
@@ -57,7 +58,7 @@ namespace GGEngine {
         // Shader and pipeline
         AssetHandle<Shader> QuadShader;
         Scope<Pipeline> QuadPipeline;
-        VkRenderPass CurrentRenderPass = VK_NULL_HANDLE;
+        RHIRenderPassHandle CurrentRenderPass;
 
         // Camera UBO and descriptors (per-frame to avoid updating in-flight descriptors)
         static constexpr uint32_t MaxFramesInFlight = 2;
@@ -151,8 +152,8 @@ namespace GGEngine {
 
         // Create descriptor set layout (camera UBO + texture sampler)
         std::vector<DescriptorBinding> bindings = {
-            { 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT, 1 },
-            { 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT, 1 }
+            { 0, DescriptorType::UniformBuffer, ShaderStage::Vertex, 1 },
+            { 1, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, 1 }
         };
         s_Data.DescriptorLayout = CreateScope<DescriptorSetLayout>(bindings);
 
@@ -205,12 +206,25 @@ namespace GGEngine {
     {
         auto& vkContext = VulkanContext::Get();
         VkExtent2D extent = vkContext.GetSwapchainExtent();
-        BeginScene(camera, vkContext.GetRenderPass(), vkContext.GetCurrentCommandBuffer(),
-                   extent.width, extent.height);
+
+        // Register render pass and cmd buffer with registry
+        auto& registry = VulkanResourceRegistry::Get();
+        RHIRenderPassHandle renderPassHandle = registry.RegisterRenderPass(vkContext.GetRenderPass());
+        VkCommandBuffer vkCmd = vkContext.GetCurrentCommandBuffer();
+
+        BeginSceneVk(camera, renderPassHandle, vkCmd, extent.width, extent.height);
     }
 
-    void Renderer2D::BeginScene(const Camera& camera, VkRenderPass renderPass, VkCommandBuffer cmd,
-                                uint32_t viewportWidth, uint32_t viewportHeight)
+    void Renderer2D::BeginScene(const Camera& camera, RHIRenderPassHandle renderPass,
+                                RHICommandBufferHandle cmd, uint32_t viewportWidth, uint32_t viewportHeight)
+    {
+        auto& registry = VulkanResourceRegistry::Get();
+        VkCommandBuffer vkCmd = registry.GetCommandBuffer(cmd);
+        BeginSceneVk(camera, renderPass, vkCmd, viewportWidth, viewportHeight);
+    }
+
+    void Renderer2D::BeginSceneVk(const Camera& camera, RHIRenderPassHandle renderPass,
+                                  void* vkCmd, uint32_t viewportWidth, uint32_t viewportHeight)
     {
         GG_PROFILE_FUNCTION();
         // Get current frame index for per-frame resources
@@ -229,11 +243,11 @@ namespace GGEngine {
             spec.shader = s_Data.QuadShader.Get();
             spec.renderPass = renderPass;
             spec.vertexLayout = &s_Data.QuadVertexLayout;
-            spec.cullMode = VK_CULL_MODE_NONE;
+            spec.cullMode = CullMode::None;
             spec.blendMode = BlendMode::Alpha;
             spec.depthTestEnable = false;
             spec.depthWriteEnable = false;
-            spec.descriptorSetLayouts.push_back(s_Data.DescriptorLayout->GetVkLayout());
+            spec.descriptorSetLayouts.push_back(s_Data.DescriptorLayout->GetHandle());
             spec.debugName = "Renderer2D_Quad";
 
             s_Data.QuadPipeline = CreateScope<Pipeline>(spec);
@@ -241,7 +255,7 @@ namespace GGEngine {
         }
 
         // Store current render state
-        s_Data.CurrentCommandBuffer = cmd;
+        s_Data.CurrentCommandBuffer = static_cast<VkCommandBuffer>(vkCmd);
         s_Data.ViewportWidth = viewportWidth;
         s_Data.ViewportHeight = viewportHeight;
 
@@ -284,11 +298,11 @@ namespace GGEngine {
         VkCommandBuffer cmd = s_Data.CurrentCommandBuffer;
 
         // Set viewport and scissor using stored dimensions
-        RenderCommand::SetViewport(cmd, s_Data.ViewportWidth, s_Data.ViewportHeight);
-        RenderCommand::SetScissor(cmd, s_Data.ViewportWidth, s_Data.ViewportHeight);
+        RenderCommand::SetViewportVk(cmd, s_Data.ViewportWidth, s_Data.ViewportHeight);
+        RenderCommand::SetScissorVk(cmd, s_Data.ViewportWidth, s_Data.ViewportHeight);
 
         // Bind pipeline
-        s_Data.QuadPipeline->Bind(cmd);
+        s_Data.QuadPipeline->BindVk(cmd);
 
         // Get a fresh descriptor set from the pool to avoid updating one that's already bound
         if (s_Data.CurrentDescriptorIndex >= Renderer2DData::DescriptorSetsPerFrame)
@@ -306,17 +320,19 @@ namespace GGEngine {
         descriptorSet->SetTexture(1, *texToBind);
 
         // Bind descriptor set (camera UBO + current texture) for current frame
-        descriptorSet->Bind(cmd, s_Data.QuadPipeline->GetLayout(), 0);
+        // Get the VkPipelineLayout from the registry
+        VkPipelineLayout pipelineLayout = VulkanResourceRegistry::Get().GetPipelineLayout(s_Data.QuadPipeline->GetLayoutHandle());
+        descriptorSet->BindVk(cmd, pipelineLayout, 0);
 
         // Bind vertex and index buffers
-        s_Data.QuadVertexBuffer->Bind(cmd);
-        s_Data.QuadIndexBuffer->Bind(cmd);
+        s_Data.QuadVertexBuffer->BindVk(cmd);
+        s_Data.QuadIndexBuffer->BindVk(cmd);
 
         // Draw with vertex offset to read from correct GPU buffer location
         // The indices (0,1,2,2,3,0 etc.) are relative, so we need vertexOffset
         // to tell the GPU where this batch's vertices actually start
-        RenderCommand::DrawIndexed(cmd, s_Data.QuadIndexCount, 1, 0,
-                                   static_cast<int32_t>(s_Data.QuadVertexOffset), 0);
+        RenderCommand::DrawIndexedVk(cmd, s_Data.QuadIndexCount, 1, 0,
+                                     static_cast<int32_t>(s_Data.QuadVertexOffset), 0);
 
         // Update GPU buffer offset for next batch (persists across flushes)
         s_Data.QuadVertexOffset += vertexCount;

@@ -20,21 +20,21 @@ namespace GGEngine {
         return 0;
     }
 
-    VkFormat GetVertexAttributeFormat(VertexAttributeType type)
+    TextureFormat GetVertexAttributeFormat(VertexAttributeType type)
     {
         switch (type)
         {
-            case VertexAttributeType::Float:     return VK_FORMAT_R32_SFLOAT;
-            case VertexAttributeType::Float2:    return VK_FORMAT_R32G32_SFLOAT;
-            case VertexAttributeType::Float3:    return VK_FORMAT_R32G32B32_SFLOAT;
-            case VertexAttributeType::Float4:    return VK_FORMAT_R32G32B32A32_SFLOAT;
-            case VertexAttributeType::Int:       return VK_FORMAT_R32_SINT;
-            case VertexAttributeType::Int2:      return VK_FORMAT_R32G32_SINT;
-            case VertexAttributeType::Int3:      return VK_FORMAT_R32G32B32_SINT;
-            case VertexAttributeType::Int4:      return VK_FORMAT_R32G32B32A32_SINT;
-            case VertexAttributeType::UByte4Norm: return VK_FORMAT_R8G8B8A8_UNORM;
+            case VertexAttributeType::Float:     return TextureFormat::R32_SFLOAT;
+            case VertexAttributeType::Float2:    return TextureFormat::R32G32_SFLOAT;
+            case VertexAttributeType::Float3:    return TextureFormat::R32G32B32_SFLOAT;
+            case VertexAttributeType::Float4:    return TextureFormat::R32G32B32A32_SFLOAT;
+            case VertexAttributeType::Int:       return TextureFormat::R32_SINT;
+            case VertexAttributeType::Int2:      return TextureFormat::R32G32_SINT;
+            case VertexAttributeType::Int3:      return TextureFormat::R32G32B32_SINT;
+            case VertexAttributeType::Int4:      return TextureFormat::R32G32B32A32_SINT;
+            case VertexAttributeType::UByte4Norm: return TextureFormat::R8G8B8A8_UNORM;
         }
-        return VK_FORMAT_UNDEFINED;
+        return TextureFormat::Undefined;
     }
 
     VertexAttribute::VertexAttribute(const std::string& name, VertexAttributeType type)
@@ -51,23 +51,23 @@ namespace GGEngine {
         return *this;
     }
 
-    VkVertexInputBindingDescription VertexLayout::GetBindingDescription(uint32_t binding) const
+    RHIVertexBindingDescription VertexLayout::GetBindingDescription(uint32_t binding) const
     {
-        VkVertexInputBindingDescription desc{};
+        RHIVertexBindingDescription desc{};
         desc.binding = binding;
         desc.stride = m_Stride;
-        desc.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+        desc.inputRate = VertexInputRate::Vertex;
         return desc;
     }
 
-    std::vector<VkVertexInputAttributeDescription> VertexLayout::GetAttributeDescriptions(uint32_t binding) const
+    std::vector<RHIVertexAttributeDescription> VertexLayout::GetAttributeDescriptions(uint32_t binding) const
     {
-        std::vector<VkVertexInputAttributeDescription> descriptions;
+        std::vector<RHIVertexAttributeDescription> descriptions;
         descriptions.reserve(m_Attributes.size());
 
         for (uint32_t i = 0; i < m_Attributes.size(); ++i)
         {
-            VkVertexInputAttributeDescription desc{};
+            RHIVertexAttributeDescription desc{};
             desc.binding = binding;
             desc.location = i;
             desc.format = GetVertexAttributeFormat(m_Attributes[i].type);

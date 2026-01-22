@@ -1,8 +1,9 @@
 #pragma once
 
 #include "GGEngine/Core/Core.h"
+#include "GGEngine/RHI/RHITypes.h"
+#include "GGEngine/RHI/RHIEnums.h"
 #include "Buffer.h"
-#include <vulkan/vulkan.h>
 #include <vector>
 
 namespace GGEngine {
@@ -25,18 +26,21 @@ namespace GGEngine {
         static Scope<IndexBuffer> Create(const std::vector<uint32_t>& indices);
         static Scope<IndexBuffer> Create(const std::vector<uint16_t>& indices);
 
-        // Bind to command buffer
-        void Bind(VkCommandBuffer cmd) const;
+        // Bind to command buffer (RHI handle)
+        void Bind(RHICommandBufferHandle cmd) const;
+
+        // Bind to command buffer (Vulkan - for backward compatibility during migration)
+        void BindVk(void* vkCmd) const;
 
         // Accessors
-        VkBuffer GetVkBuffer() const { return m_Buffer->GetVkBuffer(); }
+        RHIBufferHandle GetHandle() const { return m_Buffer->GetHandle(); }
         uint32_t GetCount() const { return m_Count; }
-        VkIndexType GetIndexType() const { return m_IndexType; }
+        IndexType GetIndexType() const { return m_IndexType; }
 
     private:
         Scope<Buffer> m_Buffer;
         uint32_t m_Count = 0;
-        VkIndexType m_IndexType = VK_INDEX_TYPE_UINT32;
+        IndexType m_IndexType = IndexType::UInt32;
     };
 
 }

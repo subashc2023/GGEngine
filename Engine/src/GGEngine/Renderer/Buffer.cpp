@@ -1,6 +1,7 @@
 #include "ggpch.h"
 #include "Buffer.h"
 #include "Platform/Vulkan/VulkanContext.h"
+#include "Platform/Vulkan/VulkanRHI.h"
 #include "GGEngine/Core/Log.h"
 #include <cstring>
 
@@ -43,8 +44,14 @@ namespace GGEngine {
             case BufferUsage::Uniform:
                 bufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
                 break;
+            case BufferUsage::Storage:
+                bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+                break;
             case BufferUsage::Staging:
                 bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+                break;
+            case BufferUsage::Indirect:
+                bufferInfo.usage = VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
                 break;
         }
 
@@ -61,11 +68,17 @@ namespace GGEngine {
             allocInfo.flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
         }
 
-        if (vmaCreateBuffer(allocator, &bufferInfo, &allocInfo, &m_Buffer, &m_Allocation, nullptr) != VK_SUCCESS)
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VmaAllocation allocation = VK_NULL_HANDLE;
+
+        if (vmaCreateBuffer(allocator, &bufferInfo, &allocInfo, &buffer, &allocation, nullptr) != VK_SUCCESS)
         {
             GG_CORE_ERROR("Failed to create buffer with VMA!");
             return;
         }
+
+        // Register the buffer with the resource registry
+        m_Handle = VulkanResourceRegistry::Get().RegisterBuffer(buffer, allocation, m_Specification.size, m_Specification.cpuVisible);
 
         if (!m_Specification.debugName.empty())
         {
@@ -75,12 +88,19 @@ namespace GGEngine {
 
     void Buffer::Destroy()
     {
-        if (m_Buffer != VK_NULL_HANDLE)
+        if (m_Handle.IsValid())
         {
-            auto allocator = VulkanContext::Get().GetAllocator();
-            vmaDestroyBuffer(allocator, m_Buffer, m_Allocation);
-            m_Buffer = VK_NULL_HANDLE;
-            m_Allocation = VK_NULL_HANDLE;
+            auto& registry = VulkanResourceRegistry::Get();
+            auto bufferData = registry.GetBufferData(m_Handle);
+
+            if (bufferData.buffer != VK_NULL_HANDLE)
+            {
+                auto allocator = VulkanContext::Get().GetAllocator();
+                vmaDestroyBuffer(allocator, bufferData.buffer, bufferData.allocation);
+            }
+
+            registry.UnregisterBuffer(m_Handle);
+            m_Handle = NullBuffer;
         }
     }
 
@@ -95,17 +115,20 @@ namespace GGEngine {
             return;
         }
 
+        auto& registry = VulkanResourceRegistry::Get();
+        auto bufferData = registry.GetBufferData(m_Handle);
+
         if (m_Specification.cpuVisible)
         {
             // Direct write for CPU-visible buffers
             void* mapped = nullptr;
             VmaAllocator allocator = VulkanContext::Get().GetAllocator();
-            if (vmaMapMemory(allocator, m_Allocation, &mapped) == VK_SUCCESS)
+            if (vmaMapMemory(allocator, bufferData.allocation, &mapped) == VK_SUCCESS)
             {
                 std::memcpy(static_cast<char*>(mapped) + offset, data, size);
                 // Flush to ensure GPU can see the data (required for non-coherent memory)
-                vmaFlushAllocation(allocator, m_Allocation, offset, size);
-                vmaUnmapMemory(allocator, m_Allocation);
+                vmaFlushAllocation(allocator, bufferData.allocation, offset, size);
+                vmaUnmapMemory(allocator, bufferData.allocation);
             }
             else
             {
@@ -123,16 +146,20 @@ namespace GGEngine {
             Buffer stagingBuffer(stagingSpec);
             stagingBuffer.SetData(data, size);
 
-            CopyBuffer(stagingBuffer.GetVkBuffer(), m_Buffer, size, offset);
+            CopyBuffer(stagingBuffer.GetHandle(), m_Handle, size, offset);
         }
     }
 
-    void Buffer::CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size, VkDeviceSize dstOffset)
+    void Buffer::CopyBuffer(RHIBufferHandle srcHandle, RHIBufferHandle dstHandle, uint64_t size, uint64_t dstOffset)
     {
-        VulkanContext::Get().ImmediateSubmit([=](VkCommandBuffer cmd) {
+        auto& registry = VulkanResourceRegistry::Get();
+        VkBuffer srcBuffer = registry.GetBuffer(srcHandle);
+        VkBuffer dstBuffer = registry.GetBuffer(dstHandle);
+
+        VulkanContext::Get().ImmediateSubmit([this, srcBuffer, dstBuffer, size, dstOffset](VkCommandBuffer cmd) {
             VkBufferCopy copyRegion{};
             copyRegion.srcOffset = 0;
-            copyRegion.dstOffset = dstOffset;  // Use the provided destination offset
+            copyRegion.dstOffset = dstOffset;
             copyRegion.size = size;
             vkCmdCopyBuffer(cmd, srcBuffer, dstBuffer, 1, &copyRegion);
 
@@ -153,9 +180,17 @@ namespace GGEngine {
                     dstAccess = VK_ACCESS_UNIFORM_READ_BIT;
                     dstStage = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
                     break;
+                case BufferUsage::Storage:
+                    dstAccess = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+                    dstStage = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+                    break;
                 case BufferUsage::Staging:
                     dstAccess = 0;
                     dstStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+                    break;
+                case BufferUsage::Indirect:
+                    dstAccess = VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+                    dstStage = VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
                     break;
             }
 
@@ -168,7 +203,7 @@ namespace GGEngine {
                 barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                 barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                 barrier.buffer = dstBuffer;
-                barrier.offset = dstOffset;  // Barrier should cover the written region
+                barrier.offset = dstOffset;
                 barrier.size = size;
 
                 vkCmdPipelineBarrier(

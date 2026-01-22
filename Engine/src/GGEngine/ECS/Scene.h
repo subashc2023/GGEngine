@@ -7,8 +7,7 @@
 #include "GGEngine/Core/Core.h"
 #include "GGEngine/Core/Timestep.h"
 #include "GGEngine/Renderer/Camera.h"
-
-#include <vulkan/vulkan.h>
+#include "GGEngine/RHI/RHITypes.h"
 
 #include <string>
 #include <vector>
@@ -59,8 +58,14 @@ namespace GGEngine {
 
         // Scene-wide operations
         void OnUpdate(Timestep ts);
-        void OnRender(const Camera& camera, VkRenderPass renderPass,
-                      VkCommandBuffer cmd, uint32_t width, uint32_t height);
+
+        // RHI-based rendering
+        void OnRender(const Camera& camera, RHIRenderPassHandle renderPass,
+                      RHICommandBufferHandle cmd, uint32_t width, uint32_t height);
+
+        // Vulkan backward compatibility
+        void OnRenderVk(const Camera& camera, RHIRenderPassHandle renderPass,
+                        void* vkCmd, uint32_t width, uint32_t height);
 
         // Iteration helpers
         const std::vector<Entity>& GetAllEntities() const { return m_Entities; }

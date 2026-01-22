@@ -1,7 +1,8 @@
 #pragma once
 
 #include "GGEngine/Core/Core.h"
-#include <vulkan/vulkan.h>
+#include "GGEngine/RHI/RHITypes.h"
+#include "GGEngine/RHI/RHIEnums.h"
 #include <vector>
 #include <memory>
 
@@ -14,8 +15,8 @@ namespace GGEngine {
     struct GG_API DescriptorBinding
     {
         uint32_t binding = 0;
-        VkDescriptorType type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        VkShaderStageFlags stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS;
+        DescriptorType type = DescriptorType::UniformBuffer;
+        ShaderStage stageFlags = ShaderStage::AllGraphics;
         uint32_t count = 1;
     };
 
@@ -29,11 +30,11 @@ namespace GGEngine {
         DescriptorSetLayout(const DescriptorSetLayout&) = delete;
         DescriptorSetLayout& operator=(const DescriptorSetLayout&) = delete;
 
-        VkDescriptorSetLayout GetVkLayout() const { return m_Layout; }
+        RHIDescriptorSetLayoutHandle GetHandle() const { return m_Handle; }
         const std::vector<DescriptorBinding>& GetBindings() const { return m_Bindings; }
 
     private:
-        VkDescriptorSetLayout m_Layout = VK_NULL_HANDLE;
+        RHIDescriptorSetLayoutHandle m_Handle;
         std::vector<DescriptorBinding> m_Bindings;
     };
 
@@ -51,13 +52,16 @@ namespace GGEngine {
         void SetUniformBuffer(uint32_t binding, const UniformBuffer& buffer);
         void SetTexture(uint32_t binding, const Texture& texture);
 
-        // Bind to command buffer
-        void Bind(VkCommandBuffer cmd, VkPipelineLayout pipelineLayout, uint32_t setIndex = 0) const;
+        // Bind to command buffer (RHI handles)
+        void Bind(RHICommandBufferHandle cmd, RHIPipelineLayoutHandle pipelineLayout, uint32_t setIndex = 0) const;
 
-        VkDescriptorSet GetVkDescriptorSet() const { return m_DescriptorSet; }
+        // Bind to command buffer (Vulkan - backward compatibility during migration)
+        void BindVk(void* vkCmd, void* vkPipelineLayout, uint32_t setIndex = 0) const;
+
+        RHIDescriptorSetHandle GetHandle() const { return m_Handle; }
 
     private:
-        VkDescriptorSet m_DescriptorSet = VK_NULL_HANDLE;
+        RHIDescriptorSetHandle m_Handle;
         const DescriptorSetLayout* m_Layout;
     };
 

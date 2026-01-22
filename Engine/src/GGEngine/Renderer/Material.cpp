@@ -2,6 +2,7 @@
 #include "Material.h"
 #include "GGEngine/Asset/Shader.h"
 #include "RenderCommand.h"
+#include "Platform/Vulkan/VulkanRHI.h"
 
 namespace GGEngine {
 
@@ -11,7 +12,7 @@ namespace GGEngine {
     }
 
     void Material::RegisterProperty(const std::string& name, PropertyType type,
-                                    VkShaderStageFlags stage, uint32_t offset)
+                                    ShaderStage stage, uint32_t offset)
     {
         PropertyMetadata metadata;
         metadata.type = type;
@@ -22,7 +23,7 @@ namespace GGEngine {
         m_Properties[name] = metadata;
 
         GG_CORE_TRACE("Material property registered: '{}' (offset: {}, size: {}, stage: {})",
-                      name, offset, metadata.size, stage);
+                      name, offset, metadata.size, static_cast<uint32_t>(stage));
     }
 
     bool Material::Create(const MaterialSpecification& spec)
@@ -33,9 +34,9 @@ namespace GGEngine {
             return false;
         }
 
-        if (spec.renderPass == VK_NULL_HANDLE)
+        if (!spec.renderPass.IsValid())
         {
-            GG_CORE_ERROR("Material::Create failed: renderPass is null");
+            GG_CORE_ERROR("Material::Create failed: renderPass is invalid");
             return false;
         }
 
@@ -72,15 +73,16 @@ namespace GGEngine {
         // For simplicity, we create one range per unique stage combination
         // covering from min offset to max offset+size for that stage
 
-        std::unordered_map<VkShaderStageFlags, std::pair<uint32_t, uint32_t>> stageRanges;
+        std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> stageRanges;
 
         for (const auto& [name, metadata] : m_Properties)
         {
-            auto it = stageRanges.find(metadata.stage);
+            uint32_t stageFlags = static_cast<uint32_t>(metadata.stage);
+            auto it = stageRanges.find(stageFlags);
             if (it == stageRanges.end())
             {
                 // New stage - initialize with this property's range
-                stageRanges[metadata.stage] = { metadata.offset, metadata.offset + metadata.size };
+                stageRanges[stageFlags] = { metadata.offset, metadata.offset + metadata.size };
             }
             else
             {
@@ -91,10 +93,10 @@ namespace GGEngine {
         }
 
         std::vector<PushConstantRange> ranges;
-        for (const auto& [stage, range] : stageRanges)
+        for (const auto& [stageFlags, range] : stageRanges)
         {
             PushConstantRange pcRange;
-            pcRange.stageFlags = stage;
+            pcRange.stageFlags = static_cast<ShaderStage>(stageFlags);
             pcRange.offset = range.first;
             pcRange.size = range.second - range.first;
             ranges.push_back(pcRange);
@@ -210,7 +212,7 @@ namespace GGEngine {
         return &it->second;
     }
 
-    void Material::Bind(VkCommandBuffer cmd) const
+    void Material::Bind(RHICommandBufferHandle cmd) const
     {
         if (!m_Pipeline)
         {
@@ -218,21 +220,23 @@ namespace GGEngine {
             return;
         }
 
+        auto& registry = VulkanResourceRegistry::Get();
+
         // Bind the pipeline
         m_Pipeline->Bind(cmd);
 
         // Push constants for each stage
-        // Group properties by stage and push the buffer region for each
-        VkPipelineLayout layout = m_Pipeline->GetLayout();
+        VkCommandBuffer vkCmd = registry.GetCommandBuffer(cmd);
+        VkPipelineLayout layout = registry.GetPipelineLayout(m_Pipeline->GetLayoutHandle());
 
         // Get the push constant ranges we built during Create()
         const auto& spec = m_Pipeline->GetSpecification();
         for (const auto& range : spec.pushConstantRanges)
         {
             vkCmdPushConstants(
-                cmd,
+                vkCmd,
                 layout,
-                range.stageFlags,
+                ToVulkan(range.stageFlags),
                 range.offset,
                 range.size,
                 m_PushConstantBuffer.data() + range.offset
@@ -240,11 +244,42 @@ namespace GGEngine {
         }
     }
 
-    VkPipelineLayout Material::GetPipelineLayout() const
+    void Material::BindVk(void* vkCmd) const
     {
         if (!m_Pipeline)
-            return VK_NULL_HANDLE;
-        return m_Pipeline->GetLayout();
+        {
+            GG_CORE_ERROR("Material '{}': cannot bind - pipeline not created", m_Name);
+            return;
+        }
+
+        auto& registry = VulkanResourceRegistry::Get();
+
+        // Bind the pipeline
+        m_Pipeline->BindVk(vkCmd);
+
+        // Push constants for each stage
+        VkPipelineLayout layout = registry.GetPipelineLayout(m_Pipeline->GetLayoutHandle());
+
+        // Get the push constant ranges we built during Create()
+        const auto& spec = m_Pipeline->GetSpecification();
+        for (const auto& range : spec.pushConstantRanges)
+        {
+            vkCmdPushConstants(
+                static_cast<VkCommandBuffer>(vkCmd),
+                layout,
+                ToVulkan(range.stageFlags),
+                range.offset,
+                range.size,
+                m_PushConstantBuffer.data() + range.offset
+            );
+        }
+    }
+
+    RHIPipelineLayoutHandle Material::GetPipelineLayoutHandle() const
+    {
+        if (!m_Pipeline)
+            return NullPipelineLayout;
+        return m_Pipeline->GetLayoutHandle();
     }
 
 }

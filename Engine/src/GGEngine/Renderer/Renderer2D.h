@@ -2,7 +2,7 @@
 
 #include "GGEngine/Core/Core.h"
 #include "GGEngine/Renderer/Camera.h"
-#include <vulkan/vulkan.h>
+#include "GGEngine/RHI/RHITypes.h"
 #include <cstdint>
 
 namespace GGEngine {
@@ -19,9 +19,15 @@ namespace GGEngine {
         // Scene management
         // Default: renders to swapchain
         static void BeginScene(const Camera& camera);
-        // Custom render pass (for framebuffers): provide render pass, command buffer, and viewport size
-        static void BeginScene(const Camera& camera, VkRenderPass renderPass, VkCommandBuffer cmd,
-                              uint32_t viewportWidth, uint32_t viewportHeight);
+
+        // Custom render pass (RHI handles)
+        static void BeginScene(const Camera& camera, RHIRenderPassHandle renderPass,
+                              RHICommandBufferHandle cmd, uint32_t viewportWidth, uint32_t viewportHeight);
+
+        // Custom render pass (Vulkan backward compatibility)
+        static void BeginSceneVk(const Camera& camera, RHIRenderPassHandle renderPass,
+                                 void* vkCmd, uint32_t viewportWidth, uint32_t viewportHeight);
+
         static void EndScene();
         static void Flush();
 

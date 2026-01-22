@@ -18,13 +18,4 @@ namespace GGEngine {
         m_Buffer->SetData(data, size, offset);
     }
 
-    VkDescriptorBufferInfo UniformBuffer::GetDescriptorInfo() const
-    {
-        VkDescriptorBufferInfo info{};
-        info.buffer = m_Buffer->GetVkBuffer();
-        info.offset = 0;
-        info.range = m_Buffer->GetSize();
-        return info;
-    }
-
 }

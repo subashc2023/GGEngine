@@ -4,6 +4,7 @@
 #include "AssetManager.h"
 #include "ShaderLibrary.h"
 #include "Platform/Vulkan/VulkanContext.h"
+#include "Platform/Vulkan/VulkanRHI.h"
 
 #include <filesystem>
 
@@ -28,12 +29,12 @@ namespace GGEngine {
     {
         GG_PROFILE_FUNCTION();
         // basePath like "assets/shaders/compiled/triangle" -> loads triangle.vert.spv, triangle.frag.spv
-        bool hasVertex = LoadStageFromFile(VK_SHADER_STAGE_VERTEX_BIT, basePath + ".vert.spv");
-        bool hasFragment = LoadStageFromFile(VK_SHADER_STAGE_FRAGMENT_BIT, basePath + ".frag.spv");
+        bool hasVertex = LoadStageFromFile(ShaderStage::Vertex, basePath + ".vert.spv");
+        bool hasFragment = LoadStageFromFile(ShaderStage::Fragment, basePath + ".frag.spv");
 
         // Optional stages - silently skip if not found
-        LoadStageFromFile(VK_SHADER_STAGE_GEOMETRY_BIT, basePath + ".geom.spv");
-        LoadStageFromFile(VK_SHADER_STAGE_COMPUTE_BIT, basePath + ".comp.spv");
+        LoadStageFromFile(ShaderStage::Geometry, basePath + ".geom.spv");
+        LoadStageFromFile(ShaderStage::Compute, basePath + ".comp.spv");
 
         bool loadedAny = hasVertex || hasFragment || !m_Stages.empty();
         m_Loaded = loadedAny;
@@ -58,7 +59,7 @@ namespace GGEngine {
         return loadedAny;
     }
 
-    bool Shader::LoadStage(VkShaderStageFlagBits stage, const std::vector<char>& spirvCode)
+    bool Shader::LoadStage(ShaderStage stage, const std::vector<char>& spirvCode)
     {
         GG_PROFILE_FUNCTION();
         if (spirvCode.empty())
@@ -83,17 +84,33 @@ namespace GGEngine {
         {
             if (it->stage == stage)
             {
-                vkDestroyShaderModule(device, it->module, nullptr);
+                // Unregister and destroy old module
+                auto& registry = VulkanResourceRegistry::Get();
+                VkShaderModule oldModule = registry.GetShaderModule(it->handle);
+                if (oldModule != VK_NULL_HANDLE)
+                {
+                    vkDestroyShaderModule(device, oldModule, nullptr);
+                }
+                registry.UnregisterShaderModule(it->handle);
                 m_Stages.erase(it);
                 break;
             }
         }
 
-        m_Stages.push_back({ stage, module, "main" });
+        // Register the new module
+        auto& registry = VulkanResourceRegistry::Get();
+        RHIShaderModuleHandle handle = registry.RegisterShaderModule(module, stage, "main");
+
+        ShaderStageInfo stageInfo;
+        stageInfo.stage = stage;
+        stageInfo.handle = handle;
+        stageInfo.entryPoint = "main";
+        m_Stages.push_back(stageInfo);
+
         return true;
     }
 
-    bool Shader::LoadStageFromFile(VkShaderStageFlagBits stage, const std::string& path)
+    bool Shader::LoadStageFromFile(ShaderStage stage, const std::string& path)
     {
         auto code = AssetManager::Get().ReadFileRaw(path);
         if (code.empty())
@@ -118,19 +135,21 @@ namespace GGEngine {
             return;
         }
 
-        for (auto& stage : m_Stages)
+        auto& registry = VulkanResourceRegistry::Get();
+        for (auto& stageInfo : m_Stages)
         {
-            if (stage.module != VK_NULL_HANDLE)
+            VkShaderModule module = registry.GetShaderModule(stageInfo.handle);
+            if (module != VK_NULL_HANDLE)
             {
-                vkDestroyShaderModule(device, stage.module, nullptr);
-                stage.module = VK_NULL_HANDLE;
+                vkDestroyShaderModule(device, module, nullptr);
             }
+            registry.UnregisterShaderModule(stageInfo.handle);
         }
         m_Stages.clear();
         m_Loaded = false;
     }
 
-    bool Shader::HasStage(VkShaderStageFlagBits stage) const
+    bool Shader::HasStage(ShaderStage stage) const
     {
         for (const auto& s : m_Stages)
         {
@@ -140,32 +159,14 @@ namespace GGEngine {
         return false;
     }
 
-    VkShaderModule Shader::GetStageModule(VkShaderStageFlagBits stage) const
+    RHIShaderModuleHandle Shader::GetStageHandle(ShaderStage stage) const
     {
         for (const auto& s : m_Stages)
         {
             if (s.stage == stage)
-                return s.module;
+                return s.handle;
         }
-        return VK_NULL_HANDLE;
-    }
-
-    std::vector<VkPipelineShaderStageCreateInfo> Shader::GetPipelineStageCreateInfos() const
-    {
-        std::vector<VkPipelineShaderStageCreateInfo> infos;
-        infos.reserve(m_Stages.size());
-
-        for (const auto& stage : m_Stages)
-        {
-            VkPipelineShaderStageCreateInfo info{};
-            info.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-            info.stage = stage.stage;
-            info.module = stage.module;
-            info.pName = stage.entryPoint.c_str();
-            infos.push_back(info);
-        }
-
-        return infos;
+        return NullShaderModule;
     }
 
 }

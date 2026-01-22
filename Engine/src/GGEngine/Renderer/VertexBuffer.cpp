@@ -1,5 +1,7 @@
 #include "ggpch.h"
 #include "VertexBuffer.h"
+#include "Platform/Vulkan/VulkanRHI.h"
+#include <vulkan/vulkan.h>
 
 namespace GGEngine {
 
@@ -35,11 +37,25 @@ namespace GGEngine {
         return CreateScope<VertexBuffer>(data, size, layout);
     }
 
-    void VertexBuffer::Bind(VkCommandBuffer cmd, uint32_t binding) const
+    void VertexBuffer::Bind(RHICommandBufferHandle cmd, uint32_t binding) const
     {
-        VkBuffer buffers[] = { m_Buffer->GetVkBuffer() };
+        auto& registry = VulkanResourceRegistry::Get();
+        VkCommandBuffer vkCmd = registry.GetCommandBuffer(cmd);
+        VkBuffer buffer = registry.GetBuffer(m_Buffer->GetHandle());
+
+        VkBuffer buffers[] = { buffer };
         VkDeviceSize offsets[] = { 0 };
-        vkCmdBindVertexBuffers(cmd, binding, 1, buffers, offsets);
+        vkCmdBindVertexBuffers(vkCmd, binding, 1, buffers, offsets);
+    }
+
+    void VertexBuffer::BindVk(void* vkCmd, uint32_t binding) const
+    {
+        auto& registry = VulkanResourceRegistry::Get();
+        VkBuffer buffer = registry.GetBuffer(m_Buffer->GetHandle());
+
+        VkBuffer buffers[] = { buffer };
+        VkDeviceSize offsets[] = { 0 };
+        vkCmdBindVertexBuffers(static_cast<VkCommandBuffer>(vkCmd), binding, 1, buffers, offsets);
     }
 
     void VertexBuffer::SetData(const void* data, uint64_t size, uint64_t offset)

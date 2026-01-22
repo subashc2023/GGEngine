@@ -1,10 +1,13 @@
 #pragma once
 
 #include "GGEngine/Core/Core.h"
+#include "GGEngine/RHI/RHITypes.h"
 #include "Buffer.h"
-#include <vulkan/vulkan.h>
 
 namespace GGEngine {
+
+    // Forward declaration for descriptor info
+    struct RHIDescriptorBufferInfo;
 
     class GG_API UniformBuffer
     {
@@ -25,11 +28,8 @@ namespace GGEngine {
         }
 
         // Accessors
-        VkBuffer GetVkBuffer() const { return m_Buffer->GetVkBuffer(); }
+        RHIBufferHandle GetHandle() const { return m_Buffer->GetHandle(); }
         uint64_t GetSize() const { return m_Buffer->GetSize(); }
-
-        // For descriptor set binding
-        VkDescriptorBufferInfo GetDescriptorInfo() const;
 
     private:
         Scope<Buffer> m_Buffer;

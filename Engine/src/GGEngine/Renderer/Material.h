@@ -2,10 +2,11 @@
 
 #include "GGEngine/Core/Core.h"
 #include "GGEngine/Core/Log.h"
+#include "GGEngine/RHI/RHITypes.h"
+#include "GGEngine/RHI/RHIEnums.h"
 #include "GGEngine/Renderer/Pipeline.h"
 #include "GGEngine/Renderer/Camera.h"
 
-#include <vulkan/vulkan.h>
 #include <string>
 #include <unordered_map>
 #include <array>
@@ -43,9 +44,9 @@ namespace GGEngine {
     struct GG_API PropertyMetadata
     {
         PropertyType type;
-        uint32_t offset;            // Byte offset in push constant buffer
-        uint32_t size;              // Size in bytes
-        VkShaderStageFlags stage;   // Shader stage(s) this property is used in
+        uint32_t offset;           // Byte offset in push constant buffer
+        uint32_t size;             // Size in bytes
+        ShaderStage stage;         // Shader stage(s) this property is used in
     };
 
     // Specification for creating a material
@@ -53,22 +54,22 @@ namespace GGEngine {
     {
         // Required
         Shader* shader = nullptr;
-        VkRenderPass renderPass = VK_NULL_HANDLE;
+        RHIRenderPassHandle renderPass;
 
         // Optional vertex layout (nullptr = shader-defined vertices)
         const VertexLayout* vertexLayout = nullptr;
 
         // Pipeline configuration (sensible defaults)
-        VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-        VkCullModeFlags cullMode = VK_CULL_MODE_NONE;
-        VkFrontFace frontFace = VK_FRONT_FACE_CLOCKWISE;
+        PrimitiveTopology topology = PrimitiveTopology::TriangleList;
+        CullMode cullMode = CullMode::None;
+        FrontFace frontFace = FrontFace::Clockwise;
         BlendMode blendMode = BlendMode::None;
         bool depthTestEnable = false;
         bool depthWriteEnable = false;
 
         // Descriptor set layouts for global bindings (e.g., camera at set 0)
         // Material will add its own layouts after these
-        std::vector<VkDescriptorSetLayout> descriptorSetLayouts;
+        std::vector<RHIDescriptorSetLayoutHandle> descriptorSetLayouts;
 
         // Debug name
         std::string name;
@@ -82,7 +83,7 @@ namespace GGEngine {
 
         // Property registration (call before Create)
         void RegisterProperty(const std::string& name, PropertyType type,
-                              VkShaderStageFlags stage, uint32_t offset);
+                              ShaderStage stage, uint32_t offset);
 
         // Create pipeline with registered properties
         bool Create(const MaterialSpecification& spec);
@@ -103,12 +104,15 @@ namespace GGEngine {
         bool HasProperty(const std::string& name) const;
         const PropertyMetadata* GetPropertyMetadata(const std::string& name) const;
 
-        // Bind pipeline and push all constants
-        void Bind(VkCommandBuffer cmd) const;
+        // Bind pipeline and push all constants (RHI handle)
+        void Bind(RHICommandBufferHandle cmd) const;
+
+        // Bind pipeline and push all constants (Vulkan - backward compatibility)
+        void BindVk(void* vkCmd) const;
 
         // Access underlying pipeline (for advanced use)
         Pipeline* GetPipeline() const { return m_Pipeline.get(); }
-        VkPipelineLayout GetPipelineLayout() const;
+        RHIPipelineLayoutHandle GetPipelineLayoutHandle() const;
 
         // Accessors
         const std::string& GetName() const { return m_Name; }

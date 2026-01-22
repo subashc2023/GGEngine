@@ -1,9 +1,11 @@
 #include "ggpch.h"
 #include "Pipeline.h"
 #include "VertexLayout.h"
+#include "DescriptorSet.h"
 #include "GGEngine/Asset/Shader.h"
 #include "Platform/Vulkan/VulkanContext.h"
 #include "Platform/Vulkan/VulkanUtils.h"
+#include "Platform/Vulkan/VulkanRHI.h"
 
 namespace GGEngine {
 
@@ -18,14 +20,25 @@ namespace GGEngine {
         Destroy();
     }
 
-    void Pipeline::Bind(VkCommandBuffer cmd)
+    void Pipeline::Bind(RHICommandBufferHandle cmd)
     {
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_Pipeline);
+        auto& registry = VulkanResourceRegistry::Get();
+        VkCommandBuffer vkCmd = registry.GetCommandBuffer(cmd);
+        VkPipeline pipeline = registry.GetPipeline(m_Handle);
+        vkCmdBindPipeline(vkCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    }
+
+    void Pipeline::BindVk(void* vkCmd)
+    {
+        auto& registry = VulkanResourceRegistry::Get();
+        VkPipeline pipeline = registry.GetPipeline(m_Handle);
+        vkCmdBindPipeline(static_cast<VkCommandBuffer>(vkCmd), VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     }
 
     void Pipeline::Create()
     {
         auto device = VulkanContext::Get().GetDevice();
+        auto& registry = VulkanResourceRegistry::Get();
 
         if (!m_Specification.shader || !m_Specification.shader->IsLoaded())
         {
@@ -33,17 +46,45 @@ namespace GGEngine {
             return;
         }
 
-        if (m_Specification.renderPass == VK_NULL_HANDLE)
+        if (!m_Specification.renderPass.IsValid())
         {
             GG_CORE_ERROR("Pipeline creation failed: No render pass specified");
             return;
         }
 
-        auto shaderStages = m_Specification.shader->GetPipelineStageCreateInfos();
-        if (shaderStages.empty())
+        // Get the actual VkRenderPass from the registry
+        VkRenderPass vkRenderPass = registry.GetRenderPass(m_Specification.renderPass);
+        if (vkRenderPass == VK_NULL_HANDLE)
+        {
+            GG_CORE_ERROR("Pipeline creation failed: Invalid render pass handle");
+            return;
+        }
+
+        // Build shader stage create infos from shader's stages
+        const auto& stages = m_Specification.shader->GetStages();
+        if (stages.empty())
         {
             GG_CORE_ERROR("Pipeline creation failed: Shader has no stages");
             return;
+        }
+
+        std::vector<VkPipelineShaderStageCreateInfo> shaderStages;
+        shaderStages.reserve(stages.size());
+        for (const auto& stageInfo : stages)
+        {
+            VkShaderModule module = registry.GetShaderModule(stageInfo.handle);
+            if (module == VK_NULL_HANDLE)
+            {
+                GG_CORE_ERROR("Pipeline creation failed: Invalid shader module for stage {}", static_cast<uint32_t>(stageInfo.stage));
+                return;
+            }
+
+            VkPipelineShaderStageCreateInfo createInfo{};
+            createInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            createInfo.stage = static_cast<VkShaderStageFlagBits>(ToVulkan(stageInfo.stage));
+            createInfo.module = module;
+            createInfo.pName = stageInfo.entryPoint.c_str();
+            shaderStages.push_back(createInfo);
         }
 
         // Vertex input - use layout if provided, otherwise empty (hardcoded in shader)
@@ -55,8 +96,14 @@ namespace GGEngine {
 
         if (m_Specification.vertexLayout && !m_Specification.vertexLayout->IsEmpty())
         {
-            bindingDesc = m_Specification.vertexLayout->GetBindingDescription();
-            attributeDescs = m_Specification.vertexLayout->GetAttributeDescriptions();
+            // Convert RHI descriptions to Vulkan
+            bindingDesc = ToVulkan(m_Specification.vertexLayout->GetBindingDescription());
+            const auto rhiAttribs = m_Specification.vertexLayout->GetAttributeDescriptions();
+            attributeDescs.reserve(rhiAttribs.size());
+            for (const auto& attrib : rhiAttribs)
+            {
+                attributeDescs.push_back(ToVulkan(attrib));
+            }
 
             vertexInputInfo.vertexBindingDescriptionCount = 1;
             vertexInputInfo.pVertexBindingDescriptions = &bindingDesc;
@@ -72,7 +119,7 @@ namespace GGEngine {
         // Input assembly
         VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
         inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-        inputAssembly.topology = m_Specification.topology;
+        inputAssembly.topology = ToVulkan(m_Specification.topology);
         inputAssembly.primitiveRestartEnable = VK_FALSE;
 
         // Dynamic viewport/scissor
@@ -92,24 +139,24 @@ namespace GGEngine {
         rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
         rasterizer.depthClampEnable = VK_FALSE;
         rasterizer.rasterizerDiscardEnable = VK_FALSE;
-        rasterizer.polygonMode = m_Specification.polygonMode;
+        rasterizer.polygonMode = ToVulkan(m_Specification.polygonMode);
         rasterizer.lineWidth = m_Specification.lineWidth;
-        rasterizer.cullMode = m_Specification.cullMode;
-        rasterizer.frontFace = m_Specification.frontFace;
+        rasterizer.cullMode = ToVulkan(m_Specification.cullMode);
+        rasterizer.frontFace = ToVulkan(m_Specification.frontFace);
         rasterizer.depthBiasEnable = VK_FALSE;
 
         // Multisampling
         VkPipelineMultisampleStateCreateInfo multisampling{};
         multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
         multisampling.sampleShadingEnable = VK_FALSE;
-        multisampling.rasterizationSamples = m_Specification.samples;
+        multisampling.rasterizationSamples = ToVulkan(m_Specification.samples);
 
         // Depth stencil
         VkPipelineDepthStencilStateCreateInfo depthStencil{};
         depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
         depthStencil.depthTestEnable = m_Specification.depthTestEnable ? VK_TRUE : VK_FALSE;
         depthStencil.depthWriteEnable = m_Specification.depthWriteEnable ? VK_TRUE : VK_FALSE;
-        depthStencil.depthCompareOp = m_Specification.depthCompareOp;
+        depthStencil.depthCompareOp = ToVulkan(m_Specification.depthCompareOp);
         depthStencil.depthBoundsTestEnable = VK_FALSE;
         depthStencil.stencilTestEnable = VK_FALSE;
 
@@ -156,23 +203,35 @@ namespace GGEngine {
         for (const auto& range : m_Specification.pushConstantRanges)
         {
             VkPushConstantRange vkRange{};
-            vkRange.stageFlags = range.stageFlags;
+            vkRange.stageFlags = ToVulkan(range.stageFlags);
             vkRange.offset = range.offset;
             vkRange.size = range.size;
             vkPushConstantRanges.push_back(vkRange);
         }
 
+        // Convert descriptor set layout handles to VkDescriptorSetLayouts
+        std::vector<VkDescriptorSetLayout> vkSetLayouts;
+        for (const auto& layoutHandle : m_Specification.descriptorSetLayouts)
+        {
+            VkDescriptorSetLayout vkLayout = registry.GetDescriptorSetLayout(layoutHandle);
+            vkSetLayouts.push_back(vkLayout);
+        }
+
         // Pipeline layout
         VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
         pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-        pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(m_Specification.descriptorSetLayouts.size());
-        pipelineLayoutInfo.pSetLayouts = m_Specification.descriptorSetLayouts.empty() ? nullptr : m_Specification.descriptorSetLayouts.data();
+        pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(vkSetLayouts.size());
+        pipelineLayoutInfo.pSetLayouts = vkSetLayouts.empty() ? nullptr : vkSetLayouts.data();
         pipelineLayoutInfo.pushConstantRangeCount = static_cast<uint32_t>(vkPushConstantRanges.size());
         pipelineLayoutInfo.pPushConstantRanges = vkPushConstantRanges.empty() ? nullptr : vkPushConstantRanges.data();
 
+        VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
         VK_CHECK_RETURN(
-            vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &m_PipelineLayout),
+            vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout),
             "Failed to create pipeline layout");
+
+        // Register pipeline layout
+        m_LayoutHandle = registry.RegisterPipelineLayout(pipelineLayout);
 
         // Create pipeline
         VkGraphicsPipelineCreateInfo pipelineInfo{};
@@ -187,14 +246,18 @@ namespace GGEngine {
         pipelineInfo.pDepthStencilState = m_Specification.depthTestEnable ? &depthStencil : nullptr;
         pipelineInfo.pColorBlendState = &colorBlending;
         pipelineInfo.pDynamicState = &dynamicState;
-        pipelineInfo.layout = m_PipelineLayout;
-        pipelineInfo.renderPass = m_Specification.renderPass;
+        pipelineInfo.layout = pipelineLayout;
+        pipelineInfo.renderPass = vkRenderPass;
         pipelineInfo.subpass = m_Specification.subpass;
         pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
 
+        VkPipeline pipeline = VK_NULL_HANDLE;
         VK_CHECK_RETURN(
-            vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_Pipeline),
+            vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline),
             "Failed to create graphics pipeline");
+
+        // Register pipeline (stores both pipeline and layout)
+        m_Handle = registry.RegisterPipeline(pipeline, pipelineLayout);
 
         if (!m_Specification.debugName.empty())
         {
@@ -205,18 +268,29 @@ namespace GGEngine {
     void Pipeline::Destroy()
     {
         auto device = VulkanContext::Get().GetDevice();
+        auto& registry = VulkanResourceRegistry::Get();
         vkDeviceWaitIdle(device);
 
-        if (m_Pipeline != VK_NULL_HANDLE)
+        if (m_Handle.IsValid())
         {
-            vkDestroyPipeline(device, m_Pipeline, nullptr);
-            m_Pipeline = VK_NULL_HANDLE;
+            VkPipeline pipeline = registry.GetPipeline(m_Handle);
+            if (pipeline != VK_NULL_HANDLE)
+            {
+                vkDestroyPipeline(device, pipeline, nullptr);
+            }
+            registry.UnregisterPipeline(m_Handle);
+            m_Handle = NullPipeline;
         }
 
-        if (m_PipelineLayout != VK_NULL_HANDLE)
+        if (m_LayoutHandle.IsValid())
         {
-            vkDestroyPipelineLayout(device, m_PipelineLayout, nullptr);
-            m_PipelineLayout = VK_NULL_HANDLE;
+            VkPipelineLayout layout = registry.GetPipelineLayout(m_LayoutHandle);
+            if (layout != VK_NULL_HANDLE)
+            {
+                vkDestroyPipelineLayout(device, layout, nullptr);
+            }
+            registry.UnregisterPipelineLayout(m_LayoutHandle);
+            m_LayoutHandle = NullPipelineLayout;
         }
     }
 

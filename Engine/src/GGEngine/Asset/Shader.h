@@ -3,8 +3,9 @@
 #include "Asset.h"
 #include "AssetManager.h"
 #include "GGEngine/Core/Core.h"
+#include "GGEngine/RHI/RHITypes.h"
+#include "GGEngine/RHI/RHIEnums.h"
 
-#include <vulkan/vulkan.h>
 #include <string>
 #include <vector>
 
@@ -15,11 +16,11 @@ namespace GGEngine {
     template<>
     constexpr AssetType GetAssetType<Shader>() { return AssetType::Shader; }
 
-    // Represents a compiled SPIR-V shader stage
-    struct GG_API ShaderStage
+    // Represents a compiled SPIR-V shader stage module (backend-agnostic)
+    struct GG_API ShaderStageInfo
     {
-        VkShaderStageFlagBits stage = VK_SHADER_STAGE_FLAG_BITS_MAX_ENUM;
-        VkShaderModule module = VK_NULL_HANDLE;
+        ShaderStage stage = ShaderStage::None;
+        RHIShaderModuleHandle handle;
         std::string entryPoint = "main";
     };
 
@@ -40,24 +41,21 @@ namespace GGEngine {
         bool Load(const std::string& basePath);
 
         // Load individual stages
-        bool LoadStage(VkShaderStageFlagBits stage, const std::vector<char>& spirvCode);
-        bool LoadStageFromFile(VkShaderStageFlagBits stage, const std::string& path);
+        bool LoadStage(ShaderStage stage, const std::vector<char>& spirvCode);
+        bool LoadStageFromFile(ShaderStage stage, const std::string& path);
 
         void Unload() override;
 
-        const std::vector<ShaderStage>& GetStages() const { return m_Stages; }
-        bool HasStage(VkShaderStageFlagBits stage) const;
-        VkShaderModule GetStageModule(VkShaderStageFlagBits stage) const;
-
-        // Create pipeline shader stage create infos - ready for VkGraphicsPipelineCreateInfo
-        std::vector<VkPipelineShaderStageCreateInfo> GetPipelineStageCreateInfos() const;
+        const std::vector<ShaderStageInfo>& GetStages() const { return m_Stages; }
+        bool HasStage(ShaderStage stage) const;
+        RHIShaderModuleHandle GetStageHandle(ShaderStage stage) const;
 
         // Name accessors
         const std::string& GetName() const { return m_Name; }
         void SetName(const std::string& name) { m_Name = name; }
 
     private:
-        std::vector<ShaderStage> m_Stages;
+        std::vector<ShaderStageInfo> m_Stages;
         std::string m_Name;
     };
 

@@ -2,6 +2,7 @@
 #include "Scene.h"
 #include "GGEngine/Renderer/Renderer2D.h"
 #include "GGEngine/Asset/TextureLibrary.h"
+#include "Platform/Vulkan/VulkanRHI.h"
 
 #include <algorithm>
 
@@ -169,11 +170,19 @@ namespace GGEngine {
         // Reserved for future systems (physics, scripting, etc.)
     }
 
-    void Scene::OnRender(const Camera& camera, VkRenderPass renderPass,
-                         VkCommandBuffer cmd, uint32_t width, uint32_t height)
+    void Scene::OnRender(const Camera& camera, RHIRenderPassHandle renderPass,
+                         RHICommandBufferHandle cmd, uint32_t width, uint32_t height)
+    {
+        auto& registry = VulkanResourceRegistry::Get();
+        void* vkCmd = registry.GetCommandBuffer(cmd);
+        OnRenderVk(camera, renderPass, vkCmd, width, height);
+    }
+
+    void Scene::OnRenderVk(const Camera& camera, RHIRenderPassHandle renderPass,
+                           void* vkCmd, uint32_t width, uint32_t height)
     {
         Renderer2D::ResetStats();
-        Renderer2D::BeginScene(camera, renderPass, cmd, width, height);
+        Renderer2D::BeginSceneVk(camera, renderPass, vkCmd, width, height);
 
         auto& textureLib = TextureLibrary::Get();
 

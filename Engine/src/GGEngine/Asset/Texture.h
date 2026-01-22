@@ -3,9 +3,9 @@
 #include "Asset.h"
 #include "AssetManager.h"
 #include "GGEngine/Core/Core.h"
+#include "GGEngine/RHI/RHITypes.h"
+#include "GGEngine/RHI/RHIEnums.h"
 
-#include <vulkan/vulkan.h>
-#include <vk_mem_alloc.h>
 #include <string>
 
 namespace GGEngine {
@@ -20,10 +20,11 @@ namespace GGEngine {
     {
         uint32_t Width = 1;
         uint32_t Height = 1;
-        VkFormat Format = VK_FORMAT_R8G8B8A8_UNORM;
-        VkFilter MinFilter = VK_FILTER_LINEAR;
-        VkFilter MagFilter = VK_FILTER_LINEAR;
-        VkSamplerAddressMode AddressMode = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        TextureFormat Format = TextureFormat::R8G8B8A8_UNORM;
+        Filter MinFilter = Filter::Linear;
+        Filter MagFilter = Filter::Linear;
+        AddressMode AddressModeU = AddressMode::Repeat;
+        AddressMode AddressModeV = AddressMode::Repeat;
     };
 
     // A 2D texture asset loaded from an image file
@@ -56,13 +57,10 @@ namespace GGEngine {
         uint32_t GetWidth() const { return m_Width; }
         uint32_t GetHeight() const { return m_Height; }
         uint32_t GetChannels() const { return m_Channels; }
+        TextureFormat GetFormat() const { return m_Format; }
 
-        VkImage GetImage() const { return m_Image; }
-        VkImageView GetImageView() const { return m_ImageView; }
-        VkSampler GetSampler() const { return m_Sampler; }
-
-        // Get descriptor info for binding to descriptor sets
-        VkDescriptorImageInfo GetDescriptorInfo() const;
+        // RHI handle for backend-agnostic usage
+        RHITextureHandle GetHandle() const { return m_Handle; }
 
     private:
         void CreateVulkanResources(const uint8_t* pixels);
@@ -70,11 +68,10 @@ namespace GGEngine {
         uint32_t m_Width = 0;
         uint32_t m_Height = 0;
         uint32_t m_Channels = 4;
+        TextureFormat m_Format = TextureFormat::R8G8B8A8_UNORM;
 
-        VkImage m_Image = VK_NULL_HANDLE;
-        VmaAllocation m_ImageAllocation = VK_NULL_HANDLE;
-        VkImageView m_ImageView = VK_NULL_HANDLE;
-        VkSampler m_Sampler = VK_NULL_HANDLE;
+        // RHI handle (maps to backend resources via registry)
+        RHITextureHandle m_Handle;
 
         // Fallback texture (owned directly, not through AssetManager)
         static Scope<Texture> s_FallbackTexture;

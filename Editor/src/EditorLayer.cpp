@@ -116,17 +116,17 @@ void EditorLayer::OnRenderOffscreen(GGEngine::Timestep ts)
     if (cmd == VK_NULL_HANDLE)
         return;
 
-    m_ViewportFramebuffer->BeginRenderPass(cmd);
+    m_ViewportFramebuffer->BeginRenderPassVk(cmd);
 
     // Scene renders all entities with SpriteRenderer components
-    m_ActiveScene->OnRender(
+    m_ActiveScene->OnRenderVk(
         m_CameraController.GetCamera(),
-        m_ViewportFramebuffer->GetRenderPass(),
+        m_ViewportFramebuffer->GetRenderPassHandle(),
         cmd,
         m_ViewportFramebuffer->GetWidth(),
         m_ViewportFramebuffer->GetHeight());
 
-    m_ViewportFramebuffer->EndRenderPass(cmd);
+    m_ViewportFramebuffer->EndRenderPassVk(cmd);
 }
 
 void EditorLayer::DrawSceneHierarchyPanel()

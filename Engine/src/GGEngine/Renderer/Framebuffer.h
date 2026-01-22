@@ -1,8 +1,8 @@
 #pragma once
 
 #include "GGEngine/Core/Core.h"
-#include <vulkan/vulkan.h>
-#include <vk_mem_alloc.h>
+#include "GGEngine/RHI/RHITypes.h"
+#include "GGEngine/RHI/RHIEnums.h"
 #include <cstdint>
 
 namespace GGEngine {
@@ -10,7 +10,7 @@ namespace GGEngine {
     struct FramebufferSpecification {
         uint32_t Width = 1280;
         uint32_t Height = 720;
-        VkFormat Format = VK_FORMAT_B8G8R8A8_UNORM;
+        TextureFormat Format = TextureFormat::B8G8R8A8_UNORM;
     };
 
     class GG_API Framebuffer {
@@ -20,29 +20,34 @@ namespace GGEngine {
 
         void Resize(uint32_t width, uint32_t height);
 
-        void BeginRenderPass(VkCommandBuffer cmd);
-        void EndRenderPass(VkCommandBuffer cmd);
+        // Render pass management (RHI handle)
+        void BeginRenderPass(RHICommandBufferHandle cmd);
+        void EndRenderPass(RHICommandBufferHandle cmd);
 
-        VkDescriptorSet GetImGuiTextureID() const { return m_ImGuiDescriptorSet; }
+        // Backward compatibility (Vulkan)
+        void BeginRenderPassVk(void* vkCmd);
+        void EndRenderPassVk(void* vkCmd);
+
+        // ImGui integration - returns opaque handle for ImGui texture binding
+        void* GetImGuiTextureID() const { return m_ImGuiDescriptorSet; }
+
         uint32_t GetWidth() const { return m_Specification.Width; }
         uint32_t GetHeight() const { return m_Specification.Height; }
-        VkRenderPass GetRenderPass() const { return m_RenderPass; }
+
+        // RHI handle for render pass
+        RHIRenderPassHandle GetRenderPassHandle() const { return m_RenderPassHandle; }
 
     private:
         void CreateResources();
         void DestroyResources();
         void CreateRenderPass();
         void DestroyRenderPass();
-        void TransitionImageLayout(VkImageLayout oldLayout, VkImageLayout newLayout);
+        void TransitionImageLayout(int oldLayout, int newLayout);
 
         FramebufferSpecification m_Specification;
+        RHIRenderPassHandle m_RenderPassHandle;
 
-        VkImage m_Image = VK_NULL_HANDLE;
-        VmaAllocation m_ImageAllocation = VK_NULL_HANDLE;
-        VkImageView m_ImageView = VK_NULL_HANDLE;
-        VkSampler m_Sampler = VK_NULL_HANDLE;
-        VkFramebuffer m_Framebuffer = VK_NULL_HANDLE;
-        VkRenderPass m_RenderPass = VK_NULL_HANDLE;
-        VkDescriptorSet m_ImGuiDescriptorSet = VK_NULL_HANDLE;
+        // Opaque pointer for ImGui descriptor set (cast to VkDescriptorSet in impl)
+        void* m_ImGuiDescriptorSet = nullptr;
     };
 }

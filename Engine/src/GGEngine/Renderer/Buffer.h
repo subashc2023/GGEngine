@@ -1,20 +1,12 @@
 #pragma once
 
 #include "GGEngine/Core/Core.h"
-#include <vulkan/vulkan.h>
-#include <vk_mem_alloc.h>
+#include "GGEngine/RHI/RHITypes.h"
+#include "GGEngine/RHI/RHIEnums.h"
 #include <cstdint>
 #include <string>
 
 namespace GGEngine {
-
-    enum class BufferUsage
-    {
-        Vertex,
-        Index,
-        Uniform,
-        Staging
-    };
 
     struct GG_API BufferSpecification
     {
@@ -37,18 +29,17 @@ namespace GGEngine {
         void SetData(const void* data, uint64_t size, uint64_t offset = 0);
 
         // Accessors
-        VkBuffer GetVkBuffer() const { return m_Buffer; }
+        RHIBufferHandle GetHandle() const { return m_Handle; }
         uint64_t GetSize() const { return m_Specification.size; }
         const BufferSpecification& GetSpecification() const { return m_Specification; }
 
     protected:
         void Create();
         void Destroy();
-        void CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size, VkDeviceSize dstOffset = 0);
+        void CopyBuffer(RHIBufferHandle srcBuffer, RHIBufferHandle dstBuffer, uint64_t size, uint64_t dstOffset = 0);
 
         BufferSpecification m_Specification;
-        VkBuffer m_Buffer = VK_NULL_HANDLE;
-        VmaAllocation m_Allocation = VK_NULL_HANDLE;
+        RHIBufferHandle m_Handle;
     };
 
 }

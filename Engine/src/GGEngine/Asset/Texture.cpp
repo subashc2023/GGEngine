@@ -4,6 +4,7 @@
 #include "AssetManager.h"
 #include "Platform/Vulkan/VulkanContext.h"
 #include "Platform/Vulkan/VulkanUtils.h"
+#include "Platform/Vulkan/VulkanRHI.h"
 #include "GGEngine/Renderer/Buffer.h"
 
 #include <stb_image.h>
@@ -55,6 +56,7 @@ namespace GGEngine {
         s_FallbackTexture->m_Width = size;
         s_FallbackTexture->m_Height = size;
         s_FallbackTexture->m_Channels = 4;
+        s_FallbackTexture->m_Format = TextureFormat::R8G8B8A8_UNORM;
         s_FallbackTexture->m_Path = "__fallback__";
         s_FallbackTexture->m_Loaded = true;
 
@@ -96,6 +98,7 @@ namespace GGEngine {
         texture->m_Width = width;
         texture->m_Height = height;
         texture->m_Channels = 4;  // Always RGBA
+        texture->m_Format = TextureFormat::R8G8B8A8_UNORM;
         texture->m_Path = "__generated__";
         texture->m_Loaded = true;
 
@@ -136,6 +139,7 @@ namespace GGEngine {
         m_Width = static_cast<uint32_t>(width);
         m_Height = static_cast<uint32_t>(height);
         m_Channels = 4;  // We always request RGBA
+        m_Format = TextureFormat::R8G8B8A8_UNORM;
         m_Path = path;
 
         CreateVulkanResources(pixels);
@@ -174,7 +178,7 @@ namespace GGEngine {
         imageInfo.extent.depth = 1;
         imageInfo.mipLevels = 1;
         imageInfo.arrayLayers = 1;
-        imageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+        imageInfo.format = ToVulkan(m_Format);
         imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
         imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -185,18 +189,21 @@ namespace GGEngine {
         allocCreateInfo.usage = VMA_MEMORY_USAGE_AUTO;
         allocCreateInfo.flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
 
-        if (vmaCreateImage(allocator, &imageInfo, &allocCreateInfo, &m_Image, &m_ImageAllocation, nullptr) != VK_SUCCESS)
+        VkImage image = VK_NULL_HANDLE;
+        VmaAllocation imageAllocation = VK_NULL_HANDLE;
+
+        if (vmaCreateImage(allocator, &imageInfo, &allocCreateInfo, &image, &imageAllocation, nullptr) != VK_SUCCESS)
         {
             GG_CORE_ERROR("Failed to create texture image with VMA!");
             return;
         }
 
         // 3. Transition, copy, transition via ImmediateSubmit
-        VkBuffer stagingVkBuffer = stagingBuffer.GetVkBuffer();
+        VkBuffer stagingVkBuffer = VulkanResourceRegistry::Get().GetBuffer(stagingBuffer.GetHandle());
 
         ctx.ImmediateSubmit([&](VkCommandBuffer cmd) {
             // UNDEFINED -> TRANSFER_DST_OPTIMAL
-            VulkanUtils::TransitionImageLayout(cmd, m_Image,
+            VulkanUtils::TransitionImageLayout(cmd, image,
                 VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
             // Copy buffer to image
@@ -211,74 +218,87 @@ namespace GGEngine {
             region.imageOffset = { 0, 0, 0 };
             region.imageExtent = { m_Width, m_Height, 1 };
 
-            vkCmdCopyBufferToImage(cmd, stagingVkBuffer, m_Image,
+            vkCmdCopyBufferToImage(cmd, stagingVkBuffer, image,
                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
             // TRANSFER_DST_OPTIMAL -> SHADER_READ_ONLY_OPTIMAL
-            VulkanUtils::TransitionImageLayout(cmd, m_Image,
+            VulkanUtils::TransitionImageLayout(cmd, image,
                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         });
 
         // Staging buffer is automatically destroyed when it goes out of scope
 
         // 4. Create image view
-        m_ImageView = VulkanUtils::CreateImageView2D(device, m_Image, VK_FORMAT_R8G8B8A8_UNORM);
-        if (m_ImageView == VK_NULL_HANDLE)
+        VkImageView imageView = VulkanUtils::CreateImageView2D(device, image, ToVulkan(m_Format));
+        if (imageView == VK_NULL_HANDLE)
+        {
+            vmaDestroyImage(allocator, image, imageAllocation);
             return;
+        }
 
         // 5. Create sampler (nearest filtering for pixel-art style)
-        m_Sampler = VulkanUtils::CreateSampler(device, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_REPEAT);
-        if (m_Sampler == VK_NULL_HANDLE)
+        VkSampler sampler = VulkanUtils::CreateSampler(device, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_REPEAT);
+        if (sampler == VK_NULL_HANDLE)
+        {
+            vkDestroyImageView(device, imageView, nullptr);
+            vmaDestroyImage(allocator, image, imageAllocation);
             return;
+        }
+
+        // 6. Register with VulkanResourceRegistry
+        auto& registry = VulkanResourceRegistry::Get();
+        m_Handle = registry.RegisterTexture(image, imageView, sampler, imageAllocation, m_Width, m_Height, m_Format);
     }
 
     void Texture::Unload()
     {
-        if (m_Image == VK_NULL_HANDLE)
+        if (!m_Handle.IsValid())
             return;
 
         // Check if VulkanContext is still valid (may be destroyed during static destruction)
         VkDevice device = VulkanContext::Get().GetDevice();
         if (device == VK_NULL_HANDLE)
         {
-            m_Image = VK_NULL_HANDLE;
-            m_ImageAllocation = VK_NULL_HANDLE;
-            m_ImageView = VK_NULL_HANDLE;
-            m_Sampler = VK_NULL_HANDLE;
+            m_Handle = NullTexture;
             m_Loaded = false;
             return;
         }
 
-        if (m_Sampler != VK_NULL_HANDLE)
+        auto& registry = VulkanResourceRegistry::Get();
+        auto textureData = registry.GetTextureData(m_Handle);
+
+        // If the registry entry doesn't exist (already unloaded or never registered),
+        // just clear our handle and return
+        if (textureData.image == VK_NULL_HANDLE && textureData.sampler == VK_NULL_HANDLE)
         {
-            vkDestroySampler(device, m_Sampler, nullptr);
-            m_Sampler = VK_NULL_HANDLE;
+            m_Handle = NullTexture;
+            m_Loaded = false;
+            return;
         }
 
-        if (m_ImageView != VK_NULL_HANDLE)
+        // Destroy Vulkan resources in reverse order of creation
+        if (textureData.sampler != VK_NULL_HANDLE)
         {
-            vkDestroyImageView(device, m_ImageView, nullptr);
-            m_ImageView = VK_NULL_HANDLE;
+            vkDestroySampler(device, textureData.sampler, nullptr);
         }
 
-        if (m_Image != VK_NULL_HANDLE)
+        if (textureData.imageView != VK_NULL_HANDLE)
+        {
+            vkDestroyImageView(device, textureData.imageView, nullptr);
+        }
+
+        if (textureData.image != VK_NULL_HANDLE)
         {
             VmaAllocator allocator = VulkanContext::Get().GetAllocator();
-            vmaDestroyImage(allocator, m_Image, m_ImageAllocation);
-            m_Image = VK_NULL_HANDLE;
-            m_ImageAllocation = VK_NULL_HANDLE;
+            if (allocator != VK_NULL_HANDLE)
+            {
+                vmaDestroyImage(allocator, textureData.image, textureData.allocation);
+            }
         }
 
+        registry.UnregisterTexture(m_Handle);
+        m_Handle = NullTexture;
         m_Loaded = false;
-    }
-
-    VkDescriptorImageInfo Texture::GetDescriptorInfo() const
-    {
-        VkDescriptorImageInfo info{};
-        info.sampler = m_Sampler;
-        info.imageView = m_ImageView;
-        info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        return info;
     }
 
 }

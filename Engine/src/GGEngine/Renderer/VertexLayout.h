@@ -1,7 +1,7 @@
 #pragma once
 
 #include "GGEngine/Core/Core.h"
-#include <vulkan/vulkan.h>
+#include "GGEngine/RHI/RHITypes.h"
 #include <string>
 #include <vector>
 #include <cstdint>
@@ -25,8 +25,8 @@ namespace GGEngine {
     // Returns size in bytes for each attribute type
     GG_API uint32_t GetVertexAttributeSize(VertexAttributeType type);
 
-    // Returns VkFormat for each attribute type
-    GG_API VkFormat GetVertexAttributeFormat(VertexAttributeType type);
+    // Returns TextureFormat for each attribute type
+    GG_API TextureFormat GetVertexAttributeFormat(VertexAttributeType type);
 
     // Single vertex attribute description
     struct GG_API VertexAttribute
@@ -53,9 +53,9 @@ namespace GGEngine {
         uint32_t GetStride() const { return m_Stride; }
         bool IsEmpty() const { return m_Attributes.empty(); }
 
-        // Vulkan descriptors
-        VkVertexInputBindingDescription GetBindingDescription(uint32_t binding = 0) const;
-        std::vector<VkVertexInputAttributeDescription> GetAttributeDescriptions(uint32_t binding = 0) const;
+        // RHI descriptors
+        RHIVertexBindingDescription GetBindingDescription(uint32_t binding = 0) const;
+        std::vector<RHIVertexAttributeDescription> GetAttributeDescriptions(uint32_t binding = 0) const;
 
     private:
         std::vector<VertexAttribute> m_Attributes;
