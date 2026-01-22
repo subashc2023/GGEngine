@@ -78,8 +78,7 @@ namespace GGEngine {
     void OrthographicCameraController::SetZoomLevel(float level)
     {
         m_ZoomLevel = level;
-        if (m_ZoomLevel < 0.1f) m_ZoomLevel = 0.1f;
-        if (m_ZoomLevel > 100.0f) m_ZoomLevel = 100.0f;
+        ClampZoom();
         UpdateProjection();
     }
 
@@ -92,10 +91,14 @@ namespace GGEngine {
     bool OrthographicCameraController::OnMouseScrolled(MouseScrolledEvent& e)
     {
         m_ZoomLevel -= e.GetYOffset() * m_ZoomSpeed;
-        if (m_ZoomLevel < 0.1f) m_ZoomLevel = 0.1f;
-        if (m_ZoomLevel > 100.0f) m_ZoomLevel = 100.0f;
+        ClampZoom();
         UpdateProjection();
         return false; // Don't consume - allow other handlers
+    }
+
+    void OrthographicCameraController::ClampZoom()
+    {
+        m_ZoomLevel = std::clamp(m_ZoomLevel, 0.1f, 100.0f);
     }
 
     void OrthographicCameraController::UpdateProjection()

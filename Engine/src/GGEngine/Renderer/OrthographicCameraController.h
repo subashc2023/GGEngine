@@ -40,6 +40,7 @@ namespace GGEngine {
         bool OnMouseScrolled(MouseScrolledEvent& e);
 
         void UpdateProjection();
+        void ClampZoom();
 
         float m_AspectRatio;
         float m_ZoomLevel;

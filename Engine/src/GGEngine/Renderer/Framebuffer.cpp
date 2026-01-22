@@ -1,6 +1,7 @@
 #include "ggpch.h"
 #include "Framebuffer.h"
 #include "Platform/Vulkan/VulkanContext.h"
+#include "Platform/Vulkan/VulkanUtils.h"
 #include "GGEngine/Core/Log.h"
 
 #include <imgui.h>
@@ -154,44 +155,14 @@ namespace GGEngine {
         }
 
         // Create Image View
-        VkImageViewCreateInfo viewInfo{};
-        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        viewInfo.image = m_Image;
-        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        viewInfo.format = m_Specification.Format;
-        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        viewInfo.subresourceRange.baseMipLevel = 0;
-        viewInfo.subresourceRange.levelCount = 1;
-        viewInfo.subresourceRange.baseArrayLayer = 0;
-        viewInfo.subresourceRange.layerCount = 1;
-
-        if (vkCreateImageView(device, &viewInfo, nullptr, &m_ImageView) != VK_SUCCESS)
-        {
-            GG_CORE_ERROR("Failed to create framebuffer image view!");
+        m_ImageView = VulkanUtils::CreateImageView2D(device, m_Image, m_Specification.Format);
+        if (m_ImageView == VK_NULL_HANDLE)
             return;
-        }
 
-        // Create Sampler
-        VkSamplerCreateInfo samplerInfo{};
-        samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-        samplerInfo.magFilter = VK_FILTER_LINEAR;
-        samplerInfo.minFilter = VK_FILTER_LINEAR;
-        samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        samplerInfo.anisotropyEnable = VK_FALSE;
-        samplerInfo.maxAnisotropy = 1.0f;
-        samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
-        samplerInfo.unnormalizedCoordinates = VK_FALSE;
-        samplerInfo.compareEnable = VK_FALSE;
-        samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
-        samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-
-        if (vkCreateSampler(device, &samplerInfo, nullptr, &m_Sampler) != VK_SUCCESS)
-        {
-            GG_CORE_ERROR("Failed to create framebuffer sampler!");
+        // Create Sampler (linear filtering, clamp to edge for framebuffer)
+        m_Sampler = VulkanUtils::CreateSampler(device, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+        if (m_Sampler == VK_NULL_HANDLE)
             return;
-        }
 
         // Create Framebuffer
         VkFramebufferCreateInfo framebufferInfo{};
@@ -221,47 +192,8 @@ namespace GGEngine {
 
     void Framebuffer::TransitionImageLayout(VkImageLayout oldLayout, VkImageLayout newLayout)
     {
-        VkPipelineStageFlags sourceStage;
-        VkPipelineStageFlags destinationStage;
-        VkAccessFlags srcAccessMask;
-        VkAccessFlags dstAccessMask;
-
-        if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
-        {
-            srcAccessMask = 0;
-            dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-            sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-            destinationStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-        }
-        else
-        {
-            GG_CORE_ERROR("Unsupported layout transition!");
-            return;
-        }
-
         VulkanContext::Get().ImmediateSubmit([=](VkCommandBuffer cmd) {
-            VkImageMemoryBarrier barrier{};
-            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            barrier.oldLayout = oldLayout;
-            barrier.newLayout = newLayout;
-            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            barrier.image = m_Image;
-            barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            barrier.subresourceRange.baseMipLevel = 0;
-            barrier.subresourceRange.levelCount = 1;
-            barrier.subresourceRange.baseArrayLayer = 0;
-            barrier.subresourceRange.layerCount = 1;
-            barrier.srcAccessMask = srcAccessMask;
-            barrier.dstAccessMask = dstAccessMask;
-
-            vkCmdPipelineBarrier(
-                cmd,
-                sourceStage, destinationStage,
-                0,
-                0, nullptr,
-                0, nullptr,
-                1, &barrier);
+            VulkanUtils::TransitionImageLayout(cmd, m_Image, oldLayout, newLayout);
         });
     }
 

@@ -21,6 +21,7 @@
 
 #include "GGEngine/ImGui/ImGuiLayer.h"
 
-//-----Application entry point-----
-#include "GGEngine/Core/EntryPoint.h"
-//---------------------------------
+// NOTE: EntryPoint.h is NOT included here to avoid "main already defined" linker errors.
+// Client applications must include it manually after GGEngine.h:
+//   #include "GGEngine.h"
+//   #include "GGEngine/Core/EntryPoint.h"

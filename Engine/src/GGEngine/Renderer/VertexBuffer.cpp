@@ -25,7 +25,7 @@ namespace GGEngine {
         BufferSpecification spec;
         spec.size = size;
         spec.usage = BufferUsage::Vertex;
-        spec.cpuVisible = false;
+        spec.cpuVisible = false;  // GPU-only memory for better performance
 
         m_Buffer = CreateScope<Buffer>(spec);
     }

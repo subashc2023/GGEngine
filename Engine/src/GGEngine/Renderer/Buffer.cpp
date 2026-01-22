@@ -99,10 +99,13 @@ namespace GGEngine {
         {
             // Direct write for CPU-visible buffers
             void* mapped = nullptr;
-            if (vmaMapMemory(VulkanContext::Get().GetAllocator(), m_Allocation, &mapped) == VK_SUCCESS)
+            VmaAllocator allocator = VulkanContext::Get().GetAllocator();
+            if (vmaMapMemory(allocator, m_Allocation, &mapped) == VK_SUCCESS)
             {
                 std::memcpy(static_cast<char*>(mapped) + offset, data, size);
-                vmaUnmapMemory(VulkanContext::Get().GetAllocator(), m_Allocation);
+                // Flush to ensure GPU can see the data (required for non-coherent memory)
+                vmaFlushAllocation(allocator, m_Allocation, offset, size);
+                vmaUnmapMemory(allocator, m_Allocation);
             }
             else
             {
@@ -120,18 +123,63 @@ namespace GGEngine {
             Buffer stagingBuffer(stagingSpec);
             stagingBuffer.SetData(data, size);
 
-            CopyBuffer(stagingBuffer.GetVkBuffer(), m_Buffer, size);
+            CopyBuffer(stagingBuffer.GetVkBuffer(), m_Buffer, size, offset);
         }
     }
 
-    void Buffer::CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size)
+    void Buffer::CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size, VkDeviceSize dstOffset)
     {
         VulkanContext::Get().ImmediateSubmit([=](VkCommandBuffer cmd) {
             VkBufferCopy copyRegion{};
             copyRegion.srcOffset = 0;
-            copyRegion.dstOffset = 0;
+            copyRegion.dstOffset = dstOffset;  // Use the provided destination offset
             copyRegion.size = size;
             vkCmdCopyBuffer(cmd, srcBuffer, dstBuffer, 1, &copyRegion);
+
+            // Ensure transfer writes are visible to subsequent reads on this queue.
+            VkAccessFlags dstAccess = 0;
+            VkPipelineStageFlags dstStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+            switch (m_Specification.usage)
+            {
+                case BufferUsage::Vertex:
+                    dstAccess = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
+                    dstStage = VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+                    break;
+                case BufferUsage::Index:
+                    dstAccess = VK_ACCESS_INDEX_READ_BIT;
+                    dstStage = VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+                    break;
+                case BufferUsage::Uniform:
+                    dstAccess = VK_ACCESS_UNIFORM_READ_BIT;
+                    dstStage = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+                    break;
+                case BufferUsage::Staging:
+                    dstAccess = 0;
+                    dstStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+                    break;
+            }
+
+            if (dstAccess != 0)
+            {
+                VkBufferMemoryBarrier barrier{};
+                barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+                barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                barrier.dstAccessMask = dstAccess;
+                barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                barrier.buffer = dstBuffer;
+                barrier.offset = dstOffset;  // Barrier should cover the written region
+                barrier.size = size;
+
+                vkCmdPipelineBarrier(
+                    cmd,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    dstStage,
+                    0,
+                    0, nullptr,
+                    1, &barrier,
+                    0, nullptr);
+            }
         });
     }
 

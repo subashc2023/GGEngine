@@ -32,7 +32,7 @@ namespace GGEngine {
         bool OnWindowResize(WindowResizeEvent& e);
 
         Scope<Window> m_Window;
-        ImGuiLayer* m_ImGuiLayer;
+        ImGuiLayer* m_ImGuiLayer = nullptr;  // Raw ptr - ownership transferred to LayerStack
         bool m_Running = true;
         bool m_Minimized = false;
         LayerStack m_LayerStack;

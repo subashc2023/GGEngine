@@ -20,9 +20,10 @@ namespace GGEngine {
     // Vertex structure for batched quads
     struct QuadVertex
     {
-        float position[3];   // World-space position (CPU-transformed)
-        float texCoord[2];   // UV coordinates
-        float color[4];      // RGBA color
+        float position[3];     // World-space position (CPU-transformed)
+        float texCoord[2];     // UV coordinates
+        float color[4];        // RGBA color
+        float tilingFactor;    // Texture tiling multiplier
     };
 
     // Internal renderer data
@@ -42,6 +43,10 @@ namespace GGEngine {
         QuadVertex* QuadVertexBufferPtr = nullptr;
         uint32_t QuadIndexCount = 0;
 
+        // GPU buffer offset tracking - persists across flushes within a frame
+        // to prevent later batches from overwriting earlier batches' vertex data
+        uint32_t QuadVertexOffset = 0;  // Offset in vertices (not bytes)
+
         // Current texture being batched
         const Texture* CurrentTexture = nullptr;
 
@@ -55,10 +60,13 @@ namespace GGEngine {
 
         // Camera UBO and descriptors (per-frame to avoid updating in-flight descriptors)
         static constexpr uint32_t MaxFramesInFlight = 2;
+        static constexpr uint32_t DescriptorSetsPerFrame = 16;  // Pool size for texture switches per frame
         Scope<UniformBuffer> CameraUniformBuffers[MaxFramesInFlight];
         Scope<DescriptorSetLayout> DescriptorLayout;
-        Scope<DescriptorSet> DescriptorSets[MaxFramesInFlight];
+        // Pool of descriptor sets per frame - each texture switch uses the next one
+        Scope<DescriptorSet> DescriptorSets[MaxFramesInFlight][DescriptorSetsPerFrame];
         uint32_t CurrentFrameIndex = 0;
+        uint32_t CurrentDescriptorIndex = 0;  // Which descriptor set in the pool we're on
 
         // Current render state
         VkCommandBuffer CurrentCommandBuffer = VK_NULL_HANDLE;
@@ -88,193 +96,31 @@ namespace GGEngine {
 
     static Renderer2DData s_Data;
 
-    // Helper to create 1x1 white texture
-    static void CreateWhiteTexture()
-    {
-        // Create a 1x1 white pixel texture
-        uint8_t whitePixel[4] = { 255, 255, 255, 255 };
-
-        auto& ctx = VulkanContext::Get();
-        VkDevice device = ctx.GetDevice();
-        VmaAllocator allocator = ctx.GetAllocator();
-
-        s_Data.WhiteTexture = CreateScope<Texture>();
-
-        // We need to manually create the texture resources similar to Texture::InitFallback()
-        // but for a 1x1 white pixel
-
-        VkDeviceSize imageSize = 4; // 1x1 RGBA
-
-        // Create staging buffer
-        BufferSpecification stagingSpec;
-        stagingSpec.size = imageSize;
-        stagingSpec.usage = BufferUsage::Staging;
-        stagingSpec.cpuVisible = true;
-        stagingSpec.debugName = "WhiteTextureStagingBuffer";
-
-        Buffer stagingBuffer(stagingSpec);
-        stagingBuffer.SetData(whitePixel, imageSize);
-
-        // Create image
-        VkImageCreateInfo imageInfo{};
-        imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-        imageInfo.imageType = VK_IMAGE_TYPE_2D;
-        imageInfo.extent.width = 1;
-        imageInfo.extent.height = 1;
-        imageInfo.extent.depth = 1;
-        imageInfo.mipLevels = 1;
-        imageInfo.arrayLayers = 1;
-        imageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
-        imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-        imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-        imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-        imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
-        VmaAllocationCreateInfo allocCreateInfo{};
-        allocCreateInfo.usage = VMA_MEMORY_USAGE_AUTO;
-        allocCreateInfo.flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
-
-        VkImage image;
-        VmaAllocation imageAllocation;
-        if (vmaCreateImage(allocator, &imageInfo, &allocCreateInfo, &image, &imageAllocation, nullptr) != VK_SUCCESS)
-        {
-            GG_CORE_ERROR("Renderer2D: Failed to create white texture image!");
-            return;
-        }
-
-        VkBuffer stagingVkBuffer = stagingBuffer.GetVkBuffer();
-
-        ctx.ImmediateSubmit([&](VkCommandBuffer cmd) {
-            // Transition to TRANSFER_DST
-            VkImageMemoryBarrier barrier{};
-            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-            barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            barrier.image = image;
-            barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            barrier.subresourceRange.baseMipLevel = 0;
-            barrier.subresourceRange.levelCount = 1;
-            barrier.subresourceRange.baseArrayLayer = 0;
-            barrier.subresourceRange.layerCount = 1;
-            barrier.srcAccessMask = 0;
-            barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-
-            vkCmdPipelineBarrier(cmd,
-                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                VK_PIPELINE_STAGE_TRANSFER_BIT,
-                0, 0, nullptr, 0, nullptr, 1, &barrier);
-
-            // Copy buffer to image
-            VkBufferImageCopy region{};
-            region.bufferOffset = 0;
-            region.bufferRowLength = 0;
-            region.bufferImageHeight = 0;
-            region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            region.imageSubresource.mipLevel = 0;
-            region.imageSubresource.baseArrayLayer = 0;
-            region.imageSubresource.layerCount = 1;
-            region.imageOffset = { 0, 0, 0 };
-            region.imageExtent = { 1, 1, 1 };
-
-            vkCmdCopyBufferToImage(cmd, stagingVkBuffer, image,
-                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-
-            // Transition to SHADER_READ_ONLY
-            barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
-            vkCmdPipelineBarrier(cmd,
-                VK_PIPELINE_STAGE_TRANSFER_BIT,
-                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                0, 0, nullptr, 0, nullptr, 1, &barrier);
-        });
-
-        // Create image view
-        VkImageView imageView;
-        VkImageViewCreateInfo viewInfo{};
-        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        viewInfo.image = image;
-        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
-        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        viewInfo.subresourceRange.baseMipLevel = 0;
-        viewInfo.subresourceRange.levelCount = 1;
-        viewInfo.subresourceRange.baseArrayLayer = 0;
-        viewInfo.subresourceRange.layerCount = 1;
-
-        if (vkCreateImageView(device, &viewInfo, nullptr, &imageView) != VK_SUCCESS)
-        {
-            GG_CORE_ERROR("Renderer2D: Failed to create white texture image view!");
-            vmaDestroyImage(allocator, image, imageAllocation);
-            return;
-        }
-
-        // Create sampler
-        VkSampler sampler;
-        VkSamplerCreateInfo samplerInfo{};
-        samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-        samplerInfo.magFilter = VK_FILTER_NEAREST;
-        samplerInfo.minFilter = VK_FILTER_NEAREST;
-        samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-        samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-        samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-        samplerInfo.anisotropyEnable = VK_FALSE;
-        samplerInfo.maxAnisotropy = 1.0f;
-        samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_WHITE;
-        samplerInfo.unnormalizedCoordinates = VK_FALSE;
-        samplerInfo.compareEnable = VK_FALSE;
-        samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
-        samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-
-        if (vkCreateSampler(device, &samplerInfo, nullptr, &sampler) != VK_SUCCESS)
-        {
-            GG_CORE_ERROR("Renderer2D: Failed to create white texture sampler!");
-            vkDestroyImageView(device, imageView, nullptr);
-            vmaDestroyImage(allocator, image, imageAllocation);
-            return;
-        }
-
-        // Store in a temporary holder - we'll use the fallback texture pattern
-        // Since Texture doesn't expose setters, we'll just use the fallback texture for white
-        // and create our own minimal texture tracking
-
-        // Clean up - we actually can't easily assign to Texture internals
-        // Let's just destroy these and use the fallback texture instead
-        vkDestroySampler(device, sampler, nullptr);
-        vkDestroyImageView(device, imageView, nullptr);
-        vmaDestroyImage(allocator, image, imageAllocation);
-
-        s_Data.WhiteTexture.reset();
-
-        GG_CORE_TRACE("Renderer2D: Using fallback texture as white texture placeholder");
-    }
-
     void Renderer2D::Init()
     {
         GG_CORE_INFO("Renderer2D: Initializing...");
 
-        // Create vertex layout: position (vec3) + texCoord (vec2) + color (vec4)
+        // Create vertex layout: position (vec3) + texCoord (vec2) + color (vec4) + tilingFactor (float)
         s_Data.QuadVertexLayout
             .Push("aPosition", VertexAttributeType::Float3)
             .Push("aTexCoord", VertexAttributeType::Float2)
-            .Push("aColor", VertexAttributeType::Float4);
+            .Push("aColor", VertexAttributeType::Float4)
+            .Push("aTilingFactor", VertexAttributeType::Float);
 
-        // Allocate CPU-side vertex buffer
-        s_Data.QuadVertexBufferBase = new QuadVertex[Renderer2DData::MaxVertices];
+        // Allocate CPU-side vertex buffer (zero-initialized to avoid any uninitialized memory issues)
+        s_Data.QuadVertexBufferBase = new QuadVertex[Renderer2DData::MaxVertices]();
         s_Data.QuadVertexBufferPtr = s_Data.QuadVertexBufferBase;
 
-        // Create GPU vertex buffer (dynamic, no initial data)
+        // Create GPU vertex buffer (dynamic)
         s_Data.QuadVertexBuffer = CreateScope<VertexBuffer>(
             static_cast<uint64_t>(Renderer2DData::MaxVertices) * sizeof(QuadVertex),
             s_Data.QuadVertexLayout
         );
+        // Initialize GPU buffer with zeros to avoid potential first-upload issues
+        s_Data.QuadVertexBuffer->SetData(s_Data.QuadVertexBufferBase,
+            Renderer2DData::MaxVertices * sizeof(QuadVertex));
 
-        // Generate indices for all quads (0,1,2,2,3,0 pattern)
+        // Generate indices for all quads (0,1,2,2,3,0 pattern) - standard indexing
         std::vector<uint32_t> indices(Renderer2DData::MaxIndices);
         uint32_t offset = 0;
         for (uint32_t i = 0; i < Renderer2DData::MaxIndices; i += 6)
@@ -288,6 +134,10 @@ namespace GGEngine {
             offset += 4;
         }
         s_Data.QuadIndexBuffer = IndexBuffer::Create(indices);
+
+        // Create 1x1 white texture for solid color rendering
+        uint32_t whitePixel = 0xFFFFFFFF;  // RGBA: white with full alpha
+        s_Data.WhiteTexture = Texture::Create(1, 1, &whitePixel);
 
         // Get quad2d shader from library (should be pre-loaded)
         s_Data.QuadShader = ShaderLibrary::Get().Get("quad2d");
@@ -304,18 +154,22 @@ namespace GGEngine {
         };
         s_Data.DescriptorLayout = CreateScope<DescriptorSetLayout>(bindings);
 
-        // Create per-frame camera UBOs and descriptor sets
+        // Create per-frame camera UBOs and descriptor set pools
         for (uint32_t i = 0; i < Renderer2DData::MaxFramesInFlight; i++)
         {
             s_Data.CameraUniformBuffers[i] = CreateScope<UniformBuffer>(sizeof(CameraUBO));
-            s_Data.DescriptorSets[i] = CreateScope<DescriptorSet>(*s_Data.DescriptorLayout);
-            s_Data.DescriptorSets[i]->SetUniformBuffer(0, *s_Data.CameraUniformBuffers[i]);
-            // Set initial texture to fallback (acts as white texture)
-            s_Data.DescriptorSets[i]->SetTexture(1, *Texture::GetFallbackPtr());
+            // Create a pool of descriptor sets per frame for texture switches
+            for (uint32_t j = 0; j < Renderer2DData::DescriptorSetsPerFrame; j++)
+            {
+                s_Data.DescriptorSets[i][j] = CreateScope<DescriptorSet>(*s_Data.DescriptorLayout);
+                s_Data.DescriptorSets[i][j]->SetUniformBuffer(0, *s_Data.CameraUniformBuffers[i]);
+                // Set initial texture to white (for solid color rendering)
+                s_Data.DescriptorSets[i][j]->SetTexture(1, *s_Data.WhiteTexture);
+            }
         }
 
-        GG_CORE_INFO("Renderer2D: Initialized (max {} quads per batch, {} frames in flight)",
-                     Renderer2DData::MaxQuads, Renderer2DData::MaxFramesInFlight);
+        GG_CORE_INFO("Renderer2D: Initialized (max {} quads per batch, {} frames in flight, {} descriptor sets per frame)",
+                     Renderer2DData::MaxQuads, Renderer2DData::MaxFramesInFlight, Renderer2DData::DescriptorSetsPerFrame);
     }
 
     void Renderer2D::Shutdown()
@@ -329,13 +183,17 @@ namespace GGEngine {
         s_Data.QuadPipeline.reset();
         for (uint32_t i = 0; i < Renderer2DData::MaxFramesInFlight; i++)
         {
-            s_Data.DescriptorSets[i].reset();
+            for (uint32_t j = 0; j < Renderer2DData::DescriptorSetsPerFrame; j++)
+            {
+                s_Data.DescriptorSets[i][j].reset();
+            }
             s_Data.CameraUniformBuffers[i].reset();
         }
         s_Data.DescriptorLayout.reset();
         s_Data.QuadIndexBuffer.reset();
         s_Data.QuadVertexBuffer.reset();
         s_Data.WhiteTexture.reset();
+        s_Data.QuadShader = AssetHandle<Shader>();  // Release shader reference
 
         GG_CORE_TRACE("Renderer2D: Shutdown complete");
     }
@@ -386,8 +244,11 @@ namespace GGEngine {
         // Reset batch state
         s_Data.QuadIndexCount = 0;
         s_Data.QuadVertexBufferPtr = s_Data.QuadVertexBufferBase;
-        s_Data.CurrentTexture = nullptr;
+        s_Data.QuadVertexOffset = 0;  // Reset GPU buffer offset at start of scene
+        s_Data.CurrentTexture = s_Data.WhiteTexture.get();
+        s_Data.CurrentDescriptorIndex = 0;
         s_Data.SceneStarted = true;
+
     }
 
     void Renderer2D::EndScene()
@@ -402,14 +263,17 @@ namespace GGEngine {
         if (s_Data.QuadIndexCount == 0)
             return;
 
-        // Calculate data size
+        // Calculate data size and vertex count for current batch
         uint32_t dataSize = static_cast<uint32_t>(
             reinterpret_cast<uint8_t*>(s_Data.QuadVertexBufferPtr) -
             reinterpret_cast<uint8_t*>(s_Data.QuadVertexBufferBase)
         );
+        uint32_t vertexCount = dataSize / sizeof(QuadVertex);
 
-        // Upload vertex data to GPU
-        s_Data.QuadVertexBuffer->SetData(s_Data.QuadVertexBufferBase, dataSize);
+        // Upload vertex data to GPU at current offset (not at 0!)
+        // This prevents later batches from overwriting earlier batches' data
+        uint64_t gpuOffset = static_cast<uint64_t>(s_Data.QuadVertexOffset) * sizeof(QuadVertex);
+        s_Data.QuadVertexBuffer->SetData(s_Data.QuadVertexBufferBase, dataSize, gpuOffset);
 
         VkCommandBuffer cmd = s_Data.CurrentCommandBuffer;
 
@@ -420,20 +284,41 @@ namespace GGEngine {
         // Bind pipeline
         s_Data.QuadPipeline->Bind(cmd);
 
+        // Get a fresh descriptor set from the pool to avoid updating one that's already bound
+        if (s_Data.CurrentDescriptorIndex >= Renderer2DData::DescriptorSetsPerFrame)
+        {
+            GG_CORE_WARN("Renderer2D: Exceeded descriptor set pool size ({} texture switches per frame). Reusing first set.",
+                        Renderer2DData::DescriptorSetsPerFrame);
+            s_Data.CurrentDescriptorIndex = 0;
+        }
+
+        auto& descriptorSet = s_Data.DescriptorSets[s_Data.CurrentFrameIndex][s_Data.CurrentDescriptorIndex];
+        s_Data.CurrentDescriptorIndex++;
+
+        // Update texture in this fresh descriptor set BEFORE binding
+        const Texture* texToBind = s_Data.CurrentTexture ? s_Data.CurrentTexture : s_Data.WhiteTexture.get();
+        descriptorSet->SetTexture(1, *texToBind);
+
         // Bind descriptor set (camera UBO + current texture) for current frame
-        s_Data.DescriptorSets[s_Data.CurrentFrameIndex]->Bind(cmd, s_Data.QuadPipeline->GetLayout(), 0);
+        descriptorSet->Bind(cmd, s_Data.QuadPipeline->GetLayout(), 0);
 
         // Bind vertex and index buffers
         s_Data.QuadVertexBuffer->Bind(cmd);
         s_Data.QuadIndexBuffer->Bind(cmd);
 
-        // Draw
-        RenderCommand::DrawIndexed(cmd, s_Data.QuadIndexCount);
+        // Draw with vertex offset to read from correct GPU buffer location
+        // The indices (0,1,2,2,3,0 etc.) are relative, so we need vertexOffset
+        // to tell the GPU where this batch's vertices actually start
+        RenderCommand::DrawIndexed(cmd, s_Data.QuadIndexCount, 1, 0,
+                                   static_cast<int32_t>(s_Data.QuadVertexOffset), 0);
+
+        // Update GPU buffer offset for next batch (persists across flushes)
+        s_Data.QuadVertexOffset += vertexCount;
 
         // Update stats
         s_Data.Stats.DrawCalls++;
 
-        // Reset batch
+        // Reset batch state for next batch (but NOT QuadVertexOffset - that persists!)
         s_Data.QuadIndexCount = 0;
         s_Data.QuadVertexBufferPtr = s_Data.QuadVertexBufferBase;
     }
@@ -441,7 +326,7 @@ namespace GGEngine {
     // Internal helper to add a quad to the batch
     static void DrawQuadInternal(float x, float y, float z, float width, float height,
                                  const Texture* texture, float r, float g, float b, float a,
-                                 float rotation = 0.0f)
+                                 float rotation = 0.0f, float tilingFactor = 1.0f)
     {
         if (!s_Data.SceneStarted)
         {
@@ -449,21 +334,31 @@ namespace GGEngine {
             return;
         }
 
-        // Use fallback texture if null (acts as white)
-        const Texture* tex = texture ? texture : Texture::GetFallbackPtr();
+        // Use white texture for solid colors when no texture provided
+        const Texture* tex = texture ? texture : s_Data.WhiteTexture.get();
 
-        // Flush if texture changed
+        // Flush if texture changed (descriptor set update happens in Flush before binding)
         if (s_Data.CurrentTexture != tex)
         {
             Renderer2D::Flush();
             s_Data.CurrentTexture = tex;
-            s_Data.DescriptorSets[s_Data.CurrentFrameIndex]->SetTexture(1, *tex);
         }
 
         // Flush if batch is full
         if (s_Data.QuadIndexCount >= Renderer2DData::MaxIndices)
         {
             Renderer2D::Flush();
+        }
+
+        // Check if adding this quad would exceed total GPU buffer capacity for the frame
+        // (This accounts for all batches already flushed + current batch + this new quad)
+        uint32_t currentBatchVertices = static_cast<uint32_t>(s_Data.QuadVertexBufferPtr - s_Data.QuadVertexBufferBase);
+        uint32_t totalVerticesAfterThisQuad = s_Data.QuadVertexOffset + currentBatchVertices + 4;
+        if (totalVerticesAfterThisQuad > Renderer2DData::MaxVertices)
+        {
+            GG_CORE_WARN("Renderer2D: Frame vertex limit exceeded ({} > {}). Quad skipped.",
+                        totalVerticesAfterThisQuad, Renderer2DData::MaxVertices);
+            return;
         }
 
         // Compute rotation if needed
@@ -499,6 +394,9 @@ namespace GGEngine {
             s_Data.QuadVertexBufferPtr->color[1] = g;
             s_Data.QuadVertexBufferPtr->color[2] = b;
             s_Data.QuadVertexBufferPtr->color[3] = a;
+
+            // Tiling factor
+            s_Data.QuadVertexBufferPtr->tilingFactor = tilingFactor;
 
             s_Data.QuadVertexBufferPtr++;
         }
@@ -538,33 +436,37 @@ namespace GGEngine {
     // Textured quads
     void Renderer2D::DrawQuad(float x, float y, float width, float height,
                              const Texture* texture,
+                             float tilingFactor,
                              float tintR, float tintG, float tintB, float tintA)
     {
-        DrawQuadInternal(x, y, 0.0f, width, height, texture, tintR, tintG, tintB, tintA);
+        DrawQuadInternal(x, y, 0.0f, width, height, texture, tintR, tintG, tintB, tintA, 0.0f, tilingFactor);
     }
 
     void Renderer2D::DrawQuad(float x, float y, float z, float width, float height,
                              const Texture* texture,
+                             float tilingFactor,
                              float tintR, float tintG, float tintB, float tintA)
     {
-        DrawQuadInternal(x, y, z, width, height, texture, tintR, tintG, tintB, tintA);
+        DrawQuadInternal(x, y, z, width, height, texture, tintR, tintG, tintB, tintA, 0.0f, tilingFactor);
     }
 
     // Rotated textured quads
     void Renderer2D::DrawRotatedQuad(float x, float y, float width, float height,
                                     float rotationRadians,
                                     const Texture* texture,
+                                    float tilingFactor,
                                     float tintR, float tintG, float tintB, float tintA)
     {
-        DrawQuadInternal(x, y, 0.0f, width, height, texture, tintR, tintG, tintB, tintA, rotationRadians);
+        DrawQuadInternal(x, y, 0.0f, width, height, texture, tintR, tintG, tintB, tintA, rotationRadians, tilingFactor);
     }
 
     void Renderer2D::DrawRotatedQuad(float x, float y, float z, float width, float height,
                                     float rotationRadians,
                                     const Texture* texture,
+                                    float tilingFactor,
                                     float tintR, float tintG, float tintB, float tintA)
     {
-        DrawQuadInternal(x, y, z, width, height, texture, tintR, tintG, tintB, tintA, rotationRadians);
+        DrawQuadInternal(x, y, z, width, height, texture, tintR, tintG, tintB, tintA, rotationRadians, tilingFactor);
     }
 
     // Statistics

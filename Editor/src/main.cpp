@@ -1,4 +1,5 @@
 #include "GGEngine.h"
+#include "GGEngine/Core/EntryPoint.h"
 #include "EditorLayer.h"
 
 class Editor : public GGEngine::Application {

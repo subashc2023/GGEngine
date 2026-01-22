@@ -44,11 +44,13 @@ namespace GGEngine {
         // Textured quads
         static void DrawQuad(float x, float y, float width, float height,
                             const Texture* texture,
+                            float tilingFactor = 1.0f,
                             float tintR = 1.0f, float tintG = 1.0f,
                             float tintB = 1.0f, float tintA = 1.0f);
 
         static void DrawQuad(float x, float y, float z, float width, float height,
                             const Texture* texture,
+                            float tilingFactor = 1.0f,
                             float tintR = 1.0f, float tintG = 1.0f,
                             float tintB = 1.0f, float tintA = 1.0f);
 
@@ -56,12 +58,14 @@ namespace GGEngine {
         static void DrawRotatedQuad(float x, float y, float width, float height,
                                    float rotationRadians,
                                    const Texture* texture,
+                                   float tilingFactor = 1.0f,
                                    float tintR = 1.0f, float tintG = 1.0f,
                                    float tintB = 1.0f, float tintA = 1.0f);
 
         static void DrawRotatedQuad(float x, float y, float z, float width, float height,
                                    float rotationRadians,
                                    const Texture* texture,
+                                   float tilingFactor = 1.0f,
                                    float tintR = 1.0f, float tintG = 1.0f,
                                    float tintB = 1.0f, float tintA = 1.0f);
 

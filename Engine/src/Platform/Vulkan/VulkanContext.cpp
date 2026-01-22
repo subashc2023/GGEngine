@@ -4,7 +4,6 @@
 #include <GLFW/glfw3.h>
 #include <set>
 #include <algorithm>
-#include <fstream>
 
 #ifdef _WIN32
 #include <dwmapi.h>
@@ -96,6 +95,7 @@ namespace GGEngine {
         vkDestroyCommandPool(m_Device, m_CommandPool, nullptr);
         DestroyAllocator();
         vkDestroyDevice(m_Device, nullptr);
+        m_Device = VK_NULL_HANDLE;  // Mark as destroyed so late cleanup code can detect this
 
         if (m_EnableValidationLayers)
             DestroyDebugUtilsMessengerEXT(m_Instance, m_DebugMessenger, nullptr);
@@ -115,11 +115,13 @@ namespace GGEngine {
 
         if (result == VK_ERROR_OUT_OF_DATE_KHR)
         {
+            m_FrameStarted = false;
             RecreateSwapchain();
             return;
         }
         else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
         {
+            m_FrameStarted = false;
             GG_CORE_ERROR("Failed to acquire swap chain image!");
             return;
         }
@@ -950,43 +952,6 @@ namespace GGEngine {
 
             return actualExtent;
         }
-    }
-
-    std::vector<char> VulkanContext::ReadFile(const std::string& filename)
-    {
-        std::ifstream file(filename, std::ios::ate | std::ios::binary);
-
-        if (!file.is_open())
-        {
-            GG_CORE_ERROR("Failed to open file: {0}", filename);
-            return {};
-        }
-
-        size_t fileSize = static_cast<size_t>(file.tellg());
-        std::vector<char> buffer(fileSize);
-
-        file.seekg(0);
-        file.read(buffer.data(), fileSize);
-        file.close();
-
-        return buffer;
-    }
-
-    VkShaderModule VulkanContext::CreateShaderModule(const std::vector<char>& code)
-    {
-        VkShaderModuleCreateInfo createInfo{};
-        createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-        createInfo.codeSize = code.size();
-        createInfo.pCode = reinterpret_cast<const uint32_t*>(code.data());
-
-        VkShaderModule shaderModule;
-        if (vkCreateShaderModule(m_Device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS)
-        {
-            GG_CORE_ERROR("Failed to create shader module!");
-            return VK_NULL_HANDLE;
-        }
-
-        return shaderModule;
     }
 
     void VulkanContext::ImmediateSubmit(const std::function<void(VkCommandBuffer)>& func)

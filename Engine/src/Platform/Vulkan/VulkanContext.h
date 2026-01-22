@@ -68,9 +68,6 @@ namespace GGEngine {
         void DestroyAllocator();
         void CreateDescriptorPool();
 
-        VkShaderModule CreateShaderModule(const std::vector<char>& code);
-        static std::vector<char> ReadFile(const std::string& filename);
-
         void CleanupSwapchain();
         void RecreateSwapchain();
 

@@ -1,4 +1,5 @@
 #include "GGEngine.h"
+#include "GGEngine/Core/EntryPoint.h"
 #include "TriangleLayer.h"
 
 class Sandbox : public GGEngine::Application

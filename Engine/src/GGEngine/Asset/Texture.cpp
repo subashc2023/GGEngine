@@ -2,6 +2,7 @@
 #include "Texture.h"
 #include "AssetManager.h"
 #include "Platform/Vulkan/VulkanContext.h"
+#include "Platform/Vulkan/VulkanUtils.h"
 #include "GGEngine/Renderer/Buffer.h"
 
 #include <stb_image.h>
@@ -83,6 +84,24 @@ namespace GGEngine {
     AssetHandle<Texture> Texture::Create(const std::string& path)
     {
         return AssetManager::Get().Load<Texture>(path);
+    }
+
+    Scope<Texture> Texture::Create(uint32_t width, uint32_t height, const void* data)
+    {
+        GG_CORE_ASSERT(data != nullptr, "Texture::Create - data cannot be null");
+        GG_CORE_ASSERT(width > 0 && height > 0, "Texture::Create - invalid dimensions");
+
+        auto texture = CreateScope<Texture>();
+        texture->m_Width = width;
+        texture->m_Height = height;
+        texture->m_Channels = 4;  // Always RGBA
+        texture->m_Path = "__generated__";
+        texture->m_Loaded = true;
+
+        texture->CreateVulkanResources(static_cast<const uint8_t*>(data));
+
+        GG_CORE_TRACE("Created {}x{} texture from raw pixel data", width, height);
+        return texture;
     }
 
     Texture::~Texture()
@@ -171,28 +190,8 @@ namespace GGEngine {
 
         ctx.ImmediateSubmit([&](VkCommandBuffer cmd) {
             // UNDEFINED -> TRANSFER_DST_OPTIMAL
-            VkImageMemoryBarrier barrier{};
-            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-            barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            barrier.image = m_Image;
-            barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            barrier.subresourceRange.baseMipLevel = 0;
-            barrier.subresourceRange.levelCount = 1;
-            barrier.subresourceRange.baseArrayLayer = 0;
-            barrier.subresourceRange.layerCount = 1;
-            barrier.srcAccessMask = 0;
-            barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-
-            vkCmdPipelineBarrier(cmd,
-                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                VK_PIPELINE_STAGE_TRANSFER_BIT,
-                0,
-                0, nullptr,
-                0, nullptr,
-                1, &barrier);
+            VulkanUtils::TransitionImageLayout(cmd, m_Image,
+                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
             // Copy buffer to image
             VkBufferImageCopy region{};
@@ -210,64 +209,21 @@ namespace GGEngine {
                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
             // TRANSFER_DST_OPTIMAL -> SHADER_READ_ONLY_OPTIMAL
-            barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
-            vkCmdPipelineBarrier(cmd,
-                VK_PIPELINE_STAGE_TRANSFER_BIT,
-                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                0,
-                0, nullptr,
-                0, nullptr,
-                1, &barrier);
+            VulkanUtils::TransitionImageLayout(cmd, m_Image,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         });
 
         // Staging buffer is automatically destroyed when it goes out of scope
 
         // 4. Create image view
-        VkImageViewCreateInfo viewInfo{};
-        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        viewInfo.image = m_Image;
-        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
-        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        viewInfo.subresourceRange.baseMipLevel = 0;
-        viewInfo.subresourceRange.levelCount = 1;
-        viewInfo.subresourceRange.baseArrayLayer = 0;
-        viewInfo.subresourceRange.layerCount = 1;
-
-        if (vkCreateImageView(device, &viewInfo, nullptr, &m_ImageView) != VK_SUCCESS)
-        {
-            GG_CORE_ERROR("Failed to create texture image view!");
+        m_ImageView = VulkanUtils::CreateImageView2D(device, m_Image, VK_FORMAT_R8G8B8A8_UNORM);
+        if (m_ImageView == VK_NULL_HANDLE)
             return;
-        }
 
-        // 5. Create sampler
-        VkSamplerCreateInfo samplerInfo{};
-        samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-        samplerInfo.magFilter = VK_FILTER_NEAREST;
-        samplerInfo.minFilter = VK_FILTER_NEAREST;
-        samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-        samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-        samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-        samplerInfo.anisotropyEnable = VK_FALSE;
-        samplerInfo.maxAnisotropy = 1.0f;
-        samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
-        samplerInfo.unnormalizedCoordinates = VK_FALSE;
-        samplerInfo.compareEnable = VK_FALSE;
-        samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
-        samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-        samplerInfo.mipLodBias = 0.0f;
-        samplerInfo.minLod = 0.0f;
-        samplerInfo.maxLod = 0.0f;
-
-        if (vkCreateSampler(device, &samplerInfo, nullptr, &m_Sampler) != VK_SUCCESS)
-        {
-            GG_CORE_ERROR("Failed to create texture sampler!");
+        // 5. Create sampler (nearest filtering for pixel-art style)
+        m_Sampler = VulkanUtils::CreateSampler(device, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_REPEAT);
+        if (m_Sampler == VK_NULL_HANDLE)
             return;
-        }
     }
 
     void Texture::Unload()

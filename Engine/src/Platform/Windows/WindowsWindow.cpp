@@ -49,7 +49,7 @@ namespace GGEngine {
         // Disable OpenGL context creation for Vulkan
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 
-        m_Window = glfwCreateWindow((int)props.Width, (int)props.Height, m_Data.Title.c_str(), nullptr, nullptr);
+        m_Window = glfwCreateWindow(static_cast<int>(props.Width), static_cast<int>(props.Height), m_Data.Title.c_str(), nullptr, nullptr);
         GG_CORE_ASSERT(m_Window, "Failed to create GLFW window");
         glfwSetWindowUserPointer(m_Window, &m_Data);
 
@@ -58,23 +58,23 @@ namespace GGEngine {
 
         glfwSetWindowSizeCallback(m_Window, [](GLFWwindow* window, int width, int height)
         {
-            WindowData& data = *(WindowData*)glfwGetWindowUserPointer(window);
+            WindowData& data = *static_cast<WindowData*>(glfwGetWindowUserPointer(window));
             data.Width = width;
             data.Height = height;
             WindowResizeEvent event(width, height);
             data.EventCallback(event);
         });
-        
+
         glfwSetWindowCloseCallback(m_Window, [](GLFWwindow* window)
         {
-            WindowData& data = *(WindowData*)glfwGetWindowUserPointer(window);
+            WindowData& data = *static_cast<WindowData*>(glfwGetWindowUserPointer(window));
             WindowCloseEvent event;
             data.EventCallback(event);
         });
 
         glfwSetKeyCallback(m_Window, [](GLFWwindow* window, int key, int scancode, int action, int mods)
         {
-            WindowData& data = *(WindowData*)glfwGetWindowUserPointer(window);
+            WindowData& data = *static_cast<WindowData*>(glfwGetWindowUserPointer(window));
             switch (action)
             {
                 case GLFW_PRESS:
@@ -102,14 +102,14 @@ namespace GGEngine {
 
         glfwSetCharCallback(m_Window, [](GLFWwindow* window, unsigned int keycode)
         {
-            WindowData& data = *(WindowData*)glfwGetWindowUserPointer(window);
+            WindowData& data = *static_cast<WindowData*>(glfwGetWindowUserPointer(window));
             KeyTypedEvent event(keycode);
             data.EventCallback(event);
         });
 
         glfwSetMouseButtonCallback(m_Window, [](GLFWwindow* window, int button, int action, int mods)
         {
-            WindowData& data = *(WindowData*)glfwGetWindowUserPointer(window);
+            WindowData& data = *static_cast<WindowData*>(glfwGetWindowUserPointer(window));
             switch (action)
             {
                 case GLFW_PRESS:
@@ -131,14 +131,14 @@ namespace GGEngine {
 
         glfwSetScrollCallback(m_Window, [](GLFWwindow* window, double xoffset, double yoffset)
         {
-            WindowData& data = *(WindowData*)glfwGetWindowUserPointer(window);
+            WindowData& data = *static_cast<WindowData*>(glfwGetWindowUserPointer(window));
             MouseScrolledEvent event(xoffset, yoffset);
             data.EventCallback(event);
         });
 
         glfwSetCursorPosCallback(m_Window, [](GLFWwindow* window, double xpos, double ypos)
         {
-            WindowData& data = *(WindowData*)glfwGetWindowUserPointer(window);
+            WindowData& data = *static_cast<WindowData*>(glfwGetWindowUserPointer(window));
             MouseMovedEvent event(xpos, ypos);
             data.EventCallback(event);
         });

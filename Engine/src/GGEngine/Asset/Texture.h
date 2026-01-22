@@ -36,6 +36,10 @@ namespace GGEngine {
         // Factory method - create texture via asset system
         static AssetHandle<Texture> Create(const std::string& path);
 
+        // Factory method - create texture from raw pixel data (not managed by AssetManager)
+        // Useful for programmatic textures like 1x1 white pixel
+        static Scope<Texture> Create(uint32_t width, uint32_t height, const void* data);
+
         // Fallback texture (magenta/black checkerboard for missing textures)
         static void InitFallback();
         static void ShutdownFallback();

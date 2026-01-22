@@ -44,7 +44,7 @@ namespace GGEngine {
     protected:
         void Create();
         void Destroy();
-        void CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size);
+        void CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size, VkDeviceSize dstOffset = 0);
 
         BufferSpecification m_Specification;
         VkBuffer m_Buffer = VK_NULL_HANDLE;
