@@ -93,6 +93,7 @@ namespace GGEngine {
         ComponentStorage<TagComponent> m_Tags;
         ComponentStorage<TransformComponent> m_Transforms;
         ComponentStorage<SpriteRendererComponent> m_Sprites;
+        ComponentStorage<TilemapComponent> m_Tilemaps;
     };
 
     // Template implementations
@@ -157,5 +158,11 @@ namespace GGEngine {
 
     template<>
     inline const ComponentStorage<SpriteRendererComponent>& Scene::GetStorage<SpriteRendererComponent>() const { return m_Sprites; }
+
+    template<>
+    inline ComponentStorage<TilemapComponent>& Scene::GetStorage<TilemapComponent>() { return m_Tilemaps; }
+
+    template<>
+    inline const ComponentStorage<TilemapComponent>& Scene::GetStorage<TilemapComponent>() const { return m_Tilemaps; }
 
 }

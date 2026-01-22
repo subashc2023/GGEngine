@@ -5,7 +5,10 @@
 #include "GGEngine/Events/Event.h"
 #include "GGEngine/Renderer/OrthographicCameraController.h"
 #include "GGEngine/Renderer/Camera.h"
+#include "GGEngine/Renderer/TextureAtlas.h"
+#include "GGEngine/Renderer/SubTexture2D.h"
 #include "GGEngine/Asset/Texture.h"
+#include "GGEngine/ParticleSystem/ParticleSystem.h"
 
 class TriangleLayer : public GGEngine::Layer
 {
@@ -33,4 +36,12 @@ private:
 
     // Texture (optional demo)
     GGEngine::AssetHandle<GGEngine::Texture> m_Texture;
+
+    // Spritesheet / Texture Atlas demo
+    GGEngine::AssetHandle<GGEngine::Texture> m_UISpritesheet;
+    GGEngine::Scope<GGEngine::TextureAtlas> m_UIAtlas;
+
+    // Particle System
+    GGEngine::ParticleSystem m_ParticleSystem;
+    GGEngine::ParticleProps m_ParticleProps;
 };

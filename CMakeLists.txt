@@ -187,8 +187,16 @@ set(ENGINE_SOURCES
     Engine/src/GGEngine/Renderer/MaterialLibrary.cpp
     Engine/src/GGEngine/Renderer/Renderer2D.h
     Engine/src/GGEngine/Renderer/Renderer2D.cpp
+    Engine/src/GGEngine/Renderer/SubTexture2D.h
+    Engine/src/GGEngine/Renderer/SubTexture2D.cpp
+    Engine/src/GGEngine/Renderer/TextureAtlas.h
+    Engine/src/GGEngine/Renderer/TextureAtlas.cpp
     Engine/src/GGEngine/Renderer/BindlessTextureManager.h
     Engine/src/GGEngine/Renderer/BindlessTextureManager.cpp
+    Engine/src/GGEngine/ParticleSystem/Random.h
+    Engine/src/GGEngine/ParticleSystem/Random.cpp
+    Engine/src/GGEngine/ParticleSystem/ParticleSystem.h
+    Engine/src/GGEngine/ParticleSystem/ParticleSystem.cpp
     Engine/src/GGEngine/RHI/RHITypes.h
     Engine/src/GGEngine/RHI/RHIEnums.h
     Engine/src/GGEngine/RHI/RHIDevice.h

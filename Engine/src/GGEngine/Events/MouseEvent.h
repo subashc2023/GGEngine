@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Event.h"
+#include "GGEngine/Core/MouseButtonCodes.h"
 
 #include <sstream>
 
@@ -33,7 +34,7 @@ namespace GGEngine {
     public:
         MouseScrolledEvent(float xOffset, float yOffset)
         : m_XOffset(xOffset), m_YOffset(yOffset) {}
-        
+
         inline float GetXOffset() const { return m_XOffset; }
         inline float GetYOffset() const { return m_YOffset; }
 
@@ -49,30 +50,30 @@ namespace GGEngine {
     private:
         float m_XOffset, m_YOffset;
     };
-    
-    
+
+
     class GG_API MouseButtonEvent : public Event
     {
     public:
-        inline int GetMouseButton() const { return m_Button; }
+        inline MouseCode GetMouseButton() const { return m_Button; }
 
         EVENT_CLASS_CATEGORY(EventCategoryMouse | EventCategoryInput)
     protected:
-        MouseButtonEvent(int button)
+        MouseButtonEvent(MouseCode button)
         : m_Button(button) {}
-        int m_Button;
+        MouseCode m_Button;
     };
 
     class GG_API MouseButtonPressedEvent : public MouseButtonEvent
     {
     public:
-        MouseButtonPressedEvent(int button)
+        MouseButtonPressedEvent(MouseCode button)
         : MouseButtonEvent(button) {}
-        
+
         std::string ToString() const override
         {
             std::stringstream ss;
-            ss << "MouseButtonPressedEvent: " << m_Button;
+            ss << "MouseButtonPressedEvent: " << static_cast<int>(m_Button);
             return ss.str();
         }
 
@@ -82,13 +83,13 @@ namespace GGEngine {
     class GG_API MouseButtonReleasedEvent : public MouseButtonEvent
     {
     public:
-        MouseButtonReleasedEvent(int button)
+        MouseButtonReleasedEvent(MouseCode button)
         : MouseButtonEvent(button) {}
-        
+
         std::string ToString() const override
         {
             std::stringstream ss;
-            ss << "MouseButtonReleasedEvent: " << m_Button;
+            ss << "MouseButtonReleasedEvent: " << static_cast<int>(m_Button);
             return ss.str();
         }
 

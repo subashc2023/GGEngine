@@ -25,9 +25,15 @@
 
 #include "GGEngine/Utils/FileDialogs.h"
 
+#include "GGEngine/ParticleSystem/Random.h"
+#include "GGEngine/ParticleSystem/ParticleSystem.h"
+
 #include "GGEngine/Renderer/Pipeline.h"
 #include "GGEngine/Renderer/Material.h"
 #include "GGEngine/Renderer/MaterialLibrary.h"
+#include "GGEngine/Renderer/Renderer2D.h"
+#include "GGEngine/Renderer/SubTexture2D.h"
+#include "GGEngine/Renderer/TextureAtlas.h"
 
 #include "GGEngine/ImGui/ImGuiLayer.h"
 

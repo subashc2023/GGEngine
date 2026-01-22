@@ -1,17 +1,26 @@
 #pragma once
 
-// From glfw3.h - using GLFW mouse button codes as the standard
+#include <cstdint>
 
-#define GG_MOUSE_BUTTON_1         0
-#define GG_MOUSE_BUTTON_2         1
-#define GG_MOUSE_BUTTON_3         2
-#define GG_MOUSE_BUTTON_4         3
-#define GG_MOUSE_BUTTON_5         4
-#define GG_MOUSE_BUTTON_6         5
-#define GG_MOUSE_BUTTON_7         6
-#define GG_MOUSE_BUTTON_8         7
+namespace GGEngine {
 
-#define GG_MOUSE_BUTTON_LAST      GG_MOUSE_BUTTON_8
-#define GG_MOUSE_BUTTON_LEFT      GG_MOUSE_BUTTON_1
-#define GG_MOUSE_BUTTON_RIGHT     GG_MOUSE_BUTTON_2
-#define GG_MOUSE_BUTTON_MIDDLE    GG_MOUSE_BUTTON_3
+    // From glfw3.h - using GLFW mouse button codes as the standard
+    enum class MouseCode : uint8_t
+    {
+        Button0 = 0,
+        Button1 = 1,
+        Button2 = 2,
+        Button3 = 3,
+        Button4 = 4,
+        Button5 = 5,
+        Button6 = 6,
+        Button7 = 7,
+
+        Left = Button0,
+        Right = Button1,
+        Middle = Button2
+    };
+
+    inline uint8_t ToInt(MouseCode button) { return static_cast<uint8_t>(button); }
+
+}

@@ -8,6 +8,14 @@
 
 namespace GGEngine {
 
+    struct GG_API OrthographicCameraBounds
+    {
+        float Left, Right, Bottom, Top;
+
+        float GetWidth() const { return Right - Left; }
+        float GetHeight() const { return Top - Bottom; }
+    };
+
     class GG_API OrthographicCameraController
     {
     public:
@@ -36,6 +44,8 @@ namespace GGEngine {
         bool IsRotationEnabled() const { return m_RotationEnabled; }
         void SetRotationEnabled(bool enabled) { m_RotationEnabled = enabled; }
 
+        const OrthographicCameraBounds& GetBounds() const { return m_Bounds; }
+
     private:
         bool OnMouseScrolled(MouseScrolledEvent& e);
 
@@ -44,6 +54,7 @@ namespace GGEngine {
 
         float m_AspectRatio;
         float m_ZoomLevel;
+        OrthographicCameraBounds m_Bounds;
         Camera m_Camera;
 
         float m_MoveSpeed = 2.0f;

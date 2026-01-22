@@ -1,5 +1,6 @@
 #include "ggpch.h"
 #include "Renderer2D.h"
+#include "SubTexture2D.h"
 #include "GGEngine/Core/Profiler.h"
 #include "VertexBuffer.h"
 #include "IndexBuffer.h"
@@ -34,9 +35,13 @@ namespace GGEngine {
     struct Renderer2DData
     {
         static constexpr uint32_t MaxFramesInFlight = 2;
-        static constexpr uint32_t MaxQuads = 50000;
-        static constexpr uint32_t MaxVertices = MaxQuads * 4;
-        static constexpr uint32_t MaxIndices = MaxQuads * 6;
+        static constexpr uint32_t InitialMaxQuads = 100000;   // Start with 100k
+        static constexpr uint32_t AbsoluteMaxQuads = 1000000; // Cap at 1M (~176MB per buffer)
+
+        // Dynamic capacity (can grow at runtime)
+        uint32_t MaxQuads = InitialMaxQuads;
+        uint32_t MaxVertices = InitialMaxQuads * 4;
+        uint32_t MaxIndices = InitialMaxQuads * 6;
 
         // Vertex data (per-frame vertex buffers to avoid GPU/CPU conflicts)
         Scope<VertexBuffer> QuadVertexBuffers[MaxFramesInFlight];
@@ -77,6 +82,13 @@ namespace GGEngine {
         // Statistics
         Renderer2D::Statistics Stats;
 
+        // Flag to request buffer growth on next frame
+        bool NeedsBufferGrowth = false;
+
+        // Track which frame we last reset the vertex offset on
+        // This allows multiple BeginScene/EndScene pairs per frame without overwriting
+        uint32_t LastResetFrameIndex = UINT32_MAX;
+
         // Unit quad vertex positions (centered at origin)
         static constexpr std::array<float[3], 4> QuadPositions = {{
             { -0.5f, -0.5f, 0.0f },  // Bottom-left
@@ -96,6 +108,65 @@ namespace GGEngine {
 
     static Renderer2DData s_Data;
 
+    // Internal function to grow buffers when capacity is exceeded
+    static void GrowBuffers()
+    {
+        // Calculate new capacity (2x current, capped at absolute max)
+        uint32_t newMaxQuads = std::min(s_Data.MaxQuads * 2, Renderer2DData::AbsoluteMaxQuads);
+        if (newMaxQuads == s_Data.MaxQuads)
+        {
+            GG_CORE_WARN("Renderer2D: Cannot grow buffers - already at maximum capacity ({} quads)", s_Data.MaxQuads);
+            return;
+        }
+
+        uint32_t newMaxVertices = newMaxQuads * 4;
+        uint32_t newMaxIndices = newMaxQuads * 6;
+
+        GG_CORE_INFO("Renderer2D: Growing buffers {} -> {} quads", s_Data.MaxQuads, newMaxQuads);
+
+        // Wait for GPU to finish using current buffers
+        RHIDevice::Get().WaitIdle();
+
+        // Reallocate CPU staging buffer
+        delete[] s_Data.QuadVertexBufferBase;
+        s_Data.QuadVertexBufferBase = new QuadVertex[newMaxVertices]();
+        s_Data.QuadVertexBufferPtr = s_Data.QuadVertexBufferBase;
+
+        // Reallocate GPU vertex buffers
+        for (uint32_t i = 0; i < Renderer2DData::MaxFramesInFlight; i++)
+        {
+            s_Data.QuadVertexBuffers[i].reset();
+            s_Data.QuadVertexBuffers[i] = CreateScope<VertexBuffer>(
+                static_cast<uint64_t>(newMaxVertices) * sizeof(QuadVertex),
+                s_Data.QuadVertexLayout
+            );
+        }
+
+        // Reallocate index buffer
+        std::vector<uint32_t> indices(newMaxIndices);
+        uint32_t offset = 0;
+        for (uint32_t i = 0; i < newMaxIndices; i += 6)
+        {
+            indices[i + 0] = offset + 0;
+            indices[i + 1] = offset + 1;
+            indices[i + 2] = offset + 2;
+            indices[i + 3] = offset + 2;
+            indices[i + 4] = offset + 3;
+            indices[i + 5] = offset + 0;
+            offset += 4;
+        }
+        s_Data.QuadIndexBuffer.reset();
+        s_Data.QuadIndexBuffer = IndexBuffer::Create(indices);
+
+        // Update capacity
+        s_Data.MaxQuads = newMaxQuads;
+        s_Data.MaxVertices = newMaxVertices;
+        s_Data.MaxIndices = newMaxIndices;
+
+        GG_CORE_INFO("Renderer2D: Buffer growth complete (now {} quads, ~{} MB per vertex buffer)",
+                     s_Data.MaxQuads, (s_Data.MaxVertices * sizeof(QuadVertex)) / (1024 * 1024));
+    }
+
     void Renderer2D::Init()
     {
         GG_PROFILE_FUNCTION();
@@ -110,25 +181,25 @@ namespace GGEngine {
             .Push("aTexIndex", VertexAttributeType::UInt);  // Bindless index (uint32_t)
 
         // Allocate CPU-side vertex buffer (zero-initialized to avoid any uninitialized memory issues)
-        s_Data.QuadVertexBufferBase = new QuadVertex[Renderer2DData::MaxVertices]();
+        s_Data.QuadVertexBufferBase = new QuadVertex[s_Data.MaxVertices]();
         s_Data.QuadVertexBufferPtr = s_Data.QuadVertexBufferBase;
 
         // Create GPU vertex buffers (one per frame in flight to avoid GPU/CPU conflicts)
         for (uint32_t i = 0; i < Renderer2DData::MaxFramesInFlight; i++)
         {
             s_Data.QuadVertexBuffers[i] = CreateScope<VertexBuffer>(
-                static_cast<uint64_t>(Renderer2DData::MaxVertices) * sizeof(QuadVertex),
+                static_cast<uint64_t>(s_Data.MaxVertices) * sizeof(QuadVertex),
                 s_Data.QuadVertexLayout
             );
             // Initialize GPU buffer with zeros to avoid potential first-upload issues
             s_Data.QuadVertexBuffers[i]->SetData(s_Data.QuadVertexBufferBase,
-                Renderer2DData::MaxVertices * sizeof(QuadVertex));
+                s_Data.MaxVertices * sizeof(QuadVertex));
         }
 
         // Generate indices for all quads (0,1,2,2,3,0 pattern) - standard indexing
-        std::vector<uint32_t> indices(Renderer2DData::MaxIndices);
+        std::vector<uint32_t> indices(s_Data.MaxIndices);
         uint32_t offset = 0;
-        for (uint32_t i = 0; i < Renderer2DData::MaxIndices; i += 6)
+        for (uint32_t i = 0; i < s_Data.MaxIndices; i += 6)
         {
             indices[i + 0] = offset + 0;
             indices[i + 1] = offset + 1;
@@ -169,8 +240,9 @@ namespace GGEngine {
             s_Data.CameraDescriptorSets[i]->SetUniformBuffer(0, *s_Data.CameraUniformBuffers[i]);
         }
 
-        GG_CORE_INFO("Renderer2D: Initialized (bindless mode, max {} quads, {} max textures, {} frames in flight)",
-                     Renderer2DData::MaxQuads, BindlessTextureManager::Get().GetMaxTextures(),
+        GG_CORE_INFO("Renderer2D: Initialized (bindless mode, initial {} quads (max {}), {} max textures, {} frames in flight)",
+                     s_Data.MaxQuads, Renderer2DData::AbsoluteMaxQuads,
+                     BindlessTextureManager::Get().GetMaxTextures(),
                      Renderer2DData::MaxFramesInFlight);
     }
 
@@ -216,6 +288,14 @@ namespace GGEngine {
                                 RHICommandBufferHandle cmd, uint32_t viewportWidth, uint32_t viewportHeight)
     {
         GG_PROFILE_FUNCTION();
+
+        // Check if we need to grow buffers from previous frame
+        if (s_Data.NeedsBufferGrowth && s_Data.MaxQuads < Renderer2DData::AbsoluteMaxQuads)
+        {
+            GrowBuffers();
+            s_Data.NeedsBufferGrowth = false;
+        }
+
         // Get current frame index for per-frame resources
         s_Data.CurrentFrameIndex = RHIDevice::Get().GetCurrentFrameIndex();
 
@@ -254,7 +334,14 @@ namespace GGEngine {
         // Reset batch state
         s_Data.QuadIndexCount = 0;
         s_Data.QuadVertexBufferPtr = s_Data.QuadVertexBufferBase;
-        s_Data.QuadVertexOffset = 0;  // Reset GPU buffer offset at start of scene
+
+        // Only reset GPU buffer offset when moving to a new frame
+        // This allows multiple BeginScene/EndScene pairs per frame without overwriting
+        if (s_Data.CurrentFrameIndex != s_Data.LastResetFrameIndex)
+        {
+            s_Data.QuadVertexOffset = 0;
+            s_Data.LastResetFrameIndex = s_Data.CurrentFrameIndex;
+        }
 
         s_Data.SceneStarted = true;
     }
@@ -323,9 +410,11 @@ namespace GGEngine {
     }
 
     // Internal helper to add a quad to the batch (bindless rendering)
+    // texCoords: optional custom UV coordinates (4 vertices * 2 floats), nullptr = use default full-texture UVs
     static void DrawQuadInternal(float x, float y, float z, float width, float height,
                                  const Texture* texture, float r, float g, float b, float a,
-                                 float rotation = 0.0f, float tilingFactor = 1.0f)
+                                 float rotation = 0.0f, float tilingFactor = 1.0f,
+                                 const float* texCoords = nullptr)
     {
         if (!s_Data.SceneStarted)
         {
@@ -346,7 +435,7 @@ namespace GGEngine {
         }
 
         // Flush if batch is full (index count only - no texture slot limit!)
-        if (s_Data.QuadIndexCount >= Renderer2DData::MaxIndices)
+        if (s_Data.QuadIndexCount >= s_Data.MaxIndices)
         {
             Renderer2D::Flush();
         }
@@ -355,10 +444,15 @@ namespace GGEngine {
         // (This accounts for all batches already flushed + current batch + this new quad)
         uint32_t currentBatchVertices = static_cast<uint32_t>(s_Data.QuadVertexBufferPtr - s_Data.QuadVertexBufferBase);
         uint32_t totalVerticesAfterThisQuad = s_Data.QuadVertexOffset + currentBatchVertices + 4;
-        if (totalVerticesAfterThisQuad > Renderer2DData::MaxVertices)
+        if (totalVerticesAfterThisQuad > s_Data.MaxVertices)
         {
-            GG_CORE_WARN("Renderer2D: Frame vertex limit exceeded ({} > {}). Quad skipped.",
-                        totalVerticesAfterThisQuad, Renderer2DData::MaxVertices);
+            // Request buffer growth for next frame
+            if (!s_Data.NeedsBufferGrowth && s_Data.MaxQuads < Renderer2DData::AbsoluteMaxQuads)
+            {
+                s_Data.NeedsBufferGrowth = true;
+                GG_CORE_INFO("Renderer2D: Buffer capacity exceeded - will grow on next frame");
+            }
+            // Skip this quad for now (will work next frame with larger buffers)
             return;
         }
 
@@ -386,9 +480,17 @@ namespace GGEngine {
             s_Data.QuadVertexBufferPtr->position[1] = y + rotatedY;
             s_Data.QuadVertexBufferPtr->position[2] = z;
 
-            // Texture coordinates
-            s_Data.QuadVertexBufferPtr->texCoord[0] = Renderer2DData::QuadTexCoords[i][0];
-            s_Data.QuadVertexBufferPtr->texCoord[1] = Renderer2DData::QuadTexCoords[i][1];
+            // Texture coordinates (use custom if provided, otherwise default full-texture UVs)
+            if (texCoords)
+            {
+                s_Data.QuadVertexBufferPtr->texCoord[0] = texCoords[i * 2 + 0];
+                s_Data.QuadVertexBufferPtr->texCoord[1] = texCoords[i * 2 + 1];
+            }
+            else
+            {
+                s_Data.QuadVertexBufferPtr->texCoord[0] = Renderer2DData::QuadTexCoords[i][0];
+                s_Data.QuadVertexBufferPtr->texCoord[1] = Renderer2DData::QuadTexCoords[i][1];
+            }
 
             // Color
             s_Data.QuadVertexBufferPtr->color[0] = r;
@@ -473,6 +575,41 @@ namespace GGEngine {
         DrawQuadInternal(x, y, z, width, height, texture, tintR, tintG, tintB, tintA, rotationRadians, tilingFactor);
     }
 
+    // Sub-textured quads (sprite sheets / texture atlases)
+    void Renderer2D::DrawQuad(float x, float y, float width, float height,
+                             const SubTexture2D* subTexture,
+                             float tintR, float tintG, float tintB, float tintA)
+    {
+        DrawQuadInternal(x, y, 0.0f, width, height, subTexture->GetTexture(),
+                        tintR, tintG, tintB, tintA, 0.0f, 1.0f, subTexture->GetTexCoords());
+    }
+
+    void Renderer2D::DrawQuad(float x, float y, float z, float width, float height,
+                             const SubTexture2D* subTexture,
+                             float tintR, float tintG, float tintB, float tintA)
+    {
+        DrawQuadInternal(x, y, z, width, height, subTexture->GetTexture(),
+                        tintR, tintG, tintB, tintA, 0.0f, 1.0f, subTexture->GetTexCoords());
+    }
+
+    void Renderer2D::DrawRotatedQuad(float x, float y, float width, float height,
+                                    float rotationRadians,
+                                    const SubTexture2D* subTexture,
+                                    float tintR, float tintG, float tintB, float tintA)
+    {
+        DrawQuadInternal(x, y, 0.0f, width, height, subTexture->GetTexture(),
+                        tintR, tintG, tintB, tintA, rotationRadians, 1.0f, subTexture->GetTexCoords());
+    }
+
+    void Renderer2D::DrawRotatedQuad(float x, float y, float z, float width, float height,
+                                    float rotationRadians,
+                                    const SubTexture2D* subTexture,
+                                    float tintR, float tintG, float tintB, float tintA)
+    {
+        DrawQuadInternal(x, y, z, width, height, subTexture->GetTexture(),
+                        tintR, tintG, tintB, tintA, rotationRadians, 1.0f, subTexture->GetTexCoords());
+    }
+
     // Statistics
     void Renderer2D::ResetStats()
     {
@@ -482,7 +619,9 @@ namespace GGEngine {
 
     Renderer2D::Statistics Renderer2D::GetStats()
     {
-        return s_Data.Stats;
+        Renderer2D::Statistics stats = s_Data.Stats;
+        stats.MaxQuadCapacity = s_Data.MaxQuads;
+        return stats;
     }
 
 }

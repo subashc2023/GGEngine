@@ -1,6 +1,8 @@
 #pragma once
 
 #include "Core.h"
+#include "KeyCodes.h"
+#include "MouseButtonCodes.h"
 
 #include <memory>
 
@@ -11,15 +13,15 @@ namespace GGEngine {
     public:
         virtual ~Input() = default;
 
-        static bool IsKeyPressed(int keycode) { return s_Instance->IsKeyPressedImpl(keycode); }
-        static bool IsMouseButtonPressed(int button) { return s_Instance->IsMouseButtonPressedImpl(button); }
+        static bool IsKeyPressed(KeyCode keycode) { return s_Instance->IsKeyPressedImpl(keycode); }
+        static bool IsMouseButtonPressed(MouseCode button) { return s_Instance->IsMouseButtonPressedImpl(button); }
         static float GetMouseX() { return s_Instance->GetMouseXImpl(); }
         static float GetMouseY() { return s_Instance->GetMouseYImpl(); }
         static std::pair<float, float> GetMousePosition() { return s_Instance->GetMousePositionImpl(); }
 
     protected:
-        virtual bool IsKeyPressedImpl(int keycode) = 0;
-        virtual bool IsMouseButtonPressedImpl(int button) = 0;
+        virtual bool IsKeyPressedImpl(KeyCode keycode) = 0;
+        virtual bool IsMouseButtonPressedImpl(MouseCode button) = 0;
         virtual float GetMouseXImpl() = 0;
         virtual float GetMouseYImpl() = 0;
         virtual std::pair<float, float> GetMousePositionImpl() = 0;

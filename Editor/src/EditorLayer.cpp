@@ -1,4 +1,6 @@
 #include "EditorLayer.h"
+#include "GGEngine/Core/Application.h"
+#include "GGEngine/ImGui/ImGuiLayer.h"
 #include "GGEngine/RHI/RHIDevice.h"
 #include "GGEngine/Renderer/Renderer2D.h"
 #include "GGEngine/ImGui/DebugUI.h"
@@ -12,6 +14,7 @@
 
 #include <imgui.h>
 #include <cstring>
+#include <algorithm>
 
 EditorLayer::EditorLayer()
     : Layer("EditorLayer"), m_CameraController(1280.0f / 720.0f, 1.0f, true)
@@ -24,6 +27,9 @@ void EditorLayer::OnAttach()
     spec.Width = 1280;
     spec.Height = 720;
     m_ViewportFramebuffer = GGEngine::CreateScope<GGEngine::Framebuffer>(spec);
+
+    // Load spritesheets from game assets folder
+    GGEngine::TextureLibrary::Get().ScanDirectory("game");
 
     CreateDefaultScene();
 
@@ -177,6 +183,13 @@ void EditorLayer::DrawSceneHierarchyPanel()
                 m_ActiveScene->AddComponent<GGEngine::SpriteRendererComponent>(entity);
                 m_SelectedEntity = entity;
             }
+            if (ImGui::MenuItem("Create Tilemap"))
+            {
+                auto entity = m_ActiveScene->CreateEntity("Tilemap");
+                auto& tilemap = m_ActiveScene->AddComponent<GGEngine::TilemapComponent>(entity);
+                tilemap.ResizeTiles();
+                m_SelectedEntity = entity;
+            }
             ImGui::EndPopup();
         }
     }
@@ -261,6 +274,53 @@ void EditorLayer::DrawPropertiesPanel(GGEngine::Timestep ts)
 
                     ImGui::EndCombo();
                 }
+
+                // Spritesheet/Atlas settings
+                ImGui::Separator();
+                ImGui::Checkbox("Use Spritesheet", &sprite->UseAtlas);
+
+                if (sprite->UseAtlas)
+                {
+                    ImGui::Indent();
+
+                    // Cell size
+                    float cellSize[2] = { sprite->AtlasCellWidth, sprite->AtlasCellHeight };
+                    if (ImGui::DragFloat2("Cell Size (px)", cellSize, 1.0f, 1.0f, 1024.0f))
+                    {
+                        sprite->AtlasCellWidth = cellSize[0];
+                        sprite->AtlasCellHeight = cellSize[1];
+                    }
+
+                    // Grid position
+                    int cellPos[2] = { static_cast<int>(sprite->AtlasCellX), static_cast<int>(sprite->AtlasCellY) };
+                    if (ImGui::DragInt2("Cell Position", cellPos, 0.1f, 0, 100))
+                    {
+                        sprite->AtlasCellX = static_cast<uint32_t>(std::max(0, cellPos[0]));
+                        sprite->AtlasCellY = static_cast<uint32_t>(std::max(0, cellPos[1]));
+                    }
+
+                    // Sprite size (in cells, for multi-cell sprites)
+                    float spriteSize[2] = { sprite->AtlasSpriteWidth, sprite->AtlasSpriteHeight };
+                    if (ImGui::DragFloat2("Sprite Size (cells)", spriteSize, 0.1f, 0.1f, 10.0f))
+                    {
+                        sprite->AtlasSpriteWidth = spriteSize[0];
+                        sprite->AtlasSpriteHeight = spriteSize[1];
+                    }
+
+                    // Show calculated UV info
+                    if (!sprite->TextureName.empty())
+                    {
+                        auto* tex = textureLib.GetTexturePtr(sprite->TextureName);
+                        if (tex)
+                        {
+                            uint32_t gridW = static_cast<uint32_t>(tex->GetWidth() / sprite->AtlasCellWidth);
+                            uint32_t gridH = static_cast<uint32_t>(tex->GetHeight() / sprite->AtlasCellHeight);
+                            ImGui::TextDisabled("Grid: %dx%d cells", gridW, gridH);
+                        }
+                    }
+
+                    ImGui::Unindent();
+                }
             }
         }
         else
@@ -269,6 +329,194 @@ void EditorLayer::DrawPropertiesPanel(GGEngine::Timestep ts)
             if (ImGui::Button("Add Sprite Renderer"))
             {
                 m_ActiveScene->AddComponent<GGEngine::SpriteRendererComponent>(m_SelectedEntity);
+            }
+        }
+
+        // TilemapComponent
+        if (m_ActiveScene->HasComponent<GGEngine::TilemapComponent>(m_SelectedEntity))
+        {
+            if (ImGui::CollapsingHeader("Tilemap", ImGuiTreeNodeFlags_DefaultOpen))
+            {
+                auto* tilemap = m_ActiveScene->GetComponent<GGEngine::TilemapComponent>(m_SelectedEntity);
+
+                // Grid dimensions
+                int dims[2] = { static_cast<int>(tilemap->Width), static_cast<int>(tilemap->Height) };
+                if (ImGui::DragInt2("Grid Size (tiles)", dims, 0.1f, 1, 256))
+                {
+                    tilemap->Width = static_cast<uint32_t>(std::max(1, dims[0]));
+                    tilemap->Height = static_cast<uint32_t>(std::max(1, dims[1]));
+                    tilemap->ResizeTiles();
+                }
+
+                // Tile size in world units
+                float tileSize[2] = { tilemap->TileWidth, tilemap->TileHeight };
+                if (ImGui::DragFloat2("Tile Size (world)", tileSize, 0.01f, 0.01f, 10.0f))
+                {
+                    tilemap->TileWidth = tileSize[0];
+                    tilemap->TileHeight = tileSize[1];
+                }
+
+                // Z-depth offset
+                ImGui::DragFloat("Z Offset", &tilemap->ZOffset, 0.01f, -10.0f, 10.0f);
+
+                // Tint color
+                ImGui::ColorEdit4("Tint", tilemap->Color);
+
+                ImGui::Separator();
+
+                // Atlas settings
+                ImGui::Text("Atlas Settings");
+
+                // Texture dropdown (same pattern as SpriteRenderer)
+                auto& textureLib = GGEngine::TextureLibrary::Get();
+                auto textureNames = textureLib.GetAllNames();
+                const char* currentTexture = tilemap->TextureName.empty() ? "None" : tilemap->TextureName.c_str();
+
+                if (ImGui::BeginCombo("Atlas Texture", currentTexture))
+                {
+                    bool isNoneSelected = tilemap->TextureName.empty();
+                    if (ImGui::Selectable("None", isNoneSelected))
+                    {
+                        tilemap->TextureName.clear();
+                    }
+                    if (isNoneSelected)
+                        ImGui::SetItemDefaultFocus();
+
+                    for (const auto& name : textureNames)
+                    {
+                        bool isSelected = (tilemap->TextureName == name);
+                        if (ImGui::Selectable(name.c_str(), isSelected))
+                        {
+                            tilemap->TextureName = name;
+                            // Auto-calculate columns when texture changes
+                            if (auto* tex = textureLib.GetTexturePtr(name))
+                            {
+                                tilemap->AtlasColumns = static_cast<uint32_t>(tex->GetWidth() / tilemap->AtlasCellWidth);
+                            }
+                        }
+                        if (isSelected)
+                            ImGui::SetItemDefaultFocus();
+                    }
+                    ImGui::EndCombo();
+                }
+
+                // Atlas cell size
+                float cellSize[2] = { tilemap->AtlasCellWidth, tilemap->AtlasCellHeight };
+                if (ImGui::DragFloat2("Cell Size (px)", cellSize, 1.0f, 1.0f, 256.0f))
+                {
+                    tilemap->AtlasCellWidth = cellSize[0];
+                    tilemap->AtlasCellHeight = cellSize[1];
+                    // Recalculate columns
+                    if (!tilemap->TextureName.empty())
+                    {
+                        if (auto* tex = textureLib.GetTexturePtr(tilemap->TextureName))
+                        {
+                            tilemap->AtlasColumns = static_cast<uint32_t>(tex->GetWidth() / tilemap->AtlasCellWidth);
+                        }
+                    }
+                }
+
+                // Show atlas info
+                if (!tilemap->TextureName.empty())
+                {
+                    if (auto* tex = textureLib.GetTexturePtr(tilemap->TextureName))
+                    {
+                        uint32_t cols = static_cast<uint32_t>(tex->GetWidth() / tilemap->AtlasCellWidth);
+                        uint32_t rows = static_cast<uint32_t>(tex->GetHeight() / tilemap->AtlasCellHeight);
+                        ImGui::TextDisabled("Atlas: %dx%d cells (%d total)", cols, rows, cols * rows);
+                    }
+                }
+
+                ImGui::Separator();
+
+                // Tile editing section
+                ImGui::Text("Tile Editing");
+                ImGui::Checkbox("Edit Mode", &m_TilemapEditMode);
+
+                if (m_TilemapEditMode)
+                {
+                    ImGui::Indent();
+
+                    // Selected tile display
+                    uint32_t selCellX, selCellY;
+                    tilemap->IndexToCell(m_SelectedAtlasTile, selCellX, selCellY);
+                    ImGui::Text("Selected: Index %d (Cell %d, %d)", m_SelectedAtlasTile, selCellX, selCellY);
+
+                    // Tile index input
+                    if (ImGui::DragInt("Brush Tile Index", &m_SelectedAtlasTile, 0.1f, -1, 9999))
+                    {
+                        // -1 is eraser
+                    }
+                    ImGui::TextDisabled("(-1 = Eraser)");
+
+                    ImGui::Separator();
+
+                    // Visual tile grid preview
+                    ImGui::Text("Tile Grid Preview:");
+                    ImGui::BeginChild("TileGrid", ImVec2(0, 200), true, ImGuiWindowFlags_HorizontalScrollbar);
+
+                    ImDrawList* drawList = ImGui::GetWindowDrawList();
+                    ImVec2 canvasPos = ImGui::GetCursorScreenPos();
+                    float previewTileSize = 16.0f;
+
+                    for (uint32_t ty = 0; ty < tilemap->Height; ty++)
+                    {
+                        for (uint32_t tx = 0; tx < tilemap->Width; tx++)
+                        {
+                            int32_t tileIdx = tilemap->GetTile(tx, ty);
+
+                            float x0 = canvasPos.x + tx * previewTileSize;
+                            float y0 = canvasPos.y + (tilemap->Height - 1 - ty) * previewTileSize;  // Flip Y for display
+                            float x1 = x0 + previewTileSize;
+                            float y1 = y0 + previewTileSize;
+
+                            // Draw tile background
+                            ImU32 color = (tileIdx < 0) ? IM_COL32(40, 40, 40, 255) : IM_COL32(80, 80, 200, 255);
+                            drawList->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), color);
+                            drawList->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), IM_COL32(60, 60, 60, 255));
+                        }
+                    }
+
+                    // Handle click to paint
+                    if (ImGui::IsWindowHovered() && ImGui::IsMouseDown(0))
+                    {
+                        ImVec2 mousePos = ImGui::GetMousePos();
+                        int clickX = static_cast<int>((mousePos.x - canvasPos.x) / previewTileSize);
+                        int clickY = static_cast<int>(tilemap->Height) - 1 - static_cast<int>((mousePos.y - canvasPos.y) / previewTileSize);
+
+                        if (clickX >= 0 && clickX < static_cast<int>(tilemap->Width) &&
+                            clickY >= 0 && clickY < static_cast<int>(tilemap->Height))
+                        {
+                            tilemap->SetTile(static_cast<uint32_t>(clickX), static_cast<uint32_t>(clickY), m_SelectedAtlasTile);
+                        }
+                    }
+
+                    // Expand child area to fit content
+                    ImGui::Dummy(ImVec2(tilemap->Width * previewTileSize, tilemap->Height * previewTileSize));
+                    ImGui::EndChild();
+
+                    ImGui::Unindent();
+                }
+
+                // Fill/Clear buttons
+                if (ImGui::Button("Fill All"))
+                {
+                    std::fill(tilemap->Tiles.begin(), tilemap->Tiles.end(), m_SelectedAtlasTile);
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Clear All"))
+                {
+                    std::fill(tilemap->Tiles.begin(), tilemap->Tiles.end(), -1);
+                }
+            }
+        }
+        else
+        {
+            // Add Tilemap button
+            if (ImGui::Button("Add Tilemap"))
+            {
+                auto& tilemap = m_ActiveScene->AddComponent<GGEngine::TilemapComponent>(m_SelectedEntity);
+                tilemap.ResizeTiles();
             }
         }
 
@@ -376,6 +624,9 @@ void EditorLayer::OnUpdate(GGEngine::Timestep ts)
     m_ViewportFocused = ImGui::IsWindowFocused();
     m_ViewportHovered = ImGui::IsWindowHovered();
 
+    // Block ImGui events when viewport is focused or hovered (allow camera control)
+    GGEngine::Application::Get().GetImGuiLayer()->SetBlockEvents(!m_ViewportFocused && !m_ViewportHovered);
+
     ImVec2 viewportPanelSize = ImGui::GetContentRegionAvail();
     if (m_ViewportWidth != viewportPanelSize.x || m_ViewportHeight != viewportPanelSize.y)
     {
@@ -409,19 +660,19 @@ void EditorLayer::OnUpdate(GGEngine::Timestep ts)
             if (transform)
             {
                 float velocity = 2.0f * ts;
-                if (GGEngine::Input::IsKeyPressed(GG_KEY_I))
+                if (GGEngine::Input::IsKeyPressed(GGEngine::KeyCode::I))
                     transform->Position[1] += velocity;
-                if (GGEngine::Input::IsKeyPressed(GG_KEY_K))
+                if (GGEngine::Input::IsKeyPressed(GGEngine::KeyCode::K))
                     transform->Position[1] -= velocity;
-                if (GGEngine::Input::IsKeyPressed(GG_KEY_J))
+                if (GGEngine::Input::IsKeyPressed(GGEngine::KeyCode::J))
                     transform->Position[0] -= velocity;
-                if (GGEngine::Input::IsKeyPressed(GG_KEY_L))
+                if (GGEngine::Input::IsKeyPressed(GGEngine::KeyCode::L))
                     transform->Position[0] += velocity;
 
                 float rotationSpeed = 90.0f * ts;
-                if (GGEngine::Input::IsKeyPressed(GG_KEY_U))
+                if (GGEngine::Input::IsKeyPressed(GGEngine::KeyCode::U))
                     transform->Rotation += rotationSpeed;
-                if (GGEngine::Input::IsKeyPressed(GG_KEY_O))
+                if (GGEngine::Input::IsKeyPressed(GGEngine::KeyCode::O))
                     transform->Rotation -= rotationSpeed;
             }
         }

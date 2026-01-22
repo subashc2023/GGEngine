@@ -54,4 +54,8 @@ private:
 
     // Selection state
     GGEngine::EntityID m_SelectedEntity = GGEngine::InvalidEntityID;
+
+    // Tilemap editing state
+    int32_t m_SelectedAtlasTile = 0;     // Currently selected tile for painting
+    bool m_TilemapEditMode = false;       // Whether in tilemap edit mode
 };

@@ -8,6 +8,7 @@
 namespace GGEngine {
 
     class Texture;
+    class SubTexture2D;
 
     class GG_API Renderer2D
     {
@@ -71,11 +72,36 @@ namespace GGEngine {
                                    float tintR = 1.0f, float tintG = 1.0f,
                                    float tintB = 1.0f, float tintA = 1.0f);
 
+        // Sub-textured quads (for sprite sheets / texture atlases)
+        static void DrawQuad(float x, float y, float width, float height,
+                            const SubTexture2D* subTexture,
+                            float tintR = 1.0f, float tintG = 1.0f,
+                            float tintB = 1.0f, float tintA = 1.0f);
+
+        static void DrawQuad(float x, float y, float z, float width, float height,
+                            const SubTexture2D* subTexture,
+                            float tintR = 1.0f, float tintG = 1.0f,
+                            float tintB = 1.0f, float tintA = 1.0f);
+
+        // Sub-textured quads with rotation
+        static void DrawRotatedQuad(float x, float y, float width, float height,
+                                   float rotationRadians,
+                                   const SubTexture2D* subTexture,
+                                   float tintR = 1.0f, float tintG = 1.0f,
+                                   float tintB = 1.0f, float tintA = 1.0f);
+
+        static void DrawRotatedQuad(float x, float y, float z, float width, float height,
+                                   float rotationRadians,
+                                   const SubTexture2D* subTexture,
+                                   float tintR = 1.0f, float tintG = 1.0f,
+                                   float tintB = 1.0f, float tintA = 1.0f);
+
         // Statistics
         struct Statistics
         {
             uint32_t DrawCalls = 0;
             uint32_t QuadCount = 0;
+            uint32_t MaxQuadCapacity = 0;  // Current buffer capacity
         };
 
         static void ResetStats();

@@ -63,6 +63,39 @@ namespace GGEngine {
                 };
                 entityJson["SpriteRendererComponent"]["TextureName"] = sprite->TextureName;
                 entityJson["SpriteRendererComponent"]["TilingFactor"] = sprite->TilingFactor;
+
+                // Atlas/spritesheet settings
+                entityJson["SpriteRendererComponent"]["UseAtlas"] = sprite->UseAtlas;
+                entityJson["SpriteRendererComponent"]["AtlasCellX"] = sprite->AtlasCellX;
+                entityJson["SpriteRendererComponent"]["AtlasCellY"] = sprite->AtlasCellY;
+                entityJson["SpriteRendererComponent"]["AtlasCellWidth"] = sprite->AtlasCellWidth;
+                entityJson["SpriteRendererComponent"]["AtlasCellHeight"] = sprite->AtlasCellHeight;
+                entityJson["SpriteRendererComponent"]["AtlasSpriteWidth"] = sprite->AtlasSpriteWidth;
+                entityJson["SpriteRendererComponent"]["AtlasSpriteHeight"] = sprite->AtlasSpriteHeight;
+            }
+
+            // Tilemap component
+            if (m_Scene->HasComponent<TilemapComponent>(entityId))
+            {
+                const auto* tilemap = m_Scene->GetComponent<TilemapComponent>(entityId);
+                auto& tm = entityJson["TilemapComponent"];
+
+                tm["Width"] = tilemap->Width;
+                tm["Height"] = tilemap->Height;
+                tm["TileWidth"] = tilemap->TileWidth;
+                tm["TileHeight"] = tilemap->TileHeight;
+                tm["TextureName"] = tilemap->TextureName;
+                tm["AtlasCellWidth"] = tilemap->AtlasCellWidth;
+                tm["AtlasCellHeight"] = tilemap->AtlasCellHeight;
+                tm["AtlasColumns"] = tilemap->AtlasColumns;
+                tm["ZOffset"] = tilemap->ZOffset;
+                tm["Color"] = {
+                    tilemap->Color[0],
+                    tilemap->Color[1],
+                    tilemap->Color[2],
+                    tilemap->Color[3]
+                };
+                tm["Tiles"] = tilemap->Tiles;  // nlohmann::json handles vector<int32_t> directly
             }
 
             entitiesArray.push_back(entityJson);
@@ -185,6 +218,62 @@ namespace GGEngine {
                     {
                         sprite.TilingFactor = s["TilingFactor"].get<float>();
                     }
+
+                    // Atlas/spritesheet settings
+                    if (s.contains("UseAtlas"))
+                        sprite.UseAtlas = s["UseAtlas"].get<bool>();
+                    if (s.contains("AtlasCellX"))
+                        sprite.AtlasCellX = s["AtlasCellX"].get<uint32_t>();
+                    if (s.contains("AtlasCellY"))
+                        sprite.AtlasCellY = s["AtlasCellY"].get<uint32_t>();
+                    if (s.contains("AtlasCellWidth"))
+                        sprite.AtlasCellWidth = s["AtlasCellWidth"].get<float>();
+                    if (s.contains("AtlasCellHeight"))
+                        sprite.AtlasCellHeight = s["AtlasCellHeight"].get<float>();
+                    if (s.contains("AtlasSpriteWidth"))
+                        sprite.AtlasSpriteWidth = s["AtlasSpriteWidth"].get<float>();
+                    if (s.contains("AtlasSpriteHeight"))
+                        sprite.AtlasSpriteHeight = s["AtlasSpriteHeight"].get<float>();
+                }
+
+                // Read tilemap component
+                if (entityJson.contains("TilemapComponent"))
+                {
+                    auto& tilemap = m_Scene->AddComponent<TilemapComponent>(entity);
+                    const auto& tm = entityJson["TilemapComponent"];
+
+                    if (tm.contains("Width"))
+                        tilemap.Width = tm["Width"].get<uint32_t>();
+                    if (tm.contains("Height"))
+                        tilemap.Height = tm["Height"].get<uint32_t>();
+                    if (tm.contains("TileWidth"))
+                        tilemap.TileWidth = tm["TileWidth"].get<float>();
+                    if (tm.contains("TileHeight"))
+                        tilemap.TileHeight = tm["TileHeight"].get<float>();
+                    if (tm.contains("TextureName"))
+                        tilemap.TextureName = tm["TextureName"].get<std::string>();
+                    if (tm.contains("AtlasCellWidth"))
+                        tilemap.AtlasCellWidth = tm["AtlasCellWidth"].get<float>();
+                    if (tm.contains("AtlasCellHeight"))
+                        tilemap.AtlasCellHeight = tm["AtlasCellHeight"].get<float>();
+                    if (tm.contains("AtlasColumns"))
+                        tilemap.AtlasColumns = tm["AtlasColumns"].get<uint32_t>();
+                    if (tm.contains("ZOffset"))
+                        tilemap.ZOffset = tm["ZOffset"].get<float>();
+                    if (tm.contains("Color"))
+                    {
+                        tilemap.Color[0] = tm["Color"][0].get<float>();
+                        tilemap.Color[1] = tm["Color"][1].get<float>();
+                        tilemap.Color[2] = tm["Color"][2].get<float>();
+                        tilemap.Color[3] = tm["Color"][3].get<float>();
+                    }
+                    if (tm.contains("Tiles"))
+                    {
+                        tilemap.Tiles = tm["Tiles"].get<std::vector<int32_t>>();
+                    }
+
+                    // Ensure tiles vector matches dimensions
+                    tilemap.ResizeTiles();
                 }
             }
         }

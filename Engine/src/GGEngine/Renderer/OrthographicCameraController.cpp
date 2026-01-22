@@ -19,27 +19,27 @@ namespace GGEngine {
         // WASD movement
         float velocity = m_MoveSpeed * m_ZoomLevel * ts; // Scale speed with zoom
 
-        if (Input::IsKeyPressed(GG_KEY_W))
+        if (Input::IsKeyPressed(KeyCode::W))
             m_Camera.Translate(0.0f, velocity, 0.0f);
-        if (Input::IsKeyPressed(GG_KEY_S))
+        if (Input::IsKeyPressed(KeyCode::S))
             m_Camera.Translate(0.0f, -velocity, 0.0f);
-        if (Input::IsKeyPressed(GG_KEY_A))
+        if (Input::IsKeyPressed(KeyCode::A))
             m_Camera.Translate(-velocity, 0.0f, 0.0f);
-        if (Input::IsKeyPressed(GG_KEY_D))
+        if (Input::IsKeyPressed(KeyCode::D))
             m_Camera.Translate(velocity, 0.0f, 0.0f);
 
         // Q/E rotation (if enabled)
         if (m_RotationEnabled)
         {
             float rotationVelocity = m_RotationSpeed * ts;
-            if (Input::IsKeyPressed(GG_KEY_Q))
+            if (Input::IsKeyPressed(KeyCode::Q))
                 m_Camera.Rotate(rotationVelocity);
-            if (Input::IsKeyPressed(GG_KEY_E))
+            if (Input::IsKeyPressed(KeyCode::E))
                 m_Camera.Rotate(-rotationVelocity);
         }
 
         // Right mouse drag to pan
-        if (Input::IsMouseButtonPressed(GG_MOUSE_BUTTON_RIGHT))
+        if (Input::IsMouseButtonPressed(MouseCode::Right))
         {
             auto [mouseX, mouseY] = Input::GetMousePosition();
 
@@ -105,6 +105,12 @@ namespace GGEngine {
     {
         float width = m_ZoomLevel * 2.0f;
         float height = width / m_AspectRatio;
+
+        m_Bounds.Left = -width * 0.5f;
+        m_Bounds.Right = width * 0.5f;
+        m_Bounds.Bottom = -height * 0.5f;
+        m_Bounds.Top = height * 0.5f;
+
         m_Camera.SetOrthographic(width, height, -100.0f, 100.0f);
     }
 

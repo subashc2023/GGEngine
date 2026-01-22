@@ -78,6 +78,18 @@ namespace GGEngine {
         GG_CORE_INFO("Asset root set to: {}", m_AssetRoot.string());
     }
 
+    void AssetManager::AddSearchPath(const std::string& path)
+    {
+        // Avoid duplicates
+        for (const auto& existing : m_SearchPaths)
+        {
+            if (existing == path)
+                return;
+        }
+        m_SearchPaths.push_back(path);
+        GG_CORE_INFO("Added asset search path: {}", path);
+    }
+
     std::filesystem::path AssetManager::ResolvePath(const std::string& relativePath) const
     {
         std::filesystem::path relPath(relativePath);
@@ -91,6 +103,14 @@ namespace GGEngine {
         fullPath = m_AssetRoot / "Engine" / relPath;
         if (std::filesystem::exists(fullPath))
             return fullPath;
+
+        // Try each additional search path
+        for (const auto& searchPath : m_SearchPaths)
+        {
+            fullPath = m_AssetRoot / searchPath / relPath;
+            if (std::filesystem::exists(fullPath))
+                return fullPath;
+        }
 
         // Return the first path (will fail with good error message)
         return m_AssetRoot / relPath;

@@ -23,6 +23,10 @@ namespace GGEngine {
         void SetAssetRoot(const std::filesystem::path& root);
         const std::filesystem::path& GetAssetRoot() const { return m_AssetRoot; }
 
+        // Add additional search path for assets (relative to asset root)
+        // Use this for app-specific asset directories (e.g., "Sandbox/assets", "Editor/assets")
+        void AddSearchPath(const std::string& path);
+
         // Resolve a relative asset path to absolute path
         std::filesystem::path ResolvePath(const std::string& relativePath) const;
 
@@ -63,6 +67,7 @@ namespace GGEngine {
         void DetectAssetRoot();
 
         std::filesystem::path m_AssetRoot;
+        std::vector<std::string> m_SearchPaths;  // Additional search paths (relative to root)
         std::unordered_map<std::string, Ref<Asset>> m_Assets;
         std::unordered_map<AssetID, Ref<Asset>> m_AssetsByID;
         std::unordered_map<AssetID, uint32_t> m_Generations;
