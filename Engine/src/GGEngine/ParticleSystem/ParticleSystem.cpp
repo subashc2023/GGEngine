@@ -2,6 +2,7 @@
 #include "ParticleSystem.h"
 #include "Random.h"
 #include "GGEngine/Renderer/Renderer2D.h"
+#include "GGEngine/Core/Math.h"
 
 #include <cmath>
 
@@ -18,7 +19,7 @@ namespace GGEngine {
         particle.Active = true;
         particle.Position[0] = props.Position[0];
         particle.Position[1] = props.Position[1];
-        particle.Rotation = Random::Float() * 2.0f * 3.14159265359f;
+        particle.Rotation = Random::Float() * Math::TwoPi;
 
         // Velocity with variation
         particle.Velocity[0] = props.Velocity[0] + props.VelocityVariation[0] * (Random::Float() - 0.5f);

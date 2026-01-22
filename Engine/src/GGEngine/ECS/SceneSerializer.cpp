@@ -1,6 +1,6 @@
 #include "ggpch.h"
 #include "SceneSerializer.h"
-#include "Components.h"
+#include "ComponentTraits.h"
 #include "GGEngine/Renderer/SceneCamera.h"
 
 #include <json.hpp>
@@ -28,97 +28,28 @@ namespace GGEngine {
 
             json entityJson;
 
-            // Tag component (required)
+            // Tag component (special handling - GUID is at entity level)
             const auto* tag = m_Scene->GetComponent<TagComponent>(entityId);
             if (tag)
             {
                 entityJson["GUID"] = tag->ID.ToString();
-                entityJson["TagComponent"]["Name"] = tag->Name;
+                json tagJson;
+                ComponentSerializer<TagComponent>::ToJson(*tag, tagJson);
+                entityJson["TagComponent"] = tagJson;
             }
 
-            // Transform component
-            if (m_Scene->HasComponent<TransformComponent>(entityId))
+            // TransformComponent is auto-added with entity, so use GetComponent instead of HasComponent
+            if (const auto* transform = m_Scene->GetComponent<TransformComponent>(entityId))
             {
-                const auto* transform = m_Scene->GetComponent<TransformComponent>(entityId);
-                entityJson["TransformComponent"]["Position"] = {
-                    transform->Position[0],
-                    transform->Position[1],
-                    transform->Position[2]
-                };
-                entityJson["TransformComponent"]["Rotation"] = transform->Rotation;
-                entityJson["TransformComponent"]["Scale"] = {
-                    transform->Scale[0],
-                    transform->Scale[1]
-                };
+                json compJson;
+                ComponentSerializer<TransformComponent>::ToJson(*transform, compJson);
+                entityJson["TransformComponent"] = compJson;
             }
 
-            // Sprite renderer component
-            if (m_Scene->HasComponent<SpriteRendererComponent>(entityId))
-            {
-                const auto* sprite = m_Scene->GetComponent<SpriteRendererComponent>(entityId);
-                entityJson["SpriteRendererComponent"]["Color"] = {
-                    sprite->Color[0],
-                    sprite->Color[1],
-                    sprite->Color[2],
-                    sprite->Color[3]
-                };
-                entityJson["SpriteRendererComponent"]["TextureName"] = sprite->TextureName;
-                entityJson["SpriteRendererComponent"]["TilingFactor"] = sprite->TilingFactor;
-
-                // Atlas/spritesheet settings
-                entityJson["SpriteRendererComponent"]["UseAtlas"] = sprite->UseAtlas;
-                entityJson["SpriteRendererComponent"]["AtlasCellX"] = sprite->AtlasCellX;
-                entityJson["SpriteRendererComponent"]["AtlasCellY"] = sprite->AtlasCellY;
-                entityJson["SpriteRendererComponent"]["AtlasCellWidth"] = sprite->AtlasCellWidth;
-                entityJson["SpriteRendererComponent"]["AtlasCellHeight"] = sprite->AtlasCellHeight;
-                entityJson["SpriteRendererComponent"]["AtlasSpriteWidth"] = sprite->AtlasSpriteWidth;
-                entityJson["SpriteRendererComponent"]["AtlasSpriteHeight"] = sprite->AtlasSpriteHeight;
-            }
-
-            // Tilemap component
-            if (m_Scene->HasComponent<TilemapComponent>(entityId))
-            {
-                const auto* tilemap = m_Scene->GetComponent<TilemapComponent>(entityId);
-                auto& tm = entityJson["TilemapComponent"];
-
-                tm["Width"] = tilemap->Width;
-                tm["Height"] = tilemap->Height;
-                tm["TileWidth"] = tilemap->TileWidth;
-                tm["TileHeight"] = tilemap->TileHeight;
-                tm["TextureName"] = tilemap->TextureName;
-                tm["AtlasCellWidth"] = tilemap->AtlasCellWidth;
-                tm["AtlasCellHeight"] = tilemap->AtlasCellHeight;
-                tm["AtlasColumns"] = tilemap->AtlasColumns;
-                tm["ZOffset"] = tilemap->ZOffset;
-                tm["Color"] = {
-                    tilemap->Color[0],
-                    tilemap->Color[1],
-                    tilemap->Color[2],
-                    tilemap->Color[3]
-                };
-                tm["Tiles"] = tilemap->Tiles;  // nlohmann::json handles vector<int32_t> directly
-            }
-
-            // Camera component
-            if (m_Scene->HasComponent<CameraComponent>(entityId))
-            {
-                const auto* camera = m_Scene->GetComponent<CameraComponent>(entityId);
-                auto& cc = entityJson["CameraComponent"];
-
-                cc["Primary"] = camera->Primary;
-                cc["FixedAspectRatio"] = camera->FixedAspectRatio;
-                cc["ProjectionType"] = static_cast<int>(camera->Camera.GetProjectionType());
-
-                // Perspective params
-                cc["PerspectiveFOV"] = camera->Camera.GetPerspectiveFOV();
-                cc["PerspectiveNear"] = camera->Camera.GetPerspectiveNearClip();
-                cc["PerspectiveFar"] = camera->Camera.GetPerspectiveFarClip();
-
-                // Orthographic params
-                cc["OrthographicSize"] = camera->Camera.GetOrthographicSize();
-                cc["OrthographicNear"] = camera->Camera.GetOrthographicNearClip();
-                cc["OrthographicFar"] = camera->Camera.GetOrthographicFarClip();
-            }
+            // Optional components using trait-based serialization
+            SerializeComponentIfPresent<SpriteRendererComponent>(m_Scene, entityId, entityJson);
+            SerializeComponentIfPresent<TilemapComponent>(m_Scene, entityId, entityJson);
+            SerializeComponentIfPresent<CameraComponent>(m_Scene, entityId, entityJson);
 
             entitiesArray.push_back(entityJson);
         }
@@ -195,139 +126,20 @@ namespace GGEngine {
                 // Create entity with preserved GUID
                 EntityID entity = m_Scene->CreateEntityWithGUID(name, guid);
 
-                // Read transform component
+                // TransformComponent - entity already has one, just update it
                 if (entityJson.contains("TransformComponent"))
                 {
                     auto* transform = m_Scene->GetComponent<TransformComponent>(entity);
                     if (transform)
                     {
-                        const auto& t = entityJson["TransformComponent"];
-                        if (t.contains("Position"))
-                        {
-                            transform->Position[0] = t["Position"][0].get<float>();
-                            transform->Position[1] = t["Position"][1].get<float>();
-                            transform->Position[2] = t["Position"][2].get<float>();
-                        }
-                        if (t.contains("Rotation"))
-                        {
-                            transform->Rotation = t["Rotation"].get<float>();
-                        }
-                        if (t.contains("Scale"))
-                        {
-                            transform->Scale[0] = t["Scale"][0].get<float>();
-                            transform->Scale[1] = t["Scale"][1].get<float>();
-                        }
+                        ComponentSerializer<TransformComponent>::FromJson(*transform, entityJson["TransformComponent"]);
                     }
                 }
 
-                // Read sprite renderer component
-                if (entityJson.contains("SpriteRendererComponent"))
-                {
-                    auto& sprite = m_Scene->AddComponent<SpriteRendererComponent>(entity);
-                    const auto& s = entityJson["SpriteRendererComponent"];
-                    if (s.contains("Color"))
-                    {
-                        sprite.Color[0] = s["Color"][0].get<float>();
-                        sprite.Color[1] = s["Color"][1].get<float>();
-                        sprite.Color[2] = s["Color"][2].get<float>();
-                        sprite.Color[3] = s["Color"][3].get<float>();
-                    }
-                    if (s.contains("TextureName"))
-                    {
-                        sprite.TextureName = s["TextureName"].get<std::string>();
-                    }
-                    if (s.contains("TilingFactor"))
-                    {
-                        sprite.TilingFactor = s["TilingFactor"].get<float>();
-                    }
-
-                    // Atlas/spritesheet settings
-                    if (s.contains("UseAtlas"))
-                        sprite.UseAtlas = s["UseAtlas"].get<bool>();
-                    if (s.contains("AtlasCellX"))
-                        sprite.AtlasCellX = s["AtlasCellX"].get<uint32_t>();
-                    if (s.contains("AtlasCellY"))
-                        sprite.AtlasCellY = s["AtlasCellY"].get<uint32_t>();
-                    if (s.contains("AtlasCellWidth"))
-                        sprite.AtlasCellWidth = s["AtlasCellWidth"].get<float>();
-                    if (s.contains("AtlasCellHeight"))
-                        sprite.AtlasCellHeight = s["AtlasCellHeight"].get<float>();
-                    if (s.contains("AtlasSpriteWidth"))
-                        sprite.AtlasSpriteWidth = s["AtlasSpriteWidth"].get<float>();
-                    if (s.contains("AtlasSpriteHeight"))
-                        sprite.AtlasSpriteHeight = s["AtlasSpriteHeight"].get<float>();
-                }
-
-                // Read tilemap component
-                if (entityJson.contains("TilemapComponent"))
-                {
-                    auto& tilemap = m_Scene->AddComponent<TilemapComponent>(entity);
-                    const auto& tm = entityJson["TilemapComponent"];
-
-                    if (tm.contains("Width"))
-                        tilemap.Width = tm["Width"].get<uint32_t>();
-                    if (tm.contains("Height"))
-                        tilemap.Height = tm["Height"].get<uint32_t>();
-                    if (tm.contains("TileWidth"))
-                        tilemap.TileWidth = tm["TileWidth"].get<float>();
-                    if (tm.contains("TileHeight"))
-                        tilemap.TileHeight = tm["TileHeight"].get<float>();
-                    if (tm.contains("TextureName"))
-                        tilemap.TextureName = tm["TextureName"].get<std::string>();
-                    if (tm.contains("AtlasCellWidth"))
-                        tilemap.AtlasCellWidth = tm["AtlasCellWidth"].get<float>();
-                    if (tm.contains("AtlasCellHeight"))
-                        tilemap.AtlasCellHeight = tm["AtlasCellHeight"].get<float>();
-                    if (tm.contains("AtlasColumns"))
-                        tilemap.AtlasColumns = tm["AtlasColumns"].get<uint32_t>();
-                    if (tm.contains("ZOffset"))
-                        tilemap.ZOffset = tm["ZOffset"].get<float>();
-                    if (tm.contains("Color"))
-                    {
-                        tilemap.Color[0] = tm["Color"][0].get<float>();
-                        tilemap.Color[1] = tm["Color"][1].get<float>();
-                        tilemap.Color[2] = tm["Color"][2].get<float>();
-                        tilemap.Color[3] = tm["Color"][3].get<float>();
-                    }
-                    if (tm.contains("Tiles"))
-                    {
-                        tilemap.Tiles = tm["Tiles"].get<std::vector<int32_t>>();
-                    }
-
-                    // Ensure tiles vector matches dimensions
-                    tilemap.ResizeTiles();
-                }
-
-                // Read camera component
-                if (entityJson.contains("CameraComponent"))
-                {
-                    auto& camera = m_Scene->AddComponent<CameraComponent>(entity);
-                    const auto& cc = entityJson["CameraComponent"];
-
-                    if (cc.contains("Primary"))
-                        camera.Primary = cc["Primary"].get<bool>();
-                    if (cc.contains("FixedAspectRatio"))
-                        camera.FixedAspectRatio = cc["FixedAspectRatio"].get<bool>();
-                    if (cc.contains("ProjectionType"))
-                        camera.Camera.SetProjectionType(
-                            static_cast<SceneCamera::ProjectionType>(cc["ProjectionType"].get<int>()));
-
-                    // Perspective params
-                    if (cc.contains("PerspectiveFOV"))
-                        camera.Camera.SetPerspectiveFOV(cc["PerspectiveFOV"].get<float>());
-                    if (cc.contains("PerspectiveNear"))
-                        camera.Camera.SetPerspectiveNearClip(cc["PerspectiveNear"].get<float>());
-                    if (cc.contains("PerspectiveFar"))
-                        camera.Camera.SetPerspectiveFarClip(cc["PerspectiveFar"].get<float>());
-
-                    // Orthographic params
-                    if (cc.contains("OrthographicSize"))
-                        camera.Camera.SetOrthographicSize(cc["OrthographicSize"].get<float>());
-                    if (cc.contains("OrthographicNear"))
-                        camera.Camera.SetOrthographicNearClip(cc["OrthographicNear"].get<float>());
-                    if (cc.contains("OrthographicFar"))
-                        camera.Camera.SetOrthographicFarClip(cc["OrthographicFar"].get<float>());
-                }
+                // Optional components using trait-based deserialization
+                DeserializeComponentIfPresent<SpriteRendererComponent>(m_Scene, entity, entityJson);
+                DeserializeComponentIfPresent<TilemapComponent>(m_Scene, entity, entityJson);
+                DeserializeComponentIfPresent<CameraComponent>(m_Scene, entity, entityJson);
             }
         }
 

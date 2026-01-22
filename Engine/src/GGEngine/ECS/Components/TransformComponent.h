@@ -1,6 +1,7 @@
 #pragma once
 
 #include "GGEngine/Renderer/Camera.h"
+#include "GGEngine/Core/Math.h"
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -24,9 +25,8 @@ namespace GGEngine {
         // Native Mat4 version for camera view matrix computation
         Mat4 GetMat4() const
         {
-            float rotationRadians = Rotation * 3.14159265359f / 180.0f;
             return Mat4::Translate(Position[0], Position[1], Position[2])
-                 * Mat4::RotateZ(rotationRadians)
+                 * Mat4::RotateZ(Math::ToRadians(Rotation))
                  * Mat4::Scale(Scale[0], Scale[1], 1.0f);
         }
     };

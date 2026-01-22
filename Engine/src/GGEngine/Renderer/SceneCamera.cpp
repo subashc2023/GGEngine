@@ -1,5 +1,6 @@
 #include "ggpch.h"
 #include "SceneCamera.h"
+#include "GGEngine/Core/Math.h"
 
 namespace GGEngine {
 
@@ -43,7 +44,7 @@ namespace GGEngine {
     {
         if (m_ProjectionType == ProjectionType::Perspective)
         {
-            float fovRadians = m_PerspectiveFOV * 3.14159265359f / 180.0f;
+            float fovRadians = Math::ToRadians(m_PerspectiveFOV);
             m_Projection = Mat4::Perspective(fovRadians, m_AspectRatio,
                                               m_PerspectiveNear, m_PerspectiveFar);
         }

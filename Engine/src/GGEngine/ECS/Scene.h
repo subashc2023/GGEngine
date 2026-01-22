@@ -82,6 +82,13 @@ namespace GGEngine {
         void SetName(const std::string& name) { m_Name = name; }
 
     private:
+        // Allocate or reuse an entity slot, returns (index, generation)
+        std::pair<Entity, uint32_t> AllocateEntitySlot();
+
+        // Internal rendering helpers (shared between OnRender and OnRenderRuntime)
+        void RenderTilemaps();
+        void RenderSprites();
+
         // Get storage for component type
         template<typename T>
         ComponentStorage<T>& GetStorage();

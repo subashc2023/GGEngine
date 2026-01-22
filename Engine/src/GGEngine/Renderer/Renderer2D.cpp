@@ -694,6 +694,26 @@ namespace GGEngine {
                         tintR, tintG, tintB, tintA, rotationRadians, 1.0f, subTexture->GetTexCoords());
     }
 
+    // Raw UV quads (no allocation - for performance-critical paths)
+    void Renderer2D::DrawQuad(float x, float y, float z, float width, float height,
+                             const Texture* texture,
+                             const float texCoords[4][2],
+                             float tintR, float tintG, float tintB, float tintA)
+    {
+        DrawQuadInternal(x, y, z, width, height, texture,
+                        tintR, tintG, tintB, tintA, 0.0f, 1.0f, &texCoords[0][0]);
+    }
+
+    void Renderer2D::DrawRotatedQuad(float x, float y, float z, float width, float height,
+                                    float rotationRadians,
+                                    const Texture* texture,
+                                    const float texCoords[4][2],
+                                    float tintR, float tintG, float tintB, float tintA)
+    {
+        DrawQuadInternal(x, y, z, width, height, texture,
+                        tintR, tintG, tintB, tintA, rotationRadians, 1.0f, &texCoords[0][0]);
+    }
+
     // Internal helper for matrix-based quad rendering
     static void DrawQuadWithMatrix(const glm::mat4& transform,
                                    const Texture* texture, float r, float g, float b, float a,
@@ -805,6 +825,21 @@ namespace GGEngine {
     {
         DrawQuadWithMatrix(transform, subTexture->GetTexture(),
                           tintR, tintG, tintB, tintA, 1.0f, subTexture->GetTexCoords());
+    }
+
+    // Unified API using QuadSpec
+    void Renderer2D::DrawQuad(const QuadSpec& spec)
+    {
+        const float* texCoordsPtr = spec.texCoords ? &spec.texCoords[0][0] : nullptr;
+        DrawQuadInternal(
+            spec.x, spec.y, spec.z,
+            spec.width, spec.height,
+            spec.texture,
+            spec.color[0], spec.color[1], spec.color[2], spec.color[3],
+            spec.rotation,
+            spec.tilingFactor,
+            texCoordsPtr
+        );
     }
 
     // Statistics

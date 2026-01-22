@@ -91,7 +91,7 @@ void ExamplesLayer::OnUpdate(GGEngine::Timestep ts)
     // Update current example
     if (m_CurrentExample)
     {
-        m_CurrentExample->OnUpdate(ts);
+        m_CurrentExample->OnUpdate(ts, m_CameraController.GetCamera());
     }
 
     // Render current example

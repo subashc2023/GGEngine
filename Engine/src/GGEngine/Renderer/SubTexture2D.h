@@ -27,6 +27,14 @@ namespace GGEngine {
                                                  float cellWidth, float cellHeight,
                                                  float spriteSizeX = 1.0f, float spriteSizeY = 1.0f);
 
+        // Calculate UV coordinates from grid position without allocating (for per-frame rendering)
+        // Writes 4 UV pairs to outTexCoords: [BL, BR, TR, TL]
+        static void CalculateGridUVs(const Texture* texture,
+                                     uint32_t cellX, uint32_t cellY,
+                                     float cellWidth, float cellHeight,
+                                     float spriteSizeX, float spriteSizeY,
+                                     float outTexCoords[4][2]);
+
         // Accessors
         const Texture* GetTexture() const { return m_Texture; }
 

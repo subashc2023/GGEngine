@@ -1,6 +1,7 @@
 #include "Renderer2DBasicsExample.h"
 #include "GGEngine/Renderer/Renderer2D.h"
 #include "GGEngine/ECS/Components/TransformComponent.h"
+#include "GGEngine/Core/Math.h"
 
 #include <imgui.h>
 #include <cmath>
@@ -16,7 +17,7 @@ void Renderer2DBasicsExample::OnAttach()
     m_Time = 0.0f;
 }
 
-void Renderer2DBasicsExample::OnUpdate(GGEngine::Timestep ts)
+void Renderer2DBasicsExample::OnUpdate(GGEngine::Timestep ts, const GGEngine::Camera& /*camera*/)
 {
     m_Time += ts;
 
@@ -66,7 +67,7 @@ void Renderer2DBasicsExample::OnRender(const GGEngine::Camera& camera)
             // Rotated quad using DrawRotatedQuad
             Renderer2D::DrawRotatedQuad(
                 0.0f, -2.0f, 1.0f, 1.0f,
-                m_QuadRotation * 3.14159f / 180.0f,  // Convert to radians
+                GGEngine::Math::ToRadians(m_QuadRotation),
                 0.8f, 0.8f, 0.2f);
 
             break;
@@ -119,8 +120,8 @@ void Renderer2DBasicsExample::OnRender(const GGEngine::Camera& camera)
                 TransformComponent t;
                 float angle = (360.0f / 8.0f) * i + m_Time * 30.0f;
                 float radius = 2.5f;
-                t.Position[0] = std::cos(angle * 3.14159f / 180.0f) * radius;
-                t.Position[1] = std::sin(angle * 3.14159f / 180.0f) * radius;
+                t.Position[0] = std::cos(GGEngine::Math::ToRadians(angle)) * radius;
+                t.Position[1] = std::sin(GGEngine::Math::ToRadians(angle)) * radius;
                 t.Rotation = angle;
                 t.Scale[0] = 0.5f;
                 t.Scale[1] = 0.5f;

@@ -13,7 +13,7 @@ public:
     Renderer2DBasicsExample();
 
     void OnAttach() override;
-    void OnUpdate(GGEngine::Timestep ts) override;
+    void OnUpdate(GGEngine::Timestep ts, const GGEngine::Camera& camera) override;
     void OnRender(const GGEngine::Camera& camera) override;
     void OnImGuiRender() override;
 

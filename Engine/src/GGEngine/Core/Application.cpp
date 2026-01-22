@@ -20,8 +20,6 @@
 
 namespace GGEngine {
 
-#define BIND_EVENT_FN(x) std::bind(&Application::x, this, std::placeholders::_1)
-
     Application* Application::s_Instance = nullptr;
 
     Application::Application()
@@ -30,7 +28,7 @@ namespace GGEngine {
         s_Instance = this;
 
         m_Window = Scope<Window>(Window::Create());
-        m_Window->SetEventCallback(BIND_EVENT_FN(OnEvent));
+        m_Window->SetEventCallback([this](Event& e) { OnEvent(e); });
 
         VulkanContext::Get().Init(static_cast<GLFWwindow*>(m_Window->GetNativeWindow()));
 
@@ -71,7 +69,7 @@ namespace GGEngine {
 
         // Shutdown asset system before Vulkan (assets may hold GPU resources)
         // Materials depend on shaders, so shut down materials first
-        MaterialLibrary::Get().Shutdown();
+        m_MaterialLibrary.Shutdown();
         TextureLibrary::Get().Shutdown();
         ShaderLibrary::Get().Shutdown();
         AssetManager::Get().Shutdown();
@@ -103,8 +101,8 @@ namespace GGEngine {
     {
         GG_PROFILE_FUNCTION();
         EventDispatcher dispatcher(e);
-        dispatcher.Dispatch<WindowCloseEvent>(BIND_EVENT_FN(OnWindowClose));
-        dispatcher.Dispatch<WindowResizeEvent>(BIND_EVENT_FN(OnWindowResize));
+        dispatcher.Dispatch<WindowCloseEvent>([this](WindowCloseEvent& e) { return OnWindowClose(e); });
+        dispatcher.Dispatch<WindowResizeEvent>([this](WindowResizeEvent& e) { return OnWindowResize(e); });
 
         for (auto it = m_LayerStack.end(); it != m_LayerStack.begin(); )
         {

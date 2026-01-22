@@ -4,12 +4,6 @@
 
 namespace GGEngine {
 
-    MaterialLibrary& MaterialLibrary::Get()
-    {
-        static MaterialLibrary instance;
-        return instance;
-    }
-
     void MaterialLibrary::Init()
     {
         GG_CORE_TRACE("MaterialLibrary initialized");

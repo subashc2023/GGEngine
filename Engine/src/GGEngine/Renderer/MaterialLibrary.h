@@ -1,20 +1,26 @@
 #pragma once
 
 #include "GGEngine/Core/Core.h"
+#include "Material.h"
 
 #include <string>
 #include <unordered_map>
 
 namespace GGEngine {
 
-    class Material;
     struct MaterialSpecification;
 
-    // Singleton registry for named materials
+    // Registry for named materials
+    // Owned by Application - access via Application::Get().GetMaterialLibrary()
     class GG_API MaterialLibrary
     {
     public:
-        static MaterialLibrary& Get();
+        MaterialLibrary() = default;
+        ~MaterialLibrary() = default;
+
+        // Non-copyable
+        MaterialLibrary(const MaterialLibrary&) = delete;
+        MaterialLibrary& operator=(const MaterialLibrary&) = delete;
 
         void Init();
         void Shutdown();
@@ -36,11 +42,6 @@ namespace GGEngine {
         void Clear();
 
     private:
-        MaterialLibrary() = default;
-        ~MaterialLibrary() = default;
-        MaterialLibrary(const MaterialLibrary&) = delete;
-        MaterialLibrary& operator=(const MaterialLibrary&) = delete;
-
         std::unordered_map<std::string, Scope<Material>> m_Materials;
     };
 

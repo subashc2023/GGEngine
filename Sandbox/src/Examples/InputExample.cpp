@@ -22,7 +22,7 @@ void InputExample::LogEvent(const std::string& msg)
     m_LogIndex = (m_LogIndex + 1) % MaxLogEntries;
 }
 
-void InputExample::OnUpdate(GGEngine::Timestep ts)
+void InputExample::OnUpdate(GGEngine::Timestep ts, const GGEngine::Camera& camera)
 {
     using namespace GGEngine;
 
@@ -42,13 +42,20 @@ void InputExample::OnUpdate(GGEngine::Timestep ts)
     auto [mouseX, mouseY] = Input::GetMousePosition();
     auto& window = Application::Get().GetWindow();
 
-    // Convert to normalized device coordinates (-1 to 1)
-    float ndcX = (mouseX / window.GetWidth()) * 2.0f - 1.0f;
-    float ndcY = 1.0f - (mouseY / window.GetHeight()) * 2.0f;
+    // Get camera view bounds and position
+    float orthoWidth = camera.GetOrthoWidth();
+    float orthoHeight = camera.GetOrthoHeight();
+    float cameraX = camera.GetPositionX();
+    float cameraY = camera.GetPositionY();
 
-    // Simple world coords (assuming 5 unit view)
-    m_MouseWorldX = ndcX * 5.0f;
-    m_MouseWorldY = ndcY * 3.0f;
+    // Convert screen coordinates to world coordinates
+    // Screen coords: (0,0) = top-left, (width, height) = bottom-right
+    // World coords: centered at camera position
+    float normalizedX = mouseX / window.GetWidth();
+    float normalizedY = mouseY / window.GetHeight();
+
+    m_MouseWorldX = (normalizedX - 0.5f) * orthoWidth + cameraX;
+    m_MouseWorldY = (0.5f - normalizedY) * orthoHeight + cameraY;
 
     m_LeftMouseDown = Input::IsMouseButtonPressed(MouseCode::Left);
     m_RightMouseDown = Input::IsMouseButtonPressed(MouseCode::Right);

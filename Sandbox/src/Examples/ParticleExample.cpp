@@ -3,6 +3,7 @@
 #include "GGEngine/Core/Input.h"
 #include "GGEngine/Core/KeyCodes.h"
 #include "GGEngine/Core/MouseButtonCodes.h"
+#include "GGEngine/Core/Application.h"
 #include "GGEngine/ParticleSystem/Random.h"
 
 #include <imgui.h>
@@ -107,7 +108,7 @@ void ParticleExample::SetPreset(int preset)
     }
 }
 
-void ParticleExample::OnUpdate(GGEngine::Timestep ts)
+void ParticleExample::OnUpdate(GGEngine::Timestep ts, const GGEngine::Camera& camera)
 {
     using namespace GGEngine;
 
@@ -115,9 +116,22 @@ void ParticleExample::OnUpdate(GGEngine::Timestep ts)
     if (Input::IsMouseButtonPressed(MouseCode::Left))
     {
         auto [mouseX, mouseY] = Input::GetMousePosition();
-        // Simple screen to world (approximate)
-        m_EmitterPosition[0] = (mouseX / 1280.0f) * 10.0f - 5.0f;
-        m_EmitterPosition[1] = (1.0f - mouseY / 720.0f) * 6.0f - 3.0f;
+        auto& window = Application::Get().GetWindow();
+
+        // Get camera view bounds and position
+        float orthoWidth = camera.GetOrthoWidth();
+        float orthoHeight = camera.GetOrthoHeight();
+        float cameraX = camera.GetPositionX();
+        float cameraY = camera.GetPositionY();
+
+        // Convert screen coordinates to world coordinates
+        // Screen coords: (0,0) = top-left, (width, height) = bottom-right
+        // World coords: centered at camera position
+        float normalizedX = mouseX / window.GetWidth();
+        float normalizedY = mouseY / window.GetHeight();
+
+        m_EmitterPosition[0] = (normalizedX - 0.5f) * orthoWidth + cameraX;
+        m_EmitterPosition[1] = (0.5f - normalizedY) * orthoHeight + cameraY;
     }
 
     // Emit particles

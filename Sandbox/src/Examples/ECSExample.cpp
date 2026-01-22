@@ -82,7 +82,7 @@ void ECSExample::DestroySelectedEntity()
     }
 }
 
-void ECSExample::OnUpdate(GGEngine::Timestep ts)
+void ECSExample::OnUpdate(GGEngine::Timestep ts, const GGEngine::Camera& /*camera*/)
 {
     // Could add entity movement/animation here
     m_Scene->OnUpdate(ts);

@@ -17,7 +17,7 @@ public:
 
     virtual void OnAttach() {}
     virtual void OnDetach() {}
-    virtual void OnUpdate(GGEngine::Timestep ts) {}
+    virtual void OnUpdate(GGEngine::Timestep ts, const GGEngine::Camera& camera) {}
     virtual void OnRender(const GGEngine::Camera& camera) {}
     virtual void OnImGuiRender() {}
     virtual void OnEvent(GGEngine::Event& event) {}

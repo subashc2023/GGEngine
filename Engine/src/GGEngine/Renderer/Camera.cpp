@@ -1,15 +1,14 @@
 #include "ggpch.h"
 #include "Camera.h"
 #include "GGEngine/Core/Profiler.h"
+#include "GGEngine/Core/Math.h"
 
 namespace GGEngine {
-
-    constexpr float PI = 3.14159265358979323846f;
 
     void Camera::SetPerspective(float fovDegrees, float aspect, float nearPlane, float farPlane)
     {
         m_IsOrthographic = false;
-        m_FovRadians = fovDegrees * PI / 180.0f;
+        m_FovRadians = Math::ToRadians(fovDegrees);
         m_Aspect = aspect;
         m_Near = nearPlane;
         m_Far = farPlane;
@@ -116,7 +115,7 @@ namespace GGEngine {
         m_Yaw = yaw;
 
         // Clamp pitch to avoid gimbal lock
-        constexpr float maxPitch = PI / 2.0f - 0.01f;
+        constexpr float maxPitch = Math::HalfPi - 0.01f;
         if (m_Pitch > maxPitch) m_Pitch = maxPitch;
         if (m_Pitch < -maxPitch) m_Pitch = -maxPitch;
 

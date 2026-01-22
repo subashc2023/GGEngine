@@ -65,7 +65,7 @@ void ECSCameraExample::OnDetach()
     m_Scene.reset();
 }
 
-void ECSCameraExample::OnUpdate(GGEngine::Timestep ts)
+void ECSCameraExample::OnUpdate(GGEngine::Timestep ts, const GGEngine::Camera& /*camera*/)
 {
     // Update camera primary flag based on toggle
     auto* cam1 = m_Scene->GetComponent<GGEngine::CameraComponent>(m_CameraEntity);

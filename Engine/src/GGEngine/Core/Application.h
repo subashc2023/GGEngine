@@ -6,6 +6,7 @@
 #include "LayerStack.h"
 #include "GGEngine/Events/Event.h"
 #include "GGEngine/Events/ApplicationEvent.h"
+#include "GGEngine/Renderer/MaterialLibrary.h"
 
 namespace GGEngine {
 
@@ -26,6 +27,7 @@ namespace GGEngine {
 
         inline Window& GetWindow() { return *m_Window; }
         inline ImGuiLayer* GetImGuiLayer() { return m_ImGuiLayer; }
+        inline MaterialLibrary& GetMaterialLibrary() { return m_MaterialLibrary; }
 
         inline static Application& Get() { return *s_Instance; }
     private:
@@ -38,6 +40,9 @@ namespace GGEngine {
         bool m_Minimized = false;
         LayerStack m_LayerStack;
         float m_LastFrameTime = 0.0f;
+
+        // Libraries owned by Application (access via Get*Library() methods)
+        MaterialLibrary m_MaterialLibrary;
 
         static Application* s_Instance;
     };

@@ -24,6 +24,7 @@
 
 #define BIT(x) (1 << x)
 
+// DEPRECATED: Use lambdas instead: [this](auto& e) { return OnEvent(e); }
 #define GG_BIND_EVENT_FN(fn) std::bind(&fn, this, std::placeholders::_1)
 
 namespace GGEngine {

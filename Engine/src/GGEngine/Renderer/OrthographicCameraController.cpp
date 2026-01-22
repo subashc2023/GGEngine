@@ -3,6 +3,7 @@
 #include "GGEngine/Core/Input.h"
 #include "GGEngine/Core/KeyCodes.h"
 #include "GGEngine/Core/MouseButtonCodes.h"
+#include "GGEngine/Core/Application.h"
 
 namespace GGEngine {
 
@@ -56,9 +57,13 @@ namespace GGEngine {
                 m_LastMouseX = mouseX;
                 m_LastMouseY = mouseY;
 
-                // Pan speed scales with zoom level
-                float panSpeed = 0.005f * m_ZoomLevel;
-                m_Camera.Translate(-dx * panSpeed, dy * panSpeed, 0.0f);
+                // Calculate pan speed based on world units per pixel
+                // This makes dragging feel 1:1 with the scene
+                auto& window = Application::Get().GetWindow();
+                float worldUnitsPerPixelX = m_Bounds.GetWidth() / static_cast<float>(window.GetWidth());
+                float worldUnitsPerPixelY = m_Bounds.GetHeight() / static_cast<float>(window.GetHeight());
+
+                m_Camera.Translate(-dx * worldUnitsPerPixelX, dy * worldUnitsPerPixelY, 0.0f);
             }
         }
         else
@@ -72,7 +77,7 @@ namespace GGEngine {
     void OrthographicCameraController::OnEvent(Event& e)
     {
         EventDispatcher dispatcher(e);
-        dispatcher.Dispatch<MouseScrolledEvent>(GG_BIND_EVENT_FN(OrthographicCameraController::OnMouseScrolled));
+        dispatcher.Dispatch<MouseScrolledEvent>([this](MouseScrolledEvent& e) { return OnMouseScrolled(e); });
     }
 
     void OrthographicCameraController::SetZoomLevel(float level)

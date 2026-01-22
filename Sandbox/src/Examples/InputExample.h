@@ -12,7 +12,7 @@ class InputExample : public Example
 public:
     InputExample();
 
-    void OnUpdate(GGEngine::Timestep ts) override;
+    void OnUpdate(GGEngine::Timestep ts, const GGEngine::Camera& camera) override;
     void OnRender(const GGEngine::Camera& camera) override;
     void OnImGuiRender() override;
     void OnEvent(GGEngine::Event& event) override;

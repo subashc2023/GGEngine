@@ -4,6 +4,7 @@
 #include "GGEngine/Renderer/SubTexture2D.h"
 #include "GGEngine/Renderer/SceneCamera.h"
 #include "GGEngine/Asset/TextureLibrary.h"
+#include "GGEngine/Core/Math.h"
 
 #include <algorithm>
 
@@ -14,7 +15,7 @@ namespace GGEngine {
     {
     }
 
-    EntityID Scene::CreateEntity(const std::string& name)
+    std::pair<Entity, uint32_t> Scene::AllocateEntitySlot()
     {
         Entity index;
         uint32_t generation;
@@ -35,8 +36,14 @@ namespace GGEngine {
         }
 
         m_Entities.push_back(index);
+        return { index, generation };
+    }
 
-        // Add required TagComponent
+    EntityID Scene::CreateEntity(const std::string& name)
+    {
+        auto [index, generation] = AllocateEntitySlot();
+
+        // Add required TagComponent with auto-generated GUID
         TagComponent tag(name);
         m_Tags.Add(index, tag);
         m_GUIDToEntity[tag.ID] = index;
@@ -50,25 +57,7 @@ namespace GGEngine {
 
     EntityID Scene::CreateEntityWithGUID(const std::string& name, const GUID& guid)
     {
-        Entity index;
-        uint32_t generation;
-
-        if (!m_FreeList.empty())
-        {
-            // Reuse recycled slot
-            index = m_FreeList.back();
-            m_FreeList.pop_back();
-            generation = m_Generations[index];
-        }
-        else
-        {
-            // Allocate new slot
-            index = static_cast<Entity>(m_Generations.size());
-            m_Generations.push_back(1);
-            generation = 1;
-        }
-
-        m_Entities.push_back(index);
+        auto [index, generation] = AllocateEntitySlot();
 
         // Add TagComponent with provided GUID
         TagComponent tag;
@@ -119,11 +108,12 @@ namespace GGEngine {
         m_Tilemaps.Remove(index);
         m_Cameras.Remove(index);
 
-        // Remove from active entities list
+        // Remove from active entities list using swap-and-pop (O(1) removal instead of O(n))
         auto it = std::find(m_Entities.begin(), m_Entities.end(), index);
         if (it != m_Entities.end())
         {
-            m_Entities.erase(it);
+            *it = m_Entities.back();
+            m_Entities.pop_back();
         }
 
         // Increment generation and add to free list
@@ -175,15 +165,10 @@ namespace GGEngine {
         // Reserved for future systems (physics, scripting, etc.)
     }
 
-    void Scene::OnRender(const Camera& camera, RHIRenderPassHandle renderPass,
-                         RHICommandBufferHandle cmd, uint32_t width, uint32_t height)
+    void Scene::RenderTilemaps()
     {
-        Renderer2D::ResetStats();
-        Renderer2D::BeginScene(camera, renderPass, cmd, width, height);
-
         auto& textureLib = TextureLibrary::Get();
 
-        // Render all tilemaps first (background layer)
         for (size_t i = 0; i < m_Tilemaps.Size(); i++)
         {
             Entity entity = m_Tilemaps.GetEntity(i);
@@ -216,11 +201,14 @@ namespace GGEngine {
                     uint32_t cellX, cellY;
                     tilemap.IndexToCell(tileIndex, cellX, cellY);
 
-                    // Create sub-texture for this tile
-                    auto subTexture = SubTexture2D::CreateFromGrid(
+                    // Calculate UV coordinates on stack (no heap allocation)
+                    float texCoords[4][2];
+                    SubTexture2D::CalculateGridUVs(
                         texture,
                         cellX, cellY,
-                        tilemap.AtlasCellWidth, tilemap.AtlasCellHeight
+                        tilemap.AtlasCellWidth, tilemap.AtlasCellHeight,
+                        1.0f, 1.0f,
+                        texCoords
                     );
 
                     // Calculate world position for this tile (center of tile)
@@ -230,14 +218,19 @@ namespace GGEngine {
                     Renderer2D::DrawQuad(
                         worldX, worldY, baseZ,
                         tilemap.TileWidth, tilemap.TileHeight,
-                        subTexture.get(),
+                        texture,
+                        texCoords,
                         tilemap.Color[0], tilemap.Color[1], tilemap.Color[2], tilemap.Color[3]
                     );
                 }
             }
         }
+    }
 
-        // Render all entities with SpriteRenderer component
+    void Scene::RenderSprites()
+    {
+        auto& textureLib = TextureLibrary::Get();
+
         for (size_t i = 0; i < m_Sprites.Size(); i++)
         {
             Entity entity = m_Sprites.GetEntity(i);
@@ -248,7 +241,7 @@ namespace GGEngine {
 
             const SpriteRendererComponent& sprite = m_Sprites.Data()[i];
 
-            float rotationRadians = transform->Rotation * 3.14159265359f / 180.0f;
+            float rotationRadians = Math::ToRadians(transform->Rotation);
 
             // Resolve texture from library
             Texture* texture = nullptr;
@@ -261,19 +254,22 @@ namespace GGEngine {
             {
                 if (sprite.UseAtlas)
                 {
-                    // Spritesheet/Atlas rendering - create SubTexture2D for the specific cell
-                    auto subTexture = SubTexture2D::CreateFromGrid(
+                    // Spritesheet/Atlas rendering - calculate UVs on stack (no heap allocation)
+                    float texCoords[4][2];
+                    SubTexture2D::CalculateGridUVs(
                         texture,
                         sprite.AtlasCellX, sprite.AtlasCellY,
                         sprite.AtlasCellWidth, sprite.AtlasCellHeight,
-                        sprite.AtlasSpriteWidth, sprite.AtlasSpriteHeight
+                        sprite.AtlasSpriteWidth, sprite.AtlasSpriteHeight,
+                        texCoords
                     );
 
                     Renderer2D::DrawRotatedQuad(
                         transform->Position[0], transform->Position[1], transform->Position[2],
                         transform->Scale[0], transform->Scale[1],
                         rotationRadians,
-                        subTexture.get(),
+                        texture,
+                        texCoords,
                         sprite.Color[0], sprite.Color[1], sprite.Color[2], sprite.Color[3]
                     );
                 }
@@ -301,6 +297,16 @@ namespace GGEngine {
                 );
             }
         }
+    }
+
+    void Scene::OnRender(const Camera& camera, RHIRenderPassHandle renderPass,
+                         RHICommandBufferHandle cmd, uint32_t width, uint32_t height)
+    {
+        Renderer2D::ResetStats();
+        Renderer2D::BeginScene(camera, renderPass, cmd, width, height);
+
+        RenderTilemaps();
+        RenderSprites();
 
         Renderer2D::EndScene();
     }
@@ -365,126 +371,8 @@ namespace GGEngine {
         Renderer2D::ResetStats();
         Renderer2D::BeginScene(*mainCamera, cameraTransform, renderPass, cmd, width, height);
 
-        auto& textureLib = TextureLibrary::Get();
-
-        // Render all tilemaps first (background layer)
-        for (size_t i = 0; i < m_Tilemaps.Size(); i++)
-        {
-            Entity entity = m_Tilemaps.GetEntity(i);
-
-            const TransformComponent* transform = m_Transforms.Get(entity);
-            if (!transform) continue;
-
-            const TilemapComponent& tilemap = m_Tilemaps.Data()[i];
-
-            // Skip if no texture assigned
-            if (tilemap.TextureName.empty()) continue;
-
-            Texture* texture = textureLib.GetTexturePtr(tilemap.TextureName);
-            if (!texture) continue;
-
-            // Calculate base position (tilemap is centered on entity position)
-            float baseX = transform->Position[0] - (tilemap.Width * tilemap.TileWidth * 0.5f);
-            float baseY = transform->Position[1] - (tilemap.Height * tilemap.TileHeight * 0.5f);
-            float baseZ = transform->Position[2] + tilemap.ZOffset;
-
-            // Render each tile
-            for (uint32_t ty = 0; ty < tilemap.Height; ty++)
-            {
-                for (uint32_t tx = 0; tx < tilemap.Width; tx++)
-                {
-                    int32_t tileIndex = tilemap.GetTile(tx, ty);
-                    if (tileIndex < 0) continue;  // Skip empty tiles
-
-                    // Convert linear atlas index to cell coordinates
-                    uint32_t cellX, cellY;
-                    tilemap.IndexToCell(tileIndex, cellX, cellY);
-
-                    // Create sub-texture for this tile
-                    auto subTexture = SubTexture2D::CreateFromGrid(
-                        texture,
-                        cellX, cellY,
-                        tilemap.AtlasCellWidth, tilemap.AtlasCellHeight
-                    );
-
-                    // Calculate world position for this tile (center of tile)
-                    float worldX = baseX + tx * tilemap.TileWidth + tilemap.TileWidth * 0.5f;
-                    float worldY = baseY + ty * tilemap.TileHeight + tilemap.TileHeight * 0.5f;
-
-                    Renderer2D::DrawQuad(
-                        worldX, worldY, baseZ,
-                        tilemap.TileWidth, tilemap.TileHeight,
-                        subTexture.get(),
-                        tilemap.Color[0], tilemap.Color[1], tilemap.Color[2], tilemap.Color[3]
-                    );
-                }
-            }
-        }
-
-        // Render all entities with SpriteRenderer component
-        for (size_t i = 0; i < m_Sprites.Size(); i++)
-        {
-            Entity entity = m_Sprites.GetEntity(i);
-
-            // Get transform (should always exist)
-            const TransformComponent* transform = m_Transforms.Get(entity);
-            if (!transform) continue;
-
-            const SpriteRendererComponent& sprite = m_Sprites.Data()[i];
-
-            float rotationRadians = transform->Rotation * 3.14159265359f / 180.0f;
-
-            // Resolve texture from library
-            Texture* texture = nullptr;
-            if (!sprite.TextureName.empty())
-            {
-                texture = textureLib.GetTexturePtr(sprite.TextureName);
-            }
-
-            if (texture)
-            {
-                if (sprite.UseAtlas)
-                {
-                    // Spritesheet/Atlas rendering - create SubTexture2D for the specific cell
-                    auto subTexture = SubTexture2D::CreateFromGrid(
-                        texture,
-                        sprite.AtlasCellX, sprite.AtlasCellY,
-                        sprite.AtlasCellWidth, sprite.AtlasCellHeight,
-                        sprite.AtlasSpriteWidth, sprite.AtlasSpriteHeight
-                    );
-
-                    Renderer2D::DrawRotatedQuad(
-                        transform->Position[0], transform->Position[1], transform->Position[2],
-                        transform->Scale[0], transform->Scale[1],
-                        rotationRadians,
-                        subTexture.get(),
-                        sprite.Color[0], sprite.Color[1], sprite.Color[2], sprite.Color[3]
-                    );
-                }
-                else
-                {
-                    // Full texture rendering
-                    Renderer2D::DrawRotatedQuad(
-                        transform->Position[0], transform->Position[1], transform->Position[2],
-                        transform->Scale[0], transform->Scale[1],
-                        rotationRadians,
-                        texture,
-                        sprite.TilingFactor,
-                        sprite.Color[0], sprite.Color[1], sprite.Color[2], sprite.Color[3]
-                    );
-                }
-            }
-            else
-            {
-                // Colored quad (no texture)
-                Renderer2D::DrawRotatedQuad(
-                    transform->Position[0], transform->Position[1], transform->Position[2],
-                    transform->Scale[0], transform->Scale[1],
-                    rotationRadians,
-                    sprite.Color[0], sprite.Color[1], sprite.Color[2], sprite.Color[3]
-                );
-            }
-        }
+        RenderTilemaps();
+        RenderSprites();
 
         Renderer2D::EndScene();
     }
