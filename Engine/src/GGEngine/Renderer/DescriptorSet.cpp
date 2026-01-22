@@ -125,6 +125,11 @@ namespace GGEngine {
 
     void DescriptorSet::SetTexture(uint32_t binding, const Texture& texture)
     {
+        SetTextureAtIndex(binding, 0, texture);
+    }
+
+    void DescriptorSet::SetTextureAtIndex(uint32_t binding, uint32_t arrayIndex, const Texture& texture)
+    {
         auto device = VulkanContext::Get().GetDevice();
         auto& registry = VulkanResourceRegistry::Get();
 
@@ -139,7 +144,7 @@ namespace GGEngine {
         write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         write.dstSet = registry.GetDescriptorSet(m_Handle);
         write.dstBinding = binding;
-        write.dstArrayElement = 0;
+        write.dstArrayElement = arrayIndex;
         write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         write.descriptorCount = 1;
         write.pImageInfo = &imageInfo;

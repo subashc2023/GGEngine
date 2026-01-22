@@ -10,14 +10,17 @@ layout(location = 0) in vec3 aPosition;   // World-space position (CPU-transform
 layout(location = 1) in vec2 aTexCoord;
 layout(location = 2) in vec4 aColor;
 layout(location = 3) in float aTilingFactor;
+layout(location = 4) in float aTexIndex;  // Index into texture array (0-31)
 
 layout(location = 0) out vec2 vTexCoord;
 layout(location = 1) out vec4 vColor;
 layout(location = 2) out float vTilingFactor;
+layout(location = 3) out float vTexIndex;
 
 void main() {
     gl_Position = camera.viewProjection * vec4(aPosition, 1.0);
     vTexCoord = aTexCoord;
     vColor = aColor;
     vTilingFactor = aTilingFactor;
+    vTexIndex = aTexIndex;
 }

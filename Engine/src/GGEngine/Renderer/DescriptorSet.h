@@ -51,6 +51,7 @@ namespace GGEngine {
         // Update bindings
         void SetUniformBuffer(uint32_t binding, const UniformBuffer& buffer);
         void SetTexture(uint32_t binding, const Texture& texture);
+        void SetTextureAtIndex(uint32_t binding, uint32_t arrayIndex, const Texture& texture);
 
         // Bind to command buffer (RHI handles)
         void Bind(RHICommandBufferHandle cmd, RHIPipelineLayoutHandle pipelineLayout, uint32_t setIndex = 0) const;
