@@ -14,6 +14,15 @@
 #include "GGEngine/Asset/Shader.h"
 #include "GGEngine/Asset/ShaderLibrary.h"
 #include "GGEngine/Asset/Texture.h"
+#include "GGEngine/Asset/TextureLibrary.h"
+
+#include "GGEngine/ECS/Entity.h"
+#include "GGEngine/ECS/GUID.h"
+#include "GGEngine/ECS/Scene.h"
+#include "GGEngine/ECS/Components.h"
+#include "GGEngine/ECS/SceneSerializer.h"
+
+#include "GGEngine/Utils/FileDialogs.h"
 
 #include "GGEngine/Renderer/Pipeline.h"
 #include "GGEngine/Renderer/Material.h"

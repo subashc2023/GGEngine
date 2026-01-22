@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(GGEngine LANGUAGES CXX)
+project(GGEngine LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -126,7 +126,24 @@ set(ENGINE_SOURCES
     Engine/src/GGEngine/Asset/ShaderLibrary.cpp
     Engine/src/GGEngine/Asset/Texture.h
     Engine/src/GGEngine/Asset/Texture.cpp
+    Engine/src/GGEngine/Asset/TextureLibrary.h
+    Engine/src/GGEngine/Asset/TextureLibrary.cpp
     Engine/src/GGEngine/Asset/stb_image.cpp
+    Engine/src/GGEngine/ECS/Entity.h
+    Engine/src/GGEngine/ECS/GUID.h
+    Engine/src/GGEngine/ECS/GUID.cpp
+    Engine/src/GGEngine/ECS/ComponentStorage.h
+    Engine/src/GGEngine/ECS/Components.h
+    Engine/src/GGEngine/ECS/Components/TransformComponent.h
+    Engine/src/GGEngine/ECS/Components/SpriteRendererComponent.h
+    Engine/src/GGEngine/ECS/Components/TagComponent.h
+    Engine/src/GGEngine/ECS/Scene.h
+    Engine/src/GGEngine/ECS/Scene.cpp
+    Engine/src/GGEngine/ECS/SceneSerializer.h
+    Engine/src/GGEngine/ECS/SceneSerializer.cpp
+    Engine/src/GGEngine/Utils/FileDialogs.h
+    Engine/src/GGEngine/Utils/FileDialogs.cpp
+    Vendor/tinyfiledialogs/tinyfiledialogs.c
     Engine/src/Platform/Windows/WindowsWindow.h
     Engine/src/Platform/Windows/WindowsWindow.cpp
     Engine/src/Platform/Windows/WindowsInput.h
@@ -194,16 +211,21 @@ target_link_libraries(Engine PUBLIC Vulkan::Vulkan)
 
 # Windows-specific libraries
 if(WIN32)
-    target_link_libraries(Engine PRIVATE dwmapi)
+    target_link_libraries(Engine PRIVATE dwmapi comdlg32 ole32)
 endif()
 
 target_include_directories(Engine PUBLIC
     ${CMAKE_SOURCE_DIR}/Engine/src
     ${CMAKE_SOURCE_DIR}/Vendor/VulkanMemoryAllocator/include
     ${CMAKE_SOURCE_DIR}/Vendor/stb_image
+    ${CMAKE_SOURCE_DIR}/Vendor/nlohmann
+    ${CMAKE_SOURCE_DIR}/Vendor/tinyfiledialogs
 )
 
 target_precompile_headers(Engine PUBLIC Engine/src/ggpch.h)
+
+# Exclude tinyfiledialogs.c from precompiled headers (it's C, not C++)
+set_source_files_properties(Vendor/tinyfiledialogs/tinyfiledialogs.c PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 
 set_target_properties(Engine PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${BIN_ROOT}/Engine"

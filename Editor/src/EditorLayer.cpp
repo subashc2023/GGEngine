@@ -5,8 +5,13 @@
 #include "GGEngine/Core/Input.h"
 #include "GGEngine/Core/KeyCodes.h"
 #include "GGEngine/Asset/Texture.h"
+#include "GGEngine/Asset/TextureLibrary.h"
+#include "GGEngine/ECS/Components.h"
+#include "GGEngine/ECS/SceneSerializer.h"
+#include "GGEngine/Utils/FileDialogs.h"
 
 #include <imgui.h>
+#include <cstring>
 
 EditorLayer::EditorLayer()
     : Layer("EditorLayer"), m_CameraController(1280.0f / 720.0f, 1.0f, true)
@@ -20,18 +25,76 @@ void EditorLayer::OnAttach()
     spec.Height = 720;
     m_ViewportFramebuffer = GGEngine::CreateScope<GGEngine::Framebuffer>(spec);
 
-    GG_INFO("EditorLayer attached - using Renderer2D");
+    CreateDefaultScene();
+
+    GG_INFO("EditorLayer attached - using ECS Scene");
+}
+
+void EditorLayer::CreateDefaultScene()
+{
+    m_ActiveScene = GGEngine::CreateScope<GGEngine::Scene>("Demo Scene");
+
+    // Create grid of colored quads
+    const int gridSize = 10;
+    const float spacing = 0.11f;
+    const float quadSize = 0.1f;
+    const float offset = (gridSize - 1) * spacing * 0.5f;
+
+    for (int y = 0; y < gridSize; y++)
+    {
+        for (int x = 0; x < gridSize; x++)
+        {
+            char name[32];
+            snprintf(name, sizeof(name), "Grid[%d,%d]", x, y);
+            auto entity = m_ActiveScene->CreateEntity(name);
+
+            auto* transform = m_ActiveScene->GetComponent<GGEngine::TransformComponent>(entity);
+            transform->Position[0] = x * spacing - offset;
+            transform->Position[1] = y * spacing - offset;
+            transform->Scale[0] = quadSize;
+            transform->Scale[1] = quadSize;
+
+            auto& sprite = m_ActiveScene->AddComponent<GGEngine::SpriteRendererComponent>(entity);
+            sprite.Color[0] = static_cast<float>(x) / (gridSize - 1);
+            sprite.Color[1] = static_cast<float>(y) / (gridSize - 1);
+            sprite.Color[2] = 0.5f;
+            sprite.Color[3] = 1.0f;
+        }
+    }
+
+    // Create movable entity
+    {
+        auto entity = m_ActiveScene->CreateEntity("Player Quad");
+        auto& sprite = m_ActiveScene->AddComponent<GGEngine::SpriteRendererComponent>(entity);
+        sprite.Color[0] = 1.0f;
+        sprite.Color[1] = 1.0f;
+        sprite.Color[2] = 1.0f;
+        sprite.Color[3] = 1.0f;
+
+        m_SelectedEntity = entity;  // Select by default
+    }
+
+    // Create textured entity
+    {
+        auto entity = m_ActiveScene->CreateEntity("Textured Quad");
+        auto* transform = m_ActiveScene->GetComponent<GGEngine::TransformComponent>(entity);
+        transform->Position[0] = 1.5f;
+
+        auto& sprite = m_ActiveScene->AddComponent<GGEngine::SpriteRendererComponent>(entity);
+        sprite.TextureName = "Checkerboard";  // Use built-in checkerboard texture
+    }
 }
 
 void EditorLayer::OnDetach()
 {
+    m_ActiveScene.reset();
     m_ViewportFramebuffer.reset();
     GG_INFO("EditorLayer detached");
 }
 
 void EditorLayer::OnRenderOffscreen(GGEngine::Timestep ts)
 {
-    if (!m_ViewportFramebuffer)
+    if (!m_ViewportFramebuffer || !m_ActiveScene)
         return;
 
     // Handle pending resize before rendering
@@ -44,7 +107,6 @@ void EditorLayer::OnRenderOffscreen(GGEngine::Timestep ts)
         m_ViewportHeight = m_PendingViewportHeight;
         m_NeedsResize = false;
 
-        // Update camera aspect ratio
         m_CameraController.SetAspectRatio(m_ViewportWidth / m_ViewportHeight);
     }
 
@@ -54,55 +116,198 @@ void EditorLayer::OnRenderOffscreen(GGEngine::Timestep ts)
     if (cmd == VK_NULL_HANDLE)
         return;
 
-    // Begin offscreen render pass
     m_ViewportFramebuffer->BeginRenderPass(cmd);
 
-    // Begin Renderer2D scene with framebuffer's render pass
-    GGEngine::Renderer2D::ResetStats();
-    GGEngine::Renderer2D::BeginScene(
+    // Scene renders all entities with SpriteRenderer components
+    m_ActiveScene->OnRender(
         m_CameraController.GetCamera(),
         m_ViewportFramebuffer->GetRenderPass(),
         cmd,
         m_ViewportFramebuffer->GetWidth(),
         m_ViewportFramebuffer->GetHeight());
 
-    // Draw 10x10 grid of colored quads
-    const int gridSize = 10;
-    const float quadSize = 0.1f;
-    const float spacing = 0.11f;
-    const float offset = (gridSize - 1) * spacing * 0.5f;
+    m_ViewportFramebuffer->EndRenderPass(cmd);
+}
 
-    for (int y = 0; y < gridSize; y++)
+void EditorLayer::DrawSceneHierarchyPanel()
+{
+    ImGui::Begin("Scene Hierarchy");
+
+    if (m_ActiveScene)
     {
-        for (int x = 0; x < gridSize; x++)
+        for (GGEngine::Entity index : m_ActiveScene->GetAllEntities())
         {
-            float posX = x * spacing - offset;
-            float posY = y * spacing - offset;
+            GGEngine::EntityID entityId = m_ActiveScene->GetEntityID(index);
 
-            // Gradient color
-            float r = static_cast<float>(x) / (gridSize - 1);
-            float g = static_cast<float>(y) / (gridSize - 1);
-            float b = 0.5f;
+            const auto* tag = m_ActiveScene->GetComponent<GGEngine::TagComponent>(entityId);
+            if (!tag) continue;
 
-            GGEngine::Renderer2D::DrawQuad(posX, posY, quadSize, quadSize, r, g, b);
+            ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow |
+                                       ImGuiTreeNodeFlags_SpanAvailWidth |
+                                       ImGuiTreeNodeFlags_Leaf;
+
+            if (m_SelectedEntity == entityId)
+                flags |= ImGuiTreeNodeFlags_Selected;
+
+            bool opened = ImGui::TreeNodeEx(
+                reinterpret_cast<void*>(static_cast<uint64_t>(index)),
+                flags, "%s", tag->Name.c_str());
+
+            if (ImGui::IsItemClicked())
+            {
+                m_SelectedEntity = entityId;
+            }
+
+            if (opened)
+            {
+                ImGui::TreePop();
+            }
+        }
+
+        // Right-click context menu for creating entities
+        if (ImGui::BeginPopupContextWindow(nullptr, ImGuiPopupFlags_NoOpenOverItems))
+        {
+            if (ImGui::MenuItem("Create Empty Entity"))
+            {
+                m_SelectedEntity = m_ActiveScene->CreateEntity("New Entity");
+            }
+            if (ImGui::MenuItem("Create Sprite"))
+            {
+                auto entity = m_ActiveScene->CreateEntity("Sprite");
+                m_ActiveScene->AddComponent<GGEngine::SpriteRendererComponent>(entity);
+                m_SelectedEntity = entity;
+            }
+            ImGui::EndPopup();
         }
     }
 
-    // Draw movable/scalable quad (z=0.0f specified to avoid overload ambiguity)
-    float rotationRadians = m_Rotation * 3.14159265359f / 180.0f;
-    GGEngine::Renderer2D::DrawRotatedQuad(
-        m_Position[0], m_Position[1], 0.0f,
-        m_Scale[0], m_Scale[1],
-        rotationRadians,
-        m_Color[0], m_Color[1], m_Color[2], m_Color[3]);
+    ImGui::End();
+}
 
-    // Draw textured quad
-    GGEngine::Renderer2D::DrawQuad(1.5f, 0.0f, 1.0f, 1.0f,
-        GGEngine::Texture::GetFallbackPtr());
+void EditorLayer::DrawPropertiesPanel(GGEngine::Timestep ts)
+{
+    ImGui::Begin("Properties");
 
-    GGEngine::Renderer2D::EndScene();
+    if (m_ActiveScene && m_ActiveScene->IsEntityValid(m_SelectedEntity))
+    {
+        // Tag/Name editing
+        if (auto* tag = m_ActiveScene->GetComponent<GGEngine::TagComponent>(m_SelectedEntity))
+        {
+            char buffer[256];
+            std::strncpy(buffer, tag->Name.c_str(), sizeof(buffer) - 1);
+            buffer[sizeof(buffer) - 1] = '\0';
+            if (ImGui::InputText("##Name", buffer, sizeof(buffer)))
+            {
+                tag->Name = buffer;
+            }
 
-    m_ViewportFramebuffer->EndRenderPass(cmd);
+            // Show GUID (read-only)
+            ImGui::TextDisabled("GUID: %s", tag->ID.ToString().substr(0, 16).c_str());
+            ImGui::Separator();
+        }
+
+        // Transform component
+        if (m_ActiveScene->HasComponent<GGEngine::TransformComponent>(m_SelectedEntity))
+        {
+            if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen))
+            {
+                auto* transform = m_ActiveScene->GetComponent<GGEngine::TransformComponent>(m_SelectedEntity);
+
+                ImGui::DragFloat3("Position", transform->Position, 0.01f);
+                ImGui::DragFloat("Rotation", &transform->Rotation, 1.0f, -360.0f, 360.0f, "%.1f deg");
+                ImGui::DragFloat2("Scale", transform->Scale, 0.01f, 0.01f, 10.0f);
+            }
+        }
+
+        // SpriteRenderer component
+        if (m_ActiveScene->HasComponent<GGEngine::SpriteRendererComponent>(m_SelectedEntity))
+        {
+            if (ImGui::CollapsingHeader("Sprite Renderer", ImGuiTreeNodeFlags_DefaultOpen))
+            {
+                auto* sprite = m_ActiveScene->GetComponent<GGEngine::SpriteRendererComponent>(m_SelectedEntity);
+
+                ImGui::ColorEdit4("Color", sprite->Color);
+                ImGui::DragFloat("Tiling Factor", &sprite->TilingFactor, 0.1f, 0.0f, 100.0f);
+
+                // Texture picker dropdown
+                auto& textureLib = GGEngine::TextureLibrary::Get();
+                auto textureNames = textureLib.GetAllNames();
+
+                // Current texture display name
+                const char* currentTexture = sprite->TextureName.empty() ? "None" : sprite->TextureName.c_str();
+
+                if (ImGui::BeginCombo("Texture", currentTexture))
+                {
+                    // "None" option to clear texture
+                    bool isNoneSelected = sprite->TextureName.empty();
+                    if (ImGui::Selectable("None", isNoneSelected))
+                    {
+                        sprite->TextureName.clear();
+                    }
+                    if (isNoneSelected)
+                        ImGui::SetItemDefaultFocus();
+
+                    // List all available textures
+                    for (const auto& name : textureNames)
+                    {
+                        bool isSelected = (sprite->TextureName == name);
+                        if (ImGui::Selectable(name.c_str(), isSelected))
+                        {
+                            sprite->TextureName = name;
+                        }
+                        if (isSelected)
+                            ImGui::SetItemDefaultFocus();
+                    }
+
+                    ImGui::EndCombo();
+                }
+            }
+        }
+        else
+        {
+            // Add component button
+            if (ImGui::Button("Add Sprite Renderer"))
+            {
+                m_ActiveScene->AddComponent<GGEngine::SpriteRendererComponent>(m_SelectedEntity);
+            }
+        }
+
+        ImGui::Separator();
+
+        // Delete entity button
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f, 0.2f, 0.2f, 1.0f));
+        if (ImGui::Button("Delete Entity"))
+        {
+            m_ActiveScene->DestroyEntity(m_SelectedEntity);
+            m_SelectedEntity = GGEngine::InvalidEntityID;
+        }
+        ImGui::PopStyleColor();
+    }
+    else
+    {
+        ImGui::Text("No entity selected");
+    }
+
+    ImGui::Separator();
+
+    // Stats section
+    if (ImGui::CollapsingHeader("Stats", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        auto stats = GGEngine::Renderer2D::GetStats();
+        ImGui::Text("Renderer2D Stats:");
+        ImGui::Text("  Draw Calls: %d", stats.DrawCalls);
+        ImGui::Text("  Quads: %d", stats.QuadCount);
+        ImGui::Separator();
+        if (m_ActiveScene)
+        {
+            ImGui::Text("Scene: %s", m_ActiveScene->GetName().c_str());
+            ImGui::Text("Entities: %zu", m_ActiveScene->GetEntityCount());
+        }
+        ImGui::Separator();
+        GGEngine::DebugUI::ShowStatsContent(ts);
+    }
+
+    ImGui::End();
 }
 
 void EditorLayer::OnUpdate(GGEngine::Timestep ts)
@@ -141,6 +346,16 @@ void EditorLayer::OnUpdate(GGEngine::Timestep ts)
     {
         if (ImGui::BeginMenu("File"))
         {
+            if (ImGui::MenuItem("New Scene", "Ctrl+N"))
+                NewScene();
+            if (ImGui::MenuItem("Open Scene...", "Ctrl+O"))
+                OpenScene();
+            ImGui::Separator();
+            if (ImGui::MenuItem("Save Scene", "Ctrl+S"))
+                SaveScene();
+            if (ImGui::MenuItem("Save Scene As...", "Ctrl+Shift+S"))
+                SaveSceneAs();
+            ImGui::Separator();
             if (ImGui::MenuItem("Exit"))
             {
                 // Could dispatch a window close event here
@@ -149,6 +364,10 @@ void EditorLayer::OnUpdate(GGEngine::Timestep ts)
         }
         ImGui::EndMenuBar();
     }
+
+    // Draw panels
+    DrawSceneHierarchyPanel();
+    DrawPropertiesPanel(ts);
 
     // Viewport window
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
@@ -160,7 +379,6 @@ void EditorLayer::OnUpdate(GGEngine::Timestep ts)
     ImVec2 viewportPanelSize = ImGui::GetContentRegionAvail();
     if (m_ViewportWidth != viewportPanelSize.x || m_ViewportHeight != viewportPanelSize.y)
     {
-        // Defer resize to next frame's OnRenderOffscreen
         m_PendingViewportWidth = viewportPanelSize.x;
         m_PendingViewportHeight = viewportPanelSize.y;
         m_NeedsResize = true;
@@ -184,63 +402,30 @@ void EditorLayer::OnUpdate(GGEngine::Timestep ts)
     {
         m_CameraController.OnUpdate(ts);
 
-        // IJKL to move the quad
-        float velocity = m_MoveSpeed * ts;
-        if (GGEngine::Input::IsKeyPressed(GG_KEY_I))
-            m_Position[1] += velocity;
-        if (GGEngine::Input::IsKeyPressed(GG_KEY_K))
-            m_Position[1] -= velocity;
-        if (GGEngine::Input::IsKeyPressed(GG_KEY_J))
-            m_Position[0] -= velocity;
-        if (GGEngine::Input::IsKeyPressed(GG_KEY_L))
-            m_Position[0] += velocity;
+        // IJKL to move the selected entity
+        if (m_ActiveScene && m_ActiveScene->IsEntityValid(m_SelectedEntity))
+        {
+            auto* transform = m_ActiveScene->GetComponent<GGEngine::TransformComponent>(m_SelectedEntity);
+            if (transform)
+            {
+                float velocity = 2.0f * ts;
+                if (GGEngine::Input::IsKeyPressed(GG_KEY_I))
+                    transform->Position[1] += velocity;
+                if (GGEngine::Input::IsKeyPressed(GG_KEY_K))
+                    transform->Position[1] -= velocity;
+                if (GGEngine::Input::IsKeyPressed(GG_KEY_J))
+                    transform->Position[0] -= velocity;
+                if (GGEngine::Input::IsKeyPressed(GG_KEY_L))
+                    transform->Position[0] += velocity;
 
-        // U/O to rotate the quad
-        float rotationSpeed = 90.0f * ts;  // Degrees per second
-        if (GGEngine::Input::IsKeyPressed(GG_KEY_U))
-            m_Rotation += rotationSpeed;
-        if (GGEngine::Input::IsKeyPressed(GG_KEY_O))
-            m_Rotation -= rotationSpeed;
+                float rotationSpeed = 90.0f * ts;
+                if (GGEngine::Input::IsKeyPressed(GG_KEY_U))
+                    transform->Rotation += rotationSpeed;
+                if (GGEngine::Input::IsKeyPressed(GG_KEY_O))
+                    transform->Rotation -= rotationSpeed;
+            }
+        }
     }
-
-    // Properties panel
-    ImGui::Begin("Properties");
-
-    if (ImGui::CollapsingHeader("Camera", ImGuiTreeNodeFlags_DefaultOpen))
-    {
-        ImGui::Text("Orthographic 2D Camera");
-        ImGui::Text("WASD: Move, Q/E: Rotate");
-        ImGui::Text("RMB drag: Pan, Scroll: Zoom");
-    }
-
-    if (ImGui::CollapsingHeader("Controls", ImGuiTreeNodeFlags_DefaultOpen))
-    {
-        ImGui::Text("IJKL: Move quad, U/O: Rotate");
-    }
-
-    if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen))
-    {
-        ImGui::DragFloat3("Position", m_Position, 0.01f);
-        ImGui::DragFloat("Rotation", &m_Rotation, 1.0f, -360.0f, 360.0f, "%.1f deg");
-        ImGui::DragFloat2("Scale", m_Scale, 0.01f, 0.01f, 10.0f);
-    }
-
-    if (ImGui::CollapsingHeader("Rendering", ImGuiTreeNodeFlags_DefaultOpen))
-    {
-        ImGui::ColorEdit4("Color", m_Color);
-    }
-
-    if (ImGui::CollapsingHeader("Stats", ImGuiTreeNodeFlags_DefaultOpen))
-    {
-        auto stats = GGEngine::Renderer2D::GetStats();
-        ImGui::Text("Renderer2D Stats:");
-        ImGui::Text("  Draw Calls: %d", stats.DrawCalls);
-        ImGui::Text("  Quads: %d", stats.QuadCount);
-        ImGui::Separator();
-        GGEngine::DebugUI::ShowStatsContent(ts);
-    }
-
-    ImGui::End();
 
     ImGui::End(); // DockSpace
 }
@@ -257,5 +442,58 @@ void EditorLayer::OnWindowResize(uint32_t width, uint32_t height)
 {
     // Editor uses ImGui viewport sizing for the framebuffer camera,
     // so we don't need to update aspect ratio here.
-    // The viewport resize is handled in OnRenderOffscreen via m_NeedsResize.
+}
+
+void EditorLayer::NewScene()
+{
+    m_ActiveScene = GGEngine::CreateScope<GGEngine::Scene>("Untitled Scene");
+    m_SelectedEntity = GGEngine::InvalidEntityID;
+    m_CurrentScenePath.clear();
+    GG_INFO("Created new scene");
+}
+
+void EditorLayer::OpenScene()
+{
+    std::string filepath = GGEngine::FileDialogs::OpenFile("*.scene", "Open Scene");
+    if (!filepath.empty())
+    {
+        m_ActiveScene = GGEngine::CreateScope<GGEngine::Scene>();
+        GGEngine::SceneSerializer serializer(m_ActiveScene.get());
+        if (serializer.Deserialize(filepath))
+        {
+            m_CurrentScenePath = filepath;
+            m_SelectedEntity = GGEngine::InvalidEntityID;
+            GG_INFO("Opened scene: {}", filepath);
+        }
+    }
+}
+
+void EditorLayer::SaveScene()
+{
+    if (m_CurrentScenePath.empty())
+    {
+        SaveSceneAs();
+    }
+    else
+    {
+        GGEngine::SceneSerializer serializer(m_ActiveScene.get());
+        serializer.Serialize(m_CurrentScenePath);
+    }
+}
+
+void EditorLayer::SaveSceneAs()
+{
+    std::string filepath = GGEngine::FileDialogs::SaveFile("*.scene", "Save Scene As");
+    if (!filepath.empty())
+    {
+        // Ensure .scene extension
+        if (filepath.find(".scene") == std::string::npos)
+        {
+            filepath += ".scene";
+        }
+        GGEngine::SceneSerializer serializer(m_ActiveScene.get());
+        serializer.Serialize(filepath);
+        m_CurrentScenePath = filepath;
+        GG_INFO("Saved scene as: {}", filepath);
+    }
 }

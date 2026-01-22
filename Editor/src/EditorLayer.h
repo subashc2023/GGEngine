@@ -6,6 +6,8 @@
 #include "GGEngine/Renderer/Framebuffer.h"
 #include "GGEngine/Renderer/OrthographicCameraController.h"
 #include "GGEngine/Renderer/Camera.h"
+#include "GGEngine/ECS/Scene.h"
+#include "GGEngine/ECS/Entity.h"
 
 class EditorLayer : public GGEngine::Layer
 {
@@ -21,11 +23,23 @@ public:
     void OnWindowResize(uint32_t width, uint32_t height) override;
 
 private:
+    // UI Panels
+    void DrawSceneHierarchyPanel();
+    void DrawPropertiesPanel(GGEngine::Timestep ts);
+
+    // Scene management
+    void CreateDefaultScene();
+    void NewScene();
+    void OpenScene();
+    void SaveScene();
+    void SaveSceneAs();
+
     GGEngine::Scope<GGEngine::Framebuffer> m_ViewportFramebuffer;
 
     // Camera system
     GGEngine::OrthographicCameraController m_CameraController;
 
+    // Viewport state
     float m_ViewportWidth = 0.0f;
     float m_ViewportHeight = 0.0f;
     float m_PendingViewportWidth = 0.0f;
@@ -34,12 +48,10 @@ private:
     bool m_ViewportHovered = false;
     bool m_NeedsResize = false;
 
-    // Object transform
-    float m_Position[3] = { 0.0f, 0.0f, 0.0f };
-    float m_Rotation = 0.0f;
-    float m_Scale[2] = { 1.0f, 1.0f };
-    float m_MoveSpeed = 2.0f;
+    // Scene
+    GGEngine::Scope<GGEngine::Scene> m_ActiveScene;
+    std::string m_CurrentScenePath;
 
-    // Color
-    float m_Color[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    // Selection state
+    GGEngine::EntityID m_SelectedEntity = GGEngine::InvalidEntityID;
 };

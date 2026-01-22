@@ -7,6 +7,7 @@
 #include "Timestep.h"
 #include "GGEngine/ImGui/ImGuiLayer.h"
 #include "GGEngine/Asset/ShaderLibrary.h"
+#include "GGEngine/Asset/TextureLibrary.h"
 #include "GGEngine/Asset/AssetManager.h"
 #include "GGEngine/Renderer/MaterialLibrary.h"
 #include "GGEngine/Renderer/Renderer2D.h"
@@ -31,6 +32,7 @@ namespace GGEngine {
 
         // Initialize asset libraries (requires VulkanContext to be ready)
         ShaderLibrary::Get().Init();
+        TextureLibrary::Get().Init();
 
         // Initialize Renderer2D (requires ShaderLibrary to be ready)
         Renderer2D::Init();
@@ -59,6 +61,7 @@ namespace GGEngine {
         // Shutdown asset system before Vulkan (assets may hold GPU resources)
         // Materials depend on shaders, so shut down materials first
         MaterialLibrary::Get().Shutdown();
+        TextureLibrary::Get().Shutdown();
         ShaderLibrary::Get().Shutdown();
         AssetManager::Get().Shutdown();
 

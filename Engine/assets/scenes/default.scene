@@ -1,0 +1,37 @@
+{
+  "Scene": "Demo Scene",
+  "Entities": [
+    {
+      "GUID": "a1b2c3d4e5f6789012345678deadbeef",
+      "TagComponent": {
+        "Name": "Player Quad"
+      },
+      "TransformComponent": {
+        "Position": [0.0, 0.0, 0.0],
+        "Rotation": 0.0,
+        "Scale": [1.0, 1.0]
+      },
+      "SpriteRendererComponent": {
+        "Color": [1.0, 1.0, 1.0, 1.0],
+        "TextureName": "",
+        "TilingFactor": 1.0
+      }
+    },
+    {
+      "GUID": "b2c3d4e5f678901234567890cafebabe",
+      "TagComponent": {
+        "Name": "Textured Quad"
+      },
+      "TransformComponent": {
+        "Position": [1.5, 0.0, 0.0],
+        "Rotation": 0.0,
+        "Scale": [1.0, 1.0]
+      },
+      "SpriteRendererComponent": {
+        "Color": [1.0, 1.0, 1.0, 1.0],
+        "TextureName": "Checkerboard",
+        "TilingFactor": 1.0
+      }
+    }
+  ]
+}
