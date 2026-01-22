@@ -5,6 +5,7 @@
 #include "GGEngine/Core/Core.h"
 #include "GGEngine/RHI/RHITypes.h"
 #include "GGEngine/RHI/RHIEnums.h"
+#include "GGEngine/Renderer/BindlessTextureManager.h"
 
 #include <string>
 
@@ -62,6 +63,9 @@ namespace GGEngine {
         // RHI handle for backend-agnostic usage
         RHITextureHandle GetHandle() const { return m_Handle; }
 
+        // Bindless texture index for shader access
+        BindlessTextureIndex GetBindlessIndex() const { return m_BindlessIndex; }
+
     private:
         void CreateVulkanResources(const uint8_t* pixels);
 
@@ -72,6 +76,9 @@ namespace GGEngine {
 
         // RHI handle (maps to backend resources via registry)
         RHITextureHandle m_Handle;
+
+        // Bindless texture index for shader access
+        BindlessTextureIndex m_BindlessIndex = InvalidBindlessIndex;
 
         // Fallback texture (owned directly, not through AssetManager)
         static Scope<Texture> s_FallbackTexture;

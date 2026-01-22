@@ -11,6 +11,7 @@
 #include "GGEngine/Asset/AssetManager.h"
 #include "GGEngine/Renderer/MaterialLibrary.h"
 #include "GGEngine/Renderer/Renderer2D.h"
+#include "GGEngine/Renderer/BindlessTextureManager.h"
 #include "GGEngine/Core/Profiler.h"
 #include "Platform/Vulkan/VulkanContext.h"
 
@@ -32,11 +33,14 @@ namespace GGEngine {
 
         VulkanContext::Get().Init(static_cast<GLFWwindow*>(m_Window->GetNativeWindow()));
 
+        // Initialize bindless texture manager (requires VulkanContext to be ready)
+        BindlessTextureManager::Get().Init();
+
         // Initialize asset libraries (requires VulkanContext to be ready)
         ShaderLibrary::Get().Init();
         TextureLibrary::Get().Init();
 
-        // Initialize Renderer2D (requires ShaderLibrary to be ready)
+        // Initialize Renderer2D (requires ShaderLibrary and BindlessTextureManager to be ready)
         Renderer2D::Init();
 
         m_ImGuiLayer = new ImGuiLayer();
@@ -67,6 +71,9 @@ namespace GGEngine {
         TextureLibrary::Get().Shutdown();
         ShaderLibrary::Get().Shutdown();
         AssetManager::Get().Shutdown();
+
+        // Shutdown bindless texture manager before Vulkan
+        BindlessTextureManager::Get().Shutdown();
 
         VulkanContext::Get().Shutdown();
     }

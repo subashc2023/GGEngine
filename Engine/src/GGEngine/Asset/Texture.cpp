@@ -248,12 +248,27 @@ namespace GGEngine {
         // 6. Register with VulkanResourceRegistry
         auto& registry = VulkanResourceRegistry::Get();
         m_Handle = registry.RegisterTexture(image, imageView, sampler, imageAllocation, m_Width, m_Height, m_Format);
+
+        // 7. Register with BindlessTextureManager for bindless rendering
+        // Only register if the manager is initialized (it may not be during fallback texture creation)
+        auto& bindlessManager = BindlessTextureManager::Get();
+        if (bindlessManager.GetMaxTextures() > 0)
+        {
+            m_BindlessIndex = bindlessManager.RegisterTexture(*this);
+        }
     }
 
     void Texture::Unload()
     {
         if (!m_Handle.IsValid())
             return;
+
+        // Unregister from BindlessTextureManager first
+        if (m_BindlessIndex != InvalidBindlessIndex)
+        {
+            BindlessTextureManager::Get().UnregisterTexture(m_BindlessIndex);
+            m_BindlessIndex = InvalidBindlessIndex;
+        }
 
         // Check if VulkanContext is still valid (may be destroyed during static destruction)
         VkDevice device = VulkanContext::Get().GetDevice();

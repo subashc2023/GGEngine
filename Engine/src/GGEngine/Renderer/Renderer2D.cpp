@@ -8,34 +8,35 @@
 #include "DescriptorSet.h"
 #include "Pipeline.h"
 #include "RenderCommand.h"
+#include "BindlessTextureManager.h"
 #include "GGEngine/Asset/Shader.h"
 #include "GGEngine/Asset/ShaderLibrary.h"
 #include "GGEngine/Asset/Texture.h"
 #include "Platform/Vulkan/VulkanContext.h"
 #include "Platform/Vulkan/VulkanRHI.h"
 
+#include <vulkan/vulkan.h>
 #include <cmath>
 #include <array>
 
 namespace GGEngine {
 
-    // Vertex structure for batched quads
+    // Vertex structure for batched quads (bindless rendering)
     struct QuadVertex
     {
         float position[3];     // World-space position (CPU-transformed)
         float texCoord[2];     // UV coordinates
         float color[4];        // RGBA color
         float tilingFactor;    // Texture tiling multiplier
-        float texIndex;        // Index into texture array (0-31)
+        uint32_t texIndex;     // Bindless texture index (0 = white texture)
     };
 
-    // Internal renderer data
+    // Internal renderer data (bindless rendering)
     struct Renderer2DData
     {
         static constexpr uint32_t MaxQuads = 10000;
         static constexpr uint32_t MaxVertices = MaxQuads * 4;
         static constexpr uint32_t MaxIndices = MaxQuads * 6;
-        static constexpr uint32_t MaxTextureSlots = 32;  // Maximum textures per batch
 
         // Vertex data
         Scope<VertexBuffer> QuadVertexBuffer;
@@ -51,12 +52,9 @@ namespace GGEngine {
         // to prevent later batches from overwriting earlier batches' vertex data
         uint32_t QuadVertexOffset = 0;  // Offset in vertices (not bytes)
 
-        // Texture slot tracking for multi-texture batching
-        std::array<const Texture*, MaxTextureSlots> TextureSlots;
-        uint32_t TextureSlotIndex = 1;  // Slot 0 reserved for white texture
-
-        // White pixel texture for solid colors
+        // White pixel texture for solid colors (index 0 in bindless array)
         Scope<Texture> WhiteTexture;
+        BindlessTextureIndex WhiteTextureIndex = InvalidBindlessIndex;
 
         // Shader and pipeline
         AssetHandle<Shader> QuadShader;
@@ -64,11 +62,11 @@ namespace GGEngine {
         RHIRenderPassHandle CurrentRenderPass;
 
         // Camera UBO and descriptors (per-frame to avoid updating in-flight descriptors)
+        // Set 0: Camera UBO only (bindless textures are in set 1, managed globally)
         static constexpr uint32_t MaxFramesInFlight = 2;
         Scope<UniformBuffer> CameraUniformBuffers[MaxFramesInFlight];
-        Scope<DescriptorSetLayout> DescriptorLayout;
-        // Single descriptor set per frame with 32 texture slots
-        Scope<DescriptorSet> DescriptorSets[MaxFramesInFlight];
+        Scope<DescriptorSetLayout> CameraDescriptorLayout;
+        Scope<DescriptorSet> CameraDescriptorSets[MaxFramesInFlight];
         uint32_t CurrentFrameIndex = 0;
 
         // Current render state
@@ -102,15 +100,15 @@ namespace GGEngine {
     void Renderer2D::Init()
     {
         GG_PROFILE_FUNCTION();
-        GG_CORE_INFO("Renderer2D: Initializing...");
+        GG_CORE_INFO("Renderer2D: Initializing (bindless mode)...");
 
-        // Create vertex layout: position (vec3) + texCoord (vec2) + color (vec4) + tilingFactor (float) + texIndex (float)
+        // Create vertex layout: position (vec3) + texCoord (vec2) + color (vec4) + tilingFactor (float) + texIndex (uint)
         s_Data.QuadVertexLayout
             .Push("aPosition", VertexAttributeType::Float3)
             .Push("aTexCoord", VertexAttributeType::Float2)
             .Push("aColor", VertexAttributeType::Float4)
             .Push("aTilingFactor", VertexAttributeType::Float)
-            .Push("aTexIndex", VertexAttributeType::Float);
+            .Push("aTexIndex", VertexAttributeType::UInt);  // Bindless index (uint32_t)
 
         // Allocate CPU-side vertex buffer (zero-initialized to avoid any uninitialized memory issues)
         s_Data.QuadVertexBufferBase = new QuadVertex[Renderer2DData::MaxVertices]();
@@ -141,8 +139,10 @@ namespace GGEngine {
         s_Data.QuadIndexBuffer = IndexBuffer::Create(indices);
 
         // Create 1x1 white texture for solid color rendering
+        // This will be registered with BindlessTextureManager automatically
         uint32_t whitePixel = 0xFFFFFFFF;  // RGBA: white with full alpha
         s_Data.WhiteTexture = Texture::Create(1, 1, &whitePixel);
+        s_Data.WhiteTextureIndex = s_Data.WhiteTexture->GetBindlessIndex();
 
         // Get quad2d shader from library (should be pre-loaded)
         s_Data.QuadShader = ShaderLibrary::Get().Get("quad2d");
@@ -152,33 +152,24 @@ namespace GGEngine {
             return;
         }
 
-        // Create descriptor set layout (camera UBO + 32 texture samplers for multi-texture batching)
-        std::vector<DescriptorBinding> bindings = {
-            { 0, DescriptorType::UniformBuffer, ShaderStage::Vertex, 1 },
-            { 1, DescriptorType::CombinedImageSampler, ShaderStage::Fragment, Renderer2DData::MaxTextureSlots }
+        // Create descriptor set layout for camera UBO only (Set 0)
+        // Textures are in Set 1, managed by BindlessTextureManager
+        std::vector<DescriptorBinding> cameraBindings = {
+            { 0, DescriptorType::UniformBuffer, ShaderStage::Vertex, 1 }
         };
-        s_Data.DescriptorLayout = CreateScope<DescriptorSetLayout>(bindings);
+        s_Data.CameraDescriptorLayout = CreateScope<DescriptorSetLayout>(cameraBindings);
 
-        // Create per-frame camera UBOs and descriptor sets with 32 texture slots
+        // Create per-frame camera UBOs and descriptor sets
         for (uint32_t i = 0; i < Renderer2DData::MaxFramesInFlight; i++)
         {
             s_Data.CameraUniformBuffers[i] = CreateScope<UniformBuffer>(sizeof(CameraUBO));
-            s_Data.DescriptorSets[i] = CreateScope<DescriptorSet>(*s_Data.DescriptorLayout);
-            s_Data.DescriptorSets[i]->SetUniformBuffer(0, *s_Data.CameraUniformBuffers[i]);
-            // Initialize all 32 texture slots with white texture
-            for (uint32_t slot = 0; slot < Renderer2DData::MaxTextureSlots; slot++)
-            {
-                s_Data.DescriptorSets[i]->SetTextureAtIndex(1, slot, *s_Data.WhiteTexture);
-            }
+            s_Data.CameraDescriptorSets[i] = CreateScope<DescriptorSet>(*s_Data.CameraDescriptorLayout);
+            s_Data.CameraDescriptorSets[i]->SetUniformBuffer(0, *s_Data.CameraUniformBuffers[i]);
         }
 
-        // Initialize texture slot tracking
-        s_Data.TextureSlots.fill(nullptr);
-        s_Data.TextureSlots[0] = s_Data.WhiteTexture.get();
-        s_Data.TextureSlotIndex = 1;
-
-        GG_CORE_INFO("Renderer2D: Initialized (max {} quads per batch, {} texture slots, {} frames in flight)",
-                     Renderer2DData::MaxQuads, Renderer2DData::MaxTextureSlots, Renderer2DData::MaxFramesInFlight);
+        GG_CORE_INFO("Renderer2D: Initialized (bindless mode, max {} quads, {} max textures, {} frames in flight)",
+                     Renderer2DData::MaxQuads, BindlessTextureManager::Get().GetMaxTextures(),
+                     Renderer2DData::MaxFramesInFlight);
     }
 
     void Renderer2D::Shutdown()
@@ -193,10 +184,10 @@ namespace GGEngine {
         s_Data.QuadPipeline.reset();
         for (uint32_t i = 0; i < Renderer2DData::MaxFramesInFlight; i++)
         {
-            s_Data.DescriptorSets[i].reset();
+            s_Data.CameraDescriptorSets[i].reset();
             s_Data.CameraUniformBuffers[i].reset();
         }
-        s_Data.DescriptorLayout.reset();
+        s_Data.CameraDescriptorLayout.reset();
         s_Data.QuadIndexBuffer.reset();
         s_Data.QuadVertexBuffer.reset();
         s_Data.WhiteTexture.reset();
@@ -250,8 +241,11 @@ namespace GGEngine {
             spec.blendMode = BlendMode::Alpha;
             spec.depthTestEnable = false;
             spec.depthWriteEnable = false;
-            spec.descriptorSetLayouts.push_back(s_Data.DescriptorLayout->GetHandle());
-            spec.debugName = "Renderer2D_Quad";
+            // Set 0: Camera UBO
+            spec.descriptorSetLayouts.push_back(s_Data.CameraDescriptorLayout->GetHandle());
+            // Set 1: Bindless textures
+            spec.descriptorSetLayouts.push_back(BindlessTextureManager::Get().GetLayoutHandle());
+            spec.debugName = "Renderer2D_Quad_Bindless";
 
             s_Data.QuadPipeline = CreateScope<Pipeline>(spec);
             s_Data.CurrentRenderPass = renderPass;
@@ -266,11 +260,6 @@ namespace GGEngine {
         s_Data.QuadIndexCount = 0;
         s_Data.QuadVertexBufferPtr = s_Data.QuadVertexBufferBase;
         s_Data.QuadVertexOffset = 0;  // Reset GPU buffer offset at start of scene
-
-        // Reset texture slots (keep slot 0 as white texture)
-        s_Data.TextureSlots.fill(nullptr);
-        s_Data.TextureSlots[0] = s_Data.WhiteTexture.get();
-        s_Data.TextureSlotIndex = 1;
 
         s_Data.SceneStarted = true;
     }
@@ -310,19 +299,16 @@ namespace GGEngine {
         // Bind pipeline
         s_Data.QuadPipeline->BindVk(cmd);
 
-        // Get descriptor set for current frame and update all used texture slots
-        auto& descriptorSet = s_Data.DescriptorSets[s_Data.CurrentFrameIndex];
-
-        // Bind all used texture slots to descriptor set
-        for (uint32_t i = 0; i < s_Data.TextureSlotIndex; i++)
-        {
-            const Texture* tex = s_Data.TextureSlots[i] ? s_Data.TextureSlots[i] : s_Data.WhiteTexture.get();
-            descriptorSet->SetTextureAtIndex(1, i, *tex);
-        }
-
-        // Bind descriptor set (camera UBO + textures) for current frame
+        // Get pipeline layout for descriptor binding
         VkPipelineLayout pipelineLayout = VulkanResourceRegistry::Get().GetPipelineLayout(s_Data.QuadPipeline->GetLayoutHandle());
-        descriptorSet->BindVk(cmd, pipelineLayout, 0);
+
+        // Bind Set 0: Camera UBO
+        s_Data.CameraDescriptorSets[s_Data.CurrentFrameIndex]->BindVk(cmd, pipelineLayout, 0);
+
+        // Bind Set 1: Bindless textures
+        VkDescriptorSet bindlessSet = static_cast<VkDescriptorSet>(BindlessTextureManager::Get().GetDescriptorSet());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                pipelineLayout, 1, 1, &bindlessSet, 0, nullptr);
 
         // Bind vertex and index buffers
         s_Data.QuadVertexBuffer->BindVk(cmd);
@@ -343,14 +329,9 @@ namespace GGEngine {
         // Reset batch state for next batch (but NOT QuadVertexOffset - that persists!)
         s_Data.QuadIndexCount = 0;
         s_Data.QuadVertexBufferPtr = s_Data.QuadVertexBufferBase;
-
-        // Reset texture slots for next batch
-        s_Data.TextureSlots.fill(nullptr);
-        s_Data.TextureSlots[0] = s_Data.WhiteTexture.get();
-        s_Data.TextureSlotIndex = 1;
     }
 
-    // Internal helper to add a quad to the batch
+    // Internal helper to add a quad to the batch (bindless rendering)
     static void DrawQuadInternal(float x, float y, float z, float width, float height,
                                  const Texture* texture, float r, float g, float b, float a,
                                  float rotation = 0.0f, float tilingFactor = 1.0f)
@@ -361,53 +342,22 @@ namespace GGEngine {
             return;
         }
 
-        // Determine texture index for multi-texture batching
-        float textureIndex = 0.0f;  // Default to white texture (slot 0)
-
+        // Get bindless texture index directly - no texture slot management needed!
+        uint32_t textureIndex = s_Data.WhiteTextureIndex;  // Default to white texture
         if (texture != nullptr)
         {
-            // Check if texture is already in a slot
-            bool found = false;
-            for (uint32_t i = 1; i < s_Data.TextureSlotIndex; i++)
+            BindlessTextureIndex bindlessIdx = texture->GetBindlessIndex();
+            if (bindlessIdx != InvalidBindlessIndex)
             {
-                if (s_Data.TextureSlots[i] == texture)
-                {
-                    textureIndex = static_cast<float>(i);
-                    found = true;
-                    break;
-                }
+                textureIndex = bindlessIdx;
             }
-
-            // If not found, add to next available slot
-            if (!found)
-            {
-                // Check if texture slots are full
-                if (s_Data.TextureSlotIndex >= Renderer2DData::MaxTextureSlots)
-                {
-                    Renderer2D::Flush();
-                }
-
-                textureIndex = static_cast<float>(s_Data.TextureSlotIndex);
-                s_Data.TextureSlots[s_Data.TextureSlotIndex] = texture;
-                s_Data.TextureSlotIndex++;
-            }
+            // If texture has invalid bindless index, use white texture (solid color fallback)
         }
 
-        // Flush if batch is full (index count)
+        // Flush if batch is full (index count only - no texture slot limit!)
         if (s_Data.QuadIndexCount >= Renderer2DData::MaxIndices)
         {
             Renderer2D::Flush();
-            // Re-add the texture to the new batch if it was provided
-            if (texture != nullptr)
-            {
-                textureIndex = static_cast<float>(s_Data.TextureSlotIndex);
-                s_Data.TextureSlots[s_Data.TextureSlotIndex] = texture;
-                s_Data.TextureSlotIndex++;
-            }
-            else
-            {
-                textureIndex = 0.0f;
-            }
         }
 
         // Check if adding this quad would exceed total GPU buffer capacity for the frame
@@ -458,7 +408,7 @@ namespace GGEngine {
             // Tiling factor
             s_Data.QuadVertexBufferPtr->tilingFactor = tilingFactor;
 
-            // Texture index for multi-texture batching
+            // Bindless texture index
             s_Data.QuadVertexBufferPtr->texIndex = textureIndex;
 
             s_Data.QuadVertexBufferPtr++;

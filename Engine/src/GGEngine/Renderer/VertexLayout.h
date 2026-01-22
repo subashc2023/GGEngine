@@ -19,7 +19,8 @@ namespace GGEngine {
         Int2,       // R32G32_SINT
         Int3,       // R32G32B32_SINT
         Int4,       // R32G32B32A32_SINT
-        UByte4Norm  // R8G8B8A8_UNORM (for colors)
+        UByte4Norm, // R8G8B8A8_UNORM (for colors)
+        UInt        // R32_UINT (for bindless texture indices)
     };
 
     // Returns size in bytes for each attribute type

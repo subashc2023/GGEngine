@@ -16,6 +16,7 @@ namespace GGEngine {
             case VertexAttributeType::Int3:      return 12;
             case VertexAttributeType::Int4:      return 16;
             case VertexAttributeType::UByte4Norm: return 4;
+            case VertexAttributeType::UInt:      return 4;
         }
         return 0;
     }
@@ -33,6 +34,7 @@ namespace GGEngine {
             case VertexAttributeType::Int3:      return TextureFormat::R32G32B32_SINT;
             case VertexAttributeType::Int4:      return TextureFormat::R32G32B32A32_SINT;
             case VertexAttributeType::UByte4Norm: return TextureFormat::R8G8B8A8_UNORM;
+            case VertexAttributeType::UInt:      return TextureFormat::R32_UINT;
         }
         return TextureFormat::Undefined;
     }

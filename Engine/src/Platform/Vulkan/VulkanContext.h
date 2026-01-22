@@ -44,6 +44,13 @@ namespace GGEngine {
 
         VmaAllocator GetAllocator() const { return m_Allocator; }
 
+        // Bindless rendering limits
+        struct BindlessLimits {
+            uint32_t maxSampledImages = 0;
+            uint32_t maxPerStageDescriptorSampledImages = 0;
+        };
+        const BindlessLimits& GetBindlessLimits() const { return m_BindlessLimits; }
+
         // Execute a one-time command buffer synchronously (blocks until complete)
         void ImmediateSubmit(const std::function<void(VkCommandBuffer)>& func);
 
@@ -127,6 +134,8 @@ namespace GGEngine {
 
         VkDescriptorPool m_DescriptorPool = VK_NULL_HANDLE;
         VmaAllocator m_Allocator = VK_NULL_HANDLE;
+
+        BindlessLimits m_BindlessLimits;
 
         uint32_t m_CurrentFrameIndex = 0;
         uint32_t m_CurrentImageIndex = 0;

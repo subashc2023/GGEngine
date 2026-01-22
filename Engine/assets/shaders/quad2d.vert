@@ -1,4 +1,5 @@
 #version 450
+#extension GL_EXT_nonuniform_qualifier : require
 
 layout(set = 0, binding = 0) uniform CameraUBO {
     mat4 view;
@@ -10,12 +11,12 @@ layout(location = 0) in vec3 aPosition;   // World-space position (CPU-transform
 layout(location = 1) in vec2 aTexCoord;
 layout(location = 2) in vec4 aColor;
 layout(location = 3) in float aTilingFactor;
-layout(location = 4) in float aTexIndex;  // Index into texture array (0-31)
+layout(location = 4) in uint aTexIndex;   // Bindless texture index (uint)
 
 layout(location = 0) out vec2 vTexCoord;
 layout(location = 1) out vec4 vColor;
 layout(location = 2) out float vTilingFactor;
-layout(location = 3) out float vTexIndex;
+layout(location = 3) flat out uint vTexIndex;  // flat for integer interpolation
 
 void main() {
     gl_Position = camera.viewProjection * vec4(aPosition, 1.0);

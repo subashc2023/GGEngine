@@ -388,13 +388,41 @@ namespace GGEngine {
             queueCreateInfos.push_back(queueCreateInfo);
         }
 
-        VkPhysicalDeviceFeatures deviceFeatures{};
+        // Query Vulkan 1.2 properties for bindless limits
+        VkPhysicalDeviceVulkan12Properties vulkan12Props{};
+        vulkan12Props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES;
+
+        VkPhysicalDeviceProperties2 props2{};
+        props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+        props2.pNext = &vulkan12Props;
+        vkGetPhysicalDeviceProperties2(m_PhysicalDevice, &props2);
+
+        // Store bindless limits
+        m_BindlessLimits.maxSampledImages = vulkan12Props.maxDescriptorSetUpdateAfterBindSampledImages;
+        m_BindlessLimits.maxPerStageDescriptorSampledImages = vulkan12Props.maxPerStageDescriptorUpdateAfterBindSampledImages;
+
+        GG_CORE_INFO("Bindless limits: maxSampledImages={}, maxPerStage={}",
+                     m_BindlessLimits.maxSampledImages, m_BindlessLimits.maxPerStageDescriptorSampledImages);
+
+        // Enable Vulkan 1.2 features for descriptor indexing (bindless)
+        VkPhysicalDeviceVulkan12Features vulkan12Features{};
+        vulkan12Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+        vulkan12Features.descriptorIndexing = VK_TRUE;
+        vulkan12Features.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+        vulkan12Features.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
+        vulkan12Features.descriptorBindingPartiallyBound = VK_TRUE;
+        vulkan12Features.runtimeDescriptorArray = VK_TRUE;
+
+        VkPhysicalDeviceFeatures2 deviceFeatures2{};
+        deviceFeatures2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        deviceFeatures2.pNext = &vulkan12Features;
 
         VkDeviceCreateInfo createInfo{};
         createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+        createInfo.pNext = &deviceFeatures2;  // Chain features via pNext
         createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueCreateInfos.size());
         createInfo.pQueueCreateInfos = queueCreateInfos.data();
-        createInfo.pEnabledFeatures = &deviceFeatures;
+        createInfo.pEnabledFeatures = nullptr;  // Must be null when using pNext features
         createInfo.enabledExtensionCount = static_cast<uint32_t>(m_DeviceExtensions.size());
         createInfo.ppEnabledExtensionNames = m_DeviceExtensions.data();
 

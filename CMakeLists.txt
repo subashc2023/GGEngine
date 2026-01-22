@@ -187,6 +187,8 @@ set(ENGINE_SOURCES
     Engine/src/GGEngine/Renderer/MaterialLibrary.cpp
     Engine/src/GGEngine/Renderer/Renderer2D.h
     Engine/src/GGEngine/Renderer/Renderer2D.cpp
+    Engine/src/GGEngine/Renderer/BindlessTextureManager.h
+    Engine/src/GGEngine/Renderer/BindlessTextureManager.cpp
     Engine/src/GGEngine/RHI/RHITypes.h
     Engine/src/GGEngine/RHI/RHIEnums.h
     Engine/src/GGEngine/RHI/RHIDevice.h
