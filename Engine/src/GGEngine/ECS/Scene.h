@@ -59,9 +59,19 @@ namespace GGEngine {
         // Scene-wide operations
         void OnUpdate(Timestep ts);
 
-        // RHI-based rendering
+        // RHI-based rendering (external camera)
         void OnRender(const Camera& camera, RHIRenderPassHandle renderPass,
                       RHICommandBufferHandle cmd, uint32_t width, uint32_t height);
+
+        // Runtime rendering using primary camera entity (ECS camera system)
+        void OnRenderRuntime(RHIRenderPassHandle renderPass,
+                             RHICommandBufferHandle cmd, uint32_t width, uint32_t height);
+
+        // Viewport resize (updates camera aspect ratios)
+        void OnViewportResize(uint32_t width, uint32_t height);
+
+        // Get primary camera entity
+        EntityID GetPrimaryCameraEntity();
 
         // Iteration helpers
         const std::vector<Entity>& GetAllEntities() const { return m_Entities; }
@@ -94,6 +104,7 @@ namespace GGEngine {
         ComponentStorage<TransformComponent> m_Transforms;
         ComponentStorage<SpriteRendererComponent> m_Sprites;
         ComponentStorage<TilemapComponent> m_Tilemaps;
+        ComponentStorage<CameraComponent> m_Cameras;
     };
 
     // Template implementations
@@ -164,5 +175,11 @@ namespace GGEngine {
 
     template<>
     inline const ComponentStorage<TilemapComponent>& Scene::GetStorage<TilemapComponent>() const { return m_Tilemaps; }
+
+    template<>
+    inline ComponentStorage<CameraComponent>& Scene::GetStorage<CameraComponent>() { return m_Cameras; }
+
+    template<>
+    inline const ComponentStorage<CameraComponent>& Scene::GetStorage<CameraComponent>() const { return m_Cameras; }
 
 }

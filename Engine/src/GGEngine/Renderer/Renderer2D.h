@@ -10,6 +10,7 @@ namespace GGEngine {
 
     class Texture;
     class SubTexture2D;
+    class SceneCamera;
 
     class GG_API Renderer2D
     {
@@ -25,6 +26,13 @@ namespace GGEngine {
         // Custom render pass (RHI handles)
         static void BeginScene(const Camera& camera, RHIRenderPassHandle renderPass,
                               RHICommandBufferHandle cmd, uint32_t viewportWidth, uint32_t viewportHeight);
+
+        // SceneCamera + transform matrix (for ECS camera system)
+        static void BeginScene(const SceneCamera& camera, const Mat4& transform);
+
+        static void BeginScene(const SceneCamera& camera, const Mat4& transform,
+                              RHIRenderPassHandle renderPass, RHICommandBufferHandle cmd,
+                              uint32_t viewportWidth, uint32_t viewportHeight);
 
         static void EndScene();
         static void Flush();

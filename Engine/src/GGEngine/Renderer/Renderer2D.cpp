@@ -1,6 +1,7 @@
 #include "ggpch.h"
 #include "Renderer2D.h"
 #include "SubTexture2D.h"
+#include "SceneCamera.h"
 #include "GGEngine/Core/Profiler.h"
 #include "VertexBuffer.h"
 #include "IndexBuffer.h"
@@ -338,6 +339,88 @@ namespace GGEngine {
 
         // Only reset GPU buffer offset when moving to a new frame
         // This allows multiple BeginScene/EndScene pairs per frame without overwriting
+        if (s_Data.CurrentFrameIndex != s_Data.LastResetFrameIndex)
+        {
+            s_Data.QuadVertexOffset = 0;
+            s_Data.LastResetFrameIndex = s_Data.CurrentFrameIndex;
+        }
+
+        s_Data.SceneStarted = true;
+    }
+
+    void Renderer2D::BeginScene(const SceneCamera& camera, const Mat4& transform)
+    {
+        auto& device = RHIDevice::Get();
+        uint32_t width = device.GetSwapchainWidth();
+        uint32_t height = device.GetSwapchainHeight();
+        RHIRenderPassHandle renderPass = device.GetSwapchainRenderPass();
+        RHICommandBufferHandle cmd = device.GetCurrentCommandBuffer();
+
+        BeginScene(camera, transform, renderPass, cmd, width, height);
+    }
+
+    void Renderer2D::BeginScene(const SceneCamera& camera, const Mat4& transform,
+                                RHIRenderPassHandle renderPass, RHICommandBufferHandle cmd,
+                                uint32_t viewportWidth, uint32_t viewportHeight)
+    {
+        GG_PROFILE_FUNCTION();
+
+        // Check if we need to grow buffers from previous frame
+        if (s_Data.NeedsBufferGrowth && s_Data.MaxQuads < Renderer2DData::AbsoluteMaxQuads)
+        {
+            GrowBuffers();
+            s_Data.NeedsBufferGrowth = false;
+        }
+
+        // Get current frame index for per-frame resources
+        s_Data.CurrentFrameIndex = RHIDevice::Get().GetCurrentFrameIndex();
+
+        // Compute view matrix as inverse of transform
+        Mat4 viewMatrix = Mat4::Inverse(transform);
+        Mat4 projectionMatrix = camera.GetProjection();
+        Mat4 viewProjectionMatrix = projectionMatrix * viewMatrix;
+
+        // Build CameraUBO
+        CameraUBO cameraUBO;
+        cameraUBO.view = viewMatrix;
+        cameraUBO.projection = projectionMatrix;
+        cameraUBO.viewProjection = viewProjectionMatrix;
+
+        s_Data.CameraUniformBuffers[s_Data.CurrentFrameIndex]->SetData(cameraUBO);
+
+        // Create or recreate pipeline if render pass changed
+        if (!s_Data.QuadPipeline || s_Data.CurrentRenderPass != renderPass)
+        {
+            s_Data.QuadPipeline.reset();
+
+            PipelineSpecification spec;
+            spec.shader = s_Data.QuadShader.Get();
+            spec.renderPass = renderPass;
+            spec.vertexLayout = &s_Data.QuadVertexLayout;
+            spec.cullMode = CullMode::None;
+            spec.blendMode = BlendMode::Alpha;
+            spec.depthTestEnable = false;
+            spec.depthWriteEnable = false;
+            // Set 0: Camera UBO
+            spec.descriptorSetLayouts.push_back(s_Data.CameraDescriptorLayout->GetHandle());
+            // Set 1: Bindless textures
+            spec.descriptorSetLayouts.push_back(BindlessTextureManager::Get().GetLayoutHandle());
+            spec.debugName = "Renderer2D_Quad_Bindless";
+
+            s_Data.QuadPipeline = CreateScope<Pipeline>(spec);
+            s_Data.CurrentRenderPass = renderPass;
+        }
+
+        // Store current render state
+        s_Data.CurrentCommandBuffer = cmd;
+        s_Data.ViewportWidth = viewportWidth;
+        s_Data.ViewportHeight = viewportHeight;
+
+        // Reset batch state
+        s_Data.QuadIndexCount = 0;
+        s_Data.QuadVertexBufferPtr = s_Data.QuadVertexBufferBase;
+
+        // Only reset GPU buffer offset when moving to a new frame
         if (s_Data.CurrentFrameIndex != s_Data.LastResetFrameIndex)
         {
             s_Data.QuadVertexOffset = 0;

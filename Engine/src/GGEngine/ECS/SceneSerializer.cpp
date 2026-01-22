@@ -1,6 +1,7 @@
 #include "ggpch.h"
 #include "SceneSerializer.h"
 #include "Components.h"
+#include "GGEngine/Renderer/SceneCamera.h"
 
 #include <json.hpp>
 #include <fstream>
@@ -96,6 +97,27 @@ namespace GGEngine {
                     tilemap->Color[3]
                 };
                 tm["Tiles"] = tilemap->Tiles;  // nlohmann::json handles vector<int32_t> directly
+            }
+
+            // Camera component
+            if (m_Scene->HasComponent<CameraComponent>(entityId))
+            {
+                const auto* camera = m_Scene->GetComponent<CameraComponent>(entityId);
+                auto& cc = entityJson["CameraComponent"];
+
+                cc["Primary"] = camera->Primary;
+                cc["FixedAspectRatio"] = camera->FixedAspectRatio;
+                cc["ProjectionType"] = static_cast<int>(camera->Camera.GetProjectionType());
+
+                // Perspective params
+                cc["PerspectiveFOV"] = camera->Camera.GetPerspectiveFOV();
+                cc["PerspectiveNear"] = camera->Camera.GetPerspectiveNearClip();
+                cc["PerspectiveFar"] = camera->Camera.GetPerspectiveFarClip();
+
+                // Orthographic params
+                cc["OrthographicSize"] = camera->Camera.GetOrthographicSize();
+                cc["OrthographicNear"] = camera->Camera.GetOrthographicNearClip();
+                cc["OrthographicFar"] = camera->Camera.GetOrthographicFarClip();
             }
 
             entitiesArray.push_back(entityJson);
@@ -274,6 +296,37 @@ namespace GGEngine {
 
                     // Ensure tiles vector matches dimensions
                     tilemap.ResizeTiles();
+                }
+
+                // Read camera component
+                if (entityJson.contains("CameraComponent"))
+                {
+                    auto& camera = m_Scene->AddComponent<CameraComponent>(entity);
+                    const auto& cc = entityJson["CameraComponent"];
+
+                    if (cc.contains("Primary"))
+                        camera.Primary = cc["Primary"].get<bool>();
+                    if (cc.contains("FixedAspectRatio"))
+                        camera.FixedAspectRatio = cc["FixedAspectRatio"].get<bool>();
+                    if (cc.contains("ProjectionType"))
+                        camera.Camera.SetProjectionType(
+                            static_cast<SceneCamera::ProjectionType>(cc["ProjectionType"].get<int>()));
+
+                    // Perspective params
+                    if (cc.contains("PerspectiveFOV"))
+                        camera.Camera.SetPerspectiveFOV(cc["PerspectiveFOV"].get<float>());
+                    if (cc.contains("PerspectiveNear"))
+                        camera.Camera.SetPerspectiveNearClip(cc["PerspectiveNear"].get<float>());
+                    if (cc.contains("PerspectiveFar"))
+                        camera.Camera.SetPerspectiveFarClip(cc["PerspectiveFar"].get<float>());
+
+                    // Orthographic params
+                    if (cc.contains("OrthographicSize"))
+                        camera.Camera.SetOrthographicSize(cc["OrthographicSize"].get<float>());
+                    if (cc.contains("OrthographicNear"))
+                        camera.Camera.SetOrthographicNearClip(cc["OrthographicNear"].get<float>());
+                    if (cc.contains("OrthographicFar"))
+                        camera.Camera.SetOrthographicFarClip(cc["OrthographicFar"].get<float>());
                 }
             }
         }

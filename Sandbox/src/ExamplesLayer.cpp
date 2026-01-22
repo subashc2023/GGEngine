@@ -8,6 +8,7 @@
 #include "Examples/Renderer2DBasicsExample.h"
 #include "Examples/Renderer2DTexturesExample.h"
 #include "Examples/ECSExample.h"
+#include "Examples/ECSCameraExample.h"
 #include "Examples/InputExample.h"
 #include "Examples/ParticleExample.h"
 
@@ -26,6 +27,7 @@ void ExamplesLayer::OnAttach()
     m_Examples.push_back(std::make_unique<Renderer2DBasicsExample>());
     m_Examples.push_back(std::make_unique<Renderer2DTexturesExample>());
     m_Examples.push_back(std::make_unique<ECSExample>());
+    m_Examples.push_back(std::make_unique<ECSCameraExample>());
     m_Examples.push_back(std::make_unique<InputExample>());
     m_Examples.push_back(std::make_unique<ParticleExample>());
 

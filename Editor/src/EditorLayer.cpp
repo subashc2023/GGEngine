@@ -3,6 +3,7 @@
 #include "GGEngine/ImGui/ImGuiLayer.h"
 #include "GGEngine/RHI/RHIDevice.h"
 #include "GGEngine/Renderer/Renderer2D.h"
+#include "GGEngine/Renderer/SceneCamera.h"
 #include "GGEngine/ImGui/DebugUI.h"
 #include "GGEngine/Core/Input.h"
 #include "GGEngine/Core/KeyCodes.h"
@@ -114,6 +115,14 @@ void EditorLayer::OnRenderOffscreen(GGEngine::Timestep ts)
         m_NeedsResize = false;
 
         m_CameraController.SetAspectRatio(m_ViewportWidth / m_ViewportHeight);
+
+        // Update scene cameras' aspect ratios
+        if (m_ActiveScene)
+        {
+            m_ActiveScene->OnViewportResize(
+                static_cast<uint32_t>(m_ViewportWidth),
+                static_cast<uint32_t>(m_ViewportHeight));
+        }
     }
 
     auto& device = GGEngine::RHIDevice::Get();
@@ -188,6 +197,12 @@ void EditorLayer::DrawSceneHierarchyPanel()
                 auto entity = m_ActiveScene->CreateEntity("Tilemap");
                 auto& tilemap = m_ActiveScene->AddComponent<GGEngine::TilemapComponent>(entity);
                 tilemap.ResizeTiles();
+                m_SelectedEntity = entity;
+            }
+            if (ImGui::MenuItem("Create Camera"))
+            {
+                auto entity = m_ActiveScene->CreateEntity("Camera");
+                m_ActiveScene->AddComponent<GGEngine::CameraComponent>(entity);
                 m_SelectedEntity = entity;
             }
             ImGui::EndPopup();
@@ -517,6 +532,65 @@ void EditorLayer::DrawPropertiesPanel(GGEngine::Timestep ts)
             {
                 auto& tilemap = m_ActiveScene->AddComponent<GGEngine::TilemapComponent>(m_SelectedEntity);
                 tilemap.ResizeTiles();
+            }
+        }
+
+        // CameraComponent
+        if (m_ActiveScene->HasComponent<GGEngine::CameraComponent>(m_SelectedEntity))
+        {
+            if (ImGui::CollapsingHeader("Camera", ImGuiTreeNodeFlags_DefaultOpen))
+            {
+                auto* camera = m_ActiveScene->GetComponent<GGEngine::CameraComponent>(m_SelectedEntity);
+
+                ImGui::Checkbox("Primary", &camera->Primary);
+
+                // Projection type combo
+                const char* projectionTypeStrings[] = { "Perspective", "Orthographic" };
+                int currentProjectionType = static_cast<int>(camera->Camera.GetProjectionType());
+                if (ImGui::Combo("Projection", &currentProjectionType, projectionTypeStrings, 2))
+                {
+                    camera->Camera.SetProjectionType(
+                        static_cast<GGEngine::SceneCamera::ProjectionType>(currentProjectionType));
+                }
+
+                if (camera->Camera.GetProjectionType() == GGEngine::SceneCamera::ProjectionType::Perspective)
+                {
+                    float fov = camera->Camera.GetPerspectiveFOV();
+                    if (ImGui::DragFloat("FOV", &fov, 1.0f, 1.0f, 179.0f, "%.1f deg"))
+                        camera->Camera.SetPerspectiveFOV(fov);
+
+                    float nearClip = camera->Camera.GetPerspectiveNearClip();
+                    if (ImGui::DragFloat("Near Clip", &nearClip, 0.01f, 0.001f, 1000.0f))
+                        camera->Camera.SetPerspectiveNearClip(nearClip);
+
+                    float farClip = camera->Camera.GetPerspectiveFarClip();
+                    if (ImGui::DragFloat("Far Clip", &farClip, 1.0f, 0.1f, 10000.0f))
+                        camera->Camera.SetPerspectiveFarClip(farClip);
+                }
+                else
+                {
+                    float size = camera->Camera.GetOrthographicSize();
+                    if (ImGui::DragFloat("Size", &size, 0.1f, 0.1f, 100.0f))
+                        camera->Camera.SetOrthographicSize(size);
+
+                    float nearClip = camera->Camera.GetOrthographicNearClip();
+                    if (ImGui::DragFloat("Near Clip", &nearClip, 0.1f, -100.0f, 100.0f))
+                        camera->Camera.SetOrthographicNearClip(nearClip);
+
+                    float farClip = camera->Camera.GetOrthographicFarClip();
+                    if (ImGui::DragFloat("Far Clip", &farClip, 0.1f, -100.0f, 100.0f))
+                        camera->Camera.SetOrthographicFarClip(farClip);
+                }
+
+                ImGui::Checkbox("Fixed Aspect Ratio", &camera->FixedAspectRatio);
+            }
+        }
+        else
+        {
+            // Add Camera button
+            if (ImGui::Button("Add Camera"))
+            {
+                m_ActiveScene->AddComponent<GGEngine::CameraComponent>(m_SelectedEntity);
             }
         }
 

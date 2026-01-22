@@ -141,6 +141,8 @@ set(ENGINE_SOURCES
     Engine/src/GGEngine/ECS/Components/TransformComponent.h
     Engine/src/GGEngine/ECS/Components/SpriteRendererComponent.h
     Engine/src/GGEngine/ECS/Components/TagComponent.h
+    Engine/src/GGEngine/ECS/Components/TilemapComponent.h
+    Engine/src/GGEngine/ECS/Components/CameraComponent.h
     Engine/src/GGEngine/ECS/Scene.h
     Engine/src/GGEngine/ECS/Scene.cpp
     Engine/src/GGEngine/ECS/SceneSerializer.h
@@ -179,6 +181,8 @@ set(ENGINE_SOURCES
     Engine/src/GGEngine/Renderer/DescriptorSet.cpp
     Engine/src/GGEngine/Renderer/Camera.h
     Engine/src/GGEngine/Renderer/Camera.cpp
+    Engine/src/GGEngine/Renderer/SceneCamera.h
+    Engine/src/GGEngine/Renderer/SceneCamera.cpp
     Engine/src/GGEngine/Renderer/OrthographicCameraController.h
     Engine/src/GGEngine/Renderer/OrthographicCameraController.cpp
     Engine/src/GGEngine/Renderer/Material.h
@@ -279,6 +283,8 @@ add_executable(Sandbox
     Sandbox/src/Examples/Renderer2DTexturesExample.cpp
     Sandbox/src/Examples/ECSExample.h
     Sandbox/src/Examples/ECSExample.cpp
+    Sandbox/src/Examples/ECSCameraExample.h
+    Sandbox/src/Examples/ECSCameraExample.cpp
     Sandbox/src/Examples/InputExample.h
     Sandbox/src/Examples/InputExample.cpp
     Sandbox/src/Examples/ParticleExample.h

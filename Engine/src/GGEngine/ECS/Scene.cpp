@@ -2,6 +2,7 @@
 #include "Scene.h"
 #include "GGEngine/Renderer/Renderer2D.h"
 #include "GGEngine/Renderer/SubTexture2D.h"
+#include "GGEngine/Renderer/SceneCamera.h"
 #include "GGEngine/Asset/TextureLibrary.h"
 
 #include <algorithm>
@@ -94,6 +95,7 @@ namespace GGEngine {
         m_Transforms.Clear();
         m_Sprites.Clear();
         m_Tilemaps.Clear();
+        m_Cameras.Clear();
 
         GG_CORE_TRACE("Scene '{}' cleared", m_Name);
     }
@@ -115,6 +117,7 @@ namespace GGEngine {
         m_Transforms.Remove(index);
         m_Sprites.Remove(index);
         m_Tilemaps.Remove(index);
+        m_Cameras.Remove(index);
 
         // Remove from active entities list
         auto it = std::find(m_Entities.begin(), m_Entities.end(), index);
@@ -177,6 +180,190 @@ namespace GGEngine {
     {
         Renderer2D::ResetStats();
         Renderer2D::BeginScene(camera, renderPass, cmd, width, height);
+
+        auto& textureLib = TextureLibrary::Get();
+
+        // Render all tilemaps first (background layer)
+        for (size_t i = 0; i < m_Tilemaps.Size(); i++)
+        {
+            Entity entity = m_Tilemaps.GetEntity(i);
+
+            const TransformComponent* transform = m_Transforms.Get(entity);
+            if (!transform) continue;
+
+            const TilemapComponent& tilemap = m_Tilemaps.Data()[i];
+
+            // Skip if no texture assigned
+            if (tilemap.TextureName.empty()) continue;
+
+            Texture* texture = textureLib.GetTexturePtr(tilemap.TextureName);
+            if (!texture) continue;
+
+            // Calculate base position (tilemap is centered on entity position)
+            float baseX = transform->Position[0] - (tilemap.Width * tilemap.TileWidth * 0.5f);
+            float baseY = transform->Position[1] - (tilemap.Height * tilemap.TileHeight * 0.5f);
+            float baseZ = transform->Position[2] + tilemap.ZOffset;
+
+            // Render each tile
+            for (uint32_t ty = 0; ty < tilemap.Height; ty++)
+            {
+                for (uint32_t tx = 0; tx < tilemap.Width; tx++)
+                {
+                    int32_t tileIndex = tilemap.GetTile(tx, ty);
+                    if (tileIndex < 0) continue;  // Skip empty tiles
+
+                    // Convert linear atlas index to cell coordinates
+                    uint32_t cellX, cellY;
+                    tilemap.IndexToCell(tileIndex, cellX, cellY);
+
+                    // Create sub-texture for this tile
+                    auto subTexture = SubTexture2D::CreateFromGrid(
+                        texture,
+                        cellX, cellY,
+                        tilemap.AtlasCellWidth, tilemap.AtlasCellHeight
+                    );
+
+                    // Calculate world position for this tile (center of tile)
+                    float worldX = baseX + tx * tilemap.TileWidth + tilemap.TileWidth * 0.5f;
+                    float worldY = baseY + ty * tilemap.TileHeight + tilemap.TileHeight * 0.5f;
+
+                    Renderer2D::DrawQuad(
+                        worldX, worldY, baseZ,
+                        tilemap.TileWidth, tilemap.TileHeight,
+                        subTexture.get(),
+                        tilemap.Color[0], tilemap.Color[1], tilemap.Color[2], tilemap.Color[3]
+                    );
+                }
+            }
+        }
+
+        // Render all entities with SpriteRenderer component
+        for (size_t i = 0; i < m_Sprites.Size(); i++)
+        {
+            Entity entity = m_Sprites.GetEntity(i);
+
+            // Get transform (should always exist)
+            const TransformComponent* transform = m_Transforms.Get(entity);
+            if (!transform) continue;
+
+            const SpriteRendererComponent& sprite = m_Sprites.Data()[i];
+
+            float rotationRadians = transform->Rotation * 3.14159265359f / 180.0f;
+
+            // Resolve texture from library
+            Texture* texture = nullptr;
+            if (!sprite.TextureName.empty())
+            {
+                texture = textureLib.GetTexturePtr(sprite.TextureName);
+            }
+
+            if (texture)
+            {
+                if (sprite.UseAtlas)
+                {
+                    // Spritesheet/Atlas rendering - create SubTexture2D for the specific cell
+                    auto subTexture = SubTexture2D::CreateFromGrid(
+                        texture,
+                        sprite.AtlasCellX, sprite.AtlasCellY,
+                        sprite.AtlasCellWidth, sprite.AtlasCellHeight,
+                        sprite.AtlasSpriteWidth, sprite.AtlasSpriteHeight
+                    );
+
+                    Renderer2D::DrawRotatedQuad(
+                        transform->Position[0], transform->Position[1], transform->Position[2],
+                        transform->Scale[0], transform->Scale[1],
+                        rotationRadians,
+                        subTexture.get(),
+                        sprite.Color[0], sprite.Color[1], sprite.Color[2], sprite.Color[3]
+                    );
+                }
+                else
+                {
+                    // Full texture rendering
+                    Renderer2D::DrawRotatedQuad(
+                        transform->Position[0], transform->Position[1], transform->Position[2],
+                        transform->Scale[0], transform->Scale[1],
+                        rotationRadians,
+                        texture,
+                        sprite.TilingFactor,
+                        sprite.Color[0], sprite.Color[1], sprite.Color[2], sprite.Color[3]
+                    );
+                }
+            }
+            else
+            {
+                // Colored quad (no texture)
+                Renderer2D::DrawRotatedQuad(
+                    transform->Position[0], transform->Position[1], transform->Position[2],
+                    transform->Scale[0], transform->Scale[1],
+                    rotationRadians,
+                    sprite.Color[0], sprite.Color[1], sprite.Color[2], sprite.Color[3]
+                );
+            }
+        }
+
+        Renderer2D::EndScene();
+    }
+
+    EntityID Scene::GetPrimaryCameraEntity()
+    {
+        for (size_t i = 0; i < m_Cameras.Size(); i++)
+        {
+            if (m_Cameras.Data()[i].Primary)
+            {
+                Entity entity = m_Cameras.GetEntity(i);
+                return EntityID{ entity, m_Generations[entity] };
+            }
+        }
+        return InvalidEntityID;
+    }
+
+    void Scene::OnViewportResize(uint32_t width, uint32_t height)
+    {
+        // Update all cameras that don't have fixed aspect ratio
+        for (size_t i = 0; i < m_Cameras.Size(); i++)
+        {
+            CameraComponent& cameraComp = m_Cameras.Data()[i];
+            if (!cameraComp.FixedAspectRatio)
+            {
+                cameraComp.Camera.SetViewportSize(width, height);
+            }
+        }
+    }
+
+    void Scene::OnRenderRuntime(RHIRenderPassHandle renderPass,
+                                 RHICommandBufferHandle cmd, uint32_t width, uint32_t height)
+    {
+        // Find primary camera
+        SceneCamera* mainCamera = nullptr;
+        Mat4 cameraTransform;
+
+        for (size_t i = 0; i < m_Cameras.Size(); i++)
+        {
+            CameraComponent& cameraComp = m_Cameras.Data()[i];
+            if (cameraComp.Primary)
+            {
+                Entity entity = m_Cameras.GetEntity(i);
+
+                // Get transform for this camera entity
+                const TransformComponent* transform = m_Transforms.Get(entity);
+                if (transform)
+                {
+                    mainCamera = &cameraComp.Camera;
+                    cameraTransform = transform->GetMat4();
+                    break;
+                }
+            }
+        }
+
+        if (!mainCamera)
+        {
+            GG_CORE_WARN("Scene::OnRenderRuntime - No primary camera found!");
+            return;
+        }
+
+        Renderer2D::ResetStats();
+        Renderer2D::BeginScene(*mainCamera, cameraTransform, renderPass, cmd, width, height);
 
         auto& textureLib = TextureLibrary::Get();
 
