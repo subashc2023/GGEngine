@@ -58,7 +58,7 @@ void TriangleLayer::OnUpdate(GGEngine::Timestep ts)
         GGEngine::Renderer2D::BeginScene(m_CameraController.GetCamera());
 
         // Draw 10x10 grid of colored quads
-        const int gridSize = 10;
+        const int gridSize = 100;
         const float quadSize = 0.1f;
         const float spacing = 0.11f;
         const float offset = (gridSize - 1) * spacing * 0.5f;

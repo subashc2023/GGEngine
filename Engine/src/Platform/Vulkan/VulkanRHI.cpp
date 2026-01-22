@@ -1497,12 +1497,20 @@ namespace GGEngine {
         auto& registry = VulkanResourceRegistry::Get();
 
         // Shader stages
-        std::vector<VkPipelineShaderStageCreateInfo> shaderStages;
+        // Store module data to keep entry point strings alive until after vkCreateGraphicsPipelines
+        std::vector<VulkanResourceRegistry::ShaderModuleData> moduleDataStorage;
+        moduleDataStorage.reserve(spec.shaderModules.size());
         for (const auto& moduleHandle : spec.shaderModules)
         {
             auto moduleData = registry.GetShaderModuleData(moduleHandle);
-            if (moduleData.module == VK_NULL_HANDLE) continue;
+            if (moduleData.module != VK_NULL_HANDLE)
+                moduleDataStorage.push_back(moduleData);
+        }
 
+        std::vector<VkPipelineShaderStageCreateInfo> shaderStages;
+        shaderStages.reserve(moduleDataStorage.size());
+        for (const auto& moduleData : moduleDataStorage)
+        {
             VkPipelineShaderStageCreateInfo stageInfo{};
             stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
             stageInfo.stage = static_cast<VkShaderStageFlagBits>(ToVulkan(moduleData.stage));

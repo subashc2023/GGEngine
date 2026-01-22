@@ -33,12 +33,13 @@ namespace GGEngine {
     // Internal renderer data (bindless rendering)
     struct Renderer2DData
     {
-        static constexpr uint32_t MaxQuads = 10000;
+        static constexpr uint32_t MaxFramesInFlight = 2;
+        static constexpr uint32_t MaxQuads = 50000;
         static constexpr uint32_t MaxVertices = MaxQuads * 4;
         static constexpr uint32_t MaxIndices = MaxQuads * 6;
 
-        // Vertex data
-        Scope<VertexBuffer> QuadVertexBuffer;
+        // Vertex data (per-frame vertex buffers to avoid GPU/CPU conflicts)
+        Scope<VertexBuffer> QuadVertexBuffers[MaxFramesInFlight];
         Scope<IndexBuffer> QuadIndexBuffer;
         VertexLayout QuadVertexLayout;
 
@@ -62,7 +63,6 @@ namespace GGEngine {
 
         // Camera UBO and descriptors (per-frame to avoid updating in-flight descriptors)
         // Set 0: Camera UBO only (bindless textures are in set 1, managed globally)
-        static constexpr uint32_t MaxFramesInFlight = 2;
         Scope<UniformBuffer> CameraUniformBuffers[MaxFramesInFlight];
         Scope<DescriptorSetLayout> CameraDescriptorLayout;
         Scope<DescriptorSet> CameraDescriptorSets[MaxFramesInFlight];
@@ -113,14 +113,17 @@ namespace GGEngine {
         s_Data.QuadVertexBufferBase = new QuadVertex[Renderer2DData::MaxVertices]();
         s_Data.QuadVertexBufferPtr = s_Data.QuadVertexBufferBase;
 
-        // Create GPU vertex buffer (dynamic)
-        s_Data.QuadVertexBuffer = CreateScope<VertexBuffer>(
-            static_cast<uint64_t>(Renderer2DData::MaxVertices) * sizeof(QuadVertex),
-            s_Data.QuadVertexLayout
-        );
-        // Initialize GPU buffer with zeros to avoid potential first-upload issues
-        s_Data.QuadVertexBuffer->SetData(s_Data.QuadVertexBufferBase,
-            Renderer2DData::MaxVertices * sizeof(QuadVertex));
+        // Create GPU vertex buffers (one per frame in flight to avoid GPU/CPU conflicts)
+        for (uint32_t i = 0; i < Renderer2DData::MaxFramesInFlight; i++)
+        {
+            s_Data.QuadVertexBuffers[i] = CreateScope<VertexBuffer>(
+                static_cast<uint64_t>(Renderer2DData::MaxVertices) * sizeof(QuadVertex),
+                s_Data.QuadVertexLayout
+            );
+            // Initialize GPU buffer with zeros to avoid potential first-upload issues
+            s_Data.QuadVertexBuffers[i]->SetData(s_Data.QuadVertexBufferBase,
+                Renderer2DData::MaxVertices * sizeof(QuadVertex));
+        }
 
         // Generate indices for all quads (0,1,2,2,3,0 pattern) - standard indexing
         std::vector<uint32_t> indices(Renderer2DData::MaxIndices);
@@ -188,7 +191,10 @@ namespace GGEngine {
         }
         s_Data.CameraDescriptorLayout.reset();
         s_Data.QuadIndexBuffer.reset();
-        s_Data.QuadVertexBuffer.reset();
+        for (uint32_t i = 0; i < Renderer2DData::MaxFramesInFlight; i++)
+        {
+            s_Data.QuadVertexBuffers[i].reset();
+        }
         s_Data.WhiteTexture.reset();
         s_Data.QuadShader = AssetHandle<Shader>();  // Release shader reference
 
@@ -274,10 +280,10 @@ namespace GGEngine {
         );
         uint32_t vertexCount = dataSize / sizeof(QuadVertex);
 
-        // Upload vertex data to GPU at current offset (not at 0!)
-        // This prevents later batches from overwriting earlier batches' data
+        // Upload vertex data to current frame's GPU buffer at current offset
+        // Per-frame buffers prevent GPU/CPU conflicts between frames in flight
         uint64_t gpuOffset = static_cast<uint64_t>(s_Data.QuadVertexOffset) * sizeof(QuadVertex);
-        s_Data.QuadVertexBuffer->SetData(s_Data.QuadVertexBufferBase, dataSize, gpuOffset);
+        s_Data.QuadVertexBuffers[s_Data.CurrentFrameIndex]->SetData(s_Data.QuadVertexBufferBase, dataSize, gpuOffset);
 
         RHICommandBufferHandle cmd = s_Data.CurrentCommandBuffer;
 
@@ -295,8 +301,8 @@ namespace GGEngine {
         RHICmd::BindDescriptorSetRaw(cmd, s_Data.QuadPipeline->GetLayoutHandle(),
                                       BindlessTextureManager::Get().GetDescriptorSet(), 1);
 
-        // Bind vertex and index buffers
-        s_Data.QuadVertexBuffer->Bind(cmd);
+        // Bind vertex and index buffers (use current frame's vertex buffer)
+        s_Data.QuadVertexBuffers[s_Data.CurrentFrameIndex]->Bind(cmd);
         s_Data.QuadIndexBuffer->Bind(cmd);
 
         // Draw with vertex offset to read from correct GPU buffer location

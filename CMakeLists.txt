@@ -236,8 +236,11 @@ target_include_directories(Engine PUBLIC
 
 target_precompile_headers(Engine PUBLIC Engine/src/ggpch.h)
 
-# Exclude tinyfiledialogs.c from precompiled headers (it's C, not C++)
-set_source_files_properties(Vendor/tinyfiledialogs/tinyfiledialogs.c PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+# Exclude tinyfiledialogs.c from precompiled headers (it's C, not C++) and suppress vendor warnings
+set_source_files_properties(Vendor/tinyfiledialogs/tinyfiledialogs.c PROPERTIES
+    SKIP_PRECOMPILE_HEADERS ON
+    COMPILE_OPTIONS "-Wno-int-conversion;-Wno-pointer-bool-conversion"
+)
 
 set_target_properties(Engine PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${BIN_ROOT}/Engine"
