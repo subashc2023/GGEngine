@@ -2,6 +2,7 @@
 
 #include "RHITypes.h"
 #include "RHIEnums.h"
+#include "RHISpecifications.h"
 #include "GGEngine/Core/Core.h"
 
 #include <cstdint>
@@ -70,8 +71,12 @@ namespace GGEngine {
         // Push Constants
         // ========================================================================
 
-        // Push constant data
+        // Push constant data (using pipeline handle to get layout)
         static void PushConstants(RHICommandBufferHandle cmd, RHIPipelineHandle pipeline,
+                                  ShaderStage stages, uint32_t offset, uint32_t size, const void* data);
+
+        // Push constant data (using explicit layout handle)
+        static void PushConstants(RHICommandBufferHandle cmd, RHIPipelineLayoutHandle layout,
                                   ShaderStage stages, uint32_t offset, uint32_t size, const void* data);
 
         // Push constant data (templated)
@@ -105,6 +110,55 @@ namespace GGEngine {
 
         // End the current render pass
         static void EndRenderPass(RHICommandBufferHandle cmd);
+
+        // ========================================================================
+        // Transfer Commands
+        // ========================================================================
+
+        // Copy data between buffers
+        static void CopyBuffer(RHICommandBufferHandle cmd, RHIBufferHandle src, RHIBufferHandle dst,
+                               uint64_t srcOffset, uint64_t dstOffset, uint64_t size);
+
+        // Copy buffer data to texture
+        static void CopyBufferToTexture(RHICommandBufferHandle cmd, RHIBufferHandle buffer,
+                                        RHITextureHandle texture, const RHIBufferImageCopy& region);
+
+        // Simplified copy for 2D textures (copies entire buffer to mip 0, layer 0)
+        static void CopyBufferToTexture(RHICommandBufferHandle cmd, RHIBufferHandle buffer,
+                                        RHITextureHandle texture, uint32_t width, uint32_t height);
+
+        // ========================================================================
+        // Image Layout Transitions
+        // ========================================================================
+
+        // Transition image layout (inserts appropriate pipeline barrier)
+        static void TransitionImageLayout(RHICommandBufferHandle cmd, RHITextureHandle texture,
+                                          ImageLayout oldLayout, ImageLayout newLayout);
+
+        // Transition with explicit mip/layer range
+        static void TransitionImageLayout(RHICommandBufferHandle cmd, RHITextureHandle texture,
+                                          ImageLayout oldLayout, ImageLayout newLayout,
+                                          uint32_t baseMipLevel, uint32_t mipCount,
+                                          uint32_t baseArrayLayer, uint32_t layerCount);
+
+        // ========================================================================
+        // Pipeline Barriers (Advanced)
+        // ========================================================================
+
+        // Execute a pipeline barrier with multiple image transitions
+        static void PipelineBarrier(RHICommandBufferHandle cmd, const RHIPipelineBarrier& barrier);
+
+        // ========================================================================
+        // Bind Descriptor Sets with Layout Handle
+        // ========================================================================
+
+        // Bind descriptor set using explicit pipeline layout (for when pipeline handle isn't available)
+        static void BindDescriptorSet(RHICommandBufferHandle cmd, RHIPipelineLayoutHandle layout,
+                                      RHIDescriptorSetHandle set, uint32_t setIndex = 0);
+
+        // Bind raw descriptor set (for bindless - accepts void* for backend-specific handle)
+        static void BindDescriptorSetRaw(RHICommandBufferHandle cmd, RHIPipelineLayoutHandle layout,
+                                         void* descriptorSet, uint32_t setIndex = 0);
     };
 
 }

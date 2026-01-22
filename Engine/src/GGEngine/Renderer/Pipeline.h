@@ -78,11 +78,8 @@ namespace GGEngine {
         Pipeline(const Pipeline&) = delete;
         Pipeline& operator=(const Pipeline&) = delete;
 
-        // Bind to command buffer (RHI handle)
+        // Bind to command buffer
         void Bind(RHICommandBufferHandle cmd);
-
-        // Bind to command buffer (Vulkan - backward compatibility during migration)
-        void BindVk(void* vkCmd);
 
         RHIPipelineHandle GetHandle() const { return m_Handle; }
         RHIPipelineLayoutHandle GetLayoutHandle() const { return m_LayoutHandle; }

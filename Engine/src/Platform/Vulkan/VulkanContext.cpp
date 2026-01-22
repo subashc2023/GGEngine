@@ -411,6 +411,7 @@ namespace GGEngine {
         vulkan12Features.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
         vulkan12Features.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
         vulkan12Features.descriptorBindingPartiallyBound = VK_TRUE;
+        vulkan12Features.descriptorBindingVariableDescriptorCount = VK_TRUE;
         vulkan12Features.runtimeDescriptorArray = VK_TRUE;
 
         VkPhysicalDeviceFeatures2 deviceFeatures2{};

@@ -63,10 +63,6 @@ namespace GGEngine {
         void OnRender(const Camera& camera, RHIRenderPassHandle renderPass,
                       RHICommandBufferHandle cmd, uint32_t width, uint32_t height);
 
-        // Vulkan backward compatibility
-        void OnRenderVk(const Camera& camera, RHIRenderPassHandle renderPass,
-                        void* vkCmd, uint32_t width, uint32_t height);
-
         // Iteration helpers
         const std::vector<Entity>& GetAllEntities() const { return m_Entities; }
         size_t GetEntityCount() const { return m_Entities.size(); }

@@ -107,9 +107,6 @@ namespace GGEngine {
         // Bind pipeline and push all constants (RHI handle)
         void Bind(RHICommandBufferHandle cmd) const;
 
-        // Bind pipeline and push all constants (Vulkan - backward compatibility)
-        void BindVk(void* vkCmd) const;
-
         // Access underlying pipeline (for advanced use)
         Pipeline* GetPipeline() const { return m_Pipeline.get(); }
         RHIPipelineLayoutHandle GetPipelineLayoutHandle() const;

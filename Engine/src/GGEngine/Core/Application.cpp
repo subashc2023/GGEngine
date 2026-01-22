@@ -13,6 +13,7 @@
 #include "GGEngine/Renderer/Renderer2D.h"
 #include "GGEngine/Renderer/BindlessTextureManager.h"
 #include "GGEngine/Core/Profiler.h"
+#include "GGEngine/RHI/RHIDevice.h"
 #include "Platform/Vulkan/VulkanContext.h"
 
 #include <GLFW/glfw3.h>
@@ -32,6 +33,9 @@ namespace GGEngine {
         m_Window->SetEventCallback(BIND_EVENT_FN(OnEvent));
 
         VulkanContext::Get().Init(static_cast<GLFWwindow*>(m_Window->GetNativeWindow()));
+
+        // Initialize RHI device (requires VulkanContext to be ready)
+        RHIDevice::Get().Init(m_Window->GetNativeWindow());
 
         // Initialize bindless texture manager (requires VulkanContext to be ready)
         BindlessTextureManager::Get().Init();
@@ -74,6 +78,9 @@ namespace GGEngine {
 
         // Shutdown bindless texture manager before Vulkan
         BindlessTextureManager::Get().Shutdown();
+
+        // Shutdown RHI device before Vulkan context
+        RHIDevice::Get().Shutdown();
 
         VulkanContext::Get().Shutdown();
     }
@@ -122,7 +129,7 @@ namespace GGEngine {
 
             GG_PROFILE_BEGIN_FRAME();
 
-            VulkanContext::Get().BeginFrame();
+            RHIDevice::Get().BeginFrame();
 
             // Measure time AFTER BeginFrame to include VSync blocking time
             // (vkAcquireNextImageKHR blocks when VSync is enabled and CPU runs ahead)
@@ -137,7 +144,7 @@ namespace GGEngine {
             }
 
             // Begin swapchain render pass for ImGui and direct swapchain rendering
-            VulkanContext::Get().BeginSwapchainRenderPass();
+            RHIDevice::Get().BeginSwapchainRenderPass();
 
             m_ImGuiLayer->Begin();
             for (Layer* layer : m_LayerStack)
@@ -146,7 +153,7 @@ namespace GGEngine {
             }
             m_ImGuiLayer->End();
 
-            VulkanContext::Get().EndFrame();
+            RHIDevice::Get().EndFrame();
         }
     }
 

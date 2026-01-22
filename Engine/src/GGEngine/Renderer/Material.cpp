@@ -1,8 +1,8 @@
 #include "ggpch.h"
 #include "Material.h"
 #include "GGEngine/Asset/Shader.h"
+#include "GGEngine/RHI/RHICommandBuffer.h"
 #include "RenderCommand.h"
-#include "Platform/Vulkan/VulkanRHI.h"
 
 namespace GGEngine {
 
@@ -220,54 +220,17 @@ namespace GGEngine {
             return;
         }
 
-        auto& registry = VulkanResourceRegistry::Get();
-
         // Bind the pipeline
         m_Pipeline->Bind(cmd);
 
-        // Push constants for each stage
-        VkCommandBuffer vkCmd = registry.GetCommandBuffer(cmd);
-        VkPipelineLayout layout = registry.GetPipelineLayout(m_Pipeline->GetLayoutHandle());
-
-        // Get the push constant ranges we built during Create()
+        // Push constants for each stage using RHI commands
         const auto& spec = m_Pipeline->GetSpecification();
         for (const auto& range : spec.pushConstantRanges)
         {
-            vkCmdPushConstants(
-                vkCmd,
-                layout,
-                ToVulkan(range.stageFlags),
-                range.offset,
-                range.size,
-                m_PushConstantBuffer.data() + range.offset
-            );
-        }
-    }
-
-    void Material::BindVk(void* vkCmd) const
-    {
-        if (!m_Pipeline)
-        {
-            GG_CORE_ERROR("Material '{}': cannot bind - pipeline not created", m_Name);
-            return;
-        }
-
-        auto& registry = VulkanResourceRegistry::Get();
-
-        // Bind the pipeline
-        m_Pipeline->BindVk(vkCmd);
-
-        // Push constants for each stage
-        VkPipelineLayout layout = registry.GetPipelineLayout(m_Pipeline->GetLayoutHandle());
-
-        // Get the push constant ranges we built during Create()
-        const auto& spec = m_Pipeline->GetSpecification();
-        for (const auto& range : spec.pushConstantRanges)
-        {
-            vkCmdPushConstants(
-                static_cast<VkCommandBuffer>(vkCmd),
-                layout,
-                ToVulkan(range.stageFlags),
+            RHICmd::PushConstants(
+                cmd,
+                m_Pipeline->GetHandle(),
+                range.stageFlags,
                 range.offset,
                 range.size,
                 m_PushConstantBuffer.data() + range.offset

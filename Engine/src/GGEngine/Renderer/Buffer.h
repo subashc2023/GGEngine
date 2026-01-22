@@ -36,7 +36,6 @@ namespace GGEngine {
     protected:
         void Create();
         void Destroy();
-        void CopyBuffer(RHIBufferHandle srcBuffer, RHIBufferHandle dstBuffer, uint64_t size, uint64_t dstOffset = 0);
 
         BufferSpecification m_Specification;
         RHIBufferHandle m_Handle;

@@ -60,22 +60,24 @@ namespace GGEngine {
         uint32_t GetChannels() const { return m_Channels; }
         TextureFormat GetFormat() const { return m_Format; }
 
-        // RHI handle for backend-agnostic usage
+        // RHI handles for backend-agnostic usage
         RHITextureHandle GetHandle() const { return m_Handle; }
+        RHISamplerHandle GetSamplerHandle() const { return m_SamplerHandle; }
 
         // Bindless texture index for shader access
         BindlessTextureIndex GetBindlessIndex() const { return m_BindlessIndex; }
 
     private:
-        void CreateVulkanResources(const uint8_t* pixels);
+        void CreateResources(const uint8_t* pixels);
 
         uint32_t m_Width = 0;
         uint32_t m_Height = 0;
         uint32_t m_Channels = 4;
         TextureFormat m_Format = TextureFormat::R8G8B8A8_UNORM;
 
-        // RHI handle (maps to backend resources via registry)
+        // RHI handles (maps to backend resources via registry)
         RHITextureHandle m_Handle;
+        RHISamplerHandle m_SamplerHandle;
 
         // Bindless texture index for shader access
         BindlessTextureIndex m_BindlessIndex = InvalidBindlessIndex;

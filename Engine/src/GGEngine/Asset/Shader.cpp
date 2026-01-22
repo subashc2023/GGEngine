@@ -3,8 +3,7 @@
 #include "GGEngine/Core/Profiler.h"
 #include "AssetManager.h"
 #include "ShaderLibrary.h"
-#include "Platform/Vulkan/VulkanContext.h"
-#include "Platform/Vulkan/VulkanRHI.h"
+#include "GGEngine/RHI/RHIDevice.h"
 
 #include <filesystem>
 
@@ -65,41 +64,27 @@ namespace GGEngine {
         if (spirvCode.empty())
             return false;
 
-        VkShaderModuleCreateInfo createInfo{};
-        createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-        createInfo.codeSize = spirvCode.size();
-        createInfo.pCode = reinterpret_cast<const uint32_t*>(spirvCode.data());
-
-        VkShaderModule module;
-        VkDevice device = VulkanContext::Get().GetDevice();
-
-        if (vkCreateShaderModule(device, &createInfo, nullptr, &module) != VK_SUCCESS)
-        {
-            GG_CORE_ERROR("Failed to create shader module");
-            return false;
-        }
+        auto& device = RHIDevice::Get();
 
         // Remove existing stage if present (for hot-reloading support)
         for (auto it = m_Stages.begin(); it != m_Stages.end(); ++it)
         {
             if (it->stage == stage)
             {
-                // Unregister and destroy old module
-                auto& registry = VulkanResourceRegistry::Get();
-                VkShaderModule oldModule = registry.GetShaderModule(it->handle);
-                if (oldModule != VK_NULL_HANDLE)
-                {
-                    vkDestroyShaderModule(device, oldModule, nullptr);
-                }
-                registry.UnregisterShaderModule(it->handle);
+                // Destroy old module
+                device.DestroyShaderModule(it->handle);
                 m_Stages.erase(it);
                 break;
             }
         }
 
-        // Register the new module
-        auto& registry = VulkanResourceRegistry::Get();
-        RHIShaderModuleHandle handle = registry.RegisterShaderModule(module, stage, "main");
+        // Create new shader module through RHI device
+        RHIShaderModuleHandle handle = device.CreateShaderModule(stage, spirvCode);
+        if (!handle.IsValid())
+        {
+            GG_CORE_ERROR("Failed to create shader module");
+            return false;
+        }
 
         ShaderStageInfo stageInfo;
         stageInfo.stage = stage;
@@ -126,24 +111,10 @@ namespace GGEngine {
         if (m_Stages.empty())
             return;
 
-        // Check if VulkanContext is still valid (may be destroyed during static destruction)
-        VkDevice device = VulkanContext::Get().GetDevice();
-        if (device == VK_NULL_HANDLE)
-        {
-            m_Stages.clear();
-            m_Loaded = false;
-            return;
-        }
-
-        auto& registry = VulkanResourceRegistry::Get();
+        auto& device = RHIDevice::Get();
         for (auto& stageInfo : m_Stages)
         {
-            VkShaderModule module = registry.GetShaderModule(stageInfo.handle);
-            if (module != VK_NULL_HANDLE)
-            {
-                vkDestroyShaderModule(device, module, nullptr);
-            }
-            registry.UnregisterShaderModule(stageInfo.handle);
+            device.DestroyShaderModule(stageInfo.handle);
         }
         m_Stages.clear();
         m_Loaded = false;

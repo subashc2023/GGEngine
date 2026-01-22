@@ -1,7 +1,6 @@
 #include "ggpch.h"
 #include "VertexBuffer.h"
-#include "Platform/Vulkan/VulkanRHI.h"
-#include <vulkan/vulkan.h>
+#include "GGEngine/RHI/RHICommandBuffer.h"
 
 namespace GGEngine {
 
@@ -39,23 +38,7 @@ namespace GGEngine {
 
     void VertexBuffer::Bind(RHICommandBufferHandle cmd, uint32_t binding) const
     {
-        auto& registry = VulkanResourceRegistry::Get();
-        VkCommandBuffer vkCmd = registry.GetCommandBuffer(cmd);
-        VkBuffer buffer = registry.GetBuffer(m_Buffer->GetHandle());
-
-        VkBuffer buffers[] = { buffer };
-        VkDeviceSize offsets[] = { 0 };
-        vkCmdBindVertexBuffers(vkCmd, binding, 1, buffers, offsets);
-    }
-
-    void VertexBuffer::BindVk(void* vkCmd, uint32_t binding) const
-    {
-        auto& registry = VulkanResourceRegistry::Get();
-        VkBuffer buffer = registry.GetBuffer(m_Buffer->GetHandle());
-
-        VkBuffer buffers[] = { buffer };
-        VkDeviceSize offsets[] = { 0 };
-        vkCmdBindVertexBuffers(static_cast<VkCommandBuffer>(vkCmd), binding, 1, buffers, offsets);
+        RHICmd::BindVertexBuffer(cmd, m_Buffer->GetHandle(), binding);
     }
 
     void VertexBuffer::SetData(const void* data, uint64_t size, uint64_t offset)

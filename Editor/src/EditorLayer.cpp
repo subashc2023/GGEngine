@@ -1,5 +1,5 @@
 #include "EditorLayer.h"
-#include "Platform/Vulkan/VulkanContext.h"
+#include "GGEngine/RHI/RHIDevice.h"
 #include "GGEngine/Renderer/Renderer2D.h"
 #include "GGEngine/ImGui/DebugUI.h"
 #include "GGEngine/Core/Input.h"
@@ -110,23 +110,23 @@ void EditorLayer::OnRenderOffscreen(GGEngine::Timestep ts)
         m_CameraController.SetAspectRatio(m_ViewportWidth / m_ViewportHeight);
     }
 
-    auto& vkContext = GGEngine::VulkanContext::Get();
-    VkCommandBuffer cmd = vkContext.GetCurrentCommandBuffer();
+    auto& device = GGEngine::RHIDevice::Get();
+    GGEngine::RHICommandBufferHandle cmd = device.GetCurrentCommandBuffer();
 
-    if (cmd == VK_NULL_HANDLE)
+    if (!cmd.IsValid())
         return;
 
-    m_ViewportFramebuffer->BeginRenderPassVk(cmd);
+    m_ViewportFramebuffer->BeginRenderPass(cmd);
 
     // Scene renders all entities with SpriteRenderer components
-    m_ActiveScene->OnRenderVk(
+    m_ActiveScene->OnRender(
         m_CameraController.GetCamera(),
         m_ViewportFramebuffer->GetRenderPassHandle(),
         cmd,
         m_ViewportFramebuffer->GetWidth(),
         m_ViewportFramebuffer->GetHeight());
 
-    m_ViewportFramebuffer->EndRenderPassVk(cmd);
+    m_ViewportFramebuffer->EndRenderPass(cmd);
 }
 
 void EditorLayer::DrawSceneHierarchyPanel()

@@ -37,31 +37,6 @@ namespace GGEngine {
         {
             PushConstants(cmd, layout, stageFlags, offset, sizeof(T), &data);
         }
-
-        // ========================================================================
-        // Vulkan backward compatibility
-        // ========================================================================
-
-        // Viewport (Vulkan)
-        static void SetViewportVk(void* vkCmd, float x, float y, float width, float height,
-                                  float minDepth = 0.0f, float maxDepth = 1.0f);
-        static void SetViewportVk(void* vkCmd, float width, float height);
-        static void SetViewportVk(void* vkCmd, uint32_t width, uint32_t height);
-
-        // Scissor (Vulkan)
-        static void SetScissorVk(void* vkCmd, int32_t x, int32_t y, uint32_t width, uint32_t height);
-        static void SetScissorVk(void* vkCmd, uint32_t width, uint32_t height);
-
-        // Draw commands (Vulkan)
-        static void DrawVk(void* vkCmd, uint32_t vertexCount, uint32_t instanceCount = 1,
-                           uint32_t firstVertex = 0, uint32_t firstInstance = 0);
-
-        static void DrawIndexedVk(void* vkCmd, uint32_t indexCount, uint32_t instanceCount = 1,
-                                  uint32_t firstIndex = 0, int32_t vertexOffset = 0, uint32_t firstInstance = 0);
-
-        // Push constants (Vulkan)
-        static void PushConstantsVk(void* vkCmd, void* vkPipelineLayout, ShaderStage stageFlags,
-                                    uint32_t offset, uint32_t size, const void* data);
     };
 
 }

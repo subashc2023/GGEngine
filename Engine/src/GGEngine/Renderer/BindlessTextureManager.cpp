@@ -3,8 +3,7 @@
 #include "GGEngine/Asset/Texture.h"
 #include "Platform/Vulkan/VulkanContext.h"
 #include "Platform/Vulkan/VulkanRHI.h"
-
-#include <vulkan/vulkan.h>
+// Note: VulkanRHI.h provides vulkan.h types
 
 namespace GGEngine {
 
@@ -206,13 +205,20 @@ namespace GGEngine {
             index = m_NextIndex++;
         }
 
-        // Get texture data from registry
+        // Get texture and sampler data from registry
         auto& registry = VulkanResourceRegistry::Get();
         auto texData = registry.GetTextureData(handle);
 
+        // Get sampler from texture's separate sampler handle (if it exists)
+        // Otherwise fallback to the sampler stored in texture data (legacy path)
+        RHISamplerHandle samplerHandle = texture.GetSamplerHandle();
+        VkSampler sampler = samplerHandle.IsValid()
+            ? reinterpret_cast<VkSampler>(samplerHandle.id)
+            : texData.sampler;
+
         // Update descriptor
         VkDescriptorImageInfo imageInfo{};
-        imageInfo.sampler = texData.sampler;
+        imageInfo.sampler = sampler;
         imageInfo.imageView = texData.imageView;
         imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 

@@ -34,9 +34,6 @@ namespace GGEngine {
         // Bind to command buffer (RHI handle)
         void Bind(RHICommandBufferHandle cmd, uint32_t binding = 0) const;
 
-        // Bind to command buffer (Vulkan - for backward compatibility during migration)
-        void BindVk(void* vkCmd, uint32_t binding = 0) const;
-
         // Update data
         void SetData(const void* data, uint64_t size, uint64_t offset = 0);
 

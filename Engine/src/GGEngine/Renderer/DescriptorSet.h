@@ -56,9 +56,6 @@ namespace GGEngine {
         // Bind to command buffer (RHI handles)
         void Bind(RHICommandBufferHandle cmd, RHIPipelineLayoutHandle pipelineLayout, uint32_t setIndex = 0) const;
 
-        // Bind to command buffer (Vulkan - backward compatibility during migration)
-        void BindVk(void* vkCmd, void* vkPipelineLayout, uint32_t setIndex = 0) const;
-
         RHIDescriptorSetHandle GetHandle() const { return m_Handle; }
 
     private:

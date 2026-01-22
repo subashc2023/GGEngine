@@ -24,10 +24,6 @@ namespace GGEngine {
         void BeginRenderPass(RHICommandBufferHandle cmd);
         void EndRenderPass(RHICommandBufferHandle cmd);
 
-        // Backward compatibility (Vulkan)
-        void BeginRenderPassVk(void* vkCmd);
-        void EndRenderPassVk(void* vkCmd);
-
         // ImGui integration - returns opaque handle for ImGui texture binding
         void* GetImGuiTextureID() const { return m_ImGuiDescriptorSet; }
 
@@ -42,12 +38,16 @@ namespace GGEngine {
         void DestroyResources();
         void CreateRenderPass();
         void DestroyRenderPass();
-        void TransitionImageLayout(int oldLayout, int newLayout);
 
         FramebufferSpecification m_Specification;
-        RHIRenderPassHandle m_RenderPassHandle;
 
-        // Opaque pointer for ImGui descriptor set (cast to VkDescriptorSet in impl)
+        // RHI handles
+        RHIRenderPassHandle m_RenderPassHandle;
+        RHITextureHandle m_TextureHandle;
+        RHISamplerHandle m_SamplerHandle;
+        RHIFramebufferHandle m_FramebufferHandle;
+
+        // Opaque pointer for ImGui descriptor set (backend-specific)
         void* m_ImGuiDescriptorSet = nullptr;
     };
 }

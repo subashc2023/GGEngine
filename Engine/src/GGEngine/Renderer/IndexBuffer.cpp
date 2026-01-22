@@ -1,7 +1,6 @@
 #include "ggpch.h"
 #include "IndexBuffer.h"
-#include "Platform/Vulkan/VulkanRHI.h"
-#include <vulkan/vulkan.h>
+#include "GGEngine/RHI/RHICommandBuffer.h"
 
 namespace GGEngine {
 
@@ -41,21 +40,7 @@ namespace GGEngine {
 
     void IndexBuffer::Bind(RHICommandBufferHandle cmd) const
     {
-        auto& registry = VulkanResourceRegistry::Get();
-        VkCommandBuffer vkCmd = registry.GetCommandBuffer(cmd);
-        VkBuffer buffer = registry.GetBuffer(m_Buffer->GetHandle());
-        VkIndexType vkIndexType = ToVulkan(m_IndexType);
-
-        vkCmdBindIndexBuffer(vkCmd, buffer, 0, vkIndexType);
-    }
-
-    void IndexBuffer::BindVk(void* vkCmd) const
-    {
-        auto& registry = VulkanResourceRegistry::Get();
-        VkBuffer buffer = registry.GetBuffer(m_Buffer->GetHandle());
-        VkIndexType vkIndexType = ToVulkan(m_IndexType);
-
-        vkCmdBindIndexBuffer(static_cast<VkCommandBuffer>(vkCmd), buffer, 0, vkIndexType);
+        RHICmd::BindIndexBuffer(cmd, m_Buffer->GetHandle(), m_IndexType);
     }
 
 }

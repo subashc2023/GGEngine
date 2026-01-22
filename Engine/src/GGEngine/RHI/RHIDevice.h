@@ -2,6 +2,7 @@
 
 #include "RHITypes.h"
 #include "RHIEnums.h"
+#include "RHISpecifications.h"
 #include "GGEngine/Core/Core.h"
 
 #include <string>
@@ -12,16 +13,6 @@ namespace GGEngine {
 
     // Forward declarations
     class VertexLayout;
-
-    // ============================================================================
-    // Push Constant Range (backend-agnostic)
-    // ============================================================================
-    struct GG_API RHIPushConstantRange
-    {
-        ShaderStage stages = ShaderStage::AllGraphics;
-        uint32_t offset = 0;
-        uint32_t size = 0;
-    };
 
     // ============================================================================
     // Descriptor Binding (backend-agnostic)
@@ -140,6 +131,10 @@ namespace GGEngine {
         // These methods provide a cleaner API for resource creation.
         // They internally use VulkanContext and register resources with VulkanResourceRegistry.
 
+        // ========================================================================
+        // Descriptor Set Management
+        // ========================================================================
+
         // Create a descriptor set layout
         RHIDescriptorSetLayoutHandle CreateDescriptorSetLayout(const std::vector<RHIDescriptorBinding>& bindings);
         void DestroyDescriptorSetLayout(RHIDescriptorSetLayoutHandle handle);
@@ -147,6 +142,96 @@ namespace GGEngine {
         // Allocate a descriptor set from the global pool
         RHIDescriptorSetHandle AllocateDescriptorSet(RHIDescriptorSetLayoutHandle layout);
         void FreeDescriptorSet(RHIDescriptorSetHandle handle);
+
+        // Update descriptor set bindings
+        void UpdateDescriptorSet(RHIDescriptorSetHandle set, const std::vector<RHIDescriptorWrite>& writes);
+
+        // ========================================================================
+        // Buffer Management
+        // ========================================================================
+
+        // Create a GPU buffer
+        RHIBufferHandle CreateBuffer(const RHIBufferSpecification& spec);
+        void DestroyBuffer(RHIBufferHandle handle);
+
+        // Buffer memory mapping (for CPU-visible buffers)
+        void* MapBuffer(RHIBufferHandle handle);
+        void UnmapBuffer(RHIBufferHandle handle);
+        void FlushBuffer(RHIBufferHandle handle, uint64_t offset = 0, uint64_t size = 0);
+
+        // Upload data to buffer (uses staging if not CPU-visible)
+        void UploadBufferData(RHIBufferHandle handle, const void* data, uint64_t size, uint64_t offset = 0);
+
+        // ========================================================================
+        // Texture Management
+        // ========================================================================
+
+        // Create a texture/image
+        RHITextureHandle CreateTexture(const RHITextureSpecification& spec);
+        void DestroyTexture(RHITextureHandle handle);
+
+        // Upload pixel data to texture (creates staging buffer internally)
+        void UploadTextureData(RHITextureHandle handle, const void* pixels, uint64_t size);
+
+        // Get texture dimensions
+        uint32_t GetTextureWidth(RHITextureHandle handle) const;
+        uint32_t GetTextureHeight(RHITextureHandle handle) const;
+
+        // ========================================================================
+        // Sampler Management
+        // ========================================================================
+
+        RHISamplerHandle CreateSampler(const RHISamplerSpecification& spec);
+        void DestroySampler(RHISamplerHandle handle);
+
+        // ========================================================================
+        // Shader Management
+        // ========================================================================
+
+        // Create shader module from SPIR-V bytecode
+        RHIShaderModuleHandle CreateShaderModule(ShaderStage stage, const std::vector<char>& spirvCode);
+        RHIShaderModuleHandle CreateShaderModule(ShaderStage stage, const void* spirvData, size_t spirvSize);
+        void DestroyShaderModule(RHIShaderModuleHandle handle);
+
+        // ========================================================================
+        // Pipeline Management
+        // ========================================================================
+
+        // Create graphics pipeline
+        RHIGraphicsPipelineResult CreateGraphicsPipeline(const RHIGraphicsPipelineSpecification& spec);
+        void DestroyPipeline(RHIPipelineHandle handle);
+        void DestroyPipelineLayout(RHIPipelineLayoutHandle handle);
+
+        // Get pipeline layout from pipeline (for push constants/descriptor binding)
+        RHIPipelineLayoutHandle GetPipelineLayout(RHIPipelineHandle pipeline) const;
+
+        // ========================================================================
+        // Render Pass Management
+        // ========================================================================
+
+        RHIRenderPassHandle CreateRenderPass(const RHIRenderPassSpecification& spec);
+        void DestroyRenderPass(RHIRenderPassHandle handle);
+
+        // ========================================================================
+        // Framebuffer Management
+        // ========================================================================
+
+        RHIFramebufferHandle CreateFramebuffer(const RHIFramebufferSpecification& spec);
+        void DestroyFramebuffer(RHIFramebufferHandle handle);
+
+        // ========================================================================
+        // Bindless Texture Support
+        // ========================================================================
+
+        // Create descriptor set layout for bindless texture array
+        RHIDescriptorSetLayoutHandle CreateBindlessTextureLayout(uint32_t maxTextures);
+
+        // Allocate bindless descriptor set with variable count
+        RHIDescriptorSetHandle AllocateBindlessDescriptorSet(RHIDescriptorSetLayoutHandle layout, uint32_t maxTextures);
+
+        // Update a single texture slot in bindless array
+        void UpdateBindlessTexture(RHIDescriptorSetHandle set, uint32_t index,
+                                   RHITextureHandle texture, RHISamplerHandle sampler);
 
     private:
         RHIDevice() = default;

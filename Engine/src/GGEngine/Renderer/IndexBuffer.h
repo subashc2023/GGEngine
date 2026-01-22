@@ -29,9 +29,6 @@ namespace GGEngine {
         // Bind to command buffer (RHI handle)
         void Bind(RHICommandBufferHandle cmd) const;
 
-        // Bind to command buffer (Vulkan - for backward compatibility during migration)
-        void BindVk(void* vkCmd) const;
-
         // Accessors
         RHIBufferHandle GetHandle() const { return m_Buffer->GetHandle(); }
         uint32_t GetCount() const { return m_Count; }

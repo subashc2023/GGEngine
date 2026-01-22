@@ -24,10 +24,6 @@ namespace GGEngine {
         static void BeginScene(const Camera& camera, RHIRenderPassHandle renderPass,
                               RHICommandBufferHandle cmd, uint32_t viewportWidth, uint32_t viewportHeight);
 
-        // Custom render pass (Vulkan backward compatibility)
-        static void BeginSceneVk(const Camera& camera, RHIRenderPassHandle renderPass,
-                                 void* vkCmd, uint32_t viewportWidth, uint32_t viewportHeight);
-
         static void EndScene();
         static void Flush();
 

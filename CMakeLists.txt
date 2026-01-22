@@ -156,7 +156,7 @@ set(ENGINE_SOURCES
     Engine/src/Platform/Vulkan/VulkanContext.cpp
     Engine/src/Platform/Vulkan/vma.cpp
     Engine/src/GGEngine/ImGui/ImGuiLayer.h
-    Engine/src/GGEngine/ImGui/ImGuiLayer.cpp
+    Engine/src/Platform/Vulkan/VulkanImGuiLayer.cpp
     Engine/src/GGEngine/ImGui/DebugUI.h
     Engine/src/GGEngine/ImGui/DebugUI.cpp
     Engine/src/GGEngine/Renderer/Framebuffer.h

@@ -39,7 +39,7 @@ namespace GGEngine {
         // Get the descriptor set layout handle
         RHIDescriptorSetLayoutHandle GetLayoutHandle() const { return m_LayoutHandle; }
 
-        // Get the raw VkDescriptorSetLayout
+        // Get the raw descriptor set layout (backend-specific opaque pointer)
         void* GetDescriptorSetLayout() const;
 
         // Get maximum number of textures supported

@@ -197,6 +197,10 @@ namespace GGEngine {
         RHICommandBufferHandle GetCurrentCommandBufferHandle(uint32_t frameIndex) const;
         VkCommandBuffer GetCommandBuffer(RHICommandBufferHandle handle) const;
 
+        // Immediate command buffer (for one-shot operations, separate from frame buffers)
+        void SetImmediateCommandBuffer(VkCommandBuffer cmd);
+        RHICommandBufferHandle GetImmediateCommandBufferHandle() const;
+
         // ========================================================================
         // Cleanup
         // ========================================================================
@@ -226,6 +230,10 @@ namespace GGEngine {
         static constexpr uint32_t MaxFramesInFlight = 2;
         VkCommandBuffer m_CommandBuffers[MaxFramesInFlight] = {};
         uint64_t m_CommandBufferHandleIds[MaxFramesInFlight] = {};
+
+        // Immediate command buffer (for one-shot operations)
+        static constexpr uint64_t ImmediateCommandBufferHandleId = 0xFFFE0000;
+        VkCommandBuffer m_ImmediateCommandBuffer = VK_NULL_HANDLE;
     };
 
 }
