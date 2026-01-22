@@ -123,9 +123,14 @@ namespace GGEngine {
             GG_PROFILE_SCOPE("RunLoop");
             m_Window->OnUpdate();
 
-            // Skip rendering when minimized to save resources
+            // When minimized, block on events instead of busy-polling
             if (m_Minimized)
+            {
+                glfwWaitEvents();
+                // Reset frame time to avoid huge timestep spike on restore
+                m_LastFrameTime = static_cast<float>(glfwGetTime());
                 continue;
+            }
 
             GG_PROFILE_BEGIN_FRAME();
 

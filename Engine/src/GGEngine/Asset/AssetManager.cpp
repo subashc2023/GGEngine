@@ -115,7 +115,8 @@ namespace GGEngine {
         if (it != m_Assets.end())
         {
             AssetID id = it->second->GetID();
-            m_Generations[id]++; // Invalidate handles
+            it->second->Unload();  // Release GPU/external resources
+            m_Generations[id]++;   // Invalidate handles
             m_AssetsByID.erase(id);
             m_Assets.erase(it);
             GG_CORE_TRACE("Unloaded asset: {}", path);

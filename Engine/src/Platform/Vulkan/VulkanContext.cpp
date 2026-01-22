@@ -404,6 +404,57 @@ namespace GGEngine {
         GG_CORE_INFO("Bindless limits: maxSampledImages={}, maxPerStage={}",
                      m_BindlessLimits.maxSampledImages, m_BindlessLimits.maxPerStageDescriptorSampledImages);
 
+        // Query supported Vulkan 1.2 features
+        VkPhysicalDeviceVulkan12Features supportedVulkan12Features{};
+        supportedVulkan12Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+
+        VkPhysicalDeviceFeatures2 supportedFeatures2{};
+        supportedFeatures2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        supportedFeatures2.pNext = &supportedVulkan12Features;
+        vkGetPhysicalDeviceFeatures2(m_PhysicalDevice, &supportedFeatures2);
+
+        // Verify required features for bindless rendering are supported
+        bool bindlessSupported = true;
+        if (!supportedVulkan12Features.descriptorIndexing)
+        {
+            GG_CORE_ERROR("Device does not support descriptorIndexing!");
+            bindlessSupported = false;
+        }
+        if (!supportedVulkan12Features.shaderSampledImageArrayNonUniformIndexing)
+        {
+            GG_CORE_ERROR("Device does not support shaderSampledImageArrayNonUniformIndexing!");
+            bindlessSupported = false;
+        }
+        if (!supportedVulkan12Features.descriptorBindingSampledImageUpdateAfterBind)
+        {
+            GG_CORE_ERROR("Device does not support descriptorBindingSampledImageUpdateAfterBind!");
+            bindlessSupported = false;
+        }
+        if (!supportedVulkan12Features.descriptorBindingPartiallyBound)
+        {
+            GG_CORE_ERROR("Device does not support descriptorBindingPartiallyBound!");
+            bindlessSupported = false;
+        }
+        if (!supportedVulkan12Features.descriptorBindingVariableDescriptorCount)
+        {
+            GG_CORE_ERROR("Device does not support descriptorBindingVariableDescriptorCount!");
+            bindlessSupported = false;
+        }
+        if (!supportedVulkan12Features.runtimeDescriptorArray)
+        {
+            GG_CORE_ERROR("Device does not support runtimeDescriptorArray!");
+            bindlessSupported = false;
+        }
+
+        if (!bindlessSupported)
+        {
+            GG_CORE_ERROR("GPU does not support required bindless rendering features. "
+                          "Please ensure you have a Vulkan 1.2+ compatible GPU with up-to-date drivers.");
+            return;
+        }
+
+        GG_CORE_INFO("All required bindless rendering features are supported");
+
         // Enable Vulkan 1.2 features for descriptor indexing (bindless)
         VkPhysicalDeviceVulkan12Features vulkan12Features{};
         vulkan12Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
@@ -765,11 +816,39 @@ namespace GGEngine {
 
         vkDeviceWaitIdle(m_Device);
 
+        size_t oldImageCount = m_SwapchainImages.size();
+
         CleanupSwapchain();
 
         CreateSwapchain();
         CreateImageViews();
         CreateFramebuffers();
+
+        // Resize synchronization objects if image count changed
+        size_t newImageCount = m_SwapchainImages.size();
+        if (newImageCount != oldImageCount)
+        {
+            // Destroy old render finished semaphores
+            for (size_t i = 0; i < m_RenderFinishedSemaphores.size(); i++)
+            {
+                vkDestroySemaphore(m_Device, m_RenderFinishedSemaphores[i], nullptr);
+            }
+
+            // Create new semaphores for the new image count
+            m_RenderFinishedSemaphores.resize(newImageCount);
+            VkSemaphoreCreateInfo semaphoreInfo{};
+            semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+
+            for (size_t i = 0; i < newImageCount; i++)
+            {
+                if (vkCreateSemaphore(m_Device, &semaphoreInfo, nullptr, &m_RenderFinishedSemaphores[i]) != VK_SUCCESS)
+                {
+                    GG_CORE_ERROR("Failed to recreate render finished semaphores!");
+                }
+            }
+
+            GG_CORE_INFO("Resized render finished semaphores: {} -> {}", oldImageCount, newImageCount);
+        }
 
         // Reset images in flight tracking
         m_ImagesInFlight.resize(m_SwapchainImages.size(), VK_NULL_HANDLE);

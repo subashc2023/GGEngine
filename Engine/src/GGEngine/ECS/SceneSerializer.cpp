@@ -130,6 +130,13 @@ namespace GGEngine {
                     guid = GUID::FromString(entityJson["GUID"].get<std::string>());
                 }
 
+                // Generate new GUID if file didn't have one (prevents collisions)
+                if (!guid.IsValid())
+                {
+                    guid = GUID::Generate();
+                    GG_CORE_WARN("Entity '{}' missing GUID in scene file, generated new one", name);
+                }
+
                 // Create entity with preserved GUID
                 EntityID entity = m_Scene->CreateEntityWithGUID(name, guid);
 
