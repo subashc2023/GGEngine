@@ -172,6 +172,11 @@ namespace GGEngine {
     {
         return VulkanContext::Get().IsVSync();
     }
-    
+
+    void WindowsWindow::GetContentScale(float* xScale, float* yScale) const
+    {
+        glfwGetWindowContentScale(m_Window, xScale, yScale);
+    }
+
 }
 
