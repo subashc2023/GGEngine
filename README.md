@@ -19,13 +19,25 @@ https://github.com/ninja-build/ninja/releases
 https://www.msys2.org/
 ```
 
-2. After installing MSYS2, search for "MSYS2 UCRT64" in your start menu and run:
+2. Clone the repo with submodules:
+
+```bash
+git clone --recurse-submodules <repo-url>
+```
+
+If you already cloned without submodules:
+
+```bash
+git submodule update --init --recursive
+```
+
+3. After installing MSYS2, search for "MSYS2 UCRT64" in your start menu and run:
 
 ```powershell
 pacman -S mingw-w64-ucrt-x86_64-toolchain
 ```
 
-3. Build everything:
+4. Build everything:
 
 ```powershell
 .\scripts\build-all.bat <debug or release>
@@ -37,7 +49,7 @@ On Linux/macOS:
 ./scripts/build-all <debug or release>
 ```
 
-4. Run:
+5. Run:
 
 ```powershell
 .\bin\Debug-x64\Sandbox\Sandbox.exe
