@@ -66,6 +66,9 @@ endforeach()
 
 add_custom_target(Shaders ALL DEPENDS ${SHADER_OUTPUTS})
 
+# GLM (header-only math library)
+add_subdirectory(Vendor/glm)
+
 # GLFW (before ImGui since ImGui needs it)
 set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
 set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
@@ -277,6 +280,7 @@ target_include_directories(Engine PUBLIC
     ${CMAKE_SOURCE_DIR}/Vendor/nlohmann
     ${CMAKE_SOURCE_DIR}/Vendor/tinyfiledialogs
 )
+target_link_libraries(Engine PUBLIC glm::glm)
 
 target_precompile_headers(Engine PUBLIC Engine/src/ggpch.h)
 

@@ -25,67 +25,115 @@ namespace GGEngine {
         VkDevice device = ctx.GetDevice();
 
         // Clamp maxTextures to device limits
+        // Using separate SAMPLED_IMAGE + SAMPLER, we only need to respect image limits
+        // (sampler count is just 1, well under any limit)
         const auto& limits = ctx.GetBindlessLimits();
         uint32_t effectiveMax = std::min(maxTextures, limits.maxPerStageDescriptorSampledImages);
         if (effectiveMax < maxTextures)
         {
-            GG_CORE_WARN("Requested {} bindless textures, but device only supports {}",
-                         maxTextures, effectiveMax);
+            GG_CORE_WARN("Requested {} bindless textures, but device only supports {} (image limit: {})",
+                         maxTextures, effectiveMax, limits.maxPerStageDescriptorSampledImages);
         }
         m_MaxTextures = effectiveMax;
 
+        // Create shared sampler (linear filtering, repeat wrap)
+        VkSamplerCreateInfo samplerInfo{};
+        samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        samplerInfo.magFilter = VK_FILTER_LINEAR;
+        samplerInfo.minFilter = VK_FILTER_LINEAR;
+        samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        samplerInfo.mipLodBias = 0.0f;
+        samplerInfo.anisotropyEnable = VK_FALSE;
+        samplerInfo.maxAnisotropy = 1.0f;
+        samplerInfo.compareEnable = VK_FALSE;
+        samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
+        samplerInfo.minLod = 0.0f;
+        samplerInfo.maxLod = VK_LOD_CLAMP_NONE;
+        samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+        samplerInfo.unnormalizedCoordinates = VK_FALSE;
+
+        VkSampler sampler = VK_NULL_HANDLE;
+        if (vkCreateSampler(device, &samplerInfo, nullptr, &sampler) != VK_SUCCESS)
+        {
+            GG_CORE_ERROR("Failed to create bindless shared sampler!");
+            return;
+        }
+        m_SharedSampler = sampler;
+
         // Create descriptor pool with UPDATE_AFTER_BIND flag
-        VkDescriptorPoolSize poolSize{};
-        poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        poolSize.descriptorCount = m_MaxTextures;
+        // Need pool sizes for both SAMPLED_IMAGE (many) and SAMPLER (1)
+        VkDescriptorPoolSize poolSizes[2] = {};
+        poolSizes[0].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        poolSizes[0].descriptorCount = m_MaxTextures;
+        poolSizes[1].type = VK_DESCRIPTOR_TYPE_SAMPLER;
+        poolSizes[1].descriptorCount = 1;
 
         VkDescriptorPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
         poolInfo.maxSets = 1;  // Single global descriptor set
-        poolInfo.poolSizeCount = 1;
-        poolInfo.pPoolSizes = &poolSize;
+        poolInfo.poolSizeCount = 2;
+        poolInfo.pPoolSizes = poolSizes;
 
         VkDescriptorPool pool = VK_NULL_HANDLE;
         if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &pool) != VK_SUCCESS)
         {
             GG_CORE_ERROR("Failed to create bindless descriptor pool!");
+            vkDestroySampler(device, sampler, nullptr);
+            m_SharedSampler = nullptr;
             return;
         }
         m_DescriptorPool = pool;
 
-        // Create descriptor set layout with PARTIALLY_BOUND and UPDATE_AFTER_BIND flags
-        VkDescriptorSetLayoutBinding binding{};
-        binding.binding = 0;
-        binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        binding.descriptorCount = m_MaxTextures;
-        binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        binding.pImmutableSamplers = nullptr;
+        // Create descriptor set layout with two bindings:
+        // Binding 0: Single immutable sampler (provides type info for MoltenVK argument buffers)
+        // Binding 1: Array of sampled images (variable count, must be last binding)
+        VkDescriptorSetLayoutBinding bindings[2] = {};
 
-        // Binding flags for bindless: partially bound + update after bind
-        VkDescriptorBindingFlags bindingFlags =
-            VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
-            VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
-            VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT;
+        // Binding 0: Immutable sampler (using the shared sampler we created above)
+        bindings[0].binding = 0;
+        bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+        bindings[0].descriptorCount = 1;
+        bindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings[0].pImmutableSamplers = &sampler;  // Immutable sampler provides type info to MoltenVK
+
+        // Binding 1: Texture array (SAMPLED_IMAGE) - variable count must be on last binding
+        bindings[1].binding = 1;
+        bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        bindings[1].descriptorCount = m_MaxTextures;
+        bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings[1].pImmutableSamplers = nullptr;
+
+        // Binding flags: sampler has no special flags, texture array needs bindless flags
+        VkDescriptorBindingFlags bindingFlags[2] = {};
+        bindingFlags[0] = 0;  // Immutable sampler has no special flags
+        bindingFlags[1] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
+                         VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
+                         VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT;
 
         VkDescriptorSetLayoutBindingFlagsCreateInfo bindingFlagsInfo{};
         bindingFlagsInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
-        bindingFlagsInfo.bindingCount = 1;
-        bindingFlagsInfo.pBindingFlags = &bindingFlags;
+        bindingFlagsInfo.bindingCount = 2;
+        bindingFlagsInfo.pBindingFlags = bindingFlags;
 
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
         layoutInfo.pNext = &bindingFlagsInfo;
         layoutInfo.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
-        layoutInfo.bindingCount = 1;
-        layoutInfo.pBindings = &binding;
+        layoutInfo.bindingCount = 2;
+        layoutInfo.pBindings = bindings;
 
         VkDescriptorSetLayout layout = VK_NULL_HANDLE;
         if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &layout) != VK_SUCCESS)
         {
             GG_CORE_ERROR("Failed to create bindless descriptor set layout!");
             vkDestroyDescriptorPool(device, pool, nullptr);
+            vkDestroySampler(device, sampler, nullptr);
             m_DescriptorPool = nullptr;
+            m_SharedSampler = nullptr;
             return;
         }
         m_DescriptorSetLayout = layout;
@@ -93,7 +141,7 @@ namespace GGEngine {
         // Register layout with RHI registry
         m_LayoutHandle = VulkanResourceRegistry::Get().RegisterDescriptorSetLayout(layout);
 
-        // Allocate descriptor set with variable descriptor count
+        // Allocate descriptor set with variable descriptor count (for texture array)
         VkDescriptorSetVariableDescriptorCountAllocateInfo variableCountInfo{};
         variableCountInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO;
         variableCountInfo.descriptorSetCount = 1;
@@ -112,18 +160,22 @@ namespace GGEngine {
             GG_CORE_ERROR("Failed to allocate bindless descriptor set!");
             vkDestroyDescriptorSetLayout(device, layout, nullptr);
             vkDestroyDescriptorPool(device, pool, nullptr);
+            vkDestroySampler(device, sampler, nullptr);
             m_DescriptorSetLayout = nullptr;
             m_DescriptorPool = nullptr;
+            m_SharedSampler = nullptr;
             return;
         }
         m_DescriptorSet = descriptorSet;
+
+        // Note: Sampler at binding 0 is immutable (baked into layout), no need to write it
 
         // Initialize slot 0 with white/fallback texture
         // This will be done when the fallback texture registers itself
         m_NextIndex = 0;
 
         m_Initialized = true;
-        GG_CORE_INFO("BindlessTextureManager initialized: max {} textures", m_MaxTextures);
+        GG_CORE_INFO("BindlessTextureManager initialized: max {} textures (separate sampler mode)", m_MaxTextures);
     }
 
     void BindlessTextureManager::Shutdown()
@@ -153,6 +205,12 @@ namespace GGEngine {
         {
             vkDestroyDescriptorPool(device, static_cast<VkDescriptorPool>(m_DescriptorPool), nullptr);
             m_DescriptorPool = nullptr;
+        }
+
+        if (m_SharedSampler)
+        {
+            vkDestroySampler(device, static_cast<VkSampler>(m_SharedSampler), nullptr);
+            m_SharedSampler = nullptr;
         }
 
         m_HandleToIndex.clear();
@@ -205,30 +263,23 @@ namespace GGEngine {
             index = m_NextIndex++;
         }
 
-        // Get texture and sampler data from registry
+        // Get texture data from registry (we only need the image view, not sampler)
         auto& registry = VulkanResourceRegistry::Get();
         auto texData = registry.GetTextureData(handle);
 
-        // Get sampler from texture's separate sampler handle (if it exists)
-        // Otherwise fallback to the sampler stored in texture data (legacy path)
-        RHISamplerHandle samplerHandle = texture.GetSamplerHandle();
-        VkSampler sampler = samplerHandle.IsValid()
-            ? reinterpret_cast<VkSampler>(samplerHandle.id)
-            : texData.sampler;
-
-        // Update descriptor
+        // Update descriptor with just the image view (sampler is immutable at binding 0)
         VkDescriptorImageInfo imageInfo{};
-        imageInfo.sampler = sampler;
+        imageInfo.sampler = VK_NULL_HANDLE;  // Not used for SAMPLED_IMAGE
         imageInfo.imageView = texData.imageView;
         imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
         VkWriteDescriptorSet write{};
         write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         write.dstSet = static_cast<VkDescriptorSet>(m_DescriptorSet);
-        write.dstBinding = 0;
+        write.dstBinding = 1;  // Texture array is at binding 1
         write.dstArrayElement = index;
         write.descriptorCount = 1;
-        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
         write.pImageInfo = &imageInfo;
 
         vkUpdateDescriptorSets(VulkanContext::Get().GetDevice(), 1, &write, 0, nullptr);

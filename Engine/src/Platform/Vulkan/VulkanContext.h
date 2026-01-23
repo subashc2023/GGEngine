@@ -48,6 +48,8 @@ namespace GGEngine {
         struct BindlessLimits {
             uint32_t maxSampledImages = 0;
             uint32_t maxPerStageDescriptorSampledImages = 0;
+            uint32_t maxSamplers = 0;
+            uint32_t maxPerStageDescriptorSamplers = 0;
         };
         const BindlessLimits& GetBindlessLimits() const { return m_BindlessLimits; }
 
@@ -156,7 +158,10 @@ namespace GGEngine {
         };
 
         const std::vector<const char*> m_DeviceExtensions = {
-            VK_KHR_SWAPCHAIN_EXTENSION_NAME
+            VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+#ifdef __APPLE__
+            "VK_KHR_portability_subset"
+#endif
         };
     };
 

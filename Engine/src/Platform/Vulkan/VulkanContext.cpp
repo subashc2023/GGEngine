@@ -277,6 +277,11 @@ namespace GGEngine {
         createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
         createInfo.pApplicationInfo = &appInfo;
 
+#ifdef __APPLE__
+        // Required for MoltenVK on macOS to enumerate portability subset devices
+        createInfo.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+#endif
+
         auto extensions = GetRequiredExtensions();
         createInfo.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
         createInfo.ppEnabledExtensionNames = extensions.data();
@@ -400,9 +405,12 @@ namespace GGEngine {
         // Store bindless limits
         m_BindlessLimits.maxSampledImages = vulkan12Props.maxDescriptorSetUpdateAfterBindSampledImages;
         m_BindlessLimits.maxPerStageDescriptorSampledImages = vulkan12Props.maxPerStageDescriptorUpdateAfterBindSampledImages;
+        m_BindlessLimits.maxSamplers = vulkan12Props.maxDescriptorSetUpdateAfterBindSamplers;
+        m_BindlessLimits.maxPerStageDescriptorSamplers = vulkan12Props.maxPerStageDescriptorUpdateAfterBindSamplers;
 
-        GG_CORE_INFO("Bindless limits: maxSampledImages={}, maxPerStage={}",
-                     m_BindlessLimits.maxSampledImages, m_BindlessLimits.maxPerStageDescriptorSampledImages);
+        GG_CORE_INFO("Bindless limits: maxSampledImages={}, maxPerStage={}, maxSamplers={}, maxPerStageSamplers={}",
+                     m_BindlessLimits.maxSampledImages, m_BindlessLimits.maxPerStageDescriptorSampledImages,
+                     m_BindlessLimits.maxSamplers, m_BindlessLimits.maxPerStageDescriptorSamplers);
 
         // Query supported Vulkan 1.2 features
         VkPhysicalDeviceVulkan12Features supportedVulkan12Features{};
@@ -892,6 +900,11 @@ namespace GGEngine {
         {
             extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
         }
+
+#ifdef __APPLE__
+        // Required for MoltenVK on macOS to enumerate portability subset devices
+        extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+#endif
 
         return extensions;
     }

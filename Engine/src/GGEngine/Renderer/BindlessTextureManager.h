@@ -64,6 +64,7 @@ namespace GGEngine {
         void* m_DescriptorPool = nullptr;
         void* m_DescriptorSetLayout = nullptr;
         void* m_DescriptorSet = nullptr;
+        void* m_SharedSampler = nullptr;  // Single sampler shared by all textures
 
         // RHI handle for the layout
         RHIDescriptorSetLayoutHandle m_LayoutHandle;

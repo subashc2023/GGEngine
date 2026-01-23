@@ -56,6 +56,15 @@ namespace GGEngine {
         GG_CORE_ASSERT(m_Window, "Failed to create GLFW window");
         glfwSetWindowUserPointer(m_Window, &m_Data);
 
+        // Debug: Log actual window dimensions vs framebuffer vs content scale
+        int actualW, actualH, fbW, fbH;
+        float scaleX, scaleY;
+        glfwGetWindowSize(m_Window, &actualW, &actualH);
+        glfwGetFramebufferSize(m_Window, &fbW, &fbH);
+        glfwGetWindowContentScale(m_Window, &scaleX, &scaleY);
+        GG_CORE_INFO("Window dimensions: logical={}x{}, framebuffer={}x{}, contentScale={}x{}",
+                     actualW, actualH, fbW, fbH, scaleX, scaleY);
+
 
         // GLFW CALLBACKS SETUP
 
@@ -145,6 +154,25 @@ namespace GGEngine {
             MouseMovedEvent event(xpos, ypos);
             data.EventCallback(event);
         });
+    }
+
+    unsigned int GLFWWindow::GetWidth() const
+    {
+        int width, height;
+        glfwGetWindowSize(m_Window, &width, &height);
+        return static_cast<unsigned int>(width);
+    }
+
+    unsigned int GLFWWindow::GetHeight() const
+    {
+        int width, height;
+        glfwGetWindowSize(m_Window, &width, &height);
+        return static_cast<unsigned int>(height);
+    }
+
+    void GLFWWindow::GetContentScale(float* xScale, float* yScale) const
+    {
+        glfwGetWindowContentScale(m_Window, xScale, yScale);
     }
 
     void GLFWWindow::Shutdown()

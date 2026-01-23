@@ -3,6 +3,7 @@
 #include "GGEngine/ImGui/DebugUI.h"
 #include "GGEngine/Core/Input.h"
 #include "GGEngine/Core/KeyCodes.h"
+#include "GGEngine/Core/Application.h"
 
 // Include all examples
 #include "Examples/Renderer2DBasicsExample.h"
@@ -15,13 +16,18 @@
 #include <imgui.h>
 
 ExamplesLayer::ExamplesLayer()
-    : Layer("ExamplesLayer"), m_CameraController(1280.0f / 720.0f, 5.0f, true)
+    : Layer("ExamplesLayer"), m_CameraController(16.0f / 9.0f, 5.0f, true)  // Default, will be updated in OnAttach
 {
 }
 
 void ExamplesLayer::OnAttach()
 {
     GG_INFO("ExamplesLayer attached - API Examples");
+
+    // Set correct aspect ratio based on actual window size
+    auto& window = GGEngine::Application::Get().GetWindow();
+    float aspectRatio = static_cast<float>(window.GetWidth()) / static_cast<float>(window.GetHeight());
+    m_CameraController.SetAspectRatio(aspectRatio);
 
     // Register all examples
     m_Examples.push_back(std::make_unique<Renderer2DBasicsExample>());

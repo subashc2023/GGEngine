@@ -26,6 +26,9 @@ namespace GGEngine {
         virtual unsigned int GetWidth() const = 0;
         virtual unsigned int GetHeight() const = 0;
 
+        // Get content scale factors for HiDPI displays (1.0 on standard, 2.0 on Retina, etc.)
+        virtual void GetContentScale(float* xScale, float* yScale) const = 0;
+
         virtual void SetEventCallback(const EventCallbackFn& callback) = 0;
         virtual void SetVSync(bool enabled) = 0;
         virtual bool IsVSync() const = 0;
