@@ -215,13 +215,19 @@ namespace GGEngine {
                     float worldX = baseX + tx * tilemap.TileWidth + tilemap.TileWidth * 0.5f;
                     float worldY = baseY + ty * tilemap.TileHeight + tilemap.TileHeight * 0.5f;
 
-                    Renderer2D::DrawQuad(
-                        worldX, worldY, baseZ,
-                        tilemap.TileWidth, tilemap.TileHeight,
-                        texture,
-                        texCoords,
-                        tilemap.Color[0], tilemap.Color[1], tilemap.Color[2], tilemap.Color[3]
-                    );
+                    QuadSpec spec;
+                    spec.x = worldX;
+                    spec.y = worldY;
+                    spec.z = baseZ;
+                    spec.width = tilemap.TileWidth;
+                    spec.height = tilemap.TileHeight;
+                    spec.texture = texture;
+                    spec.texCoords = texCoords;
+                    spec.color[0] = tilemap.Color[0];
+                    spec.color[1] = tilemap.Color[1];
+                    spec.color[2] = tilemap.Color[2];
+                    spec.color[3] = tilemap.Color[3];
+                    Renderer2D::DrawQuad(spec);
                 }
             }
         }
@@ -250,8 +256,23 @@ namespace GGEngine {
                 texture = textureLib.GetTexturePtr(sprite.TextureName);
             }
 
+            // Build QuadSpec for this sprite
+            QuadSpec spec;
+            spec.x = transform->Position[0];
+            spec.y = transform->Position[1];
+            spec.z = transform->Position[2];
+            spec.width = transform->Scale[0];
+            spec.height = transform->Scale[1];
+            spec.rotation = rotationRadians;
+            spec.color[0] = sprite.Color[0];
+            spec.color[1] = sprite.Color[1];
+            spec.color[2] = sprite.Color[2];
+            spec.color[3] = sprite.Color[3];
+
             if (texture)
             {
+                spec.texture = texture;
+
                 if (sprite.UseAtlas)
                 {
                     // Spritesheet/Atlas rendering - calculate UVs on stack (no heap allocation)
@@ -263,39 +284,15 @@ namespace GGEngine {
                         sprite.AtlasSpriteWidth, sprite.AtlasSpriteHeight,
                         texCoords
                     );
-
-                    Renderer2D::DrawRotatedQuad(
-                        transform->Position[0], transform->Position[1], transform->Position[2],
-                        transform->Scale[0], transform->Scale[1],
-                        rotationRadians,
-                        texture,
-                        texCoords,
-                        sprite.Color[0], sprite.Color[1], sprite.Color[2], sprite.Color[3]
-                    );
+                    spec.texCoords = texCoords;
                 }
                 else
                 {
-                    // Full texture rendering
-                    Renderer2D::DrawRotatedQuad(
-                        transform->Position[0], transform->Position[1], transform->Position[2],
-                        transform->Scale[0], transform->Scale[1],
-                        rotationRadians,
-                        texture,
-                        sprite.TilingFactor,
-                        sprite.Color[0], sprite.Color[1], sprite.Color[2], sprite.Color[3]
-                    );
+                    spec.tilingFactor = sprite.TilingFactor;
                 }
             }
-            else
-            {
-                // Colored quad (no texture)
-                Renderer2D::DrawRotatedQuad(
-                    transform->Position[0], transform->Position[1], transform->Position[2],
-                    transform->Scale[0], transform->Scale[1],
-                    rotationRadians,
-                    sprite.Color[0], sprite.Color[1], sprite.Color[2], sprite.Color[3]
-                );
-            }
+
+            Renderer2D::DrawQuad(spec);
         }
     }
 

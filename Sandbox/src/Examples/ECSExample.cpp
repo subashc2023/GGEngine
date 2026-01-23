@@ -109,10 +109,11 @@ void ECSExample::OnRender(const GGEngine::Camera& camera)
 
         if (transform && sprite)
         {
-            // Use matrix-based rendering
-            Renderer2D::DrawQuad(
-                transform->GetMatrix(),
-                sprite->Color[0], sprite->Color[1], sprite->Color[2], sprite->Color[3]);
+            // Use matrix-based rendering via QuadSpec
+            auto mat = transform->GetMatrix();
+            Renderer2D::DrawQuad(QuadSpec()
+                .SetTransform(&mat)
+                .SetColor(sprite->Color[0], sprite->Color[1], sprite->Color[2], sprite->Color[3]));
 
             // Highlight selected entity
             if (entityID.Index == m_SelectedEntity.Index &&
@@ -123,7 +124,9 @@ void ECSExample::OnRender(const GGEngine::Camera& camera)
                     glm::vec3(transform->Position[0], transform->Position[1], transform->Position[2] - 0.01f))
                     * glm::rotate(glm::mat4(1.0f), glm::radians(transform->Rotation), glm::vec3(0, 0, 1))
                     * glm::scale(glm::mat4(1.0f), glm::vec3(transform->Scale[0] * 1.2f, transform->Scale[1] * 1.2f, 1.0f));
-                Renderer2D::DrawQuad(outlineMat, 1.0f, 1.0f, 0.0f, 0.8f);
+                Renderer2D::DrawQuad(QuadSpec()
+                    .SetTransform(&outlineMat)
+                    .SetColor(1.0f, 1.0f, 0.0f, 0.8f));
             }
         }
     }

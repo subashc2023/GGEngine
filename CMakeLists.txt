@@ -91,9 +91,14 @@ target_include_directories(ImGui PUBLIC
 target_link_libraries(ImGui PUBLIC Vulkan::Headers glfw)
 
 # ImGui DLL export/import - use same pattern as GG_API
-if(WIN32 AND GGENGINE_BUILD_DLL)
-    # ImGui static lib itself exports (will be linked into Engine.dll)
-    target_compile_definitions(ImGui PRIVATE IMGUI_API=__declspec\(dllexport\))
+if(GGENGINE_BUILD_DLL)
+    if(WIN32)
+        # ImGui static lib itself exports (will be linked into Engine.dll)
+        target_compile_definitions(ImGui PRIVATE IMGUI_API=__declspec\(dllexport\))
+    else()
+        # Linux/macOS: Use visibility attribute
+        target_compile_definitions(ImGui PRIVATE IMGUI_API=__attribute__\(\(visibility\("default"\)\)\))
+    endif()
 endif()
 
 # Engine source files
@@ -150,10 +155,6 @@ set(ENGINE_SOURCES
     Engine/src/GGEngine/Utils/FileDialogs.h
     Engine/src/GGEngine/Utils/FileDialogs.cpp
     Vendor/tinyfiledialogs/tinyfiledialogs.c
-    Engine/src/Platform/Windows/WindowsWindow.h
-    Engine/src/Platform/Windows/WindowsWindow.cpp
-    Engine/src/Platform/Windows/WindowsInput.h
-    Engine/src/Platform/Windows/WindowsInput.cpp
     Engine/src/Platform/Vulkan/VulkanContext.h
     Engine/src/Platform/Vulkan/VulkanContext.cpp
     Engine/src/Platform/Vulkan/vma.cpp
@@ -211,17 +212,48 @@ set(ENGINE_SOURCES
     Engine/src/ggpch.cpp
 )
 
+# Platform-specific window and input sources
+if(WIN32)
+    list(APPEND ENGINE_SOURCES
+        Engine/src/Platform/Windows/WindowsWindow.h
+        Engine/src/Platform/Windows/WindowsWindow.cpp
+        Engine/src/Platform/Windows/WindowsInput.h
+        Engine/src/Platform/Windows/WindowsInput.cpp
+    )
+else()
+    # Linux and macOS use GLFW abstraction
+    list(APPEND ENGINE_SOURCES
+        Engine/src/Platform/GLFW/GLFWWindow.h
+        Engine/src/Platform/GLFW/GLFWWindow.cpp
+        Engine/src/Platform/GLFW/GLFWInput.h
+        Engine/src/Platform/GLFW/GLFWInput.cpp
+    )
+endif()
+
 if(GGENGINE_BUILD_DLL)
     add_library(Engine SHARED ${ENGINE_SOURCES})
     target_compile_definitions(Engine PRIVATE GG_BUILD_DLL)
     target_compile_definitions(Engine PUBLIC GG_DLL)
     # Engine sources that include imgui.h need to see export definition
-    target_compile_definitions(Engine PRIVATE IMGUI_API=__declspec\(dllexport\))
+    if(WIN32)
+        target_compile_definitions(Engine PRIVATE IMGUI_API=__declspec\(dllexport\))
+    else()
+        # Linux/macOS: Set visibility for shared library symbols
+        set_target_properties(Engine PROPERTIES CXX_VISIBILITY_PRESET hidden)
+        target_compile_definitions(Engine PRIVATE IMGUI_API=__attribute__\(\(visibility\("default"\)\)\))
+    endif()
 else()
     add_library(Engine STATIC ${ENGINE_SOURCES})
 endif()
 
-target_compile_definitions(Engine PUBLIC GG_PLATFORM_WINDOWS)
+# Platform detection and definitions
+if(WIN32)
+    target_compile_definitions(Engine PUBLIC GG_PLATFORM_WINDOWS)
+elseif(UNIX AND NOT APPLE)
+    target_compile_definitions(Engine PUBLIC GG_PLATFORM_LINUX)
+elseif(APPLE)
+    target_compile_definitions(Engine PUBLIC GG_PLATFORM_MACOS)
+endif()
 
 # Dependencies
 add_subdirectory(${CMAKE_SOURCE_DIR}/Vendor/spdlog)
@@ -262,7 +294,7 @@ set_target_properties(Engine PROPERTIES
     PREFIX ""
 )
 
-if(GGENGINE_BUILD_DLL)
+if(GGENGINE_BUILD_DLL AND WIN32)
     set_target_properties(Engine PROPERTIES
         WINDOWS_EXPORT_ALL_SYMBOLS ON
     )
@@ -293,9 +325,13 @@ add_executable(Sandbox
 
 target_link_libraries(Sandbox PRIVATE Engine)
 
-# Import ImGui symbols from Engine DLL
-if(WIN32 AND GGENGINE_BUILD_DLL)
-    target_compile_definitions(Sandbox PRIVATE IMGUI_API=__declspec\(dllimport\))
+# Import ImGui symbols from Engine DLL/shared library
+if(GGENGINE_BUILD_DLL)
+    if(WIN32)
+        target_compile_definitions(Sandbox PRIVATE IMGUI_API=__declspec\(dllimport\))
+    else()
+        target_compile_definitions(Sandbox PRIVATE IMGUI_API=)
+    endif()
 endif()
 
 set_target_properties(Sandbox PROPERTIES
@@ -321,9 +357,13 @@ add_executable(Editor
 
 target_link_libraries(Editor PRIVATE Engine)
 
-# Import ImGui symbols from Engine DLL
-if(WIN32 AND GGENGINE_BUILD_DLL)
-    target_compile_definitions(Editor PRIVATE IMGUI_API=__declspec\(dllimport\))
+# Import ImGui symbols from Engine DLL/shared library
+if(GGENGINE_BUILD_DLL)
+    if(WIN32)
+        target_compile_definitions(Editor PRIVATE IMGUI_API=__declspec\(dllimport\))
+    else()
+        target_compile_definitions(Editor PRIVATE IMGUI_API=)
+    endif()
 endif()
 
 set_target_properties(Editor PROPERTIES

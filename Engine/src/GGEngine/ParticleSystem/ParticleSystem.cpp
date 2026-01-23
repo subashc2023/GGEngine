@@ -87,13 +87,19 @@ namespace GGEngine {
             // Interpolate size
             float size = particle.SizeEnd + (particle.SizeBegin - particle.SizeEnd) * life;
 
-            // Draw rotated quad
-            Renderer2D::DrawRotatedQuad(
-                particle.Position[0], particle.Position[1], 0.0f,
-                size, size,
-                particle.Rotation,
-                r, g, b, a
-            );
+            // Draw particle using QuadSpec
+            QuadSpec spec;
+            spec.x = particle.Position[0];
+            spec.y = particle.Position[1];
+            spec.z = 0.0f;
+            spec.width = size;
+            spec.height = size;
+            spec.rotation = particle.Rotation;
+            spec.color[0] = r;
+            spec.color[1] = g;
+            spec.color[2] = b;
+            spec.color[3] = a;
+            Renderer2D::DrawQuad(spec);
         }
 
         Renderer2D::EndScene();

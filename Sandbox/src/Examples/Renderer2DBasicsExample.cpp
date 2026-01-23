@@ -53,22 +53,29 @@ void Renderer2DBasicsExample::OnRender(const GGEngine::Camera& camera)
         case 0:  // Basic quads demo
         {
             // Static colored quad
-            Renderer2D::DrawQuad(-3.0f, 0.0f, 1.0f, 1.0f, 0.8f, 0.2f, 0.2f);
+            Renderer2D::DrawQuad(QuadSpec()
+                .SetPosition(-3.0f, 0.0f)
+                .SetSize(1.0f, 1.0f)
+                .SetColor(0.8f, 0.2f, 0.2f));
 
             // Animated colored quad
-            Renderer2D::DrawQuad(
-                m_QuadPosition[0], m_QuadPosition[1], 0.0f,
-                m_QuadScale[0], m_QuadScale[1],
-                m_QuadColor[0], m_QuadColor[1], m_QuadColor[2], m_QuadColor[3]);
+            Renderer2D::DrawQuad(QuadSpec()
+                .SetPosition(m_QuadPosition[0], m_QuadPosition[1], 0.0f)
+                .SetSize(m_QuadScale[0], m_QuadScale[1])
+                .SetColor(m_QuadColor[0], m_QuadColor[1], m_QuadColor[2], m_QuadColor[3]));
 
             // Semi-transparent quad
-            Renderer2D::DrawQuad(3.0f, 0.0f, 0.0f, 1.5f, 1.5f, 0.2f, 0.2f, 0.8f, 0.5f);
+            Renderer2D::DrawQuad(QuadSpec()
+                .SetPosition(3.0f, 0.0f, 0.0f)
+                .SetSize(1.5f, 1.5f)
+                .SetColor(0.2f, 0.2f, 0.8f, 0.5f));
 
-            // Rotated quad using DrawRotatedQuad
-            Renderer2D::DrawRotatedQuad(
-                0.0f, -2.0f, 1.0f, 1.0f,
-                GGEngine::Math::ToRadians(m_QuadRotation),
-                0.8f, 0.8f, 0.2f);
+            // Rotated quad
+            Renderer2D::DrawQuad(QuadSpec()
+                .SetPosition(0.0f, -2.0f)
+                .SetSize(1.0f, 1.0f)
+                .SetRotation(GGEngine::Math::ToRadians(m_QuadRotation))
+                .SetColor(0.8f, 0.8f, 0.2f));
 
             break;
         }
@@ -92,7 +99,10 @@ void Renderer2DBasicsExample::OnRender(const GGEngine::Camera& camera)
                     float g = static_cast<float>(y) / (gridSize - 1);
                     float b = 0.5f + 0.5f * std::sin(m_Time + x * 0.3f + y * 0.3f);
 
-                    Renderer2D::DrawQuad(posX, posY, quadSize, quadSize, r, g, b);
+                    Renderer2D::DrawQuad(QuadSpec()
+                        .SetPosition(posX, posY)
+                        .SetSize(quadSize, quadSize)
+                        .SetColor(r, g, b));
                 }
             }
             break;
@@ -109,10 +119,11 @@ void Renderer2DBasicsExample::OnRender(const GGEngine::Camera& camera)
             transform.Scale[0] = m_QuadScale[0];
             transform.Scale[1] = m_QuadScale[1];
 
-            // Render using the matrix API
-            Renderer2D::DrawQuad(
-                transform.GetMatrix(),
-                m_QuadColor[0], m_QuadColor[1], m_QuadColor[2], m_QuadColor[3]);
+            // Render using the matrix API via QuadSpec
+            auto mat = transform.GetMatrix();
+            Renderer2D::DrawQuad(QuadSpec()
+                .SetTransform(&mat)
+                .SetColor(m_QuadColor[0], m_QuadColor[1], m_QuadColor[2], m_QuadColor[3]));
 
             // Show multiple transforms with different rotations
             for (int i = 0; i < 8; i++)
@@ -135,7 +146,10 @@ void Renderer2DBasicsExample::OnRender(const GGEngine::Camera& camera)
                 g = std::max(0.0f, std::min(1.0f, g));
                 b = std::max(0.0f, std::min(1.0f, b));
 
-                Renderer2D::DrawQuad(t.GetMatrix(), r, g, b, 1.0f);
+                auto tMat = t.GetMatrix();
+                Renderer2D::DrawQuad(QuadSpec()
+                    .SetTransform(&tMat)
+                    .SetColor(r, g, b, 1.0f));
             }
             break;
         }

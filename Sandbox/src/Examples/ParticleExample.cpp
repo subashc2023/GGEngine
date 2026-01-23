@@ -168,7 +168,10 @@ void ParticleExample::OnRender(const GGEngine::Camera& camera)
     // Draw emitter indicator
     Renderer2D::ResetStats();
     Renderer2D::BeginScene(camera);
-    Renderer2D::DrawQuad(m_EmitterPosition[0], m_EmitterPosition[1], 0.1f, 0.1f, 1.0f, 1.0f, 1.0f);
+    Renderer2D::DrawQuad(QuadSpec()
+        .SetPosition(m_EmitterPosition[0], m_EmitterPosition[1])
+        .SetSize(0.1f, 0.1f)
+        .SetColor(1.0f, 1.0f, 1.0f));
     Renderer2D::EndScene();
 
     // Draw particles

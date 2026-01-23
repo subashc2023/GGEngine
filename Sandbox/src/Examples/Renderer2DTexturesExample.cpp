@@ -48,11 +48,17 @@ void Renderer2DTexturesExample::OnRender(const GGEngine::Camera& camera)
         case 0:  // Single texture with fallback
         {
             // Draw fallback texture (magenta/black checkerboard)
-            Renderer2D::DrawQuad(-2.0f, 0.0f, 2.0f, 2.0f, Texture::GetFallbackPtr());
+            Renderer2D::DrawQuad(QuadSpec()
+                .SetPosition(-2.0f, 0.0f)
+                .SetSize(2.0f, 2.0f)
+                .SetTexture(Texture::GetFallbackPtr()));
 
             // Draw with tint
-            Renderer2D::DrawQuad(2.0f, 0.0f, 2.0f, 2.0f, Texture::GetFallbackPtr(),
-                                1.0f, m_TintColor[0], m_TintColor[1], m_TintColor[2], m_TintColor[3]);
+            Renderer2D::DrawQuad(QuadSpec()
+                .SetPosition(2.0f, 0.0f)
+                .SetSize(2.0f, 2.0f)
+                .SetTexture(Texture::GetFallbackPtr())
+                .SetColor(m_TintColor[0], m_TintColor[1], m_TintColor[2], m_TintColor[3]));
 
             ImGui::TextWrapped("Left: Fallback texture (no texture loaded)");
             ImGui::TextWrapped("Right: Fallback with color tint applied");
@@ -62,14 +68,36 @@ void Renderer2DTexturesExample::OnRender(const GGEngine::Camera& camera)
         case 1:  // Tiling demo
         {
             // Draw with different tiling factors
-            Renderer2D::DrawQuad(-3.0f, 0.0f, 2.0f, 2.0f, Texture::GetFallbackPtr(), 1.0f);
-            Renderer2D::DrawQuad(0.0f, 0.0f, 2.0f, 2.0f, Texture::GetFallbackPtr(), 2.0f);
-            Renderer2D::DrawQuad(3.0f, 0.0f, 2.0f, 2.0f, Texture::GetFallbackPtr(), m_TilingFactor);
+            Renderer2D::DrawQuad(QuadSpec()
+                .SetPosition(-3.0f, 0.0f)
+                .SetSize(2.0f, 2.0f)
+                .SetTexture(Texture::GetFallbackPtr(), 1.0f));
+
+            Renderer2D::DrawQuad(QuadSpec()
+                .SetPosition(0.0f, 0.0f)
+                .SetSize(2.0f, 2.0f)
+                .SetTexture(Texture::GetFallbackPtr(), 2.0f));
+
+            Renderer2D::DrawQuad(QuadSpec()
+                .SetPosition(3.0f, 0.0f)
+                .SetSize(2.0f, 2.0f)
+                .SetTexture(Texture::GetFallbackPtr(), m_TilingFactor));
 
             // Labels (using colored quads as indicators)
-            Renderer2D::DrawQuad(-3.0f, -1.5f, 0.3f, 0.1f, 1.0f, 1.0f, 1.0f);
-            Renderer2D::DrawQuad(0.0f, -1.5f, 0.6f, 0.1f, 1.0f, 1.0f, 1.0f);
-            Renderer2D::DrawQuad(3.0f, -1.5f, 0.9f, 0.1f, 1.0f, 1.0f, 1.0f);
+            Renderer2D::DrawQuad(QuadSpec()
+                .SetPosition(-3.0f, -1.5f)
+                .SetSize(0.3f, 0.1f)
+                .SetColor(1.0f, 1.0f, 1.0f));
+
+            Renderer2D::DrawQuad(QuadSpec()
+                .SetPosition(0.0f, -1.5f)
+                .SetSize(0.6f, 0.1f)
+                .SetColor(1.0f, 1.0f, 1.0f));
+
+            Renderer2D::DrawQuad(QuadSpec()
+                .SetPosition(3.0f, -1.5f)
+                .SetSize(0.9f, 0.1f)
+                .SetColor(1.0f, 1.0f, 1.0f));
 
             break;
         }
@@ -97,18 +125,26 @@ void Renderer2DTexturesExample::OnRender(const GGEngine::Camera& camera)
                         if (x == static_cast<uint32_t>(m_SelectedSpriteX) &&
                             y == static_cast<uint32_t>(m_SelectedSpriteY))
                         {
-                            Renderer2D::DrawQuad(posX, posY, -0.01f, size * 1.1f, size * 1.1f,
-                                               1.0f, 1.0f, 0.0f, 1.0f);
+                            Renderer2D::DrawQuad(QuadSpec()
+                                .SetPosition(posX, posY, -0.01f)
+                                .SetSize(size * 1.1f, size * 1.1f)
+                                .SetColor(1.0f, 1.0f, 0.0f, 1.0f));
                         }
 
-                        Renderer2D::DrawQuad(posX, posY, size, size, sprite.get(),
-                                           m_TintColor[0], m_TintColor[1], m_TintColor[2], m_TintColor[3]);
+                        Renderer2D::DrawQuad(QuadSpec()
+                            .SetPosition(posX, posY)
+                            .SetSize(size, size)
+                            .SetSubTexture(sprite.get())
+                            .SetColor(m_TintColor[0], m_TintColor[1], m_TintColor[2], m_TintColor[3]));
                     }
                 }
             }
             else
             {
-                Renderer2D::DrawQuad(0.0f, 0.0f, 2.0f, 2.0f, 0.5f, 0.5f, 0.5f);
+                Renderer2D::DrawQuad(QuadSpec()
+                    .SetPosition(0.0f, 0.0f)
+                    .SetSize(2.0f, 2.0f)
+                    .SetColor(0.5f, 0.5f, 0.5f));
             }
             break;
         }
@@ -122,8 +158,11 @@ void Renderer2DTexturesExample::OnRender(const GGEngine::Camera& camera)
                 int frame = static_cast<int>(m_AnimTime * 4.0f) % gridW;  // 4 fps animation
 
                 auto sprite = m_Atlas->GetSprite(frame, m_SelectedSpriteY);
-                Renderer2D::DrawQuad(0.0f, 0.0f, 3.0f, 3.0f, sprite.get(),
-                                   m_TintColor[0], m_TintColor[1], m_TintColor[2], m_TintColor[3]);
+                Renderer2D::DrawQuad(QuadSpec()
+                    .SetPosition(0.0f, 0.0f)
+                    .SetSize(3.0f, 3.0f)
+                    .SetSubTexture(sprite.get())
+                    .SetColor(m_TintColor[0], m_TintColor[1], m_TintColor[2], m_TintColor[3]));
 
                 // Show all frames below
                 float startX = -(gridW - 1) * 0.6f * 0.5f;
@@ -131,8 +170,11 @@ void Renderer2DTexturesExample::OnRender(const GGEngine::Camera& camera)
                 {
                     auto frameSprite = m_Atlas->GetSprite(x, m_SelectedSpriteY);
                     float alpha = (x == static_cast<uint32_t>(frame)) ? 1.0f : 0.3f;
-                    Renderer2D::DrawQuad(startX + x * 0.6f, -2.5f, 0.5f, 0.5f,
-                                       frameSprite.get(), alpha, alpha, alpha, 1.0f);
+                    Renderer2D::DrawQuad(QuadSpec()
+                        .SetPosition(startX + x * 0.6f, -2.5f)
+                        .SetSize(0.5f, 0.5f)
+                        .SetSubTexture(frameSprite.get())
+                        .SetColor(alpha, alpha, alpha, 1.0f));
                 }
             }
             break;

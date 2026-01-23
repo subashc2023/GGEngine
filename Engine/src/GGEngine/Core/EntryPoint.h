@@ -1,6 +1,6 @@
 #pragma once
 
-#ifdef GG_PLATFORM_WINDOWS
+#if defined(GG_PLATFORM_WINDOWS) || defined(GG_PLATFORM_LINUX) || defined(GG_PLATFORM_MACOS)
 
 extern GGEngine::Application* GGEngine::CreateApplication();
 
@@ -24,4 +24,6 @@ int main(int argc, char** argv)
     return 0;
 }
 
+#else
+    #error "Unsupported platform! GGEngine supports Windows, Linux, and macOS."
 #endif

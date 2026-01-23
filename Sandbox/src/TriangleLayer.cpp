@@ -140,19 +140,25 @@ void TriangleLayer::OnUpdate(GGEngine::Timestep ts)
                 float g = static_cast<float>(y) / (gridSize - 1);
                 float b = 0.5f;
 
-                GGEngine::Renderer2D::DrawQuad(posX, posY, quadSize, quadSize, r, g, b);
+                GGEngine::Renderer2D::DrawQuad(GGEngine::QuadSpec()
+                    .SetPosition(posX, posY)
+                    .SetSize(quadSize, quadSize)
+                    .SetColor(r, g, b));
             }
         }
 
-        // Draw movable/rotatable quad on top (z=0.0f specified to avoid overload ambiguity)
-        GGEngine::Renderer2D::DrawRotatedQuad(
-            m_Position[0], m_Position[1], 0.0f, 0.5f, 0.5f,
-            m_Rotation,
-            m_Color[0], m_Color[1], m_Color[2], m_Color[3]);
+        // Draw movable/rotatable quad on top
+        GGEngine::Renderer2D::DrawQuad(GGEngine::QuadSpec()
+            .SetPosition(m_Position[0], m_Position[1], 0.0f)
+            .SetSize(0.5f, 0.5f)
+            .SetRotation(m_Rotation)
+            .SetColor(m_Color[0], m_Color[1], m_Color[2], m_Color[3]));
 
         // Draw textured quad using fallback texture (magenta/black checkerboard)
-        GGEngine::Renderer2D::DrawQuad(1.5f, 0.0f, 1.0f, 1.0f,
-            GGEngine::Texture::GetFallbackPtr());
+        GGEngine::Renderer2D::DrawQuad(GGEngine::QuadSpec()
+            .SetPosition(1.5f, 0.0f)
+            .SetSize(1.0f, 1.0f)
+            .SetTexture(GGEngine::Texture::GetFallbackPtr()));
 
         // Draw UI sprites from atlas (white sprites, tinted with colors)
         if (m_UIAtlas)
@@ -170,14 +176,22 @@ void TriangleLayer::OnUpdate(GGEngine::Timestep ts)
                 float r = (i == 0 || i == 3) ? 1.0f : 0.3f;
                 float g = (i == 1 || i == 3) ? 1.0f : 0.3f;
                 float b = (i == 2 || i == 4) ? 1.0f : 0.3f;
-                GGEngine::Renderer2D::DrawQuad(startX + i * 1.2f, y, size, size, sprite.get(), r, g, b);
+                GGEngine::Renderer2D::DrawQuad(GGEngine::QuadSpec()
+                    .SetPosition(startX + i * 1.2f, y)
+                    .SetSize(size, size)
+                    .SetSubTexture(sprite.get())
+                    .SetColor(r, g, b));
             }
 
             // Draw second row of tiles
             for (uint32_t i = 0; i < 5; i++)
             {
                 auto sprite = m_UIAtlas->GetSprite(i, 1);  // Second row from bottom
-                GGEngine::Renderer2D::DrawQuad(startX + i * 1.2f, y - 1.2f, size, size, sprite.get(), 0.2f, 0.6f, 1.0f);
+                GGEngine::Renderer2D::DrawQuad(GGEngine::QuadSpec()
+                    .SetPosition(startX + i * 1.2f, y - 1.2f)
+                    .SetSize(size, size)
+                    .SetSubTexture(sprite.get())
+                    .SetColor(0.2f, 0.6f, 1.0f));
             }
         }
 

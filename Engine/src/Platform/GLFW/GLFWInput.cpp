@@ -1,0 +1,46 @@
+#include "ggpch.h"
+#include "GLFWInput.h"
+
+#include "GGEngine/Core/Application.h"
+
+#include <GLFW/glfw3.h>
+
+namespace GGEngine {
+
+    std::unique_ptr<Input> Input::s_Instance = std::make_unique<GLFWInput>();
+
+    bool GLFWInput::IsKeyPressedImpl(KeyCode keycode)
+    {
+        auto window = static_cast<GLFWwindow*>(Application::Get().GetWindow().GetNativeWindow());
+        auto state = glfwGetKey(window, static_cast<int>(keycode));
+        return state == GLFW_PRESS || state == GLFW_REPEAT;
+    }
+
+    bool GLFWInput::IsMouseButtonPressedImpl(MouseCode button)
+    {
+        auto window = static_cast<GLFWwindow*>(Application::Get().GetWindow().GetNativeWindow());
+        auto state = glfwGetMouseButton(window, static_cast<int>(button));
+        return state == GLFW_PRESS;
+    }
+
+    std::pair<float, float> GLFWInput::GetMousePositionImpl()
+    {
+        auto window = static_cast<GLFWwindow*>(Application::Get().GetWindow().GetNativeWindow());
+        double xpos, ypos;
+        glfwGetCursorPos(window, &xpos, &ypos);
+        return { static_cast<float>(xpos), static_cast<float>(ypos) };
+    }
+
+    float GLFWInput::GetMouseXImpl()
+    {
+        auto [x, y] = GetMousePositionImpl();
+        return x;
+    }
+
+    float GLFWInput::GetMouseYImpl()
+    {
+        auto [x, y] = GetMousePositionImpl();
+        return y;
+    }
+
+}

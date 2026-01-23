@@ -827,19 +827,45 @@ namespace GGEngine {
                           tintR, tintG, tintB, tintA, 1.0f, subTexture->GetTexCoords());
     }
 
-    // Unified API using QuadSpec
+    // Unified API using QuadSpec (PREFERRED API)
     void Renderer2D::DrawQuad(const QuadSpec& spec)
     {
+        // Determine texture and UVs (SubTexture takes precedence if set)
+        const Texture* texture = spec.texture;
         const float* texCoordsPtr = spec.texCoords ? &spec.texCoords[0][0] : nullptr;
-        DrawQuadInternal(
-            spec.x, spec.y, spec.z,
-            spec.width, spec.height,
-            spec.texture,
-            spec.color[0], spec.color[1], spec.color[2], spec.color[3],
-            spec.rotation,
-            spec.tilingFactor,
-            texCoordsPtr
-        );
+        float tilingFactor = spec.tilingFactor;
+
+        if (spec.subTexture)
+        {
+            texture = spec.subTexture->GetTexture();
+            texCoordsPtr = spec.subTexture->GetTexCoords();
+            tilingFactor = 1.0f;  // SubTextures don't use tiling
+        }
+
+        // Use matrix path if transform is provided
+        if (spec.transform)
+        {
+            DrawQuadWithMatrix(
+                *spec.transform,
+                texture,
+                spec.color[0], spec.color[1], spec.color[2], spec.color[3],
+                tilingFactor,
+                texCoordsPtr
+            );
+        }
+        else
+        {
+            // Use position/size/rotation path
+            DrawQuadInternal(
+                spec.x, spec.y, spec.z,
+                spec.width, spec.height,
+                texture,
+                spec.color[0], spec.color[1], spec.color[2], spec.color[3],
+                spec.rotation,
+                tilingFactor,
+                texCoordsPtr
+            );
+        }
     }
 
     // Statistics

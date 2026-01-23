@@ -2,8 +2,15 @@
 #include "AssetManager.h"
 #include "Texture.h"
 
+// Platform-specific includes for executable path detection
 #ifdef GG_PLATFORM_WINDOWS
     #include <Windows.h>
+#elif defined(GG_PLATFORM_LINUX)
+    #include <unistd.h>
+    #include <linux/limits.h>
+#elif defined(GG_PLATFORM_MACOS)
+    #include <mach-o/dyld.h>
+    #include <limits.h>
 #endif
 
 namespace GGEngine {
@@ -31,13 +38,47 @@ namespace GGEngine {
 
     void AssetManager::DetectAssetRoot()
     {
-        // Get executable directory
+        // Get executable directory (platform-specific)
         std::filesystem::path exePath;
 
 #ifdef GG_PLATFORM_WINDOWS
         char buffer[MAX_PATH];
         GetModuleFileNameA(nullptr, buffer, MAX_PATH);
         exePath = std::filesystem::path(buffer).parent_path();
+#elif defined(GG_PLATFORM_LINUX)
+        char buffer[PATH_MAX];
+        ssize_t len = readlink("/proc/self/exe", buffer, sizeof(buffer) - 1);
+        if (len != -1)
+        {
+            buffer[len] = '\0';
+            exePath = std::filesystem::path(buffer).parent_path();
+        }
+        else
+        {
+            GG_CORE_WARN("Failed to get executable path, using current directory");
+            exePath = std::filesystem::current_path();
+        }
+#elif defined(GG_PLATFORM_MACOS)
+        char buffer[PATH_MAX];
+        uint32_t size = sizeof(buffer);
+        if (_NSGetExecutablePath(buffer, &size) == 0)
+        {
+            // Resolve symlinks and get canonical path
+            char realPath[PATH_MAX];
+            if (realpath(buffer, realPath) != nullptr)
+            {
+                exePath = std::filesystem::path(realPath).parent_path();
+            }
+            else
+            {
+                exePath = std::filesystem::path(buffer).parent_path();
+            }
+        }
+        else
+        {
+            GG_CORE_WARN("Failed to get executable path, using current directory");
+            exePath = std::filesystem::current_path();
+        }
 #else
         // Fallback for other platforms
         exePath = std::filesystem::current_path();

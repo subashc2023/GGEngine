@@ -68,18 +68,26 @@ void InputExample::OnRender(const GGEngine::Camera& camera)
     Renderer2D::ResetStats();
     Renderer2D::BeginScene(camera);
 
-    // Player quad (controlled by WASD)
-    Renderer2D::DrawQuad(m_Position[0], m_Position[1], 0.5f, 0.5f, 0.2f, 0.6f, 0.9f);
+    // Player quad (controlled by Arrow keys)
+    Renderer2D::DrawQuad(QuadSpec()
+        .SetPosition(m_Position[0], m_Position[1])
+        .SetSize(0.5f, 0.5f)
+        .SetColor(0.2f, 0.6f, 0.9f));
 
     // Mouse cursor indicator
     float cursorColor = m_LeftMouseDown ? 1.0f : 0.3f;
-    Renderer2D::DrawQuad(m_MouseWorldX, m_MouseWorldY, 0.2f, 0.2f,
-                        cursorColor, cursorColor * 0.5f, 0.2f);
+    Renderer2D::DrawQuad(QuadSpec()
+        .SetPosition(m_MouseWorldX, m_MouseWorldY)
+        .SetSize(0.2f, 0.2f)
+        .SetColor(cursorColor, cursorColor * 0.5f, 0.2f));
 
     // Right-click draws a marker
     if (m_RightMouseDown)
     {
-        Renderer2D::DrawQuad(m_MouseWorldX, m_MouseWorldY, 0.0f, 0.4f, 0.4f, 0.9f, 0.2f, 0.2f, 0.5f);
+        Renderer2D::DrawQuad(QuadSpec()
+            .SetPosition(m_MouseWorldX, m_MouseWorldY, 0.0f)
+            .SetSize(0.4f, 0.4f)
+            .SetColor(0.9f, 0.2f, 0.2f, 0.5f));
     }
 
     // Visual keyboard indicator - Arrow keys
@@ -88,19 +96,34 @@ void InputExample::OnRender(const GGEngine::Camera& camera)
 
     // Up arrow
     float upBright = Input::IsKeyPressed(KeyCode::Up) ? 1.0f : 0.3f;
-    Renderer2D::DrawQuad(-3.0f, indicatorY + 0.35f, indicatorSize, indicatorSize, upBright, upBright, upBright);
+    Renderer2D::DrawQuad(QuadSpec()
+        .SetPosition(-3.0f, indicatorY + 0.35f)
+        .SetSize(indicatorSize, indicatorSize)
+        .SetColor(upBright, upBright, upBright));
 
     // Left, Down, Right arrows
     float leftBright = Input::IsKeyPressed(KeyCode::Left) ? 1.0f : 0.3f;
     float downBright = Input::IsKeyPressed(KeyCode::Down) ? 1.0f : 0.3f;
     float rightBright = Input::IsKeyPressed(KeyCode::Right) ? 1.0f : 0.3f;
-    Renderer2D::DrawQuad(-3.35f, indicatorY, indicatorSize, indicatorSize, leftBright, leftBright, leftBright);
-    Renderer2D::DrawQuad(-3.0f, indicatorY, indicatorSize, indicatorSize, downBright, downBright, downBright);
-    Renderer2D::DrawQuad(-2.65f, indicatorY, indicatorSize, indicatorSize, rightBright, rightBright, rightBright);
+    Renderer2D::DrawQuad(QuadSpec()
+        .SetPosition(-3.35f, indicatorY)
+        .SetSize(indicatorSize, indicatorSize)
+        .SetColor(leftBright, leftBright, leftBright));
+    Renderer2D::DrawQuad(QuadSpec()
+        .SetPosition(-3.0f, indicatorY)
+        .SetSize(indicatorSize, indicatorSize)
+        .SetColor(downBright, downBright, downBright));
+    Renderer2D::DrawQuad(QuadSpec()
+        .SetPosition(-2.65f, indicatorY)
+        .SetSize(indicatorSize, indicatorSize)
+        .SetColor(rightBright, rightBright, rightBright));
 
     // Space bar
     float spaceBright = Input::IsKeyPressed(KeyCode::Space) ? 1.0f : 0.3f;
-    Renderer2D::DrawQuad(-3.0f, indicatorY - 0.4f, 1.0f, indicatorSize, spaceBright, spaceBright, spaceBright);
+    Renderer2D::DrawQuad(QuadSpec()
+        .SetPosition(-3.0f, indicatorY - 0.4f)
+        .SetSize(1.0f, indicatorSize)
+        .SetColor(spaceBright, spaceBright, spaceBright));
 
     Renderer2D::EndScene();
 }
