@@ -423,3 +423,13 @@ if(GGENGINE_BUILD_DLL)
             $<TARGET_FILE_DIR:Editor>
     )
 endif()
+
+# =============================================================================
+# Testing Configuration
+# =============================================================================
+option(GGENGINE_BUILD_TESTS "Build unit tests" ON)
+
+if(GGENGINE_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(Tests)
+endif()
