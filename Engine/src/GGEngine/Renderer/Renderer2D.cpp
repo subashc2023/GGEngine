@@ -1,19 +1,15 @@
 #include "ggpch.h"
 #include "Renderer2D.h"
+#include "Renderer2DBase.h"
 #include "SubTexture2D.h"
 #include "SceneCamera.h"
 #include "GGEngine/Core/Profiler.h"
 #include "VertexBuffer.h"
 #include "IndexBuffer.h"
 #include "VertexLayout.h"
-#include "UniformBuffer.h"
-#include "DescriptorSet.h"
-#include "Pipeline.h"
 #include "RenderCommand.h"
-#include "BindlessTextureManager.h"
 #include "GGEngine/Asset/Shader.h"
 #include "GGEngine/Asset/ShaderLibrary.h"
-#include "GGEngine/Asset/Texture.h"
 #include "GGEngine/RHI/RHIDevice.h"
 #include "GGEngine/RHI/RHICommandBuffer.h"
 
@@ -33,12 +29,12 @@ namespace GGEngine {
         uint32_t texIndex;     // Bindless texture index (0 = white texture)
     };
 
-    // Internal renderer data (bindless rendering)
-    struct Renderer2DData
+    // Implementation class inheriting from base
+    class Renderer2DImpl : public Renderer2DBase
     {
-        static constexpr uint32_t MaxFramesInFlight = 2;
+    public:
         static constexpr uint32_t InitialMaxQuads = 100000;   // Start with 100k
-        static constexpr uint32_t AbsoluteMaxQuads = 1000000; // Cap at 1M (~176MB per buffer)
+        static constexpr uint32_t AbsoluteMaxQuads = 1000000; // Cap at 1M
 
         // Dynamic capacity (can grow at runtime)
         uint32_t MaxQuads = InitialMaxQuads;
@@ -50,109 +46,205 @@ namespace GGEngine {
         Scope<IndexBuffer> QuadIndexBuffer;
         VertexLayout QuadVertexLayout;
 
-        // CPU-side vertex staging buffer (unique_ptr for RAII)
+        // CPU-side vertex staging buffer
         std::unique_ptr<QuadVertex[]> QuadVertexBufferBase;
-        QuadVertex* QuadVertexBufferPtr = nullptr;  // Write cursor (points into QuadVertexBufferBase)
+        QuadVertex* QuadVertexBufferPtr = nullptr;
         uint32_t QuadIndexCount = 0;
 
-        // GPU buffer offset tracking - persists across flushes within a frame
-        // to prevent later batches from overwriting earlier batches' vertex data
-        uint32_t QuadVertexOffset = 0;  // Offset in vertices (not bytes)
+        // GPU buffer offset tracking
+        uint32_t QuadVertexOffset = 0;
 
-        // White pixel texture for solid colors (index 0 in bindless array)
-        Scope<Texture> WhiteTexture;
-        BindlessTextureIndex WhiteTextureIndex = InvalidBindlessIndex;
-
-        // Shader and pipeline
+        // Shader
         AssetHandle<Shader> QuadShader;
-        Scope<Pipeline> QuadPipeline;
-        RHIRenderPassHandle CurrentRenderPass;
-
-        // Camera UBO and descriptors (per-frame to avoid updating in-flight descriptors)
-        // Set 0: Camera UBO only (bindless textures are in set 1, managed globally)
-        Scope<UniformBuffer> CameraUniformBuffers[MaxFramesInFlight];
-        Scope<DescriptorSetLayout> CameraDescriptorLayout;
-        Scope<DescriptorSet> CameraDescriptorSets[MaxFramesInFlight];
-        uint32_t CurrentFrameIndex = 0;
-
-        // Current render state
-        RHICommandBufferHandle CurrentCommandBuffer;
-        uint32_t ViewportWidth = 0;
-        uint32_t ViewportHeight = 0;
-        bool SceneStarted = false;
 
         // Statistics
         Renderer2D::Statistics Stats;
 
-        // Flag to request buffer growth on next frame
-        bool NeedsBufferGrowth = false;
-
-        // Track which frame we last reset the vertex offset on
-        // This allows multiple BeginScene/EndScene pairs per frame without overwriting
+        // Track frame for vertex offset reset
         uint32_t LastResetFrameIndex = UINT32_MAX;
 
         // Unit quad vertex positions (centered at origin)
         static constexpr std::array<float[3], 4> QuadPositions = {{
-            { -0.5f, -0.5f, 0.0f },  // Bottom-left
-            {  0.5f, -0.5f, 0.0f },  // Bottom-right
-            {  0.5f,  0.5f, 0.0f },  // Top-right
-            { -0.5f,  0.5f, 0.0f }   // Top-left
+            { -0.5f, -0.5f, 0.0f },
+            {  0.5f, -0.5f, 0.0f },
+            {  0.5f,  0.5f, 0.0f },
+            { -0.5f,  0.5f, 0.0f }
         }};
 
         // Quad texture coordinates
         static constexpr std::array<float[2], 4> QuadTexCoords = {{
-            { 0.0f, 0.0f },  // Bottom-left
-            { 1.0f, 0.0f },  // Bottom-right
-            { 1.0f, 1.0f },  // Top-right
-            { 0.0f, 1.0f }   // Top-left
+            { 0.0f, 0.0f },
+            { 1.0f, 0.0f },
+            { 1.0f, 1.0f },
+            { 0.0f, 1.0f }
         }};
+
+        void Init();
+        void Shutdown();
+        void Flush();
+
+    protected:
+        void OnBeginScene() override;
+        void RecreatePipeline(RHIRenderPassHandle renderPass) override;
+        void GrowBuffers() override;
+        uint32_t GetCurrentCapacity() const override { return MaxQuads; }
+        uint32_t GetAbsoluteMaxCapacity() const override { return AbsoluteMaxQuads; }
     };
 
-    static Renderer2DData s_Data;
+    static Renderer2DImpl s_Impl;
 
-    // Forward declarations for internal helpers
-    static void BeginSceneShared(const CameraUBO& cameraUBO,
-                                  RHIRenderPassHandle renderPass,
-                                  RHICommandBufferHandle cmd,
-                                  uint32_t viewportWidth,
-                                  uint32_t viewportHeight);
+    // Helper declarations
     static bool PrepareForQuad(const Texture* texture, uint32_t& outTextureIndex);
-    static void WriteQuadVertices(const float positions[4][3],
-                                   const float* texCoords,
+    static void WriteQuadVertices(const float positions[4][3], const float* texCoords,
                                    float r, float g, float b, float a,
-                                   float tilingFactor,
-                                   uint32_t textureIndex);
+                                   float tilingFactor, uint32_t textureIndex);
 
-    // Internal function to grow buffers when capacity is exceeded
-    static void GrowBuffers()
+    // ============================================================================
+    // Renderer2DImpl Implementation
+    // ============================================================================
+
+    void Renderer2DImpl::Init()
     {
-        // Calculate new capacity (2x current, capped at absolute max)
-        uint32_t newMaxQuads = std::min(s_Data.MaxQuads * 2, Renderer2DData::AbsoluteMaxQuads);
-        if (newMaxQuads == s_Data.MaxQuads)
+        GG_PROFILE_FUNCTION();
+        GG_CORE_INFO("Renderer2D: Initializing (bindless mode)...");
+
+        // Create vertex layout
+        QuadVertexLayout
+            .Push("aPosition", VertexAttributeType::Float3)
+            .Push("aTexCoord", VertexAttributeType::Float2)
+            .Push("aColor", VertexAttributeType::Float4)
+            .Push("aTilingFactor", VertexAttributeType::Float)
+            .Push("aTexIndex", VertexAttributeType::UInt);
+
+        // Allocate CPU-side vertex buffer
+        QuadVertexBufferBase = std::make_unique<QuadVertex[]>(MaxVertices);
+        QuadVertexBufferPtr = QuadVertexBufferBase.get();
+
+        // Create GPU vertex buffers (one per frame in flight)
+        for (uint32_t i = 0; i < MaxFramesInFlight; i++)
         {
-            GG_CORE_WARN("Renderer2D: Cannot grow buffers - already at maximum capacity ({} quads)", s_Data.MaxQuads);
+            QuadVertexBuffers[i] = CreateScope<VertexBuffer>(
+                static_cast<uint64_t>(MaxVertices) * sizeof(QuadVertex),
+                QuadVertexLayout
+            );
+            QuadVertexBuffers[i]->SetData(QuadVertexBufferBase.get(),
+                MaxVertices * sizeof(QuadVertex));
+        }
+
+        // Generate indices for all quads
+        std::vector<uint32_t> indices(MaxIndices);
+        uint32_t offset = 0;
+        for (uint32_t i = 0; i < MaxIndices; i += 6)
+        {
+            indices[i + 0] = offset + 0;
+            indices[i + 1] = offset + 1;
+            indices[i + 2] = offset + 2;
+            indices[i + 3] = offset + 2;
+            indices[i + 4] = offset + 3;
+            indices[i + 5] = offset + 0;
+            offset += 4;
+        }
+        QuadIndexBuffer = IndexBuffer::Create(indices);
+
+        // Initialize base class resources (white texture, camera descriptors)
+        InitBase();
+
+        // Get quad shader from library
+        QuadShader = ShaderLibrary::Get().Get("quad2d");
+        if (!QuadShader.IsValid())
+        {
+            GG_CORE_ERROR("Renderer2D: Failed to get 'quad2d' shader from library!");
+            return;
+        }
+
+        GG_CORE_INFO("Renderer2D: Initialized (bindless mode, initial {} quads (max {}), {} max textures, {} frames in flight)",
+                     MaxQuads, AbsoluteMaxQuads,
+                     BindlessTextureManager::Get().GetMaxTextures(),
+                     MaxFramesInFlight);
+    }
+
+    void Renderer2DImpl::Shutdown()
+    {
+        GG_PROFILE_FUNCTION();
+        GG_CORE_INFO("Renderer2D: Shutting down...");
+
+        QuadVertexBufferBase.reset();
+        QuadVertexBufferPtr = nullptr;
+
+        QuadIndexBuffer.reset();
+        for (uint32_t i = 0; i < MaxFramesInFlight; i++)
+        {
+            QuadVertexBuffers[i].reset();
+        }
+
+        QuadShader = AssetHandle<Shader>();
+
+        // Shutdown base class resources
+        ShutdownBase();
+
+        GG_CORE_TRACE("Renderer2D: Shutdown complete");
+    }
+
+    void Renderer2DImpl::OnBeginScene()
+    {
+        // Reset batch state
+        QuadIndexCount = 0;
+        QuadVertexBufferPtr = QuadVertexBufferBase.get();
+
+        // Only reset GPU buffer offset when moving to a new frame
+        if (m_CurrentFrameIndex != LastResetFrameIndex)
+        {
+            QuadVertexOffset = 0;
+            LastResetFrameIndex = m_CurrentFrameIndex;
+        }
+    }
+
+    void Renderer2DImpl::RecreatePipeline(RHIRenderPassHandle renderPass)
+    {
+        m_Pipeline.reset();
+
+        PipelineSpecification spec;
+        spec.shader = QuadShader.Get();
+        spec.renderPass = renderPass;
+        spec.vertexLayout = &QuadVertexLayout;
+        spec.cullMode = CullMode::None;
+        spec.blendMode = BlendMode::Alpha;
+        spec.depthTestEnable = false;
+        spec.depthWriteEnable = false;
+        spec.descriptorSetLayouts.push_back(m_CameraDescriptorLayout->GetHandle());
+        spec.descriptorSetLayouts.push_back(BindlessTextureManager::Get().GetLayoutHandle());
+        spec.debugName = "Renderer2D_Quad_Bindless";
+
+        m_Pipeline = CreateScope<Pipeline>(spec);
+    }
+
+    void Renderer2DImpl::GrowBuffers()
+    {
+        uint32_t newMaxQuads = std::min(MaxQuads * 2, AbsoluteMaxQuads);
+        if (newMaxQuads == MaxQuads)
+        {
+            GG_CORE_WARN("Renderer2D: Cannot grow buffers - already at maximum capacity ({} quads)", MaxQuads);
             return;
         }
 
         uint32_t newMaxVertices = newMaxQuads * 4;
         uint32_t newMaxIndices = newMaxQuads * 6;
 
-        GG_CORE_INFO("Renderer2D: Growing buffers {} -> {} quads", s_Data.MaxQuads, newMaxQuads);
+        GG_CORE_INFO("Renderer2D: Growing buffers {} -> {} quads", MaxQuads, newMaxQuads);
 
-        // Wait for GPU to finish using current buffers
         RHIDevice::Get().WaitIdle();
 
-        // Reallocate CPU staging buffer (using unique_ptr for exception safety)
-        s_Data.QuadVertexBufferBase = std::make_unique<QuadVertex[]>(newMaxVertices);
-        s_Data.QuadVertexBufferPtr = s_Data.QuadVertexBufferBase.get();
+        // Reallocate CPU staging buffer
+        QuadVertexBufferBase = std::make_unique<QuadVertex[]>(newMaxVertices);
+        QuadVertexBufferPtr = QuadVertexBufferBase.get();
 
         // Reallocate GPU vertex buffers
-        for (uint32_t i = 0; i < Renderer2DData::MaxFramesInFlight; i++)
+        for (uint32_t i = 0; i < MaxFramesInFlight; i++)
         {
-            s_Data.QuadVertexBuffers[i].reset();
-            s_Data.QuadVertexBuffers[i] = CreateScope<VertexBuffer>(
+            QuadVertexBuffers[i].reset();
+            QuadVertexBuffers[i] = CreateScope<VertexBuffer>(
                 static_cast<uint64_t>(newMaxVertices) * sizeof(QuadVertex),
-                s_Data.QuadVertexLayout
+                QuadVertexLayout
             );
         }
 
@@ -169,310 +261,140 @@ namespace GGEngine {
             indices[i + 5] = offset + 0;
             offset += 4;
         }
-        s_Data.QuadIndexBuffer.reset();
-        s_Data.QuadIndexBuffer = IndexBuffer::Create(indices);
+        QuadIndexBuffer.reset();
+        QuadIndexBuffer = IndexBuffer::Create(indices);
 
-        // Update capacity
-        s_Data.MaxQuads = newMaxQuads;
-        s_Data.MaxVertices = newMaxVertices;
-        s_Data.MaxIndices = newMaxIndices;
+        MaxQuads = newMaxQuads;
+        MaxVertices = newMaxVertices;
+        MaxIndices = newMaxIndices;
 
         GG_CORE_INFO("Renderer2D: Buffer growth complete (now {} quads, ~{} MB per vertex buffer)",
-                     s_Data.MaxQuads, (s_Data.MaxVertices * sizeof(QuadVertex)) / (1024 * 1024));
+                     MaxQuads, (MaxVertices * sizeof(QuadVertex)) / (1024 * 1024));
     }
+
+    void Renderer2DImpl::Flush()
+    {
+        GG_PROFILE_FUNCTION();
+        if (QuadIndexCount == 0)
+            return;
+
+        // Calculate data size and vertex count
+        uint32_t dataSize = static_cast<uint32_t>(
+            reinterpret_cast<uint8_t*>(QuadVertexBufferPtr) -
+            reinterpret_cast<uint8_t*>(QuadVertexBufferBase.get())
+        );
+        uint32_t vertexCount = dataSize / sizeof(QuadVertex);
+
+        // Upload vertex data to current frame's GPU buffer
+        uint64_t gpuOffset = static_cast<uint64_t>(QuadVertexOffset) * sizeof(QuadVertex);
+        QuadVertexBuffers[m_CurrentFrameIndex]->SetData(QuadVertexBufferBase.get(), dataSize, gpuOffset);
+
+        // Set viewport and scissor
+        SetViewportAndScissor();
+
+        // Bind pipeline
+        m_Pipeline->Bind(m_CurrentCommandBuffer);
+
+        // Bind descriptors
+        BindCameraDescriptorSet(m_Pipeline->GetLayoutHandle());
+        BindBindlessDescriptorSet(m_Pipeline->GetLayoutHandle());
+
+        // Bind vertex and index buffers
+        QuadVertexBuffers[m_CurrentFrameIndex]->Bind(m_CurrentCommandBuffer);
+        QuadIndexBuffer->Bind(m_CurrentCommandBuffer);
+
+        // Draw with vertex offset
+        RHICmd::DrawIndexed(m_CurrentCommandBuffer, QuadIndexCount, 1, 0,
+                            static_cast<int32_t>(QuadVertexOffset), 0);
+
+        // Update GPU buffer offset for next batch
+        QuadVertexOffset += vertexCount;
+
+        Stats.DrawCalls++;
+
+        // Reset batch state
+        QuadIndexCount = 0;
+        QuadVertexBufferPtr = QuadVertexBufferBase.get();
+    }
+
+    // ============================================================================
+    // Static API Implementation (delegates to s_Impl)
+    // ============================================================================
 
     void Renderer2D::Init()
     {
-        GG_PROFILE_FUNCTION();
-        GG_CORE_INFO("Renderer2D: Initializing (bindless mode)...");
-
-        // Create vertex layout: position (vec3) + texCoord (vec2) + color (vec4) + tilingFactor (float) + texIndex (uint)
-        s_Data.QuadVertexLayout
-            .Push("aPosition", VertexAttributeType::Float3)
-            .Push("aTexCoord", VertexAttributeType::Float2)
-            .Push("aColor", VertexAttributeType::Float4)
-            .Push("aTilingFactor", VertexAttributeType::Float)
-            .Push("aTexIndex", VertexAttributeType::UInt);  // Bindless index (uint32_t)
-
-        // Allocate CPU-side vertex buffer (zero-initialized via value initialization)
-        s_Data.QuadVertexBufferBase = std::make_unique<QuadVertex[]>(s_Data.MaxVertices);
-        s_Data.QuadVertexBufferPtr = s_Data.QuadVertexBufferBase.get();
-
-        // Create GPU vertex buffers (one per frame in flight to avoid GPU/CPU conflicts)
-        for (uint32_t i = 0; i < Renderer2DData::MaxFramesInFlight; i++)
-        {
-            s_Data.QuadVertexBuffers[i] = CreateScope<VertexBuffer>(
-                static_cast<uint64_t>(s_Data.MaxVertices) * sizeof(QuadVertex),
-                s_Data.QuadVertexLayout
-            );
-            // Initialize GPU buffer with zeros to avoid potential first-upload issues
-            s_Data.QuadVertexBuffers[i]->SetData(s_Data.QuadVertexBufferBase.get(),
-                s_Data.MaxVertices * sizeof(QuadVertex));
-        }
-
-        // Generate indices for all quads (0,1,2,2,3,0 pattern) - standard indexing
-        std::vector<uint32_t> indices(s_Data.MaxIndices);
-        uint32_t offset = 0;
-        for (uint32_t i = 0; i < s_Data.MaxIndices; i += 6)
-        {
-            indices[i + 0] = offset + 0;
-            indices[i + 1] = offset + 1;
-            indices[i + 2] = offset + 2;
-            indices[i + 3] = offset + 2;
-            indices[i + 4] = offset + 3;
-            indices[i + 5] = offset + 0;
-            offset += 4;
-        }
-        s_Data.QuadIndexBuffer = IndexBuffer::Create(indices);
-
-        // Create 1x1 white texture for solid color rendering
-        // This will be registered with BindlessTextureManager automatically
-        uint32_t whitePixel = 0xFFFFFFFF;  // RGBA: white with full alpha
-        s_Data.WhiteTexture = Texture::Create(1, 1, &whitePixel);
-        s_Data.WhiteTextureIndex = s_Data.WhiteTexture->GetBindlessIndex();
-
-        // Get quad2d shader from library (should be pre-loaded)
-        s_Data.QuadShader = ShaderLibrary::Get().Get("quad2d");
-        if (!s_Data.QuadShader.IsValid())
-        {
-            GG_CORE_ERROR("Renderer2D: Failed to get 'quad2d' shader from library!");
-            return;
-        }
-
-        // Create descriptor set layout for camera UBO only (Set 0)
-        // Textures are in Set 1, managed by BindlessTextureManager
-        std::vector<DescriptorBinding> cameraBindings = {
-            { 0, DescriptorType::UniformBuffer, ShaderStage::Vertex, 1 }
-        };
-        s_Data.CameraDescriptorLayout = CreateScope<DescriptorSetLayout>(cameraBindings);
-
-        // Create per-frame camera UBOs and descriptor sets
-        for (uint32_t i = 0; i < Renderer2DData::MaxFramesInFlight; i++)
-        {
-            s_Data.CameraUniformBuffers[i] = CreateScope<UniformBuffer>(sizeof(CameraUBO));
-            s_Data.CameraDescriptorSets[i] = CreateScope<DescriptorSet>(*s_Data.CameraDescriptorLayout);
-            s_Data.CameraDescriptorSets[i]->SetUniformBuffer(0, *s_Data.CameraUniformBuffers[i]);
-        }
-
-        GG_CORE_INFO("Renderer2D: Initialized (bindless mode, initial {} quads (max {}), {} max textures, {} frames in flight)",
-                     s_Data.MaxQuads, Renderer2DData::AbsoluteMaxQuads,
-                     BindlessTextureManager::Get().GetMaxTextures(),
-                     Renderer2DData::MaxFramesInFlight);
+        s_Impl.Init();
     }
 
     void Renderer2D::Shutdown()
     {
-        GG_PROFILE_FUNCTION();
-        GG_CORE_INFO("Renderer2D: Shutting down...");
-
-        s_Data.QuadVertexBufferBase.reset();
-        s_Data.QuadVertexBufferPtr = nullptr;
-
-        s_Data.QuadPipeline.reset();
-        for (uint32_t i = 0; i < Renderer2DData::MaxFramesInFlight; i++)
-        {
-            s_Data.CameraDescriptorSets[i].reset();
-            s_Data.CameraUniformBuffers[i].reset();
-        }
-        s_Data.CameraDescriptorLayout.reset();
-        s_Data.QuadIndexBuffer.reset();
-        for (uint32_t i = 0; i < Renderer2DData::MaxFramesInFlight; i++)
-        {
-            s_Data.QuadVertexBuffers[i].reset();
-        }
-        s_Data.WhiteTexture.reset();
-        s_Data.QuadShader = AssetHandle<Shader>();  // Release shader reference
-
-        GG_CORE_TRACE("Renderer2D: Shutdown complete");
-    }
-
-    // Internal shared implementation for BeginScene
-    static void BeginSceneShared(const CameraUBO& cameraUBO,
-                                  RHIRenderPassHandle renderPass,
-                                  RHICommandBufferHandle cmd,
-                                  uint32_t viewportWidth,
-                                  uint32_t viewportHeight)
-    {
-        GG_PROFILE_FUNCTION();
-
-        // Check if we need to grow buffers from previous frame
-        if (s_Data.NeedsBufferGrowth && s_Data.MaxQuads < Renderer2DData::AbsoluteMaxQuads)
-        {
-            GrowBuffers();
-            s_Data.NeedsBufferGrowth = false;
-        }
-
-        // Get current frame index for per-frame resources
-        s_Data.CurrentFrameIndex = RHIDevice::Get().GetCurrentFrameIndex();
-
-        // Update camera UBO for current frame
-        s_Data.CameraUniformBuffers[s_Data.CurrentFrameIndex]->SetData(cameraUBO);
-
-        // Create or recreate pipeline if render pass changed
-        if (!s_Data.QuadPipeline || s_Data.CurrentRenderPass != renderPass)
-        {
-            s_Data.QuadPipeline.reset();
-
-            PipelineSpecification spec;
-            spec.shader = s_Data.QuadShader.Get();
-            spec.renderPass = renderPass;
-            spec.vertexLayout = &s_Data.QuadVertexLayout;
-            spec.cullMode = CullMode::None;
-            spec.blendMode = BlendMode::Alpha;
-            spec.depthTestEnable = false;
-            spec.depthWriteEnable = false;
-            // Set 0: Camera UBO
-            spec.descriptorSetLayouts.push_back(s_Data.CameraDescriptorLayout->GetHandle());
-            // Set 1: Bindless textures
-            spec.descriptorSetLayouts.push_back(BindlessTextureManager::Get().GetLayoutHandle());
-            spec.debugName = "Renderer2D_Quad_Bindless";
-
-            s_Data.QuadPipeline = CreateScope<Pipeline>(spec);
-            s_Data.CurrentRenderPass = renderPass;
-        }
-
-        // Store current render state
-        s_Data.CurrentCommandBuffer = cmd;
-        s_Data.ViewportWidth = viewportWidth;
-        s_Data.ViewportHeight = viewportHeight;
-
-        // Reset batch state
-        s_Data.QuadIndexCount = 0;
-        s_Data.QuadVertexBufferPtr = s_Data.QuadVertexBufferBase.get();
-
-        // Only reset GPU buffer offset when moving to a new frame
-        // This allows multiple BeginScene/EndScene pairs per frame without overwriting
-        if (s_Data.CurrentFrameIndex != s_Data.LastResetFrameIndex)
-        {
-            s_Data.QuadVertexOffset = 0;
-            s_Data.LastResetFrameIndex = s_Data.CurrentFrameIndex;
-        }
-
-        s_Data.SceneStarted = true;
+        s_Impl.Shutdown();
     }
 
     void Renderer2D::BeginScene(const Camera& camera)
     {
         auto& device = RHIDevice::Get();
-        uint32_t width = device.GetSwapchainWidth();
-        uint32_t height = device.GetSwapchainHeight();
-        RHIRenderPassHandle renderPass = device.GetSwapchainRenderPass();
-        RHICommandBufferHandle cmd = device.GetCurrentCommandBuffer();
-
-        BeginScene(camera, renderPass, cmd, width, height);
+        BeginScene(camera, device.GetSwapchainRenderPass(), device.GetCurrentCommandBuffer(),
+                   device.GetSwapchainWidth(), device.GetSwapchainHeight());
     }
 
     void Renderer2D::BeginScene(const Camera& camera, RHIRenderPassHandle renderPass,
                                 RHICommandBufferHandle cmd, uint32_t viewportWidth, uint32_t viewportHeight)
     {
         CameraUBO cameraUBO = camera.GetUBO();
-        BeginSceneShared(cameraUBO, renderPass, cmd, viewportWidth, viewportHeight);
+        s_Impl.BeginSceneInternal(cameraUBO, renderPass, cmd, viewportWidth, viewportHeight);
     }
 
     void Renderer2D::BeginScene(const SceneCamera& camera, const Mat4& transform)
     {
         auto& device = RHIDevice::Get();
-        uint32_t width = device.GetSwapchainWidth();
-        uint32_t height = device.GetSwapchainHeight();
-        RHIRenderPassHandle renderPass = device.GetSwapchainRenderPass();
-        RHICommandBufferHandle cmd = device.GetCurrentCommandBuffer();
-
-        BeginScene(camera, transform, renderPass, cmd, width, height);
+        BeginScene(camera, transform, device.GetSwapchainRenderPass(), device.GetCurrentCommandBuffer(),
+                   device.GetSwapchainWidth(), device.GetSwapchainHeight());
     }
 
     void Renderer2D::BeginScene(const SceneCamera& camera, const Mat4& transform,
                                 RHIRenderPassHandle renderPass, RHICommandBufferHandle cmd,
                                 uint32_t viewportWidth, uint32_t viewportHeight)
     {
-        // Compute view matrix as inverse of transform
         Mat4 viewMatrix = Mat4::Inverse(transform);
         Mat4 projectionMatrix = camera.GetProjection();
         Mat4 viewProjectionMatrix = projectionMatrix * viewMatrix;
 
-        // Build CameraUBO
         CameraUBO cameraUBO;
         cameraUBO.view = viewMatrix;
         cameraUBO.projection = projectionMatrix;
         cameraUBO.viewProjection = viewProjectionMatrix;
 
-        BeginSceneShared(cameraUBO, renderPass, cmd, viewportWidth, viewportHeight);
+        s_Impl.BeginSceneInternal(cameraUBO, renderPass, cmd, viewportWidth, viewportHeight);
     }
 
     void Renderer2D::EndScene()
     {
         GG_PROFILE_FUNCTION();
         Flush();
-        s_Data.SceneStarted = false;
-        s_Data.CurrentCommandBuffer = RHICommandBufferHandle{};
+        s_Impl.SetSceneStarted(false);
+        s_Impl.ClearCommandBuffer();
     }
 
     void Renderer2D::Flush()
     {
-        GG_PROFILE_FUNCTION();
-        if (s_Data.QuadIndexCount == 0)
-            return;
-
-        // Calculate data size and vertex count for current batch
-        uint32_t dataSize = static_cast<uint32_t>(
-            reinterpret_cast<uint8_t*>(s_Data.QuadVertexBufferPtr) -
-            reinterpret_cast<uint8_t*>(s_Data.QuadVertexBufferBase.get())
-        );
-        uint32_t vertexCount = dataSize / sizeof(QuadVertex);
-
-        // Upload vertex data to current frame's GPU buffer at current offset
-        // Per-frame buffers prevent GPU/CPU conflicts between frames in flight
-        uint64_t gpuOffset = static_cast<uint64_t>(s_Data.QuadVertexOffset) * sizeof(QuadVertex);
-        s_Data.QuadVertexBuffers[s_Data.CurrentFrameIndex]->SetData(s_Data.QuadVertexBufferBase.get(), dataSize, gpuOffset);
-
-        RHICommandBufferHandle cmd = s_Data.CurrentCommandBuffer;
-
-        // Set viewport and scissor using stored dimensions
-        RHICmd::SetViewport(cmd, s_Data.ViewportWidth, s_Data.ViewportHeight);
-        RHICmd::SetScissor(cmd, s_Data.ViewportWidth, s_Data.ViewportHeight);
-
-        // Bind pipeline
-        s_Data.QuadPipeline->Bind(cmd);
-
-        // Bind Set 0: Camera UBO
-        s_Data.CameraDescriptorSets[s_Data.CurrentFrameIndex]->Bind(cmd, s_Data.QuadPipeline->GetLayoutHandle(), 0);
-
-        // Bind Set 1: Bindless textures (raw descriptor set)
-        RHICmd::BindDescriptorSetRaw(cmd, s_Data.QuadPipeline->GetLayoutHandle(),
-                                      BindlessTextureManager::Get().GetDescriptorSet(), 1);
-
-        // Bind vertex and index buffers (use current frame's vertex buffer)
-        s_Data.QuadVertexBuffers[s_Data.CurrentFrameIndex]->Bind(cmd);
-        s_Data.QuadIndexBuffer->Bind(cmd);
-
-        // Draw with vertex offset to read from correct GPU buffer location
-        // The indices (0,1,2,2,3,0 etc.) are relative, so we need vertexOffset
-        // to tell the GPU where this batch's vertices actually start
-        RHICmd::DrawIndexed(cmd, s_Data.QuadIndexCount, 1, 0,
-                            static_cast<int32_t>(s_Data.QuadVertexOffset), 0);
-
-        // Update GPU buffer offset for next batch (persists across flushes)
-        s_Data.QuadVertexOffset += vertexCount;
-
-        // Update stats
-        s_Data.Stats.DrawCalls++;
-
-        // Reset batch state for next batch (but NOT QuadVertexOffset - that persists!)
-        s_Data.QuadIndexCount = 0;
-        s_Data.QuadVertexBufferPtr = s_Data.QuadVertexBufferBase.get();
+        s_Impl.Flush();
     }
 
-    // Internal helper: validates batch state and resolves texture index
-    // Returns false if the quad cannot be added (scene not started or capacity exceeded)
+    // ============================================================================
+    // Quad Drawing Helpers
+    // ============================================================================
+
     static bool PrepareForQuad(const Texture* texture, uint32_t& outTextureIndex)
     {
-        if (!s_Data.SceneStarted)
+        if (!s_Impl.IsSceneStarted())
         {
             GG_CORE_WARN("Renderer2D::DrawQuad called outside BeginScene/EndScene");
             return false;
         }
 
-        // Get bindless texture index (default to white texture for solid colors)
-        outTextureIndex = s_Data.WhiteTextureIndex;
+        // Get bindless texture index
+        outTextureIndex = s_Impl.GetWhiteTextureIndex();
         if (texture != nullptr)
         {
             BindlessTextureIndex bindlessIdx = texture->GetBindlessIndex();
@@ -483,20 +405,19 @@ namespace GGEngine {
         }
 
         // Flush if batch is full
-        if (s_Data.QuadIndexCount >= s_Data.MaxIndices)
+        if (s_Impl.QuadIndexCount >= s_Impl.MaxIndices)
         {
             Renderer2D::Flush();
         }
 
-        // Check if adding this quad would exceed total GPU buffer capacity for the frame
-        uint32_t currentBatchVertices = static_cast<uint32_t>(s_Data.QuadVertexBufferPtr - s_Data.QuadVertexBufferBase.get());
-        uint32_t totalVerticesAfterThisQuad = s_Data.QuadVertexOffset + currentBatchVertices + 4;
-        if (totalVerticesAfterThisQuad > s_Data.MaxVertices)
+        // Check capacity
+        uint32_t currentBatchVertices = static_cast<uint32_t>(s_Impl.QuadVertexBufferPtr - s_Impl.QuadVertexBufferBase.get());
+        uint32_t totalVerticesAfterThisQuad = s_Impl.QuadVertexOffset + currentBatchVertices + 4;
+        if (totalVerticesAfterThisQuad > s_Impl.MaxVertices)
         {
-            // Request buffer growth for next frame
-            if (!s_Data.NeedsBufferGrowth && s_Data.MaxQuads < Renderer2DData::AbsoluteMaxQuads)
+            if (!s_Impl.NeedsBufferGrowth() && s_Impl.MaxQuads < Renderer2DImpl::AbsoluteMaxQuads)
             {
-                s_Data.NeedsBufferGrowth = true;
+                s_Impl.RequestBufferGrowth();
                 GG_CORE_INFO("Renderer2D: Buffer capacity exceeded - will grow on next frame");
             }
             return false;
@@ -505,9 +426,6 @@ namespace GGEngine {
         return true;
     }
 
-    // Internal helper: writes the 4 vertices of a quad to the batch buffer
-    // positions: array of 4 pre-computed world-space positions [4][3]
-    // texCoords: optional custom UVs (nullptr = use default full-texture UVs)
     static void WriteQuadVertices(const float positions[4][3],
                                    const float* texCoords,
                                    float r, float g, float b, float a,
@@ -516,38 +434,36 @@ namespace GGEngine {
     {
         for (int i = 0; i < 4; i++)
         {
-            s_Data.QuadVertexBufferPtr->position[0] = positions[i][0];
-            s_Data.QuadVertexBufferPtr->position[1] = positions[i][1];
-            s_Data.QuadVertexBufferPtr->position[2] = positions[i][2];
+            s_Impl.QuadVertexBufferPtr->position[0] = positions[i][0];
+            s_Impl.QuadVertexBufferPtr->position[1] = positions[i][1];
+            s_Impl.QuadVertexBufferPtr->position[2] = positions[i][2];
 
-            // Texture coordinates (use custom if provided, otherwise default)
             if (texCoords)
             {
-                s_Data.QuadVertexBufferPtr->texCoord[0] = texCoords[i * 2 + 0];
-                s_Data.QuadVertexBufferPtr->texCoord[1] = texCoords[i * 2 + 1];
+                s_Impl.QuadVertexBufferPtr->texCoord[0] = texCoords[i * 2 + 0];
+                s_Impl.QuadVertexBufferPtr->texCoord[1] = texCoords[i * 2 + 1];
             }
             else
             {
-                s_Data.QuadVertexBufferPtr->texCoord[0] = Renderer2DData::QuadTexCoords[i][0];
-                s_Data.QuadVertexBufferPtr->texCoord[1] = Renderer2DData::QuadTexCoords[i][1];
+                s_Impl.QuadVertexBufferPtr->texCoord[0] = Renderer2DImpl::QuadTexCoords[i][0];
+                s_Impl.QuadVertexBufferPtr->texCoord[1] = Renderer2DImpl::QuadTexCoords[i][1];
             }
 
-            s_Data.QuadVertexBufferPtr->color[0] = r;
-            s_Data.QuadVertexBufferPtr->color[1] = g;
-            s_Data.QuadVertexBufferPtr->color[2] = b;
-            s_Data.QuadVertexBufferPtr->color[3] = a;
+            s_Impl.QuadVertexBufferPtr->color[0] = r;
+            s_Impl.QuadVertexBufferPtr->color[1] = g;
+            s_Impl.QuadVertexBufferPtr->color[2] = b;
+            s_Impl.QuadVertexBufferPtr->color[3] = a;
 
-            s_Data.QuadVertexBufferPtr->tilingFactor = tilingFactor;
-            s_Data.QuadVertexBufferPtr->texIndex = textureIndex;
+            s_Impl.QuadVertexBufferPtr->tilingFactor = tilingFactor;
+            s_Impl.QuadVertexBufferPtr->texIndex = textureIndex;
 
-            s_Data.QuadVertexBufferPtr++;
+            s_Impl.QuadVertexBufferPtr++;
         }
 
-        s_Data.QuadIndexCount += 6;
-        s_Data.Stats.QuadCount++;
+        s_Impl.QuadIndexCount += 6;
+        s_Impl.Stats.QuadCount++;
     }
 
-    // Internal helper to add a quad to the batch (position/size/rotation path)
     static void DrawQuadInternal(float x, float y, float z, float width, float height,
                                  const Texture* texture, float r, float g, float b, float a,
                                  float rotation = 0.0f, float tilingFactor = 1.0f,
@@ -557,7 +473,6 @@ namespace GGEngine {
         if (!PrepareForQuad(texture, textureIndex))
             return;
 
-        // Compute rotation if needed
         float cosR = 1.0f, sinR = 0.0f;
         if (rotation != 0.0f)
         {
@@ -565,15 +480,12 @@ namespace GGEngine {
             sinR = std::sin(rotation);
         }
 
-        // Compute world-space positions for all 4 vertices
         float positions[4][3];
         for (int i = 0; i < 4; i++)
         {
-            // Scale unit quad by size
-            float localX = Renderer2DData::QuadPositions[i][0] * width;
-            float localY = Renderer2DData::QuadPositions[i][1] * height;
+            float localX = Renderer2DImpl::QuadPositions[i][0] * width;
+            float localY = Renderer2DImpl::QuadPositions[i][1] * height;
 
-            // Apply rotation (around center) and translate to world position
             positions[i][0] = x + (localX * cosR - localY * sinR);
             positions[i][1] = y + (localX * sinR + localY * cosR);
             positions[i][2] = z;
@@ -582,7 +494,6 @@ namespace GGEngine {
         WriteQuadVertices(positions, texCoords, r, g, b, a, tilingFactor, textureIndex);
     }
 
-    // Internal helper for matrix-based quad rendering
     static void DrawQuadWithMatrix(const glm::mat4& transform,
                                    const Texture* texture, float r, float g, float b, float a,
                                    float tilingFactor = 1.0f,
@@ -592,15 +503,13 @@ namespace GGEngine {
         if (!PrepareForQuad(texture, textureIndex))
             return;
 
-        // Unit quad positions (centered at origin, 1x1 size)
         static constexpr glm::vec4 unitQuadPositions[4] = {
-            { -0.5f, -0.5f, 0.0f, 1.0f },  // Bottom-left
-            {  0.5f, -0.5f, 0.0f, 1.0f },  // Bottom-right
-            {  0.5f,  0.5f, 0.0f, 1.0f },  // Top-right
-            { -0.5f,  0.5f, 0.0f, 1.0f }   // Top-left
+            { -0.5f, -0.5f, 0.0f, 1.0f },
+            {  0.5f, -0.5f, 0.0f, 1.0f },
+            {  0.5f,  0.5f, 0.0f, 1.0f },
+            { -0.5f,  0.5f, 0.0f, 1.0f }
         };
 
-        // Compute world-space positions by transforming unit quad vertices
         float positions[4][3];
         for (int i = 0; i < 4; i++)
         {
@@ -613,10 +522,8 @@ namespace GGEngine {
         WriteQuadVertices(positions, texCoords, r, g, b, a, tilingFactor, textureIndex);
     }
 
-    // Draw a quad using the unified QuadSpec
     void Renderer2D::DrawQuad(const QuadSpec& spec)
     {
-        // Determine texture and UVs (SubTexture takes precedence if set)
         const Texture* texture = spec.texture;
         const float* texCoordsPtr = spec.texCoords ? &spec.texCoords[0][0] : nullptr;
         float tilingFactor = spec.tilingFactor;
@@ -625,10 +532,9 @@ namespace GGEngine {
         {
             texture = spec.subTexture->GetTexture();
             texCoordsPtr = spec.subTexture->GetTexCoords();
-            tilingFactor = 1.0f;  // SubTextures don't use tiling
+            tilingFactor = 1.0f;
         }
 
-        // Use matrix path if transform is provided
         if (spec.transform)
         {
             DrawQuadWithMatrix(
@@ -641,7 +547,6 @@ namespace GGEngine {
         }
         else
         {
-            // Use position/size/rotation path
             DrawQuadInternal(
                 spec.x, spec.y, spec.z,
                 spec.width, spec.height,
@@ -654,17 +559,16 @@ namespace GGEngine {
         }
     }
 
-    // Statistics
     void Renderer2D::ResetStats()
     {
-        s_Data.Stats.DrawCalls = 0;
-        s_Data.Stats.QuadCount = 0;
+        s_Impl.Stats.DrawCalls = 0;
+        s_Impl.Stats.QuadCount = 0;
     }
 
     Renderer2D::Statistics Renderer2D::GetStats()
     {
-        Renderer2D::Statistics stats = s_Data.Stats;
-        stats.MaxQuadCapacity = s_Data.MaxQuads;
+        Renderer2D::Statistics stats = s_Impl.Stats;
+        stats.MaxQuadCapacity = s_Impl.MaxQuads;
         return stats;
     }
 

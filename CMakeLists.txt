@@ -212,6 +212,8 @@ set(ENGINE_SOURCES
     Engine/src/GGEngine/Renderer/Material.cpp
     Engine/src/GGEngine/Renderer/MaterialLibrary.h
     Engine/src/GGEngine/Renderer/MaterialLibrary.cpp
+    Engine/src/GGEngine/Renderer/Renderer2DBase.h
+    Engine/src/GGEngine/Renderer/Renderer2DBase.cpp
     Engine/src/GGEngine/Renderer/Renderer2D.h
     Engine/src/GGEngine/Renderer/Renderer2D.cpp
     Engine/src/GGEngine/Renderer/InstancedRenderer2D.h
@@ -235,7 +237,16 @@ set(ENGINE_SOURCES
     Engine/src/GGEngine/RHI/RHIDevice.h
     Engine/src/GGEngine/RHI/RHICommandBuffer.h
     Engine/src/Platform/Vulkan/VulkanRHI.h
-    Engine/src/Platform/Vulkan/VulkanRHI.cpp
+    Engine/src/Platform/Vulkan/VulkanConversions.h
+    Engine/src/Platform/Vulkan/VulkanConversions.cpp
+    Engine/src/Platform/Vulkan/VulkanResourceRegistry.h
+    Engine/src/Platform/Vulkan/VulkanResourceRegistry.cpp
+    Engine/src/Platform/Vulkan/VulkanRHIDevice.cpp
+    Engine/src/Platform/Vulkan/VulkanRHIShaders.cpp
+    Engine/src/Platform/Vulkan/VulkanRHIPipelines.cpp
+    Engine/src/Platform/Vulkan/VulkanRHIRenderPass.cpp
+    Engine/src/Platform/Vulkan/VulkanRHIBindless.cpp
+    Engine/src/Platform/Vulkan/VulkanRHICmd.cpp
     Engine/src/ggpch.h
     Engine/src/ggpch.cpp
 )
