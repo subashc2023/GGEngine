@@ -14,6 +14,7 @@
 #include "Examples/InputExample.h"
 #include "Examples/ParticleExample.h"
 #include "Examples/MultithreadingExample.h"
+#include "Examples/TimestepExample.h"
 
 #include <imgui.h>
 
@@ -39,6 +40,7 @@ void ExamplesLayer::OnAttach()
     m_Examples.push_back(std::make_unique<InputExample>());
     m_Examples.push_back(std::make_unique<ParticleExample>());
     m_Examples.push_back(std::make_unique<MultithreadingExample>());
+    m_Examples.push_back(std::make_unique<TimestepExample>());
 
     // Start with first example
     SwitchExample(0);
@@ -73,6 +75,15 @@ void ExamplesLayer::SwitchExample(int index)
     m_CurrentExample->OnAttach();
 
     GG_INFO("Switched to example: {}", m_CurrentExample->GetName());
+}
+
+void ExamplesLayer::OnFixedUpdate(float fixedDeltaTime)
+{
+    // Forward to current example
+    if (m_CurrentExample)
+    {
+        m_CurrentExample->OnFixedUpdate(fixedDeltaTime);
+    }
 }
 
 void ExamplesLayer::OnUpdate(GGEngine::Timestep ts)

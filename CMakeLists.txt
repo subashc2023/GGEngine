@@ -155,6 +155,7 @@ set(ENGINE_SOURCES
     Engine/src/GGEngine/ECS/Components/TagComponent.h
     Engine/src/GGEngine/ECS/Components/TilemapComponent.h
     Engine/src/GGEngine/ECS/Components/CameraComponent.h
+    Engine/src/GGEngine/ECS/Components/InterpolationComponent.h
     Engine/src/GGEngine/ECS/Scene.h
     Engine/src/GGEngine/ECS/Scene.cpp
     Engine/src/GGEngine/ECS/SceneSerializer.h
@@ -342,6 +343,8 @@ add_executable(Sandbox
     Sandbox/src/Examples/ParticleExample.cpp
     Sandbox/src/Examples/MultithreadingExample.h
     Sandbox/src/Examples/MultithreadingExample.cpp
+    Sandbox/src/Examples/TimestepExample.h
+    Sandbox/src/Examples/TimestepExample.cpp
 )
 
 target_link_libraries(Sandbox PRIVATE Engine)

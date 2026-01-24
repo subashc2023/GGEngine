@@ -17,6 +17,7 @@ public:
 
     virtual void OnAttach() {}
     virtual void OnDetach() {}
+    virtual void OnFixedUpdate(float fixedDeltaTime) {}  // Called at fixed rate (e.g., 60Hz)
     virtual void OnUpdate(GGEngine::Timestep ts, const GGEngine::Camera& camera) {}
     virtual void OnRender(const GGEngine::Camera& camera) {}
     virtual void OnImGuiRender() {}

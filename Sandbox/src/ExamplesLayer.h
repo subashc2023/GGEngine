@@ -16,6 +16,7 @@ public:
 
     void OnAttach() override;
     void OnDetach() override;
+    void OnFixedUpdate(float fixedDeltaTime) override;
     void OnUpdate(GGEngine::Timestep ts) override;
     void OnEvent(GGEngine::Event& event) override;
     void OnWindowResize(uint32_t width, uint32_t height) override;

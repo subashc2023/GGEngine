@@ -1,6 +1,8 @@
 #include "ggpch.h"
 #include "Application.h"
 
+#include <chrono>
+
 #include "GGEngine/Events/ApplicationEvent.h"
 #include "Window.h"
 #include "Log.h"
@@ -162,8 +164,13 @@ namespace GGEngine {
             // Measure time AFTER BeginFrame to include VSync blocking time
             // (vkAcquireNextImageKHR blocks when VSync is enabled and CPU runs ahead)
             float time = static_cast<float>(glfwGetTime());
-            Timestep timestep = time - m_LastFrameTime;
+            float frameTime = time - m_LastFrameTime;
             m_LastFrameTime = time;
+
+            // Clamp frame time to avoid spiral of death (e.g., after breakpoint or long pause)
+            const float maxFrameTime = 0.25f;  // Max 250ms per frame
+            if (frameTime > maxFrameTime)
+                frameTime = maxFrameTime;
 
             // Reset thread command pools for this frame (safe since fence waited)
             ThreadedCommandBuffer::Get().ResetPools(RHIDevice::Get().GetCurrentFrameIndex());
@@ -178,6 +185,40 @@ namespace GGEngine {
 
             // Flush pending GPU uploads before rendering
             TransferQueue::Get().FlushUploads(RHIDevice::Get().GetCurrentCommandBuffer());
+
+            // Fixed timestep accumulator pattern
+            float alpha = 1.0f;  // Interpolation factor for rendering
+            m_FixedUpdatesThisFrame = 0;
+
+            if (m_UseFixedTimestep)
+            {
+                GG_PROFILE_SCOPE("FixedUpdate Loop");
+
+                auto fixedStart = std::chrono::high_resolution_clock::now();
+
+                m_Accumulator += frameTime;
+
+                // Run fixed updates until we've caught up
+                while (m_Accumulator >= m_FixedTimestep)
+                {
+                    GG_PROFILE_SCOPE("OnFixedUpdate");
+                    for (Layer* layer : m_LayerStack)
+                    {
+                        layer->OnFixedUpdate(m_FixedTimestep);
+                    }
+                    m_Accumulator -= m_FixedTimestep;
+                    m_FixedUpdatesThisFrame++;
+                }
+
+                // Calculate interpolation alpha (how far between previous and current state)
+                alpha = m_Accumulator / m_FixedTimestep;
+
+                auto fixedEnd = std::chrono::high_resolution_clock::now();
+                m_FixedUpdateTime = std::chrono::duration<float, std::milli>(fixedEnd - fixedStart).count();
+            }
+
+            // Create timestep with interpolation alpha
+            Timestep timestep(frameTime, alpha);
 
             // Offscreen rendering phase - layers render to their framebuffers
             for (Layer* layer : m_LayerStack)
