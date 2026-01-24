@@ -277,11 +277,6 @@ namespace GGEngine {
         createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
         createInfo.pApplicationInfo = &appInfo;
 
-#ifdef __APPLE__
-        // Required for MoltenVK on macOS to enumerate portability subset devices
-        createInfo.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
-#endif
-
         auto extensions = GetRequiredExtensions();
         createInfo.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
         createInfo.ppEnabledExtensionNames = extensions.data();
@@ -900,11 +895,6 @@ namespace GGEngine {
         {
             extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
         }
-
-#ifdef __APPLE__
-        // Required for MoltenVK on macOS to enumerate portability subset devices
-        extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
-#endif
 
         return extensions;
     }

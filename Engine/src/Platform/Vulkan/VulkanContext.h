@@ -158,10 +158,7 @@ namespace GGEngine {
         };
 
         const std::vector<const char*> m_DeviceExtensions = {
-            VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-#ifdef __APPLE__
-            "VK_KHR_portability_subset"
-#endif
+            VK_KHR_SWAPCHAIN_EXTENSION_NAME
         };
     };
 
