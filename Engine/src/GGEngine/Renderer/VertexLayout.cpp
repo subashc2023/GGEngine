@@ -62,6 +62,15 @@ namespace GGEngine {
         return desc;
     }
 
+    RHIVertexBindingDescription VertexLayout::GetBindingDescription(uint32_t binding, VertexInputRate inputRate) const
+    {
+        RHIVertexBindingDescription desc{};
+        desc.binding = binding;
+        desc.stride = m_Stride;
+        desc.inputRate = inputRate;
+        return desc;
+    }
+
     std::vector<RHIVertexAttributeDescription> VertexLayout::GetAttributeDescriptions(uint32_t binding) const
     {
         std::vector<RHIVertexAttributeDescription> descriptions;
@@ -72,6 +81,24 @@ namespace GGEngine {
             RHIVertexAttributeDescription desc{};
             desc.binding = binding;
             desc.location = i;
+            desc.format = GetVertexAttributeFormat(m_Attributes[i].type);
+            desc.offset = m_Attributes[i].offset;
+            descriptions.push_back(desc);
+        }
+
+        return descriptions;
+    }
+
+    std::vector<RHIVertexAttributeDescription> VertexLayout::GetAttributeDescriptions(uint32_t binding, uint32_t startLocation) const
+    {
+        std::vector<RHIVertexAttributeDescription> descriptions;
+        descriptions.reserve(m_Attributes.size());
+
+        for (uint32_t i = 0; i < m_Attributes.size(); ++i)
+        {
+            RHIVertexAttributeDescription desc{};
+            desc.binding = binding;
+            desc.location = startLocation + i;
             desc.format = GetVertexAttributeFormat(m_Attributes[i].type);
             desc.offset = m_Attributes[i].offset;
             descriptions.push_back(desc);

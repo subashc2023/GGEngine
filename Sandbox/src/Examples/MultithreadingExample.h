@@ -84,6 +84,7 @@ private:
     // Settings
     int m_EntityCount = 100;
     bool m_UseParallelExecution = true;
+    bool m_UseInstancedRendering = true;  // Toggle between batched and instanced
     bool m_EnableMovement = true;
     bool m_EnableRotation = true;
     bool m_EnableColorCycle = true;
@@ -91,6 +92,7 @@ private:
 
     // Timing stats
     float m_LastUpdateTimeMs = 0.0f;
+    float m_LastRenderTimeMs = 0.0f;  // Track render time
     float m_SequentialTimeMs = 0.0f;
     float m_ParallelTimeMs = 0.0f;
 

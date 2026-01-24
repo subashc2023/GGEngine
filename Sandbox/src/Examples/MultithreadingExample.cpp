@@ -1,11 +1,14 @@
 #include "MultithreadingExample.h"
 #include "GGEngine/Renderer/Renderer2D.h"
+#include "GGEngine/Renderer/InstancedRenderer2D.h"
 #include "GGEngine/ECS/Components/TransformComponent.h"
 #include "GGEngine/ECS/Components/SpriteRendererComponent.h"
 #include "GGEngine/ECS/ComponentStorage.h"
 #include "GGEngine/Core/Profiler.h"
 #include "GGEngine/Core/TaskGraph.h"
 #include "GGEngine/Core/Log.h"
+#include "GGEngine/Core/Math.h"
+#include "GGEngine/Asset/TextureLibrary.h"
 
 #include <imgui.h>
 #include <cstdlib>
@@ -286,28 +289,112 @@ void MultithreadingExample::OnRender(const GGEngine::Camera& camera)
 {
     GG_PROFILE_SCOPE("MultithreadingExample::Render");
 
-    GGEngine::Renderer2D::ResetStats();
-    GGEngine::Renderer2D::BeginScene(camera);
+    auto startTime = std::chrono::high_resolution_clock::now();
 
-    // Render all entities
-    const auto& entities = m_Scene->GetAllEntities();
-    for (GGEngine::Entity index : entities)
+    if (m_UseInstancedRendering)
     {
-        auto entityID = m_Scene->GetEntityID(index);
+        GG_PROFILE_SCOPE("InstancedRenderer2D Path");
 
-        const auto* transform = m_Scene->GetComponent<GGEngine::TransformComponent>(entityID);
-        const auto* sprite = m_Scene->GetComponent<GGEngine::SpriteRendererComponent>(entityID);
+        GGEngine::InstancedRenderer2D::ResetStats();
+        GGEngine::InstancedRenderer2D::BeginScene(camera);
 
-        if (transform && sprite)
+        // Get component storage for direct access
+        const auto& entities = m_Scene->GetAllEntities();
+        const uint32_t whiteTexIndex = GGEngine::InstancedRenderer2D::GetWhiteTextureIndex();
+
+        // Allocate instances for all entities
+        GGEngine::QuadInstanceData* instances = GGEngine::InstancedRenderer2D::AllocateInstances(
+            static_cast<uint32_t>(entities.size()));
+
+        if (instances)
         {
-            auto mat = transform->GetMatrix();
-            GGEngine::Renderer2D::DrawQuad(GGEngine::QuadSpec()
-                .SetTransform(&mat)
-                .SetColor(sprite->Color[0], sprite->Color[1], sprite->Color[2], sprite->Color[3]));
+            // Use TaskGraph for parallel instance preparation
+            auto& taskGraph = GGEngine::TaskGraph::Get();
+            const size_t entityCount = entities.size();
+            const uint32_t workerCount = taskGraph.GetWorkerCount();
+            const size_t chunkSize = std::max(size_t(256), (entityCount + workerCount) / (workerCount + 1));
+
+            std::vector<GGEngine::TaskID> tasks;
+
+            for (size_t start = 0; start < entityCount; start += chunkSize)
+            {
+                size_t end = std::min(start + chunkSize, entityCount);
+
+                GGEngine::TaskID taskId = taskGraph.CreateTask("PrepareQuadInstances",
+                    [this, &entities, instances, whiteTexIndex, start, end]() -> GGEngine::TaskResult
+                    {
+                        for (size_t i = start; i < end; ++i)
+                        {
+                            GGEngine::Entity index = entities[i];
+                            auto entityID = m_Scene->GetEntityID(index);
+
+                            const auto* transform = m_Scene->GetComponent<GGEngine::TransformComponent>(entityID);
+                            const auto* sprite = m_Scene->GetComponent<GGEngine::SpriteRendererComponent>(entityID);
+
+                            if (transform && sprite)
+                            {
+                                GGEngine::QuadInstanceData& inst = instances[i];
+                                inst.SetTransform(
+                                    transform->Position[0],
+                                    transform->Position[1],
+                                    transform->Position[2],
+                                    GGEngine::Math::ToRadians(transform->Rotation),
+                                    transform->Scale[0],
+                                    transform->Scale[1]
+                                );
+                                inst.SetColor(
+                                    sprite->Color[0],
+                                    sprite->Color[1],
+                                    sprite->Color[2],
+                                    sprite->Color[3]
+                                );
+                                inst.SetFullTexture(whiteTexIndex, 1.0f);
+                            }
+                        }
+                        return GGEngine::TaskResult::Success();
+                    },
+                    GGEngine::JobPriority::High
+                );
+                tasks.push_back(taskId);
+            }
+
+            // Wait for all parallel tasks
+            taskGraph.WaitAll(tasks);
         }
+
+        GGEngine::InstancedRenderer2D::EndScene();
+    }
+    else
+    {
+        GG_PROFILE_SCOPE("Renderer2D Batched Path");
+
+        GGEngine::Renderer2D::ResetStats();
+        GGEngine::Renderer2D::BeginScene(camera);
+
+        // Render all entities (batched, single-threaded)
+        const auto& entities = m_Scene->GetAllEntities();
+        for (GGEngine::Entity index : entities)
+        {
+            auto entityID = m_Scene->GetEntityID(index);
+
+            const auto* transform = m_Scene->GetComponent<GGEngine::TransformComponent>(entityID);
+            const auto* sprite = m_Scene->GetComponent<GGEngine::SpriteRendererComponent>(entityID);
+
+            if (transform && sprite)
+            {
+                auto mat = transform->GetMatrix();
+                GGEngine::Renderer2D::DrawQuad(GGEngine::QuadSpec()
+                    .SetTransform(&mat)
+                    .SetColor(sprite->Color[0], sprite->Color[1], sprite->Color[2], sprite->Color[3]));
+            }
+        }
+
+        GGEngine::Renderer2D::EndScene();
     }
 
-    GGEngine::Renderer2D::EndScene();
+    auto endTime = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime);
+    m_LastRenderTimeMs = static_cast<float>(duration.count()) / 1000.0f;
 }
 
 void MultithreadingExample::OnImGuiRender()
@@ -326,8 +413,18 @@ void MultithreadingExample::OnImGuiRender()
 
     ImGui::Separator();
 
+    // Rendering mode
+    ImGui::Text("Rendering Mode:");
+    if (ImGui::RadioButton("Instanced (GPU + Parallel)", m_UseInstancedRendering))
+        m_UseInstancedRendering = true;
+    ImGui::SameLine();
+    if (ImGui::RadioButton("Batched (CPU)", !m_UseInstancedRendering))
+        m_UseInstancedRendering = false;
+
+    ImGui::Separator();
+
     // Execution mode
-    ImGui::Text("Execution Mode:");
+    ImGui::Text("ECS Execution Mode:");
     if (ImGui::RadioButton("Parallel (SystemScheduler)", m_UseParallelExecution))
         m_UseParallelExecution = true;
     ImGui::SameLine();
@@ -379,7 +476,9 @@ void MultithreadingExample::OnImGuiRender()
 
     // Timing info
     ImGui::Text("Performance:");
-    ImGui::Text("Last Update: %.3f ms", m_LastUpdateTimeMs);
+    ImGui::Text("ECS Update: %.3f ms", m_LastUpdateTimeMs);
+    ImGui::Text("Render:     %.3f ms", m_LastRenderTimeMs);
+    ImGui::Text("Mode: %s", m_UseInstancedRendering ? "Instanced (GPU)" : "Batched (CPU)");
 
     if (m_BenchmarkRunning)
     {
@@ -443,7 +542,20 @@ void MultithreadingExample::OnImGuiRender()
 
     // Renderer stats
     ImGui::Separator();
-    auto stats = GGEngine::Renderer2D::GetStats();
-    ImGui::Text("Draw Calls: %d", stats.DrawCalls);
-    ImGui::Text("Quads: %d", stats.QuadCount);
+    if (m_UseInstancedRendering)
+    {
+        auto stats = GGEngine::InstancedRenderer2D::GetStats();
+        ImGui::Text("Renderer: Instanced");
+        ImGui::Text("Draw Calls: %d", stats.DrawCalls);
+        ImGui::Text("Instances: %d", stats.InstanceCount);
+        ImGui::Text("Max Capacity: %d", stats.MaxInstanceCapacity);
+    }
+    else
+    {
+        auto stats = GGEngine::Renderer2D::GetStats();
+        ImGui::Text("Renderer: Batched");
+        ImGui::Text("Draw Calls: %d", stats.DrawCalls);
+        ImGui::Text("Quads: %d", stats.QuadCount);
+        ImGui::Text("Max Capacity: %d", stats.MaxQuadCapacity);
+    }
 }

@@ -67,6 +67,12 @@ namespace GGEngine {
         void OnRenderRuntime(RHIRenderPassHandle renderPass,
                              RHICommandBufferHandle cmd, uint32_t width, uint32_t height);
 
+        // Instanced rendering (parallel sprite processing, GPU instancing)
+        void OnRenderInstanced(const Camera& camera, RHIRenderPassHandle renderPass,
+                               RHICommandBufferHandle cmd, uint32_t width, uint32_t height);
+        void OnRenderRuntimeInstanced(RHIRenderPassHandle renderPass,
+                                       RHICommandBufferHandle cmd, uint32_t width, uint32_t height);
+
         // Viewport resize (updates camera aspect ratios)
         void OnViewportResize(uint32_t width, uint32_t height);
 
@@ -88,6 +94,7 @@ namespace GGEngine {
         // Internal rendering helpers (shared between OnRender and OnRenderRuntime)
         void RenderTilemaps();
         void RenderSprites();
+        void RenderSpritesInstanced();  // Parallel instanced rendering path
 
         // Get storage for component type
         template<typename T>

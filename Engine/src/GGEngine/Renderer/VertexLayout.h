@@ -56,7 +56,9 @@ namespace GGEngine {
 
         // RHI descriptors
         RHIVertexBindingDescription GetBindingDescription(uint32_t binding = 0) const;
+        RHIVertexBindingDescription GetBindingDescription(uint32_t binding, VertexInputRate inputRate) const;
         std::vector<RHIVertexAttributeDescription> GetAttributeDescriptions(uint32_t binding = 0) const;
+        std::vector<RHIVertexAttributeDescription> GetAttributeDescriptions(uint32_t binding, uint32_t startLocation) const;
 
     private:
         std::vector<VertexAttribute> m_Attributes;

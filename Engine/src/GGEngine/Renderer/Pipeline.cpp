@@ -57,11 +57,24 @@ namespace GGEngine {
             rhiSpec.shaderModules.push_back(stageInfo.handle);
         }
 
-        // Vertex input from layout
+        // Vertex input from primary layout (binding 0)
         if (m_Specification.vertexLayout && !m_Specification.vertexLayout->IsEmpty())
         {
             rhiSpec.vertexBindings.push_back(m_Specification.vertexLayout->GetBindingDescription());
             rhiSpec.vertexAttributes = m_Specification.vertexLayout->GetAttributeDescriptions();
+        }
+
+        // Additional vertex bindings (for instanced rendering, etc.)
+        for (const auto& bindingInfo : m_Specification.additionalVertexBindings)
+        {
+            if (bindingInfo.layout && !bindingInfo.layout->IsEmpty())
+            {
+                rhiSpec.vertexBindings.push_back(
+                    bindingInfo.layout->GetBindingDescription(bindingInfo.binding, bindingInfo.inputRate)
+                );
+                auto attrs = bindingInfo.layout->GetAttributeDescriptions(bindingInfo.binding, bindingInfo.startLocation);
+                rhiSpec.vertexAttributes.insert(rhiSpec.vertexAttributes.end(), attrs.begin(), attrs.end());
+            }
         }
 
         // Input assembly

@@ -50,6 +50,8 @@ set(SHADER_SOURCES
     ${SHADER_SOURCE_DIR}/texture.frag
     ${SHADER_SOURCE_DIR}/quad2d.vert
     ${SHADER_SOURCE_DIR}/quad2d.frag
+    ${SHADER_SOURCE_DIR}/quad2d_instanced.vert
+    ${SHADER_SOURCE_DIR}/quad2d_instanced.frag
 )
 
 foreach(SHADER ${SHADER_SOURCES})
@@ -207,6 +209,8 @@ set(ENGINE_SOURCES
     Engine/src/GGEngine/Renderer/MaterialLibrary.cpp
     Engine/src/GGEngine/Renderer/Renderer2D.h
     Engine/src/GGEngine/Renderer/Renderer2D.cpp
+    Engine/src/GGEngine/Renderer/InstancedRenderer2D.h
+    Engine/src/GGEngine/Renderer/InstancedRenderer2D.cpp
     Engine/src/GGEngine/Renderer/SubTexture2D.h
     Engine/src/GGEngine/Renderer/SubTexture2D.cpp
     Engine/src/GGEngine/Renderer/TextureAtlas.h

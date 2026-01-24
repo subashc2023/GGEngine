@@ -1,10 +1,12 @@
 #include "ggpch.h"
 #include "Scene.h"
 #include "GGEngine/Renderer/Renderer2D.h"
+#include "GGEngine/Renderer/InstancedRenderer2D.h"
 #include "GGEngine/Renderer/SubTexture2D.h"
 #include "GGEngine/Renderer/SceneCamera.h"
 #include "GGEngine/Asset/TextureLibrary.h"
 #include "GGEngine/Core/Math.h"
+#include "GGEngine/Core/TaskGraph.h"
 
 #include <algorithm>
 
@@ -296,6 +298,114 @@ namespace GGEngine {
         }
     }
 
+    void Scene::RenderSpritesInstanced()
+    {
+        auto& textureLib = TextureLibrary::Get();
+        auto& taskGraph = TaskGraph::Get();
+
+        const size_t spriteCount = m_Sprites.Size();
+        if (spriteCount == 0)
+            return;
+
+        // Allocate instance buffer space (thread-safe)
+        QuadInstanceData* instances = InstancedRenderer2D::AllocateInstances(static_cast<uint32_t>(spriteCount));
+        if (!instances)
+        {
+            GG_CORE_WARN("Scene::RenderSpritesInstanced - Failed to allocate instance buffer");
+            return;
+        }
+
+        // Get raw data pointers for parallel access
+        const SpriteRendererComponent* spriteData = m_Sprites.Data();
+        const uint32_t whiteTexIndex = InstancedRenderer2D::GetWhiteTextureIndex();
+
+        // Determine chunk size based on worker count
+        const uint32_t workerCount = taskGraph.GetWorkerCount();
+        const size_t minChunkSize = 256;
+        const size_t chunkSize = std::max(minChunkSize, (spriteCount + workerCount) / (workerCount + 1));
+
+        // Create parallel tasks for instance buffer preparation
+        std::vector<TaskID> tasks;
+        tasks.reserve((spriteCount + chunkSize - 1) / chunkSize);
+
+        for (size_t start = 0; start < spriteCount; start += chunkSize)
+        {
+            size_t end = std::min(start + chunkSize, spriteCount);
+
+            TaskID taskId = taskGraph.CreateTask("PrepareInstances",
+                [this, &textureLib, spriteData, instances, whiteTexIndex, start, end]() -> TaskResult
+                {
+                    for (size_t i = start; i < end; ++i)
+                    {
+                        Entity entity = m_Sprites.GetEntity(i);
+
+                        // Get transform
+                        const TransformComponent* transform = m_Transforms.Get(entity);
+                        if (!transform)
+                            continue;
+
+                        const SpriteRendererComponent& sprite = spriteData[i];
+                        QuadInstanceData& inst = instances[i];
+
+                        // Set transform (position, rotation, scale)
+                        inst.SetTransform(
+                            transform->Position[0],
+                            transform->Position[1],
+                            transform->Position[2],
+                            Math::ToRadians(transform->Rotation),
+                            transform->Scale[0],
+                            transform->Scale[1]
+                        );
+
+                        // Set color
+                        inst.SetColor(
+                            sprite.Color[0],
+                            sprite.Color[1],
+                            sprite.Color[2],
+                            sprite.Color[3]
+                        );
+
+                        // Resolve texture and UVs
+                        uint32_t texIndex = whiteTexIndex;
+                        float minU = 0.0f, minV = 0.0f, maxU = 1.0f, maxV = 1.0f;
+                        float tiling = sprite.TilingFactor;
+
+                        if (!sprite.TextureName.empty())
+                        {
+                            Texture* texture = textureLib.GetTexturePtr(sprite.TextureName);
+                            if (texture)
+                            {
+                                texIndex = texture->GetBindlessIndex();
+
+                                if (sprite.UseAtlas && texture->GetWidth() > 0 && texture->GetHeight() > 0)
+                                {
+                                    // Calculate atlas UVs
+                                    float texWidth = static_cast<float>(texture->GetWidth());
+                                    float texHeight = static_cast<float>(texture->GetHeight());
+
+                                    minU = (sprite.AtlasCellX * sprite.AtlasCellWidth) / texWidth;
+                                    minV = (sprite.AtlasCellY * sprite.AtlasCellHeight) / texHeight;
+                                    maxU = minU + (sprite.AtlasSpriteWidth * sprite.AtlasCellWidth) / texWidth;
+                                    maxV = minV + (sprite.AtlasSpriteHeight * sprite.AtlasCellHeight) / texHeight;
+                                }
+                            }
+                        }
+
+                        inst.SetTexCoords(minU, minV, maxU, maxV, texIndex, tiling);
+                    }
+
+                    return TaskResult::Success();
+                },
+                JobPriority::High
+            );
+
+            tasks.push_back(taskId);
+        }
+
+        // Wait for all preparation tasks to complete
+        taskGraph.WaitAll(tasks);
+    }
+
     void Scene::OnRender(const Camera& camera, RHIRenderPassHandle renderPass,
                          RHICommandBufferHandle cmd, uint32_t width, uint32_t height)
     {
@@ -372,6 +482,68 @@ namespace GGEngine {
         RenderSprites();
 
         Renderer2D::EndScene();
+    }
+
+    void Scene::OnRenderInstanced(const Camera& camera, RHIRenderPassHandle renderPass,
+                                   RHICommandBufferHandle cmd, uint32_t width, uint32_t height)
+    {
+        InstancedRenderer2D::ResetStats();
+        InstancedRenderer2D::BeginScene(camera, renderPass, cmd, width, height);
+
+        // Tilemaps still use batched renderer for now (could be instanced in future)
+        Renderer2D::ResetStats();
+        Renderer2D::BeginScene(camera, renderPass, cmd, width, height);
+        RenderTilemaps();
+        Renderer2D::EndScene();
+
+        // Sprites use instanced renderer with parallel preparation
+        RenderSpritesInstanced();
+
+        InstancedRenderer2D::EndScene();
+    }
+
+    void Scene::OnRenderRuntimeInstanced(RHIRenderPassHandle renderPass,
+                                          RHICommandBufferHandle cmd, uint32_t width, uint32_t height)
+    {
+        // Find primary camera
+        SceneCamera* mainCamera = nullptr;
+        Mat4 cameraTransform;
+
+        for (size_t i = 0; i < m_Cameras.Size(); i++)
+        {
+            CameraComponent& cameraComp = m_Cameras.Data()[i];
+            if (cameraComp.Primary)
+            {
+                Entity entity = m_Cameras.GetEntity(i);
+                const TransformComponent* transform = m_Transforms.Get(entity);
+                if (transform)
+                {
+                    mainCamera = &cameraComp.Camera;
+                    cameraTransform = transform->GetMat4();
+                    break;
+                }
+            }
+        }
+
+        if (!mainCamera)
+        {
+            GG_CORE_WARN("Scene::OnRenderRuntimeInstanced - No primary camera found!");
+            return;
+        }
+
+        InstancedRenderer2D::ResetStats();
+        InstancedRenderer2D::BeginScene(*mainCamera, cameraTransform, renderPass, cmd, width, height);
+
+        // Tilemaps still use batched renderer
+        Renderer2D::ResetStats();
+        Renderer2D::BeginScene(*mainCamera, cameraTransform, renderPass, cmd, width, height);
+        RenderTilemaps();
+        Renderer2D::EndScene();
+
+        // Sprites use instanced renderer with parallel preparation
+        RenderSpritesInstanced();
+
+        InstancedRenderer2D::EndScene();
     }
 
 }

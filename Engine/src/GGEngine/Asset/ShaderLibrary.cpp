@@ -20,6 +20,7 @@ namespace GGEngine {
         Load("basic", "assets/shaders/compiled/basic");
         Load("texture", "assets/shaders/compiled/texture");
         Load("quad2d", "assets/shaders/compiled/quad2d");
+        Load("quad2d_instanced", "assets/shaders/compiled/quad2d_instanced");
 
         GG_CORE_INFO("ShaderLibrary initialized with {} built-in shaders", m_Shaders.size());
     }

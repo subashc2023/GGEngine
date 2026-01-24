@@ -13,6 +13,7 @@
 #include "GGEngine/Asset/AssetManager.h"
 #include "GGEngine/Renderer/MaterialLibrary.h"
 #include "GGEngine/Renderer/Renderer2D.h"
+#include "GGEngine/Renderer/InstancedRenderer2D.h"
 #include "GGEngine/Renderer/BindlessTextureManager.h"
 #include "GGEngine/Renderer/TransferQueue.h"
 #include "GGEngine/Renderer/ThreadedCommandBuffer.h"
@@ -60,6 +61,9 @@ namespace GGEngine {
         // Initialize Renderer2D (requires ShaderLibrary and BindlessTextureManager to be ready)
         Renderer2D::Init();
 
+        // Initialize InstancedRenderer2D (requires ShaderLibrary and BindlessTextureManager to be ready)
+        InstancedRenderer2D::Init();
+
         m_ImGuiLayer = new ImGuiLayer();
         PushOverlay(m_ImGuiLayer);
     }
@@ -79,7 +83,8 @@ namespace GGEngine {
             layer->OnDetach();
         }
 
-        // Shutdown Renderer2D before materials/shaders (it uses both)
+        // Shutdown Renderer2D and InstancedRenderer2D before materials/shaders (they use both)
+        InstancedRenderer2D::Shutdown();
         Renderer2D::Shutdown();
 
         // Shutdown transfer queue before asset system

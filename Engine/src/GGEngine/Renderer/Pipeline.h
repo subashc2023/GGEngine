@@ -29,6 +29,15 @@ namespace GGEngine {
         uint32_t size = 0;
     };
 
+    // Additional vertex binding for instanced rendering
+    struct GG_API VertexBindingInfo
+    {
+        const VertexLayout* layout = nullptr;
+        uint32_t binding = 0;
+        uint32_t startLocation = 0;  // Starting attribute location
+        VertexInputRate inputRate = VertexInputRate::Vertex;
+    };
+
     // Pipeline specification for graphics pipelines
     struct GG_API PipelineSpecification
     {
@@ -36,8 +45,11 @@ namespace GGEngine {
         RHIRenderPassHandle renderPass;
         uint32_t subpass = 0;
 
-        // Vertex input
+        // Vertex input (primary binding 0)
         const VertexLayout* vertexLayout = nullptr;  // nullptr = no vertex input (hardcoded in shader)
+
+        // Additional vertex bindings (for instanced rendering, etc.)
+        std::vector<VertexBindingInfo> additionalVertexBindings;
 
         // Input assembly
         PrimitiveTopology topology = PrimitiveTopology::TriangleList;
