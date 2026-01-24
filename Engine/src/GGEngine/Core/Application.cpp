@@ -13,8 +13,10 @@
 #include "GGEngine/Renderer/Renderer2D.h"
 #include "GGEngine/Renderer/BindlessTextureManager.h"
 #include "GGEngine/Renderer/TransferQueue.h"
+#include "GGEngine/Renderer/ThreadedCommandBuffer.h"
 #include "GGEngine/Core/Profiler.h"
 #include "GGEngine/Core/JobSystem.h"
+#include "GGEngine/Core/TaskGraph.h"
 #include "GGEngine/RHI/RHIDevice.h"
 #include "Platform/Vulkan/VulkanContext.h"
 
@@ -34,8 +36,14 @@ namespace GGEngine {
 
         VulkanContext::Get().Init(static_cast<GLFWwindow*>(m_Window->GetNativeWindow()));
 
-        // Initialize job system for async asset loading
+        // Initialize job system for async asset loading (legacy - being replaced by TaskGraph)
         JobSystem::Get().Init(1);  // Single worker thread for I/O-bound asset loading
+
+        // Initialize TaskGraph with multiple workers for parallel task execution
+        TaskGraph::Get().Init();  // Defaults to hardware_concurrency - 1 workers
+
+        // Initialize ThreadedCommandBuffer for parallel command recording
+        ThreadedCommandBuffer::Get().Init(TaskGraph::Get().GetWorkerCount());
 
         // Initialize RHI device (requires VulkanContext to be ready)
         RHIDevice::Get().Init(m_Window->GetNativeWindow());
@@ -84,6 +92,12 @@ namespace GGEngine {
 
         // Shutdown bindless texture manager before Vulkan
         BindlessTextureManager::Get().Shutdown();
+
+        // Shutdown ThreadedCommandBuffer before TaskGraph
+        ThreadedCommandBuffer::Get().Shutdown();
+
+        // Shutdown TaskGraph (waits for pending tasks to complete)
+        TaskGraph::Get().Shutdown();
 
         // Shutdown job system (waits for pending jobs to complete)
         JobSystem::Get().Shutdown();
@@ -151,12 +165,16 @@ namespace GGEngine {
             Timestep timestep = time - m_LastFrameTime;
             m_LastFrameTime = time;
 
+            // Reset thread command pools for this frame (safe since fence waited)
+            ThreadedCommandBuffer::Get().ResetPools(RHIDevice::Get().GetCurrentFrameIndex());
+
             // Cleanup staging buffers from completed frame (safe now that fence waited)
             TransferQueue::Get().EndFrame(RHIDevice::Get().GetCurrentFrameIndex());
 
             // Process async asset loading - uploads pending textures and fires callbacks
             AssetManager::Get().Update();
             JobSystem::Get().ProcessCompletedCallbacks();
+            TaskGraph::Get().ProcessCompletedCallbacks();
 
             // Flush pending GPU uploads before rendering
             TransferQueue::Get().FlushUploads(RHIDevice::Get().GetCurrentCommandBuffer());

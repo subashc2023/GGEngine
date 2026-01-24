@@ -4,6 +4,7 @@
 #include "GGEngine/Core/Input.h"
 #include "GGEngine/Core/KeyCodes.h"
 #include "GGEngine/Core/Application.h"
+#include "GGEngine/Core/Profiler.h"
 
 // Include all examples
 #include "Examples/Renderer2DBasicsExample.h"
@@ -12,6 +13,7 @@
 #include "Examples/ECSCameraExample.h"
 #include "Examples/InputExample.h"
 #include "Examples/ParticleExample.h"
+#include "Examples/MultithreadingExample.h"
 
 #include <imgui.h>
 
@@ -36,6 +38,7 @@ void ExamplesLayer::OnAttach()
     m_Examples.push_back(std::make_unique<ECSCameraExample>());
     m_Examples.push_back(std::make_unique<InputExample>());
     m_Examples.push_back(std::make_unique<ParticleExample>());
+    m_Examples.push_back(std::make_unique<MultithreadingExample>());
 
     // Start with first example
     SwitchExample(0);
@@ -97,12 +100,14 @@ void ExamplesLayer::OnUpdate(GGEngine::Timestep ts)
     // Update current example
     if (m_CurrentExample)
     {
+        GG_PROFILE_SCOPE("Example::OnUpdate");
         m_CurrentExample->OnUpdate(ts, m_CameraController.GetCamera());
     }
 
     // Render current example
     if (m_CurrentExample)
     {
+        GG_PROFILE_SCOPE("Example::OnRender");
         m_CurrentExample->OnRender(m_CameraController.GetCamera());
     }
 
@@ -152,6 +157,9 @@ void ExamplesLayer::OnUpdate(GGEngine::Timestep ts)
     GGEngine::DebugUI::ShowStatsContent(ts);
 
     ImGui::End();
+
+    // Show profiler window separately
+    GGEngine::DebugUI::ShowProfiler();
 }
 
 void ExamplesLayer::OnEvent(GGEngine::Event& event)

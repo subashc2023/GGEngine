@@ -116,6 +116,8 @@ set(ENGINE_SOURCES
     Engine/src/GGEngine/Core/Profiler.cpp
     Engine/src/GGEngine/Core/JobSystem.h
     Engine/src/GGEngine/Core/JobSystem.cpp
+    Engine/src/GGEngine/Core/TaskGraph.h
+    Engine/src/GGEngine/Core/TaskGraph.cpp
     Engine/src/GGEngine/Debug/Instrumentor.h
     Engine/src/GGEngine/Debug/Instrumentor.cpp
     Engine/src/GGEngine/Events/Event.h
@@ -157,6 +159,11 @@ set(ENGINE_SOURCES
     Engine/src/GGEngine/ECS/Scene.cpp
     Engine/src/GGEngine/ECS/SceneSerializer.h
     Engine/src/GGEngine/ECS/SceneSerializer.cpp
+    Engine/src/GGEngine/ECS/System.h
+    Engine/src/GGEngine/ECS/SystemScheduler.h
+    Engine/src/GGEngine/ECS/SystemScheduler.cpp
+    Engine/src/GGEngine/ECS/DeferredCommands.h
+    Engine/src/GGEngine/ECS/DeferredCommands.cpp
     Engine/src/GGEngine/Utils/FileDialogs.h
     Engine/src/GGEngine/Utils/FileDialogs.cpp
     Engine/src/GGEngine/Utils/FileWatcher.h
@@ -207,6 +214,8 @@ set(ENGINE_SOURCES
     Engine/src/GGEngine/Renderer/BindlessTextureManager.cpp
     Engine/src/GGEngine/Renderer/TransferQueue.h
     Engine/src/GGEngine/Renderer/TransferQueue.cpp
+    Engine/src/GGEngine/Renderer/ThreadedCommandBuffer.h
+    Engine/src/GGEngine/Renderer/ThreadedCommandBuffer.cpp
     Engine/src/GGEngine/ParticleSystem/Random.h
     Engine/src/GGEngine/ParticleSystem/Random.cpp
     Engine/src/GGEngine/ParticleSystem/ParticleSystem.h
@@ -331,6 +340,8 @@ add_executable(Sandbox
     Sandbox/src/Examples/InputExample.cpp
     Sandbox/src/Examples/ParticleExample.h
     Sandbox/src/Examples/ParticleExample.cpp
+    Sandbox/src/Examples/MultithreadingExample.h
+    Sandbox/src/Examples/MultithreadingExample.cpp
 )
 
 target_link_libraries(Sandbox PRIVATE Engine)

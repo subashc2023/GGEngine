@@ -11,6 +11,7 @@
 #include "GGEngine/Core/MouseButtonCodes.h"
 #include "GGEngine/Core/Profiler.h"
 #include "GGEngine/Core/JobSystem.h"
+#include "GGEngine/Core/TaskGraph.h"
 
 #include "GGEngine/Asset/AssetManager.h"
 #include "GGEngine/Asset/Shader.h"
@@ -23,6 +24,9 @@
 #include "GGEngine/ECS/Scene.h"
 #include "GGEngine/ECS/Components.h"
 #include "GGEngine/ECS/SceneSerializer.h"
+#include "GGEngine/ECS/System.h"
+#include "GGEngine/ECS/SystemScheduler.h"
+#include "GGEngine/ECS/DeferredCommands.h"
 
 #include "GGEngine/Utils/FileDialogs.h"
 
@@ -35,6 +39,7 @@
 #include "GGEngine/Renderer/Renderer2D.h"
 #include "GGEngine/Renderer/SubTexture2D.h"
 #include "GGEngine/Renderer/TextureAtlas.h"
+#include "GGEngine/Renderer/ThreadedCommandBuffer.h"
 
 #include "GGEngine/ImGui/ImGuiLayer.h"
 

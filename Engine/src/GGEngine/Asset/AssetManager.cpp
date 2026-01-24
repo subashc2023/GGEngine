@@ -1,7 +1,7 @@
 #include "ggpch.h"
 #include "AssetManager.h"
 #include "Texture.h"
-#include "GGEngine/Core/JobSystem.h"
+#include "GGEngine/Core/TaskGraph.h"
 
 #include <algorithm>
 #include <chrono>
@@ -80,9 +80,10 @@ namespace GGEngine {
 
         GG_CORE_TRACE("Async texture load started: {} (ID: {})", path, assetId);
 
-        // Submit job to load CPU data on worker thread
-        JobSystem::Get().Submit(
-            [this, path, assetId]() {
+        // Submit task to load CPU data on worker thread
+        TaskGraph::Get().CreateTask(
+            "LoadTexture:" + path,
+            [this, path, assetId]() -> TaskResult {
                 // Worker thread: Load texture data to CPU
                 TextureCPUData cpuData = Texture::LoadCPU(path);
 
@@ -93,6 +94,8 @@ namespace GGEngine {
                     std::lock_guard<std::mutex> lock(m_PendingUploadsMutex);
                     m_PendingTextureUploads.push({assetId, std::move(cpuDataPtr)});
                 }
+
+                return TaskResult::Success();
             }
         );
 
