@@ -2,6 +2,7 @@
 
 #include "GGEngine/Core/Core.h"
 #include "GGEngine/RHI/RHITypes.h"
+#include "GGEngine/RHI/RHIEnums.h"
 
 #include <cstdint>
 #include <queue>
@@ -24,8 +25,15 @@ namespace GGEngine {
         static BindlessTextureManager& Get();
 
         // Initialize with maximum number of textures (default 16384)
-        void Init(uint32_t maxTextures = 16384);
+        // Filter defaults to Nearest for pixel-art style rendering
+        void Init(uint32_t maxTextures = 16384,
+                  Filter minFilter = Filter::Nearest,
+                  Filter magFilter = Filter::Nearest);
         void Shutdown();
+
+        // Get the current sampler filter settings
+        Filter GetMinFilter() const { return m_MinFilter; }
+        Filter GetMagFilter() const { return m_MagFilter; }
 
         // Register a texture and get its bindless index
         BindlessTextureIndex RegisterTexture(const Texture& texture);
@@ -60,14 +68,14 @@ namespace GGEngine {
         uint32_t m_TextureCount = 0;
         uint32_t m_NextIndex = 0;
 
-        // Vulkan resources (stored as void* to avoid including vulkan.h in header)
-        void* m_DescriptorPool = nullptr;
-        void* m_DescriptorSetLayout = nullptr;
-        void* m_DescriptorSet = nullptr;
-        void* m_SharedSampler = nullptr;  // Single sampler shared by all textures
+        // Sampler filter settings
+        Filter m_MinFilter = Filter::Nearest;
+        Filter m_MagFilter = Filter::Nearest;
 
-        // RHI handle for the layout
+        // RHI handles for descriptor resources
+        RHISamplerHandle m_SharedSampler;
         RHIDescriptorSetLayoutHandle m_LayoutHandle;
+        RHIDescriptorSetHandle m_DescriptorSetHandle;
 
         // Free list for recycled indices
         std::queue<BindlessTextureIndex> m_FreeIndices;

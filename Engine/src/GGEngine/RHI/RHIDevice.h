@@ -223,6 +223,9 @@ namespace GGEngine {
         // Bindless Texture Support
         // ========================================================================
 
+        // Query maximum supported bindless textures
+        uint32_t GetMaxBindlessTextures() const;
+
         // Create descriptor set layout for bindless texture array
         RHIDescriptorSetLayoutHandle CreateBindlessTextureLayout(uint32_t maxTextures);
 
@@ -232,6 +235,37 @@ namespace GGEngine {
         // Update a single texture slot in bindless array
         void UpdateBindlessTexture(RHIDescriptorSetHandle set, uint32_t index,
                                    RHITextureHandle texture, RHISamplerHandle sampler);
+
+        // Get raw descriptor set handle for binding (needed for RHICmd::BindDescriptorSetRaw)
+        void* GetRawDescriptorSet(RHIDescriptorSetHandle handle) const;
+
+        // ========================================================================
+        // Bindless Texture Support (Separate Sampler Pattern)
+        // ========================================================================
+        // For MoltenVK/Metal compatibility, uses separate sampler (binding 0) and
+        // texture array (binding 1) instead of combined image samplers.
+
+        // Create layout with: binding 0 = immutable sampler, binding 1 = texture array
+        RHIDescriptorSetLayoutHandle CreateBindlessSamplerTextureLayout(
+            RHISamplerHandle immutableSampler, uint32_t maxTextures);
+
+        // Allocate descriptor set with variable texture count
+        RHIDescriptorSetHandle AllocateBindlessSamplerTextureSet(
+            RHIDescriptorSetLayoutHandle layout, uint32_t maxTextures);
+
+        // Update a single texture slot (binding 1, SAMPLED_IMAGE type)
+        void UpdateBindlessSamplerTextureSlot(
+            RHIDescriptorSetHandle set, uint32_t index, RHITextureHandle texture);
+
+        // ========================================================================
+        // ImGui Integration
+        // ========================================================================
+
+        // Register a texture for use with ImGui::Image() (returns opaque handle)
+        void* RegisterImGuiTexture(RHITextureHandle texture, RHISamplerHandle sampler);
+
+        // Unregister a texture from ImGui
+        void UnregisterImGuiTexture(void* imguiHandle);
 
     private:
         RHIDevice() = default;

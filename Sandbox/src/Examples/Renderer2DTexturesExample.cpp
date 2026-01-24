@@ -19,9 +19,6 @@ void Renderer2DTexturesExample::OnAttach()
     {
         m_Atlas = GGEngine::CreateScope<GGEngine::TextureAtlas>(
             m_Spritesheet.Get(), 256.0f, 256.0f);
-        GG_INFO("Loaded spritesheet: {}x{} ({} x {} grid)",
-                m_Spritesheet->GetWidth(), m_Spritesheet->GetHeight(),
-                m_Atlas->GetGridWidth(), m_Atlas->GetGridHeight());
     }
 
     m_AnimTime = 0.0f;
@@ -108,22 +105,24 @@ void Renderer2DTexturesExample::OnRender(const GGEngine::Camera& camera)
             {
                 uint32_t gridW = m_Atlas->GetGridWidth();
                 uint32_t gridH = m_Atlas->GetGridHeight();
-                float size = 1.0f;
-                float spacing = 1.1f;
-                float startX = -(gridW - 1) * spacing * 0.5f;
-                float startY = (gridH - 1) * spacing * 0.5f;
+                float size = 1.2f;
+                float spacing = 1.3f;
+
+                // Center the grid around origin
+                float offsetX = (gridW - 1) * spacing * 0.5f;
+                float offsetY = (gridH - 1) * spacing * 0.5f;
 
                 for (uint32_t y = 0; y < gridH; y++)
                 {
                     for (uint32_t x = 0; x < gridW; x++)
                     {
                         auto sprite = m_Atlas->GetSprite(x, y);
-                        float posX = startX + x * spacing;
-                        float posY = startY - y * spacing;
+                        float posX = x * spacing - offsetX;
+                        float posY = offsetY - y * spacing;
 
                         // Highlight selected sprite
-                        if (x == static_cast<uint32_t>(m_SelectedSpriteX) &&
-                            y == static_cast<uint32_t>(m_SelectedSpriteY))
+                        if (static_cast<int>(x) == m_SelectedSpriteX &&
+                            static_cast<int>(y) == m_SelectedSpriteY)
                         {
                             Renderer2D::DrawQuad(QuadSpec()
                                 .SetPosition(posX, posY, -0.01f)
@@ -188,7 +187,7 @@ void Renderer2DTexturesExample::OnImGuiRender()
 {
     ImGui::Text("Demo Mode:");
     ImGui::RadioButton("Single Texture", &m_DemoMode, 0);
-    ImGui::RadioButton("Tiling Factor", &m_DemoMode, 1);
+    ImGui::RadioButton("Tiling Demo", &m_DemoMode, 1);
     ImGui::RadioButton("Atlas Grid", &m_DemoMode, 2);
     ImGui::RadioButton("Animated Sprite", &m_DemoMode, 3);
 

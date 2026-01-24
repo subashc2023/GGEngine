@@ -86,7 +86,8 @@ namespace GGEngine {
         return AssetManager::Get().Load<Texture>(path);
     }
 
-    Scope<Texture> Texture::Create(uint32_t width, uint32_t height, const void* data)
+    Scope<Texture> Texture::Create(uint32_t width, uint32_t height, const void* data,
+                                    Filter minFilter, Filter magFilter)
     {
         GG_CORE_ASSERT(data != nullptr, "Texture::Create - data cannot be null");
         GG_CORE_ASSERT(width > 0 && height > 0, "Texture::Create - invalid dimensions");
@@ -98,6 +99,8 @@ namespace GGEngine {
         texture->m_Format = TextureFormat::R8G8B8A8_UNORM;
         texture->m_Path = "__generated__";
         texture->m_Loaded = true;
+        texture->m_MinFilter = minFilter;
+        texture->m_MagFilter = magFilter;
 
         texture->CreateResources(static_cast<const uint8_t*>(data));
 
@@ -175,11 +178,11 @@ namespace GGEngine {
         // 2. Upload pixel data (handles staging, layout transitions internally)
         device.UploadTextureData(m_Handle, pixels, imageSize);
 
-        // 3. Create sampler (nearest filtering for pixel-art style)
+        // 3. Create sampler with configured filtering
         RHISamplerSpecification samplerSpec;
-        samplerSpec.minFilter = Filter::Nearest;
-        samplerSpec.magFilter = Filter::Nearest;
-        samplerSpec.mipmapMode = MipmapMode::Nearest;
+        samplerSpec.minFilter = m_MinFilter;
+        samplerSpec.magFilter = m_MagFilter;
+        samplerSpec.mipmapMode = (m_MinFilter == Filter::Nearest) ? MipmapMode::Nearest : MipmapMode::Linear;
         samplerSpec.addressModeU = AddressMode::Repeat;
         samplerSpec.addressModeV = AddressMode::Repeat;
         samplerSpec.addressModeW = AddressMode::Repeat;

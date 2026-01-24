@@ -40,7 +40,8 @@ namespace GGEngine {
 
         // Factory method - create texture from raw pixel data (not managed by AssetManager)
         // Useful for programmatic textures like 1x1 white pixel
-        static Scope<Texture> Create(uint32_t width, uint32_t height, const void* data);
+        static Scope<Texture> Create(uint32_t width, uint32_t height, const void* data,
+                                     Filter minFilter = Filter::Nearest, Filter magFilter = Filter::Nearest);
 
         // Fallback texture (magenta/black checkerboard for missing textures)
         static void InitFallback();
@@ -51,6 +52,11 @@ namespace GGEngine {
 
         // Load from image file (PNG, JPG, BMP, TGA supported)
         bool Load(const std::string& path);
+
+        // Set filter mode (must be called before Load or CreateResources)
+        void SetFilter(Filter minFilter, Filter magFilter) { m_MinFilter = minFilter; m_MagFilter = magFilter; }
+        Filter GetMinFilter() const { return m_MinFilter; }
+        Filter GetMagFilter() const { return m_MagFilter; }
 
         void Unload() override;
 
@@ -78,6 +84,10 @@ namespace GGEngine {
         // RHI handles (maps to backend resources via registry)
         RHITextureHandle m_Handle;
         RHISamplerHandle m_SamplerHandle;
+
+        // Sampler settings
+        Filter m_MinFilter = Filter::Nearest;
+        Filter m_MagFilter = Filter::Nearest;
 
         // Bindless texture index for shader access
         BindlessTextureIndex m_BindlessIndex = InvalidBindlessIndex;

@@ -53,7 +53,7 @@ namespace GGEngine {
     {
         GG_PROFILE_FUNCTION();
         // Wait for GPU to finish before cleanup
-        vkDeviceWaitIdle(VulkanContext::Get().GetDevice());
+        RHIDevice::Get().WaitIdle();
 
         // Manually call OnDetach() on all layers before VulkanContext shutdown.
         // This ensures layers can clean up their GPU resources (pipelines, buffers, etc.)
@@ -177,7 +177,7 @@ namespace GGEngine {
         }
 
         m_Minimized = false;
-        VulkanContext::Get().OnWindowResize(e.GetWidth(), e.GetHeight());
+        RHIDevice::Get().OnWindowResize(e.GetWidth(), e.GetHeight());
 
         // Notify all layers of the resize
         for (Layer* layer : m_LayerStack)

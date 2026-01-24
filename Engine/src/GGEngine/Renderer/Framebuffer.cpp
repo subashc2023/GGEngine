@@ -4,11 +4,6 @@
 #include "GGEngine/RHI/RHICommandBuffer.h"
 #include "GGEngine/Core/Log.h"
 
-// Vulkan-specific includes needed only for ImGui integration
-#include "Platform/Vulkan/VulkanRHI.h"
-#include <imgui.h>
-#include <backends/imgui_impl_vulkan.h>
-
 namespace GGEngine {
 
     Framebuffer::Framebuffer(const FramebufferSpecification& spec)
@@ -164,13 +159,8 @@ namespace GGEngine {
                                           ImageLayout::Undefined, ImageLayout::ShaderReadOnly);
         });
 
-        // 5. Register with ImGui (needs access to underlying Vulkan handles)
-        auto& registry = VulkanResourceRegistry::Get();
-        auto textureData = registry.GetTextureData(m_TextureHandle);
-        VkSampler vkSampler = reinterpret_cast<VkSampler>(m_SamplerHandle.id);
-
-        m_ImGuiDescriptorSet = ImGui_ImplVulkan_AddTexture(
-            vkSampler, textureData.imageView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        // 5. Register with ImGui (abstracted through RHI)
+        m_ImGuiDescriptorSet = device.RegisterImGuiTexture(m_TextureHandle, m_SamplerHandle);
 
         GG_CORE_INFO("Framebuffer created: {}x{}", m_Specification.Width, m_Specification.Height);
     }
@@ -182,7 +172,7 @@ namespace GGEngine {
         // Unregister from ImGui
         if (m_ImGuiDescriptorSet != nullptr)
         {
-            ImGui_ImplVulkan_RemoveTexture(static_cast<VkDescriptorSet>(m_ImGuiDescriptorSet));
+            device.UnregisterImGuiTexture(m_ImGuiDescriptorSet);
             m_ImGuiDescriptorSet = nullptr;
         }
 

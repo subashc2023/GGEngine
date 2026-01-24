@@ -110,6 +110,19 @@ namespace GGEngine {
 
     static Renderer2DData s_Data;
 
+    // Forward declarations for internal helpers
+    static void BeginSceneShared(const CameraUBO& cameraUBO,
+                                  RHIRenderPassHandle renderPass,
+                                  RHICommandBufferHandle cmd,
+                                  uint32_t viewportWidth,
+                                  uint32_t viewportHeight);
+    static bool PrepareForQuad(const Texture* texture, uint32_t& outTextureIndex);
+    static void WriteQuadVertices(const float positions[4][3],
+                                   const float* texCoords,
+                                   float r, float g, float b, float a,
+                                   float tilingFactor,
+                                   uint32_t textureIndex);
+
     // Internal function to grow buffers when capacity is exceeded
     static void GrowBuffers()
     {
@@ -275,19 +288,12 @@ namespace GGEngine {
         GG_CORE_TRACE("Renderer2D: Shutdown complete");
     }
 
-    void Renderer2D::BeginScene(const Camera& camera)
-    {
-        auto& device = RHIDevice::Get();
-        uint32_t width = device.GetSwapchainWidth();
-        uint32_t height = device.GetSwapchainHeight();
-        RHIRenderPassHandle renderPass = device.GetSwapchainRenderPass();
-        RHICommandBufferHandle cmd = device.GetCurrentCommandBuffer();
-
-        BeginScene(camera, renderPass, cmd, width, height);
-    }
-
-    void Renderer2D::BeginScene(const Camera& camera, RHIRenderPassHandle renderPass,
-                                RHICommandBufferHandle cmd, uint32_t viewportWidth, uint32_t viewportHeight)
+    // Internal shared implementation for BeginScene
+    static void BeginSceneShared(const CameraUBO& cameraUBO,
+                                  RHIRenderPassHandle renderPass,
+                                  RHICommandBufferHandle cmd,
+                                  uint32_t viewportWidth,
+                                  uint32_t viewportHeight)
     {
         GG_PROFILE_FUNCTION();
 
@@ -302,7 +308,6 @@ namespace GGEngine {
         s_Data.CurrentFrameIndex = RHIDevice::Get().GetCurrentFrameIndex();
 
         // Update camera UBO for current frame
-        CameraUBO cameraUBO = camera.GetUBO();
         s_Data.CameraUniformBuffers[s_Data.CurrentFrameIndex]->SetData(cameraUBO);
 
         // Create or recreate pipeline if render pass changed
@@ -348,6 +353,24 @@ namespace GGEngine {
         s_Data.SceneStarted = true;
     }
 
+    void Renderer2D::BeginScene(const Camera& camera)
+    {
+        auto& device = RHIDevice::Get();
+        uint32_t width = device.GetSwapchainWidth();
+        uint32_t height = device.GetSwapchainHeight();
+        RHIRenderPassHandle renderPass = device.GetSwapchainRenderPass();
+        RHICommandBufferHandle cmd = device.GetCurrentCommandBuffer();
+
+        BeginScene(camera, renderPass, cmd, width, height);
+    }
+
+    void Renderer2D::BeginScene(const Camera& camera, RHIRenderPassHandle renderPass,
+                                RHICommandBufferHandle cmd, uint32_t viewportWidth, uint32_t viewportHeight)
+    {
+        CameraUBO cameraUBO = camera.GetUBO();
+        BeginSceneShared(cameraUBO, renderPass, cmd, viewportWidth, viewportHeight);
+    }
+
     void Renderer2D::BeginScene(const SceneCamera& camera, const Mat4& transform)
     {
         auto& device = RHIDevice::Get();
@@ -363,18 +386,6 @@ namespace GGEngine {
                                 RHIRenderPassHandle renderPass, RHICommandBufferHandle cmd,
                                 uint32_t viewportWidth, uint32_t viewportHeight)
     {
-        GG_PROFILE_FUNCTION();
-
-        // Check if we need to grow buffers from previous frame
-        if (s_Data.NeedsBufferGrowth && s_Data.MaxQuads < Renderer2DData::AbsoluteMaxQuads)
-        {
-            GrowBuffers();
-            s_Data.NeedsBufferGrowth = false;
-        }
-
-        // Get current frame index for per-frame resources
-        s_Data.CurrentFrameIndex = RHIDevice::Get().GetCurrentFrameIndex();
-
         // Compute view matrix as inverse of transform
         Mat4 viewMatrix = Mat4::Inverse(transform);
         Mat4 projectionMatrix = camera.GetProjection();
@@ -386,48 +397,7 @@ namespace GGEngine {
         cameraUBO.projection = projectionMatrix;
         cameraUBO.viewProjection = viewProjectionMatrix;
 
-        s_Data.CameraUniformBuffers[s_Data.CurrentFrameIndex]->SetData(cameraUBO);
-
-        // Create or recreate pipeline if render pass changed
-        if (!s_Data.QuadPipeline || s_Data.CurrentRenderPass != renderPass)
-        {
-            s_Data.QuadPipeline.reset();
-
-            PipelineSpecification spec;
-            spec.shader = s_Data.QuadShader.Get();
-            spec.renderPass = renderPass;
-            spec.vertexLayout = &s_Data.QuadVertexLayout;
-            spec.cullMode = CullMode::None;
-            spec.blendMode = BlendMode::Alpha;
-            spec.depthTestEnable = false;
-            spec.depthWriteEnable = false;
-            // Set 0: Camera UBO
-            spec.descriptorSetLayouts.push_back(s_Data.CameraDescriptorLayout->GetHandle());
-            // Set 1: Bindless textures
-            spec.descriptorSetLayouts.push_back(BindlessTextureManager::Get().GetLayoutHandle());
-            spec.debugName = "Renderer2D_Quad_Bindless";
-
-            s_Data.QuadPipeline = CreateScope<Pipeline>(spec);
-            s_Data.CurrentRenderPass = renderPass;
-        }
-
-        // Store current render state
-        s_Data.CurrentCommandBuffer = cmd;
-        s_Data.ViewportWidth = viewportWidth;
-        s_Data.ViewportHeight = viewportHeight;
-
-        // Reset batch state
-        s_Data.QuadIndexCount = 0;
-        s_Data.QuadVertexBufferPtr = s_Data.QuadVertexBufferBase;
-
-        // Only reset GPU buffer offset when moving to a new frame
-        if (s_Data.CurrentFrameIndex != s_Data.LastResetFrameIndex)
-        {
-            s_Data.QuadVertexOffset = 0;
-            s_Data.LastResetFrameIndex = s_Data.CurrentFrameIndex;
-        }
-
-        s_Data.SceneStarted = true;
+        BeginSceneShared(cameraUBO, renderPass, cmd, viewportWidth, viewportHeight);
     }
 
     void Renderer2D::EndScene()
@@ -493,39 +463,34 @@ namespace GGEngine {
         s_Data.QuadVertexBufferPtr = s_Data.QuadVertexBufferBase;
     }
 
-    // Internal helper to add a quad to the batch (bindless rendering)
-    // texCoords: optional custom UV coordinates (4 vertices * 2 floats), nullptr = use default full-texture UVs
-    static void DrawQuadInternal(float x, float y, float z, float width, float height,
-                                 const Texture* texture, float r, float g, float b, float a,
-                                 float rotation = 0.0f, float tilingFactor = 1.0f,
-                                 const float* texCoords = nullptr)
+    // Internal helper: validates batch state and resolves texture index
+    // Returns false if the quad cannot be added (scene not started or capacity exceeded)
+    static bool PrepareForQuad(const Texture* texture, uint32_t& outTextureIndex)
     {
         if (!s_Data.SceneStarted)
         {
             GG_CORE_WARN("Renderer2D::DrawQuad called outside BeginScene/EndScene");
-            return;
+            return false;
         }
 
-        // Get bindless texture index directly - no texture slot management needed!
-        uint32_t textureIndex = s_Data.WhiteTextureIndex;  // Default to white texture
+        // Get bindless texture index (default to white texture for solid colors)
+        outTextureIndex = s_Data.WhiteTextureIndex;
         if (texture != nullptr)
         {
             BindlessTextureIndex bindlessIdx = texture->GetBindlessIndex();
             if (bindlessIdx != InvalidBindlessIndex)
             {
-                textureIndex = bindlessIdx;
+                outTextureIndex = bindlessIdx;
             }
-            // If texture has invalid bindless index, use white texture (solid color fallback)
         }
 
-        // Flush if batch is full (index count only - no texture slot limit!)
+        // Flush if batch is full
         if (s_Data.QuadIndexCount >= s_Data.MaxIndices)
         {
             Renderer2D::Flush();
         }
 
         // Check if adding this quad would exceed total GPU buffer capacity for the frame
-        // (This accounts for all batches already flushed + current batch + this new quad)
         uint32_t currentBatchVertices = static_cast<uint32_t>(s_Data.QuadVertexBufferPtr - s_Data.QuadVertexBufferBase);
         uint32_t totalVerticesAfterThisQuad = s_Data.QuadVertexOffset + currentBatchVertices + 4;
         if (totalVerticesAfterThisQuad > s_Data.MaxVertices)
@@ -536,35 +501,28 @@ namespace GGEngine {
                 s_Data.NeedsBufferGrowth = true;
                 GG_CORE_INFO("Renderer2D: Buffer capacity exceeded - will grow on next frame");
             }
-            // Skip this quad for now (will work next frame with larger buffers)
-            return;
+            return false;
         }
 
-        // Compute rotation if needed
-        float cosR = 1.0f, sinR = 0.0f;
-        if (rotation != 0.0f)
-        {
-            cosR = std::cos(rotation);
-            sinR = std::sin(rotation);
-        }
+        return true;
+    }
 
-        // Write 4 vertices
+    // Internal helper: writes the 4 vertices of a quad to the batch buffer
+    // positions: array of 4 pre-computed world-space positions [4][3]
+    // texCoords: optional custom UVs (nullptr = use default full-texture UVs)
+    static void WriteQuadVertices(const float positions[4][3],
+                                   const float* texCoords,
+                                   float r, float g, float b, float a,
+                                   float tilingFactor,
+                                   uint32_t textureIndex)
+    {
         for (int i = 0; i < 4; i++)
         {
-            // Scale unit quad by size
-            float localX = Renderer2DData::QuadPositions[i][0] * width;
-            float localY = Renderer2DData::QuadPositions[i][1] * height;
+            s_Data.QuadVertexBufferPtr->position[0] = positions[i][0];
+            s_Data.QuadVertexBufferPtr->position[1] = positions[i][1];
+            s_Data.QuadVertexBufferPtr->position[2] = positions[i][2];
 
-            // Apply rotation (around center)
-            float rotatedX = localX * cosR - localY * sinR;
-            float rotatedY = localX * sinR + localY * cosR;
-
-            // Translate to world position
-            s_Data.QuadVertexBufferPtr->position[0] = x + rotatedX;
-            s_Data.QuadVertexBufferPtr->position[1] = y + rotatedY;
-            s_Data.QuadVertexBufferPtr->position[2] = z;
-
-            // Texture coordinates (use custom if provided, otherwise default full-texture UVs)
+            // Texture coordinates (use custom if provided, otherwise default)
             if (texCoords)
             {
                 s_Data.QuadVertexBufferPtr->texCoord[0] = texCoords[i * 2 + 0];
@@ -576,16 +534,12 @@ namespace GGEngine {
                 s_Data.QuadVertexBufferPtr->texCoord[1] = Renderer2DData::QuadTexCoords[i][1];
             }
 
-            // Color
             s_Data.QuadVertexBufferPtr->color[0] = r;
             s_Data.QuadVertexBufferPtr->color[1] = g;
             s_Data.QuadVertexBufferPtr->color[2] = b;
             s_Data.QuadVertexBufferPtr->color[3] = a;
 
-            // Tiling factor
             s_Data.QuadVertexBufferPtr->tilingFactor = tilingFactor;
-
-            // Bindless texture index
             s_Data.QuadVertexBufferPtr->texIndex = textureIndex;
 
             s_Data.QuadVertexBufferPtr++;
@@ -593,6 +547,41 @@ namespace GGEngine {
 
         s_Data.QuadIndexCount += 6;
         s_Data.Stats.QuadCount++;
+    }
+
+    // Internal helper to add a quad to the batch (position/size/rotation path)
+    static void DrawQuadInternal(float x, float y, float z, float width, float height,
+                                 const Texture* texture, float r, float g, float b, float a,
+                                 float rotation = 0.0f, float tilingFactor = 1.0f,
+                                 const float* texCoords = nullptr)
+    {
+        uint32_t textureIndex;
+        if (!PrepareForQuad(texture, textureIndex))
+            return;
+
+        // Compute rotation if needed
+        float cosR = 1.0f, sinR = 0.0f;
+        if (rotation != 0.0f)
+        {
+            cosR = std::cos(rotation);
+            sinR = std::sin(rotation);
+        }
+
+        // Compute world-space positions for all 4 vertices
+        float positions[4][3];
+        for (int i = 0; i < 4; i++)
+        {
+            // Scale unit quad by size
+            float localX = Renderer2DData::QuadPositions[i][0] * width;
+            float localY = Renderer2DData::QuadPositions[i][1] * height;
+
+            // Apply rotation (around center) and translate to world position
+            positions[i][0] = x + (localX * cosR - localY * sinR);
+            positions[i][1] = y + (localX * sinR + localY * cosR);
+            positions[i][2] = z;
+        }
+
+        WriteQuadVertices(positions, texCoords, r, g, b, a, tilingFactor, textureIndex);
     }
 
     // Colored quads
@@ -720,86 +709,29 @@ namespace GGEngine {
                                    float tilingFactor = 1.0f,
                                    const float* texCoords = nullptr)
     {
-        if (!s_Data.SceneStarted)
-        {
-            GG_CORE_WARN("Renderer2D::DrawQuad called outside BeginScene/EndScene");
+        uint32_t textureIndex;
+        if (!PrepareForQuad(texture, textureIndex))
             return;
-        }
-
-        // Get bindless texture index
-        uint32_t textureIndex = s_Data.WhiteTextureIndex;
-        if (texture != nullptr)
-        {
-            BindlessTextureIndex bindlessIdx = texture->GetBindlessIndex();
-            if (bindlessIdx != InvalidBindlessIndex)
-            {
-                textureIndex = bindlessIdx;
-            }
-        }
-
-        // Flush if batch is full
-        if (s_Data.QuadIndexCount >= s_Data.MaxIndices)
-        {
-            Renderer2D::Flush();
-        }
-
-        // Check buffer capacity
-        uint32_t currentBatchVertices = static_cast<uint32_t>(s_Data.QuadVertexBufferPtr - s_Data.QuadVertexBufferBase);
-        uint32_t totalVerticesAfterThisQuad = s_Data.QuadVertexOffset + currentBatchVertices + 4;
-        if (totalVerticesAfterThisQuad > s_Data.MaxVertices)
-        {
-            if (!s_Data.NeedsBufferGrowth && s_Data.MaxQuads < Renderer2DData::AbsoluteMaxQuads)
-            {
-                s_Data.NeedsBufferGrowth = true;
-                GG_CORE_INFO("Renderer2D: Buffer capacity exceeded - will grow on next frame");
-            }
-            return;
-        }
 
         // Unit quad positions (centered at origin, 1x1 size)
-        static constexpr glm::vec4 quadPositions[4] = {
+        static constexpr glm::vec4 unitQuadPositions[4] = {
             { -0.5f, -0.5f, 0.0f, 1.0f },  // Bottom-left
             {  0.5f, -0.5f, 0.0f, 1.0f },  // Bottom-right
             {  0.5f,  0.5f, 0.0f, 1.0f },  // Top-right
             { -0.5f,  0.5f, 0.0f, 1.0f }   // Top-left
         };
 
-        // Write 4 vertices, transforming by the matrix
+        // Compute world-space positions by transforming unit quad vertices
+        float positions[4][3];
         for (int i = 0; i < 4; i++)
         {
-            glm::vec4 worldPos = transform * quadPositions[i];
-
-            s_Data.QuadVertexBufferPtr->position[0] = worldPos.x;
-            s_Data.QuadVertexBufferPtr->position[1] = worldPos.y;
-            s_Data.QuadVertexBufferPtr->position[2] = worldPos.z;
-
-            // Texture coordinates
-            if (texCoords)
-            {
-                s_Data.QuadVertexBufferPtr->texCoord[0] = texCoords[i * 2 + 0];
-                s_Data.QuadVertexBufferPtr->texCoord[1] = texCoords[i * 2 + 1];
-            }
-            else
-            {
-                s_Data.QuadVertexBufferPtr->texCoord[0] = Renderer2DData::QuadTexCoords[i][0];
-                s_Data.QuadVertexBufferPtr->texCoord[1] = Renderer2DData::QuadTexCoords[i][1];
-            }
-
-            // Color
-            s_Data.QuadVertexBufferPtr->color[0] = r;
-            s_Data.QuadVertexBufferPtr->color[1] = g;
-            s_Data.QuadVertexBufferPtr->color[2] = b;
-            s_Data.QuadVertexBufferPtr->color[3] = a;
-
-            // Tiling factor and texture index
-            s_Data.QuadVertexBufferPtr->tilingFactor = tilingFactor;
-            s_Data.QuadVertexBufferPtr->texIndex = textureIndex;
-
-            s_Data.QuadVertexBufferPtr++;
+            glm::vec4 worldPos = transform * unitQuadPositions[i];
+            positions[i][0] = worldPos.x;
+            positions[i][1] = worldPos.y;
+            positions[i][2] = worldPos.z;
         }
 
-        s_Data.QuadIndexCount += 6;
-        s_Data.Stats.QuadCount++;
+        WriteQuadVertices(positions, texCoords, r, g, b, a, tilingFactor, textureIndex);
     }
 
     // Matrix-based quads (colored)
