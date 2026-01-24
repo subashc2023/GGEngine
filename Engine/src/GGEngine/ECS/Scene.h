@@ -14,6 +14,7 @@
 #include <unordered_map>
 #include <typeindex>
 #include <memory>
+#include <shared_mutex>
 
 namespace GGEngine {
 
@@ -100,6 +101,9 @@ namespace GGEngine {
         // Allows custom components without modifying engine code
         mutable std::unordered_map<std::type_index, std::unique_ptr<IComponentStorage>> m_ComponentRegistry;
 
+        // Mutex protecting m_ComponentRegistry for thread-safe access during parallel system execution
+        mutable std::shared_mutex m_RegistryMutex;
+
         // Helper to get or create storage for a component type
         template<typename T>
         ComponentStorage<T>& GetOrCreateStorage() const;
@@ -108,20 +112,39 @@ namespace GGEngine {
     // Template implementations
 
     // Get or create storage for any component type (lazy initialization)
+    // Thread-safe via double-checked locking pattern
     template<typename T>
     ComponentStorage<T>& Scene::GetOrCreateStorage() const
     {
         std::type_index typeIndex(typeid(T));
-        auto it = m_ComponentRegistry.find(typeIndex);
-        if (it == m_ComponentRegistry.end())
+
+        // Fast path: check with shared (read) lock
         {
+            std::shared_lock<std::shared_mutex> readLock(m_RegistryMutex);
+            auto it = m_ComponentRegistry.find(typeIndex);
+            if (it != m_ComponentRegistry.end())
+            {
+                return *static_cast<ComponentStorage<T>*>(it->second.get());
+            }
+        }
+
+        // Slow path: acquire exclusive (write) lock and double-check
+        {
+            std::unique_lock<std::shared_mutex> writeLock(m_RegistryMutex);
+
+            // Double-check: another thread may have created it while we waited for the lock
+            auto it = m_ComponentRegistry.find(typeIndex);
+            if (it != m_ComponentRegistry.end())
+            {
+                return *static_cast<ComponentStorage<T>*>(it->second.get());
+            }
+
             // Create new storage for this component type
             auto storage = std::make_unique<ComponentStorage<T>>();
             auto* ptr = storage.get();
             m_ComponentRegistry[typeIndex] = std::move(storage);
             return *ptr;
         }
-        return *static_cast<ComponentStorage<T>*>(it->second.get());
     }
 
     template<typename T>

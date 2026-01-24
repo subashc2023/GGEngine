@@ -77,10 +77,13 @@ namespace GGEngine {
         m_FreeList.clear();
         m_GUIDToEntity.clear();
 
-        // Clear all registered component storages
-        for (auto& [typeIndex, storage] : m_ComponentRegistry)
+        // Clear all registered component storages (thread-safe)
         {
-            storage->Clear();
+            std::shared_lock<std::shared_mutex> lock(m_RegistryMutex);
+            for (auto& [typeIndex, storage] : m_ComponentRegistry)
+            {
+                storage->Clear();
+            }
         }
 
         GG_CORE_TRACE("Scene '{}' cleared", m_Name);
@@ -98,10 +101,13 @@ namespace GGEngine {
             m_GUIDToEntity.erase(tag->ID);
         }
 
-        // Remove all components from all registered storages
-        for (auto& [typeIndex, storage] : m_ComponentRegistry)
+        // Remove all components from all registered storages (thread-safe)
         {
-            storage->Remove(index);
+            std::shared_lock<std::shared_mutex> lock(m_RegistryMutex);
+            for (auto& [typeIndex, storage] : m_ComponentRegistry)
+            {
+                storage->Remove(index);
+            }
         }
 
         // Remove from active entities list using swap-and-pop (O(1) removal instead of O(n))

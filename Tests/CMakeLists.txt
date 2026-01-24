@@ -36,6 +36,9 @@ set(TEST_SOURCES
     # Phase 3: Concurrent System Tests
     Concurrent/JobSystemTests.cpp
     Concurrent/TaskGraphTests.cpp
+
+    # Phase 4: Integration Tests
+    ECS/SceneIntegrationTests.cpp
 )
 
 add_executable(GGEngineTests ${TEST_SOURCES})
