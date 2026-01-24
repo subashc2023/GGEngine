@@ -1,7 +1,6 @@
 #pragma once
 
 #include "Core.h"
-#include "JobSystem.h"  // For JobPriority
 
 #include <functional>
 #include <queue>
@@ -15,6 +14,17 @@
 #include <unordered_map>
 
 namespace GGEngine {
+
+    // Priority levels for tasks (moved from JobSystem - JobSystem is deprecated)
+    enum class JobPriority : uint8_t
+    {
+        Low = 0,
+        Normal = 1,
+        High = 2
+    };
+
+    // Alias for clarity - prefer using TaskPriority in new code
+    using TaskPriority = JobPriority;
 
     // =============================================================================
     // Task State

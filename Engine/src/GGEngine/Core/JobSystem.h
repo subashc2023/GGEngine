@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Core.h"
+#include "TaskGraph.h"  // For JobPriority
 
 #include <functional>
 #include <queue>
@@ -11,16 +12,19 @@
 
 namespace GGEngine {
 
-    // Priority levels for jobs
-    enum class JobPriority : uint8_t
-    {
-        Low = 0,
-        Normal = 1,
-        High = 2
-    };
-
-    // Lightweight job system with a single worker thread for async asset loading.
-    // Jobs are executed on the worker thread, callbacks are queued for main thread.
+    // DEPRECATED: Use TaskGraph instead.
+    // JobSystem is kept for backwards compatibility but is no longer used by the engine.
+    // TaskGraph provides all the same functionality plus task dependencies, result passing,
+    // and error propagation.
+    //
+    // Migration guide:
+    //   JobSystem::Get().Submit(work, callback)
+    // becomes:
+    //   TaskSpec spec;
+    //   spec.Work = [work]() { work(); return TaskResult::Success(); };
+    //   spec.OnComplete = [callback](TaskID, const TaskResult&) { callback(); };
+    //   TaskGraph::Get().CreateTask(spec);
+    //
     class GG_API JobSystem
     {
     public:

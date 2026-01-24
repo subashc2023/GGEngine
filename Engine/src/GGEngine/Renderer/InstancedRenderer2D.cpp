@@ -47,8 +47,8 @@ namespace GGEngine {
         Scope<VertexBuffer> InstanceBuffers[MaxFramesInFlight];
         VertexLayout InstanceLayout;
 
-        // CPU-side instance staging buffer
-        QuadInstanceData* InstanceBufferBase = nullptr;
+        // CPU-side instance staging buffer (unique_ptr for RAII)
+        std::unique_ptr<QuadInstanceData[]> InstanceBufferBase;
         std::atomic<uint32_t> InstanceCount{0};
 
         // White pixel texture for solid colors
@@ -111,9 +111,8 @@ namespace GGEngine {
 
         RHIDevice::Get().WaitIdle();
 
-        // Reallocate CPU staging buffer
-        delete[] s_Data.InstanceBufferBase;
-        s_Data.InstanceBufferBase = new QuadInstanceData[newMaxInstances]();
+        // Reallocate CPU staging buffer (using unique_ptr for exception safety)
+        s_Data.InstanceBufferBase = std::make_unique<QuadInstanceData[]>(newMaxInstances);
 
         // Reallocate GPU instance buffers
         for (uint32_t i = 0; i < InstancedRenderer2DData::MaxFramesInFlight; i++)
@@ -166,8 +165,8 @@ namespace GGEngine {
             .Push("aTilingFactor", VertexAttributeType::Float)  // location 9
             .Push("_pad2", VertexAttributeType::Float2);        // location 10 (padding)
 
-        // Allocate CPU-side instance buffer
-        s_Data.InstanceBufferBase = new QuadInstanceData[s_Data.MaxInstances]();
+        // Allocate CPU-side instance buffer (zero-initialized via value initialization)
+        s_Data.InstanceBufferBase = std::make_unique<QuadInstanceData[]>(s_Data.MaxInstances);
 
         // Create GPU instance buffers (per-frame)
         for (uint32_t i = 0; i < InstancedRenderer2DData::MaxFramesInFlight; i++)
@@ -216,8 +215,7 @@ namespace GGEngine {
         GG_PROFILE_FUNCTION();
         GG_CORE_INFO("InstancedRenderer2D: Shutting down...");
 
-        delete[] s_Data.InstanceBufferBase;
-        s_Data.InstanceBufferBase = nullptr;
+        s_Data.InstanceBufferBase.reset();
 
         s_Data.InstancedPipeline.reset();
         for (uint32_t i = 0; i < InstancedRenderer2DData::MaxFramesInFlight; i++)
@@ -352,7 +350,7 @@ namespace GGEngine {
 
         // Upload instance data to GPU
         uint64_t dataSize = static_cast<uint64_t>(instanceCount) * sizeof(QuadInstanceData);
-        s_Data.InstanceBuffers[s_Data.CurrentFrameIndex]->SetData(s_Data.InstanceBufferBase, dataSize);
+        s_Data.InstanceBuffers[s_Data.CurrentFrameIndex]->SetData(s_Data.InstanceBufferBase.get(), dataSize);
 
         RHICommandBufferHandle cmd = s_Data.CurrentCommandBuffer;
 
@@ -407,7 +405,7 @@ namespace GGEngine {
             return nullptr;
         }
 
-        return s_Data.InstanceBufferBase + offset;
+        return s_Data.InstanceBufferBase.get() + offset;
     }
 
     void InstancedRenderer2D::SubmitInstance(const QuadInstanceData& instance)

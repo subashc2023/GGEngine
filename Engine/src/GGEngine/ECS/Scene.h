@@ -12,6 +12,8 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <typeindex>
+#include <memory>
 
 namespace GGEngine {
 
@@ -113,15 +115,45 @@ namespace GGEngine {
         // GUID lookup for serialization
         std::unordered_map<GUID, Entity, GUIDHash> m_GUIDToEntity;
 
-        // Component storage (SoA)
-        ComponentStorage<TagComponent> m_Tags;
-        ComponentStorage<TransformComponent> m_Transforms;
-        ComponentStorage<SpriteRendererComponent> m_Sprites;
-        ComponentStorage<TilemapComponent> m_Tilemaps;
-        ComponentStorage<CameraComponent> m_Cameras;
+        // Component registry - stores ComponentStorage<T> for any component type
+        // Allows custom components without modifying engine code
+        mutable std::unordered_map<std::type_index, std::unique_ptr<IComponentStorage>> m_ComponentRegistry;
+
+        // Helper to get or create storage for a component type
+        template<typename T>
+        ComponentStorage<T>& GetOrCreateStorage() const;
     };
 
     // Template implementations
+
+    // Get or create storage for any component type (lazy initialization)
+    template<typename T>
+    ComponentStorage<T>& Scene::GetOrCreateStorage() const
+    {
+        std::type_index typeIndex(typeid(T));
+        auto it = m_ComponentRegistry.find(typeIndex);
+        if (it == m_ComponentRegistry.end())
+        {
+            // Create new storage for this component type
+            auto storage = std::make_unique<ComponentStorage<T>>();
+            auto* ptr = storage.get();
+            m_ComponentRegistry[typeIndex] = std::move(storage);
+            return *ptr;
+        }
+        return *static_cast<ComponentStorage<T>*>(it->second.get());
+    }
+
+    template<typename T>
+    ComponentStorage<T>& Scene::GetStorage()
+    {
+        return GetOrCreateStorage<T>();
+    }
+
+    template<typename T>
+    const ComponentStorage<T>& Scene::GetStorage() const
+    {
+        return GetOrCreateStorage<T>();
+    }
 
     template<typename T>
     T& Scene::AddComponent(EntityID entity)
@@ -164,36 +196,5 @@ namespace GGEngine {
         if (!IsEntityValid(entity)) return nullptr;
         return GetStorage<T>().Get(entity.Index);
     }
-
-    // Storage accessor inline specializations (required for DLL export)
-    template<>
-    inline ComponentStorage<TagComponent>& Scene::GetStorage<TagComponent>() { return m_Tags; }
-
-    template<>
-    inline ComponentStorage<TransformComponent>& Scene::GetStorage<TransformComponent>() { return m_Transforms; }
-
-    template<>
-    inline ComponentStorage<SpriteRendererComponent>& Scene::GetStorage<SpriteRendererComponent>() { return m_Sprites; }
-
-    template<>
-    inline const ComponentStorage<TagComponent>& Scene::GetStorage<TagComponent>() const { return m_Tags; }
-
-    template<>
-    inline const ComponentStorage<TransformComponent>& Scene::GetStorage<TransformComponent>() const { return m_Transforms; }
-
-    template<>
-    inline const ComponentStorage<SpriteRendererComponent>& Scene::GetStorage<SpriteRendererComponent>() const { return m_Sprites; }
-
-    template<>
-    inline ComponentStorage<TilemapComponent>& Scene::GetStorage<TilemapComponent>() { return m_Tilemaps; }
-
-    template<>
-    inline const ComponentStorage<TilemapComponent>& Scene::GetStorage<TilemapComponent>() const { return m_Tilemaps; }
-
-    template<>
-    inline ComponentStorage<CameraComponent>& Scene::GetStorage<CameraComponent>() { return m_Cameras; }
-
-    template<>
-    inline const ComponentStorage<CameraComponent>& Scene::GetStorage<CameraComponent>() const { return m_Cameras; }
 
 }

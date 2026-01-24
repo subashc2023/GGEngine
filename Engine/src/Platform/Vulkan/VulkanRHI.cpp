@@ -1,9 +1,11 @@
 #include "ggpch.h"
 #include "VulkanRHI.h"
 #include "VulkanContext.h"
+#include "VulkanUtils.h"
 #include "GGEngine/RHI/RHIDevice.h"
 #include "GGEngine/RHI/RHICommandBuffer.h"
 #include <backends/imgui_impl_vulkan.h>
+#include <GLFW/glfw3.h>
 
 namespace GGEngine {
 
@@ -810,12 +812,19 @@ namespace GGEngine {
 
     void RHIDevice::Init(void* windowHandle)
     {
-        // RHIDevice wraps VulkanContext - the actual initialization happens there
-        // This is called after VulkanContext::Init() to set up RHI-specific state
+        if (m_Initialized)
+        {
+            GG_CORE_WARN("RHIDevice::Init called when already initialized");
+            return;
+        }
+
+        // Initialize the Vulkan backend
+        auto& vkContext = VulkanContext::Get();
+        vkContext.Init(static_cast<GLFWwindow*>(windowHandle));
+
         m_Initialized = true;
 
         // Register the swapchain render pass
-        auto& vkContext = VulkanContext::Get();
         auto& registry = VulkanResourceRegistry::Get();
         VkExtent2D extent = vkContext.GetSwapchainExtent();
         m_SwapchainRenderPassHandle = registry.RegisterRenderPass(
@@ -832,6 +841,9 @@ namespace GGEngine {
         {
             VulkanResourceRegistry::Get().Clear();
             m_Initialized = false;
+
+            // Shutdown the Vulkan backend
+            VulkanContext::Get().Shutdown();
         }
     }
 
@@ -1073,13 +1085,10 @@ namespace GGEngine {
     // Buffer Management
     // ============================================================================
 
-    RHIBufferHandle RHIDevice::CreateBuffer(const RHIBufferSpecification& spec)
+    Result<RHIBufferHandle> RHIDevice::TryCreateBuffer(const RHIBufferSpecification& spec)
     {
         if (spec.size == 0)
-        {
-            GG_CORE_ERROR("RHIDevice::CreateBuffer: size is 0");
-            return NullBuffer;
-        }
+            return Result<RHIBufferHandle>::Err("Buffer size cannot be 0");
 
         auto allocator = VulkanContext::Get().GetAllocator();
 
@@ -1126,13 +1135,26 @@ namespace GGEngine {
         VkBuffer buffer = VK_NULL_HANDLE;
         VmaAllocation allocation = VK_NULL_HANDLE;
 
-        if (vmaCreateBuffer(allocator, &bufferInfo, &allocInfo, &buffer, &allocation, nullptr) != VK_SUCCESS)
+        VkResult vkResult = vmaCreateBuffer(allocator, &bufferInfo, &allocInfo, &buffer, &allocation, nullptr);
+        if (vkResult != VK_SUCCESS)
         {
-            GG_CORE_ERROR("RHIDevice::CreateBuffer: vmaCreateBuffer failed");
-            return NullBuffer;
+            return Result<RHIBufferHandle>::Err(
+                std::string("vmaCreateBuffer failed: ") + std::string(VkResultToString(vkResult)));
         }
 
-        return VulkanResourceRegistry::Get().RegisterBuffer(buffer, allocation, spec.size, spec.cpuVisible);
+        return Result<RHIBufferHandle>::Ok(
+            VulkanResourceRegistry::Get().RegisterBuffer(buffer, allocation, spec.size, spec.cpuVisible));
+    }
+
+    RHIBufferHandle RHIDevice::CreateBuffer(const RHIBufferSpecification& spec)
+    {
+        auto result = TryCreateBuffer(spec);
+        if (result.IsErr())
+        {
+            GG_CORE_ERROR("RHIDevice::CreateBuffer: {}", result.Error());
+            return NullBuffer;
+        }
+        return result.Value();
     }
 
     void RHIDevice::DestroyBuffer(RHIBufferHandle handle)
@@ -1239,7 +1261,7 @@ namespace GGEngine {
     // Texture Management
     // ============================================================================
 
-    RHITextureHandle RHIDevice::CreateTexture(const RHITextureSpecification& spec)
+    Result<RHITextureHandle> RHIDevice::TryCreateTexture(const RHITextureSpecification& spec)
     {
         auto& vkContext = VulkanContext::Get();
         auto device = vkContext.GetDevice();
@@ -1285,10 +1307,12 @@ namespace GGEngine {
         VkImage image = VK_NULL_HANDLE;
         VmaAllocation allocation = VK_NULL_HANDLE;
 
-        if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &image, &allocation, nullptr) != VK_SUCCESS)
+        VkResult vkResult = vmaCreateImage(allocator, &imageInfo, &allocInfo, &image, &allocation, nullptr);
+        if (vkResult != VK_SUCCESS)
         {
-            GG_CORE_ERROR("RHIDevice::CreateTexture: vmaCreateImage failed");
-            return NullTexture;
+            return Result<RHITextureHandle>::Err(
+                std::string("vmaCreateImage failed (") + std::to_string(spec.width) + "x" +
+                std::to_string(spec.height) + "): " + std::string(VkResultToString(vkResult)));
         }
 
         // Create image view
@@ -1304,15 +1328,28 @@ namespace GGEngine {
         viewInfo.subresourceRange.layerCount = spec.arrayLayers;
 
         VkImageView imageView = VK_NULL_HANDLE;
-        if (vkCreateImageView(device, &viewInfo, nullptr, &imageView) != VK_SUCCESS)
+        vkResult = vkCreateImageView(device, &viewInfo, nullptr, &imageView);
+        if (vkResult != VK_SUCCESS)
         {
             vmaDestroyImage(allocator, image, allocation);
-            GG_CORE_ERROR("RHIDevice::CreateTexture: vkCreateImageView failed");
-            return NullTexture;
+            return Result<RHITextureHandle>::Err(
+                std::string("vkCreateImageView failed: ") + std::string(VkResultToString(vkResult)));
         }
 
-        return VulkanResourceRegistry::Get().RegisterTexture(image, imageView, VK_NULL_HANDLE, allocation,
-                                                              spec.width, spec.height, spec.format);
+        return Result<RHITextureHandle>::Ok(
+            VulkanResourceRegistry::Get().RegisterTexture(image, imageView, VK_NULL_HANDLE, allocation,
+                                                          spec.width, spec.height, spec.format));
+    }
+
+    RHITextureHandle RHIDevice::CreateTexture(const RHITextureSpecification& spec)
+    {
+        auto result = TryCreateTexture(spec);
+        if (result.IsErr())
+        {
+            GG_CORE_ERROR("RHIDevice::CreateTexture: {}", result.Error());
+            return NullTexture;
+        }
+        return result.Value();
     }
 
     void RHIDevice::DestroyTexture(RHITextureHandle handle)
@@ -1460,13 +1497,16 @@ namespace GGEngine {
     // Shader Management
     // ============================================================================
 
-    RHIShaderModuleHandle RHIDevice::CreateShaderModule(ShaderStage stage, const std::vector<char>& spirvCode)
+    Result<RHIShaderModuleHandle> RHIDevice::TryCreateShaderModule(ShaderStage stage, const std::vector<char>& spirvCode)
     {
-        return CreateShaderModule(stage, spirvCode.data(), spirvCode.size());
+        return TryCreateShaderModule(stage, spirvCode.data(), spirvCode.size());
     }
 
-    RHIShaderModuleHandle RHIDevice::CreateShaderModule(ShaderStage stage, const void* spirvData, size_t spirvSize)
+    Result<RHIShaderModuleHandle> RHIDevice::TryCreateShaderModule(ShaderStage stage, const void* spirvData, size_t spirvSize)
     {
+        if (!spirvData || spirvSize == 0)
+            return Result<RHIShaderModuleHandle>::Err("SPIR-V data is null or empty");
+
         auto device = VulkanContext::Get().GetDevice();
 
         VkShaderModuleCreateInfo createInfo{};
@@ -1475,13 +1515,37 @@ namespace GGEngine {
         createInfo.pCode = reinterpret_cast<const uint32_t*>(spirvData);
 
         VkShaderModule module = VK_NULL_HANDLE;
-        if (vkCreateShaderModule(device, &createInfo, nullptr, &module) != VK_SUCCESS)
+        VkResult vkResult = vkCreateShaderModule(device, &createInfo, nullptr, &module);
+        if (vkResult != VK_SUCCESS)
         {
-            GG_CORE_ERROR("RHIDevice::CreateShaderModule: vkCreateShaderModule failed");
-            return NullShaderModule;
+            return Result<RHIShaderModuleHandle>::Err(
+                std::string("vkCreateShaderModule failed: ") + std::string(VkResultToString(vkResult)));
         }
 
-        return VulkanResourceRegistry::Get().RegisterShaderModule(module, stage);
+        return Result<RHIShaderModuleHandle>::Ok(
+            VulkanResourceRegistry::Get().RegisterShaderModule(module, stage));
+    }
+
+    RHIShaderModuleHandle RHIDevice::CreateShaderModule(ShaderStage stage, const std::vector<char>& spirvCode)
+    {
+        auto result = TryCreateShaderModule(stage, spirvCode);
+        if (result.IsErr())
+        {
+            GG_CORE_ERROR("RHIDevice::CreateShaderModule: {}", result.Error());
+            return NullShaderModule;
+        }
+        return result.Value();
+    }
+
+    RHIShaderModuleHandle RHIDevice::CreateShaderModule(ShaderStage stage, const void* spirvData, size_t spirvSize)
+    {
+        auto result = TryCreateShaderModule(stage, spirvData, spirvSize);
+        if (result.IsErr())
+        {
+            GG_CORE_ERROR("RHIDevice::CreateShaderModule: {}", result.Error());
+            return NullShaderModule;
+        }
+        return result.Value();
     }
 
     void RHIDevice::DestroyShaderModule(RHIShaderModuleHandle handle)
@@ -1502,9 +1566,8 @@ namespace GGEngine {
     // Pipeline Management
     // ============================================================================
 
-    RHIGraphicsPipelineResult RHIDevice::CreateGraphicsPipeline(const RHIGraphicsPipelineSpecification& spec)
+    Result<RHIGraphicsPipelineResult> RHIDevice::TryCreateGraphicsPipeline(const RHIGraphicsPipelineSpecification& spec)
     {
-        RHIGraphicsPipelineResult result;
         auto device = VulkanContext::Get().GetDevice();
         auto& registry = VulkanResourceRegistry::Get();
 
@@ -1518,6 +1581,9 @@ namespace GGEngine {
             if (moduleData.module != VK_NULL_HANDLE)
                 moduleDataStorage.push_back(moduleData);
         }
+
+        if (moduleDataStorage.empty())
+            return Result<RHIGraphicsPipelineResult>::Err("No valid shader modules provided");
 
         std::vector<VkPipelineShaderStageCreateInfo> shaderStages;
         shaderStages.reserve(moduleDataStorage.size());
@@ -1640,10 +1706,11 @@ namespace GGEngine {
         layoutInfo.pPushConstantRanges = vkPushConstants.data();
 
         VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
-        if (vkCreatePipelineLayout(device, &layoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS)
+        VkResult vkResult = vkCreatePipelineLayout(device, &layoutInfo, nullptr, &pipelineLayout);
+        if (vkResult != VK_SUCCESS)
         {
-            GG_CORE_ERROR("RHIDevice::CreateGraphicsPipeline: vkCreatePipelineLayout failed");
-            return result;
+            return Result<RHIGraphicsPipelineResult>::Err(
+                std::string("vkCreatePipelineLayout failed: ") + std::string(VkResultToString(vkResult)));
         }
 
         // Create pipeline
@@ -1664,16 +1731,29 @@ namespace GGEngine {
         pipelineInfo.subpass = spec.subpass;
 
         VkPipeline pipeline = VK_NULL_HANDLE;
-        if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS)
+        vkResult = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline);
+        if (vkResult != VK_SUCCESS)
         {
             vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-            GG_CORE_ERROR("RHIDevice::CreateGraphicsPipeline: vkCreateGraphicsPipelines failed");
-            return result;
+            return Result<RHIGraphicsPipelineResult>::Err(
+                std::string("vkCreateGraphicsPipelines failed: ") + std::string(VkResultToString(vkResult)));
         }
 
+        RHIGraphicsPipelineResult result;
         result.pipeline = registry.RegisterPipeline(pipeline, pipelineLayout);
         result.layout = registry.RegisterPipelineLayout(pipelineLayout);
-        return result;
+        return Result<RHIGraphicsPipelineResult>::Ok(result);
+    }
+
+    RHIGraphicsPipelineResult RHIDevice::CreateGraphicsPipeline(const RHIGraphicsPipelineSpecification& spec)
+    {
+        auto result = TryCreateGraphicsPipeline(spec);
+        if (result.IsErr())
+        {
+            GG_CORE_ERROR("RHIDevice::CreateGraphicsPipeline: {}", result.Error());
+            return RHIGraphicsPipelineResult{};
+        }
+        return result.Value();
     }
 
     void RHIDevice::DestroyPipeline(RHIPipelineHandle handle)

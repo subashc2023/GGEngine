@@ -4,6 +4,7 @@
 #include "RHIEnums.h"
 #include "RHISpecifications.h"
 #include "GGEngine/Core/Core.h"
+#include "GGEngine/Core/Result.h"
 
 #include <string>
 #include <vector>
@@ -150,8 +151,12 @@ namespace GGEngine {
         // Buffer Management
         // ========================================================================
 
-        // Create a GPU buffer
+        // Create a GPU buffer (returns NullBuffer on failure, logs error)
         RHIBufferHandle CreateBuffer(const RHIBufferSpecification& spec);
+
+        // Create a GPU buffer with detailed error information
+        Result<RHIBufferHandle> TryCreateBuffer(const RHIBufferSpecification& spec);
+
         void DestroyBuffer(RHIBufferHandle handle);
 
         // Buffer memory mapping (for CPU-visible buffers)
@@ -166,8 +171,12 @@ namespace GGEngine {
         // Texture Management
         // ========================================================================
 
-        // Create a texture/image
+        // Create a texture/image (returns NullTexture on failure, logs error)
         RHITextureHandle CreateTexture(const RHITextureSpecification& spec);
+
+        // Create a texture/image with detailed error information
+        Result<RHITextureHandle> TryCreateTexture(const RHITextureSpecification& spec);
+
         void DestroyTexture(RHITextureHandle handle);
 
         // Upload pixel data to texture (creates staging buffer internally)
@@ -188,17 +197,26 @@ namespace GGEngine {
         // Shader Management
         // ========================================================================
 
-        // Create shader module from SPIR-V bytecode
+        // Create shader module from SPIR-V bytecode (returns NullShaderModule on failure, logs error)
         RHIShaderModuleHandle CreateShaderModule(ShaderStage stage, const std::vector<char>& spirvCode);
         RHIShaderModuleHandle CreateShaderModule(ShaderStage stage, const void* spirvData, size_t spirvSize);
+
+        // Create shader module with detailed error information
+        Result<RHIShaderModuleHandle> TryCreateShaderModule(ShaderStage stage, const std::vector<char>& spirvCode);
+        Result<RHIShaderModuleHandle> TryCreateShaderModule(ShaderStage stage, const void* spirvData, size_t spirvSize);
+
         void DestroyShaderModule(RHIShaderModuleHandle handle);
 
         // ========================================================================
         // Pipeline Management
         // ========================================================================
 
-        // Create graphics pipeline
+        // Create graphics pipeline (returns invalid result on failure, logs error)
         RHIGraphicsPipelineResult CreateGraphicsPipeline(const RHIGraphicsPipelineSpecification& spec);
+
+        // Create graphics pipeline with detailed error information
+        Result<RHIGraphicsPipelineResult> TryCreateGraphicsPipeline(const RHIGraphicsPipelineSpecification& spec);
+
         void DestroyPipeline(RHIPipelineHandle handle);
         void DestroyPipelineLayout(RHIPipelineLayoutHandle handle);
 

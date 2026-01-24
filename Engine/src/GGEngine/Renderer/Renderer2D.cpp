@@ -50,9 +50,9 @@ namespace GGEngine {
         Scope<IndexBuffer> QuadIndexBuffer;
         VertexLayout QuadVertexLayout;
 
-        // CPU-side vertex staging buffer
-        QuadVertex* QuadVertexBufferBase = nullptr;
-        QuadVertex* QuadVertexBufferPtr = nullptr;
+        // CPU-side vertex staging buffer (unique_ptr for RAII)
+        std::unique_ptr<QuadVertex[]> QuadVertexBufferBase;
+        QuadVertex* QuadVertexBufferPtr = nullptr;  // Write cursor (points into QuadVertexBufferBase)
         uint32_t QuadIndexCount = 0;
 
         // GPU buffer offset tracking - persists across flushes within a frame
@@ -142,10 +142,9 @@ namespace GGEngine {
         // Wait for GPU to finish using current buffers
         RHIDevice::Get().WaitIdle();
 
-        // Reallocate CPU staging buffer
-        delete[] s_Data.QuadVertexBufferBase;
-        s_Data.QuadVertexBufferBase = new QuadVertex[newMaxVertices]();
-        s_Data.QuadVertexBufferPtr = s_Data.QuadVertexBufferBase;
+        // Reallocate CPU staging buffer (using unique_ptr for exception safety)
+        s_Data.QuadVertexBufferBase = std::make_unique<QuadVertex[]>(newMaxVertices);
+        s_Data.QuadVertexBufferPtr = s_Data.QuadVertexBufferBase.get();
 
         // Reallocate GPU vertex buffers
         for (uint32_t i = 0; i < Renderer2DData::MaxFramesInFlight; i++)
@@ -195,9 +194,9 @@ namespace GGEngine {
             .Push("aTilingFactor", VertexAttributeType::Float)
             .Push("aTexIndex", VertexAttributeType::UInt);  // Bindless index (uint32_t)
 
-        // Allocate CPU-side vertex buffer (zero-initialized to avoid any uninitialized memory issues)
-        s_Data.QuadVertexBufferBase = new QuadVertex[s_Data.MaxVertices]();
-        s_Data.QuadVertexBufferPtr = s_Data.QuadVertexBufferBase;
+        // Allocate CPU-side vertex buffer (zero-initialized via value initialization)
+        s_Data.QuadVertexBufferBase = std::make_unique<QuadVertex[]>(s_Data.MaxVertices);
+        s_Data.QuadVertexBufferPtr = s_Data.QuadVertexBufferBase.get();
 
         // Create GPU vertex buffers (one per frame in flight to avoid GPU/CPU conflicts)
         for (uint32_t i = 0; i < Renderer2DData::MaxFramesInFlight; i++)
@@ -207,7 +206,7 @@ namespace GGEngine {
                 s_Data.QuadVertexLayout
             );
             // Initialize GPU buffer with zeros to avoid potential first-upload issues
-            s_Data.QuadVertexBuffers[i]->SetData(s_Data.QuadVertexBufferBase,
+            s_Data.QuadVertexBuffers[i]->SetData(s_Data.QuadVertexBufferBase.get(),
                 s_Data.MaxVertices * sizeof(QuadVertex));
         }
 
@@ -266,8 +265,7 @@ namespace GGEngine {
         GG_PROFILE_FUNCTION();
         GG_CORE_INFO("Renderer2D: Shutting down...");
 
-        delete[] s_Data.QuadVertexBufferBase;
-        s_Data.QuadVertexBufferBase = nullptr;
+        s_Data.QuadVertexBufferBase.reset();
         s_Data.QuadVertexBufferPtr = nullptr;
 
         s_Data.QuadPipeline.reset();
@@ -340,7 +338,7 @@ namespace GGEngine {
 
         // Reset batch state
         s_Data.QuadIndexCount = 0;
-        s_Data.QuadVertexBufferPtr = s_Data.QuadVertexBufferBase;
+        s_Data.QuadVertexBufferPtr = s_Data.QuadVertexBufferBase.get();
 
         // Only reset GPU buffer offset when moving to a new frame
         // This allows multiple BeginScene/EndScene pairs per frame without overwriting
@@ -417,14 +415,14 @@ namespace GGEngine {
         // Calculate data size and vertex count for current batch
         uint32_t dataSize = static_cast<uint32_t>(
             reinterpret_cast<uint8_t*>(s_Data.QuadVertexBufferPtr) -
-            reinterpret_cast<uint8_t*>(s_Data.QuadVertexBufferBase)
+            reinterpret_cast<uint8_t*>(s_Data.QuadVertexBufferBase.get())
         );
         uint32_t vertexCount = dataSize / sizeof(QuadVertex);
 
         // Upload vertex data to current frame's GPU buffer at current offset
         // Per-frame buffers prevent GPU/CPU conflicts between frames in flight
         uint64_t gpuOffset = static_cast<uint64_t>(s_Data.QuadVertexOffset) * sizeof(QuadVertex);
-        s_Data.QuadVertexBuffers[s_Data.CurrentFrameIndex]->SetData(s_Data.QuadVertexBufferBase, dataSize, gpuOffset);
+        s_Data.QuadVertexBuffers[s_Data.CurrentFrameIndex]->SetData(s_Data.QuadVertexBufferBase.get(), dataSize, gpuOffset);
 
         RHICommandBufferHandle cmd = s_Data.CurrentCommandBuffer;
 
@@ -460,7 +458,7 @@ namespace GGEngine {
 
         // Reset batch state for next batch (but NOT QuadVertexOffset - that persists!)
         s_Data.QuadIndexCount = 0;
-        s_Data.QuadVertexBufferPtr = s_Data.QuadVertexBufferBase;
+        s_Data.QuadVertexBufferPtr = s_Data.QuadVertexBufferBase.get();
     }
 
     // Internal helper: validates batch state and resolves texture index
@@ -491,7 +489,7 @@ namespace GGEngine {
         }
 
         // Check if adding this quad would exceed total GPU buffer capacity for the frame
-        uint32_t currentBatchVertices = static_cast<uint32_t>(s_Data.QuadVertexBufferPtr - s_Data.QuadVertexBufferBase);
+        uint32_t currentBatchVertices = static_cast<uint32_t>(s_Data.QuadVertexBufferPtr - s_Data.QuadVertexBufferBase.get());
         uint32_t totalVerticesAfterThisQuad = s_Data.QuadVertexOffset + currentBatchVertices + 4;
         if (totalVerticesAfterThisQuad > s_Data.MaxVertices)
         {

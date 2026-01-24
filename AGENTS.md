@@ -147,8 +147,8 @@ MaterialLibrary& GetMaterialLibrary(); // Get material library
 
 **Initialization Order:**
 1. Window creation (GLFW)
-2. VulkanContext initialization
-3. RHIDevice initialization
+2. RHIDevice initialization (internally initializes graphics backend)
+3. TaskGraph initialization
 4. BindlessTextureManager initialization
 5. ShaderLibrary/TextureLibrary initialization
 6. Renderer2D initialization
@@ -248,40 +248,116 @@ namespace GGEngine {
 }
 ```
 
-### JobSystem (`Core/JobSystem.h`)
+### Result Type (`Core/Result.h`)
 
-Thread-safe work queue for async operations (asset loading, etc.).
+Lightweight error handling type for operations that can fail. Returns either a value or an error message.
+
+**Design Philosophy:**
+- No exceptions (matches Unreal/Godot pattern)
+- Error context preserved for callers
+- Zero overhead on success path (no exception unwinding)
+- Assertions on invalid access (catches bugs in debug)
 
 ```cpp
-JobSystem& jobs = JobSystem::Get();
+// Create a Result-returning function
+Result<RHITextureHandle> CreateTexture(const TextureSpec& spec) {
+    if (spec.width == 0)
+        return Result<RHITextureHandle>::Err("Width cannot be 0");
 
-// Initialize with worker thread count (usually 1 for I/O-bound work)
-jobs.Init(1);
+    // ... create texture ...
+    return Result<RHITextureHandle>::Ok(handle);
+}
 
-// Submit work to background thread
-jobs.Submit(
-    []() {
-        // This runs on worker thread
-        LoadFileFromDisk();
-    },
-    []() {
-        // Optional: callback runs on main thread after job completes
-        OnLoadComplete();
-    },
-    JobPriority::Normal  // or High, Low
-);
+// Use the result
+auto result = CreateTexture(spec);
+if (result.IsErr()) {
+    GG_CORE_ERROR("Failed: {}", result.Error());
+    return;
+}
+auto handle = result.Value();
 
-// Call every frame from main thread to process callbacks
-jobs.ProcessCompletedCallbacks();
+// Or with fallback
+auto handle = CreateTexture(spec).ValueOr(fallbackHandle);
 
-// Shutdown (waits for pending jobs)
-jobs.Shutdown();
+// Result<void> for operations without a return value
+Result<void> Initialize() {
+    if (failed)
+        return Result<void>::Err("Init failed");
+    return Result<void>::Ok();
+}
+```
+
+**API Pattern:**
+- `Create*()` - Returns handle, logs error on failure (existing API)
+- `TryCreate*()` - Returns `Result<Handle>` with detailed error (new API)
+
+```cpp
+// Old API (backward compatible)
+RHITextureHandle h = device.CreateTexture(spec);  // Logs on failure
+
+// New API (full error context)
+auto result = device.TryCreateTexture(spec);
+if (result.IsErr()) {
+    // Handle error with full context: "vmaCreateImage failed (512x512): VK_ERROR_OUT_OF_DEVICE_MEMORY"
+}
+```
+
+### TaskGraph (`Core/TaskGraph.h`)
+
+Advanced task system with dependencies, results, and error propagation for all async operations.
+
+```cpp
+TaskGraph& tasks = TaskGraph::Get();
+
+// Simple task (no dependencies, no result)
+TaskID id = tasks.CreateTask("LoadAsset", []() -> TaskResult {
+    LoadFileFromDisk();
+    return TaskResult::Success();
+});
+
+// Task with callback (fires on main thread after completion)
+TaskSpec spec;
+spec.Name = "ProcessData";
+spec.Work = []() -> TaskResult {
+    auto data = ProcessSomething();
+    TaskResult result;
+    result.Set(data);
+    return result;
+};
+spec.OnComplete = [](TaskID id, const TaskResult& result) {
+    // Runs on main thread
+    OnProcessComplete(result.Get<MyData>());
+};
+tasks.CreateTask(spec);
+
+// Task with dependencies
+TaskID first = tasks.CreateTask("First", work1);
+TaskID second = tasks.CreateTask("Second", work2, {first});  // Waits for first
+
+// Task chain with result passing
+TaskID producer = tasks.CreateTask<int>("Compute", []() { return 42; });
+TaskID consumer = tasks.Then<int, int>(producer, "Double", [](const int& v) { return v * 2; });
+
+// Wait for task completion (blocking)
+tasks.Wait(id);
+
+// Check task state (non-blocking)
+if (tasks.IsComplete(id)) { /* ... */ }
+if (tasks.IsFailed(id)) { /* ... */ }
+
+// Get result after completion
+const TaskResult& result = tasks.GetResult(id);
+if (result.HasError()) { /* handle error */ }
+
+// Cancel pending task (cascades to dependents)
+tasks.Cancel(id);
 ```
 
 **Thread Safety:**
-- `Submit()` is thread-safe
+- All methods are thread-safe
 - Callbacks always fire on main thread via `ProcessCompletedCallbacks()`
-- Jobs execute in priority order (High > Normal > Low)
+- Tasks execute in priority order (High > Normal > Low)
+- Failed dependencies automatically fail dependent tasks
 
 ---
 
@@ -1126,12 +1202,15 @@ bool IsValid(EntityID id) {
 
 ### 5. SoA ECS (Structure of Arrays)
 
-Cache-friendly component storage:
+Cache-friendly component storage with extensible component registry:
 ```cpp
 class Scene {
-    ComponentStorage<TransformComponent> m_Transforms;
-    ComponentStorage<SpriteRendererComponent> m_Sprites;
-    // ...
+    // Component registry - stores ComponentStorage<T> for any component type
+    // Custom components are created lazily when first accessed
+    std::unordered_map<std::type_index, std::unique_ptr<IComponentStorage>> m_ComponentRegistry;
+
+    template<typename T>
+    ComponentStorage<T>& GetStorage();  // Get or create storage for any type
 };
 ```
 
@@ -1154,40 +1233,44 @@ QuadVertexBuffers[frame]->SetData(...);
 
 ### Adding a New Component
 
-1. Create header in `Engine/src/GGEngine/ECS/Components/`:
+The ECS uses a registry pattern - custom components work automatically without engine modification:
+
+1. Define your component (can be in game code, not engine):
    ```cpp
    // MyComponent.h
-   #pragma once
-   namespace GGEngine {
-       struct MyComponent {
-           float Value = 0.0f;
-       };
+   struct MyComponent {
+       float Value = 0.0f;
+       int32_t Count = 0;
+   };
+   ```
+
+2. Use it directly with Scene (storage is created lazily):
+   ```cpp
+   // Add component to entity
+   auto entity = scene.CreateEntity("Player");
+   scene.AddComponent<MyComponent>(entity);
+
+   // Access component
+   auto* comp = scene.GetComponent<MyComponent>(entity);
+   comp->Value = 42.0f;
+
+   // Check/remove
+   if (scene.HasComponent<MyComponent>(entity)) {
+       scene.RemoveComponent<MyComponent>(entity);
    }
    ```
 
-2. Include in `Components.h`:
+3. Iterate over all components (cache-friendly):
    ```cpp
-   #include "Components/MyComponent.h"
-   ```
-
-3. Add storage in `Scene.h`:
-   ```cpp
-   ComponentStorage<MyComponent> m_MyComponents;
-   ```
-
-4. Add template specializations in `Scene.h`:
-   ```cpp
-   template<>
-   inline ComponentStorage<MyComponent>& Scene::GetStorage<MyComponent>() {
-       return m_MyComponents;
-   }
-   template<>
-   inline const ComponentStorage<MyComponent>& Scene::GetStorage<MyComponent>() const {
-       return m_MyComponents;
+   auto& storage = scene.GetStorage<MyComponent>();
+   for (size_t i = 0; i < storage.Size(); i++) {
+       MyComponent& comp = storage.Data()[i];
+       Entity entity = storage.GetEntity(i);
+       // Process...
    }
    ```
 
-5. Update `SceneSerializer` if component should be saved.
+**Note:** For engine-level components that need serialization, also update `SceneSerializer`.
 
 ### Adding a New Shader
 

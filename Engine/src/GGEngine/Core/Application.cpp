@@ -18,10 +18,8 @@
 #include "GGEngine/Renderer/TransferQueue.h"
 #include "GGEngine/Renderer/ThreadedCommandBuffer.h"
 #include "GGEngine/Core/Profiler.h"
-#include "GGEngine/Core/JobSystem.h"
 #include "GGEngine/Core/TaskGraph.h"
 #include "GGEngine/RHI/RHIDevice.h"
-#include "Platform/Vulkan/VulkanContext.h"
 
 #include <GLFW/glfw3.h>
 
@@ -37,24 +35,19 @@ namespace GGEngine {
         m_Window = Scope<Window>(Window::Create());
         m_Window->SetEventCallback([this](Event& e) { OnEvent(e); });
 
-        VulkanContext::Get().Init(static_cast<GLFWwindow*>(m_Window->GetNativeWindow()));
+        // Initialize RHI device (initializes graphics backend internally)
+        RHIDevice::Get().Init(m_Window->GetNativeWindow());
 
-        // Initialize job system for async asset loading (legacy - being replaced by TaskGraph)
-        JobSystem::Get().Init(1);  // Single worker thread for I/O-bound asset loading
-
-        // Initialize TaskGraph with multiple workers for parallel task execution
+        // Initialize TaskGraph for async operations (asset loading, parallel ECS, etc.)
         TaskGraph::Get().Init();  // Defaults to hardware_concurrency - 1 workers
 
         // Initialize ThreadedCommandBuffer for parallel command recording
         ThreadedCommandBuffer::Get().Init(TaskGraph::Get().GetWorkerCount());
 
-        // Initialize RHI device (requires VulkanContext to be ready)
-        RHIDevice::Get().Init(m_Window->GetNativeWindow());
-
-        // Initialize bindless texture manager (requires VulkanContext to be ready)
+        // Initialize bindless texture manager (requires RHI device to be ready)
         BindlessTextureManager::Get().Init();
 
-        // Initialize asset libraries (requires VulkanContext to be ready)
+        // Initialize asset libraries (requires RHI device to be ready)
         ShaderLibrary::Get().Init();
         TextureLibrary::Get().Init();
 
@@ -74,9 +67,9 @@ namespace GGEngine {
         // Wait for GPU to finish before cleanup
         RHIDevice::Get().WaitIdle();
 
-        // Manually call OnDetach() on all layers before VulkanContext shutdown.
+        // Manually call OnDetach() on all layers before RHI shutdown.
         // This ensures layers can clean up their GPU resources (pipelines, buffers, etc.)
-        // while the Vulkan device is still valid. LayerStack destructor will then delete
+        // while the graphics device is still valid. LayerStack destructor will then delete
         // the layer objects, but their GPU resources are already released.
         for (Layer* layer : m_LayerStack)
         {
@@ -90,14 +83,14 @@ namespace GGEngine {
         // Shutdown transfer queue before asset system
         TransferQueue::Get().Shutdown();
 
-        // Shutdown asset system before Vulkan (assets may hold GPU resources)
+        // Shutdown asset system before RHI (assets may hold GPU resources)
         // Materials depend on shaders, so shut down materials first
         m_MaterialLibrary.Shutdown();
         TextureLibrary::Get().Shutdown();
         ShaderLibrary::Get().Shutdown();
         AssetManager::Get().Shutdown();
 
-        // Shutdown bindless texture manager before Vulkan
+        // Shutdown bindless texture manager before RHI
         BindlessTextureManager::Get().Shutdown();
 
         // Shutdown ThreadedCommandBuffer before TaskGraph
@@ -106,13 +99,8 @@ namespace GGEngine {
         // Shutdown TaskGraph (waits for pending tasks to complete)
         TaskGraph::Get().Shutdown();
 
-        // Shutdown job system (waits for pending jobs to complete)
-        JobSystem::Get().Shutdown();
-
-        // Shutdown RHI device before Vulkan context
+        // Shutdown RHI device (shuts down graphics backend internally)
         RHIDevice::Get().Shutdown();
-
-        VulkanContext::Get().Shutdown();
     }
 
     void Application::PushLayer(Layer* layer)
@@ -185,7 +173,6 @@ namespace GGEngine {
 
             // Process async asset loading - uploads pending textures and fires callbacks
             AssetManager::Get().Update();
-            JobSystem::Get().ProcessCompletedCallbacks();
             TaskGraph::Get().ProcessCompletedCallbacks();
 
             // Flush pending GPU uploads before rendering

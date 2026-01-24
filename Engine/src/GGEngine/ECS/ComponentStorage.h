@@ -9,6 +9,18 @@
 
 namespace GGEngine {
 
+    // Base interface for type-erased component storage
+    // Used by the component registry to manage storages of different types uniformly
+    class GG_API IComponentStorage
+    {
+    public:
+        virtual ~IComponentStorage() = default;
+        virtual void Clear() = 0;
+        virtual void Remove(Entity entity) = 0;
+        virtual bool Has(Entity entity) const = 0;
+        virtual size_t Size() const = 0;
+    };
+
     // SoA component storage for a single component type
     // Each component type has its own storage instance
     //
@@ -19,13 +31,16 @@ namespace GGEngine {
     //   and should only be used when you have external synchronization
     //
     template<typename T>
-    class ComponentStorage
+    class ComponentStorage : public IComponentStorage
     {
     public:
         class ReadLock;
         class WriteLock;
         friend class ReadLock;
         friend class WriteLock;
+
+        ~ComponentStorage() override = default;
+
         // Add component to entity (returns reference)
         T& Add(Entity entity)
         {
@@ -47,7 +62,7 @@ namespace GGEngine {
         }
 
         // Remove component from entity (O(1) via swap-with-last)
-        void Remove(Entity entity)
+        void Remove(Entity entity) override
         {
             auto it = m_EntityToIndex.find(entity);
             if (it == m_EntityToIndex.end()) return;
@@ -70,7 +85,7 @@ namespace GGEngine {
         }
 
         // Check if entity has component
-        bool Has(Entity entity) const
+        bool Has(Entity entity) const override
         {
             return m_EntityToIndex.find(entity) != m_EntityToIndex.end();
         }
@@ -91,7 +106,7 @@ namespace GGEngine {
         }
 
         // Iteration support
-        size_t Size() const { return m_Components.size(); }
+        size_t Size() const override { return m_Components.size(); }
 
         // Direct array access for cache-friendly iteration
         T* Data() { return m_Components.data(); }
@@ -100,7 +115,7 @@ namespace GGEngine {
         Entity GetEntity(size_t index) const { return m_IndexToEntity[index]; }
 
         // Clear all components
-        void Clear()
+        void Clear() override
         {
             m_Components.clear();
             m_EntityToIndex.clear();

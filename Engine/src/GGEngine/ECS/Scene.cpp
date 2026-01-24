@@ -47,11 +47,11 @@ namespace GGEngine {
 
         // Add required TagComponent with auto-generated GUID
         TagComponent tag(name);
-        m_Tags.Add(index, tag);
+        GetStorage<TagComponent>().Add(index, tag);
         m_GUIDToEntity[tag.ID] = index;
 
         // Add default TransformComponent
-        m_Transforms.Add(index);
+        GetStorage<TransformComponent>().Add(index);
 
         GG_CORE_TRACE("Created entity '{}' (index={}, gen={})", name, index, generation);
         return EntityID{ index, generation };
@@ -65,11 +65,11 @@ namespace GGEngine {
         TagComponent tag;
         tag.Name = name;
         tag.ID = guid;
-        m_Tags.Add(index, tag);
+        GetStorage<TagComponent>().Add(index, tag);
         m_GUIDToEntity[tag.ID] = index;
 
         // Add default TransformComponent
-        m_Transforms.Add(index);
+        GetStorage<TransformComponent>().Add(index);
 
         GG_CORE_TRACE("Created entity '{}' with GUID (index={}, gen={})", name, index, generation);
         return EntityID{ index, generation };
@@ -82,11 +82,12 @@ namespace GGEngine {
         m_Generations.clear();
         m_FreeList.clear();
         m_GUIDToEntity.clear();
-        m_Tags.Clear();
-        m_Transforms.Clear();
-        m_Sprites.Clear();
-        m_Tilemaps.Clear();
-        m_Cameras.Clear();
+
+        // Clear all registered component storages
+        for (auto& [typeIndex, storage] : m_ComponentRegistry)
+        {
+            storage->Clear();
+        }
 
         GG_CORE_TRACE("Scene '{}' cleared", m_Name);
     }
@@ -98,17 +99,16 @@ namespace GGEngine {
         Entity index = entity.Index;
 
         // Remove from GUID lookup
-        if (auto* tag = m_Tags.Get(index))
+        if (auto* tag = GetStorage<TagComponent>().Get(index))
         {
             m_GUIDToEntity.erase(tag->ID);
         }
 
-        // Remove all components
-        m_Tags.Remove(index);
-        m_Transforms.Remove(index);
-        m_Sprites.Remove(index);
-        m_Tilemaps.Remove(index);
-        m_Cameras.Remove(index);
+        // Remove all components from all registered storages
+        for (auto& [typeIndex, storage] : m_ComponentRegistry)
+        {
+            storage->Remove(index);
+        }
 
         // Remove from active entities list using swap-and-pop (O(1) removal instead of O(n))
         auto it = std::find(m_Entities.begin(), m_Entities.end(), index);
@@ -140,11 +140,12 @@ namespace GGEngine {
 
     EntityID Scene::FindEntityByName(const std::string& name) const
     {
-        for (size_t i = 0; i < m_Tags.Size(); i++)
+        auto& tags = GetStorage<TagComponent>();
+        for (size_t i = 0; i < tags.Size(); i++)
         {
-            if (m_Tags.Data()[i].Name == name)
+            if (tags.Data()[i].Name == name)
             {
-                Entity index = m_Tags.GetEntity(i);
+                Entity index = tags.GetEntity(i);
                 return EntityID{ index, m_Generations[index] };
             }
         }
@@ -170,15 +171,17 @@ namespace GGEngine {
     void Scene::RenderTilemaps()
     {
         auto& textureLib = TextureLibrary::Get();
+        auto& tilemaps = GetStorage<TilemapComponent>();
+        auto& transforms = GetStorage<TransformComponent>();
 
-        for (size_t i = 0; i < m_Tilemaps.Size(); i++)
+        for (size_t i = 0; i < tilemaps.Size(); i++)
         {
-            Entity entity = m_Tilemaps.GetEntity(i);
+            Entity entity = tilemaps.GetEntity(i);
 
-            const TransformComponent* transform = m_Transforms.Get(entity);
+            const TransformComponent* transform = transforms.Get(entity);
             if (!transform) continue;
 
-            const TilemapComponent& tilemap = m_Tilemaps.Data()[i];
+            const TilemapComponent& tilemap = tilemaps.Data()[i];
 
             // Skip if no texture assigned
             if (tilemap.TextureName.empty()) continue;
@@ -238,16 +241,18 @@ namespace GGEngine {
     void Scene::RenderSprites()
     {
         auto& textureLib = TextureLibrary::Get();
+        auto& sprites = GetStorage<SpriteRendererComponent>();
+        auto& transforms = GetStorage<TransformComponent>();
 
-        for (size_t i = 0; i < m_Sprites.Size(); i++)
+        for (size_t i = 0; i < sprites.Size(); i++)
         {
-            Entity entity = m_Sprites.GetEntity(i);
+            Entity entity = sprites.GetEntity(i);
 
             // Get transform (should always exist)
-            const TransformComponent* transform = m_Transforms.Get(entity);
+            const TransformComponent* transform = transforms.Get(entity);
             if (!transform) continue;
 
-            const SpriteRendererComponent& sprite = m_Sprites.Data()[i];
+            const SpriteRendererComponent& sprite = sprites.Data()[i];
 
             float rotationRadians = Math::ToRadians(transform->Rotation);
 
@@ -302,8 +307,10 @@ namespace GGEngine {
     {
         auto& textureLib = TextureLibrary::Get();
         auto& taskGraph = TaskGraph::Get();
+        auto& sprites = GetStorage<SpriteRendererComponent>();
+        auto& transforms = GetStorage<TransformComponent>();
 
-        const size_t spriteCount = m_Sprites.Size();
+        const size_t spriteCount = sprites.Size();
         if (spriteCount == 0)
             return;
 
@@ -316,7 +323,7 @@ namespace GGEngine {
         }
 
         // Get raw data pointers for parallel access
-        const SpriteRendererComponent* spriteData = m_Sprites.Data();
+        const SpriteRendererComponent* spriteData = sprites.Data();
         const uint32_t whiteTexIndex = InstancedRenderer2D::GetWhiteTextureIndex();
 
         // Determine chunk size based on worker count
@@ -333,14 +340,14 @@ namespace GGEngine {
             size_t end = std::min(start + chunkSize, spriteCount);
 
             TaskID taskId = taskGraph.CreateTask("PrepareInstances",
-                [this, &textureLib, spriteData, instances, whiteTexIndex, start, end]() -> TaskResult
+                [this, &textureLib, &sprites, &transforms, spriteData, instances, whiteTexIndex, start, end]() -> TaskResult
                 {
                     for (size_t i = start; i < end; ++i)
                     {
-                        Entity entity = m_Sprites.GetEntity(i);
+                        Entity entity = sprites.GetEntity(i);
 
                         // Get transform
-                        const TransformComponent* transform = m_Transforms.Get(entity);
+                        const TransformComponent* transform = transforms.Get(entity);
                         if (!transform)
                             continue;
 
@@ -420,11 +427,12 @@ namespace GGEngine {
 
     EntityID Scene::GetPrimaryCameraEntity()
     {
-        for (size_t i = 0; i < m_Cameras.Size(); i++)
+        auto& cameras = GetStorage<CameraComponent>();
+        for (size_t i = 0; i < cameras.Size(); i++)
         {
-            if (m_Cameras.Data()[i].Primary)
+            if (cameras.Data()[i].Primary)
             {
-                Entity entity = m_Cameras.GetEntity(i);
+                Entity entity = cameras.GetEntity(i);
                 return EntityID{ entity, m_Generations[entity] };
             }
         }
@@ -434,9 +442,10 @@ namespace GGEngine {
     void Scene::OnViewportResize(uint32_t width, uint32_t height)
     {
         // Update all cameras that don't have fixed aspect ratio
-        for (size_t i = 0; i < m_Cameras.Size(); i++)
+        auto& cameras = GetStorage<CameraComponent>();
+        for (size_t i = 0; i < cameras.Size(); i++)
         {
-            CameraComponent& cameraComp = m_Cameras.Data()[i];
+            CameraComponent& cameraComp = cameras.Data()[i];
             if (!cameraComp.FixedAspectRatio)
             {
                 cameraComp.Camera.SetViewportSize(width, height);
@@ -451,15 +460,18 @@ namespace GGEngine {
         SceneCamera* mainCamera = nullptr;
         Mat4 cameraTransform;
 
-        for (size_t i = 0; i < m_Cameras.Size(); i++)
+        auto& cameras = GetStorage<CameraComponent>();
+        auto& transforms = GetStorage<TransformComponent>();
+
+        for (size_t i = 0; i < cameras.Size(); i++)
         {
-            CameraComponent& cameraComp = m_Cameras.Data()[i];
+            CameraComponent& cameraComp = cameras.Data()[i];
             if (cameraComp.Primary)
             {
-                Entity entity = m_Cameras.GetEntity(i);
+                Entity entity = cameras.GetEntity(i);
 
                 // Get transform for this camera entity
-                const TransformComponent* transform = m_Transforms.Get(entity);
+                const TransformComponent* transform = transforms.Get(entity);
                 if (transform)
                 {
                     mainCamera = &cameraComp.Camera;
@@ -509,13 +521,16 @@ namespace GGEngine {
         SceneCamera* mainCamera = nullptr;
         Mat4 cameraTransform;
 
-        for (size_t i = 0; i < m_Cameras.Size(); i++)
+        auto& cameras = GetStorage<CameraComponent>();
+        auto& transforms = GetStorage<TransformComponent>();
+
+        for (size_t i = 0; i < cameras.Size(); i++)
         {
-            CameraComponent& cameraComp = m_Cameras.Data()[i];
+            CameraComponent& cameraComp = cameras.Data()[i];
             if (cameraComp.Primary)
             {
-                Entity entity = m_Cameras.GetEntity(i);
-                const TransformComponent* transform = m_Transforms.Get(entity);
+                Entity entity = cameras.GetEntity(i);
+                const TransformComponent* transform = transforms.Get(entity);
                 if (transform)
                 {
                     mainCamera = &cameraComp.Camera;
