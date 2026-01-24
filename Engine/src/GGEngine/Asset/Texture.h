@@ -8,6 +8,7 @@
 #include "GGEngine/Renderer/BindlessTextureManager.h"
 
 #include <string>
+#include <vector>
 
 namespace GGEngine {
 
@@ -15,6 +16,18 @@ namespace GGEngine {
     class Texture;
     template<>
     constexpr AssetType GetAssetType<Texture>() { return AssetType::Texture; }
+
+    // CPU-side loaded texture data (for async loading)
+    struct GG_API TextureCPUData
+    {
+        std::vector<uint8_t> pixels;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        uint32_t channels = 4;
+        std::string sourcePath;
+
+        bool IsValid() const { return !pixels.empty() && width > 0 && height > 0; }
+    };
 
     // Texture specification for creation
     struct GG_API TextureSpecification
@@ -51,7 +64,31 @@ namespace GGEngine {
         AssetType GetType() const override { return AssetType::Texture; }
 
         // Load from image file (PNG, JPG, BMP, TGA supported)
+        // This is synchronous - calls LoadCPU then UploadGPU
         bool Load(const std::string& path);
+
+        // ================================================================
+        // Async Loading Support
+        // ================================================================
+
+        // Load image file to CPU memory (thread-safe, can run on worker thread)
+        // Returns TextureCPUData with pixel data, or empty data on failure
+        static TextureCPUData LoadCPU(const std::string& path);
+
+        // Upload CPU data to GPU and create resources (must run on main thread)
+        // Takes ownership of cpuData pixels
+        bool UploadGPU(TextureCPUData&& cpuData);
+
+        // Get source path for hot reload
+        const std::string& GetSourcePath() const { return m_SourcePath; }
+
+#ifndef GG_DIST
+        // Reload texture from disk, preserving bindless index
+        // Available in Debug and Release builds, excluded from Dist
+        bool Reload();
+#endif
+
+        // ================================================================
 
         // Set filter mode (must be called before Load or CreateResources)
         void SetFilter(Filter minFilter, Filter magFilter) { m_MinFilter = minFilter; m_MagFilter = magFilter; }
@@ -91,6 +128,9 @@ namespace GGEngine {
 
         // Bindless texture index for shader access
         BindlessTextureIndex m_BindlessIndex = InvalidBindlessIndex;
+
+        // Source path for hot reload
+        std::string m_SourcePath;
 
         // Fallback texture (owned directly, not through AssetManager)
         static Scope<Texture> s_FallbackTexture;

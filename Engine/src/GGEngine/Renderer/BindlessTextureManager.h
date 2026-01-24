@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <queue>
 #include <unordered_map>
+#include <mutex>
 
 namespace GGEngine {
 
@@ -37,6 +38,10 @@ namespace GGEngine {
 
         // Register a texture and get its bindless index
         BindlessTextureIndex RegisterTexture(const Texture& texture);
+
+        // Register a texture at a specific index (for hot reload)
+        // The index must be valid (either previously used or within range)
+        BindlessTextureIndex RegisterTextureAtIndex(const Texture& texture, BindlessTextureIndex index);
 
         // Unregister a texture, returning its index to the free list
         void UnregisterTexture(BindlessTextureIndex index);
@@ -82,6 +87,9 @@ namespace GGEngine {
 
         // Map from texture RHI handle ID to bindless index
         std::unordered_map<uint64_t, BindlessTextureIndex> m_HandleToIndex;
+
+        // Mutex for thread-safe registration (hot reload may call from different contexts)
+        mutable std::mutex m_Mutex;
 
         bool m_Initialized = false;
     };

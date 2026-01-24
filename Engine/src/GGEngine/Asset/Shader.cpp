@@ -36,7 +36,7 @@ namespace GGEngine {
         LoadStageFromFile(ShaderStage::Compute, basePath + ".comp.spv");
 
         bool loadedAny = hasVertex || hasFragment || !m_Stages.empty();
-        m_Loaded = loadedAny;
+        SetState(loadedAny ? AssetState::Ready : AssetState::Failed);
         m_Path = basePath;
 
         // Extract name from path if not already set
@@ -117,7 +117,7 @@ namespace GGEngine {
             device.DestroyShaderModule(stageInfo.handle);
         }
         m_Stages.clear();
-        m_Loaded = false;
+        SetState(AssetState::Unloaded);
     }
 
     bool Shader::HasStage(ShaderStage stage) const

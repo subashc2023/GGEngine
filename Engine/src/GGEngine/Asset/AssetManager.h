@@ -8,8 +8,23 @@
 #include <unordered_map>
 #include <string>
 #include <vector>
+#include <functional>
+#include <mutex>
+#include <queue>
+
+#ifndef GG_DIST
+#include "GGEngine/Utils/FileWatcher.h"
+#endif
 
 namespace GGEngine {
+
+    // Forward declarations
+    class Texture;
+    struct TextureCPUData;
+
+    // Callback types
+    using AssetReadyCallback = std::function<void(AssetID id, bool success)>;
+    using AssetReloadCallback = std::function<void(AssetID id)>;
 
     class GG_API AssetManager
     {
@@ -18,6 +33,38 @@ namespace GGEngine {
 
         void Init();
         void Shutdown();
+
+        // Called every frame from main loop - processes pending async loads and callbacks
+        void Update();
+
+        // ================================================================
+        // Async Loading API
+        // ================================================================
+
+        // Load texture asynchronously - returns handle immediately
+        // Handle's IsReady() returns false until load completes
+        // Use OnAssetReady() to get notified when loading finishes
+        AssetHandle<Texture> LoadTextureAsync(const std::string& path);
+
+        // Register callback for when an asset becomes ready (or fails)
+        void OnAssetReady(AssetID id, AssetReadyCallback callback);
+
+        // ================================================================
+        // Hot Reload API (Debug & Release builds, excluded from Dist)
+        // ================================================================
+#ifndef GG_DIST
+        // Enable/disable automatic hot reload for assets in watched directories
+        void EnableHotReload(bool enable);
+        bool IsHotReloadEnabled() const { return m_HotReloadEnabled; }
+
+        // Watch a directory for file changes (relative to asset root)
+        void WatchDirectory(const std::string& relativePath);
+
+        // Register callback for when an asset is reloaded
+        void OnAssetReload(AssetID id, AssetReloadCallback callback);
+#endif
+
+        // ================================================================
 
         // Set custom asset root (optional - auto-detected if not set)
         void SetAssetRoot(const std::filesystem::path& root);
@@ -65,6 +112,14 @@ namespace GGEngine {
         AssetManager& operator=(const AssetManager&) = delete;
 
         void DetectAssetRoot();
+        void ProcessPendingTextureUploads();
+        void FireReadyCallbacks(AssetID id, bool success);
+
+#ifndef GG_DIST
+        void ProcessFileChanges();
+        void OnFileChanged(const std::filesystem::path& path, FileChangeType type);
+        void FireReloadCallbacks(AssetID id);
+#endif
 
         std::filesystem::path m_AssetRoot;
         std::vector<std::string> m_SearchPaths;  // Additional search paths (relative to root)
@@ -72,6 +127,41 @@ namespace GGEngine {
         std::unordered_map<AssetID, Ref<Asset>> m_AssetsByID;
         std::unordered_map<AssetID, uint32_t> m_Generations;
         AssetID m_NextID = 1;
+
+        // ================================================================
+        // Async Loading State
+        // ================================================================
+
+        // Pending texture uploads (CPU data ready, waiting for GPU upload)
+        struct PendingTextureUpload
+        {
+            AssetID assetId;
+            std::unique_ptr<TextureCPUData> cpuData;
+        };
+        std::queue<PendingTextureUpload> m_PendingTextureUploads;
+        std::mutex m_PendingUploadsMutex;
+
+        // Asset ready callbacks
+        std::unordered_map<AssetID, std::vector<AssetReadyCallback>> m_ReadyCallbacks;
+        std::mutex m_CallbacksMutex;
+
+        // ================================================================
+        // Hot Reload State (Debug & Release, excluded from Dist)
+        // ================================================================
+#ifndef GG_DIST
+        FileWatcher m_FileWatcher;
+        bool m_HotReloadEnabled = false;
+
+        // Map from absolute file path to asset path for quick lookup during file changes
+        std::unordered_map<std::string, std::string> m_AbsoluteToAssetPath;
+
+        // Pending reloads (file path -> time of change, for debouncing)
+        std::unordered_map<std::string, std::chrono::steady_clock::time_point> m_PendingReloads;
+        std::chrono::milliseconds m_ReloadDebounceTime{100};  // Wait 100ms after last change
+
+        // Asset reload callbacks
+        std::unordered_map<AssetID, std::vector<AssetReloadCallback>> m_ReloadCallbacks;
+#endif
     };
 
     // Template implementations

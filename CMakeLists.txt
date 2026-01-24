@@ -114,6 +114,8 @@ set(ENGINE_SOURCES
     Engine/src/GGEngine/Core/Log.cpp
     Engine/src/GGEngine/Core/Profiler.h
     Engine/src/GGEngine/Core/Profiler.cpp
+    Engine/src/GGEngine/Core/JobSystem.h
+    Engine/src/GGEngine/Core/JobSystem.cpp
     Engine/src/GGEngine/Debug/Instrumentor.h
     Engine/src/GGEngine/Debug/Instrumentor.cpp
     Engine/src/GGEngine/Events/Event.h
@@ -157,6 +159,8 @@ set(ENGINE_SOURCES
     Engine/src/GGEngine/ECS/SceneSerializer.cpp
     Engine/src/GGEngine/Utils/FileDialogs.h
     Engine/src/GGEngine/Utils/FileDialogs.cpp
+    Engine/src/GGEngine/Utils/FileWatcher.h
+    Engine/src/GGEngine/Utils/FileWatcher.cpp
     Vendor/tinyfiledialogs/tinyfiledialogs.c
     Engine/src/Platform/Vulkan/VulkanContext.h
     Engine/src/Platform/Vulkan/VulkanContext.cpp
@@ -201,6 +205,8 @@ set(ENGINE_SOURCES
     Engine/src/GGEngine/Renderer/TextureAtlas.cpp
     Engine/src/GGEngine/Renderer/BindlessTextureManager.h
     Engine/src/GGEngine/Renderer/BindlessTextureManager.cpp
+    Engine/src/GGEngine/Renderer/TransferQueue.h
+    Engine/src/GGEngine/Renderer/TransferQueue.cpp
     Engine/src/GGEngine/ParticleSystem/Random.h
     Engine/src/GGEngine/ParticleSystem/Random.cpp
     Engine/src/GGEngine/ParticleSystem/ParticleSystem.h

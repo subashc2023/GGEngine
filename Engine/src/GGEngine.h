@@ -10,6 +10,7 @@
 #include "GGEngine/Core/KeyCodes.h"
 #include "GGEngine/Core/MouseButtonCodes.h"
 #include "GGEngine/Core/Profiler.h"
+#include "GGEngine/Core/JobSystem.h"
 
 #include "GGEngine/Asset/AssetManager.h"
 #include "GGEngine/Asset/Shader.h"

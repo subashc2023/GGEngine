@@ -1,6 +1,10 @@
 #include "ggpch.h"
 #include "AssetManager.h"
 #include "Texture.h"
+#include "GGEngine/Core/JobSystem.h"
+
+#include <algorithm>
+#include <chrono>
 
 // Platform-specific includes for executable path detection
 #ifdef GG_PLATFORM_WINDOWS
@@ -34,6 +38,148 @@ namespace GGEngine {
 
         UnloadAll();
         GG_CORE_INFO("AssetManager shutdown");
+    }
+
+    void AssetManager::Update()
+    {
+        // Process pending texture uploads (CPU data -> GPU)
+        ProcessPendingTextureUploads();
+
+#ifndef GG_DIST
+        // Process file changes for hot reload
+        if (m_HotReloadEnabled)
+        {
+            ProcessFileChanges();
+        }
+#endif
+    }
+
+    AssetHandle<Texture> AssetManager::LoadTextureAsync(const std::string& path)
+    {
+        // Check if already loaded or loading
+        auto it = m_Assets.find(path);
+        if (it != m_Assets.end())
+        {
+            auto asset = it->second;
+            return AssetHandle<Texture>(asset->GetID(), m_Generations[asset->GetID()]);
+        }
+
+        // Create the asset immediately (in Loading state)
+        auto texture = CreateRef<Texture>();
+        texture->m_ID = m_NextID++;
+        texture->m_Path = path;
+        texture->SetState(AssetState::Loading);
+        m_Generations[texture->m_ID] = 1;
+
+        // Store it before submitting job (so handle is valid immediately)
+        m_Assets[path] = texture;
+        m_AssetsByID[texture->m_ID] = texture;
+
+        AssetID assetId = texture->m_ID;
+        AssetHandle<Texture> handle(assetId, m_Generations[assetId]);
+
+        GG_CORE_TRACE("Async texture load started: {} (ID: {})", path, assetId);
+
+        // Submit job to load CPU data on worker thread
+        JobSystem::Get().Submit(
+            [this, path, assetId]() {
+                // Worker thread: Load texture data to CPU
+                TextureCPUData cpuData = Texture::LoadCPU(path);
+
+                // Queue for GPU upload on main thread
+                auto cpuDataPtr = std::make_unique<TextureCPUData>(std::move(cpuData));
+
+                {
+                    std::lock_guard<std::mutex> lock(m_PendingUploadsMutex);
+                    m_PendingTextureUploads.push({assetId, std::move(cpuDataPtr)});
+                }
+            }
+        );
+
+        return handle;
+    }
+
+    void AssetManager::OnAssetReady(AssetID id, AssetReadyCallback callback)
+    {
+        if (!callback) return;
+
+        // Check if asset is already ready
+        auto it = m_AssetsByID.find(id);
+        if (it != m_AssetsByID.end() && it->second->IsReady())
+        {
+            // Already ready, call immediately
+            callback(id, true);
+            return;
+        }
+
+        // Register callback for later
+        std::lock_guard<std::mutex> lock(m_CallbacksMutex);
+        m_ReadyCallbacks[id].push_back(std::move(callback));
+    }
+
+    void AssetManager::ProcessPendingTextureUploads()
+    {
+        // Swap out pending uploads to minimize lock time
+        std::queue<PendingTextureUpload> uploadsToProcess;
+        {
+            std::lock_guard<std::mutex> lock(m_PendingUploadsMutex);
+            std::swap(uploadsToProcess, m_PendingTextureUploads);
+        }
+
+        while (!uploadsToProcess.empty())
+        {
+            auto& upload = uploadsToProcess.front();
+
+            // Find the texture asset
+            auto it = m_AssetsByID.find(upload.assetId);
+            if (it == m_AssetsByID.end())
+            {
+                GG_CORE_WARN("Async texture upload: asset {} no longer exists", upload.assetId);
+                uploadsToProcess.pop();
+                continue;
+            }
+
+            Texture* texture = static_cast<Texture*>(it->second.get());
+
+            bool success = false;
+            if (upload.cpuData && upload.cpuData->IsValid())
+            {
+                // Upload to GPU
+                texture->SetState(AssetState::Uploading);
+                success = texture->UploadGPU(std::move(*upload.cpuData));
+            }
+            else
+            {
+                // CPU load failed
+                texture->SetError("Failed to load texture data");
+                GG_CORE_ERROR("Async texture load failed for asset {}", upload.assetId);
+            }
+
+            // Fire callbacks
+            FireReadyCallbacks(upload.assetId, success);
+
+            uploadsToProcess.pop();
+        }
+    }
+
+    void AssetManager::FireReadyCallbacks(AssetID id, bool success)
+    {
+        std::vector<AssetReadyCallback> callbacks;
+        {
+            std::lock_guard<std::mutex> lock(m_CallbacksMutex);
+            auto it = m_ReadyCallbacks.find(id);
+            if (it != m_ReadyCallbacks.end())
+            {
+                callbacks = std::move(it->second);
+                m_ReadyCallbacks.erase(it);
+            }
+        }
+
+        for (auto& callback : callbacks)
+        {
+            if (callback)
+                callback(id, success);
+        }
     }
 
     void AssetManager::DetectAssetRoot()
@@ -221,5 +367,150 @@ namespace GGEngine {
 
         return buffer;
     }
+
+    // ========================================================================
+    // Hot Reload Implementation (Debug & Release, excluded from Dist)
+    // ========================================================================
+
+#ifndef GG_DIST
+    void AssetManager::EnableHotReload(bool enable)
+    {
+        if (m_HotReloadEnabled == enable)
+            return;
+
+        m_HotReloadEnabled = enable;
+        m_FileWatcher.SetEnabled(enable);
+
+        if (enable)
+        {
+            GG_CORE_INFO("Hot reload enabled");
+        }
+        else
+        {
+            GG_CORE_INFO("Hot reload disabled");
+        }
+    }
+
+    void AssetManager::WatchDirectory(const std::string& relativePath)
+    {
+        std::filesystem::path fullPath = ResolvePath(relativePath);
+        if (!std::filesystem::exists(fullPath))
+        {
+            GG_CORE_WARN("AssetManager::WatchDirectory - directory does not exist: {}", relativePath);
+            return;
+        }
+
+        // Set up file watch callback
+        m_FileWatcher.Watch(fullPath, [this](const std::filesystem::path& path, FileChangeType type) {
+            OnFileChanged(path, type);
+        });
+    }
+
+    void AssetManager::OnAssetReload(AssetID id, AssetReloadCallback callback)
+    {
+        if (!callback) return;
+
+        m_ReloadCallbacks[id].push_back(std::move(callback));
+    }
+
+    void AssetManager::OnFileChanged(const std::filesystem::path& changedPath, FileChangeType type)
+    {
+        // Only care about modifications (not creates/deletes for hot reload)
+        if (type != FileChangeType::Modified)
+            return;
+
+        std::string pathStr = changedPath.string();
+
+        // Check if this is a known asset file extension
+        std::string ext = changedPath.extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+
+        // Only reload supported texture formats
+        if (ext != ".png" && ext != ".jpg" && ext != ".jpeg" &&
+            ext != ".bmp" && ext != ".tga" && ext != ".gif")
+        {
+            return;
+        }
+
+        // Add to pending reloads with debounce time
+        m_PendingReloads[pathStr] = std::chrono::steady_clock::now();
+
+        GG_CORE_TRACE("File change detected: {} (queued for reload)", changedPath.filename().string());
+    }
+
+    void AssetManager::ProcessFileChanges()
+    {
+        // Poll file watcher
+        m_FileWatcher.Update();
+
+        // Process debounced reloads
+        auto now = std::chrono::steady_clock::now();
+        std::vector<std::string> readyToReload;
+
+        for (auto& [path, lastChange] : m_PendingReloads)
+        {
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastChange);
+            if (elapsed >= m_ReloadDebounceTime)
+            {
+                readyToReload.push_back(path);
+            }
+        }
+
+        for (const auto& absolutePath : readyToReload)
+        {
+            m_PendingReloads.erase(absolutePath);
+
+            // Find matching asset by comparing resolved paths
+            std::filesystem::path changedPath(absolutePath);
+
+            for (auto& [assetPath, asset] : m_Assets)
+            {
+                // Skip non-texture assets
+                if (asset->GetType() != AssetType::Texture)
+                    continue;
+
+                Texture* texture = static_cast<Texture*>(asset.get());
+                std::filesystem::path resolvedAssetPath = ResolvePath(texture->GetSourcePath());
+
+                // Compare canonical paths
+                try
+                {
+                    auto canonicalChanged = std::filesystem::canonical(changedPath);
+                    auto canonicalAsset = std::filesystem::canonical(resolvedAssetPath);
+
+                    if (canonicalChanged == canonicalAsset)
+                    {
+                        GG_CORE_INFO("Hot reload triggered for: {}", assetPath);
+
+                        if (texture->Reload())
+                        {
+                            // Fire reload callbacks
+                            FireReloadCallbacks(asset->GetID());
+                        }
+                        break;  // Found the matching asset
+                    }
+                }
+                catch (const std::filesystem::filesystem_error& e)
+                {
+                    // Path doesn't exist or access denied - skip
+                    GG_CORE_TRACE("Hot reload path comparison failed: {}", e.what());
+                }
+            }
+        }
+    }
+
+    void AssetManager::FireReloadCallbacks(AssetID id)
+    {
+        auto it = m_ReloadCallbacks.find(id);
+        if (it == m_ReloadCallbacks.end())
+            return;
+
+        for (auto& callback : it->second)
+        {
+            if (callback)
+                callback(id);
+        }
+    }
+#endif
 
 }

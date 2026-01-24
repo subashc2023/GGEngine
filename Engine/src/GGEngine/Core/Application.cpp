@@ -12,7 +12,9 @@
 #include "GGEngine/Renderer/MaterialLibrary.h"
 #include "GGEngine/Renderer/Renderer2D.h"
 #include "GGEngine/Renderer/BindlessTextureManager.h"
+#include "GGEngine/Renderer/TransferQueue.h"
 #include "GGEngine/Core/Profiler.h"
+#include "GGEngine/Core/JobSystem.h"
 #include "GGEngine/RHI/RHIDevice.h"
 #include "Platform/Vulkan/VulkanContext.h"
 
@@ -31,6 +33,9 @@ namespace GGEngine {
         m_Window->SetEventCallback([this](Event& e) { OnEvent(e); });
 
         VulkanContext::Get().Init(static_cast<GLFWwindow*>(m_Window->GetNativeWindow()));
+
+        // Initialize job system for async asset loading
+        JobSystem::Get().Init(1);  // Single worker thread for I/O-bound asset loading
 
         // Initialize RHI device (requires VulkanContext to be ready)
         RHIDevice::Get().Init(m_Window->GetNativeWindow());
@@ -67,6 +72,9 @@ namespace GGEngine {
         // Shutdown Renderer2D before materials/shaders (it uses both)
         Renderer2D::Shutdown();
 
+        // Shutdown transfer queue before asset system
+        TransferQueue::Get().Shutdown();
+
         // Shutdown asset system before Vulkan (assets may hold GPU resources)
         // Materials depend on shaders, so shut down materials first
         m_MaterialLibrary.Shutdown();
@@ -76,6 +84,9 @@ namespace GGEngine {
 
         // Shutdown bindless texture manager before Vulkan
         BindlessTextureManager::Get().Shutdown();
+
+        // Shutdown job system (waits for pending jobs to complete)
+        JobSystem::Get().Shutdown();
 
         // Shutdown RHI device before Vulkan context
         RHIDevice::Get().Shutdown();
@@ -139,6 +150,16 @@ namespace GGEngine {
             float time = static_cast<float>(glfwGetTime());
             Timestep timestep = time - m_LastFrameTime;
             m_LastFrameTime = time;
+
+            // Cleanup staging buffers from completed frame (safe now that fence waited)
+            TransferQueue::Get().EndFrame(RHIDevice::Get().GetCurrentFrameIndex());
+
+            // Process async asset loading - uploads pending textures and fires callbacks
+            AssetManager::Get().Update();
+            JobSystem::Get().ProcessCompletedCallbacks();
+
+            // Flush pending GPU uploads before rendering
+            TransferQueue::Get().FlushUploads(RHIDevice::Get().GetCurrentCommandBuffer());
 
             // Offscreen rendering phase - layers render to their framebuffers
             for (Layer* layer : m_LayerStack)

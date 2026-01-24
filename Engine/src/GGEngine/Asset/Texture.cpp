@@ -55,7 +55,7 @@ namespace GGEngine {
         s_FallbackTexture->m_Channels = 4;
         s_FallbackTexture->m_Format = TextureFormat::R8G8B8A8_UNORM;
         s_FallbackTexture->m_Path = "__fallback__";
-        s_FallbackTexture->m_Loaded = true;
+        s_FallbackTexture->SetState(AssetState::Ready);
 
         s_FallbackTexture->CreateResources(pixels.data());
 
@@ -98,7 +98,7 @@ namespace GGEngine {
         texture->m_Channels = 4;  // Always RGBA
         texture->m_Format = TextureFormat::R8G8B8A8_UNORM;
         texture->m_Path = "__generated__";
-        texture->m_Loaded = true;
+        texture->SetState(AssetState::Ready);
         texture->m_MinFilter = minFilter;
         texture->m_MagFilter = magFilter;
 
@@ -116,11 +116,30 @@ namespace GGEngine {
     bool Texture::Load(const std::string& path)
     {
         GG_PROFILE_SCOPE("Texture::Load");
+
+        // Use the two-phase loading: CPU then GPU
+        TextureCPUData cpuData = LoadCPU(path);
+        if (!cpuData.IsValid())
+        {
+            SetError("Failed to load texture from file");
+            return false;
+        }
+
+        return UploadGPU(std::move(cpuData));
+    }
+
+    TextureCPUData Texture::LoadCPU(const std::string& path)
+    {
+        GG_PROFILE_SCOPE("Texture::LoadCPU");
+
+        TextureCPUData result;
+        result.sourcePath = path;
+
         // Resolve path through asset manager
         auto resolvedPath = AssetManager::Get().ResolvePath(path);
         std::string pathStr = resolvedPath.string();
 
-        // Load image using stb_image
+        // Load image using stb_image (thread-safe as long as we don't share file handles)
         int width, height, channels;
         stbi_set_flip_vertically_on_load(1);  // Vulkan expects bottom-left origin like OpenGL
 
@@ -133,21 +152,49 @@ namespace GGEngine {
         if (!pixels)
         {
             GG_CORE_ERROR("Failed to load texture: {} - {}", path, stbi_failure_reason());
-            return false;
+            return result;  // Return empty/invalid data
         }
 
-        m_Width = static_cast<uint32_t>(width);
-        m_Height = static_cast<uint32_t>(height);
-        m_Channels = 4;  // We always request RGBA
-        m_Format = TextureFormat::R8G8B8A8_UNORM;
-        m_Path = path;
-
-        CreateResources(pixels);
+        // Copy pixel data to our vector (stbi uses malloc, we need to free it)
+        uint64_t imageSize = static_cast<uint64_t>(width) * height * 4;
+        result.pixels.resize(imageSize);
+        std::memcpy(result.pixels.data(), pixels, imageSize);
+        result.width = static_cast<uint32_t>(width);
+        result.height = static_cast<uint32_t>(height);
+        result.channels = 4;  // We always request RGBA
 
         stbi_image_free(pixels);
 
-        m_Loaded = true;
-        GG_CORE_INFO("Texture loaded: {} ({}x{}, {} channels)", path, m_Width, m_Height, channels);
+        GG_CORE_TRACE("Texture::LoadCPU completed: {} ({}x{})", path, result.width, result.height);
+        return result;
+    }
+
+    bool Texture::UploadGPU(TextureCPUData&& cpuData)
+    {
+        GG_PROFILE_SCOPE("Texture::UploadGPU");
+
+        if (!cpuData.IsValid())
+        {
+            GG_CORE_ERROR("Texture::UploadGPU - invalid CPU data");
+            SetError("Invalid CPU data for GPU upload");
+            return false;
+        }
+
+        m_Width = cpuData.width;
+        m_Height = cpuData.height;
+        m_Channels = cpuData.channels;
+        m_Format = TextureFormat::R8G8B8A8_UNORM;
+        m_Path = cpuData.sourcePath;
+        m_SourcePath = cpuData.sourcePath;
+
+        CreateResources(cpuData.pixels.data());
+
+        // Clear CPU data to free memory (pixels moved, now release)
+        cpuData.pixels.clear();
+        cpuData.pixels.shrink_to_fit();
+
+        SetState(AssetState::Ready);
+        GG_CORE_INFO("Texture uploaded to GPU: {} ({}x{})", m_SourcePath, m_Width, m_Height);
         return true;
     }
 
@@ -205,6 +252,122 @@ namespace GGEngine {
         }
     }
 
+#ifndef GG_DIST
+    bool Texture::Reload()
+    {
+        GG_PROFILE_SCOPE("Texture::Reload");
+
+        if (m_SourcePath.empty())
+        {
+            GG_CORE_WARN("Cannot reload texture without source path");
+            return false;
+        }
+
+        // Save the bindless index before unloading
+        BindlessTextureIndex savedIndex = m_BindlessIndex;
+        Filter savedMinFilter = m_MinFilter;
+        Filter savedMagFilter = m_MagFilter;
+
+        GG_CORE_INFO("Hot reloading texture: {} (bindless index: {})", m_SourcePath, savedIndex);
+
+        SetState(AssetState::Reloading);
+
+        // Destroy GPU resources WITHOUT unregistering from bindless manager
+        // (we want to reuse the same slot)
+        if (m_SamplerHandle.IsValid())
+        {
+            RHIDevice::Get().DestroySampler(m_SamplerHandle);
+            m_SamplerHandle = NullSampler;
+        }
+
+        if (m_Handle.IsValid())
+        {
+            RHIDevice::Get().DestroyTexture(m_Handle);
+            m_Handle = NullTexture;
+        }
+
+        // Reload from disk (synchronous for simplicity - hot reload is dev-only)
+        TextureCPUData cpuData = LoadCPU(m_SourcePath);
+        if (!cpuData.IsValid())
+        {
+            SetError("Failed to reload texture from disk");
+            GG_CORE_ERROR("Hot reload failed for texture: {}", m_SourcePath);
+            return false;
+        }
+
+        // Store dimensions and path
+        m_Width = cpuData.width;
+        m_Height = cpuData.height;
+        m_Channels = cpuData.channels;
+        m_MinFilter = savedMinFilter;
+        m_MagFilter = savedMagFilter;
+
+        // Create new GPU resources
+        auto& device = RHIDevice::Get();
+        uint64_t imageSize = m_Width * m_Height * 4;
+
+        RHITextureSpecification textureSpec;
+        textureSpec.width = m_Width;
+        textureSpec.height = m_Height;
+        textureSpec.depth = 1;
+        textureSpec.mipLevels = 1;
+        textureSpec.arrayLayers = 1;
+        textureSpec.format = m_Format;
+        textureSpec.samples = SampleCount::Count1;
+        textureSpec.usage = TextureUsage::Sampled | TextureUsage::TransferDst;
+        textureSpec.debugName = m_Path.string();
+
+        m_Handle = device.CreateTexture(textureSpec);
+        if (!m_Handle.IsValid())
+        {
+            SetError("Failed to create texture during reload");
+            return false;
+        }
+
+        device.UploadTextureData(m_Handle, cpuData.pixels.data(), imageSize);
+
+        RHISamplerSpecification samplerSpec;
+        samplerSpec.minFilter = m_MinFilter;
+        samplerSpec.magFilter = m_MagFilter;
+        samplerSpec.mipmapMode = (m_MinFilter == Filter::Nearest) ? MipmapMode::Nearest : MipmapMode::Linear;
+        samplerSpec.addressModeU = AddressMode::Repeat;
+        samplerSpec.addressModeV = AddressMode::Repeat;
+        samplerSpec.addressModeW = AddressMode::Repeat;
+
+        m_SamplerHandle = device.CreateSampler(samplerSpec);
+        if (!m_SamplerHandle.IsValid())
+        {
+            device.DestroyTexture(m_Handle);
+            m_Handle = NullTexture;
+            SetError("Failed to create sampler during reload");
+            return false;
+        }
+
+        // Re-register at the same bindless index to preserve shader references
+        if (savedIndex != InvalidBindlessIndex)
+        {
+            m_BindlessIndex = BindlessTextureManager::Get().RegisterTextureAtIndex(*this, savedIndex);
+            if (m_BindlessIndex != savedIndex)
+            {
+                GG_CORE_WARN("Bindless index changed during hot reload: {} -> {}", savedIndex, m_BindlessIndex);
+            }
+        }
+        else
+        {
+            // Texture wasn't registered before, register now
+            auto& bindlessManager = BindlessTextureManager::Get();
+            if (bindlessManager.GetMaxTextures() > 0)
+            {
+                m_BindlessIndex = bindlessManager.RegisterTexture(*this);
+            }
+        }
+
+        SetState(AssetState::Ready);
+        GG_CORE_INFO("Hot reload complete: {} ({}x{}, bindless: {})", m_SourcePath, m_Width, m_Height, m_BindlessIndex);
+        return true;
+    }
+#endif
+
     void Texture::Unload()
     {
         // Unregister from BindlessTextureManager first
@@ -228,7 +391,7 @@ namespace GGEngine {
             m_Handle = NullTexture;
         }
 
-        m_Loaded = false;
+        SetState(AssetState::Unloaded);
     }
 
 }

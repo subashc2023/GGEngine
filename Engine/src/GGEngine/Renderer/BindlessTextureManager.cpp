@@ -127,6 +127,8 @@ namespace GGEngine {
 
     BindlessTextureIndex BindlessTextureManager::RegisterTexture(const Texture& texture)
     {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+
         if (!m_Initialized)
         {
             GG_CORE_WARN("BindlessTextureManager not initialized!");
@@ -174,8 +176,60 @@ namespace GGEngine {
         return index;
     }
 
+    BindlessTextureIndex BindlessTextureManager::RegisterTextureAtIndex(const Texture& texture, BindlessTextureIndex index)
+    {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+
+        if (!m_Initialized)
+        {
+            GG_CORE_WARN("BindlessTextureManager not initialized!");
+            return InvalidBindlessIndex;
+        }
+
+        if (index == InvalidBindlessIndex || index >= m_MaxTextures)
+        {
+            GG_CORE_WARN("RegisterTextureAtIndex: invalid index {}", index);
+            return InvalidBindlessIndex;
+        }
+
+        RHITextureHandle handle = texture.GetHandle();
+        if (!handle.IsValid())
+        {
+            GG_CORE_WARN("Cannot register texture with invalid handle!");
+            return InvalidBindlessIndex;
+        }
+
+        // Update descriptor set at the specific index
+        RHIDevice::Get().UpdateBindlessSamplerTextureSlot(m_DescriptorSetHandle, index, handle);
+
+        // Update mapping (remove old handle if exists, add new)
+        for (auto it = m_HandleToIndex.begin(); it != m_HandleToIndex.end(); )
+        {
+            if (it->second == index)
+            {
+                it = m_HandleToIndex.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+        m_HandleToIndex[handle.id] = index;
+
+        // Ensure NextIndex is at least index+1
+        if (index >= m_NextIndex)
+        {
+            m_NextIndex = index + 1;
+        }
+
+        GG_CORE_TRACE("BindlessTextureManager: registered texture at index {} (hot reload)", index);
+        return index;
+    }
+
     void BindlessTextureManager::UnregisterTexture(BindlessTextureIndex index)
     {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+
         if (!m_Initialized)
             return;
 
