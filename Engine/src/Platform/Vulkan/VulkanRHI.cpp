@@ -712,11 +712,12 @@ namespace GGEngine {
 
     // Descriptor Set
     RHIDescriptorSetHandle VulkanResourceRegistry::RegisterDescriptorSet(VkDescriptorSet set,
-                                                                          RHIDescriptorSetLayoutHandle layoutHandle)
+                                                                          RHIDescriptorSetLayoutHandle layoutHandle,
+                                                                          VkDescriptorPool owningPool)
     {
         std::lock_guard<std::mutex> lock(m_Mutex);
         uint64_t id = GenerateId();
-        m_DescriptorSets[id] = { set, layoutHandle };
+        m_DescriptorSets[id] = { set, layoutHandle, owningPool };
         return RHIDescriptorSetHandle{ id };
     }
 
@@ -990,13 +991,23 @@ namespace GGEngine {
         if (!handle.IsValid()) return;
 
         auto device = VulkanContext::Get().GetDevice();
-        auto pool = VulkanContext::Get().GetDescriptorPool();
         auto& registry = VulkanResourceRegistry::Get();
-        VkDescriptorSet descriptorSet = registry.GetDescriptorSet(handle);
+        auto setData = registry.GetDescriptorSetData(handle);
 
-        if (descriptorSet != VK_NULL_HANDLE)
+        if (setData.descriptorSet != VK_NULL_HANDLE)
         {
-            vkFreeDescriptorSets(device, pool, 1, &descriptorSet);
+            // Use the owning pool if this set has one, otherwise use the global pool
+            VkDescriptorPool pool = setData.owningPool != VK_NULL_HANDLE
+                ? setData.owningPool
+                : VulkanContext::Get().GetDescriptorPool();
+
+            vkFreeDescriptorSets(device, pool, 1, &setData.descriptorSet);
+
+            // If this set owned its pool, destroy the pool now
+            if (setData.owningPool != VK_NULL_HANDLE)
+            {
+                vkDestroyDescriptorPool(device, setData.owningPool, nullptr);
+            }
         }
         registry.UnregisterDescriptorSet(handle);
     }
@@ -1951,7 +1962,8 @@ namespace GGEngine {
             return NullDescriptorSet;
         }
 
-        return registry.RegisterDescriptorSet(descriptorSet, layoutHandle);
+        // Register with the owning pool so it gets destroyed when the set is freed
+        return registry.RegisterDescriptorSet(descriptorSet, layoutHandle, pool);
     }
 
     void RHIDevice::UpdateBindlessTexture(RHIDescriptorSetHandle setHandle, uint32_t index,
@@ -2102,7 +2114,8 @@ namespace GGEngine {
             return NullDescriptorSet;
         }
 
-        return registry.RegisterDescriptorSet(descriptorSet, layoutHandle);
+        // Register with the owning pool so it gets destroyed when the set is freed
+        return registry.RegisterDescriptorSet(descriptorSet, layoutHandle, pool);
     }
 
     void RHIDevice::UpdateBindlessSamplerTextureSlot(

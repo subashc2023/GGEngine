@@ -180,9 +180,11 @@ namespace GGEngine {
         {
             VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
             RHIDescriptorSetLayoutHandle layoutHandle;
+            VkDescriptorPool owningPool = VK_NULL_HANDLE;  // If non-null, this pool is owned and will be destroyed with the set
         };
 
-        RHIDescriptorSetHandle RegisterDescriptorSet(VkDescriptorSet set, RHIDescriptorSetLayoutHandle layoutHandle);
+        RHIDescriptorSetHandle RegisterDescriptorSet(VkDescriptorSet set, RHIDescriptorSetLayoutHandle layoutHandle,
+                                                      VkDescriptorPool owningPool = VK_NULL_HANDLE);
         void UnregisterDescriptorSet(RHIDescriptorSetHandle handle);
         DescriptorSetData GetDescriptorSetData(RHIDescriptorSetHandle handle) const;
         VkDescriptorSet GetDescriptorSet(RHIDescriptorSetHandle handle) const;
