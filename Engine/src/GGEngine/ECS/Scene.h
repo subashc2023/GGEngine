@@ -61,20 +61,6 @@ namespace GGEngine {
         // Scene-wide operations
         void OnUpdate(Timestep ts);
 
-        // RHI-based rendering (external camera)
-        void OnRender(const Camera& camera, RHIRenderPassHandle renderPass,
-                      RHICommandBufferHandle cmd, uint32_t width, uint32_t height);
-
-        // Runtime rendering using primary camera entity (ECS camera system)
-        void OnRenderRuntime(RHIRenderPassHandle renderPass,
-                             RHICommandBufferHandle cmd, uint32_t width, uint32_t height);
-
-        // Instanced rendering (parallel sprite processing, GPU instancing)
-        void OnRenderInstanced(const Camera& camera, RHIRenderPassHandle renderPass,
-                               RHICommandBufferHandle cmd, uint32_t width, uint32_t height);
-        void OnRenderRuntimeInstanced(RHIRenderPassHandle renderPass,
-                                       RHICommandBufferHandle cmd, uint32_t width, uint32_t height);
-
         // Viewport resize (updates camera aspect ratios)
         void OnViewportResize(uint32_t width, uint32_t height);
 
@@ -89,21 +75,16 @@ namespace GGEngine {
         const std::string& GetName() const { return m_Name; }
         void SetName(const std::string& name) { m_Name = name; }
 
-    private:
-        // Allocate or reuse an entity slot, returns (index, generation)
-        std::pair<Entity, uint32_t> AllocateEntitySlot();
-
-        // Internal rendering helpers (shared between OnRender and OnRenderRuntime)
-        void RenderTilemaps();
-        void RenderSprites();
-        void RenderSpritesInstanced();  // Parallel instanced rendering path
-
-        // Get storage for component type
+        // Get storage for component type (for bulk iteration in systems)
         template<typename T>
         ComponentStorage<T>& GetStorage();
 
         template<typename T>
         const ComponentStorage<T>& GetStorage() const;
+
+    private:
+        // Allocate or reuse an entity slot, returns (index, generation)
+        std::pair<Entity, uint32_t> AllocateEntitySlot();
 
         std::string m_Name;
 

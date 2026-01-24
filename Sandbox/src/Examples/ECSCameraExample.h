@@ -3,6 +3,7 @@
 #include "Example.h"
 #include "GGEngine/ECS/Scene.h"
 #include "GGEngine/ECS/Entity.h"
+#include "GGEngine/ECS/Systems/SpriteRenderSystem.h"
 
 // Demonstrates the ECS Camera System:
 // - Camera as an entity with CameraComponent
@@ -22,6 +23,7 @@ public:
 
 private:
     GGEngine::Scope<GGEngine::Scene> m_Scene;
+    GGEngine::SpriteRenderSystem m_SpriteRenderSystem;
 
     GGEngine::EntityID m_CameraEntity = GGEngine::InvalidEntityID;
     GGEngine::EntityID m_SecondCameraEntity = GGEngine::InvalidEntityID;

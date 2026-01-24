@@ -24,6 +24,13 @@ namespace GGEngine {
         RHICmd::BindPipeline(cmd, m_Handle);
     }
 
+    void Pipeline::Recreate()
+    {
+        GG_CORE_INFO("Recreating pipeline '{}'", m_Specification.debugName);
+        Destroy();
+        Create();
+    }
+
     void Pipeline::Create()
     {
         auto& device = RHIDevice::Get();

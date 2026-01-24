@@ -93,6 +93,9 @@ namespace GGEngine {
         // Bind to command buffer
         void Bind(RHICommandBufferHandle cmd);
 
+        // Recreate pipeline (useful after shader hot-reload)
+        void Recreate();
+
         RHIPipelineHandle GetHandle() const { return m_Handle; }
         RHIPipelineLayoutHandle GetLayoutHandle() const { return m_LayoutHandle; }
         const PipelineSpecification& GetSpecification() const { return m_Specification; }

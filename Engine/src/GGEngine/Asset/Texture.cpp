@@ -113,27 +113,23 @@ namespace GGEngine {
         Unload();
     }
 
-    bool Texture::Load(const std::string& path)
+    Result<void> Texture::Load(const std::string& path)
     {
         GG_PROFILE_SCOPE("Texture::Load");
 
         // Use the two-phase loading: CPU then GPU
-        TextureCPUData cpuData = LoadCPU(path);
-        if (!cpuData.IsValid())
-        {
-            SetError("Failed to load texture from file");
-            return false;
-        }
+        auto cpuDataResult = LoadCPU(path);
+        if (cpuDataResult.IsErr())
+            return Result<void>::Err(cpuDataResult.Error());
 
-        return UploadGPU(std::move(cpuData));
+        auto cpuData = std::move(cpuDataResult).Value();
+        GG_TRY_VOID(UploadGPU(std::move(cpuData)));
+        return Result<void>::Ok();
     }
 
-    TextureCPUData Texture::LoadCPU(const std::string& path)
+    Result<TextureCPUData> Texture::LoadCPU(const std::string& path)
     {
         GG_PROFILE_SCOPE("Texture::LoadCPU");
-
-        TextureCPUData result;
-        result.sourcePath = path;
 
         // Resolve path through asset manager
         auto resolvedPath = AssetManager::Get().ResolvePath(path);
@@ -151,11 +147,13 @@ namespace GGEngine {
 
         if (!pixels)
         {
-            GG_CORE_ERROR("Failed to load texture: {} - {}", path, stbi_failure_reason());
-            return result;  // Return empty/invalid data
+            return Result<TextureCPUData>::Err(
+                "Failed to load texture '" + path + "': " + stbi_failure_reason());
         }
 
         // Copy pixel data to our vector (stbi uses malloc, we need to free it)
+        TextureCPUData result;
+        result.sourcePath = path;
         uint64_t imageSize = static_cast<uint64_t>(width) * height * 4;
         result.pixels.resize(imageSize);
         std::memcpy(result.pixels.data(), pixels, imageSize);
@@ -166,18 +164,16 @@ namespace GGEngine {
         stbi_image_free(pixels);
 
         GG_CORE_TRACE("Texture::LoadCPU completed: {} ({}x{})", path, result.width, result.height);
-        return result;
+        return Result<TextureCPUData>::Ok(std::move(result));
     }
 
-    bool Texture::UploadGPU(TextureCPUData&& cpuData)
+    Result<void> Texture::UploadGPU(TextureCPUData&& cpuData)
     {
         GG_PROFILE_SCOPE("Texture::UploadGPU");
 
         if (!cpuData.IsValid())
         {
-            GG_CORE_ERROR("Texture::UploadGPU - invalid CPU data");
-            SetError("Invalid CPU data for GPU upload");
-            return false;
+            return Result<void>::Err("Invalid CPU data for GPU upload");
         }
 
         m_Width = cpuData.width;
@@ -195,7 +191,7 @@ namespace GGEngine {
 
         SetState(AssetState::Ready);
         GG_CORE_INFO("Texture uploaded to GPU: {} ({}x{})", m_SourcePath, m_Width, m_Height);
-        return true;
+        return Result<void>::Ok();
     }
 
     void Texture::CreateResources(const uint8_t* pixels)
@@ -253,14 +249,13 @@ namespace GGEngine {
     }
 
 #ifndef GG_DIST
-    bool Texture::Reload()
+    Result<void> Texture::Reload()
     {
         GG_PROFILE_SCOPE("Texture::Reload");
 
         if (m_SourcePath.empty())
         {
-            GG_CORE_WARN("Cannot reload texture without source path");
-            return false;
+            return Result<void>::Err("Cannot reload texture without source path");
         }
 
         // Save the bindless index before unloading
@@ -287,13 +282,13 @@ namespace GGEngine {
         }
 
         // Reload from disk (synchronous for simplicity - hot reload is dev-only)
-        TextureCPUData cpuData = LoadCPU(m_SourcePath);
-        if (!cpuData.IsValid())
+        auto cpuDataResult = LoadCPU(m_SourcePath);
+        if (cpuDataResult.IsErr())
         {
-            SetError("Failed to reload texture from disk");
-            GG_CORE_ERROR("Hot reload failed for texture: {}", m_SourcePath);
-            return false;
+            SetError(cpuDataResult.Error());
+            return Result<void>::Err("Hot reload failed: " + cpuDataResult.Error());
         }
+        auto cpuData = std::move(cpuDataResult).Value();
 
         // Store dimensions and path
         m_Width = cpuData.width;
@@ -320,8 +315,7 @@ namespace GGEngine {
         m_Handle = device.CreateTexture(textureSpec);
         if (!m_Handle.IsValid())
         {
-            SetError("Failed to create texture during reload");
-            return false;
+            return Result<void>::Err("Failed to create texture during reload");
         }
 
         device.UploadTextureData(m_Handle, cpuData.pixels.data(), imageSize);
@@ -339,8 +333,7 @@ namespace GGEngine {
         {
             device.DestroyTexture(m_Handle);
             m_Handle = NullTexture;
-            SetError("Failed to create sampler during reload");
-            return false;
+            return Result<void>::Err("Failed to create sampler during reload");
         }
 
         // Re-register at the same bindless index to preserve shader references
@@ -364,7 +357,7 @@ namespace GGEngine {
 
         SetState(AssetState::Ready);
         GG_CORE_INFO("Hot reload complete: {} ({}x{}, bindless: {})", m_SourcePath, m_Width, m_Height, m_BindlessIndex);
-        return true;
+        return Result<void>::Ok();
     }
 #endif
 

@@ -8,6 +8,8 @@
 #include "GGEngine/Renderer/Camera.h"
 #include "GGEngine/ECS/Scene.h"
 #include "GGEngine/ECS/Entity.h"
+#include "GGEngine/ECS/Systems/SpriteRenderSystem.h"
+#include "GGEngine/ECS/Systems/TilemapRenderSystem.h"
 
 class EditorLayer : public GGEngine::Layer
 {
@@ -38,6 +40,10 @@ private:
 
     // Camera system
     GGEngine::OrthographicCameraController m_CameraController;
+
+    // Render systems
+    GGEngine::TilemapRenderSystem m_TilemapRenderSystem;
+    GGEngine::SpriteRenderSystem m_SpriteRenderSystem;
 
     // Viewport state
     float m_ViewportWidth = 0.0f;

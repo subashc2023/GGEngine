@@ -3,6 +3,7 @@
 #include "Asset.h"
 #include "AssetManager.h"
 #include "GGEngine/Core/Core.h"
+#include "GGEngine/Core/Result.h"
 #include "GGEngine/RHI/RHITypes.h"
 #include "GGEngine/RHI/RHIEnums.h"
 
@@ -38,13 +39,24 @@ namespace GGEngine {
         AssetType GetType() const override { return AssetType::Shader; }
 
         // Load from SPIR-V files (e.g., "assets/shaders/compiled/triangle" loads triangle.vert.spv and triangle.frag.spv)
-        bool Load(const std::string& basePath);
+        Result<void> Load(const std::string& basePath);
 
         // Load individual stages
-        bool LoadStage(ShaderStage stage, const std::vector<char>& spirvCode);
+        Result<void> LoadStage(ShaderStage stage, const std::vector<char>& spirvCode);
+
+        // Load stage from file - returns false if file doesn't exist (for optional stages)
         bool LoadStageFromFile(ShaderStage stage, const std::string& path);
 
         void Unload() override;
+
+        // Get source path (base path) for hot reload
+        const std::string& GetSourcePath() const { return m_SourcePath; }
+
+#ifndef GG_DIST
+        // Reload shader from disk
+        // Available in Debug and Release builds, excluded from Dist
+        Result<void> Reload();
+#endif
 
         const std::vector<ShaderStageInfo>& GetStages() const { return m_Stages; }
         bool HasStage(ShaderStage stage) const;
@@ -57,6 +69,7 @@ namespace GGEngine {
     private:
         std::vector<ShaderStageInfo> m_Stages;
         std::string m_Name;
+        std::string m_SourcePath;  // Base path for hot reload
     };
 
 }

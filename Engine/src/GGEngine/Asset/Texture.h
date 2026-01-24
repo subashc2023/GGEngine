@@ -3,6 +3,7 @@
 #include "Asset.h"
 #include "AssetManager.h"
 #include "GGEngine/Core/Core.h"
+#include "GGEngine/Core/Result.h"
 #include "GGEngine/RHI/RHITypes.h"
 #include "GGEngine/RHI/RHIEnums.h"
 #include "GGEngine/Renderer/BindlessTextureManager.h"
@@ -65,19 +66,19 @@ namespace GGEngine {
 
         // Load from image file (PNG, JPG, BMP, TGA supported)
         // This is synchronous - calls LoadCPU then UploadGPU
-        bool Load(const std::string& path);
+        Result<void> Load(const std::string& path);
 
         // ================================================================
         // Async Loading Support
         // ================================================================
 
         // Load image file to CPU memory (thread-safe, can run on worker thread)
-        // Returns TextureCPUData with pixel data, or empty data on failure
-        static TextureCPUData LoadCPU(const std::string& path);
+        // Returns TextureCPUData with pixel data, or error on failure
+        static Result<TextureCPUData> LoadCPU(const std::string& path);
 
         // Upload CPU data to GPU and create resources (must run on main thread)
         // Takes ownership of cpuData pixels
-        bool UploadGPU(TextureCPUData&& cpuData);
+        Result<void> UploadGPU(TextureCPUData&& cpuData);
 
         // Get source path for hot reload
         const std::string& GetSourcePath() const { return m_SourcePath; }
@@ -85,7 +86,7 @@ namespace GGEngine {
 #ifndef GG_DIST
         // Reload texture from disk, preserving bindless index
         // Available in Debug and Release builds, excluded from Dist
-        bool Reload();
+        Result<void> Reload();
 #endif
 
         // ================================================================

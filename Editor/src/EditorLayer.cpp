@@ -11,6 +11,7 @@
 #include "GGEngine/Asset/TextureLibrary.h"
 #include "GGEngine/ECS/Components.h"
 #include "GGEngine/ECS/SceneSerializer.h"
+#include "GGEngine/ECS/Systems/RenderSystem.h"
 #include "GGEngine/Utils/FileDialogs.h"
 
 #include <imgui.h>
@@ -133,13 +134,20 @@ void EditorLayer::OnRenderOffscreen(GGEngine::Timestep ts)
 
     m_ViewportFramebuffer->BeginRenderPass(cmd);
 
-    // Scene renders all entities with SpriteRenderer components
-    m_ActiveScene->OnRender(
-        m_CameraController.GetCamera(),
-        m_ViewportFramebuffer->GetRenderPassHandle(),
-        cmd,
-        m_ViewportFramebuffer->GetWidth(),
-        m_ViewportFramebuffer->GetHeight());
+    // Setup render context with the editor camera
+    GGEngine::RenderContext ctx;
+    ctx.RenderPass = m_ViewportFramebuffer->GetRenderPassHandle();
+    ctx.CommandBuffer = cmd;
+    ctx.ViewportWidth = m_ViewportFramebuffer->GetWidth();
+    ctx.ViewportHeight = m_ViewportFramebuffer->GetHeight();
+    ctx.ExternalCamera = &m_CameraController.GetCamera();
+
+    // Render tilemaps first (background), then sprites (foreground)
+    m_TilemapRenderSystem.SetRenderContext(ctx);
+    m_TilemapRenderSystem.Execute(*m_ActiveScene, 0.0f);
+
+    m_SpriteRenderSystem.SetRenderContext(ctx);
+    m_SpriteRenderSystem.Execute(*m_ActiveScene, 0.0f);
 
     m_ViewportFramebuffer->EndRenderPass(cmd);
 }

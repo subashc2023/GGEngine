@@ -1,5 +1,6 @@
 #include "ECSCameraExample.h"
 #include "GGEngine/Renderer/Renderer2D.h"
+#include "GGEngine/Renderer/SceneCamera.h"
 #include "GGEngine/ECS/Components.h"
 #include "GGEngine/Core/Input.h"
 #include "GGEngine/Core/KeyCodes.h"
@@ -118,14 +119,35 @@ void ECSCameraExample::OnUpdate(GGEngine::Timestep ts, const GGEngine::Camera& /
 
 void ECSCameraExample::OnRender(const GGEngine::Camera& camera)
 {
-    // Instead of using the passed camera, use our scene's ECS camera
-    auto& device = GGEngine::RHIDevice::Get();
-    m_Scene->OnRenderRuntime(
-        device.GetSwapchainRenderPass(),
-        device.GetCurrentCommandBuffer(),
-        device.GetSwapchainWidth(),
-        device.GetSwapchainHeight()
-    );
+    using namespace GGEngine;
+
+    // Find primary camera entity and get its camera/transform
+    EntityID cameraEntity = m_Scene->GetPrimaryCameraEntity();
+    if (!m_Scene->IsEntityValid(cameraEntity))
+    {
+        GG_CORE_WARN("ECSCameraExample - No primary camera found!");
+        return;
+    }
+
+    auto* cameraComp = m_Scene->GetComponent<CameraComponent>(cameraEntity);
+    auto* cameraTransform = m_Scene->GetComponent<TransformComponent>(cameraEntity);
+    if (!cameraComp || !cameraTransform)
+        return;
+
+    // Setup render context with the ECS camera
+    auto& device = RHIDevice::Get();
+    RenderContext ctx;
+    ctx.RenderPass = device.GetSwapchainRenderPass();
+    ctx.CommandBuffer = device.GetCurrentCommandBuffer();
+    ctx.ViewportWidth = device.GetSwapchainWidth();
+    ctx.ViewportHeight = device.GetSwapchainHeight();
+    ctx.RuntimeCamera = &cameraComp->Camera;
+    Mat4 camMat = cameraTransform->GetMat4();
+    ctx.CameraTransform = &camMat;
+
+    // Render sprites using the render system
+    m_SpriteRenderSystem.SetRenderContext(ctx);
+    m_SpriteRenderSystem.Execute(*m_Scene, 0.0f);
 }
 
 void ECSCameraExample::OnImGuiRender()

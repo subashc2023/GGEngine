@@ -165,6 +165,11 @@ set(ENGINE_SOURCES
     Engine/src/GGEngine/ECS/System.h
     Engine/src/GGEngine/ECS/SystemScheduler.h
     Engine/src/GGEngine/ECS/SystemScheduler.cpp
+    Engine/src/GGEngine/ECS/Systems/RenderSystem.h
+    Engine/src/GGEngine/ECS/Systems/SpriteRenderSystem.h
+    Engine/src/GGEngine/ECS/Systems/SpriteRenderSystem.cpp
+    Engine/src/GGEngine/ECS/Systems/TilemapRenderSystem.h
+    Engine/src/GGEngine/ECS/Systems/TilemapRenderSystem.cpp
     Engine/src/GGEngine/ECS/DeferredCommands.h
     Engine/src/GGEngine/ECS/DeferredCommands.cpp
     Engine/src/GGEngine/Utils/FileDialogs.h

@@ -184,9 +184,11 @@ namespace GGEngine {
         m_Generations[asset->m_ID] = 1;
 
         // Load the asset
-        if (!asset->Load(path))
+        auto result = asset->Load(path);
+        if (result.IsErr())
         {
-            GG_CORE_ERROR("Failed to load asset: {}", path);
+            asset->SetError(result.Error());
+            GG_CORE_ERROR("Failed to load asset '{}': {}", path, result.Error());
             return AssetHandle<T>();
         }
 

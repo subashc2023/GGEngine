@@ -1,6 +1,7 @@
 #include "ggpch.h"
 #include "AssetManager.h"
 #include "Texture.h"
+#include "Shader.h"
 #include "GGEngine/Core/TaskGraph.h"
 
 #include <algorithm>
@@ -85,10 +86,15 @@ namespace GGEngine {
             "LoadTexture:" + path,
             [this, path, assetId]() -> TaskResult {
                 // Worker thread: Load texture data to CPU
-                TextureCPUData cpuData = Texture::LoadCPU(path);
+                auto cpuDataResult = Texture::LoadCPU(path);
 
-                // Queue for GPU upload on main thread
-                auto cpuDataPtr = std::make_unique<TextureCPUData>(std::move(cpuData));
+                // Queue for GPU upload on main thread (even if failed, ProcessPendingTextureUploads handles it)
+                std::unique_ptr<TextureCPUData> cpuDataPtr;
+                if (cpuDataResult.IsOk())
+                {
+                    cpuDataPtr = std::make_unique<TextureCPUData>(std::move(cpuDataResult).Value());
+                }
+                // If failed, cpuDataPtr remains nullptr, ProcessPendingTextureUploads will set error
 
                 {
                     std::lock_guard<std::mutex> lock(m_PendingUploadsMutex);
@@ -149,7 +155,16 @@ namespace GGEngine {
             {
                 // Upload to GPU
                 texture->SetState(AssetState::Uploading);
-                success = texture->UploadGPU(std::move(*upload.cpuData));
+                auto result = texture->UploadGPU(std::move(*upload.cpuData));
+                if (result.IsErr())
+                {
+                    texture->SetError(result.Error());
+                    GG_CORE_ERROR("Async texture upload failed: {}", result.Error());
+                }
+                else
+                {
+                    success = true;
+                }
             }
             else
             {
@@ -428,9 +443,14 @@ namespace GGEngine {
         std::string ext = changedPath.extension().string();
         std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 
-        // Only reload supported texture formats
-        if (ext != ".png" && ext != ".jpg" && ext != ".jpeg" &&
-            ext != ".bmp" && ext != ".tga" && ext != ".gif")
+        // Supported texture formats
+        bool isTexture = (ext == ".png" || ext == ".jpg" || ext == ".jpeg" ||
+                          ext == ".bmp" || ext == ".tga" || ext == ".gif");
+
+        // Supported shader formats (compiled SPIR-V)
+        bool isShader = (ext == ".spv");
+
+        if (!isTexture && !isShader)
         {
             return;
         }
@@ -465,38 +485,95 @@ namespace GGEngine {
 
             // Find matching asset by comparing resolved paths
             std::filesystem::path changedPath(absolutePath);
+            std::string ext = changedPath.extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+
+            bool isShaderFile = (ext == ".spv");
 
             for (auto& [assetPath, asset] : m_Assets)
             {
-                // Skip non-texture assets
-                if (asset->GetType() != AssetType::Texture)
-                    continue;
-
-                Texture* texture = static_cast<Texture*>(asset.get());
-                std::filesystem::path resolvedAssetPath = ResolvePath(texture->GetSourcePath());
-
-                // Compare canonical paths
-                try
+                if (asset->GetType() == AssetType::Texture && !isShaderFile)
                 {
-                    auto canonicalChanged = std::filesystem::canonical(changedPath);
-                    auto canonicalAsset = std::filesystem::canonical(resolvedAssetPath);
+                    Texture* texture = static_cast<Texture*>(asset.get());
+                    std::filesystem::path resolvedAssetPath = ResolvePath(texture->GetSourcePath());
 
-                    if (canonicalChanged == canonicalAsset)
+                    // Compare canonical paths
+                    try
                     {
-                        GG_CORE_INFO("Hot reload triggered for: {}", assetPath);
+                        auto canonicalChanged = std::filesystem::canonical(changedPath);
+                        auto canonicalAsset = std::filesystem::canonical(resolvedAssetPath);
 
-                        if (texture->Reload())
+                        if (canonicalChanged == canonicalAsset)
                         {
-                            // Fire reload callbacks
-                            FireReloadCallbacks(asset->GetID());
+                            GG_CORE_INFO("Hot reload triggered for texture: {}", assetPath);
+
+                            auto result = texture->Reload();
+                            if (result.IsOk())
+                            {
+                                FireReloadCallbacks(asset->GetID());
+                            }
+                            else
+                            {
+                                GG_CORE_ERROR("Hot reload failed: {}", result.Error());
+                            }
+                            break;
                         }
-                        break;  // Found the matching asset
+                    }
+                    catch (const std::filesystem::filesystem_error& e)
+                    {
+                        GG_CORE_TRACE("Hot reload path comparison failed: {}", e.what());
                     }
                 }
-                catch (const std::filesystem::filesystem_error& e)
+                else if (asset->GetType() == AssetType::Shader && isShaderFile)
                 {
-                    // Path doesn't exist or access denied - skip
-                    GG_CORE_TRACE("Hot reload path comparison failed: {}", e.what());
+                    Shader* shader = static_cast<Shader*>(asset.get());
+
+                    // Shader .spv files are named like: basepath.vert.spv, basepath.frag.spv
+                    // Need to match changedPath against shader's source path + stage suffix
+                    std::filesystem::path resolvedBasePath = ResolvePath(shader->GetSourcePath());
+
+                    // Check if this .spv file matches any of the shader's stage files
+                    bool matches = false;
+                    try
+                    {
+                        auto canonicalChanged = std::filesystem::canonical(changedPath);
+
+                        // Check against all possible stage suffixes
+                        const char* stageSuffixes[] = { ".vert.spv", ".frag.spv", ".geom.spv", ".comp.spv" };
+                        for (const char* suffix : stageSuffixes)
+                        {
+                            std::filesystem::path stagePath = resolvedBasePath.string() + suffix;
+                            if (std::filesystem::exists(stagePath))
+                            {
+                                auto canonicalStage = std::filesystem::canonical(stagePath);
+                                if (canonicalChanged == canonicalStage)
+                                {
+                                    matches = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    catch (const std::filesystem::filesystem_error& e)
+                    {
+                        GG_CORE_TRACE("Hot reload path comparison failed: {}", e.what());
+                    }
+
+                    if (matches)
+                    {
+                        GG_CORE_INFO("Hot reload triggered for shader: {}", assetPath);
+
+                        auto result = shader->Reload();
+                        if (result.IsOk())
+                        {
+                            FireReloadCallbacks(asset->GetID());
+                        }
+                        else
+                        {
+                            GG_CORE_ERROR("Hot reload failed: {}", result.Error());
+                        }
+                        break;
+                    }
                 }
             }
         }
