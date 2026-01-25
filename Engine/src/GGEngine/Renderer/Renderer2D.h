@@ -1,7 +1,6 @@
 #pragma once
 
 #include "GGEngine/Core/Core.h"
-#include "GGEngine/Renderer/Camera.h"
 #include "GGEngine/RHI/RHITypes.h"
 #include <glm/glm.hpp>
 #include <cstdint>
@@ -10,6 +9,7 @@ namespace GGEngine {
 
     class Texture;
     class SubTexture2D;
+    class Camera;
     class SceneCamera;
 
     // Unified specification for drawing a quad
@@ -115,9 +115,9 @@ namespace GGEngine {
                               RHICommandBufferHandle cmd, uint32_t viewportWidth, uint32_t viewportHeight);
 
         // SceneCamera + transform matrix (for ECS camera system)
-        static void BeginScene(const SceneCamera& camera, const Mat4& transform);
+        static void BeginScene(const SceneCamera& camera, const glm::mat4& transform);
 
-        static void BeginScene(const SceneCamera& camera, const Mat4& transform,
+        static void BeginScene(const SceneCamera& camera, const glm::mat4& transform,
                               RHIRenderPassHandle renderPass, RHICommandBufferHandle cmd,
                               uint32_t viewportWidth, uint32_t viewportHeight);
 

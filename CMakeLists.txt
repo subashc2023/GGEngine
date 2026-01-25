@@ -116,8 +116,6 @@ set(ENGINE_SOURCES
     Engine/src/GGEngine/Core/Log.cpp
     Engine/src/GGEngine/Core/Profiler.h
     Engine/src/GGEngine/Core/Profiler.cpp
-    Engine/src/GGEngine/Core/JobSystem.h
-    Engine/src/GGEngine/Core/JobSystem.cpp
     Engine/src/GGEngine/Core/TaskGraph.h
     Engine/src/GGEngine/Core/TaskGraph.cpp
     Engine/src/GGEngine/Debug/Instrumentor.h

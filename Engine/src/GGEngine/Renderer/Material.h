@@ -5,7 +5,7 @@
 #include "GGEngine/RHI/RHITypes.h"
 #include "GGEngine/RHI/RHIEnums.h"
 #include "GGEngine/Renderer/Pipeline.h"
-#include "GGEngine/Renderer/Camera.h"
+#include <glm/glm.hpp>
 
 #include <string>
 #include <unordered_map>
@@ -93,7 +93,7 @@ namespace GGEngine {
         void SetVec2(const std::string& name, float x, float y);
         void SetVec3(const std::string& name, float x, float y, float z);
         void SetVec4(const std::string& name, float x, float y, float z, float w);
-        void SetMat4(const std::string& name, const Mat4& matrix);
+        void SetMat4(const std::string& name, const glm::mat4& matrix);
 
         // Overloads accepting arrays/pointers
         void SetVec2(const std::string& name, const float* values);

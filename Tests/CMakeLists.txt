@@ -34,7 +34,6 @@ set(TEST_SOURCES
     ECS/ComponentStorageTests.cpp
 
     # Phase 3: Concurrent System Tests
-    Concurrent/JobSystemTests.cpp
     Concurrent/TaskGraphTests.cpp
 
     # Phase 4: Integration Tests

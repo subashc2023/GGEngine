@@ -2,11 +2,11 @@
 
 #include "GGEngine/ECS/System.h"
 #include "GGEngine/RHI/RHITypes.h"
-#include "GGEngine/Renderer/Camera.h"
-#include "GGEngine/Core/Math.h"
+#include <glm/glm.hpp>
 
 namespace GGEngine {
 
+    class Camera;
     class SceneCamera;
 
     // =============================================================================
@@ -29,7 +29,7 @@ namespace GGEngine {
 
         // Option 2: Scene camera with transform (runtime, ECS camera entity)
         const SceneCamera* RuntimeCamera = nullptr;
-        const Mat4* CameraTransform = nullptr;
+        const glm::mat4* CameraTransform = nullptr;
 
         // Helper to check if context is valid for rendering
         bool IsValid() const

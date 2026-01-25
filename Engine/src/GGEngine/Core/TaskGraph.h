@@ -15,7 +15,7 @@
 
 namespace GGEngine {
 
-    // Priority levels for tasks (moved from JobSystem - JobSystem is deprecated)
+    // Priority levels for tasks
     enum class JobPriority : uint8_t
     {
         Low = 0,

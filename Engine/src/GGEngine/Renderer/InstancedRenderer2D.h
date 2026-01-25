@@ -1,13 +1,14 @@
 #pragma once
 
 #include "GGEngine/Core/Core.h"
-#include "GGEngine/Renderer/Camera.h"
 #include "GGEngine/RHI/RHITypes.h"
+#include <glm/glm.hpp>
 #include <cstdint>
 #include <atomic>
 
 namespace GGEngine {
 
+    class Camera;
     class SceneCamera;
 
     // Per-instance data for GPU instancing (80 bytes, aligned)
@@ -84,8 +85,8 @@ namespace GGEngine {
         static void BeginScene(const Camera& camera);
         static void BeginScene(const Camera& camera, RHIRenderPassHandle renderPass,
                               RHICommandBufferHandle cmd, uint32_t viewportWidth, uint32_t viewportHeight);
-        static void BeginScene(const SceneCamera& camera, const Mat4& transform);
-        static void BeginScene(const SceneCamera& camera, const Mat4& transform,
+        static void BeginScene(const SceneCamera& camera, const glm::mat4& transform);
+        static void BeginScene(const SceneCamera& camera, const glm::mat4& transform,
                               RHIRenderPassHandle renderPass, RHICommandBufferHandle cmd,
                               uint32_t viewportWidth, uint32_t viewportHeight);
         static void EndScene();

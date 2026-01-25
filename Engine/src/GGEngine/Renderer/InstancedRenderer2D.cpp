@@ -1,6 +1,7 @@
 #include "ggpch.h"
 #include "InstancedRenderer2D.h"
 #include "Renderer2DBase.h"
+#include "Camera.h"
 #include "SceneCamera.h"
 #include "GGEngine/Core/Profiler.h"
 #include "VertexBuffer.h"
@@ -296,20 +297,20 @@ namespace GGEngine {
         s_Impl.BeginSceneInternal(cameraUBO, renderPass, cmd, viewportWidth, viewportHeight);
     }
 
-    void InstancedRenderer2D::BeginScene(const SceneCamera& camera, const Mat4& transform)
+    void InstancedRenderer2D::BeginScene(const SceneCamera& camera, const glm::mat4& transform)
     {
         auto& device = RHIDevice::Get();
         BeginScene(camera, transform, device.GetSwapchainRenderPass(), device.GetCurrentCommandBuffer(),
                    device.GetSwapchainWidth(), device.GetSwapchainHeight());
     }
 
-    void InstancedRenderer2D::BeginScene(const SceneCamera& camera, const Mat4& transform,
+    void InstancedRenderer2D::BeginScene(const SceneCamera& camera, const glm::mat4& transform,
                                           RHIRenderPassHandle renderPass, RHICommandBufferHandle cmd,
                                           uint32_t viewportWidth, uint32_t viewportHeight)
     {
-        Mat4 viewMatrix = Mat4::Inverse(transform);
-        Mat4 projectionMatrix = camera.GetProjection();
-        Mat4 viewProjectionMatrix = projectionMatrix * viewMatrix;
+        glm::mat4 viewMatrix = glm::inverse(transform);
+        glm::mat4 projectionMatrix = camera.GetProjection();
+        glm::mat4 viewProjectionMatrix = projectionMatrix * viewMatrix;
 
         CameraUBO cameraUBO;
         cameraUBO.view = viewMatrix;

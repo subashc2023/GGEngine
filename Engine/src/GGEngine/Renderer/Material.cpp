@@ -190,13 +190,13 @@ namespace GGEngine {
         WriteProperty(metadata.offset, values, sizeof(float) * 4);
     }
 
-    void Material::SetMat4(const std::string& name, const Mat4& matrix)
+    void Material::SetMat4(const std::string& name, const glm::mat4& matrix)
     {
         if (!ValidateProperty(name, PropertyType::Mat4))
             return;
 
         const auto& metadata = m_Properties.at(name);
-        WriteProperty(metadata.offset, matrix.data, sizeof(float) * 16);
+        WriteProperty(metadata.offset, &matrix[0][0], sizeof(float) * 16);
     }
 
     bool Material::HasProperty(const std::string& name) const

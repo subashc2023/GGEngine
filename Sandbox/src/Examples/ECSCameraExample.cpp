@@ -142,7 +142,7 @@ void ECSCameraExample::OnRender(const GGEngine::Camera& camera)
     ctx.ViewportWidth = device.GetSwapchainWidth();
     ctx.ViewportHeight = device.GetSwapchainHeight();
     ctx.RuntimeCamera = &cameraComp->Camera;
-    Mat4 camMat = cameraTransform->GetMat4();
+    glm::mat4 camMat = cameraTransform->GetMatrix();
     ctx.CameraTransform = &camMat;
 
     // Render sprites using the render system

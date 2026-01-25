@@ -1,6 +1,6 @@
 #include "ggpch.h"
 #include "SceneCamera.h"
-#include "GGEngine/Core/Math.h"
+#include <glm/gtc/matrix_transform.hpp>
 
 namespace GGEngine {
 
@@ -44,9 +44,11 @@ namespace GGEngine {
     {
         if (m_ProjectionType == ProjectionType::Perspective)
         {
-            float fovRadians = Math::ToRadians(m_PerspectiveFOV);
-            m_Projection = Mat4::Perspective(fovRadians, m_AspectRatio,
-                                              m_PerspectiveNear, m_PerspectiveFar);
+            float fovRadians = glm::radians(m_PerspectiveFOV);
+            m_Projection = glm::perspective(fovRadians, m_AspectRatio,
+                                            m_PerspectiveNear, m_PerspectiveFar);
+            // Flip Y for Vulkan coordinate system
+            m_Projection[1][1] *= -1.0f;
         }
         else
         {
@@ -54,8 +56,8 @@ namespace GGEngine {
             float orthoRight = m_OrthographicSize * m_AspectRatio;
             float orthoBottom = -m_OrthographicSize;
             float orthoTop = m_OrthographicSize;
-            m_Projection = Mat4::Orthographic(orthoLeft, orthoRight, orthoBottom, orthoTop,
-                                               m_OrthographicNear, m_OrthographicFar);
+            m_Projection = glm::ortho(orthoLeft, orthoRight, orthoBottom, orthoTop,
+                                      m_OrthographicNear, m_OrthographicFar);
         }
     }
 

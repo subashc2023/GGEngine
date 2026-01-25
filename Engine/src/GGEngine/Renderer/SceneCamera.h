@@ -1,7 +1,7 @@
 #pragma once
 
 #include "GGEngine/Core/Core.h"
-#include "Camera.h"
+#include <glm/glm.hpp>
 
 namespace GGEngine {
 
@@ -39,7 +39,7 @@ namespace GGEngine {
         void SetViewportSize(uint32_t width, uint32_t height);
 
         // Get the projection matrix
-        const Mat4& GetProjection() const { return m_Projection; }
+        const glm::mat4& GetProjection() const { return m_Projection; }
 
     private:
         void RecalculateProjection();
@@ -57,7 +57,7 @@ namespace GGEngine {
         float m_OrthographicFar = 1.0f;
 
         float m_AspectRatio = 1.0f;
-        Mat4 m_Projection;
+        glm::mat4 m_Projection{1.0f};
     };
 
 }

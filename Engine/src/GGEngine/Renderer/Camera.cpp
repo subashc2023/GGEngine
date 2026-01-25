@@ -8,11 +8,13 @@ namespace GGEngine {
     void Camera::SetPerspective(float fovDegrees, float aspect, float nearPlane, float farPlane)
     {
         m_IsOrthographic = false;
-        m_FovRadians = Math::ToRadians(fovDegrees);
+        m_FovRadians = glm::radians(fovDegrees);
         m_Aspect = aspect;
         m_Near = nearPlane;
         m_Far = farPlane;
-        m_ProjectionMatrix = Mat4::Perspective(m_FovRadians, m_Aspect, m_Near, m_Far);
+        m_ProjectionMatrix = glm::perspective(m_FovRadians, m_Aspect, m_Near, m_Far);
+        // Flip Y for Vulkan coordinate system
+        m_ProjectionMatrix[1][1] *= -1.0f;
     }
 
     void Camera::SetOrthographic(float width, float height, float nearPlane, float farPlane)
@@ -24,7 +26,7 @@ namespace GGEngine {
         m_Far = farPlane;
         float halfWidth = width * 0.5f;
         float halfHeight = height * 0.5f;
-        m_ProjectionMatrix = Mat4::Orthographic(-halfWidth, halfWidth, -halfHeight, halfHeight, m_Near, m_Far);
+        m_ProjectionMatrix = glm::ortho(-halfWidth, halfWidth, -halfHeight, halfHeight, m_Near, m_Far);
     }
 
     void Camera::SetPosition(float x, float y, float z)
@@ -152,21 +154,24 @@ namespace GGEngine {
         {
             float halfWidth = m_OrthoWidth * 0.5f;
             float halfHeight = m_OrthoHeight * 0.5f;
-            m_ProjectionMatrix = Mat4::Orthographic(-halfWidth, halfWidth, -halfHeight, halfHeight, m_Near, m_Far);
+            m_ProjectionMatrix = glm::ortho(-halfWidth, halfWidth, -halfHeight, halfHeight, m_Near, m_Far);
 
             // 2D view matrix: rotation then translation
             // V = R * T (rotate first, then translate in rotated space)
-            Mat4 translation = Mat4::Translate(-m_PositionX, -m_PositionY, 0.0f);
-            Mat4 rotation = Mat4::RotateZ(-m_Rotation);  // Negative to rotate world opposite to camera
+            glm::mat4 translation = glm::translate(glm::mat4(1.0f), glm::vec3(-m_PositionX, -m_PositionY, 0.0f));
+            glm::mat4 rotation = glm::rotate(glm::mat4(1.0f), -m_Rotation, glm::vec3(0.0f, 0.0f, 1.0f));
             m_ViewMatrix = rotation * translation;
         }
         else
         {
-            m_ProjectionMatrix = Mat4::Perspective(m_FovRadians, m_Aspect, m_Near, m_Far);
-            m_ViewMatrix = Mat4::LookAt(
-                m_PositionX, m_PositionY, m_PositionZ,
-                m_TargetX, m_TargetY, m_TargetZ,
-                0.0f, 1.0f, 0.0f  // Up vector
+            m_ProjectionMatrix = glm::perspective(m_FovRadians, m_Aspect, m_Near, m_Far);
+            // Flip Y for Vulkan coordinate system
+            m_ProjectionMatrix[1][1] *= -1.0f;
+
+            m_ViewMatrix = glm::lookAt(
+                glm::vec3(m_PositionX, m_PositionY, m_PositionZ),
+                glm::vec3(m_TargetX, m_TargetY, m_TargetZ),
+                glm::vec3(0.0f, 1.0f, 0.0f)  // Up vector
             );
         }
         m_ViewProjectionMatrix = m_ProjectionMatrix * m_ViewMatrix;
