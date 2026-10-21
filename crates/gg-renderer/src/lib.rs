@@ -1,6 +1,7 @@
 //! Turns the render data the engine hands it each frame into images, built on `gg-gpu`: meshes
-//! drawn with games' shaders and textures in the game's view, as its camera sees them, and the UI
-//! over them; and the render graph, materials, lighting and post-processing to come.
+//! and sprites drawn in the game's view, as its camera sees them, with games' shaders and textures
+//! and the engine's own, and the UI over them; and the render graph, materials, lighting and
+//! post-processing to come.
 //!
 //! It knows nothing about the scene, ECS or gameplay. It receives plain data, so rendering
 //! can run on its own thread, a frame behind simulation.
@@ -8,6 +9,7 @@
 mod camera;
 mod mesh;
 mod shader;
+mod sprite;
 mod texture;
 mod ui;
 
@@ -24,6 +26,7 @@ pub use camera::{Camera, Projection};
 pub use gg_gpu::{Blend, Sampler, Validation, Window};
 pub use mesh::{Mesh, Meshes};
 pub use shader::{Shader, Shaders};
+pub use sprite::Sprite;
 pub use texture::{Texture, Textures};
 pub use ui::Ui;
 
@@ -74,6 +77,12 @@ impl Draws {
             transform,
             params: start..self.params.len(),
         });
+    }
+
+    /// Draws `sprite` over the meshes drawn before it, as [`Sprite`] describes. `transform` takes
+    /// the sprite's own space, where it's a unit square around the origin, to the world's.
+    pub fn push_sprite(&mut self, transform: Mat4, sprite: Sprite) {
+        self.push(sprite::QUAD, sprite::SHADER, transform, sprite.params());
     }
 
     /// Forgets every draw.

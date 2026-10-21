@@ -7,25 +7,17 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use bytemuck::NoUninit;
-use gg_engine::egui::{ViewportCommand, ViewportId};
+use gg_engine::egui::{self, ViewportCommand, ViewportId};
 use gg_engine::math::{EulerRot, Mat4, Vec2, Vec3, Vec4};
 use gg_engine::{
     Blend, Camera, Context, Event, Key, Layer, Mesh, OrthographicCameraController, Projection,
-    Sampler, Shader, Texture, Ui,
+    Sampler, Shader, Sprite, Texture, Ui,
 };
 use tracing::info;
 
 fn main() -> ExitCode {
     let app = gg_engine::App::new("Sandbox").custom_title_bar();
     gg_engine::run(app.layer(Sandbox::new()))
-}
-
-/// A corner of a mesh in one color, which `shaders/flat_color.slang` reads: its position in the
-/// mesh's own space.
-#[repr(C)]
-#[derive(Clone, Copy, NoUninit)]
-struct Position {
-    position: Vec3,
 }
 
 /// A corner of a mesh in the colors of its corners, which `shaders/vertex_color.slang` reads: its
@@ -37,69 +29,6 @@ struct Colored {
     position: Vec3,
     color: [f32; 4],
 }
-
-/// A corner of a mesh in a texture, which `shaders/texture.slang` reads: its position in the mesh's
-/// own space, and where it is in the texture, from (0, 0) at its top left to (1, 1) at its bottom
-/// right.
-#[repr(C)]
-#[derive(Clone, Copy, NoUninit)]
-struct Textured {
-    position: Vec3,
-    uv: Vec2,
-}
-
-/// What `shaders/flat_color.slang` takes with each draw: the color, in linear RGBA.
-#[repr(C)]
-#[derive(Clone, Copy, NoUninit)]
-struct Tint {
-    color: Vec4,
-}
-
-/// What `shaders/texture.slang` takes with each draw: the texture, and the index of the sampler
-/// to sample it with.
-#[repr(C)]
-#[derive(Clone, Copy, NoUninit)]
-struct Sampling {
-    texture: Texture,
-    sampler: u32,
-}
-
-/// A square a unit across, as two triangles.
-const SQUARE: [Position; 4] = [
-    Position {
-        position: Vec3::new(-0.5, -0.5, 0.0),
-    },
-    Position {
-        position: Vec3::new(0.5, -0.5, 0.0),
-    },
-    Position {
-        position: Vec3::new(0.5, 0.5, 0.0),
-    },
-    Position {
-        position: Vec3::new(-0.5, 0.5, 0.0),
-    },
-];
-const SQUARE_INDICES: [u32; 6] = [0, 1, 2, 2, 3, 0];
-
-/// The same square, with its texture upright on it.
-const TEXTURED_SQUARE: [Textured; 4] = [
-    Textured {
-        position: Vec3::new(-0.5, -0.5, 0.0),
-        uv: Vec2::new(0.0, 1.0),
-    },
-    Textured {
-        position: Vec3::new(0.5, -0.5, 0.0),
-        uv: Vec2::new(1.0, 1.0),
-    },
-    Textured {
-        position: Vec3::new(0.5, 0.5, 0.0),
-        uv: Vec2::new(1.0, 0.0),
-    },
-    Textured {
-        position: Vec3::new(-0.5, 0.5, 0.0),
-        uv: Vec2::new(0.0, 0.0),
-    },
-];
 
 /// A triangle in red, green and blue, a unit across, pointing up.
 const TRIANGLE: [Colored; 3] = [
@@ -120,27 +49,24 @@ const TRIANGLE: [Colored; 3] = [
 /// How fast the triangle turns, in radians a second: a quarter turn.
 const TURN_SPEED: f32 = FRAC_PI_2;
 
-/// The square drawn in textures, its shader, and the textures from `assets/`: the checkerboard,
-/// and the logo drawn over it.
-struct TexturedSquare {
-    mesh: Mesh<Textured>,
-    shader: Shader<Textured, Sampling>,
+/// The textures from `assets/`: the checkerboard, and the logo drawn over it.
+struct Assets {
     checkerboard: Texture,
     logo: Texture,
 }
 
-/// Draws a grid of squares in the game's view, in two colors that alternate, which each square's
-/// draw gives its shader; over its middle, a square in a checkerboard texture, then a triangle in
-/// red, green and blue turning, then the same square in a logo whose alpha shows them through it.
-/// Each mesh has a vertex type and shader of its own, and they're drawn over a color that drifts
-/// slowly, so that a running sandbox visibly animates. The engine's camera controller steers the
-/// camera: W, A, S and D move it along its own axes, Q and E turn it left and right, at the same
-/// speed whatever the frame rate, and the mouse wheel zooms it. Shows four panels to dock: frame
-/// times and the camera; the grid's colors, which can be picked; whether the checkerboard is
-/// filtered smooth or sharp; and the clear color, which can be held or picked.
-/// Logs the key and mouse presses that reach it, which those on the panels don't. It polls input
-/// too: holding Space pauses the drift, and a panel shows where the cursor is. The title bar's File
-/// menu quits.
+/// Draws a grid of sprites in the game's view, in two colors that alternate; over its middle, a
+/// checkerboard sprite, tiled and tinted, then a triangle in red, green and blue turning, then a
+/// logo sprite whose alpha shows them through it. The triangle is a mesh with a vertex type and
+/// shader of the sandbox's own, the rest the engine's sprites, and they're drawn over a color that
+/// drifts slowly, so that a running sandbox visibly animates. The engine's camera controller steers
+/// the camera: W, A, S and D move it along its own axes, Q and E turn it left and right, at the
+/// same speed whatever the frame rate, and the mouse wheel zooms it. Shows four panels to dock:
+/// frame times and the camera; the grid's colors, which can be picked; the checkerboard's
+/// filtering, smooth or sharp, how many times it repeats, and its tint; and the clear color, which
+/// can be held or picked. Logs the key and mouse presses that reach it, which those on the panels
+/// don't. It polls input too: holding Space pauses the drift, and a panel shows where the cursor
+/// is. The title bar's File menu quits.
 struct Sandbox {
     time: Duration,
     drift: bool,
@@ -151,15 +77,18 @@ struct Sandbox {
     /// Whether the checkerboard is filtered linearly, which blurs its texels together, rather than
     /// sampled at the nearest, which keeps them sharp.
     smooth: bool,
+    /// How many times the checkerboard repeats across and down.
+    tiles: f32,
+    /// What the checkerboard's colors are multiplied by, in linear RGBA, alpha not multiplied in.
+    tint: [f32; 4],
     /// The last frame's time, shown as it is: smoothing would hide uneven frames.
     frame_time: Duration,
     camera: OrthographicCameraController,
     /// How far the triangle has turned counterclockwise, in radians from 0 to a whole turn.
     triangle_turn: f32,
     /// Added once the sandbox attaches.
-    square: Option<(Mesh<Position>, Shader<Position, Tint>)>,
     triangle: Option<(Mesh<Colored>, Shader<Colored>)>,
-    textured: Option<TexturedSquare>,
+    assets: Option<Assets>,
 }
 
 impl Sandbox {
@@ -181,12 +110,14 @@ impl Sandbox {
             // Blue and red.
             grid_colors: [[0.2, 0.3, 0.8], [0.8, 0.2, 0.3]],
             smooth: false,
+            tiles: 2.0,
+            // Pink.
+            tint: [1.0, 0.8, 0.8, 1.0],
             frame_time: Duration::ZERO,
             camera,
             triangle_turn: 0.0,
-            square: None,
             triangle: None,
-            textured: None,
+            assets: None,
         }
     }
 }
@@ -196,36 +127,20 @@ impl Layer for Sandbox {
         // A shader that doesn't compile, or a texture that doesn't load, stops the sandbox, with
         // what went wrong.
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let shaders = root.join("shaders");
         let assets = root.join("assets");
-        let flat = cx.add_shader(
-            "flat color",
-            shaders.join("flat_color.slang"),
-            Blend::Opaque,
-        );
         let colored = cx.add_shader(
             "vertex color",
-            shaders.join("vertex_color.slang"),
+            root.join("shaders/vertex_color.slang"),
             Blend::Opaque,
         );
-        let texture = cx.add_shader("texture", shaders.join("texture.slang"), Blend::Alpha);
-        let square = cx.add_mesh("square", &SQUARE, &SQUARE_INDICES);
         let triangle = cx.add_mesh("triangle", &TRIANGLE, &[0, 1, 2]);
-        let textured = cx.add_mesh("textured square", &TEXTURED_SQUARE, &SQUARE_INDICES);
         let checkerboard = cx.add_texture("checkerboard", assets.join("checkerboard.png"));
         let logo = cx.add_texture("logo", assets.join("logo.png"));
-        let whole = "the meshes are whole triangles, of their own vertices";
-        self.square = Some((
-            square.expect(whole),
-            flat.expect("the flat color shader compiles"),
-        ));
         self.triangle = Some((
-            triangle.expect(whole),
+            triangle.expect("the triangle is a whole triangle, of its own vertices"),
             colored.expect("the vertex color shader compiles"),
         ));
-        self.textured = Some(TexturedSquare {
-            mesh: textured.expect(whole),
-            shader: texture.expect("the texture shader compiles"),
+        self.assets = Some(Assets {
             checkerboard: checkerboard.expect("the checkerboard loads"),
             logo: logo.expect("the logo loads"),
         });
@@ -235,43 +150,46 @@ impl Layer for Sandbox {
         let seconds = dt.as_secs_f32();
         self.camera.update(cx, dt);
 
-        if let Some((mesh, shader)) = self.square {
-            // 10 by 10, 2 units across, each square a little smaller than the spacing, in the
-            // grid's colors in turn, as a checkerboard's.
-            for row in 0..10 {
-                for column in 0..10 {
-                    let at = Vec3::new(column as f32 - 4.5, row as f32 - 4.5, 0.0) * 0.2;
-                    let transform =
-                        Mat4::from_translation(at) * Mat4::from_scale(Vec3::splat(0.18));
-                    let color = Vec3::from(self.grid_colors[(row + column) % 2]).extend(1.0);
-                    cx.draw(mesh, shader, transform, Tint { color });
-                }
+        // 10 by 10, 2 units across, each square a little smaller than the spacing, in the grid's
+        // colors in turn, as a checkerboard's.
+        for row in 0..10 {
+            for column in 0..10 {
+                let at = Vec3::new(column as f32 - 4.5, row as f32 - 4.5, 0.0) * 0.2;
+                let transform = Mat4::from_translation(at) * Mat4::from_scale(Vec3::splat(0.18));
+                let color = Vec3::from(self.grid_colors[(row + column) % 2]).extend(1.0);
+                let sprite = Sprite {
+                    color,
+                    ..Sprite::default()
+                };
+                cx.draw_sprite(transform, sprite);
             }
         }
         // 1.5 units across, over the grid's middle.
         let middle = Mat4::from_scale(Vec3::splat(1.5));
-        if let Some(square) = &self.textured {
+        if let Some(assets) = &self.assets {
             let sampler = if self.smooth {
-                Sampler::LinearClamp
+                Sampler::LinearRepeat
             } else {
-                Sampler::NearestClamp
+                Sampler::NearestRepeat
             };
-            let sampling = Sampling {
-                texture: square.checkerboard,
-                sampler: sampler.index(),
+            let checkerboard = Sprite {
+                color: Vec4::from(self.tint),
+                texture: assets.checkerboard,
+                rect: [Vec2::ZERO, Vec2::splat(self.tiles)],
+                sampler,
             };
-            cx.draw(square.mesh, square.shader, middle, sampling);
+            cx.draw_sprite(middle, checkerboard);
         }
         self.triangle_turn = (self.triangle_turn + TURN_SPEED * seconds).rem_euclid(TAU);
         if let Some((mesh, shader)) = self.triangle {
             cx.draw(mesh, shader, Mat4::from_rotation_z(self.triangle_turn), ());
         }
-        if let Some(square) = &self.textured {
-            let sampling = Sampling {
-                texture: square.logo,
-                sampler: Sampler::LinearClamp.index(),
+        if let Some(assets) = &self.assets {
+            let logo = Sprite {
+                texture: assets.logo,
+                ..Sprite::default()
             };
-            cx.draw(square.mesh, square.shader, middle, sampling);
+            cx.draw_sprite(middle, logo);
         }
 
         self.frame_time = dt;
@@ -334,6 +252,11 @@ impl Layer for Sandbox {
         });
         ui.panel("Textures", |ui| {
             ui.checkbox(&mut self.smooth, "Smooth the checkerboard");
+            ui.add(egui::Slider::new(&mut self.tiles, 1.0..=10.0).text("Tiles"));
+            ui.horizontal(|ui| {
+                ui.label("Tint");
+                ui.color_edit_button_rgba_unmultiplied(&mut self.tint);
+            });
         });
         ui.panel("Clear color", |ui| {
             ui.checkbox(&mut self.drift, "Drift");

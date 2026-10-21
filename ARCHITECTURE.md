@@ -280,8 +280,8 @@ dock leaves the game, and the UI draws over it. Layers add shaders, meshes and t
 them and set the camera through their `Context`, and the renderer's `Shaders`, `Meshes` and
 `Textures` hand out their handles at once.
 
-A shader is a Slang file that the engine compiles with slangc as a layer adds it, so one that
-doesn't compile fails there, with slangc's diagnostics naming the file and line; the renderer
+A game's shader is a Slang file that the engine compiles with slangc as a layer adds it, so one
+that doesn't compile fails there, with slangc's diagnostics naming the file and line; the renderer
 makes its pipeline the next time it renders. A mesh's vertices are any `#[repr(C)]` type without
 padding, with glam's vectors and matrices among its fields, and the next frame that renders
 copies them and the indices into GPU memory, where they stay. Shaders read vertices through their
@@ -296,9 +296,9 @@ pipeline: opaque, or by the alpha it returns, not multiplied into its color. Vul
 nothing about a shader, so its interface, which `Shaders::add` describes, is trusted, and
 validation checks it in debug builds.
 
-A texture is a PNG that the engine decodes as a layer adds it, to RGBA8 with colors sRGB-encoded
-and alpha not multiplied into them, as images store them; the next frame that renders copies it
-into GPU memory, where it stays, and shaders sample its colors decoded to linear. Texture
+A game's texture is a PNG that the engine decodes as a layer adds it, to RGBA8 with colors
+sRGB-encoded and alpha not multiplied into them, as images store them; the next frame that renders
+copies it into GPU memory, where it stays, and shaders sample its colors decoded to linear. Texture
 coordinates run from (0, 0) at an image's top left, as glTF's do, and Vulkan samples rows stored
 top first that way, so images load as they're stored, without the flip OpenGL needs. A texture's
 handle is its index in the bindless set, which a draw's parameters carry as it is and the shader
@@ -317,14 +317,19 @@ can also steer the camera with the engine's orthographic camera controller, whic
 and calls from its own update and event, not adding it to the stack, so that the game can still
 place its camera itself or stop steering it.
 
-2D games draw sprites, which are draws like any other rather than a renderer of their own: a
-quad mesh, drawn with the engine's sprite shader, whose parameters are a color, a texture and
-the rectangle of it to show, so that a sprite sheet's frames and an atlas's images draw from one
-texture. Batching comes with them: each run of consecutive draws of one mesh with one shader
-becomes a single instanced draw, the frame copies the run's transforms and parameters into its
-memory together, and shaders read their own by instance rather than from push constants. A
-change of texture is a change of parameters, which bindless textures make free, so 100,000
-sprites take a handful of draws, and every mesh is batched, not only quads.
+2D games draw sprites, which are draws like any other rather than a renderer of their own:
+`Context::draw_sprite` draws the engine's quad mesh with its sprite shader, whose parameters are a
+color, a texture, the rectangle of it to show and the sampler to show it with, so that a sprite
+sheet's frames and an atlas's images draw from one texture, and a rectangle past the texture's
+edges tiles it under a repeating sampler. Every `Meshes`, `Shaders` and `Textures` starts with
+the engine's own: the quad, the sprite shader, which slangc compiles as the engine builds, and a
+white texture a pixel across, which a sprite of only a color shows, so that one shader draws
+sprites flat and textured. They reach the GPU as games' do, and games' handles come after them.
+Batching comes next: each run of consecutive draws of one mesh with one shader becomes a single
+instanced draw, the frame copies the run's transforms and parameters into its memory together,
+and shaders read their own by instance rather than from push constants. A change of texture is a
+change of parameters, which bindless textures make free, so 100,000 sprites take a handful of
+draws, and every mesh is batched, not only quads.
 
 An error while rendering ends the renderer, since a failed frame can leave meshes and textures
 half copied to the GPU.

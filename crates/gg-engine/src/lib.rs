@@ -39,10 +39,10 @@ pub use event::{Event, Key, MouseButton, Scroll};
 /// The engine's vectors, matrices and quaternions; apps use them from here, so that they share
 /// the engine's version.
 pub use gg_core::math;
-/// What layers draw, which they add and draw through their [`Context`]: meshes; shaders for
-/// their vertex types, each added with how it blends; the textures those shaders sample, and
-/// the samplers they sample them with; and the camera the game's view sees them from.
-pub use gg_renderer::{Blend, Camera, Mesh, Projection, Sampler, Shader, Texture};
+/// What layers draw, which they add and draw through their [`Context`]: sprites; meshes; shaders
+/// for their vertex types, each added with how it blends; the textures those shaders and sprites
+/// sample, and the samplers they sample them with; and the camera the game's view sees them from.
+pub use gg_renderer::{Blend, Camera, Mesh, Projection, Sampler, Shader, Sprite, Texture};
 pub use input::Input;
 use layer::Stack;
 pub use layer::{Context, Layer, Window};

@@ -55,15 +55,20 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   mouse wheel; the sandbox steers its camera with it. The first update after the window is
   restored from being minimized is given no time, rather than the pause. The 2D renderer's design
   is in ARCHITECTURE.md.
+- **Sprites** (2026-10-21): layers draw sprites with `Context::draw_sprite`, the engine's quad
+  drawn with its sprite shader in a color, a texture, a rectangle of it and a sampler, the
+  rectangle tiling the texture past its edges under a repeating sampler and flipping it when
+  reversed; a sprite of only a color shows the engine's white texture, so that one shader draws
+  sprites flat and textured. The sandbox's grid, its checkerboard, tiled and tinted, and its logo
+  are sprites, around its triangle, and a GPU test checks sprites against a reference image.
 
 ## Now: 2D renderer
 
-Sprites as [ARCHITECTURE.md](../ARCHITECTURE.md#rendering) describes them: the engine's quad mesh
-and sprite shader, whose parameters are a color, a texture and a rectangle of it, so that sprites
-come from sprite sheets and atlases; batching, which makes each run of consecutive draws of one
-mesh with one shader a single instanced draw, with the shaders' contract changed to read their
-transforms and parameters by instance; and the frame's counts of draws and instances, shown in
-the sandbox.
+Batching, as [ARCHITECTURE.md](../ARCHITECTURE.md#rendering) describes it, which makes each run of
+consecutive draws of one mesh with one shader a single instanced draw, with the shaders' contract
+changed to read their transforms and parameters by instance; sprites from a sprite sheet's cells,
+given in pixels rather than texture coordinates, without the cells beside them bleeding in at the
+edges; and the frame's counts of draws and instances, shown in the sandbox.
 
 *Done when* the sandbox draws 100,000 moving sprites, textured from a sprite sheet, in a single
 instanced draw at 60 fps or more in a release build on the RTX 4090, and a GPU test checks
@@ -158,6 +163,7 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Mipmaps: a texture drawn smaller than it is samples its one level, and shimmers | Phase 4, with the textured glTF mesh |
 | Images other than PNG, such as the JPEGs glTF allows; and PNGs' own color profiles and gamma, which are ignored, every PNG taken as sRGB | Phase 4, with glTF; Phase 7 cooks KTX2 |
 | Decoding images off the main thread; `Context::add_texture` decodes before it returns | Phase 7, with the streaming loader |
+| Layers making textures from their own pixels; `Textures::add` takes pixels, but `Context` adds only PNGs | A game makes its own textures |
 | Pixels and vertices reach the GPU through the frame's arena, which keeps the size of the largest frame: a frame that adds many textures leaves that much host memory held for each frame in flight | Phase 4, with uploads through the transfer queue |
 | More than one camera or view, such as split screen or the editor's scene view | A game or the editor draws several |
 | Converting between the view's pixels and the world, to pick what's under the cursor or zoom toward it; the camera controller zooms about the view's center | Something picks with the mouse, or a tool zooms toward the cursor |

@@ -1,23 +1,27 @@
-//! Textures that games bring: images their shaders sample, whose handles are their places in the
-//! bindless set, so that a shader's parameters carry them as they are.
+//! Textures: images that shaders sample, games' and the engine's white one, whose handles are their
+//! places in the bindless set, so that a shader's parameters carry them as they are.
 
 use bytemuck::NoUninit;
 use gg_core::{Error, Result};
 use gg_gpu::{MAX_TEXTURE_SIZE, PLACED_TEXTURES};
 
-/// A texture that [`Textures::add`] handed out. It's a field of a shader's parameters as it is: a
-/// `uint` in the shader, the texture's index in the bindless set, which the shader samples as
-/// `textures[index]`.
+/// A texture that [`Textures::add`] handed out, or the engine's white one. It's a field of a
+/// shader's parameters as it is: a `uint` in the shader, the texture's index in the bindless set,
+/// which the shader samples as `textures[index]`.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, NoUninit)]
 pub struct Texture {
     pub(crate) index: u32,
 }
 
-/// The textures a renderer's shaders sample. It hands out each one's handle at once, and keeps its
-/// pixels until the next frame that renders copies them to the GPU. A renderer samples the
-/// textures of one `Textures` only.
-#[derive(Default)]
+impl Texture {
+    /// The engine's white texture, a pixel across, which a sprite of only a color shows.
+    pub(crate) const WHITE: Self = Self { index: 0 };
+}
+
+/// The textures a renderer's shaders sample, the first of them the engine's white texture. It
+/// hands out each one's handle at once, and keeps its pixels until the next frame that renders
+/// copies them to the GPU. A renderer samples the textures of one `Textures` only.
 pub struct Textures {
     /// Those added since a frame last took them, in order.
     pub(crate) added: Vec<Added>,
@@ -40,7 +44,8 @@ impl Textures {
     ///
     /// Fails with `renderer.bad_texture` if a side is 0 or more than 8,192 pixels, the most every
     /// Vulkan 1.4 device takes, or `pixels` doesn't fill it exactly; and with
-    /// `renderer.too_many_textures` past the 61,440 textures a renderer holds.
+    /// `renderer.too_many_textures` past the 61,440 textures a renderer holds, the engine's white
+    /// one among them.
     pub fn add(&mut self, name: &str, size: [u32; 2], pixels: &[u8]) -> Result<Texture> {
         let bad = |problem: String| {
             Error::new(
@@ -66,7 +71,10 @@ impl Textures {
         if self.count == PLACED_TEXTURES {
             return Err(Error::new(
                 "renderer.too_many_textures",
-                format!("texture {name:?} is one more than the {PLACED_TEXTURES} a renderer holds"),
+                format!(
+                    "texture {name:?} is one more than the {PLACED_TEXTURES} a renderer holds, \
+                     the engine's white one among them"
+                ),
             ));
         }
         let index = self.count;
@@ -78,6 +86,20 @@ impl Textures {
             pixels: pixels.to_vec(),
         });
         Ok(Texture { index })
+    }
+}
+
+impl Default for Textures {
+    fn default() -> Self {
+        let mut textures = Self {
+            added: Vec::new(),
+            count: 0,
+        };
+        let white = textures
+            .add("white", [1, 1], &[255; 4])
+            .expect("a texture a pixel across");
+        assert_eq!(white, Texture::WHITE, "the white texture comes first");
+        textures
     }
 }
 
@@ -111,14 +133,16 @@ mod tests {
                 .add("a", [2, 1], &[0; 8])
                 .map(|texture| texture.index)
         };
-        assert_eq!(add().ok(), Some(0));
+        // After the engine's white texture.
         assert_eq!(add().ok(), Some(1));
+        assert_eq!(add().ok(), Some(2));
     }
 
     #[test]
     fn a_renderer_holds_as_many_textures_as_the_placed_slots() {
         let mut textures = Textures::default();
-        for _ in 0..PLACED_TEXTURES {
+        // The engine's white texture takes the first.
+        for _ in 1..PLACED_TEXTURES {
             textures.add("a", [1, 1], &[0; 4]).expect("a slot for it");
         }
         let error = textures

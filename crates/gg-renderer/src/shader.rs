@@ -1,5 +1,5 @@
-//! Shaders that games bring: Slang files, compiled to SPIR-V with slangc as they're added, which
-//! draw meshes of one vertex type in the game's view.
+//! Shaders: Slang files compiled to SPIR-V with slangc, games' as they're added and the engine's
+//! own as it builds, which draw meshes of one vertex type in the game's view.
 
 use std::fmt;
 use std::marker::PhantomData;
@@ -11,6 +11,8 @@ use bytemuck::NoUninit;
 use gg_core::{Error, Result};
 use gg_gpu::Blend;
 use tracing::{debug, warn};
+
+use crate::sprite::{self, Corner, Params};
 
 /// The slangc that compiled the renderer's own shaders, as the build found it.
 const SLANGC: &str = env!("GG_SLANGC");
@@ -31,16 +33,25 @@ impl<V, P> Clone for Shader<V, P> {
 
 impl<V, P> Copy for Shader<V, P> {}
 
+impl<V, P> Shader<V, P> {
+    pub(crate) const fn new(index: u32) -> Self {
+        Self {
+            index,
+            types: PhantomData,
+        }
+    }
+}
+
 impl<V, P> fmt::Debug for Shader<V, P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("Shader").field(&self.index).finish()
     }
 }
 
-/// The shaders a renderer draws meshes with. It compiles each one as it's added and hands out its
-/// handle, and keeps its SPIR-V until a renderer makes its pipeline, the next time it renders. A
-/// renderer draws with the shaders of one `Shaders` only.
-#[derive(Default)]
+/// The shaders a renderer draws meshes with, the first of them the engine's sprite shader, which
+/// the build compiled. It compiles each one added as it's added and hands out its handle, and
+/// keeps its SPIR-V until a renderer makes its pipeline, the next time it renders. A renderer draws
+/// with the shaders of one `Shaders` only.
 pub struct Shaders {
     /// Those added since a renderer last took them, in order.
     pub(crate) added: Vec<Added>,
@@ -98,6 +109,12 @@ impl Shaders {
         blend: Blend,
     ) -> Result<Shader<V, P>> {
         let spirv = compile(Path::new(SLANGC), name, path)?;
+        Ok(self.push(name, spirv, blend))
+    }
+
+    /// Takes `spirv`, shader `name` compiled, which draws meshes of vertex type `V` and takes
+    /// parameters of type `P`, and hands out its handle.
+    fn push<V, P>(&mut self, name: &str, spirv: Vec<u8>, blend: Blend) -> Shader<V, P> {
         let index = self.count;
         self.count += 1;
         self.added.push(Added {
@@ -108,10 +125,23 @@ impl Shaders {
             params_size: size_of::<P>(),
             blend,
         });
-        Ok(Shader {
-            index,
-            types: PhantomData,
-        })
+        Shader::new(index)
+    }
+}
+
+impl Default for Shaders {
+    fn default() -> Self {
+        let mut shaders = Self {
+            added: Vec::new(),
+            count: 0,
+        };
+        let shader = shaders.push::<Corner, Params>("sprite", sprite::SPIRV.to_vec(), Blend::Alpha);
+        assert_eq!(
+            shader.index,
+            sprite::SHADER.index,
+            "the sprite shader comes first"
+        );
+        shaders
     }
 }
 
@@ -201,8 +231,9 @@ mod tests {
         let mut flat = || {
             shaders.add::<[f32; 3], [f32; 4]>("flat", &fixture("flat_color.slang"), Blend::Opaque)
         };
-        assert_eq!(flat().map(|shader| shader.index).ok(), Some(0));
+        // After the engine's sprite shader.
         assert_eq!(flat().map(|shader| shader.index).ok(), Some(1));
+        assert_eq!(flat().map(|shader| shader.index).ok(), Some(2));
     }
 
     #[test]

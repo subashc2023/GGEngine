@@ -1,5 +1,6 @@
 //! Meshes: the handles that the engine draws with, and the vertices and indices behind them in
-//! GPU memory, drawn with games' shaders and textures in the game's view, as its camera sees them.
+//! GPU memory, drawn with their shaders and textures, games' and the engine's, in the game's view,
+//! as its camera sees them.
 
 use std::fmt;
 use std::marker::PhantomData;
@@ -15,7 +16,7 @@ use gg_gpu::{
 
 use crate::shader::Shaders;
 use crate::texture::Textures;
-use crate::{Draws, Viewport};
+use crate::{Draws, Viewport, sprite};
 
 /// A mesh that [`Meshes::add`] handed out, of vertex type `V`.
 pub struct Mesh<V> {
@@ -32,16 +33,24 @@ impl<V> Clone for Mesh<V> {
 
 impl<V> Copy for Mesh<V> {}
 
+impl<V> Mesh<V> {
+    pub(crate) const fn new(index: u32) -> Self {
+        Self {
+            index,
+            vertex: PhantomData,
+        }
+    }
+}
+
 impl<V> fmt::Debug for Mesh<V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("Mesh").field(&self.index).finish()
     }
 }
 
-/// The meshes a renderer draws. It hands out each one's handle at once, and keeps its vertices
-/// and indices until the next frame that renders copies them to the GPU. A renderer draws the
-/// meshes of one `Meshes` only.
-#[derive(Default)]
+/// The meshes a renderer draws, the first of them the engine's quad, which sprites are drawn on.
+/// It hands out each one's handle at once, and keeps its vertices and indices until the next frame
+/// that renders copies them to the GPU. A renderer draws the meshes of one `Meshes` only.
 pub struct Meshes {
     /// Those added since a frame last took them, in order.
     added: Vec<Added>,
@@ -98,14 +107,25 @@ impl Meshes {
             vertex_size: size_of::<V>(),
             indices: indices.to_vec(),
         });
-        Ok(Mesh {
-            index,
-            vertex: PhantomData,
-        })
+        Ok(Mesh::new(index))
     }
 }
 
-/// Draws meshes with games' shaders, and keeps on the GPU the meshes' vertices and indices and the
+impl Default for Meshes {
+    fn default() -> Self {
+        let mut meshes = Self {
+            added: Vec::new(),
+            count: 0,
+        };
+        let quad = meshes
+            .add("quad", &sprite::CORNERS, &sprite::INDICES)
+            .expect("the quad is whole triangles of its own corners");
+        assert_eq!(quad.index, sprite::QUAD.index, "the quad comes first");
+        meshes
+    }
+}
+
+/// Draws meshes with their shaders, and keeps on the GPU the meshes' vertices and indices and the
 /// textures the shaders sample.
 pub(crate) struct MeshPass {
     device: Arc<Device>,
@@ -316,7 +336,8 @@ mod tests {
             assert!(error.to_string().contains("\"broken\""), "{error}");
         }
         let mut add = |indices: &[u32]| meshes.add("a", &TRIANGLE, indices).map(|mesh| mesh.index);
-        assert_eq!(add(&[0, 1, 2]).ok(), Some(0));
-        assert_eq!(add(&[2, 1, 0]).ok(), Some(1));
+        // After the engine's quad.
+        assert_eq!(add(&[0, 1, 2]).ok(), Some(1));
+        assert_eq!(add(&[2, 1, 0]).ok(), Some(2));
     }
 }

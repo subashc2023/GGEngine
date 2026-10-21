@@ -13,10 +13,10 @@ use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
 use bytemuck::NoUninit;
-use gg_core::math::{Mat4, Quat, Vec3, Vec4};
+use gg_core::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{
     Blend, Camera, Draws, Meshes, Projection, RenderData, Renderer, Sampler, Settings, Shaders,
-    Texture, Textures, Ui, Viewport,
+    Sprite, Texture, Textures, Ui, Viewport,
 };
 
 fn main() {
@@ -38,6 +38,10 @@ fn main() {
     run(
         "textures_match_their_reference",
         textures_match_their_reference,
+    );
+    run(
+        "sprites_match_their_reference",
+        sprites_match_their_reference,
     );
 }
 
@@ -232,9 +236,9 @@ struct Sampling {
 /// it and part of the clear color, into an offscreen image, and compares it with its reference
 /// image. Each draw's parameters give its texture and sampler. The checkerboard repeats twice each
 /// way, sharp, so that a sampler ignored would clamp it and blur it, and its top left is a third
-/// color, so that an image flipped moves it. A texture added first and never drawn takes slot 0,
-/// so that textures put in the wrong slots, or sampled through the wrong ones, show it or each
-/// other; the one with alpha is added after the first frame. Its texels are opaque, half, a
+/// color, so that an image flipped moves it. The engine's white texture, never drawn here, takes
+/// slot 0, so that textures put in the wrong slots, or sampled through the wrong ones, show it or
+/// each other; the one with alpha is added after the first frame. Its texels are opaque, half, a
 /// quarter and wholly transparent, so that a shader blended as opaque, or as though its alpha were
 /// multiplied in, changes thousands of pixels; and the textures are sRGB, so that colors sampled
 /// without decoding come out brighter.
@@ -277,9 +281,6 @@ fn textures_match_their_reference() {
     let place =
         |x| Mat4::from_translation(Vec3::new(x, 0.0, 0.0)) * Mat4::from_scale(Vec3::splat(2.0));
 
-    textures
-        .add("unused", [1, 1], &[255, 0, 255, 255])
-        .expect("a texture");
     // 4 by 4 texels, sRGB-encoded: a checkerboard of red and blue, with yellow at the top left.
     let checkerboard: Vec<u8> = (0..16)
         .flat_map(|i| match (i % 4, i / 4) {
@@ -334,6 +335,102 @@ fn textures_match_their_reference() {
         render_without_ui(&mut renderer, data);
     }
     check(renderer, "textures", WIDTH, HEIGHT);
+}
+
+/// Draws sprites into an offscreen image and compares it with its reference image: along the top,
+/// a sheet of 4 by 4 texels whole, its top right quarter, and the whole sheet flipped left to
+/// right; along the bottom, the sheet repeated three times across and twice down, a sprite of only
+/// a color, and the sheet tinted and half transparent over part of that sprite and part of the
+/// clear color. Each of the sheet's texels has a color of its own, so that texture coordinates
+/// flipped, turned or taken from the wrong part of the rectangle change hundreds of pixels; and its
+/// bottom left quarter is half transparent, so that a sprite shader that drops the texture's alpha,
+/// or draws opaque, changes hundreds more. The sprite of only a color shows the engine's white
+/// texture tinted, so that a tint dropped, or a default texture other than white, changes it all.
+fn sprites_match_their_reference() {
+    const WIDTH: u32 = 240;
+    const HEIGHT: u32 = 160;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut meshes = Meshes::default();
+    let mut shaders = Shaders::default();
+    let mut textures = Textures::default();
+    // 4 units from the view's bottom to its top, 40 pixels a unit, and 6 across, around the origin.
+    let camera = Camera {
+        projection: Projection::Orthographic {
+            height: 4.0,
+            near: -1.0,
+            far: 1.0,
+        },
+        ..Camera::default()
+    };
+    // 4 by 4 texels, sRGB-encoded, red growing to the right and green downward; the bottom left
+    // quarter is half transparent.
+    let sheet: Vec<u8> = (0..16)
+        .flat_map(|i| {
+            let (x, y) = (i % 4, i / 4);
+            let alpha = if x < 2 && y >= 2 { 128 } else { 255 };
+            [40 + 60 * x, 40 + 60 * y, 120, alpha]
+        })
+        .collect();
+    let sheet = textures.add("sheet", [4, 4], &sheet).expect("a texture");
+    // `width` by `height` units, centered at (`x`, `y`). Every sprite's edges fall between pixels.
+    let place = |[x, y]: [f32; 2], [width, height]: [f32; 2]| {
+        Mat4::from_translation(Vec3::new(x, y, 0.0))
+            * Mat4::from_scale(Vec3::new(width, height, 1.0))
+    };
+    let whole = Sprite {
+        texture: sheet,
+        sampler: Sampler::NearestClamp,
+        ..Sprite::default()
+    };
+    let mut draws = Draws::default();
+    // Along the top, each 60 pixels across: the whole sheet, 15 pixels a texel; its top right
+    // quarter, 30 pixels a texel; and the whole sheet flipped.
+    draws.push_sprite(place([-2.0, 1.0], [1.5, 1.5]), whole);
+    let quarter = Sprite {
+        rect: [Vec2::new(0.5, 0.0), Vec2::new(1.0, 0.5)],
+        ..whole
+    };
+    draws.push_sprite(place([0.0, 1.0], [1.5, 1.5]), quarter);
+    let flipped = Sprite {
+        rect: [Vec2::new(1.0, 0.0), Vec2::new(0.0, 1.0)],
+        ..whole
+    };
+    draws.push_sprite(place([2.0, 1.0], [1.5, 1.5]), flipped);
+    // Along the bottom: the sheet tiled, 8 pixels a texel, so that no pixel's center is on a
+    // texel's edge; orange; and the sheet tinted, over the orange sprite's right third, 20 pixels.
+    let tiled = Sprite {
+        rect: [Vec2::ZERO, Vec2::new(3.0, 2.0)],
+        sampler: Sampler::NearestRepeat,
+        ..whole
+    };
+    draws.push_sprite(place([-1.75, -1.0], [2.4, 1.6]), tiled);
+    let orange = Sprite {
+        color: Vec4::new(0.9, 0.4, 0.1, 1.0),
+        ..Sprite::default()
+    };
+    draws.push_sprite(place([0.5, -1.0], [1.5, 1.5]), orange);
+    let tinted = Sprite {
+        color: Vec4::new(0.3, 0.8, 1.0, 0.5),
+        ..whole
+    };
+    draws.push_sprite(place([1.5, -1.0], [1.5, 1.5]), tinted);
+    // More frames than are in flight.
+    for _ in 0..3 {
+        let data = RenderData {
+            clear_color: CLEAR,
+            viewport: Viewport {
+                origin: [0, 0],
+                size: [WIDTH, HEIGHT],
+            },
+            camera,
+            meshes: &mut meshes,
+            shaders: &mut shaders,
+            textures: &mut textures,
+            draws: &draws,
+        };
+        render_without_ui(&mut renderer, data);
+    }
+    check(renderer, "sprites", WIDTH, HEIGHT);
 }
 
 /// Renders a frame of `data`, without UI.

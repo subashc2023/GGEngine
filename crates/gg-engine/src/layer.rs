@@ -9,7 +9,8 @@ use bytemuck::NoUninit;
 use gg_core::Result;
 use gg_core::math::Mat4;
 use gg_renderer::{
-    Blend, Camera, Draws, Mesh, Meshes, RenderData, Shader, Shaders, Texture, Textures, Viewport,
+    Blend, Camera, Draws, Mesh, Meshes, RenderData, Shader, Shaders, Sprite, Texture, Textures,
+    Viewport,
 };
 
 use crate::{Event, Input, Ui, image};
@@ -119,16 +120,17 @@ impl Context {
         self.shaders.add(name, path.as_ref(), blend)
     }
 
-    /// Loads the PNG file at `path` as a texture for layers' shaders to sample from then on,
-    /// through the handle, which is a field of their parameters as it is. Any PNG loads: its
-    /// colors are taken as sRGB-encoded and its alpha as not multiplied into them, and shaders
-    /// sample its colors decoded to linear, with texture coordinates from (0, 0) at its top left to
-    /// (1, 1) at its bottom right. `name` names the texture in errors and GPU captures. The GPU has
-    /// it from the next frame that renders.
+    /// Loads the PNG file at `path` as a texture for sprites and layers' shaders to sample from
+    /// then on, through the handle: a sprite's `texture`, or a field of a shader's parameters as it
+    /// is. Any PNG loads: its colors are taken as sRGB-encoded and its alpha as not multiplied
+    /// into them, and shaders sample its colors decoded to linear, with texture coordinates from
+    /// (0, 0) at its top left to (1, 1) at its bottom right. `name` names the texture in errors
+    /// and GPU captures. The GPU has it from the next frame that renders.
     ///
     /// Fails with `engine.bad_texture` if the file can't be read or doesn't decode as a PNG, with
     /// `renderer.bad_texture` if a side is more than 8,192 pixels, the most every Vulkan 1.4
-    /// device takes, and with `renderer.too_many_textures` past the 61,440 a renderer holds.
+    /// device takes, and with `renderer.too_many_textures` past the 61,440 a renderer holds, the
+    /// engine's white one among them.
     pub fn add_texture(&mut self, name: &str, path: impl AsRef<Path>) -> Result<Texture> {
         let image = image::load_png(name, path.as_ref())?;
         self.textures.add(name, image.size, &image.pixels)
@@ -161,6 +163,13 @@ impl Context {
         params: P,
     ) {
         self.draws.push(mesh, shader, transform, params);
+    }
+
+    /// Draws `sprite` this frame, where `transform` places it in the world, over the meshes drawn
+    /// before it, in the game's view as the camera sees it. Unscaled, a sprite is a unit square
+    /// around the transform's translation, as [`Sprite`] says.
+    pub fn draw_sprite(&mut self, transform: Mat4, sprite: Sprite) {
+        self.draws.push_sprite(transform, sprite);
     }
 
     /// The frame's render data, with the game's view at `viewport`.
