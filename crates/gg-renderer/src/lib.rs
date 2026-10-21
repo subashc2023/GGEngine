@@ -4,6 +4,7 @@
 //! It knows nothing about the scene, ECS or gameplay. It receives plain data, so rendering
 //! can run on its own thread, a frame behind simulation.
 
+mod mesh;
 mod ui;
 
 use std::iter;
@@ -13,9 +14,30 @@ use gg_core::Result;
 use gg_gpu::{ColorImage, Device, Frames, Instance, InstanceDesc, Surface, Swapchain, Target};
 
 pub use gg_gpu::{Validation, Window};
+pub use mesh::{Mesh, Meshes, Vertex};
 pub use ui::Ui;
 
+use mesh::MeshPass;
 use ui::UiPass;
+
+/// The `size` pixels of a frame whose top left is at `origin`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Viewport {
+    pub origin: [u32; 2],
+    pub size: [u32; 2],
+}
+
+/// What a frame draws besides UI: plain data, which the engine extracts every frame.
+pub struct RenderData<'a> {
+    /// The color the whole frame clears to, in linear RGBA.
+    pub clear_color: [f32; 4],
+    /// The game's view, which the meshes are drawn in: clip space spans it.
+    pub viewport: Viewport,
+    /// The meshes; those added since a frame last rendered reach the GPU first.
+    pub meshes: &'a mut Meshes,
+    /// The meshes to draw, in order, each over those before it.
+    pub draws: &'a [Mesh],
+}
 
 /// How to set up a renderer.
 pub struct Settings<'a> {
@@ -37,6 +59,7 @@ pub struct Renderer {
     /// The keys of the other windows, in the order of their swapchains in `windows`.
     window_keys: Vec<u64>,
     windows: Vec<Swapchain>,
+    meshes: MeshPass,
     ui: UiPass,
     instance: Arc<Instance>,
     device: Arc<Device>,
@@ -101,6 +124,7 @@ impl Renderer {
             output,
             window_keys: Vec::new(),
             windows: Vec::new(),
+            meshes: MeshPass::new(device, format)?,
             ui: UiPass::new(device, format)?,
             instance: instance.clone(),
             device: device.clone(),
@@ -157,17 +181,21 @@ impl Renderer {
         }
     }
 
-    /// Renders a frame cleared to `clear_color`, in linear RGBA, with `ui` drawn over it, and
-    /// draws into each of the other windows its UI from `windows`, over black. It presents them
-    /// all. `windows` lists the UIs in the order egui ran their passes, which ran before `ui`'s:
-    /// the order of their texture changes. A window that isn't open, or whose swapchain has no
-    /// image free yet, is left as it was.
+    /// Renders a frame from `data`, with `ui` drawn over it, and draws into each of the other
+    /// windows its UI from `windows`, over black. It presents them all. `windows` lists the UIs
+    /// in the order egui ran their passes, which ran before `ui`'s: the order of their texture
+    /// changes. A window that isn't open, or whose swapchain has no image free yet, is left as it
+    /// was.
     ///
     /// Returns `false` when there was nothing to render into, as when the window is minimized;
-    /// the UIs' texture changes are applied regardless.
+    /// the meshes added and the UIs' texture changes wait for the next frame that renders.
+    ///
+    /// # Panics
+    ///
+    /// If `data` holds meshes of another [`Meshes`] than the one it held before.
     pub fn render(
         &mut self,
-        clear_color: [f32; 4],
+        data: RenderData<'_>,
         ui: Ui<'_>,
         windows: &mut [(u64, Ui<'_>)],
     ) -> Result<bool> {
@@ -187,10 +215,12 @@ impl Renderer {
         let Some(mut frame) = self.frames.begin(iter::once(target).chain(others))? else {
             return Ok(false);
         };
+        self.meshes.upload(&mut frame, data.meshes)?;
         self.ui.write_textures(&mut frame)?;
         let mut pass = frame
-            .begin_pass(0, c"frame", clear_color)
+            .begin_pass(0, c"frame", data.clear_color)
             .expect("a frame's first target has an image");
+        self.meshes.draw(&mut pass, data.viewport, data.draws);
         self.ui
             .draw(&mut pass, ui.primitives, ui.pixels_per_point)?;
         drop(pass);

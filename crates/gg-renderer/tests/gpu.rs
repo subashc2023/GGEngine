@@ -12,7 +12,7 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
-use gg_renderer::{Renderer, Settings, Ui};
+use gg_renderer::{Meshes, RenderData, Renderer, Settings, Ui, Vertex, Viewport};
 
 fn main() {
     // CI runners without a GPU or a Vulkan driver, Windows' and macOS's, set this. Linux CI runs
@@ -29,6 +29,10 @@ fn main() {
     gg_core::log::init("renderer-gpu-tests", &dir);
 
     run("ui_matches_its_reference", ui_matches_its_reference);
+    run(
+        "triangle_matches_its_reference",
+        triangle_matches_its_reference,
+    );
 }
 
 fn run(name: &str, test: impl FnOnce()) {
@@ -36,22 +40,32 @@ fn run(name: &str, test: impl FnOnce()) {
     println!("test {name} ... ok");
 }
 
-/// Draws a window of egui widgets offscreen, and compares it with its reference image.
-fn ui_matches_its_reference() {
-    const WIDTH: u32 = 320;
-    const HEIGHT: u32 = 200;
+/// What the tests clear to, in linear RGBA.
+const CLEAR: [f32; 4] = [0.02, 0.03, 0.05, 1.0];
+
+/// A headless renderer of `width` by `height` pixels, under validation.
+fn renderer(width: u32, height: u32) -> Renderer {
     let settings = Settings {
         app_name: "renderer gpu tests",
         validation: true,
         gpu: None,
         vsync: false,
     };
-    let mut renderer = Renderer::headless(&settings, WIDTH, HEIGHT).expect("a renderer");
-    let validation = renderer.validation();
+    let renderer = Renderer::headless(&settings, width, height).expect("a renderer");
     assert!(
-        validation.enabled(),
+        renderer.validation().enabled(),
         "GPU tests run under validation; install the Vulkan SDK's validation layer"
     );
+    renderer
+}
+
+/// Draws a window of egui widgets offscreen, and compares it with its reference image.
+fn ui_matches_its_reference() {
+    const WIDTH: u32 = 320;
+    const HEIGHT: u32 = 200;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let validation = renderer.validation();
+    let mut meshes = Meshes::default();
 
     let egui = egui::Context::default();
     // Without animation, the first frames show the window as it stays.
@@ -83,10 +97,17 @@ fn ui_matches_its_reference() {
             textures: &mut output.textures_delta,
             pixels_per_point: output.pixels_per_point,
         };
+        let data = RenderData {
+            clear_color: CLEAR,
+            viewport: Viewport {
+                origin: [0, 0],
+                size: [WIDTH, HEIGHT],
+            },
+            meshes: &mut meshes,
+            draws: &[],
+        };
         assert!(
-            renderer
-                .render([0.02, 0.03, 0.05, 1.0], ui, &mut [])
-                .expect("a frame"),
+            renderer.render(data, ui, &mut []).expect("a frame"),
             "an offscreen image can always be rendered into"
         );
     }
@@ -101,6 +122,59 @@ fn ui_matches_its_reference() {
         "validation reported problems; the log above says what"
     );
     compare("ui", WIDTH, HEIGHT, &pixels);
+}
+
+/// Draws a triangle in red, green and blue into part of an offscreen image, over more frames
+/// than are in flight, so that the later frames draw from what the first copied to the GPU, and
+/// compares it with its reference image.
+fn triangle_matches_its_reference() {
+    const WIDTH: u32 = 320;
+    const HEIGHT: u32 = 200;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let validation = renderer.validation();
+    let mut meshes = Meshes::default();
+    let corner = |position, color| Vertex { position, color };
+    let vertices = [
+        corner([0.0, -0.5, 0.0], [1.0, 0.0, 0.0, 1.0]),
+        corner([0.5, 0.5, 0.0], [0.0, 1.0, 0.0, 1.0]),
+        corner([-0.5, 0.5, 0.0], [0.0, 0.0, 1.0, 1.0]),
+    ];
+    let triangle = meshes
+        .add("triangle", &vertices, &[0, 1, 2])
+        .expect("a mesh");
+    for _ in 0..3 {
+        let data = RenderData {
+            clear_color: CLEAR,
+            // Off the image's corner, so that the image shows where the view is.
+            viewport: Viewport {
+                origin: [40, 20],
+                size: [240, 160],
+            },
+            meshes: &mut meshes,
+            draws: &[triangle],
+        };
+        let mut textures = egui::TexturesDelta::default();
+        let ui = Ui {
+            primitives: &[],
+            textures: &mut textures,
+            pixels_per_point: 1.0,
+        };
+        assert!(
+            renderer.render(data, ui, &mut []).expect("a frame"),
+            "an offscreen image can always be rendered into"
+        );
+    }
+    let pixels = renderer
+        .read_back()
+        .expect("the frame's pixels")
+        .expect("a headless renderer's frame can be read back");
+    drop(renderer);
+    assert_eq!(
+        validation.messages(),
+        0,
+        "validation reported problems; the log above says what"
+    );
+    compare("triangle", WIDTH, HEIGHT, &pixels);
 }
 
 /// Compares RGBA8 `pixels` with the reference image `name`, allowing for how GPUs differ in

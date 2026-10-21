@@ -24,6 +24,10 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   DWM's border and shadow and the bands just outside them that resize them; the main window's
   title bar moves it, maximizes it and opens the system menu as the OS's own does, and Snap
   Layouts shows over its maximize button.
+- **First triangle** (2026-10-21): layers add meshes and draw them in the game's view, the dock's
+  central area; their vertices and indices live in GPU memory, copied there by the next frame
+  after they're added, and a Slang shader reads the vertices through their address. The sandbox
+  draws a triangle in red, green and blue, and a GPU test checks one against a reference image.
 
 ## Now: Phase 3, runtime core
 
@@ -107,6 +111,8 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Composed text from an input method (winit's `Ime` events), for languages typed through one | A game takes text input, such as chat |
 | Steady-state frames that draw UI allocate, in egui's layout and tessellation | Phase 4, with the allocation check; the overlay is for development |
 | Keeping within the GPU's memory budget (`VK_EXT_memory_budget` through VMA) | Phase 7, with streaming |
+| Removing meshes; a mesh lasts until the app ends | Something adds and removes meshes as it runs, such as asset hot reload in Phase 4 |
+| A camera and transforms: meshes are given in clip space, so they stretch with the game's view | Phase 4, which draws moving entities |
 | A swapchain without an sRGB format falls back to the first one offered, where colors come out too dark | A device offers no sRGB swapchain format |
 | Splits in a torn-off window, which holds one tab group | A tool wants panels side by side outside the main window |
 | Closing a panel from its tab; a panel shows while its layer shows it | Panels the user opens and closes, such as the editor's |

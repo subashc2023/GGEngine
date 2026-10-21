@@ -24,8 +24,9 @@ use ash::vk;
 use gg_core::Error;
 
 pub use bindless::Sampler;
+pub use buffer::GpuBuffer;
 pub use device::Device;
-pub use frame::{Frame, Frames, Pass, Target, Upload};
+pub use frame::{Frame, Frames, Indices, Pass, Target, Upload};
 pub use image::ColorImage;
 pub use instance::{Instance, InstanceDesc, Validation};
 pub use pipeline::{Blend, Format, GraphicsDesc, Pipeline};

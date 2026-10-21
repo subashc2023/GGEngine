@@ -4,6 +4,9 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Duration;
 
+use gg_core::Result;
+use gg_renderer::{Mesh, Meshes, RenderData, Vertex, Viewport};
+
 use crate::{Event, Input, Ui};
 
 /// A part of an app that the main loop drives. Every method has a default that does nothing,
@@ -34,6 +37,9 @@ pub struct Context {
     window: Option<Window>,
     input: Input,
     clear_color: [f32; 4],
+    meshes: Meshes,
+    /// The meshes to draw this frame, in order.
+    draws: Vec<Mesh>,
 }
 
 impl Context {
@@ -42,6 +48,8 @@ impl Context {
             window,
             input: Input::default(),
             clear_color: [0.02, 0.02, 0.02, 1.0],
+            meshes: Meshes::default(),
+            draws: Vec::new(),
         }
     }
 
@@ -63,6 +71,38 @@ impl Context {
 
     pub fn set_clear_color(&mut self, color: [f32; 4]) {
         self.clear_color = color;
+    }
+
+    /// Adds a mesh for layers to draw from then on: triangles, three of `indices` each, which
+    /// index `vertices`. `name` names it in errors and GPU captures. The GPU has it from the next
+    /// frame that renders.
+    ///
+    /// Fails with `renderer.bad_mesh` if it has no triangles, indices left over from whole
+    /// triangles, or an index past its vertices.
+    pub fn add_mesh(&mut self, name: &str, vertices: &[Vertex], indices: &[u32]) -> Result<Mesh> {
+        self.meshes.add(name, vertices, indices)
+    }
+
+    /// Draws `mesh` this frame, over the meshes drawn before it, in the game's view: the main
+    /// window's central area, which the panels dock around. Until there are cameras, its
+    /// positions are in clip space, which spans the view.
+    pub fn draw(&mut self, mesh: Mesh) {
+        self.draws.push(mesh);
+    }
+
+    /// The frame's render data, with the game's view at `viewport`.
+    pub(crate) fn render_data(&mut self, viewport: Viewport) -> RenderData<'_> {
+        RenderData {
+            clear_color: self.clear_color,
+            viewport,
+            meshes: &mut self.meshes,
+            draws: &self.draws,
+        }
+    }
+
+    /// Forgets the frame's draws, once the renderer has had them.
+    pub(crate) fn clear_draws(&mut self) {
+        self.draws.clear();
     }
 }
 

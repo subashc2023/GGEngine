@@ -260,6 +260,18 @@ come while the window is out of focus.
 Layers run on the main thread with the event loop. Input that reaches a game's layer enters the
 simulation as commands, as [ECS](#ecs) describes.
 
+## Rendering
+
+Each frame the engine hands `gg-renderer` that frame's render data, as plain data: the color the
+frame clears to, the game's view, and the meshes to draw in it, in order. The view is the main
+window's central area, which the dock leaves the game, and the UI draws over it. Layers add
+meshes and draw them through their `Context`. The renderer's `Meshes` hands out each mesh's
+handle at once and keeps its vertices and indices until the next frame that renders, which
+copies them into GPU memory, where they stay. Shaders read vertices through their buffer's
+address rather than through vertex input, so a mesh's layout is between its data and its shader;
+draws take the indices. Until there are cameras, meshes are in Vulkan's clip space, which spans
+the view.
+
 ## Threads
 
 The main thread runs the OS event loop, which macOS requires. Simulation runs on a job system.

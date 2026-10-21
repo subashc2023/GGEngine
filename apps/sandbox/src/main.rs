@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use gg_engine::egui::{ViewportCommand, ViewportId};
-use gg_engine::{Context, Event, Key, Layer, Ui};
+use gg_engine::{Context, Event, Key, Layer, Mesh, Ui, Vertex};
 use tracing::info;
 
 fn main() -> ExitCode {
@@ -13,10 +13,27 @@ fn main() -> ExitCode {
     gg_engine::run(app.layer(Sandbox::new()))
 }
 
-/// Clears to a color that drifts slowly, so that a running sandbox visibly animates, and shows two
-/// panels to dock: frame times, and the color, which can be held or picked. Logs the key and mouse
-/// presses that reach it, which those on the panels don't. It polls input too: holding Space
-/// pauses the drift, and a panel shows where the cursor is. The title bar's File menu quits.
+/// A triangle in red, green and blue, pointing up, in clip space.
+const TRIANGLE: [Vertex; 3] = [
+    Vertex {
+        position: [0.0, -0.5, 0.0],
+        color: [1.0, 0.0, 0.0, 1.0],
+    },
+    Vertex {
+        position: [0.5, 0.5, 0.0],
+        color: [0.0, 1.0, 0.0, 1.0],
+    },
+    Vertex {
+        position: [-0.5, 0.5, 0.0],
+        color: [0.0, 0.0, 1.0, 1.0],
+    },
+];
+
+/// Draws a triangle in the game's view, over a color that drifts slowly, so that a running
+/// sandbox visibly animates, and shows two panels to dock: frame times, and the color, which can
+/// be held or picked. Logs the key and mouse presses that reach it, which those on the panels
+/// don't. It polls input too: holding Space pauses the drift, and a panel shows where the cursor
+/// is. The title bar's File menu quits.
 struct Sandbox {
     time: Duration,
     drift: bool,
@@ -24,6 +41,8 @@ struct Sandbox {
     color: [f32; 3],
     /// The last frame's time, shown as it is: smoothing would hide uneven frames.
     frame_time: Duration,
+    /// Added once the sandbox attaches.
+    triangle: Option<Mesh>,
 }
 
 impl Sandbox {
@@ -33,12 +52,21 @@ impl Sandbox {
             drift: true,
             color: [0.0; 3],
             frame_time: Duration::ZERO,
+            triangle: None,
         }
     }
 }
 
 impl Layer for Sandbox {
+    fn attach(&mut self, cx: &mut Context) {
+        let triangle = cx.add_mesh("triangle", &TRIANGLE, &[0, 1, 2]);
+        self.triangle = Some(triangle.expect("the triangle is a whole one, of its own vertices"));
+    }
+
     fn update(&mut self, cx: &mut Context, dt: Duration) {
+        if let Some(triangle) = self.triangle {
+            cx.draw(triangle);
+        }
         self.frame_time = dt;
         if self.drift && !cx.input().key_down(Key::Space) {
             self.time += dt;

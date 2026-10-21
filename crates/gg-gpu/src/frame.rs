@@ -3,6 +3,7 @@
 //! A frame can render into several targets, such as an app's windows, and presents all their
 //! swapchains at once.
 
+use std::marker::PhantomData;
 use std::slice;
 use std::sync::Arc;
 
@@ -13,7 +14,9 @@ use tracing::error;
 use crate::bindless::PUSH_CONSTANTS;
 use crate::buffer::Buffer;
 use crate::vma::Memory;
-use crate::{COLOR_RANGE, ColorImage, Device, Format, Pipeline, Swapchain, Texture, vk_error};
+use crate::{
+    COLOR_RANGE, ColorImage, Device, Format, GpuBuffer, Pipeline, Swapchain, Texture, vk_error,
+};
 
 /// How many frames the GPU works on at once.
 const FRAMES_IN_FLIGHT: u64 = 2;
@@ -369,6 +372,77 @@ impl<'a> Frame<'a> {
         Ok(())
     }
 
+    /// Writes `bytes` into `buffer`, starting `offset` bytes in. The buffer's other bytes keep
+    /// what they had. Shaders and draws see the new bytes from this frame's passes on.
+    ///
+    /// # Panics
+    ///
+    /// If the bytes don't fit in the buffer.
+    pub fn write_buffer(
+        &mut self,
+        buffer: &mut GpuBuffer,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<()> {
+        let size = bytes.len() as u64;
+        assert!(
+            offset
+                .checked_add(size)
+                .is_some_and(|end| end <= buffer.size()),
+            "{size} bytes at {offset} overflow a buffer of {}",
+            buffer.size()
+        );
+        // A copy has at least a byte.
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let staged = self.upload(bytes)?;
+        let device = &self.frames.device;
+        let commands = self.frames.slots[self.slot].commands;
+        // What reads a buffer during a frame: shaders, through its address, and draws' indices.
+        let readers = vk::PipelineStageFlags2::VERTEX_SHADER
+            | vk::PipelineStageFlags2::FRAGMENT_SHADER
+            | vk::PipelineStageFlags2::INDEX_INPUT;
+        // Earlier frames on this queue may still read the buffer, or copy into it; the copy waits
+        // for them.
+        let to_copy = vk::MemoryBarrier2::default()
+            .src_stage_mask(readers | vk::PipelineStageFlags2::COPY)
+            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::COPY)
+            .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE);
+        let region = vk::BufferCopy {
+            src_offset: staged.offset,
+            dst_offset: offset,
+            size,
+        };
+        let to_read = vk::MemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COPY)
+            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .dst_stage_mask(readers)
+            .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::INDEX_READ);
+        let raw = device.raw();
+        // SAFETY: the commands are recording outside a pass, the region fits the buffer, and the
+        // staged bytes and the buffer live until the frame has finished: the arena is reset only
+        // after that, and the buffer retires until then.
+        unsafe {
+            device.begin_label(commands, c"write buffer");
+            if buffer.written() {
+                raw.cmd_pipeline_barrier2(
+                    commands,
+                    &vk::DependencyInfo::default().memory_barriers(slice::from_ref(&to_copy)),
+                );
+            }
+            raw.cmd_copy_buffer(commands, staged.buffer, buffer.raw(), &[region]);
+            raw.cmd_pipeline_barrier2(
+                commands,
+                &vk::DependencyInfo::default().memory_barriers(slice::from_ref(&to_read)),
+            );
+            device.end_label(commands);
+        }
+        buffer.set_written();
+        Ok(())
+    }
+
     /// Clears the whole of the `target`th target to `color`, in linear RGBA, if it has an image
     /// this frame.
     pub fn clear(&mut self, target: usize, color: [f32; 4]) {
@@ -628,6 +702,36 @@ impl Pass<'_, '_> {
         }
     }
 
+    /// Maps clip space onto the `size` pixels at `origin` for the draws that follow, and keeps
+    /// them inside those pixels, clipped to the target.
+    ///
+    /// # Panics
+    ///
+    /// If `size` has no area, which a viewport can't have.
+    pub fn set_viewport(&mut self, origin: [u32; 2], size: [u32; 2]) {
+        assert!(
+            size[0] > 0 && size[1] > 0,
+            "a viewport has an area; got {size:?}"
+        );
+        let viewport = vk::Viewport {
+            x: origin[0] as f32,
+            y: origin[1] as f32,
+            width: size[0] as f32,
+            height: size[1] as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
+        // SAFETY: the commands are recording, and the viewport has an area.
+        unsafe {
+            self.frame
+                .frames
+                .device
+                .raw()
+                .cmd_set_viewport(self.commands(), 0, &[viewport]);
+        }
+        self.set_scissor(origin, size);
+    }
+
     /// Limits the draws that follow to the `size` pixels at `origin`, clipped to the target.
     pub fn set_scissor(&mut self, origin: [u32; 2], size: [u32; 2]) {
         let x = origin[0].min(self.extent.width);
@@ -676,11 +780,19 @@ impl Pass<'_, '_> {
         }
     }
 
-    /// Draws `count` indices from `indices`, 32-bit each, starting `first` indices in, with the
-    /// pipeline set last. Each index is offset by `vertex_offset` before the vertex shader sees it.
-    pub fn draw_indexed(&mut self, indices: Upload, first: u32, count: u32, vertex_offset: i32) {
-        // SAFETY: the commands are recording inside a pass with a pipeline set, and the indices
-        // live in this frame's arena until it has finished.
+    /// Draws `count` of `indices`, starting `first` indices in, with the pipeline set last. Each
+    /// index is offset by `vertex_offset` before the vertex shader sees it.
+    pub fn draw_indexed<'i>(
+        &mut self,
+        indices: impl Into<Indices<'i>>,
+        first: u32,
+        count: u32,
+        vertex_offset: i32,
+    ) {
+        let indices = indices.into();
+        // SAFETY: the commands are recording inside a pass with a pipeline set, and the indices'
+        // buffer lives until the frame has finished: an upload's arena is reset only after that,
+        // and a GPU buffer retires until then.
         unsafe {
             let raw = self.frame.frames.device.raw();
             raw.cmd_bind_index_buffer(
@@ -721,6 +833,36 @@ impl Upload {
     /// Where shaders read the bytes, through a buffer pointer.
     pub fn address(&self) -> u64 {
         self.address
+    }
+}
+
+/// The 32-bit indices a draw takes: an [`Upload`] of the frame's, or a [`GpuBuffer`] from its
+/// start.
+#[derive(Clone, Copy, Debug)]
+pub struct Indices<'a> {
+    buffer: vk::Buffer,
+    offset: u64,
+    /// A GPU buffer's indices borrow it, so that it outlives the draw's recording.
+    buffer_life: PhantomData<&'a GpuBuffer>,
+}
+
+impl From<Upload> for Indices<'_> {
+    fn from(upload: Upload) -> Self {
+        Self {
+            buffer: upload.buffer,
+            offset: upload.offset,
+            buffer_life: PhantomData,
+        }
+    }
+}
+
+impl<'a> From<&'a GpuBuffer> for Indices<'a> {
+    fn from(buffer: &'a GpuBuffer) -> Self {
+        Self {
+            buffer: buffer.raw(),
+            offset: 0,
+            buffer_life: PhantomData,
+        }
     }
 }
 

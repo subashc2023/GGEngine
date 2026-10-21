@@ -124,3 +124,55 @@ impl Drop for Buffer {
         }
     }
 }
+
+/// A buffer in the GPU's own memory, which frames fill ([`Frame::write_buffer`]): vertices and
+/// other data that shaders read through its address, and the indices that draws take. Dropping
+/// it retires it until the GPU is done with it.
+///
+/// [`Frame::write_buffer`]: crate::Frame::write_buffer
+pub struct GpuBuffer {
+    buffer: Buffer,
+    /// Whether a frame has written it, so that a later write waits for the frames reading it.
+    written: bool,
+}
+
+impl GpuBuffer {
+    /// A buffer of `size` bytes, with `name` as its debug name. What it holds is undefined until
+    /// a frame writes it.
+    ///
+    /// # Panics
+    ///
+    /// If `size` is 0, which Vulkan doesn't allow.
+    pub fn new(device: &Arc<Device>, size: u64, name: &str) -> Result<Self> {
+        assert!(size > 0, "a buffer holds at least a byte");
+        let usage = vk::BufferUsageFlags::INDEX_BUFFER
+            | vk::BufferUsageFlags::STORAGE_BUFFER
+            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+            | vk::BufferUsageFlags::TRANSFER_DST;
+        Ok(Self {
+            buffer: Buffer::new(device, size, usage, Memory::Gpu, name)?,
+            written: false,
+        })
+    }
+
+    pub fn size(&self) -> u64 {
+        self.buffer.size()
+    }
+
+    /// Where shaders read the buffer, through a buffer pointer.
+    pub fn address(&self) -> u64 {
+        self.buffer.address()
+    }
+
+    pub(crate) fn raw(&self) -> vk::Buffer {
+        self.buffer.raw()
+    }
+
+    pub(crate) fn written(&self) -> bool {
+        self.written
+    }
+
+    pub(crate) fn set_written(&mut self) {
+        self.written = true;
+    }
+}

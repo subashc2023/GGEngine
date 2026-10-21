@@ -182,6 +182,11 @@ impl Dock {
         }
     }
 
+    /// The central area, the game's view, in the main window's points, as this frame arranged it.
+    pub(crate) fn central(&self) -> Rect {
+        self.arrangement.central
+    }
+
     /// Where the title bar was right-clicked since this was last asked, in the main window's
     /// points, for the OS's window menu.
     pub(crate) fn take_window_menu(&mut self) -> Option<Pos2> {

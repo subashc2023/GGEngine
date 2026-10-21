@@ -172,7 +172,15 @@ impl Handler<'_> {
                 window.show_window_menu(pos);
             }
         }
-        let rendered = render_frame(&self.egui, &self.cx, output, &mut windows, renderer);
+        let view = self.dock.central();
+        let rendered = render_frame(
+            &self.egui,
+            &mut self.cx,
+            view,
+            output,
+            &mut windows,
+            renderer,
+        );
         let rendered = rendered.map(|(presented, platform_output)| {
             egui_winit
                 .state

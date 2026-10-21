@@ -131,6 +131,8 @@ impl UiPass {
             .iter()
             .find(|&&(made_for, _)| made_for == pass.format())
             .expect("a pipeline for each format of target");
+        // The whole target, whichever viewport drew before.
+        pass.set_viewport([0, 0], [width, height]);
         pass.set_pipeline(pipeline);
         for ClippedPrimitive {
             clip_rect,

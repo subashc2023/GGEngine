@@ -22,7 +22,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use gg_core::Result;
-use gg_renderer::{Renderer, Settings, Validation};
+use gg_renderer::{Renderer, Settings, Validation, Viewport};
 use tracing::{debug, error, info};
 
 use args::Args;
@@ -36,6 +36,8 @@ pub use event::{Event, Key, MouseButton, Scroll};
 /// The engine's vectors, matrices and quaternions; apps use them from here, so that they share
 /// the engine's version.
 pub use gg_core::math;
+/// What layers draw: meshes, which they add and draw through their [`Context`].
+pub use gg_renderer::{Mesh, Vertex};
 pub use input::Input;
 use layer::Stack;
 pub use layer::{Context, Layer, Window};
@@ -176,7 +178,14 @@ fn run_headless(app: &mut App, args: &Args) -> Result<Ran> {
                 ..Default::default()
             };
             let output = run_frame(&mut app.stack, &mut cx, &mut clock, &egui, &mut dock, input);
-            render_frame(&egui, &cx, output, &mut [], &mut renderer)?;
+            render_frame(
+                &egui,
+                &mut cx,
+                dock.central(),
+                output,
+                &mut [],
+                &mut renderer,
+            )?;
             frames += 1;
         }
         Ok(())
@@ -215,12 +224,14 @@ fn run_frame(
     })
 }
 
-/// The second half: renders the frame with the UI in `output` over it, and into the windows of
-/// their own what their passes drew, in `windows`. Returns whether the frame was presented, and
-/// egui's requests of the main window, such as the cursor to show.
+/// The second half: renders the frame, with the meshes the layers drew in the game's view, the
+/// main window's central area `view` in points, and the UI in `output` over them; and into the
+/// windows of their own what their passes drew, in `windows`. Returns whether the frame was
+/// presented, and egui's requests of the main window, such as the cursor to show.
 fn render_frame(
     egui: &egui::Context,
-    cx: &Context,
+    cx: &mut Context,
+    view: egui::Rect,
     mut output: egui::FullOutput,
     windows: &mut [Drawn],
     renderer: &mut Renderer,
@@ -232,8 +243,22 @@ fn render_frame(
         pixels_per_point: output.pixels_per_point,
     };
     let mut windows: Vec<_> = windows.iter_mut().map(Drawn::ui).collect();
-    let presented = renderer.render(cx.clear_color(), ui, &mut windows)?;
-    Ok((presented, output.platform_output))
+    let data = cx.render_data(viewport(view, output.pixels_per_point));
+    let presented = renderer.render(data, ui, &mut windows);
+    cx.clear_draws();
+    Ok((presented?, output.platform_output))
+}
+
+/// The pixels of `rect`, in points of `ppp` pixels each, rounded as egui rounds its clip
+/// rectangles.
+fn viewport(rect: egui::Rect, ppp: f32) -> Viewport {
+    let min = (rect.min.to_vec2() * ppp).round();
+    let max = (rect.max.to_vec2() * ppp).round();
+    // Casts saturate, so a rect without an area has none in pixels either.
+    Viewport {
+        origin: [min.x as u32, min.y as u32],
+        size: [(max.x - min.x) as u32, (max.y - min.y) as u32],
+    }
 }
 
 /// Measures frames: the time between them, and since the first.
@@ -319,5 +344,22 @@ impl Ran {
             "Exited cleanly"
         );
         ExitCode::SUCCESS
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_games_view_is_the_central_area_in_pixels() {
+        let central = egui::Rect::from_min_max(egui::pos2(10.2, 31.0), egui::pos2(400.6, 300.0));
+        assert_eq!(
+            viewport(central, 1.25),
+            Viewport {
+                origin: [13, 39],
+                size: [488, 336],
+            }
+        );
     }
 }
