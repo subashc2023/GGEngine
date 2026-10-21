@@ -55,6 +55,8 @@ are in [AGENTS.md](AGENTS.md).
   game builds its own player.
 
 Games depend on `gg-engine` the same way the apps do; see [Game code](#game-code).
+Executables are named `gg-` and the app, such as `gg-sandbox`: GPU drivers apply per-game
+settings by executable name, and a generic name can match one.
 
 ### Layering rules
 
@@ -82,7 +84,7 @@ catch it.
 `gg-engine`'s development tooling (hot reload, the tool API, debug UI) will sit
 behind a `dev` feature that development builds turn on and shipping builds never do; shipping
 builds run cooked data only. Cargo merges the features of every package a command selects, so
-`--workspace`, a bare `cargo build` and `--bin player` would all hand the player `dev`.
+`--workspace`, a bare `cargo build` and `--bin gg-player` would all hand the player `dev`.
 Shipping builds therefore select the player alone, with `-p player`, and a game's shipping
 build selects the game alone the same way.
 
@@ -142,9 +144,9 @@ in the editor is out of an agent's reach.
   results and talks to running games; an MCP server gives agents that speak MCP the same
   reach; the editor is one more client, with no ability an agent lacks.
 - **Headless runs.** Every app runs without a window (`--headless`) and can run a set number
-  of frames, then exit with a status (`--frames N`). Dedicated servers, CI and agents checking
-  their work run this way; rendering checks render offscreen, and simulation-only runs need no
-  GPU.
+  of frames, then exit with a status (`--frames N`): 0 for a clean run, 1 after an error or any
+  validation message, and 2 for bad arguments. Dedicated servers, CI and agents checking their
+  work run this way; rendering checks render offscreen, and simulation-only runs need no GPU.
 
 ## Project state
 
@@ -189,10 +191,14 @@ peer-to-peer rollback; the engine supplies these pieces.
 
 Diagnostics are data, so agents and tools can act on them as reliably as people read them.
 
-- **Logs** go through `tracing` with structured fields. Each run prints readable lines to the
-  console and writes every event as a JSON line to a log file that agents and tools read.
-- **Errors and warnings name their subject.** Each carries a stable code and the thing it is
-  about: an entity ID, an asset path, a render pass, or a shader file and line.
+- **Logs** go through `tracing` with structured fields, filtered by `RUST_LOG`. Each run prints
+  readable, colored lines to stderr, which keeps stdout for machine-readable output, and writes
+  every event as a JSON line to a file that agents and tools read:
+  `logs/<app>-<UTC time>-<process ID>.jsonl` beside the executable, whose path the run logs as
+  it starts.
+- **Errors and warnings name their subject.** Each carries a stable code, a dotted name such as
+  `gpu.device_lost`, and the thing it is about: an entity ID, an asset path, a render pass, or
+  a shader file and line.
 - **Validation messages** become events with their VUID and the debug names of the objects
   involved, and a panic is logged with its location before the process ends.
 

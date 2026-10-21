@@ -10,40 +10,18 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 
 ## Now: Phase 1, entry point, logging and Vulkan bring-up
 
-At the first push, `rust-toolchain.toml` pins the stable release the gates run on, and CI runs
-the three gates on Windows, Linux and macOS, x86-64 and ARM64, plus a check that the crate graph
-follows the layering rules.
+On Windows, with the RTX 4090 and with the AMD iGPU, the sandbox clears the screen at vsync,
+survives resize, minimize and close, and runs `--headless --frames 60` without a window, exiting
+0, with validation reporting nothing. The GPU tests clear an offscreen image and read back its
+color, and find a validation error caused on purpose in the JSON log with its VUID and object
+names. What's left:
 
-The entry point: an app's `main` describes the app and hands control to `gg-engine`, which
-parses the flags every app shares (`--headless`, `--frames N`) and returns the exit status.
-Logs and diagnostics as [ARCHITECTURE.md](../ARCHITECTURE.md#diagnostics) describes.
-
-winit window and event loop; instance with the validation layer and debug messenger when
-validation is on (the default in debug builds); device selection that requires Vulkan 1.4; a
-graphics queue, plus async compute and transfer queues where the device has them; a swapchain
-that handles resize, minimize and out-of-date; frames in flight paced by a timeline semaphore,
-with binary semaphores only where the swapchain requires them and the present semaphore per
-swapchain image, not per frame in flight, since current validation layers flag per-frame reuse
-([Vulkan Guide](https://docs.vulkan.org/guide/latest/swapchain_semaphore_reuse.html)).
-
-ash 0.38, the newest release as of 2026-10-20, has Vulkan 1.3 headers. Until an ash release
-ships 1.4 headers, request API 1.3 in `VkApplicationInfo`, still selecting only devices that
-report 1.4, and enable the 1.4 additions through the extensions they were promoted from.
-
-Don't enable `VK_KHR_portability_enumeration`, though ash's examples do on macOS: KosmicKrisp
-needs no portability extensions, and leaving it off keeps MoltenVK out of device enumeration.
-
-Third-party implicit layers (Steam, OBS, Epic and other overlays) can load into any instance,
-and a broken one makes the loader log errors by itself. Only validation-type messages fail a
-test, and GPU tests set `VK_LOADER_LAYERS_DISABLE=~implicit~` so overlays can't add validation
-errors. Dev runs keep implicit layers, since RenderDoc's is one.
-
-*Done when* the sandbox clears the screen at vsync on Windows (RTX 4090 and the AMD iGPU),
-Linux and macOS (KosmicKrisp in Vulkan SDK 1.4.363.0 or later, the first conformant build),
-survives resize, minimize and close, and runs `--headless --frames 60` without a window,
-exiting 0; validation reports nothing; a test clears an offscreen image and reads back its
-color on lavapipe in Linux CI (Mesa 25.0 or later, the first with Vulkan 1.4); and a validation
-error caused on purpose shows up in the run's JSON log with its VUID and object names.
+- At the first push, `rust-toolchain.toml` pins the stable release the gates run on, and CI
+  runs the three gates on Windows, Linux and macOS, x86-64 and ARM64, plus a check that the
+  crate graph follows the layering rules. In Linux CI the GPU tests run on lavapipe (Mesa 25.0
+  or later, the first with Vulkan 1.4).
+- The same checks of the sandbox on Linux, and on macOS with KosmicKrisp (Vulkan SDK 1.4.363.0
+  or later, the first conformant build).
 
 ## Next
 
@@ -113,10 +91,12 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 
 | Skipped | Add when |
 |---|---|
-| Third-party dependencies | Phase 1, as code first uses them |
 | The engine as a dynamic library in development builds, to shorten relinks | Rebuilding a game gets slow |
 | Optimized dependencies in dev builds (`[profile.dev.package."*"] opt-level = 3`) | A heavy dependency (image decoding, physics) makes debug builds slow |
 | Shipping profile (LTO, `codegen-units = 1`) | Phase 6, with the player |
+| Compiling trace and debug events out of shipping builds, through `tracing`'s `release_max_level_*` features | Phase 6, with the shipping profile |
+| Deleting old JSON logs; every run's log is kept | Logs pile up enough to matter |
+| A clean shutdown on Ctrl+C, which now ends the process at once; the JSON log keeps every line written until then | A headless run that goes on until it's stopped, such as a dedicated server |
 | A gate that compiles the shipping configuration: `cargo clippy -p player --all-targets -- -D warnings` | When `gg-engine` gets its `dev` feature |
 
 ## Open questions

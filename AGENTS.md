@@ -33,8 +33,13 @@ ARCHITECTURE.md: check a change against them yourself instead of trusting the bu
 ```sh
 cargo build                       # the whole workspace
 cargo run -p sandbox
+cargo run -p sandbox -- --help    # the flags every app shares
+cargo run -p sandbox -- --headless --frames 60   # does the engine run? 0 means cleanly
 cargo build -p player --release   # shipping: the player alone
 ```
+
+Each run writes a JSON log and logs its path as it starts; filter it on `level`, `code` or
+`vuid`. `RUST_LOG` sets what's logged, such as `RUST_LOG=gg_gpu=trace`.
 
 Build and check shipping configurations with `-p player` alone, since a wider build merges the
 sandbox's features into the player ([Builds](ARCHITECTURE.md#builds)).
@@ -46,6 +51,10 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
+
+The tests include GPU tests, which need a Vulkan 1.4 driver and the Khronos validation layer.
+Without a GPU, lavapipe serves: on Debian or Ubuntu, `mesa-vulkan-drivers` (Mesa 25.0 or later)
+and `vulkan-validationlayers`.
 
 ## Rust
 

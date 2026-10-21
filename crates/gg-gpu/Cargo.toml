@@ -5,7 +5,20 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+ash.workspace = true
+ash-window.workspace = true
 gg-core.workspace = true
+raw-window-handle.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+# The GPU tests have a main of their own: it sets the Vulkan loader's environment before any
+# thread exists, then runs the tests one at a time in one process.
+[[test]]
+name = "gpu"
+harness = false
 
 [lints]
 workspace = true

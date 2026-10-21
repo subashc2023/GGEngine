@@ -7,6 +7,8 @@ publish.workspace = true
 [dependencies]
 gg-core.workspace = true
 gg-renderer.workspace = true
+tracing.workspace = true
+winit.workspace = true
 
 [lints]
 workspace = true

@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+# GPU drivers apply per-game profiles by executable name, and one matches `sandbox.exe`: under it,
+# presentation ignores vsync. Engine executables get a `gg-` prefix to stay clear of such matches.
+[[bin]]
+name = "gg-sandbox"
+path = "src/main.rs"
+
 [dependencies]
 gg-engine.workspace = true
 
