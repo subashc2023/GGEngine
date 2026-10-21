@@ -11,5 +11,6 @@ deny = [
     { crate = "gg-renderer", wrappers = ["gg-engine"], reason = "apps and games build on gg-engine" },
     { crate = "ash", wrappers = ["gg-gpu", "ash-window"], reason = "gg-gpu owns Vulkan" },
     { crate = "ash-window", wrappers = ["gg-gpu"], reason = "gg-gpu owns Vulkan" },
-    { crate = "winit", wrappers = ["gg-engine"], reason = "gg-engine owns the window and input" },
+    { crate = "winit", wrappers = ["gg-engine", "egui-winit"], reason = "gg-engine owns the window and input" },
+    { crate = "egui-winit", wrappers = ["gg-engine"], reason = "gg-engine owns the window and input" },
 ]

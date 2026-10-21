@@ -154,9 +154,10 @@ in the editor is out of an agent's reach.
 
 A project's state is text that people and agents edit, diff and merge with ordinary tools.
 
-- **Canonical text files.** Scenes, prefabs and project settings are saved in a canonical form:
-  saving what was loaded gives the same bytes, entities are ordered by ID, and changing a field
-  changes only that field's lines.
+- **Canonical text files.** Scenes, prefabs and project settings are saved as RON in a
+  canonical form: saving what was loaded gives the same bytes, entities are ordered by ID, and
+  changing a field changes only that field's lines. RON maps Rust's enums and tuples directly,
+  and its trailing commas mean adding an entry never touches its neighbors' lines.
 - **Stable IDs.** Every entity has a persistent ID, separate from its runtime handle, that
   files, operations, diagnostics and network messages use to name it. IDs are random rather
   than sequential, so entities added on two branches neither collide nor land on the same
@@ -204,6 +205,26 @@ Diagnostics are data, so agents and tools can act on them as reliably as people 
 - **Validation messages** become events with their VUID and the debug names of the objects
   involved, and a panic is logged with its location before the process ends.
 
+## Events and layers
+
+The engine turns the window system's events into its own: window (close, resize, focus, scale,
+minimize), keyboard and mouse. winit stays inside `gg-engine`, so apps and games never see its
+types.
+
+An app is a stack of layers, which its `main` describes on `App`: layers, then overlays above
+them. Each layer attaches when the app starts and detaches when it ends, updates every frame
+with the time since the last, handles events and draws UI. An event goes down the stack from
+the top overlay until a layer handles it; updates and UI go up from the bottom. Headless runs
+have no window events, but their layers update and draw UI all the same.
+
+egui, the engine's immediate-mode UI, is the top overlay: it sees every event first and keeps
+those it wants, such as a click on one of its panels, and `gg-renderer` draws its meshes over
+the frame. Key and button releases reach the layers regardless, so that none is left holding a
+key or button it saw pressed.
+
+Layers run on the main thread with the event loop. Input that reaches a game's layer enters the
+simulation as commands, as [ECS](#ecs) describes.
+
 ## Threads
 
 The main thread runs the OS event loop, which macOS requires. Simulation runs on a job system.
@@ -233,6 +254,8 @@ works on up to two frames at once.
 | GPU API | Vulkan through `ash`: one backend, no multi-API abstraction layer |
 | GPU memory | VMA through our own binding in `gg-gpu`, for its budgets, aliasing, pools and defragmentation |
 | Window and input | `winit`, with `ash-window` for surfaces and `gilrs` for gamepads |
+| UI | egui, drawn by `gg-renderer` |
+| Project state | RON in a canonical form; see [Project state](#project-state) |
 | Math | `glam` |
 | ECS | Our own; see [ECS](#ecs) |
 | Logs and profiling | `tracing` for logs; Tracy for CPU zones and GPU timestamps |

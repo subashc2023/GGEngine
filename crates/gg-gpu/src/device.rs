@@ -1,6 +1,7 @@
 //! Choosing a GPU, and the logical device with its queues.
 
 use std::ffi::{CStr, CString};
+use std::mem::ManuallyDrop;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use ash::prelude::VkResult;
@@ -8,16 +9,41 @@ use ash::{ext, khr, vk};
 use gg_core::{Error, Result};
 use tracing::{debug, info};
 
+use crate::bindless::Bindless;
+use crate::vma::{Allocation, Allocator};
 use crate::{Instance, REQUIRED_VERSION, Surface, Version, vk_error};
 
-/// A GPU opened for rendering, with its queues.
+/// A resource that was dropped while frames that may use it could still be running on the GPU.
+pub(crate) enum Retired {
+    Buffer(vk::Buffer, Allocation),
+    Image(vk::Image, vk::ImageView, Allocation),
+    /// An image with a slot in the bindless set.
+    Texture(vk::Image, vk::ImageView, Allocation, u32),
+    Pipeline(vk::Pipeline),
+}
+
+/// Retired resources, each with the last frame that may use it, and how far frames have got.
+#[derive(Default)]
+struct Retirement {
+    /// The last frame that began recording.
+    begun: u64,
+    /// The last frame the GPU finished, which the frames before it finished first.
+    finished: u64,
+    resources: Vec<(u64, Retired)>,
+}
+
+/// A GPU opened for rendering, with its queues and its memory allocator.
 pub struct Device {
     /// The instance, which must outlive the device.
     _instance: Arc<Instance>,
     physical: vk::PhysicalDevice,
     raw: ash::Device,
     name: String,
-    memory: vk::PhysicalDeviceMemoryProperties,
+    /// Dropped by hand, before the device is destroyed.
+    allocator: ManuallyDrop<Allocator>,
+    /// Destroyed by hand, before the device is.
+    bindless: Bindless,
+    retirement: Mutex<Retirement>,
     debug_utils: Option<ext::debug_utils::Device>,
     swapchain_fn: Option<khr::swapchain::Device>,
     graphics: Queue,
@@ -74,15 +100,10 @@ impl Device {
             .expect("a GPU without problems has a graphics queue");
 
         // SAFETY: the physical device came from this instance.
-        let (families, memory) = unsafe {
-            (
-                instance
-                    .raw()
-                    .get_physical_device_queue_family_properties(physical),
-                instance
-                    .raw()
-                    .get_physical_device_memory_properties(physical),
-            )
+        let families = unsafe {
+            instance
+                .raw()
+                .get_physical_device_queue_family_properties(physical)
         };
         let find = |wanted: vk::QueueFlags, unwanted: vk::QueueFlags| {
             families
@@ -115,7 +136,9 @@ impl Device {
         } else {
             Vec::new()
         };
-        let mut vulkan12 = vk::PhysicalDeviceVulkan12Features::default().timeline_semaphore(true);
+        let mut vulkan12 = bindless_features()
+            .timeline_semaphore(true)
+            .buffer_device_address(true);
         let mut vulkan13 = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
             .synchronization2(true);
@@ -125,9 +148,31 @@ impl Device {
             .push_next(&mut vulkan12)
             .push_next(&mut vulkan13);
         // SAFETY: the physical device came from this instance, every Vulkan 1.4 device has these
-        // features, and the create info's pointers outlive the call.
+        // features but the bindless ones, which `Candidate::new` checked, and the create info's
+        // pointers outlive the call.
         let raw = unsafe { instance.raw().create_device(physical, &create_info, None) }
             .map_err(|e| vk_error("vkCreateDevice", e))?;
+        // SAFETY: the device was just made from this physical device, with buffer device
+        // addresses, and `Device` keeps the instance alive and drops the allocator first.
+        let allocator =
+            match unsafe { Allocator::new(instance.entry(), instance.raw(), physical, &raw) } {
+                Ok(allocator) => allocator,
+                Err(error) => {
+                    // SAFETY: nothing has been made from the device yet.
+                    unsafe { raw.destroy_device(None) };
+                    return Err(error);
+                }
+            };
+        // SAFETY: the device has the bindless features, and `Device` destroys the set first.
+        let bindless = match unsafe { Bindless::new(&raw) } {
+            Ok(bindless) => bindless,
+            Err(error) => {
+                drop(allocator);
+                // SAFETY: nothing else has been made from the device.
+                unsafe { raw.destroy_device(None) };
+                return Err(error);
+            }
+        };
 
         let queue = |family| Queue {
             family,
@@ -145,12 +190,19 @@ impl Device {
             _instance: instance.clone(),
             physical,
             name: chosen.name.clone(),
-            memory,
+            allocator: ManuallyDrop::new(allocator),
+            bindless,
+            retirement: Mutex::default(),
             raw,
         };
-        // SAFETY: the device and its queues are live.
+        // SAFETY: the device, its queues and the bindless set are live.
         unsafe {
             device.set_name(device.raw.handle(), &device.name);
+            device.set_name(device.bindless.set(), "bindless set");
+            device.set_name(
+                device.bindless.pipeline_layout(),
+                "bindless pipeline layout",
+            );
             device.set_name(*device.graphics.lock(), "graphics queue");
             if let Some(queue) = &device.compute {
                 device.set_name(*queue.lock(), "compute queue");
@@ -196,6 +248,82 @@ impl Device {
 
     pub(crate) fn physical(&self) -> vk::PhysicalDevice {
         self.physical
+    }
+
+    pub(crate) fn allocator(&self) -> &Allocator {
+        &self.allocator
+    }
+
+    /// Destroys `resource` once the GPU has finished every frame that may use it: at once if
+    /// none is running.
+    pub(crate) fn retire(&self, resource: Retired) {
+        let mut retirement = self.lock_retirement();
+        if retirement.begun <= retirement.finished {
+            // SAFETY: every frame that began has finished, and a resource dropped now can't be
+            // used in frames after it.
+            unsafe { self.destroy(resource) };
+        } else {
+            let last_use = retirement.begun;
+            retirement.resources.push((last_use, resource));
+        }
+    }
+
+    /// Notes that `frame` began recording, so resources retired from now on may be used in it.
+    /// Frames are numbered from 1, and only one [`Frames`](crate::Frames) records them.
+    pub(crate) fn frame_begun(&self, frame: u64) {
+        self.lock_retirement().begun = frame;
+    }
+
+    /// Notes that the GPU has finished `frame` and those before it, and destroys the resources
+    /// they were the last to use.
+    pub(crate) fn frames_finished(&self, frame: u64) {
+        let mut retirement = self.lock_retirement();
+        retirement.finished = frame;
+        let mut i = 0;
+        while i < retirement.resources.len() {
+            if retirement.resources[i].0 <= frame {
+                let (_, resource) = retirement.resources.swap_remove(i);
+                // SAFETY: the frames that may use it have finished.
+                unsafe { self.destroy(resource) };
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    fn lock_retirement(&self) -> MutexGuard<'_, Retirement> {
+        // Destroying a resource doesn't panic midway, so the list is intact after a panic.
+        self.retirement
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// # Safety
+    ///
+    /// The GPU must be done with the resource.
+    unsafe fn destroy(&self, resource: Retired) {
+        // SAFETY: the caller guarantees it; each resource's parts were made together.
+        unsafe {
+            match resource {
+                Retired::Buffer(buffer, allocation) => {
+                    self.allocator.destroy_buffer(buffer, allocation);
+                }
+                Retired::Image(image, view, allocation) => {
+                    self.raw.destroy_image_view(view, None);
+                    self.allocator.destroy_image(image, allocation);
+                }
+                Retired::Texture(image, view, allocation, slot) => {
+                    self.raw.destroy_image_view(view, None);
+                    self.allocator.destroy_image(image, allocation);
+                    self.bindless.remove(slot);
+                }
+                Retired::Pipeline(pipeline) => self.raw.destroy_pipeline(pipeline, None),
+            }
+        }
+    }
+
+    pub(crate) fn bindless(&self) -> &Bindless {
+        &self.bindless
     }
 
     pub(crate) fn graphics_family(&self) -> u32 {
@@ -327,35 +455,21 @@ impl Device {
             unsafe { debug_utils.cmd_end_debug_utils_label(commands) };
         }
     }
-
-    /// A memory type allowed by `bits` with the `required` properties, preferring one that also
-    /// has the `preferred` ones.
-    pub(crate) fn memory_type(
-        &self,
-        bits: u32,
-        required: vk::MemoryPropertyFlags,
-        preferred: vk::MemoryPropertyFlags,
-    ) -> Option<u32> {
-        let find = |flags: vk::MemoryPropertyFlags| {
-            self.memory
-                .memory_types_as_slice()
-                .iter()
-                .zip(0u32..)
-                .find(|(memory_type, index)| {
-                    bits & (1 << index) != 0 && memory_type.property_flags.contains(flags)
-                })
-                .map(|(_, index)| index)
-        };
-        find(required | preferred).or_else(|| find(required))
-    }
 }
 
 impl Drop for Device {
     fn drop(&mut self) {
-        // SAFETY: everything made from the device holds an Arc to it, so only the device is
-        // left; waiting first lets the GPU finish.
+        // SAFETY: everything made from the device holds an Arc to it, so only the device, its
+        // allocator and retired resources are left; waiting first lets the GPU finish, and the
+        // allocator goes before the device it allocates from.
         unsafe {
             let _ = self.raw.device_wait_idle();
+            let retired = std::mem::take(&mut self.lock_retirement().resources);
+            for (_, resource) in retired {
+                self.destroy(resource);
+            }
+            self.bindless.destroy(&self.raw);
+            ManuallyDrop::drop(&mut self.allocator);
             self.raw.destroy_device(None);
         }
     }
@@ -390,6 +504,13 @@ impl Candidate {
                 raw.get_physical_device_memory_properties(physical),
                 raw.get_physical_device_queue_family_properties(physical),
             )
+        };
+        let bindless = properties.api_version >= vk::API_VERSION_1_2 && {
+            let mut vulkan12 = vk::PhysicalDeviceVulkan12Features::default();
+            let mut features = vk::PhysicalDeviceFeatures2::default().push_next(&mut vulkan12);
+            // SAFETY: as above; the 1.2 features are core in Vulkan 1.2.
+            unsafe { raw.get_physical_device_features2(physical, &mut features) };
+            has_bindless(&vulkan12)
         };
         let name = properties.device_name_as_c_str().map_or_else(
             |_| format!("GPU {index}"),
@@ -444,6 +565,8 @@ impl Candidate {
             Some("has no graphics queue".to_owned())
         } else if surface.is_some() && !has_swapchain(instance, physical) {
             Some("doesn't support VK_KHR_swapchain".to_owned())
+        } else if !bindless {
+            Some("doesn't support the descriptor indexing that bindless textures need".to_owned())
         } else {
             None
         };
@@ -479,6 +602,32 @@ impl Candidate {
             _ => 0,
         }
     }
+}
+
+/// The descriptor indexing features that the bindless set needs, which Vulkan 1.4 doesn't
+/// require but every desktop driver has. A device that has `descriptorIndexing` can hold at
+/// least 500,000 update-after-bind sampled images.
+fn bindless_features() -> vk::PhysicalDeviceVulkan12Features<'static> {
+    vk::PhysicalDeviceVulkan12Features::default()
+        .runtime_descriptor_array(true)
+        .descriptor_binding_partially_bound(true)
+        .descriptor_binding_sampled_image_update_after_bind(true)
+        .descriptor_binding_update_unused_while_pending(true)
+        .shader_sampled_image_array_non_uniform_indexing(true)
+}
+
+/// Whether a device has `descriptorIndexing` and each feature [`bindless_features`] enables.
+fn has_bindless(features: &vk::PhysicalDeviceVulkan12Features<'_>) -> bool {
+    [
+        features.descriptor_indexing,
+        features.runtime_descriptor_array,
+        features.descriptor_binding_partially_bound,
+        features.descriptor_binding_sampled_image_update_after_bind,
+        features.descriptor_binding_update_unused_while_pending,
+        features.shader_sampled_image_array_non_uniform_indexing,
+    ]
+    .iter()
+    .all(|&feature| feature == vk::TRUE)
 }
 
 fn has_swapchain(instance: &Instance, physical: vk::PhysicalDevice) -> bool {

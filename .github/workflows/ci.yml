@@ -38,12 +38,46 @@ jobs:
     env:
       GG_SKIP_GPU_TESTS: ${{ matrix.skip-gpu-tests }}
     steps:
+      # g++ builds gg-gpu's Vulkan Memory Allocator.
       - name: Install build tools, lavapipe and the validation layer
         if: matrix.container
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl gcc git libc6-dev \
+          apt-get install -y --no-install-recommends ca-certificates curl g++ gcc git libc6-dev \
             libvulkan1 mesa-vulkan-drivers vulkan-validationlayers
+      # gg-renderer's build compiles its shaders with slangc, which the Vulkan SDK ships; CI
+      # takes it from Slang's release instead, checked against the release's digests.
+      - name: Install slangc
+        shell: bash
+        run: |
+          case "$RUNNER_OS-$RUNNER_ARCH" in
+            Linux-X64) asset=linux-x86_64-glibc-2.28
+              digest=84ebd777968caceea26b21bfd014341078be6047be6c5a963a69f984f896cebd ;;
+            Linux-ARM64) asset=linux-aarch64-glibc-2.28
+              digest=9959d741713162efdbd863ff6d32400432b6e103eae3a9ee0afbdba6a00c6a9e ;;
+            Windows-X64) asset=windows-x86_64
+              digest=7b9bb838b105de0bb86390196ac5bcb02efc610c0542517204105cf87ec98399 ;;
+            Windows-ARM64) asset=windows-aarch64
+              digest=b5802a24e810b2b82e18cc796166692b4431431b66a65b108d111b668a920e7c ;;
+            macOS-X64) asset=macos-x86_64
+              digest=b4f01f615dc625f60c593d7d0a4bbd38e05dfa2a34bfd3973017c309d866feaa ;;
+            macOS-ARM64) asset=macos-aarch64
+              digest=07fa8833fdbb343c3674c84fdd885910f495f3daaaa0c732b32980151e8b58c4 ;;
+            *) echo "no Slang release is listed for $RUNNER_OS-$RUNNER_ARCH"; exit 1 ;;
+          esac
+          archive="slang-$SLANG-$asset.tar.gz"
+          cd "$RUNNER_TEMP"
+          curl -fsSLo "$archive" "https://github.com/shader-slang/slang/releases/download/v$SLANG/$archive"
+          actual=$( (sha256sum "$archive" 2>/dev/null || shasum -a 256 "$archive") | cut -d' ' -f1)
+          if [ "$actual" != "$digest" ]; then
+            echo "$archive's digest is $actual, not $digest"
+            exit 1
+          fi
+          mkdir slang
+          tar -xzf "$archive" -C slang
+          echo "$RUNNER_TEMP/slang/bin" >> "$GITHUB_PATH"
+        env:
+          SLANG: "2026.20"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Installs the release rust-toolchain.toml pins, and caches dependencies.
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0

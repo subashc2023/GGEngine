@@ -1,21 +1,22 @@
-//! Windowed runs: the winit event loop, which renders a frame whenever the window can show one.
+//! Windowed runs: the winit event loop, which hands events to the layers and renders a frame
+//! whenever the window can show one.
 
+use std::ops::ControlFlow;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use gg_core::{Error, Result};
 use gg_renderer::Renderer;
-use tracing::{debug, info};
+use tracing::{debug, info, trace};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::WindowEvent;
+use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window, WindowId};
 
 use crate::args::Args;
-use crate::{App, Ran, clear_color, settings};
+use crate::{App, Clock, Context, Event, Ran, event, render_frame, settings};
 
-pub(crate) fn run(app: &App, args: &Args) -> Result<Ran> {
+pub(crate) fn run(app: &mut App, args: &Args) -> Result<Ran> {
     let event_loop = EventLoop::new().map_err(|error| {
         Error::new(
             "engine.window",
@@ -28,9 +29,12 @@ pub(crate) fn run(app: &App, args: &Args) -> Result<Ran> {
         args,
         window: None,
         renderer: None,
-        start: None,
+        egui: egui::Context::default(),
+        egui_winit: None,
+        cx: Context::new(None),
+        clock: Clock::default(),
         frames: 0,
-        paused: false,
+        minimized: false,
         error: None,
         ran: None,
     };
@@ -48,16 +52,20 @@ pub(crate) fn run(app: &App, args: &Args) -> Result<Ran> {
 }
 
 /// The event loop's state: the window and renderer once the loop starts, and how the run went.
+/// The layers are attached while the renderer exists.
 struct Handler<'a> {
-    app: &'a App,
+    app: &'a mut App,
     args: &'a Args,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
-    /// When the first frame started.
-    start: Option<Instant>,
+    egui: egui::Context,
+    /// egui's view of the window, which turns its events into egui's input.
+    egui_winit: Option<egui_winit::State>,
+    cx: Context,
+    clock: Clock,
     frames: u64,
-    /// Set while the window has no area to render into, as when it's minimized.
-    paused: bool,
+    /// Set while the window has no area to render into.
+    minimized: bool,
     error: Option<Error>,
     ran: Option<Ran>,
 }
@@ -81,16 +89,40 @@ impl Handler<'_> {
         let settings = settings(self.app, self.args);
         let renderer = Renderer::windowed(&settings, window.clone(), size.width, size.height)?;
         self.renderer = Some(renderer);
+        self.egui_winit = Some(egui_winit::State::new(
+            self.egui.clone(),
+            egui::ViewportId::ROOT,
+            &window,
+            Some(window.scale_factor() as f32),
+            window.theme(),
+            None,
+        ));
+        self.cx = Context::new(Some(crate::Window::new(window.clone())));
         self.window = Some(window);
+        self.app.stack.attach(&mut self.cx);
         Ok(())
     }
 
     fn frame(&mut self, event_loop: &ActiveEventLoop) {
-        let (Some(window), Some(renderer)) = (&self.window, &mut self.renderer) else {
+        let (Some(window), Some(renderer), Some(egui_winit)) =
+            (&self.window, &mut self.renderer, &mut self.egui_winit)
+        else {
             return;
         };
-        let start = *self.start.get_or_insert_with(Instant::now);
-        match renderer.render(clear_color(start.elapsed())) {
+        let input = egui_winit.take_egui_input(window);
+        let rendered = render_frame(
+            &mut self.app.stack,
+            &mut self.cx,
+            &mut self.clock,
+            &self.egui,
+            input,
+            renderer,
+        );
+        let rendered = rendered.map(|(presented, platform_output)| {
+            egui_winit.handle_platform_output(window, platform_output);
+            presented
+        });
+        match rendered {
             Ok(true) => {
                 self.frames += 1;
                 if self.args.frames.is_some_and(|limit| self.frames >= limit) {
@@ -101,13 +133,33 @@ impl Handler<'_> {
             // otherwise the swapchain is rebuilt in time for the next frame.
             Ok(false) => {
                 let size = window.inner_size();
-                if (size.width == 0 || size.height == 0) && !self.paused {
-                    debug!("Window minimized; rendering pauses until it's restored");
-                    self.paused = true;
+                if size.width == 0 || size.height == 0 {
+                    self.set_minimized(true);
                 }
             }
             Err(error) => self.fail(event_loop, error),
         }
+    }
+
+    /// Tells the layers when the window loses or regains its area, which is when rendering
+    /// pauses and resumes.
+    fn set_minimized(&mut self, minimized: bool) {
+        if self.minimized == minimized {
+            return;
+        }
+        self.minimized = minimized;
+        if minimized {
+            debug!("Window minimized; rendering pauses until it's restored");
+            let _ = self.dispatch(&Event::Minimized);
+        } else {
+            debug!("Window restored; rendering resumes");
+            let _ = self.dispatch(&Event::Restored);
+        }
+    }
+
+    fn dispatch(&mut self, event: &Event<'_>) -> ControlFlow<()> {
+        trace!(?event, "Event");
+        self.app.stack.event(&mut self.cx, event)
     }
 
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: Error) {
@@ -130,39 +182,68 @@ impl ApplicationHandler for Handler<'_> {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
-        match event {
-            WindowEvent::CloseRequested => {
-                debug!("Window closed");
-                event_loop.exit();
+        // egui, the top overlay, sees each event first, and keeps the input it wants: a click
+        // on one of its panels, or keys while one of its text fields has focus.
+        let mut consumed = false;
+        if !matches!(event, WindowEvent::RedrawRequested)
+            && let (Some(window), Some(egui_winit)) = (&self.window, &mut self.egui_winit)
+        {
+            consumed = egui_winit.on_window_event(window, &event).consumed;
+        }
+        // Releases reach the layers regardless: egui keeps input by what it wants when the
+        // input comes, so it would keep the release of a key held down before one of its text
+        // fields took focus, or of a button pressed over the scene and let go over a panel.
+        consumed &= !matches!(
+            &event,
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Released
+        ) && !matches!(
+            event,
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                ..
             }
+        );
+        match event {
             WindowEvent::Resized(size) => {
                 if let Some(renderer) = &mut self.renderer {
                     renderer.resize(size.width, size.height);
                 }
-                if self.paused && size.width > 0 && size.height > 0 {
-                    debug!(
-                        width = size.width,
-                        height = size.height,
-                        "Window restored; rendering resumes"
-                    );
-                    self.paused = false;
+                if size.width == 0 || size.height == 0 {
+                    self.set_minimized(true);
+                    return;
                 }
+                self.set_minimized(false);
+                let _ = self.dispatch(&Event::Resized {
+                    width: size.width,
+                    height: size.height,
+                });
                 // Windows doesn't call `about_to_wait` while the user drags the window's edge,
                 // so frames are requested here as well.
-                if !self.paused
-                    && let Some(window) = &self.window
-                {
+                if let Some(window) = &self.window {
                     window.request_redraw();
                 }
             }
             WindowEvent::RedrawRequested => self.frame(event_loop),
-            _ => {}
+            _ if consumed => trace!(?event, "Event kept by the UI"),
+            other => {
+                let mut close = false;
+                event::convert(&other, |event| {
+                    if self.dispatch(&event).is_continue() && event == Event::CloseRequested {
+                        close = true;
+                    }
+                });
+                if close {
+                    debug!("Window closed");
+                    event_loop.exit();
+                }
+            }
         }
     }
 
     fn about_to_wait(&mut self, _: &ActiveEventLoop) {
-        // Frames render back to back; FIFO presentation paces them to the display.
-        if !self.paused
+        // Frames render back to back, paced by presentation: mailbox's to the GPU, FIFO's
+        // (`--vsync`) to the display.
+        if !self.minimized
             && let Some(window) = &self.window
         {
             window.request_redraw();
@@ -170,10 +251,12 @@ impl ApplicationHandler for Handler<'_> {
     }
 
     fn exiting(&mut self, _: &ActiveEventLoop) {
-        let time = self.start.map_or(Duration::ZERO, |start| start.elapsed());
         if let Some(renderer) = self.renderer.take() {
-            self.ran = Some(Ran::finish(renderer, self.frames, time));
+            self.app.stack.detach(&mut self.cx);
+            self.ran = Some(Ran::finish(renderer, self.frames, self.clock.elapsed()));
         }
+        self.cx = Context::new(None);
+        self.egui_winit = None;
         self.window = None;
     }
 }

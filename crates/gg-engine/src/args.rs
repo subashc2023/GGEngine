@@ -10,6 +10,7 @@ pub(crate) struct Args {
     pub(crate) frames: Option<u64>,
     pub(crate) gpu: Option<String>,
     pub(crate) validation: bool,
+    pub(crate) vsync: bool,
 }
 
 /// The help text, for the program called `program`.
@@ -23,6 +24,7 @@ Options:
   --gpu <NAME>      Use the GPU whose name contains NAME, such as `--gpu amd`
   --validation      Run under Vulkan validation (the default in debug builds)
   --no-validation   Run without Vulkan validation (the default in release builds)
+  --vsync           Present at the display's refresh rate, rather than uncapped
   -h, --help        Print this help
 
 Environment:
@@ -41,6 +43,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
         frames: None,
         gpu: None,
         validation: cfg!(debug_assertions),
+        vsync: false,
     };
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -63,6 +66,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
             "--headless" => parsed.headless = true,
             "--validation" => parsed.validation = true,
             "--no-validation" => parsed.validation = false,
+            "--vsync" => parsed.vsync = true,
             "--frames" => {
                 let frames = value_of(flag)?;
                 let frames = frames.parse().map_err(|_| {
@@ -96,10 +100,17 @@ mod tests {
 
     #[test]
     fn parses_shared_flags_in_both_forms() {
-        let args = parse_strs(&["--headless", "--frames", "60", "--gpu=AMD Radeon"])
-            .unwrap()
-            .unwrap();
+        let args = parse_strs(&[
+            "--headless",
+            "--frames",
+            "60",
+            "--gpu=AMD Radeon",
+            "--vsync",
+        ])
+        .unwrap()
+        .unwrap();
         assert!(args.headless);
+        assert!(args.vsync);
         assert_eq!(args.frames, Some(60));
         assert_eq!(args.gpu.as_deref(), Some("AMD Radeon"));
         assert_eq!(

@@ -4,12 +4,17 @@
 //! It knows nothing about the scene, ECS or gameplay. It receives plain data, so rendering
 //! can run on its own thread, a frame behind simulation.
 
+mod ui;
+
 use std::sync::Arc;
 
 use gg_core::Result;
 use gg_gpu::{ColorImage, Device, Frames, Instance, InstanceDesc, Surface, Swapchain, Target};
 
 pub use gg_gpu::{Validation, Window};
+pub use ui::Ui;
+
+use ui::UiPass;
 
 /// How to set up a renderer.
 pub struct Settings<'a> {
@@ -19,12 +24,15 @@ pub struct Settings<'a> {
     pub validation: bool,
     /// Use the GPU whose name contains this, ignoring case.
     pub gpu: Option<&'a str>,
+    /// Present at the display's refresh rate, rather than as fast as frames are rendered.
+    pub vsync: bool,
 }
 
 /// Renders frames into a window or, headless, into an offscreen image.
 pub struct Renderer {
     frames: Frames,
     output: Output,
+    ui: UiPass,
     validation: Validation,
 }
 
@@ -48,7 +56,7 @@ impl Renderer {
         })?;
         let surface = Surface::new(&instance, window)?;
         let device = Device::new(&instance, settings.gpu, Some(&surface))?;
-        let swapchain = Swapchain::new(&device, surface, width, height)?;
+        let swapchain = Swapchain::new(&device, surface, width, height, settings.vsync)?;
         Self::new(&instance, &device, Output::Window(swapchain))
     }
 
@@ -66,9 +74,14 @@ impl Renderer {
     }
 
     fn new(instance: &Instance, device: &Arc<Device>, output: Output) -> Result<Self> {
+        let format = match &output {
+            Output::Window(swapchain) => swapchain.format(),
+            Output::Offscreen(image) => image.format(),
+        };
         Ok(Self {
             frames: Frames::new(device)?,
             output,
+            ui: UiPass::new(device, format)?,
             validation: instance.validation(),
         })
     }
@@ -80,19 +93,35 @@ impl Renderer {
         }
     }
 
-    /// Renders a frame cleared to `clear_color`, in linear RGBA, and presents it. Returns `false`
-    /// when there was nothing to render into, as when the window is minimized.
-    pub fn render(&mut self, clear_color: [f32; 4]) -> Result<bool> {
+    /// Renders a frame cleared to `clear_color`, in linear RGBA, with `ui` drawn over it, and
+    /// presents it. Returns `false` when there was nothing to render into, as when the window
+    /// is minimized; the UI's texture changes are applied regardless.
+    pub fn render(&mut self, clear_color: [f32; 4], ui: Ui<'_>) -> Result<bool> {
         let target = match &mut self.output {
             Output::Window(swapchain) => Target::Swapchain(swapchain),
             Output::Offscreen(image) => Target::Image(image),
         };
+        // egui sends each texture change once, so changes wait for a frame that renders.
+        self.ui.queue(ui.textures);
         let Some(mut frame) = self.frames.begin(target)? else {
             return Ok(false);
         };
-        frame.clear(clear_color);
+        self.ui.write_textures(&mut frame)?;
+        let mut pass = frame.begin_pass(c"frame", clear_color);
+        self.ui
+            .draw(&mut pass, ui.primitives, ui.pixels_per_point)?;
+        drop(pass);
         frame.submit()?;
         Ok(true)
+    }
+
+    /// Copies the last frame rendered offscreen to the CPU: rows of RGBA8 pixels, sRGB-encoded
+    /// and tightly packed, top row first. `None` for a renderer with a window.
+    pub fn read_back(&mut self) -> Result<Option<Vec<u8>>> {
+        match &mut self.output {
+            Output::Window(_) => Ok(None),
+            Output::Offscreen(image) => image.read_back().map(Some),
+        }
     }
 
     /// What validation reports. It outlives the renderer, so it also counts what's reported

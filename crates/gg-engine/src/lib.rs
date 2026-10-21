@@ -4,6 +4,8 @@
 //! An app's `main` starts the engine; there is no separate entry-point crate.
 
 mod args;
+mod event;
+mod layer;
 mod window;
 
 use std::path::{Path, PathBuf};
@@ -11,10 +13,16 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use gg_core::Result;
-use gg_renderer::{Renderer, Settings, Validation};
+use gg_renderer::{Renderer, Settings, Ui, Validation};
 use tracing::{debug, error, info};
 
 use args::Args;
+/// The UI library layers draw with, in [`Layer::ui`]; apps use it from here, so that they
+/// share the engine's version.
+pub use egui;
+pub use event::{Event, Key, MouseButton, Scroll};
+use layer::Stack;
+pub use layer::{Context, Layer, Window};
 
 const BUILD: &str = if cfg!(debug_assertions) {
     "debug"
@@ -22,16 +30,34 @@ const BUILD: &str = if cfg!(debug_assertions) {
     "release"
 };
 
-/// Describes an app to the engine. An app's `main` is
-/// `gg_engine::run(gg_engine::App::new("Sandbox"))`.
+/// Describes an app to the engine: its name and its layers. An app's `main` is
+/// `gg_engine::run(gg_engine::App::new("Sandbox").layer(Sandbox::default()))`.
 pub struct App {
     name: &'static str,
+    stack: Stack,
 }
 
 impl App {
     /// `name` titles the window and names the log file.
-    pub const fn new(name: &'static str) -> Self {
-        Self { name }
+    pub fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            stack: Stack::default(),
+        }
+    }
+
+    /// Adds a layer above the layers added before it, and below every overlay.
+    #[must_use]
+    pub fn layer(mut self, layer: impl Layer + 'static) -> Self {
+        self.stack.push_layer(Box::new(layer));
+        self
+    }
+
+    /// Adds an overlay above everything added before it.
+    #[must_use]
+    pub fn overlay(mut self, overlay: impl Layer + 'static) -> Self {
+        self.stack.push_overlay(Box::new(overlay));
+        self
     }
 }
 
@@ -39,7 +65,7 @@ impl App {
 ///
 /// It parses the flags every app shares, which `--help` lists, and starts logging. The status is
 /// 0 on success, 1 on an error or a Vulkan validation message, and 2 on bad arguments.
-pub fn run(app: App) -> ExitCode {
+pub fn run(mut app: App) -> ExitCode {
     let mut argv = std::env::args_os();
     let program = argv
         .next()
@@ -84,9 +110,9 @@ pub fn run(app: App) -> ExitCode {
     );
 
     let ran = if args.headless {
-        run_headless(&app, &args)
+        run_headless(&mut app, &args)
     } else {
-        window::run(&app, &args)
+        window::run(&mut app, &args)
     };
     match ran {
         Ok(ran) => ran.report(),
@@ -98,15 +124,88 @@ pub fn run(app: App) -> ExitCode {
 }
 
 /// Renders offscreen, without a window, as fast as the GPU allows.
-fn run_headless(app: &App, args: &Args) -> Result<Ran> {
-    let mut renderer = Renderer::headless(&settings(app, args), 1280, 720)?;
-    let start = Instant::now();
+fn run_headless(app: &mut App, args: &Args) -> Result<Ran> {
+    let (width, height) = (1280, 720);
+    let mut renderer = Renderer::headless(&settings(app, args), width, height)?;
+    let mut cx = Context::new(None);
+    let mut clock = Clock::default();
+    let egui = egui::Context::default();
     let mut frames = 0;
-    while args.frames.is_none_or(|limit| frames < limit) {
-        renderer.render(clear_color(start.elapsed()))?;
-        frames += 1;
+    app.stack.attach(&mut cx);
+    let rendered = (|| -> Result<()> {
+        while args.frames.is_none_or(|limit| frames < limit) {
+            // One point is one pixel, as on a display without scaling.
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(width as f32, height as f32),
+                )),
+                time: Some(clock.elapsed().as_secs_f64()),
+                ..Default::default()
+            };
+            render_frame(
+                &mut app.stack,
+                &mut cx,
+                &mut clock,
+                &egui,
+                input,
+                &mut renderer,
+            )?;
+            frames += 1;
+        }
+        Ok(())
+    })();
+    app.stack.detach(&mut cx);
+    rendered?;
+    Ok(Ran::finish(renderer, frames, clock.elapsed()))
+}
+
+/// One turn of the main loop: updates the layers, has them draw their UI with egui, and renders
+/// the frame. Returns whether the frame was presented, and egui's requests of the window, such
+/// as the cursor to show.
+///
+/// egui allocates as it lays out and tessellates, so frames that draw UI allocate; the UI is a
+/// development overlay.
+fn render_frame(
+    stack: &mut Stack,
+    cx: &mut Context,
+    clock: &mut Clock,
+    egui: &egui::Context,
+    input: egui::RawInput,
+    renderer: &mut Renderer,
+) -> Result<(bool, egui::PlatformOutput)> {
+    stack.update(cx, clock.tick());
+    let mut output = egui.run_pass(input, |ui| stack.ui(cx, ui));
+    let primitives = egui.tessellate(output.shapes, output.pixels_per_point);
+    let ui = Ui {
+        primitives: &primitives,
+        textures: &mut output.textures_delta,
+        pixels_per_point: output.pixels_per_point,
+    };
+    let presented = renderer.render(cx.clear_color(), ui)?;
+    Ok((presented, output.platform_output))
+}
+
+/// Measures frames: the time between them, and since the first.
+#[derive(Default)]
+struct Clock {
+    first: Option<Instant>,
+    last: Option<Instant>,
+}
+
+impl Clock {
+    /// Starts a frame, and returns the time since the last one started; zero for the first.
+    fn tick(&mut self) -> Duration {
+        let now = Instant::now();
+        let dt = self.last.map_or(Duration::ZERO, |last| now - last);
+        self.first.get_or_insert(now);
+        self.last = Some(now);
+        dt
     }
-    Ok(Ran::finish(renderer, frames, start.elapsed()))
+
+    fn elapsed(&self) -> Duration {
+        self.first.map_or(Duration::ZERO, |first| first.elapsed())
+    }
 }
 
 fn settings<'a>(app: &'a App, args: &'a Args) -> Settings<'a> {
@@ -114,15 +213,8 @@ fn settings<'a>(app: &'a App, args: &'a Args) -> Settings<'a> {
         app_name: app.name,
         validation: args.validation,
         gpu: args.gpu.as_deref(),
+        vsync: args.vsync,
     }
-}
-
-/// Until the engine draws scenes, each frame clears to a color that drifts slowly, so that a
-/// running app visibly animates.
-fn clear_color(time: Duration) -> [f32; 4] {
-    let t = time.as_secs_f32() * 0.4;
-    let wave = |phase: f32| 0.02 + 0.06 * (0.5 + 0.5 * (t + phase).sin());
-    [wave(0.0), wave(2.1), wave(4.2), 1.0]
 }
 
 /// Logs go in `logs` beside the executable, such as `target/debug/logs` for `cargo run`.

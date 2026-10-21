@@ -8,7 +8,10 @@ use ash::vk;
 use gg_core::Result;
 use tracing::error;
 
-use crate::{COLOR_RANGE, ColorImage, Device, Swapchain, vk_error};
+use crate::bindless::PUSH_CONSTANTS;
+use crate::buffer::Buffer;
+use crate::vma::Memory;
+use crate::{COLOR_RANGE, ColorImage, Device, Pipeline, Swapchain, Texture, vk_error};
 
 /// How many frames the GPU works on at once.
 const FRAMES_IN_FLIGHT: u64 = 2;
@@ -21,13 +24,16 @@ pub enum Target<'a> {
     Image(&'a mut ColorImage),
 }
 
-/// The resources of the frames in flight, and the timeline semaphore that paces them.
+/// The resources of the frames in flight, and the timeline semaphore that paces them. A device
+/// has one; its resources retire by its frames.
 pub struct Frames {
     device: Arc<Device>,
     /// Reaches N when the Nth frame has finished on the GPU.
     timeline: vk::Semaphore,
     submitted: u64,
     slots: Vec<Slot>,
+    /// Each slot's arena.
+    arenas: Vec<Arena>,
 }
 
 /// What one frame in flight records into and synchronizes with.
@@ -54,6 +60,7 @@ impl Frames {
             timeline,
             submitted: 0,
             slots: Vec::new(),
+            arenas: (0..FRAMES_IN_FLIGHT).map(Arena::new).collect(),
         };
         // SAFETY: the semaphore is live.
         unsafe { device.set_name(timeline, "frame timeline") };
@@ -97,6 +104,7 @@ impl Frames {
         let slot = (self.submitted % FRAMES_IN_FLIGHT) as usize;
         if let Some(previous) = self.submitted.checked_sub(FRAMES_IN_FLIGHT) {
             self.wait(previous + 1)?;
+            self.device.frames_finished(previous + 1);
         }
         let Slot {
             pool,
@@ -112,16 +120,27 @@ impl Frames {
             },
             Target::Image(image) => (0, image.layout()),
         };
+        self.device.frame_begun(self.submitted + 1);
+        self.arenas[slot].reset(&self.device)?;
         let raw = self.device.raw();
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        let bindless = self.device.bindless();
         // SAFETY: the GPU has finished the slot's previous frame, so its commands can be reset
-        // and recorded again.
+        // and recorded again; the set and layout live as long as the device.
         unsafe {
             raw.reset_command_pool(pool, vk::CommandPoolResetFlags::empty())
                 .map_err(|e| vk_error("vkResetCommandPool", e))?;
             raw.begin_command_buffer(commands, &begin_info)
                 .map_err(|e| vk_error("vkBeginCommandBuffer", e))?;
+            raw.cmd_bind_descriptor_sets(
+                commands,
+                vk::PipelineBindPoint::GRAPHICS,
+                bindless.pipeline_layout(),
+                0,
+                &[bindless.set()],
+                &[],
+            );
         }
         Ok(Some(Frame {
             frames: self,
@@ -151,6 +170,7 @@ impl Drop for Frames {
         if self.wait(self.submitted).is_err() {
             let _ = self.device.wait_idle();
         }
+        self.device.frames_finished(self.submitted);
         let raw = self.device.raw();
         // SAFETY: the GPU has finished every frame, so nothing here is in use. Null handles,
         // left by a failed `new`, are allowed.
@@ -178,9 +198,126 @@ pub struct Frame<'a> {
     submitted: bool,
 }
 
-impl Frame<'_> {
+impl<'a> Frame<'a> {
+    /// Copies `bytes` into the frame's arena, where the GPU reads them during this frame:
+    /// geometry, and data shaders read through its address. Using it in a later frame reads
+    /// whatever has replaced it.
+    pub fn upload(&mut self, bytes: &[u8]) -> Result<Upload> {
+        self.frames.arenas[self.slot].upload(&self.frames.device, bytes)
+    }
+
+    /// Writes `pixels` into the `size` pixels of `texture` starting at `origin`: rows of RGBA8,
+    /// in the texture's format and tightly packed, top row first. The texture's other pixels
+    /// keep what they had, except on its first write, which leaves them undefined. Shaders see
+    /// the new pixels from this frame's passes on.
+    ///
+    /// # Panics
+    ///
+    /// If the region doesn't fit in the texture, or `pixels` doesn't fill it exactly.
+    pub fn write_texture(
+        &mut self,
+        texture: &mut Texture,
+        origin: [u32; 2],
+        size: [u32; 2],
+        pixels: &[u8],
+    ) -> Result<()> {
+        let [width, height] = texture.size();
+        assert!(
+            origin[0].checked_add(size[0]).is_some_and(|x| x <= width)
+                && origin[1].checked_add(size[1]).is_some_and(|y| y <= height),
+            "a {}x{} region at {origin:?} overflows a {width}x{height} texture",
+            size[0],
+            size[1],
+        );
+        assert_eq!(
+            pixels.len() as u64,
+            u64::from(size[0]) * u64::from(size[1]) * 4,
+            "the pixels don't fill a {}x{} region",
+            size[0],
+            size[1],
+        );
+        let staged = self.upload(pixels)?;
+        let device = &self.frames.device;
+        let commands = self.frames.slots[self.slot].commands;
+        // Earlier frames on this queue may still sample the texture; the copy waits for them.
+        let (old_layout, src_stage) = if texture.written() {
+            (
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                vk::PipelineStageFlags2::FRAGMENT_SHADER,
+            )
+        } else {
+            (vk::ImageLayout::UNDEFINED, vk::PipelineStageFlags2::NONE)
+        };
+        let to_copy = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(src_stage)
+            .dst_stage_mask(vk::PipelineStageFlags2::COPY)
+            .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .old_layout(old_layout)
+            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .image(texture.raw())
+            .subresource_range(COLOR_RANGE);
+        let region = vk::BufferImageCopy::default()
+            .buffer_offset(staged.offset)
+            .image_subresource(vk::ImageSubresourceLayers {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                mip_level: 0,
+                base_array_layer: 0,
+                layer_count: 1,
+            })
+            .image_offset(vk::Offset3D {
+                x: origin[0] as i32,
+                y: origin[1] as i32,
+                z: 0,
+            })
+            .image_extent(vk::Extent3D {
+                width: size[0],
+                height: size[1],
+                depth: 1,
+            });
+        let to_read = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COPY)
+            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+            .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
+            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .image(texture.raw())
+            .subresource_range(COLOR_RANGE);
+        let raw = device.raw();
+        // SAFETY: the commands are recording outside a pass, the region fits the texture, and
+        // the staged pixels and the texture live until the frame has finished: the arena is
+        // reset only after that, and the texture retires until then.
+        unsafe {
+            device.begin_label(commands, c"write texture");
+            raw.cmd_pipeline_barrier2(
+                commands,
+                &vk::DependencyInfo::default().image_memory_barriers(slice::from_ref(&to_copy)),
+            );
+            raw.cmd_copy_buffer_to_image(
+                commands,
+                staged.buffer,
+                texture.raw(),
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &[region],
+            );
+            raw.cmd_pipeline_barrier2(
+                commands,
+                &vk::DependencyInfo::default().image_memory_barriers(slice::from_ref(&to_read)),
+            );
+            device.end_label(commands);
+        }
+        texture.set_written();
+        Ok(())
+    }
+
     /// Clears the whole target to `color`, in linear RGBA.
     pub fn clear(&mut self, color: [f32; 4]) {
+        drop(self.begin_pass(c"clear", color));
+    }
+
+    /// Starts rendering into the target, cleared to `color`, in linear RGBA. `label` names the
+    /// pass in captures. Rendering ends when the pass is dropped.
+    pub fn begin_pass(&mut self, label: &std::ffi::CStr, color: [f32; 4]) -> Pass<'_, 'a> {
         let device = &self.frames.device;
         let commands = self.frames.slots[self.slot].commands;
         let (image, view, extent) = match &self.target {
@@ -221,20 +358,33 @@ impl Frame<'_> {
             .render_area(extent.into())
             .layer_count(1)
             .color_attachments(slice::from_ref(&attachment));
+        let viewport = vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: extent.width as f32,
+            height: extent.height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
         let raw = device.raw();
-        // SAFETY: the commands are recording, and the image and view live until the frame has
-        // finished on the GPU: their owners wait for the GPU before destroying them.
+        // SAFETY: the commands are recording outside a pass, and the image and view live until
+        // the frame has finished on the GPU: the swapchain waits for its frames before
+        // destroying its images, and an offscreen image retires until then.
         unsafe {
-            device.begin_label(commands, c"clear");
+            device.begin_label(commands, label);
             raw.cmd_pipeline_barrier2(
                 commands,
                 &vk::DependencyInfo::default().image_memory_barriers(slice::from_ref(&barrier)),
             );
             raw.cmd_begin_rendering(commands, &rendering);
-            raw.cmd_end_rendering(commands);
-            device.end_label(commands);
+            raw.cmd_set_viewport(commands, 0, &[viewport]);
+            raw.cmd_set_scissor(commands, 0, &[extent.into()]);
         }
         self.layout = vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL;
+        Pass {
+            frame: self,
+            extent,
+        }
     }
 
     /// Sends the frame's commands to the GPU and, for a swapchain, presents the image.
@@ -246,6 +396,7 @@ impl Frame<'_> {
         // Set first, so that dropping the frame after a failure doesn't submit it again.
         self.submitted = true;
         let frames = &mut *self.frames;
+        frames.arenas[self.slot].flush()?;
         let device = &frames.device;
         let raw = device.raw();
         let Slot {
@@ -302,9 +453,8 @@ impl Frame<'_> {
             .wait_semaphore_infos(waits)
             .command_buffer_infos(&command_infos)
             .signal_semaphore_infos(signals);
-        // SAFETY: what the submission uses lives until the timeline reaches `frame`: the slot is
-        // reused only after waiting for it, and the target's owner waits for the GPU before
-        // destroying it.
+        // SAFETY: what the submission uses lives until the timeline reaches `frame`: the slot and
+        // its arena are reused only after waiting for it, and resources retire until then.
         unsafe { device.submit(slice::from_ref(&submit)) }?;
         frames.submitted = frame;
         match &mut self.target {
@@ -327,5 +477,208 @@ impl Drop for Frame<'_> {
         {
             error!(code = error.code(), "{error:#}");
         }
+    }
+}
+
+/// Rendering into a frame's target, which ends when the pass is dropped. Draws read their
+/// geometry from [`Upload`]s through push constants, and their textures from the bindless set.
+pub struct Pass<'p, 'a> {
+    frame: &'p mut Frame<'a>,
+    extent: vk::Extent2D,
+}
+
+impl Pass<'_, '_> {
+    /// The target's width and height in pixels.
+    pub fn size(&self) -> [u32; 2] {
+        [self.extent.width, self.extent.height]
+    }
+
+    /// As [`Frame::upload`].
+    pub fn upload(&mut self, bytes: &[u8]) -> Result<Upload> {
+        self.frame.upload(bytes)
+    }
+
+    pub fn set_pipeline(&mut self, pipeline: &Pipeline) {
+        // SAFETY: the commands are recording, and the pipeline retires until the frame has
+        // finished.
+        unsafe {
+            self.frame.frames.device.raw().cmd_bind_pipeline(
+                self.commands(),
+                vk::PipelineBindPoint::GRAPHICS,
+                pipeline.raw(),
+            );
+        }
+    }
+
+    /// Limits the draws that follow to the `size` pixels at `origin`, clipped to the target.
+    pub fn set_scissor(&mut self, origin: [u32; 2], size: [u32; 2]) {
+        let x = origin[0].min(self.extent.width);
+        let y = origin[1].min(self.extent.height);
+        let scissor = vk::Rect2D {
+            offset: vk::Offset2D {
+                x: x as i32,
+                y: y as i32,
+            },
+            extent: vk::Extent2D {
+                width: size[0].min(self.extent.width - x),
+                height: size[1].min(self.extent.height - y),
+            },
+        };
+        // SAFETY: the commands are recording, and the scissor lies within the target.
+        unsafe {
+            self.frame
+                .frames
+                .device
+                .raw()
+                .cmd_set_scissor(self.commands(), 0, &[scissor]);
+        }
+    }
+
+    /// Sets the push constants, from offset 0, that the draws which follow see in every stage.
+    ///
+    /// # Panics
+    ///
+    /// If `bytes` is longer than 128 bytes or isn't a whole number of 4-byte words.
+    pub fn push_constants(&mut self, bytes: &[u8]) {
+        assert!(
+            bytes.len() <= PUSH_CONSTANTS as usize && bytes.len().is_multiple_of(4),
+            "push constants are up to {PUSH_CONSTANTS} bytes, in 4-byte words; got {}",
+            bytes.len()
+        );
+        let device = &self.frame.frames.device;
+        // SAFETY: the commands are recording, and the range lies within the layout's.
+        unsafe {
+            device.raw().cmd_push_constants(
+                self.commands(),
+                device.bindless().pipeline_layout(),
+                vk::ShaderStageFlags::ALL,
+                0,
+                bytes,
+            );
+        }
+    }
+
+    /// Draws `count` indices from `indices`, 32-bit each, starting `first` indices in, with the
+    /// pipeline set last. Each index is offset by `vertex_offset` before the vertex shader sees it.
+    pub fn draw_indexed(&mut self, indices: Upload, first: u32, count: u32, vertex_offset: i32) {
+        // SAFETY: the commands are recording inside a pass with a pipeline set, and the indices
+        // live in this frame's arena until it has finished.
+        unsafe {
+            let raw = self.frame.frames.device.raw();
+            raw.cmd_bind_index_buffer(
+                self.commands(),
+                indices.buffer,
+                indices.offset,
+                vk::IndexType::UINT32,
+            );
+            raw.cmd_draw_indexed(self.commands(), count, 1, first, vertex_offset, 0);
+        }
+    }
+
+    fn commands(&self) -> vk::CommandBuffer {
+        self.frame.frames.slots[self.frame.slot].commands
+    }
+}
+
+impl Drop for Pass<'_, '_> {
+    fn drop(&mut self) {
+        let device = &self.frame.frames.device;
+        // SAFETY: the commands are recording inside the pass this ends, and its label.
+        unsafe {
+            device.raw().cmd_end_rendering(self.commands());
+            device.end_label(self.commands());
+        }
+    }
+}
+
+/// Bytes in a frame's arena, valid for the GPU during that frame.
+#[derive(Clone, Copy, Debug)]
+pub struct Upload {
+    buffer: vk::Buffer,
+    offset: u64,
+    address: vk::DeviceAddress,
+}
+
+impl Upload {
+    /// Where shaders read the bytes, through a buffer pointer.
+    pub fn address(&self) -> u64 {
+        self.address
+    }
+}
+
+/// Memory the CPU writes during a frame for the GPU to read in it, allocated by bumping an
+/// offset: geometry, data shaders read, and pixels on their way to textures. It's reset when
+/// the frame's slot comes round again, and grows by adding buffers, which the reset merges
+/// into one big enough for them all, so frames stop allocating once they reach a steady state.
+struct Arena {
+    slot: u64,
+    /// The newest buffer last; only it has room.
+    buffers: Vec<Buffer>,
+    /// How much of the newest buffer is used.
+    used: u64,
+}
+
+impl Arena {
+    /// What a new arena's first buffer holds.
+    const FIRST_SIZE: u64 = 1 << 20;
+    /// Every upload starts at a multiple of this, which covers index buffers, texture copies and
+    /// the data types shaders read.
+    const ALIGNMENT: u64 = 16;
+
+    fn new(slot: u64) -> Self {
+        Self {
+            slot,
+            buffers: Vec::new(),
+            used: 0,
+        }
+    }
+
+    /// Empties the arena, once the GPU has finished the frame that last used it.
+    fn reset(&mut self, device: &Arc<Device>) -> Result<()> {
+        if self.buffers.len() > 1 {
+            let total = self.buffers.iter().map(Buffer::size).sum();
+            self.buffers.clear();
+            self.grow(device, total)?;
+        }
+        self.used = 0;
+        Ok(())
+    }
+
+    fn upload(&mut self, device: &Arc<Device>, bytes: &[u8]) -> Result<Upload> {
+        let size = bytes.len() as u64;
+        let mut offset = self.used.next_multiple_of(Self::ALIGNMENT);
+        let room = self.buffers.last().map_or(0, Buffer::size);
+        if offset + size > room {
+            self.grow(device, (room * 2).max(size).max(Self::FIRST_SIZE))?;
+            offset = 0;
+        }
+        let buffer = self.buffers.last_mut().expect("the arena just made room");
+        buffer.write(offset, bytes);
+        self.used = offset + size;
+        Ok(Upload {
+            buffer: buffer.raw(),
+            offset,
+            address: buffer.address() + offset,
+        })
+    }
+
+    fn grow(&mut self, device: &Arc<Device>, size: u64) -> Result<()> {
+        let usage = vk::BufferUsageFlags::INDEX_BUFFER
+            | vk::BufferUsageFlags::STORAGE_BUFFER
+            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+            | vk::BufferUsageFlags::TRANSFER_SRC;
+        let name = format!("frame {} arena", self.slot);
+        self.buffers
+            .push(Buffer::new(device, size, usage, Memory::Upload, &name)?);
+        self.used = 0;
+        Ok(())
+    }
+
+    /// Makes what the CPU wrote visible to the GPU.
+    fn flush(&self) -> Result<()> {
+        for buffer in &self.buffers {
+            buffer.flush(0, vk::WHOLE_SIZE)?;
+        }
+        Ok(())
     }
 }

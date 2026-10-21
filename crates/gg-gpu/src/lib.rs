@@ -6,24 +6,32 @@
 // Vulkan through ash is an unsafe API; wrapping it in safe types is this crate's job.
 #![allow(unsafe_code)]
 
+mod bindless;
+mod buffer;
 mod device;
 mod frame;
 mod image;
 mod instance;
+mod pipeline;
 mod surface;
 mod swapchain;
+mod texture;
+mod vma;
 
 use std::fmt;
 
 use ash::vk;
 use gg_core::Error;
 
+pub use bindless::Sampler;
 pub use device::Device;
-pub use frame::{Frame, Frames, Target};
+pub use frame::{Frame, Frames, Pass, Target, Upload};
 pub use image::ColorImage;
 pub use instance::{Instance, InstanceDesc, Validation};
+pub use pipeline::{Blend, Format, GraphicsDesc, Pipeline};
 pub use surface::{Surface, Window};
 pub use swapchain::Swapchain;
+pub use texture::{Texture, TextureFormat};
 
 /// The Vulkan version a device must support.
 const REQUIRED_VERSION: u32 = vk::make_api_version(0, 1, 4, 0);

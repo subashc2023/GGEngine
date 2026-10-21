@@ -5,9 +5,21 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+bytemuck.workspace = true
+epaint.workspace = true
 gg-core.workspace = true
 gg-gpu.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+egui.workspace = true
+png.workspace = true
+
+# The GPU tests have a main of their own, like gg-gpu's: it sets the Vulkan loader's
+# environment before any thread exists, then runs the tests one at a time in one process.
+[[test]]
+name = "gpu"
+harness = false
 
 [lints]
 workspace = true

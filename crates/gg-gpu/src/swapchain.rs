@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use ash::vk;
 use gg_core::{Error, Result};
-use tracing::{info, trace};
+use tracing::{debug, info, trace};
 
 use crate::{COLOR_RANGE, Device, Surface, vk_error};
 
@@ -14,6 +14,10 @@ pub struct Swapchain {
     surface: Surface,
     raw: vk::SwapchainKHR,
     format: vk::SurfaceFormatKHR,
+    present_mode: vk::PresentModeKHR,
+    /// Signaled by each acquire once the display has let go of the image, and reset after the
+    /// wait on it.
+    available: vk::Fence,
     extent: vk::Extent2D,
     /// The window's size, for surfaces that take their size from the swapchain.
     window_extent: vk::Extent2D,
@@ -31,8 +35,16 @@ pub struct Swapchain {
 
 impl Swapchain {
     /// A swapchain for `surface`, the surface `device` was opened for, sized to the window's
-    /// `width` and `height` where the surface doesn't set its own size.
-    pub fn new(device: &Arc<Device>, surface: Surface, width: u32, height: u32) -> Result<Self> {
+    /// `width` and `height` where the surface doesn't set its own size. With `vsync`, it
+    /// presents at the display's refresh rate; otherwise as fast as frames are rendered, where
+    /// the device can do that without tearing.
+    pub fn new(
+        device: &Arc<Device>,
+        surface: Surface,
+        width: u32,
+        height: u32,
+        vsync: bool,
+    ) -> Result<Self> {
         if device.swapchain_fn().is_none() {
             return Err(Error::new(
                 "gpu.no_swapchain",
@@ -52,11 +64,32 @@ impl Swapchain {
                 format!("{} offers no formats for the window", device.name()),
             )
         })?;
+        // SAFETY: the physical device and the surface are live.
+        let present_modes = unsafe {
+            surface
+                .surface_fn()
+                .get_physical_device_surface_present_modes(device.physical(), surface.raw())
+        }
+        .map_err(|e| vk_error("vkGetPhysicalDeviceSurfacePresentModesKHR", e))?;
+        debug!(modes = ?present_modes, "Present modes");
+        let present_mode = choose_present_mode(&present_modes, vsync);
+        // SAFETY: the device is live.
+        let available = unsafe {
+            device
+                .raw()
+                .create_fence(&vk::FenceCreateInfo::default(), None)
+        }
+        .map_err(|e| vk_error("vkCreateFence", e))?;
+        // SAFETY: the fence is live.
+        unsafe { device.set_name(available, "swapchain image available") };
+        // From here on, dropping `swapchain` destroys the fence.
         let mut swapchain = Self {
             device: device.clone(),
             surface,
             raw: vk::SwapchainKHR::null(),
             format,
+            present_mode,
+            available,
             extent: vk::Extent2D::default(),
             window_extent: vk::Extent2D { width, height },
             images: Vec::new(),
@@ -68,6 +101,11 @@ impl Swapchain {
         Ok(swapchain)
     }
 
+    /// The format of the images it presents, which pipelines that draw into them are made for.
+    pub fn format(&self) -> crate::Format {
+        crate::Format(self.format.format)
+    }
+
     /// Tells the swapchain that the window is now `width` by `height`, so that it's rebuilt
     /// before the next frame if its size no longer matches.
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -77,7 +115,8 @@ impl Swapchain {
         }
     }
 
-    /// Acquires the next image, signaling `acquired` once it's ready to render into. Returns
+    /// Acquires the next image, waiting until the display has let go of it, and signals
+    /// `acquired` for the GPU to wait on. Returns
     /// `None` when there's nothing to present to this time: the window has no area, or the
     /// swapchain went out of date and is rebuilt for the next frame.
     ///
@@ -89,14 +128,27 @@ impl Swapchain {
             return Ok(None);
         }
         let swapchain_fn = self.swapchain_fn();
-        // SAFETY: the swapchain is live, and the caller guarantees the semaphore.
+        // SAFETY: the swapchain is live, the caller guarantees the semaphore, and the fence is
+        // unsignaled, since it's reset after each wait on it.
         let acquired = unsafe {
-            swapchain_fn.acquire_next_image(self.raw, u64::MAX, acquired, vk::Fence::null())
+            swapchain_fn.acquire_next_image(self.raw, u64::MAX, acquired, self.available)
         };
         match acquired {
             // A suboptimal image is still presented; the swapchain is rebuilt after it.
             Ok((image, suboptimal)) => {
                 self.stale |= suboptimal;
+                // Waits until the display has let go of the image, which under FIFO is at a
+                // vertical sync, so that frames start once per refresh. Waiting only for the GPU
+                // to finish the frame before last let them start in pairs, 1 ms apart and then
+                // 7 ms at 240 Hz, though the display still showed one per refresh.
+                let fences = [self.available];
+                let raw = self.device.raw();
+                // SAFETY: the acquire signals the fence, which nothing else uses.
+                unsafe {
+                    raw.wait_for_fences(&fences, true, u64::MAX)
+                        .and_then(|()| raw.reset_fences(&fences))
+                }
+                .map_err(|e| vk_error("vkWaitForFences", e))?;
                 Ok(Some(image))
             }
             // Nothing was acquired, so the semaphore stays unsignaled.
@@ -208,8 +260,7 @@ impl Swapchain {
             .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
             .pre_transform(capabilities.current_transform)
             .composite_alpha(composite_alpha)
-            // FIFO waits for vertical sync, and every device supports it.
-            .present_mode(vk::PresentModeKHR::FIFO)
+            .present_mode(self.present_mode)
             .clipped(true)
             .old_swapchain(self.raw);
         let swapchain_fn = device
@@ -259,7 +310,7 @@ impl Swapchain {
                 images = self.images.len(),
                 format = ?self.format.format,
                 color_space = ?self.format.color_space,
-                present_mode = "fifo",
+                present_mode = ?self.present_mode,
                 "Swapchain created"
             );
         } else {
@@ -293,12 +344,25 @@ impl Drop for Swapchain {
     fn drop(&mut self) {
         // Frames in flight may still use the images and semaphores.
         let _ = self.device.wait_idle();
-        // SAFETY: the device is idle, so nothing uses the swapchain or its objects. The surface,
-        // a field, is destroyed after it.
+        // SAFETY: the device is idle, so nothing uses the swapchain or its objects, and every
+        // acquire that signaled the fence was waited on. The surface, a field, is destroyed after
+        // it.
         unsafe {
             self.destroy_views_and_semaphores();
             self.swapchain_fn().destroy_swapchain(self.raw, None);
+            self.device.raw().destroy_fence(self.available, None);
         }
+    }
+}
+
+/// FIFO with `vsync`, and otherwise mailbox where the device has it, which renders as fast as
+/// the GPU can and shows the newest finished frame at each vertical sync, without tearing. FIFO,
+/// which every device supports, waits for vertical sync, so the frame rate is the display's.
+fn choose_present_mode(modes: &[vk::PresentModeKHR], vsync: bool) -> vk::PresentModeKHR {
+    if !vsync && modes.contains(&vk::PresentModeKHR::MAILBOX) {
+        vk::PresentModeKHR::MAILBOX
+    } else {
+        vk::PresentModeKHR::FIFO
     }
 }
 

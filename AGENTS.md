@@ -39,6 +39,9 @@ cargo run -p sandbox -- --headless --frames 60   # does the engine run? 0 means 
 cargo build -p player --release   # shipping: the player alone
 ```
 
+Building needs a C++ compiler, for the Vulkan Memory Allocator, and `slangc` for the shaders: the
+Vulkan SDK's, or the one `SLANGC` names.
+
 Each run writes a JSON log and logs its path as it starts; filter it on `level`, `code` or
 `vuid`. `RUST_LOG` sets what's logged, such as `RUST_LOG=gg_gpu=trace`.
 
@@ -55,7 +58,9 @@ cargo test --workspace
 
 The tests include GPU tests, which need a Vulkan 1.4 driver and the Khronos validation layer.
 Without a GPU, lavapipe serves: on Debian or Ubuntu, `mesa-vulkan-drivers` (Mesa 25.0 or later)
-and `vulkan-validationlayers`.
+and `vulkan-validationlayers`. When a test's image differs from its reference, the test says
+where it wrote its own; after an intended change, `GG_UPDATE_REFERENCES=1` rewrites the
+references, which you look at before committing them.
 
 CI ([ci.yml](.github/workflows/ci.yml)) runs the three gates on every push, on Windows, Linux
 and macOS, x86-64 and ARM64, and the layering check. Its Linux jobs run the GPU tests on

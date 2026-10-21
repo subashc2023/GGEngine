@@ -11,6 +11,9 @@ gg-core.workspace = true
 raw-window-handle.workspace = true
 tracing.workspace = true
 
+[build-dependencies]
+cc.workspace = true
+
 [dev-dependencies]
 serde_json.workspace = true
 
