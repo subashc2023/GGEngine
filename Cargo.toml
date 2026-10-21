@@ -1,0 +1,21 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "apps/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+gg-core = { path = "crates/gg-core" }
+gg-gpu = { path = "crates/gg-gpu" }
+gg-renderer = { path = "crates/gg-renderer" }
+gg-engine = { path = "crates/gg-engine" }
+
+[workspace.lints.rust]
+# A crate opts in to unsafe code with `#![allow(unsafe_code)]` and a stated reason.
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "warn"

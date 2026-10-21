@@ -1,0 +1,3 @@
+# LF in every checkout, whatever core.autocrlf says (Git for Windows defaults it to true), so
+# worktrees and clones on every OS hold the same bytes as the repository.
+* text=auto eol=lf
