@@ -1,11 +1,12 @@
 //! Meshes: the handles that the engine draws with, and the vertices and indices behind them in
-//! GPU memory, drawn with games' shaders in the game's view.
+//! GPU memory, drawn with games' shaders in the game's view, as its camera sees them.
 
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
 use bytemuck::NoUninit;
+use gg_core::math::Mat4;
 use gg_core::{Error, Result};
 use gg_gpu::{Blend, Device, Format, Frame, GpuBuffer, GraphicsDesc, Pass, Pipeline};
 
@@ -189,15 +190,22 @@ impl MeshPass {
         Ok(())
     }
 
-    /// Draws `draws` in order, each over those before it, in `viewport` of the pass's target. A
-    /// viewport without an area draws nothing.
+    /// Draws `draws` in order, each over those before it, in `viewport` of the pass's target,
+    /// where `view_projection` takes the world to clip space. A viewport without an area draws
+    /// nothing.
     ///
     /// # Panics
     ///
     /// If a mesh drawn isn't one the pass has uploaded, a shader isn't one it has made a pipeline
     /// of, a mesh's vertices aren't the size its shader reads, or the target's format isn't the
     /// pass's.
-    pub(crate) fn draw(&self, pass: &mut Pass<'_, '_>, viewport: Viewport, draws: &[Draw]) {
+    pub(crate) fn draw(
+        &self,
+        pass: &mut Pass<'_, '_>,
+        viewport: Viewport,
+        view_projection: Mat4,
+        draws: &[Draw],
+    ) {
         if draws.is_empty() || viewport.size.contains(&0) {
             return;
         }
@@ -223,8 +231,14 @@ impl MeshPass {
                 pass.set_pipeline(pipeline);
                 bound = Some(draw.shader);
             }
-            // The shader's push constants: the vertices' address.
-            pass.push_constants(&mesh.vertices.address().to_ne_bytes());
+            // The shader's `Push`: the matrix from the mesh's space to clip space, column-major,
+            // then the vertices' address. The matrix goes first, so that both offsets are the
+            // same under every layout Slang gives push constants.
+            let clip_from_mesh = view_projection * draw.transform;
+            let mut push = [0u8; 72];
+            push[0..64].copy_from_slice(bytemuck::cast_slice(&clip_from_mesh.to_cols_array()));
+            push[64..72].copy_from_slice(&mesh.vertices.address().to_ne_bytes());
+            pass.push_constants(&push);
             pass.draw_indexed(&mesh.indices, 0, mesh.count, 0);
         }
     }

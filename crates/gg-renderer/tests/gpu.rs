@@ -12,7 +12,10 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
-use gg_renderer::{Draw, Meshes, RenderData, Renderer, Settings, Shaders, Ui, Viewport};
+use gg_core::math::{Mat4, Quat, Vec3};
+use gg_renderer::{
+    Camera, Draw, Meshes, Projection, RenderData, Renderer, Settings, Shaders, Ui, Viewport,
+};
 
 fn main() {
     // CI runners without a GPU or a Vulkan driver, Windows' and macOS's, set this. Linux CI runs
@@ -100,6 +103,7 @@ fn ui_matches_its_reference() {
                 origin: [0, 0],
                 size: [WIDTH, HEIGHT],
             },
+            camera: Camera::default(),
             meshes: &mut meshes,
             shaders: &mut shaders,
             draws: &[],
@@ -113,9 +117,12 @@ fn ui_matches_its_reference() {
 }
 
 /// Draws a square in one color, then a triangle in red, green and blue over it, each with its own
-/// vertex type and shader, into part of an offscreen image, and compares it with its reference
-/// image. The triangle is added after the first frame, and the frames outnumber those in flight,
-/// so that later frames draw from what earlier ones copied to the GPU.
+/// vertex type and shader and placed by a transform of its own, into part of an offscreen image,
+/// as a camera away from the origin sees them, and compares it with its reference image. The
+/// square is turned and scaled, and the triangle moved and scaled to cover much of it, so that a
+/// matrix pushed transposed or multiplied in the wrong order, or the meshes drawn out of order,
+/// change thousands of pixels. The triangle is added after the first frame, and the frames
+/// outnumber those in flight, so that later frames draw from what earlier ones copied to the GPU.
 fn meshes_match_their_reference() {
     const WIDTH: u32 = 320;
     const HEIGHT: u32 = 200;
@@ -127,20 +134,38 @@ fn meshes_match_their_reference() {
             .join("tests/shaders")
             .join(file)
     };
+    // 4 units from the view's bottom to its top, which is 160 pixels, so 40 pixels a unit both
+    // ways; the view's center is (1, 0.5).
+    let camera = Camera {
+        position: Vec3::new(1.0, 0.5, 0.0),
+        projection: Projection::Orthographic {
+            height: 4.0,
+            near: -1.0,
+            far: 1.0,
+        },
+        ..Camera::default()
+    };
+    let transform = |scale, turn: f32, [x, y]: [f32; 2]| {
+        Mat4::from_scale_rotation_translation(
+            Vec3::splat(scale),
+            Quat::from_rotation_z(turn.to_radians()),
+            Vec3::new(x, y, 0.0),
+        )
+    };
     // Positions.
     let flat = shaders
         .add::<[f32; 3]>("flat color", &shader("flat_color.slang"))
         .expect("a shader");
     let corners = [
-        [-0.75, -0.75, 0.0],
-        [0.75, -0.75, 0.0],
-        [0.75, 0.75, 0.0],
-        [-0.75, 0.75, 0.0],
+        [-0.5, -0.5, 0.0],
+        [0.5, -0.5, 0.0],
+        [0.5, 0.5, 0.0],
+        [-0.5, 0.5, 0.0],
     ];
     let square = meshes
         .add("square", &corners, &[0, 1, 2, 2, 3, 0])
         .expect("a mesh");
-    let mut draws = vec![Draw::new(square, flat)];
+    let mut draws = vec![Draw::new(square, flat, transform(2.5, 30.0, [0.5, 0.5]))];
     for frame in 0..3 {
         if frame == 1 {
             // Positions, then colors.
@@ -148,15 +173,20 @@ fn meshes_match_their_reference() {
                 .add::<[f32; 7]>("vertex color", &shader("vertex_color.slang"))
                 .expect("a shader");
             let corner = |[x, y, z]: [f32; 3], [r, g, b, a]: [f32; 4]| [x, y, z, r, g, b, a];
+            // Pointing up.
             let vertices = [
-                corner([0.0, -0.5, 0.0], [1.0, 0.0, 0.0, 1.0]),
-                corner([0.5, 0.5, 0.0], [0.0, 1.0, 0.0, 1.0]),
-                corner([-0.5, 0.5, 0.0], [0.0, 0.0, 1.0, 1.0]),
+                corner([0.0, 0.5, 0.0], [1.0, 0.0, 0.0, 1.0]),
+                corner([0.5, -0.5, 0.0], [0.0, 1.0, 0.0, 1.0]),
+                corner([-0.5, -0.5, 0.0], [0.0, 0.0, 1.0, 1.0]),
             ];
             let triangle = meshes
                 .add("triangle", &vertices, &[0, 1, 2])
                 .expect("a mesh");
-            draws.push(Draw::new(triangle, colored));
+            draws.push(Draw::new(
+                triangle,
+                colored,
+                transform(2.0, 0.0, [1.0, 0.5]),
+            ));
         }
         let data = RenderData {
             clear_color: CLEAR,
@@ -165,6 +195,7 @@ fn meshes_match_their_reference() {
                 origin: [40, 20],
                 size: [240, 160],
             },
+            camera,
             meshes: &mut meshes,
             shaders: &mut shaders,
             draws: &draws,

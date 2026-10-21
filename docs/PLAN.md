@@ -33,6 +33,12 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   types; a shader is added for a vertex type, and each draw pairs a mesh with a shader for its
   own. The sandbox draws a flat blue square behind its triangle, with two shaders and two vertex
   types, and a GPU test checks the pair against a reference image.
+- **Cameras and transforms** (2026-10-21): layers set the camera the game's view sees the world
+  from, orthographic and keeping the view's aspect ratio, and draw each mesh with a transform, in
+  a world that is right-handed with +Y up, as glTF's is. The sandbox draws a grid of squares and
+  a turning triangle, and moves and turns its camera with W, A, S, D, Q and E, by the frame time;
+  a unit test checks the camera's matrix, and a GPU test a camera and transforms against a
+  reference image.
 
 ## Now: Phase 3, runtime core
 
@@ -117,7 +123,12 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Steady-state frames that draw UI allocate: in egui's layout and tessellation, and in the dock's own bookkeeping, which copies each frame's panel and menu names and torn-off windows' titles, and makes its arrangement and its list of groups left to draw anew | Phase 4, with the allocation check; the overlay is for development |
 | Keeping within the GPU's memory budget (`VK_EXT_memory_budget` through VMA) | Phase 7, with streaming |
 | Removing meshes and shaders; each lasts until the app ends | Something adds and removes them as it runs, such as asset hot reload in Phase 4 |
-| A camera, transforms and other per-draw data: shaders get only the vertices' address, so meshes are given in clip space and stretch with the game's view | Phase 4, which draws moving entities |
+| Perspective cameras; a camera is orthographic | Phase 4, with depth |
+| Per-frame data in a buffer: shaders get only the product of the camera's view and projection and each draw's transform, so none sees positions in the world | Phase 6, with lighting |
+| Per-draw data besides the transform, such as a material's constants | Phase 6, with materials |
+| More than one camera or view, such as split screen or the editor's scene view | A game or the editor draws several |
+| Converting between the view's pixels and the world, to pick what's under the cursor | Something picks with the mouse |
+| A camera controller in the engine; the sandbox steers its own | A second app needs one, such as the editor in Phase 9 |
 | Checking a game's shader against the contract on `Shaders::add` through Slang reflection: its push constants, its resources, and the size of its vertex struct against its vertex type's; until then it's trusted, and validation checks it in debug builds | Phase 4, with Slang reflection |
 | Games' shaders compile with slangc as they're added, so running a game needs the Vulkan SDK | Phase 7, which cooks shaders |
 | Shader paths are as the game gives them; the sandbox gives its source's | Phase 4, with assets |

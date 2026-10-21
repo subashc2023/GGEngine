@@ -1,5 +1,5 @@
-// Meshes in the colors of their vertices, whose positions are in clip space. The colors are
-// linear, and the sRGB target encodes them.
+// Meshes in the colors of their vertices, whose positions are in the mesh's own space. The colors
+// are linear, and the sRGB target encodes them.
 
 struct Vertex {
     float3 position;
@@ -7,6 +7,7 @@ struct Vertex {
 };
 
 struct Push {
+    float4x4 clip_from_mesh;
     Vertex* vertices;
 };
 [[vk::push_constant]] ConstantBuffer<Push> push;
@@ -20,7 +21,7 @@ struct Varyings {
 Varyings vertex_main(uint index: SV_VulkanVertexID) {
     Vertex vertex = push.vertices[index];
     Varyings out;
-    out.position = float4(vertex.position, 1.0);
+    out.position = mul(push.clip_from_mesh, float4(vertex.position, 1.0));
     out.color = vertex.color;
     return out;
 }

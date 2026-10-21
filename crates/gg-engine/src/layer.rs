@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use bytemuck::NoUninit;
 use gg_core::Result;
-use gg_renderer::{Draw, Mesh, Meshes, RenderData, Shader, Shaders, Viewport};
+use gg_core::math::Mat4;
+use gg_renderer::{Camera, Draw, Mesh, Meshes, RenderData, Shader, Shaders, Viewport};
 
 use crate::{Event, Input, Ui};
 
@@ -39,6 +40,7 @@ pub struct Context {
     window: Option<Window>,
     input: Input,
     clear_color: [f32; 4],
+    camera: Camera,
     meshes: Meshes,
     shaders: Shaders,
     /// What to draw this frame, in order.
@@ -51,6 +53,7 @@ impl Context {
             window,
             input: Input::default(),
             clear_color: [0.02, 0.02, 0.02, 1.0],
+            camera: Camera::default(),
             meshes: Meshes::default(),
             shaders: Shaders::default(),
             draws: Vec::new(),
@@ -77,11 +80,23 @@ impl Context {
         self.clear_color = color;
     }
 
+    /// What the game's view sees the world from; at first, [`Camera::default`].
+    pub fn camera(&self) -> Camera {
+        self.camera
+    }
+
+    /// Sets what the game's view sees the world from, for this frame and those after it. A
+    /// projection that can't project panics as the frame renders, as
+    /// [`Projection`](crate::Projection) says.
+    pub fn set_camera(&mut self, camera: Camera) {
+        self.camera = camera;
+    }
+
     /// Compiles the Slang shader at `path` for layers to draw meshes of vertex type `V` with from
     /// then on. `name` names it in errors and GPU captures. The shader keeps to the contract that
     /// [`gg_renderer::Shaders::add`] describes: entry points `vertex_main` and `fragment_main`,
-    /// and push constants that hold the address of the vertices, which it reads as `V` is laid
-    /// out.
+    /// and push constants that hold the matrix from the mesh's space to clip space and the
+    /// address of the vertices, which it reads as `V` is laid out.
     ///
     /// Fails with `renderer.bad_shader` and slangc's diagnostics if it doesn't compile, and with
     /// `renderer.no_slangc` if slangc can't be run.
@@ -109,11 +124,11 @@ impl Context {
         self.meshes.add(name, vertices, indices)
     }
 
-    /// Draws `mesh` with `shader` this frame, over the meshes drawn before it, in the game's
-    /// view: the main window's central area, which the panels dock around. Until there are
-    /// cameras, the shader places it in clip space, which spans the view.
-    pub fn draw<V>(&mut self, mesh: Mesh<V>, shader: Shader<V>) {
-        self.draws.push(Draw::new(mesh, shader));
+    /// Draws `mesh` with `shader` this frame, where `transform` places it in the world, over the
+    /// meshes drawn before it, in the game's view as the camera sees it. The view is the main
+    /// window's central area, which the panels dock around.
+    pub fn draw<V>(&mut self, mesh: Mesh<V>, shader: Shader<V>, transform: Mat4) {
+        self.draws.push(Draw::new(mesh, shader, transform));
     }
 
     /// The frame's render data, with the game's view at `viewport`.
@@ -121,6 +136,7 @@ impl Context {
         RenderData {
             clear_color: self.clear_color,
             viewport,
+            camera: self.camera,
             meshes: &mut self.meshes,
             shaders: &mut self.shaders,
             draws: &self.draws,

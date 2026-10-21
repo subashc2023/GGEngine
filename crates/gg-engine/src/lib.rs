@@ -37,8 +37,8 @@ pub use event::{Event, Key, MouseButton, Scroll};
 /// the engine's version.
 pub use gg_core::math;
 /// What layers draw: meshes, with shaders for their vertex types, which they add and draw
-/// through their [`Context`].
-pub use gg_renderer::{Mesh, Shader};
+/// through their [`Context`], and the camera the game's view sees them from.
+pub use gg_renderer::{Camera, Mesh, Projection, Shader};
 pub use input::Input;
 use layer::Stack;
 pub use layer::{Context, Layer, Window};

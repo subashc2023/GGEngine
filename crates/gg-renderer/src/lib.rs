@@ -1,10 +1,11 @@
 //! Turns the render data the engine hands it each frame into images, built on `gg-gpu`: meshes
-//! drawn with games' shaders in the game's view and the UI over them, and the render graph,
-//! materials, lighting and post-processing to come.
+//! drawn with games' shaders in the game's view, as its camera sees them, and the UI over them;
+//! and the render graph, materials, lighting and post-processing to come.
 //!
 //! It knows nothing about the scene, ECS or gameplay. It receives plain data, so rendering
 //! can run on its own thread, a frame behind simulation.
 
+mod camera;
 mod mesh;
 mod shader;
 mod ui;
@@ -12,9 +13,11 @@ mod ui;
 use std::iter;
 use std::sync::Arc;
 
+use gg_core::math::Mat4;
 use gg_core::{Error, Result};
 use gg_gpu::{ColorImage, Device, Frames, Instance, InstanceDesc, Surface, Swapchain, Target};
 
+pub use camera::{Camera, Projection};
 pub use gg_gpu::{Validation, Window};
 pub use mesh::{Mesh, Meshes};
 pub use shader::{Shader, Shaders};
@@ -30,18 +33,22 @@ pub struct Viewport {
     pub size: [u32; 2],
 }
 
-/// A mesh, and the shader to draw it with, which reads its vertex type.
+/// A mesh, the shader to draw it with, which reads its vertex type, and where it is in the world.
 #[derive(Clone, Copy, Debug)]
 pub struct Draw {
     mesh: u32,
     shader: u32,
+    transform: Mat4,
 }
 
 impl Draw {
-    pub fn new<V>(mesh: Mesh<V>, shader: Shader<V>) -> Self {
+    /// `transform` takes the mesh's own space, which its vertices' positions are in, to the
+    /// world's.
+    pub fn new<V>(mesh: Mesh<V>, shader: Shader<V>, transform: Mat4) -> Self {
         Self {
             mesh: mesh.index,
             shader: shader.index,
+            transform,
         }
     }
 }
@@ -50,8 +57,10 @@ impl Draw {
 pub struct RenderData<'a> {
     /// The color the whole frame clears to, in linear RGBA.
     pub clear_color: [f32; 4],
-    /// The game's view, which the meshes are drawn in: clip space spans it.
+    /// The game's view, which the meshes are drawn in.
     pub viewport: Viewport,
+    /// What the view sees the world from.
+    pub camera: Camera,
     /// The meshes; those added since a frame last rendered reach the GPU first.
     pub meshes: &'a mut Meshes,
     /// The shaders; those added since the renderer last rendered get their pipelines first.
@@ -218,7 +227,8 @@ impl Renderer {
     /// # Panics
     ///
     /// If `data` holds meshes or shaders of another [`Meshes`] or [`Shaders`] than the ones it
-    /// held before, which could draw a mesh with a shader for another vertex type.
+    /// held before, which could draw a mesh with a shader for another vertex type; or if its
+    /// camera's projection can't project, as [`Projection`] says.
     pub fn render(
         &mut self,
         data: RenderData<'_>,
@@ -250,6 +260,10 @@ impl Renderer {
         self.ui.queue(ui.textures);
         // Before the frame begins, which a failure would then present unrendered.
         self.meshes.add_shaders(data.shaders)?;
+        // Every frame, whether it renders or draws anything, so that a camera that can't project
+        // always panics. A view without an area draws nothing, so its aspect ratio doesn't matter.
+        let [width, height] = data.viewport.size;
+        let view_projection = data.camera.view_projection(width as f32 / height as f32);
         let target = match &mut self.output {
             Output::Window(swapchain) => Target::Swapchain(swapchain),
             Output::Offscreen(image) => Target::Image(image),
@@ -266,7 +280,8 @@ impl Renderer {
         let mut pass = frame
             .begin_pass(0, c"frame", data.clear_color)
             .expect("a frame's first target has an image");
-        self.meshes.draw(&mut pass, data.viewport, data.draws);
+        self.meshes
+            .draw(&mut pass, data.viewport, view_projection, data.draws);
         self.ui
             .draw(&mut pass, ui.primitives, ui.pixels_per_point)?;
         drop(pass);

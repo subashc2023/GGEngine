@@ -63,8 +63,11 @@ impl Shaders {
     ///
     /// - Its entry points are `vertex_main`, a vertex shader, and `fragment_main`, a fragment
     ///   shader that returns one `float4`: the color, in linear RGBA.
-    /// - Its push constants are `struct { V* vertices; }`, the address of the mesh's vertices:
-    ///   the only 8 bytes set. It uses no other resources.
+    /// - Its push constants are `struct { float4x4 clip_from_mesh; V* vertices; }`, the only 72
+    ///   bytes set. The first is the camera's view and projection times the draw's transform,
+    ///   from the mesh's own space to Vulkan's clip space, for `mul(clip_from_mesh,
+    ///   float4(position, 1.0))`; the second, the address of the mesh's vertices. It uses no
+    ///   other resources.
     /// - It reads only the vertex at `SV_VulkanVertexID`, not `SV_VertexID`, which needs a
     ///   feature the engine doesn't enable.
     /// - Its struct for `V` has `V`'s fields, in order, of 32-bit types: Slang lays out what a
@@ -95,6 +98,9 @@ fn compile(slangc: &Path, name: &str, path: &Path) -> Result<Vec<u8>> {
     let output = Command::new(slangc)
         .arg(path)
         .args(["-target", "spirv", "-fvk-use-entrypoint-name"])
+        // As glam lays matrices out. It's slangc's default too, but only for legacy reasons, as
+        // Slang's docs have it: elsewhere the default is row-major.
+        .arg("-matrix-layout-column-major")
         // A function marked for one stage but compiled as the other.
         .args(["-warnings-as-errors", "38006"])
         .args(["-entry", "vertex_main", "-stage", "vertex"])
