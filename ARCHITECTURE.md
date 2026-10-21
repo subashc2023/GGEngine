@@ -237,6 +237,17 @@ window's, and the main window's frame renders them all. Only the main window pac
 another with no image free skips the frame. Their events go to egui, never to the layers. On
 Wayland, where windows can't be placed, groups float over the main window instead.
 
+Layers add menus through `Ui` too. The OS draws the windows' frames, and the menus get a bar of
+their own below its title bar, unless the app calls `App::custom_title_bar`, as tools do for the
+room: then the UI draws them. The main window's title bar holds the menus, the title and the
+buttons that minimize, maximize and close it, and a torn-off window's tab bar is its title bar,
+with a close button. Dragging the main window's title bar has the OS move it, so snapping works
+as usual, while a torn-off window moves with the dock's drag, so that it can dock; the edges have
+the OS resize a window. On macOS the OS keeps its own buttons and the edges. Games keep the OS's
+frame. A menu quits by sending egui's `Close` to the main window,
+which, like the OS's close button, gives the layers `CloseRequested` first; egui's own Ctrl or
+Cmd+Q is off, since a game may use those keys.
+
 Layers can also poll input, through their `Context` rather than a global: which keys and mouse
 buttons are held, and where the cursor is. That state follows the events the stack is sent, so
 input the UI keeps doesn't count, and a press and release between two frames never shows as

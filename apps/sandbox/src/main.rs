@@ -4,17 +4,19 @@ use std::ops::ControlFlow;
 use std::process::ExitCode;
 use std::time::Duration;
 
+use gg_engine::egui::{ViewportCommand, ViewportId};
 use gg_engine::{Context, Event, Key, Layer, Ui};
 use tracing::info;
 
 fn main() -> ExitCode {
-    gg_engine::run(gg_engine::App::new("Sandbox").layer(Sandbox::new()))
+    let app = gg_engine::App::new("Sandbox").custom_title_bar();
+    gg_engine::run(app.layer(Sandbox::new()))
 }
 
 /// Clears to a color that drifts slowly, so that a running sandbox visibly animates, and shows two
 /// panels to dock: frame times, and the color, which can be held or picked. Logs the key and mouse
 /// presses that reach it, which those on the panels don't. It polls input too: holding Space
-/// pauses the drift, and a panel shows where the cursor is.
+/// pauses the drift, and a panel shows where the cursor is. The title bar's File menu quits.
 struct Sandbox {
     time: Duration,
     drift: bool,
@@ -65,6 +67,12 @@ impl Layer for Sandbox {
     }
 
     fn ui(&mut self, cx: &mut Context, ui: &mut Ui<'_>) {
+        ui.menu("File", |ui| {
+            if ui.button("Quit").clicked() {
+                ui.ctx()
+                    .send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Close);
+            }
+        });
         ui.panel("Stats", |ui| {
             let ms = self.frame_time.as_secs_f32() * 1000.0;
             let fps = if ms > 0.0 { 1000.0 / ms } else { 0.0 };

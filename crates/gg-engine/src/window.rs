@@ -10,16 +10,19 @@ use gg_core::{Error, Result};
 use gg_renderer::Renderer;
 use tracing::{debug, info, trace};
 use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
+use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
 use crate::args::Args;
+use crate::chrome::{self, Chrome};
 use crate::dock::{self, Dock};
 use crate::viewports::{self, Viewports, WindowInput};
-use crate::{App, Clock, Context, Event, Ran, event, render_frame, run_frame, settings};
+use crate::{
+    App, Clock, Context, Event, Ran, egui_context, event, render_frame, run_frame, settings,
+};
 
 pub(crate) fn run(app: &mut App, args: &Args) -> Result<Ran> {
     let event_loop = EventLoop::new().map_err(|error| {
@@ -32,13 +35,15 @@ pub(crate) fn run(app: &mut App, args: &Args) -> Result<Ran> {
     let layout = dock::path(app.name, std::env::consts::OS, |name| {
         std::env::var_os(name)
     });
+    let chrome = Chrome::new(app.custom_title_bar);
     let mut handler = Handler {
-        dock: Dock::new(layout),
+        dock: Dock::new(layout, chrome),
         app,
         args,
+        chrome,
         window: None,
         renderer: None,
-        egui: egui::Context::default(),
+        egui: egui_context(),
         egui_winit: None,
         viewports: None,
         cx: Context::new(None),
@@ -66,6 +71,8 @@ pub(crate) fn run(app: &mut App, args: &Args) -> Result<Ran> {
 struct Handler<'a> {
     app: &'a mut App,
     args: &'a Args,
+    /// Who draws the windows' frames.
+    chrome: Chrome,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     egui: egui::Context,
@@ -88,6 +95,7 @@ impl Handler<'_> {
         let attributes = Window::default_attributes()
             .with_title(self.app.name)
             .with_inner_size(LogicalSize::new(1280.0, 720.0));
+        let attributes = chrome::attributes(self.chrome, attributes);
         let window = event_loop.create_window(attributes).map_err(|error| {
             Error::new("engine.window", "can't create the window").with_source(error)
         })?;
@@ -132,7 +140,11 @@ impl Handler<'_> {
             )
         });
         let outputs = mem::take(&mut output.viewport_output);
-        let mut windows = viewports.end_frame(&self.egui, outputs, renderer);
+        let (mut windows, close) = viewports.end_frame(&self.egui, egui_winit, outputs, renderer);
+        if let Some(pos) = self.dock.take_window_menu() {
+            let ppp = egui_winit::pixels_per_point(&self.egui, window);
+            window.show_window_menu(PhysicalPosition::new(pos.x * ppp, pos.y * ppp));
+        }
         let rendered = render_frame(&self.egui, &self.cx, output, &mut windows, renderer);
         let rendered = rendered.map(|(presented, platform_output)| {
             egui_winit
@@ -156,6 +168,18 @@ impl Handler<'_> {
                 }
             }
             Err(error) => self.fail(event_loop, error),
+        }
+        if close {
+            self.close(event_loop);
+        }
+    }
+
+    /// Asks the layers whether the app should close, for the OS's close button or egui's Close
+    /// command to the main window, and exits unless one handles it.
+    fn close(&mut self, event_loop: &ActiveEventLoop) {
+        if self.dispatch(&Event::CloseRequested).is_continue() {
+            debug!("Window closed");
+            event_loop.exit();
         }
     }
 
@@ -261,18 +285,10 @@ impl ApplicationHandler for Handler<'_> {
             }
             WindowEvent::RedrawRequested => self.frame(event_loop),
             _ if consumed => trace!(?event, "Event kept by the UI"),
-            other => {
-                let mut close = false;
-                event::convert(&other, |event| {
-                    if self.dispatch(&event).is_continue() && event == Event::CloseRequested {
-                        close = true;
-                    }
-                });
-                if close {
-                    debug!("Window closed");
-                    event_loop.exit();
-                }
-            }
+            WindowEvent::CloseRequested => self.close(event_loop),
+            other => event::convert(&other, |event| {
+                let _ = self.dispatch(&event);
+            }),
         }
     }
 

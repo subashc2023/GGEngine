@@ -114,6 +114,9 @@ pub(crate) struct Arrangement {
     pub(crate) splitters: Vec<Splitter>,
     /// The central area, which is the game's.
     pub(crate) central: Rect,
+    /// The rect it's laid out in: the main window's, below its title bar. Groups floating over
+    /// the main window stay in it.
+    pub(crate) area: Rect,
 }
 
 /// The handle between a split's two sides.
@@ -288,14 +291,15 @@ impl Layout {
         }
     }
 
-    /// Lays out the main tree in `rect`, the main window's, where `shown` says which panels
-    /// show this frame. A group with none takes no room.
+    /// Lays out the main tree in `rect`, the main window's below its title bar, where `shown`
+    /// says which panels show this frame. A group with none takes no room.
     pub(crate) fn arrange(&self, rect: Rect, shown: &impl Fn(&str) -> bool) -> Arrangement {
         let mut arrangement = Arrangement {
             strips: Vec::new(),
             groups: Vec::new(),
             splitters: Vec::new(),
             central: rect,
+            area: rect,
         };
         self.main.arrange(rect, shown, true, &mut arrangement);
         arrangement

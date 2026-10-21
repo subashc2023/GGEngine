@@ -11,8 +11,8 @@ use std::sync::Arc;
 use egui::epaint::ClippedShape;
 use egui::{
     ClippedPrimitive, ImmediateViewport, OrderedViewportIdMap, Pos2, RawInput, Rect, TexturesDelta,
-    ViewportBuilder, ViewportClass, ViewportEvent, ViewportId, ViewportIdMap, ViewportIdPair,
-    ViewportInfo, ViewportOutput, pos2,
+    ViewportBuilder, ViewportClass, ViewportCommand, ViewportEvent, ViewportId, ViewportIdMap,
+    ViewportIdPair, ViewportInfo, ViewportOutput, pos2,
 };
 use egui_winit::EventResponse;
 use gg_core::{Error, Result};
@@ -133,15 +133,18 @@ impl Viewports {
         input
     }
 
-    /// After the main window's pass: closes the windows egui no longer shows, makes the changes
-    /// it asks of the others, and has the renderer present to the new ones. Returns what the
-    /// windows' passes drew, in the order they ran.
+    /// After the main window's pass: makes the changes egui asks of the windows, closes those it
+    /// no longer shows, and has the renderer present to the new ones. `main` is the main
+    /// window's input. Returns what the windows' passes drew, in the order they ran, and whether
+    /// egui asked to close the main window, which, as with the OS's close button, is the
+    /// layers' to allow.
     pub(crate) fn end_frame(
         &self,
         egui: &egui::Context,
+        main: &mut WindowInput,
         mut outputs: OrderedViewportIdMap<ViewportOutput>,
         renderer: &mut Renderer,
-    ) -> Vec<Drawn> {
+    ) -> (Vec<Drawn>, bool) {
         let mut shared = self.shared.borrow_mut();
         let shared = &mut *shared;
         if !shared.warned
@@ -157,6 +160,14 @@ impl Viewports {
             );
             shared.warned = true;
         }
+        // What the main window opened with stays as it was: only its commands apply.
+        let mut close = false;
+        if let Some(output) = outputs.remove(&ViewportId::ROOT) {
+            let mut commands = output.commands;
+            close = commands.contains(&ViewportCommand::Close);
+            commands.retain(|command| *command != ViewportCommand::Close);
+            apply(egui, &mut shared.main_info, main, &shared.main, commands);
+        }
         shared.children.retain_mut(|child| {
             let Some(output) = outputs.remove(&child.id) else {
                 debug!(title = child.window.title(), "Panel window closed");
@@ -166,15 +177,14 @@ impl Viewports {
             // This frame's passes saw its events.
             child.info.events.clear();
             // What changes only with a new window, the dock never changes.
-            let (commands, _) = child.builder.patch(output.builder);
-            // egui's requests to cut, copy and paste, which nothing in the engine sends, go
-            // unanswered, as the main window's do.
-            egui_winit::process_viewport_commands(
+            let (mut commands, _) = child.builder.patch(output.builder);
+            commands.extend(output.commands);
+            apply(
                 egui,
                 &mut child.info,
-                commands.into_iter().chain(output.commands),
+                &mut child.input,
                 &child.window,
-                &mut Vec::new(),
+                commands,
             );
             if !child.presented {
                 let size = child.window.inner_size();
@@ -191,16 +201,15 @@ impl Viewports {
         });
         // Tessellated only now, since the rest of the main window's pass could grow the font
         // atlas the shapes' text is in.
-        shared
-            .passes
-            .drain(..)
+        let drawn = (shared.passes.drain(..))
             .map(|pass| Drawn {
                 key: key(pass.viewport),
                 primitives: egui.tessellate(pass.shapes, pass.pixels_per_point),
                 textures: pass.textures,
                 pixels_per_point: pass.pixels_per_point,
             })
-            .collect()
+            .collect();
+        (drawn, close)
     }
 
     /// Hands an event of one of the windows of their own to egui. Their events never reach the
@@ -353,6 +362,29 @@ impl Child {
     }
 }
 
+/// Makes the changes egui asks of `window`. Moving or resizing a window hands the pointer to the
+/// OS, which on macOS, X11 and Wayland may never send the button's release back, so egui gets it
+/// now, when egui-winit starts the move: only while the window has focus. On Windows the release
+/// comes back as well, which egui and the layers ignore, having seen no press.
+fn apply(
+    egui: &egui::Context,
+    info: &mut ViewportInfo,
+    input: &mut WindowInput,
+    window: &Window,
+    commands: Vec<ViewportCommand>,
+) {
+    let moves = commands.iter().any(|command| match command {
+        ViewportCommand::StartDrag => window.has_focus(),
+        ViewportCommand::BeginResize(_) => true,
+        _ => false,
+    });
+    if moves {
+        input.release(egui::PointerButton::Primary);
+    }
+    // egui's requests to cut, copy and paste, which nothing in the engine sends, go unanswered.
+    egui_winit::process_viewport_commands(egui, info, commands, window, &mut Vec::new());
+}
+
 /// On Windows, the main window owns the others: they stay above it, and hide while it's
 /// minimized.
 #[cfg(target_os = "windows")]
@@ -430,22 +462,26 @@ impl WindowInput {
                 ..
             } if !self.state.is_pointer_in_window() => {
                 if let Some(button) = pointer_button(button) {
-                    let egui = self.state.egui_ctx();
-                    let modifiers = egui.input_for(self.viewport, |i| i.modifiers);
-                    self.state
-                        .egui_input_mut()
-                        .events
-                        .push(egui::Event::PointerButton {
-                            pos: self.cursor,
-                            button,
-                            pressed: false,
-                            modifiers,
-                        });
+                    self.release(button);
                 }
             }
             _ => {}
         }
         self.state.on_window_event(window, event)
+    }
+
+    /// Lets go of `button` in egui, at the cursor's last position.
+    fn release(&mut self, button: egui::PointerButton) {
+        let modifiers = (self.state.egui_ctx()).input_for(self.viewport, |i| i.modifiers);
+        self.state
+            .egui_input_mut()
+            .events
+            .push(egui::Event::PointerButton {
+                pos: self.cursor,
+                button,
+                pressed: false,
+                modifiers,
+            });
     }
 }
 

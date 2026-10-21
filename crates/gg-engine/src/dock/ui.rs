@@ -7,12 +7,14 @@ use std::path::PathBuf;
 
 use egui::{
     Align, Area, Button, Context, CursorIcon, Frame, Id, LayerId, Order, Painter, Panel, Pos2,
-    Rect, Sense, StrokeKind, UiBuilder, Vec2, ViewportBuilder, ViewportId, pos2, vec2,
+    Rect, Sense, StrokeKind, UiBuilder, Vec2, ViewportBuilder, ViewportClass, ViewportCommand,
+    ViewportId, pos2, vec2,
 };
 use tracing::warn;
 
 use super::file;
 use super::tree::{Arrangement, Axis, CENTRAL, Layout, NodeId, Place, Side, Zone};
+use crate::chrome::{self, Chrome, Icon, TitleBar};
 
 /// The size of a new floating group, in points.
 const NEW_SIZE: Vec2 = vec2(320.0, 240.0);
@@ -49,6 +51,19 @@ impl<'a> Ui<'a> {
         self.dock.panel(self.root, name, add_contents);
     }
 
+    /// Adds menu `name` to the main window's menu bar this frame, with what `add_contents` draws
+    /// in it while it's open. Menus come in the order layers add them, bottom layer first, and a
+    /// second menu of the same name in a frame doesn't show. With
+    /// [`App::custom_title_bar`](crate::App::custom_title_bar) the menu bar is the title bar;
+    /// otherwise it's a bar of its own below the OS's, from the frame after a menu first shows.
+    ///
+    /// A Quit item closes the main window as the OS's close button does, which the layers get
+    /// as [`Event::CloseRequested`](crate::Event::CloseRequested) first:
+    /// `ui.ctx().send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close)`.
+    pub fn menu(&mut self, name: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
+        self.dock.bar.menu(name, add_contents);
+    }
+
     /// egui, for UI that isn't a panel.
     pub fn egui(&self) -> &egui::Context {
         self.root.ctx()
@@ -60,6 +75,10 @@ pub(crate) struct Dock {
     layout: Layout,
     /// Where the layout is saved; `None` keeps it in memory only, as headless runs do.
     file: Option<PathBuf>,
+    /// The main window's menu bar, which is its title bar when the UI draws the frame.
+    bar: TitleBar,
+    /// Who draws the frames of the windows of their own.
+    chrome: Chrome,
     /// The panels shown last frame, which tab bars list, and those shown this frame so far.
     shown: HashSet<String>,
     showing: HashSet<String>,
@@ -123,9 +142,10 @@ enum Zones {
 }
 
 impl Dock {
-    /// A dock with the layout saved in `file`, or kept in memory only without one. A file that
-    /// can't be read logs a warning, and the dock starts empty.
-    pub(crate) fn new(file: Option<PathBuf>) -> Self {
+    /// A dock with the layout saved in `file`, or kept in memory only without one, in windows
+    /// framed as `chrome` says. A file that can't be read logs a warning, and the dock starts
+    /// empty.
+    pub(crate) fn new(file: Option<PathBuf>, chrome: Chrome) -> Self {
         let layout = match &file {
             Some(path) => file::load(path).unwrap_or_else(|error| {
                 warn!(code = error.code(), path = %path.display(), "{error:#}; the dock starts empty");
@@ -137,6 +157,8 @@ impl Dock {
         Self {
             layout,
             file,
+            bar: TitleBar::new(chrome),
+            chrome,
             shown: HashSet::new(),
             showing: HashSet::new(),
             arrangement,
@@ -158,10 +180,17 @@ impl Dock {
         }
     }
 
-    /// Starts a frame: takes the strips along the main window's edges that docked groups fill
-    /// from `root`, leaving it the central area. egui counts the strips as its own, and the
-    /// central area as the game's.
+    /// Where the title bar was right-clicked since this was last asked, in the main window's
+    /// points, for the OS's window menu.
+    pub(crate) fn take_window_menu(&mut self) -> Option<Pos2> {
+        self.bar.take_window_menu()
+    }
+
+    /// Starts a frame: takes the title bar off the top of `root`, then the strips along the main
+    /// window's edges that docked groups fill, leaving it the central area. egui counts the bar
+    /// and the strips as its own, and the central area as the game's.
     pub(crate) fn begin(&mut self, root: &mut egui::Ui) {
+        self.bar.begin(root);
         if root.ctx().embed_viewports() {
             // Without windows of their own, floating groups float over the main window.
             for floating in &mut self.layout.floating {
@@ -212,9 +241,10 @@ impl Dock {
         }
     }
 
-    /// Ends a frame: draws what the panels didn't, moves the drag along, and makes the frame's
-    /// changes to the layout.
+    /// Ends a frame: finishes the title bar, draws what the panels didn't, moves the drag along,
+    /// and makes the frame's changes to the layout.
     pub(crate) fn end(&mut self, root: &mut egui::Ui) {
+        self.bar.end();
         let ctx = root.ctx().clone();
         // The tab bars of groups whose showing panel wasn't shown, so that the user can pick
         // another, and the window a drag started in, which the drag's pointer comes through.
@@ -279,7 +309,7 @@ impl Dock {
             let mut ui = root.new_child(builder);
             ui.set_clip_rect(rect.intersect(root.clip_rect()));
             ui.painter().rect_filled(rect, 0.0, ui.visuals().panel_fill);
-            self.body(&mut ui, id, false, add_contents);
+            self.body(&mut ui, id, false, false, add_contents);
             return;
         }
         // A docked group none of whose panels showed last frame takes no room until the next.
@@ -310,6 +340,8 @@ impl Dock {
             .order(Order::Middle)
             .current_pos(min)
             .movable(false)
+            // Off the title bar.
+            .constrain_to(self.arrangement.area)
             .show(ctx, |ui| {
                 let rect = Rect::from_min_size(ui.min_rect().min, size);
                 let visuals = ui.visuals();
@@ -322,7 +354,7 @@ impl Dock {
                     .rect(rect, corner, fill, stroke, StrokeKind::Inside);
                 let mut group = ui.new_child(UiBuilder::new().max_rect(rect));
                 group.set_clip_rect(rect);
-                self.body(&mut group, id, true, add_contents);
+                self.body(&mut group, id, true, false, add_contents);
                 let grip = Rect::from_min_max(rect.max - Vec2::splat(GRIP), rect.max);
                 let resize = ui
                     .interact(grip, Id::unique(("gg dock resize", id)), Sense::drag())
@@ -381,6 +413,16 @@ impl Dock {
             // Off the taskbar, a minimized window would be hard to find again.
             .with_taskbar(false)
             .with_minimize_button(false);
+        builder = match self.chrome {
+            Chrome::Os => builder,
+            Chrome::Drawn => builder.with_decorations(false),
+            // The OS keeps the edges.
+            Chrome::AroundTrafficLights => builder
+                .with_fullsize_content_view(true)
+                .with_title_shown(false)
+                .with_titlebar_shown(false)
+                .with_titlebar_buttons_shown(false),
+        };
         // egui moves or sizes the window whenever these change, which would fight the user
         // moving it: they're set as it opens, and its position while the dock drags it.
         let dragged =
@@ -393,15 +435,21 @@ impl Dock {
                 builder.with_position(pos2(position[0] as f32 / ppp, position[1] as f32 / ppp));
         }
         let mut add_contents = Some(add_contents);
-        ctx.show_viewport_immediate(viewport, builder, |ui, _| {
+        ctx.show_viewport_immediate(viewport, builder, |ui, class| {
+            // The UI draws the frame of a window of its own, whose tab bar is its title bar, but
+            // not of one shown in the main window, whose closing and resizing it would take.
+            let framed = self.chrome != Chrome::Os && class == ViewportClass::Immediate;
             let rect = ui.max_rect();
             ui.painter().rect_filled(rect, 0.0, ui.visuals().panel_fill);
             let mut group = ui.new_child(UiBuilder::new().max_rect(rect));
-            self.body(&mut group, id, false, |ui| {
+            self.body(&mut group, id, framed, framed, |ui| {
                 if let Some(add_contents) = add_contents.take() {
                     add_contents(ui);
                 }
             });
+            if framed && self.chrome == Chrome::Drawn {
+                chrome::edges(ui.ctx());
+            }
             if self
                 .drag
                 .as_ref()
@@ -409,8 +457,16 @@ impl Dock {
             {
                 ui.interact(rect, drag_id(), Sense::drag());
             }
-            if let Some(hover) = self.hover.filter(|hover| hover.window == Some(id)) {
-                paint_hover(ui.ctx(), &hover);
+            // The targets of what the dragged group is over, and, as in Dear ImGui, the same in
+            // the dragged group's window, which would hide them.
+            if let Some(hover) = self.hover {
+                let from = hover.window.map_or(ViewportId::ROOT, window_id);
+                if from == viewport {
+                    paint_hover(ui.ctx(), &hover);
+                } else if dragged && let Some(rect) = between(ui.ctx(), hover.rect, from, viewport)
+                {
+                    paint_hover(ui.ctx(), &Hover { rect, ..hover });
+                }
             }
         });
     }
@@ -418,22 +474,34 @@ impl Dock {
     /// Draws a group into `ui`, filling it: its tab bar, with a tab for each of its panels shown
     /// last frame, then what `add_contents` draws of the one showing. Clicking a tab shows its
     /// panel from the next frame, and dragging a tab starts a drag, as does dragging the bar of
-    /// a group floating over the main window (`movable`).
+    /// a group that moves by it (`movable`): one floating over the main window, or one whose
+    /// bar is its window's title bar, which then has a button that closes the window (`close`).
     fn body(
         &mut self,
         ui: &mut egui::Ui,
         id: NodeId,
         movable: bool,
+        close: bool,
         add_contents: impl FnOnce(&mut egui::Ui),
     ) {
         let rect = ui.max_rect();
         let spacing = ui.spacing().clone();
         let bar_height = spacing.interact_size.y + 2.0 * spacing.item_spacing.y;
         let (bar, content) = rect.split_top_bottom_at_y(rect.min.y + bar_height);
-        let background =
-            movable.then(|| ui.interact(bar, Id::unique(("gg dock bar", id)), Sense::drag()));
         ui.painter()
             .rect_filled(bar, 0.0, ui.visuals().faint_bg_color);
+        let bar = if close {
+            let (bar, button) = bar.split_left_right_at_x(bar.max.x - chrome::BUTTON);
+            if chrome::button(ui, button, Icon::Close).clicked() {
+                // The dock floats the group over the main window once its window closes.
+                ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+            }
+            bar
+        } else {
+            bar
+        };
+        let background =
+            movable.then(|| ui.interact(bar, Id::unique(("gg dock bar", id)), Sense::drag()));
         let shown = &self.shown;
         let Some(tabs) = self.layout.group(id) else {
             return;
@@ -562,21 +630,44 @@ impl Dock {
         let Some(drag) = &mut self.drag else {
             return;
         };
-        let (local, down, focused) = ctx.input_for(drag.source, |i| {
-            (i.pointer.latest_pos(), i.pointer.primary_down(), i.focused)
+        let (local, moved, down, focused) = ctx.input_for(drag.source, |i| {
+            let pointer = &i.pointer;
+            let moved = pointer.delta() != Vec2::ZERO;
+            (
+                pointer.latest_pos(),
+                moved,
+                pointer.primary_down(),
+                i.focused,
+            )
         });
         let pointer = local.and_then(|local| to_main(ctx, drag.source, local));
+        let area = self.arrangement.area;
         if let (Some(local), Some(pointer)) = (local, pointer) {
             if let Dragging::Tab { panel, bar } = &drag.what
                 && !bar.expand(DETACH).contains(local)
             {
-                let place = place_at(ctx, pointer, drag.grab, Vec2::ZERO, drag.size);
+                let place = place_at(ctx, area, pointer, drag.grab, Vec2::ZERO, drag.size);
                 drag.what = Dragging::Group(self.layout.detach(panel, place));
             } else if let Dragging::Group(group) = drag.what
                 && let Some(floating) = self.layout.floating_mut(group)
             {
-                let frame = window_frame(ctx, group);
-                floating.place = place_at(ctx, pointer, drag.grab, frame, floating.place.size());
+                let size = floating.place.size();
+                if drag.source == window_id(group) {
+                    // A window moved by its own bar stays one, over the main window too, since
+                    // the pointer comes through it. It keeps its place under the pointer in its
+                    // own pixels, whatever its monitor's scale, and moves only on a new pointer
+                    // sample: an old one is from before its last move.
+                    if moved && let Some(position) = follow(ctx, group, local.to_vec2() - drag.grab)
+                    {
+                        floating.place = Place::Window {
+                            position,
+                            size: size.into(),
+                        };
+                    }
+                } else {
+                    let frame = window_frame(ctx, group);
+                    floating.place = place_at(ctx, area, pointer, drag.grab, frame, size);
+                }
             }
             if let Dragging::Group(group) = drag.what {
                 self.hover = hover(&self.layout, &self.arrangement, ctx, pointer, group);
@@ -687,6 +778,26 @@ fn to_main(ctx: &Context, from: ViewportId, pos: Pos2) -> Option<Pos2> {
     from_desktop(ctx, [px.x.round() as i32, px.y.round() as i32])
 }
 
+/// `rect`, in viewport `from`'s points, in viewport `to`'s: through where the two are on the
+/// desktop.
+fn between(ctx: &Context, rect: Rect, from: ViewportId, to: ViewportId) -> Option<Rect> {
+    let (from, from_ppp) = geometry(ctx, from)?;
+    let (to, to_ppp) = geometry(ctx, to)?;
+    let point = |pos: Pos2| (from.min + pos.to_vec2()) * (from_ppp / to_ppp) - to.min.to_vec2();
+    Some(Rect::from_min_max(point(rect.min), point(rect.max)))
+}
+
+/// Where floating group `id`'s window goes, on the desktop in physical pixels, moved `by` its
+/// own points.
+fn follow(ctx: &Context, id: NodeId, by: Vec2) -> Option<[i32; 2]> {
+    let zoom = ctx.zoom_factor();
+    ctx.input(|i| {
+        let info = i.raw.viewports.get(&window_id(id))?;
+        let px = (info.outer_rect?.min + by) * info.native_pixels_per_point? * zoom;
+        Some([px.x.round() as i32, px.y.round() as i32])
+    })
+}
+
 /// How far the inside of floating group `id`'s window is from its outside corner, past its
 /// title bar and border, in the main window's points; zero until the window is open.
 fn window_frame(ctx: &Context, id: NodeId) -> Vec2 {
@@ -716,13 +827,19 @@ fn to_desktop(ctx: &Context, pos: Pos2) -> Option<[i32; 2]> {
 }
 
 /// Where a group held at `grab` by the pointer at `pointer`, in the main window's points, goes:
-/// over the main window while the pointer is, and otherwise in a window of its own, where egui
-/// opens them, whose inside is `frame` from its outside corner.
-fn place_at(ctx: &Context, pointer: Pos2, grab: Vec2, frame: Vec2, size: Vec2) -> Place {
+/// over the main window while the pointer is over the dock's `area`, and otherwise in a window
+/// of its own, where egui opens them, whose inside is `frame` from its outside corner.
+fn place_at(
+    ctx: &Context,
+    area: Rect,
+    pointer: Pos2,
+    grab: Vec2,
+    frame: Vec2,
+    size: Vec2,
+) -> Place {
     let min = pointer - grab;
-    let main = ctx.input_for(ViewportId::ROOT, |i| i.viewport_rect());
     if !ctx.embed_viewports()
-        && !main.contains(pointer)
+        && !area.contains(pointer)
         && let Some(position) = to_desktop(ctx, min - frame)
     {
         return Place::Window {
@@ -775,10 +892,7 @@ fn hover(
             }
         }
     }
-    if !ctx
-        .input_for(ViewportId::ROOT, |i| i.viewport_rect())
-        .contains(pointer)
-    {
+    if !arrangement.area.contains(pointer) {
         return None;
     }
     for floating in others() {
@@ -867,10 +981,17 @@ fn paint_hover(ctx: &Context, hover: &Hover) {
 
 #[cfg(test)]
 mod tests {
-    use egui::{Event, Modifiers, PointerButton, RawInput, ViewportInfo};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use egui::{
+        Event, ImmediateViewport, Modifiers, PointerButton, RawInput, ResizeDirection,
+        ViewportEvent, ViewportIdMap, ViewportInfo,
+    };
 
     use super::super::tree::{Node, Tabs};
     use super::*;
+    use crate::chrome::BAR;
 
     const SCREEN: Vec2 = vec2(800.0, 600.0);
 
@@ -882,26 +1003,46 @@ mod tests {
         pointer: Pos2,
         /// Where the windows are on the desktop, for a run with windows of their own.
         viewports: Vec<(ViewportId, ViewportInfo)>,
+        /// What the passes of windows of their own get, when they run as the engine runs them.
+        passes: Option<Rc<RefCell<Passes>>>,
+        /// What egui asked of each window in the last frame.
+        commands: Vec<(ViewportId, ViewportCommand)>,
+    }
+
+    /// What each window's next pass gets: where the windows are, and its events.
+    #[derive(Default)]
+    struct Passes {
+        viewports: ViewportIdMap<ViewportInfo>,
+        events: ViewportIdMap<Vec<Event>>,
+        time: f64,
     }
 
     impl Run {
         /// Runs until both panels float, A then B, cascaded from the top-left.
         fn new() -> Self {
+            Self::with_chrome(Chrome::Os)
+        }
+
+        /// Under the frame `chrome` says.
+        fn with_chrome(chrome: Chrome) -> Self {
             let mut run = Self {
-                ctx: Context::default(),
-                dock: Dock::new(None),
+                ctx: crate::egui_context(),
+                dock: Dock::new(None, chrome),
                 frame: 0,
                 pointer: Pos2::ZERO,
                 viewports: Vec::new(),
+                passes: None,
+                commands: Vec::new(),
             };
             run.frames(2);
             run
         }
 
         /// A run with windows of their own, whose main window's inside starts at (100, 50) on
-        /// the desktop, at 1.5 pixels a point.
-        fn with_windows() -> Self {
-            let mut run = Self::new();
+        /// the desktop, at 1.5 pixels a point. Without egui's callback for them, which the
+        /// renderer gives it, they show in the main window.
+        fn with_windows(chrome: Chrome) -> Self {
+            let mut run = Self::with_chrome(chrome);
             run.ctx.set_embed_viewports(false);
             let main = ViewportInfo {
                 inner_rect: Some(Rect::from_min_size(pos2(100.0, 50.0), SCREEN)),
@@ -912,14 +1053,78 @@ mod tests {
             run
         }
 
+        /// A run with windows of their own, framed by the UI, whose passes run as the engine
+        /// runs them: through egui's callback, each with its own input.
+        fn with_window_passes() -> Self {
+            let mut run = Self::with_windows(Chrome::Drawn);
+            let passes = Rc::new(RefCell::new(Passes::default()));
+            let shared = passes.clone();
+            // The callback is the test thread's.
+            Context::set_immediate_viewport_renderer(move |ctx, viewport| {
+                let ImmediateViewport {
+                    ids,
+                    mut viewport_ui_cb,
+                    ..
+                } = viewport;
+                let input = {
+                    let mut passes = shared.borrow_mut();
+                    let info = passes.viewports.entry(ids.this).or_default();
+                    let size = info.inner_rect.map_or(NEW_SIZE, |inner| inner.size());
+                    RawInput {
+                        viewport_id: ids.this,
+                        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+                        time: Some(passes.time),
+                        events: passes.events.remove(&ids.this).unwrap_or_default(),
+                        viewports: passes.viewports.clone(),
+                        ..RawInput::default()
+                    }
+                };
+                let mut output = ctx.run_ui(input, |ui| viewport_ui_cb(ui));
+                output.textures_delta.clear();
+            });
+            run.passes = Some(passes);
+            run
+        }
+
+        /// Puts `panel`'s group in a window of its own without a frame, whose inside is at `min`
+        /// on the desktop, in its points at 1.25 pixels a point. Returns the window's viewport.
+        fn tear_off(&mut self, panel: &str, min: Pos2) -> ViewportId {
+            let id = self.layout().find(panel).expect("the panel is in the dock");
+            let px = min * 1.25;
+            self.dock
+                .layout
+                .floating_mut(id)
+                .expect("the panel floats")
+                .place = Place::Window {
+                position: [px.x.round() as i32, px.y.round() as i32],
+                size: NEW_SIZE.into(),
+            };
+            let rect = Rect::from_min_size(min, NEW_SIZE);
+            let info = ViewportInfo {
+                outer_rect: Some(rect),
+                inner_rect: Some(rect),
+                native_pixels_per_point: Some(1.25),
+                ..ViewportInfo::default()
+            };
+            self.viewports.push((window_id(id), info));
+            self.frames(2);
+            window_id(id)
+        }
+
         fn frame(&mut self, events: Vec<Event>) {
+            let time = f64::from(self.frame) / 60.0;
             let mut input = RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SCREEN)),
-                time: Some(f64::from(self.frame) / 60.0),
+                time: Some(time),
                 events,
                 ..RawInput::default()
             };
             input.viewports.extend(self.viewports.iter().cloned());
+            if let Some(passes) = &self.passes {
+                let mut passes = passes.borrow_mut();
+                passes.viewports = input.viewports.clone();
+                passes.time = time;
+            }
             self.frame += 1;
             let dock = &mut self.dock;
             let mut output = self.ctx.run_ui(input, |root| {
@@ -933,6 +1138,81 @@ mod tests {
                 dock.end(root);
             });
             output.textures_delta.clear();
+            // As the OS and the engine would: a window moves where egui asks, and a close comes
+            // back as an event, which the next frame's passes see.
+            self.commands.clear();
+            for (id, output) in output.viewport_output {
+                if let Some((_, info)) = self.viewports.iter_mut().find(|(window, _)| *window == id)
+                {
+                    info.events.clear();
+                    if let (Some(position), Some(outer), Some(inner)) =
+                        (output.builder.position, info.outer_rect, info.inner_rect)
+                    {
+                        let by = position - outer.min;
+                        info.outer_rect = Some(outer.translate(by));
+                        info.inner_rect = Some(inner.translate(by));
+                    }
+                    if output.commands.contains(&ViewportCommand::Close) {
+                        info.events.push(ViewportEvent::Close);
+                    }
+                }
+                let commands = output.commands.into_iter();
+                self.commands.extend(commands.map(|command| (id, command)));
+            }
+        }
+
+        /// Sends `events` to window `viewport`'s next pass, and runs a frame.
+        fn frame_in(&mut self, viewport: ViewportId, events: Vec<Event>) {
+            let passes = self
+                .passes
+                .as_ref()
+                .expect("the windows run their own passes");
+            let mut passes = passes.borrow_mut();
+            passes.events.entry(viewport).or_default().extend(events);
+            drop(passes);
+            self.frame(Vec::new());
+        }
+
+        /// Window `viewport`'s inside on the desktop, in its points, and its pixels per point.
+        fn window(&self, viewport: ViewportId) -> (Rect, f32) {
+            let (_, info) = (self.viewports.iter())
+                .find(|(window, _)| *window == viewport)
+                .expect("the window is open");
+            (
+                info.inner_rect.unwrap(),
+                info.native_pixels_per_point.unwrap(),
+            )
+        }
+
+        /// Point `px` on the desktop, in pixels, in window `viewport`'s points.
+        fn local(&self, viewport: ViewportId, px: Pos2) -> Pos2 {
+            let (inner, ppp) = self.window(viewport);
+            pos2(px.x / ppp, px.y / ppp) - inner.min.to_vec2()
+        }
+
+        /// Moves the pointer to `px` on the desktop, in pixels, through window `viewport`.
+        fn move_in(&mut self, viewport: ViewportId, px: Pos2) {
+            let pos = self.local(viewport, px);
+            self.frame_in(viewport, vec![Event::PointerMoved(pos)]);
+        }
+
+        /// Presses or lets go at `px` on the desktop, in pixels, through window `viewport`.
+        fn button_in(&mut self, viewport: ViewportId, px: Pos2, pressed: bool) {
+            let pos = self.local(viewport, px);
+            let button = Event::PointerButton {
+                pos,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            };
+            self.frame_in(viewport, vec![button]);
+        }
+
+        /// Clicks at `px` on the desktop, in pixels, through window `viewport`.
+        fn click_in(&mut self, viewport: ViewportId, px: Pos2) {
+            self.move_in(viewport, px);
+            self.button_in(viewport, px, true);
+            self.button_in(viewport, px, false);
         }
 
         fn frames(&mut self, n: usize) {
@@ -1028,6 +1308,16 @@ mod tests {
     }
 
     #[test]
+    fn the_title_bar_takes_the_top_and_the_dock_arranges_below_it() {
+        let mut run = Run::with_chrome(Chrome::Drawn);
+        let a = run.layout().find("A").unwrap();
+        assert!(run.dock.layout.dock(a, CENTRAL, Zone::Side(Side::Left)));
+        run.frames(2);
+        assert_eq!(run.docked("A").min.y, BAR);
+        assert_eq!(run.dock.arrangement.central.min.y, BAR);
+    }
+
+    #[test]
     fn a_group_docks_on_the_target_its_dropped_on_and_floats_elsewhere() {
         let mut run = Run::new();
         let screen = Rect::from_min_size(Pos2::ZERO, SCREEN);
@@ -1108,7 +1398,7 @@ mod tests {
 
     #[test]
     fn a_group_dragged_off_the_main_window_tears_off_into_a_window_of_its_own() {
-        let mut run = Run::with_windows();
+        let mut run = Run::with_windows(Chrome::Os);
         let (from, to) = (bar(pos2(48.0, 48.0)), pos2(-40.0, 300.0));
         run.drag(from, to);
         let grab = from - pos2(48.0, 48.0);
@@ -1123,7 +1413,7 @@ mod tests {
 
     #[test]
     fn a_dragged_window_keeps_the_pointer_where_it_holds_the_group() {
-        let mut run = Run::with_windows();
+        let mut run = Run::with_windows(Chrome::Os);
         // Once A's window is open, its inside is past a border 8 points wide and a title bar 30
         // points high, at 1.25 pixels a point.
         let a = run.layout().find("A").unwrap();
@@ -1145,5 +1435,118 @@ mod tests {
                 size: NEW_SIZE.into()
             }
         );
+    }
+
+    #[test]
+    fn a_group_dragged_over_the_title_bar_tears_off() {
+        let mut run = Run::with_windows(Chrome::Drawn);
+        run.drag(bar(pos2(48.0, 48.0)), pos2(400.0, BAR / 2.0));
+        assert!(
+            matches!(run.floating("A"), Place::Window { .. }),
+            "{:?}",
+            run.floating("A")
+        );
+    }
+
+    #[test]
+    fn a_group_floating_over_the_main_window_stays_off_the_title_bar() {
+        let mut run = Run::with_chrome(Chrome::Drawn);
+        let from = bar(pos2(48.0, 48.0));
+        run.drag(from, from - vec2(0.0, 40.0));
+        let Place::Main { min, .. } = run.floating("A") else {
+            panic!("A floats over the main window: {:?}", run.floating("A"));
+        };
+        assert_eq!(min[1], BAR);
+    }
+
+    /// A point on the bar of A's window from [`Run::tear_off`], clear of its tab and its close
+    /// button.
+    const WINDOW_BAR: Vec2 = vec2(200.0, 12.0);
+
+    #[test]
+    fn a_window_moved_by_its_bar_stays_a_window_over_the_main_one_and_docks_on_a_target() {
+        let mut run = Run::with_window_passes();
+        // Right of the main window, at a scale of its own.
+        let a = run.tear_off("A", pos2(1200.0, 100.0));
+        let (inner, ppp) = run.window(a);
+        let from = (inner.min + WINDOW_BAR) * ppp;
+        // The central area's right target, on the desktop.
+        let central = Rect::from_min_max(pos2(0.0, BAR), SCREEN.to_pos2());
+        let to = (pos2(100.0, 50.0) + target(central, Zone::Side(Side::Right)).to_vec2()) * 1.5;
+        run.move_in(a, from);
+        run.button_in(a, from, true);
+        for step in 1..=8 {
+            run.move_in(a, from + (to - from) * step as f32 / 8.0);
+        }
+        // It stays where it is without a new pointer sample, with the pointer where it holds it.
+        let place = run.floating("A");
+        run.frames(2);
+        assert_eq!(run.floating("A"), place);
+        let Place::Window { position, .. } = place else {
+            panic!("A stays a window over the main one: {place:?}");
+        };
+        let held = pos2(position[0] as f32, position[1] as f32) + WINDOW_BAR * ppp;
+        assert!((held - to).length() < 1.0, "held at {held:?}, not {to:?}");
+        run.button_in(a, to, false);
+        run.frames(2);
+        assert_eq!(
+            run.docked("A"),
+            Rect::from_min_max(pos2(608.0, BAR), SCREEN.to_pos2())
+        );
+    }
+
+    #[test]
+    fn a_windows_close_button_floats_its_group_over_the_main_window() {
+        let mut run = Run::with_window_passes();
+        let a = run.tear_off("A", pos2(1200.0, 100.0));
+        let (inner, ppp) = run.window(a);
+        let close = (inner.min + vec2(NEW_SIZE.x - chrome::BUTTON / 2.0, 12.0)) * ppp;
+        run.click_in(a, close);
+        assert!(run.commands.contains(&(a, ViewportCommand::Close)));
+        run.frames(2);
+        assert!(
+            matches!(run.floating("A"), Place::Main { .. }),
+            "{:?}",
+            run.floating("A")
+        );
+    }
+
+    #[test]
+    fn a_windows_edges_resize_it() {
+        let mut run = Run::with_window_passes();
+        let a = run.tear_off("A", pos2(1200.0, 100.0));
+        let (inner, ppp) = run.window(a);
+        let edge = (inner.min + vec2(2.0, 120.0)) * ppp;
+        run.move_in(a, edge);
+        run.button_in(a, edge, true);
+        let resize = ViewportCommand::BeginResize(ResizeDirection::West);
+        assert!(run.commands.contains(&(a, resize)), "{:?}", run.commands);
+    }
+
+    #[test]
+    fn a_window_shown_in_the_main_one_has_no_frame_of_the_uis() {
+        // Without egui's callback for windows of their own, A's shows in the main window, which
+        // its close button would close. The main window is maximized, without edges of its own.
+        let mut run = Run::with_windows(Chrome::Drawn);
+        run.viewports[0].1.maximized = Some(true);
+        let a = run.layout().find("A").unwrap();
+        run.dock.layout.floating_mut(a).unwrap().place = Place::Window {
+            position: desktop(pos2(300.0, 200.0)),
+            size: NEW_SIZE.into(),
+        };
+        run.frames(2);
+        let window = (run.ctx.memory(|m| m.area_rect(Id::unique(window_id(a)))))
+            .expect("A's window shows in the main one");
+        for x in [8.0, 23.0, 38.0] {
+            for y in [12.0, 20.0] {
+                let at = pos2(window.max.x - x, window.min.y + y);
+                run.move_to(at);
+                run.button(true);
+                run.button(false);
+                let closes =
+                    (run.commands.iter()).any(|(_, command)| *command == ViewportCommand::Close);
+                assert!(!closes, "at {at:?}: {:?}", run.commands);
+            }
+        }
     }
 }

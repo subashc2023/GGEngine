@@ -4,6 +4,7 @@
 //! An app's `main` starts the engine; there is no separate entry-point crate.
 
 mod args;
+mod chrome;
 mod dock;
 mod event;
 mod input;
@@ -20,6 +21,7 @@ use gg_renderer::{Renderer, Settings, Validation};
 use tracing::{debug, error, info};
 
 use args::Args;
+use chrome::Chrome;
 use dock::Dock;
 pub use dock::Ui;
 /// The UI library layers draw with, in [`Layer::ui`]; apps use it from here, so that they
@@ -45,6 +47,7 @@ const BUILD: &str = if cfg!(debug_assertions) {
 pub struct App {
     name: &'static str,
     stack: Stack,
+    custom_title_bar: bool,
 }
 
 impl App {
@@ -53,6 +56,7 @@ impl App {
         Self {
             name,
             stack: Stack::default(),
+            custom_title_bar: false,
         }
     }
 
@@ -67,6 +71,16 @@ impl App {
     #[must_use]
     pub fn overlay(mut self, overlay: impl Layer + 'static) -> Self {
         self.stack.push_overlay(Box::new(overlay));
+        self
+    }
+
+    /// Has the UI draw the frames of the app's windows instead of the OS, with the menus layers
+    /// add through [`Ui::menu`] in the main window's title bar, and the tab bars of torn-off
+    /// panels as their windows' title bars: for tools, which want the room. On macOS the OS keeps
+    /// its buttons and edges. Games keep the OS's frame.
+    #[must_use]
+    pub fn custom_title_bar(mut self) -> Self {
+        self.custom_title_bar = true;
         self
     }
 }
@@ -139,9 +153,10 @@ fn run_headless(app: &mut App, args: &Args) -> Result<Ran> {
     let mut renderer = Renderer::headless(&settings(app, args), width, height)?;
     let mut cx = Context::new(None);
     let mut clock = Clock::default();
-    let egui = egui::Context::default();
-    // Headless runs neither read nor save the layout, so that they're reproducible.
-    let mut dock = Dock::new(None);
+    let egui = egui_context();
+    // Headless runs neither read nor save the layout, so that they're reproducible, and have no
+    // window to frame.
+    let mut dock = Dock::new(None, Chrome::Os);
     let mut frames = 0;
     app.stack.attach(&mut cx);
     let rendered = (|| -> Result<()> {
@@ -164,6 +179,14 @@ fn run_headless(app: &mut App, args: &Args) -> Result<Ran> {
     app.stack.detach(&mut cx);
     rendered?;
     Ok(Ran::finish(renderer, frames, clock.elapsed()))
+}
+
+/// egui, without its shortcut that closes the window, Ctrl or Cmd+Q: a game may use those keys,
+/// and apps quit from their own menus.
+fn egui_context() -> egui::Context {
+    let egui = egui::Context::default();
+    egui.options_mut(|options| options.quit_shortcuts.clear());
+    egui
 }
 
 /// The first half of a turn of the main loop: updates the layers and has them draw their UI, in

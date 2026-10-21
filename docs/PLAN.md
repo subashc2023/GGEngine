@@ -17,6 +17,9 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Docking and viewports** (2026-10-21): layers show panels, which dock in tabs and splits
   around the game's central area, float, or tear off into windows of their own; the layout is
   saved per user; one frame renders every window, paced by the main one.
+- **Title bars the UI draws** (2026-10-21): with `App::custom_title_bar`, the UI draws the
+  windows' frames; the main window's title bar holds the menus layers add, and a torn-off
+  window's tab bar is its title bar. The sandbox opts in, with a File menu that quits.
 
 ## Now: Phase 3, runtime core
 
@@ -104,7 +107,10 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Splits in a torn-off window, which holds one tab group | A tool wants panels side by side outside the main window |
 | Closing a panel from its tab; a panel shows while its layer shows it | Panels the user opens and closes, such as the editor's |
 | Reordering tabs by dragging them along their bar; a drop among the tabs adds one at the end | Phase 9, the editor |
-| Torn-off windows without the OS's title bar, with one the dock draws, as Dear ImGui does | Phase 9, the editor |
+| Windows' own frame around a window whose title bar the UI draws, through `WM_NCHITTEST`: the Snap Layouts flyout on the maximize button, resize bands outside the window, and the OS's border. It needs Win32 subclassing, so `unsafe` in `gg-engine` | Next, as a change of its own |
+| Checking the drawn title bars on macOS and X11: the menus' inset clear of the traffic lights (72 points), and moving a torn-off window by its tab bar where the OS moves windows asynchronously | With the sandbox's check by hand on Linux and macOS |
+| On macOS, the menus in the system's menu bar, and a double-click on the title bar doing what the user's setting says | A tool ships on macOS |
+| Alt and access keys to reach the menus, and layers adding items to one another's menus | Phase 9, the editor |
 | Windows of their own on Wayland, where groups float over the main window | winit can place windows on Wayland |
 | egui's deferred viewports, which don't open (`engine.viewport_deferred`); immediate ones do | A tool needs a window that repaints apart from the main one |
 | A saved window position off every monitor, which should be moved onto one | Someone loses a window after their monitors change |
