@@ -14,6 +14,12 @@ use ash::vk;
 use gg_gpu::{ColorImage, Device, Frames, Instance, InstanceDesc, Target};
 
 fn main() {
+    // CI runners without a GPU or a Vulkan driver, Windows' and macOS's, set this. Linux CI runs
+    // the tests on lavapipe instead.
+    if std::env::var_os("GG_SKIP_GPU_TESTS").is_some_and(|value| !value.is_empty()) {
+        println!("GPU tests skipped: GG_SKIP_GPU_TESTS is set");
+        return;
+    }
     // Overlays such as Steam's and OBS's load into every instance as implicit layers, and can
     // add validation errors of their own. Apps keep implicit layers, since RenderDoc's capture
     // layer is one; the loader warns about each one it leaves out here.

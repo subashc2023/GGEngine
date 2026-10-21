@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+# A newer push to a branch cancels the run still going for it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gates:
+    name: ${{ matrix.name }}
+    # A pull request from a branch of this repository was already checked when it was pushed.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Hosted runners have no GPU. On Linux the GPU tests run on lavapipe, Mesa's CPU
+          # Vulkan driver, from Debian trixie: Mesa 25.0, the first with Vulkan 1.4, and the
+          # validation layer 1.4.309. Elsewhere they're skipped.
+          - { name: Linux x86-64, runner: ubuntu-24.04, container: "debian:trixie" }
+          - { name: Linux ARM64, runner: ubuntu-24.04-arm, container: "debian:trixie" }
+          - { name: Windows x86-64, runner: windows-2025, skip-gpu-tests: "1" }
+          - { name: Windows ARM64, runner: windows-11-arm, skip-gpu-tests: "1" }
+          - { name: macOS x86-64, runner: macos-15-intel, skip-gpu-tests: "1" }
+          - { name: macOS ARM64, runner: macos-15, skip-gpu-tests: "1" }
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container }}
+    env:
+      GG_SKIP_GPU_TESTS: ${{ matrix.skip-gpu-tests }}
+    steps:
+      - name: Install build tools, lavapipe and the validation layer
+        if: matrix.container
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl gcc git libc6-dev \
+            libvulkan1 mesa-vulkan-drivers vulkan-validationlayers
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Installs the release rust-toolchain.toml pins, and caches dependencies.
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          # The gates below are AGENTS.md's, unchanged: clippy already denies warnings.
+          build-warnings: warn
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+
+  layering:
+    name: Layering rules
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          cache: false
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-deny@0.20.2
+      - run: cargo deny --locked check bans

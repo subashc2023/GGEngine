@@ -26,7 +26,8 @@ docs/PLAN.md      the roadmap (see Workflow)
 
 Dependencies point down: apps → `gg-engine` → `gg-renderer` → `gg-gpu` → `gg-core`, and any
 crate may use `gg-core`. Cargo catches only some breaches of the layering rules in
-ARCHITECTURE.md: check a change against them yourself instead of trusting the build.
+ARCHITECTURE.md, and `cargo deny check bans` (from [deny.toml](deny.toml)) catches skip-level
+edges and the wrong crate using `ash` or `winit`: check a change against the rest yourself.
 
 ## Commands
 
@@ -56,9 +57,13 @@ The tests include GPU tests, which need a Vulkan 1.4 driver and the Khronos vali
 Without a GPU, lavapipe serves: on Debian or Ubuntu, `mesa-vulkan-drivers` (Mesa 25.0 or later)
 and `vulkan-validationlayers`.
 
+CI ([ci.yml](.github/workflows/ci.yml)) runs the three gates on every push, on Windows, Linux
+and macOS, x86-64 and ARM64, and the layering check. Its Linux jobs run the GPU tests on
+lavapipe; Windows' and macOS's runners have no GPU, so there `GG_SKIP_GPU_TESTS` skips them.
+
 ## Rust
 
-- Stable Rust, edition 2024, resolver 3.
+- Stable Rust, the release `rust-toolchain.toml` pins; edition 2024, resolver 3.
 - Every member manifest inherits `version`, `edition` and `publish` from `[workspace.package]`
   and has `[lints] workspace = true`. Without that line, neither the unsafe denial nor the
   SAFETY-comment lint reaches the crate.

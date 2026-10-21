@@ -1,0 +1,6 @@
+# The release the gates run on, locally and in CI. Move it forward in a commit of its own that
+# passes the gates on the new release.
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

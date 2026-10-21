@@ -14,14 +14,10 @@ On Windows, with the RTX 4090 and with the AMD iGPU, the sandbox clears the scre
 survives resize, minimize and close, and runs `--headless --frames 60` without a window, exiting
 0, with validation reporting nothing. The GPU tests clear an offscreen image and read back its
 color, and find a validation error caused on purpose in the JSON log with its VUID and object
-names. What's left:
-
-- At the first push, `rust-toolchain.toml` pins the stable release the gates run on, and CI
-  runs the three gates on Windows, Linux and macOS, x86-64 and ARM64, plus a check that the
-  crate graph follows the layering rules. In Linux CI the GPU tests run on lavapipe (Mesa 25.0
-  or later, the first with Vulkan 1.4).
-- The same checks of the sandbox on Linux, and on macOS with KosmicKrisp (Vulkan SDK 1.4.363.0
-  or later, the first conformant build).
+names. CI runs the gates on Windows, Linux and macOS, x86-64 and ARM64, with the GPU tests on
+lavapipe in the Linux jobs, and checks the layering rules. What's left: the same checks of the
+sandbox on Linux, and on macOS with KosmicKrisp (Vulkan SDK 1.4.363.0 or later, the first
+conformant build).
 
 ## Next
 
@@ -97,6 +93,7 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Compiling trace and debug events out of shipping builds, through `tracing`'s `release_max_level_*` features | Phase 6, with the shipping profile |
 | Deleting old JSON logs; every run's log is kept | Logs pile up enough to matter |
 | A clean shutdown on Ctrl+C, which now ends the process at once; the JSON log keeps every line written until then | A headless run that goes on until it's stopped, such as a dedicated server |
+| GPU tests in Windows and macOS CI, which skip them because hosted runners there have no GPU | A self-hosted runner with a GPU, or a Vulkan driver that runs on those runners without one |
 | A gate that compiles the shipping configuration: `cargo clippy -p player --all-targets -- -D warnings` | When `gg-engine` gets its `dev` feature |
 
 ## Open questions

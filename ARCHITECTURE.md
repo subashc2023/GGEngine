@@ -75,9 +75,11 @@ settings by executable name, and a generic name can match one.
    `gg-engine`, so there is no entry-point crate. Android will be the exception: its
    `android_main` lives in a `cdylib`, which gets a small crate of its own.
 
-Cargo's cycle check enforces rule 1, and rule 2's ban on `gg-*` dependencies. It can't see
-the rest: a skip-level edge such as `gg-engine` → `gg-gpu` forms no cycle, so review has to
-catch it.
+Cargo's cycle check enforces rule 1, and rule 2's ban on `gg-*` dependencies. It can't see a
+skip-level edge such as `gg-engine` → `gg-gpu`, which forms no cycle, so
+[deny.toml](deny.toml) names the only crates that may depend directly on `gg-gpu`,
+`gg-renderer`, `ash`, `ash-window` and `winit`, and CI checks it with cargo-deny. Rule 4, and
+what a crate does with the dependencies it may have, are left to review.
 
 ### Builds
 

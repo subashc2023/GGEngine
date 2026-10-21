@@ -1,0 +1,15 @@
+# The layering rules in ARCHITECTURE.md that Cargo can't check, as cargo-deny bans: each crate
+# below may be a direct dependency only of the crates in its `wrappers`, dev-dependencies
+# included. Check with `cargo deny check bans`; CI runs it.
+
+[bans]
+# Duplicate versions say nothing about layering.
+multiple-versions = "allow"
+deny = [
+    # No skip-level edges: each layer is reached only from the one above it.
+    { crate = "gg-gpu", wrappers = ["gg-renderer"], reason = "the engine reaches the GPU only through gg-renderer" },
+    { crate = "gg-renderer", wrappers = ["gg-engine"], reason = "apps and games build on gg-engine" },
+    { crate = "ash", wrappers = ["gg-gpu", "ash-window"], reason = "gg-gpu owns Vulkan" },
+    { crate = "ash-window", wrappers = ["gg-gpu"], reason = "gg-gpu owns Vulkan" },
+    { crate = "winit", wrappers = ["gg-engine"], reason = "gg-engine owns the window and input" },
+]
