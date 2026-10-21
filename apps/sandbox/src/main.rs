@@ -8,9 +8,10 @@ use std::time::Duration;
 
 use bytemuck::NoUninit;
 use gg_engine::egui::{ViewportCommand, ViewportId};
-use gg_engine::math::{Mat4, Quat, Vec2, Vec3, Vec4};
+use gg_engine::math::{EulerRot, Mat4, Vec2, Vec3, Vec4};
 use gg_engine::{
-    Blend, Camera, Context, Event, Key, Layer, Mesh, Projection, Sampler, Shader, Texture, Ui,
+    Blend, Camera, Context, Event, Key, Layer, Mesh, OrthographicCameraController, Projection,
+    Sampler, Shader, Texture, Ui,
 };
 use tracing::info;
 
@@ -116,9 +117,7 @@ const TRIANGLE: [Colored; 3] = [
     },
 ];
 
-/// How fast the camera moves, in world units a second.
-const CAMERA_SPEED: f32 = 1.5;
-/// How fast the camera and the triangle turn, in radians a second: a quarter turn.
+/// How fast the triangle turns, in radians a second: a quarter turn.
 const TURN_SPEED: f32 = FRAC_PI_2;
 
 /// The square drawn in textures, its shader, and the textures from `assets/`: the checkerboard,
@@ -134,10 +133,11 @@ struct TexturedSquare {
 /// draw gives its shader; over its middle, a square in a checkerboard texture, then a triangle in
 /// red, green and blue turning, then the same square in a logo whose alpha shows them through it.
 /// Each mesh has a vertex type and shader of its own, and they're drawn over a color that drifts
-/// slowly, so that a running sandbox visibly animates. W, A, S and D move the camera along its own
-/// axes, and Q and E turn it left and right, at the same speed whatever the frame rate. Shows four
-/// panels to dock: frame times and the camera; the grid's colors, which can be picked; whether the
-/// checkerboard is filtered smooth or sharp; and the clear color, which can be held or picked.
+/// slowly, so that a running sandbox visibly animates. The engine's camera controller steers the
+/// camera: W, A, S and D move it along its own axes, Q and E turn it left and right, at the same
+/// speed whatever the frame rate, and the mouse wheel zooms it. Shows four panels to dock: frame
+/// times and the camera; the grid's colors, which can be picked; whether the checkerboard is
+/// filtered smooth or sharp; and the clear color, which can be held or picked.
 /// Logs the key and mouse presses that reach it, which those on the panels don't. It polls input
 /// too: holding Space pauses the drift, and a panel shows where the cursor is. The title bar's File
 /// menu quits.
@@ -153,10 +153,8 @@ struct Sandbox {
     smooth: bool,
     /// The last frame's time, shown as it is: smoothing would hide uneven frames.
     frame_time: Duration,
-    camera: Camera,
-    /// How far the camera and the triangle have turned counterclockwise, in radians from 0 to a
-    /// whole turn.
-    camera_turn: f32,
+    camera: OrthographicCameraController,
+    /// How far the triangle has turned counterclockwise, in radians from 0 to a whole turn.
     triangle_turn: f32,
     /// Added once the sandbox attaches.
     square: Option<(Mesh<Position>, Shader<Position, Tint>)>,
@@ -166,6 +164,16 @@ struct Sandbox {
 
 impl Sandbox {
     fn new() -> Self {
+        // 3 units from the view's bottom to its top, around the grid's 2.
+        let mut camera = OrthographicCameraController::new(Camera {
+            projection: Projection::Orthographic {
+                height: 3.0,
+                near: -1.0,
+                far: 1.0,
+            },
+            ..Camera::default()
+        });
+        camera.rotation = true;
         Self {
             time: Duration::ZERO,
             drift: true,
@@ -174,16 +182,7 @@ impl Sandbox {
             grid_colors: [[0.2, 0.3, 0.8], [0.8, 0.2, 0.3]],
             smooth: false,
             frame_time: Duration::ZERO,
-            // 3 units from the view's bottom to its top, around the grid's 2.
-            camera: Camera {
-                projection: Projection::Orthographic {
-                    height: 3.0,
-                    near: -1.0,
-                    far: 1.0,
-                },
-                ..Camera::default()
-            },
-            camera_turn: 0.0,
+            camera,
             triangle_turn: 0.0,
             square: None,
             triangle: None,
@@ -234,20 +233,7 @@ impl Layer for Sandbox {
 
     fn update(&mut self, cx: &mut Context, dt: Duration) {
         let seconds = dt.as_secs_f32();
-        let held = |key| if cx.input().key_down(key) { 1.0 } else { 0.0 };
-        let turn = held(Key::KeyQ) - held(Key::KeyE);
-        // Along the camera's own axes, so that W moves up the screen however it's turned, and as
-        // fast diagonally as straight.
-        let along = Vec3::new(
-            held(Key::KeyD) - held(Key::KeyA),
-            held(Key::KeyW) - held(Key::KeyS),
-            0.0,
-        );
-        self.camera_turn = (self.camera_turn + turn * TURN_SPEED * seconds).rem_euclid(TAU);
-        self.camera.rotation = Quat::from_rotation_z(self.camera_turn);
-        self.camera.position +=
-            self.camera.rotation * along.normalize_or_zero() * CAMERA_SPEED * seconds;
-        cx.set_camera(self.camera);
+        self.camera.update(cx, dt);
 
         if let Some((mesh, shader)) = self.square {
             // 10 by 10, 2 units across, each square a little smaller than the spacing, in the
@@ -297,7 +283,8 @@ impl Layer for Sandbox {
         }
     }
 
-    fn event(&mut self, _: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
+    fn event(&mut self, cx: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
+        self.camera.event(cx, event)?;
         match *event {
             Event::Key {
                 key,
@@ -324,10 +311,13 @@ impl Layer for Sandbox {
             let ms = self.frame_time.as_secs_f32() * 1000.0;
             let fps = if ms > 0.0 { 1000.0 / ms } else { 0.0 };
             ui.label(format!("{ms:.2} ms a frame, {fps:.0} fps"));
-            let [x, y, _] = self.camera.position.to_array();
+            let camera = self.camera.camera;
+            let [x, y, _] = camera.position.to_array();
+            let (turn, _, _) = camera.rotation.to_euler(EulerRot::ZYX);
+            let Projection::Orthographic { height, .. } = camera.projection;
             ui.label(format!(
-                "Camera at {x:.2}, {y:.2}, turned {:.0}°",
-                self.camera_turn.to_degrees()
+                "Camera at {x:.2}, {y:.2}, turned {:.0}°, {height:.2} units high",
+                turn.to_degrees().rem_euclid(360.0)
             ));
             ui.label(match cx.input().cursor() {
                 Some([x, y]) => format!("Cursor at {x:.0}, {y:.0}"),

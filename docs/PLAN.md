@@ -49,25 +49,41 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   add each shader with how it blends, opaque or by straight alpha. The sandbox draws a
   checkerboard over its grid and a translucent logo over that, with the turning triangle between
   them, and a GPU test checks textures, samplers and blending against a reference image.
+- **Camera controller** (2026-10-21): the engine's orthographic camera controller, which a layer
+  keeps and calls from its own update and event, moves the camera with W, A, S and D at half the
+  view's height a second, turns it with Q and E, and zooms it about the view's center with the
+  mouse wheel; the sandbox steers its camera with it. The first update after the window is
+  restored from being minimized is given no time, rather than the pause. The 2D renderer's design
+  is in ARCHITECTURE.md.
 
-## Now: Phase 3, runtime core
+## Now: 2D renderer
 
-Our own ECS with a transform hierarchy, reflected component types registered at runtime, stable
-entity IDs, scenes and prefabs in canonical text, operations with inverses and their log, and
-whole-world snapshots and restores. A fixed timestep, with commands as the only way into the
-simulation; the deterministic mode, with a world hash per tick, recordings and replays, and math
-that is identical everywhere (glam's `scalar-math` and `libm` features, or math types of our
-own); input actions; a job system. All of it runs headless.
+Sprites as [ARCHITECTURE.md](../ARCHITECTURE.md#rendering) describes them: the engine's quad mesh
+and sprite shader, whose parameters are a color, a texture and a rectangle of it, so that sprites
+come from sprite sheets and atlases; batching, which makes each run of consecutive draws of one
+mesh with one shader a single instanced draw, with the shaders' contract changed to read their
+transforms and parameters by instance; and the frame's counts of draws and instances, shown in
+the sandbox.
 
-*Done when* a scene saved, loaded and saved again is byte-identical; undoing a log of operations
-gives back the original world's hash; a restored snapshot matches the world it was taken from;
-steady-state ticks don't allocate; and a recording replays to the same hashes on all three OSes
-and both architectures, with a forced divergence reported as its first tick, entity and field.
+*Done when* the sandbox draws 100,000 moving sprites, textured from a sprite sheet, in a single
+instanced draw at 60 fps or more in a release build on the RTX 4090, and a GPU test checks
+batched sprites against a reference image.
 
 ## Next
 
 Each phase ends in something you can run and check.
 
+3. **Runtime core.** Our own ECS with a transform hierarchy, reflected component types
+   registered at runtime, stable entity IDs, scenes and prefabs in canonical text, operations
+   with inverses and their log, and whole-world snapshots and restores. A fixed timestep, with
+   commands as the only way into the simulation; the deterministic mode, with a world hash per
+   tick, recordings and replays, and math that is identical everywhere (glam's `scalar-math`
+   and `libm` features, or math types of our own); input actions; a job system. All of it runs
+   headless. *Done when* a scene saved, loaded and saved again is byte-identical; undoing a log
+   of operations gives back the original world's hash; a restored snapshot matches the world it
+   was taken from; steady-state ticks don't allocate; and a recording replays to the same
+   hashes on all three OSes and both architectures, with a forced divergence reported as its
+   first tick, entity and field.
 4. **First mesh.** Uploads of whole assets through the transfer queue, or by host image copy
    where a device has no separate transfer queue; depth; Slang reflection; an on-disk pipeline
    cache; shader hot reload. Render extraction, with the render thread a frame behind
@@ -133,7 +149,7 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Steady-state frames that draw UI allocate: in egui's layout and tessellation, and in the dock's own bookkeeping, which copies each frame's panel and menu names and torn-off windows' titles, and makes its arrangement and its list of groups left to draw anew | Phase 4, with the allocation check; the overlay is for development |
 | Keeping within the GPU's memory budget (`VK_EXT_memory_budget` through VMA) | Phase 7, with streaming |
 | Removing meshes, shaders and textures; each lasts until the app ends | Something adds and removes them as it runs, such as asset hot reload in Phase 4 |
-| Perspective cameras; a camera is orthographic | Phase 4, with depth |
+| Perspective cameras, and a controller for them; a camera is orthographic, and so is the engine's controller | Phase 4, with depth |
 | Per-frame data in a buffer: shaders get only the product of the camera's view and projection and each draw's transform, so none sees positions in the world | Phase 6, with lighting |
 | Materials: parameters kept on the GPU and written when they change, rather than copied with every draw | Phase 6, with materials |
 | Textures of data rather than color, such as normal maps, which shaders read as stored rather than decoded from sRGB | Phase 6, with PBR's maps |
@@ -144,8 +160,8 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Decoding images off the main thread; `Context::add_texture` decodes before it returns | Phase 7, with the streaming loader |
 | Pixels and vertices reach the GPU through the frame's arena, which keeps the size of the largest frame: a frame that adds many textures leaves that much host memory held for each frame in flight | Phase 4, with uploads through the transfer queue |
 | More than one camera or view, such as split screen or the editor's scene view | A game or the editor draws several |
-| Converting between the view's pixels and the world, to pick what's under the cursor | Something picks with the mouse |
-| A camera controller in the engine; the sandbox steers its own | A second app needs one, such as the editor in Phase 9 |
+| Converting between the view's pixels and the world, to pick what's under the cursor or zoom toward it; the camera controller zooms about the view's center | Something picks with the mouse, or a tool zooms toward the cursor |
+| The camera controller's keys, W, A, S, D, Q and E, and the mouse wheel, are fixed, and it takes no gamepad | Phase 3, with input actions |
 | Checking a game's shader against the contract on `Shaders::add` through Slang reflection: its push constants, its resources, and the sizes of its vertex and parameter structs against their types'; until then it's trusted, and validation checks it in debug builds | Phase 4, with Slang reflection |
 | Games' shaders compile with slangc as they're added, so running a game needs the Vulkan SDK | Phase 7, which cooks shaders |
 | A library of assets: shaders and textures load from the paths the game gives, the sandbox giving its source's, and nothing finds one by path or name, so a file added twice loads twice; scenes and the tool API will name them | Phase 4, with assets |

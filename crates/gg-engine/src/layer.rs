@@ -23,7 +23,9 @@ pub trait Layer {
     /// Called once as the app ends.
     fn detach(&mut self, _cx: &mut Context) {}
 
-    /// Called every frame, with the time since the last one (zero for the first).
+    /// Called every frame, with the time since the last one: zero for the first, and for the
+    /// first after the window is restored from being minimized, so that the pause doesn't count
+    /// as one long frame.
     fn update(&mut self, _cx: &mut Context, _dt: Duration) {}
 
     /// Called for each event that the layers above didn't handle. `Break` handles it, so the

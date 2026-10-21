@@ -219,7 +219,7 @@ impl Handler<'_> {
     }
 
     /// Tells the layers when the window loses or regains its area, which is when rendering
-    /// pauses and resumes.
+    /// pauses and resumes; the first frame after the pause counts from its own start.
     fn set_minimized(&mut self, minimized: bool) {
         if self.minimized == minimized {
             return;
@@ -230,6 +230,7 @@ impl Handler<'_> {
             let _ = self.dispatch(&Event::Minimized);
         } else {
             debug!("Window restored; rendering resumes");
+            self.clock.resume();
             let _ = self.dispatch(&Event::Restored);
         }
     }

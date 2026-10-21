@@ -213,9 +213,11 @@ types.
 
 An app is a stack of layers, which its `main` describes on `App`: layers, then overlays above
 them. Each layer attaches when the app starts and detaches when it ends, updates every frame
-with the time since the last, handles events and draws UI. An event goes down the stack from
-the top overlay until a layer handles it; updates and UI go up from the bottom. Headless runs
-have no window events, but their layers update and draw UI all the same.
+with the time since the last, handles events and draws UI. Frames pause while the main window
+is minimized, and the first update after it's restored is given no time, rather than the length
+of the pause. An event goes down the stack from the top overlay until a layer handles it;
+updates and UI go up from the bottom. Headless runs have no window events, but their layers
+update and draw UI all the same.
 
 egui, the engine's immediate-mode UI, is the top overlay: it sees every event first and keeps
 those it wants, such as a click on one of its panels, and `gg-renderer` draws its meshes over
@@ -310,7 +312,19 @@ sees as much of the world from bottom to top as the game sets, and as much acros
 aspect ratio makes, so nothing stretches as the dock resizes the view; perspective comes with
 depth. Each frame the renderer multiplies the camera's view and projection by each draw's
 transform, and pushes the product, column-major as glam's matrices are, with the addresses of
-the vertices and of the draw's parameters: a shader places its vertices with one matrix.
+the vertices and of the draw's parameters: a shader places its vertices with one matrix. Layers
+can also steer the camera with the engine's orthographic camera controller, which a layer keeps
+and calls from its own update and event, not adding it to the stack, so that the game can still
+place its camera itself or stop steering it.
+
+2D games draw sprites, which are draws like any other rather than a renderer of their own: a
+quad mesh, drawn with the engine's sprite shader, whose parameters are a color, a texture and
+the rectangle of it to show, so that a sprite sheet's frames and an atlas's images draw from one
+texture. Batching comes with them: each run of consecutive draws of one mesh with one shader
+becomes a single instanced draw, the frame copies the run's transforms and parameters into its
+memory together, and shaders read their own by instance rather than from push constants. A
+change of texture is a change of parameters, which bindless textures make free, so 100,000
+sprites take a handful of draws, and every mesh is batched, not only quads.
 
 An error while rendering ends the renderer, since a failed frame can leave meshes and textures
 half copied to the GPU.

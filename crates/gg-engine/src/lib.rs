@@ -4,6 +4,7 @@
 //! An app's `main` starts the engine; there is no separate entry-point crate.
 
 mod args;
+mod camera;
 mod chrome;
 mod dock;
 mod event;
@@ -27,6 +28,7 @@ use gg_renderer::{Renderer, Settings, Validation, Viewport};
 use tracing::{debug, error, info};
 
 use args::Args;
+pub use camera::OrthographicCameraController;
 use chrome::Chrome;
 use dock::Dock;
 pub use dock::Ui;
@@ -272,13 +274,21 @@ struct Clock {
 }
 
 impl Clock {
-    /// Starts a frame, and returns the time since the last one started; zero for the first.
+    /// Starts a frame, and returns the time since the last one started; zero for the first, and
+    /// for the first after [`Clock::resume`].
     fn tick(&mut self) -> Duration {
         let now = Instant::now();
         let dt = self.last.map_or(Duration::ZERO, |last| now - last);
         self.first.get_or_insert(now);
         self.last = Some(now);
         dt
+    }
+
+    /// Has the next frame count from its own start, as the first does, after a pause in which no
+    /// frames ran, such as while the window was minimized: otherwise the layers would take the
+    /// pause for one long frame.
+    fn resume(&mut self) {
+        self.last = None;
     }
 
     fn elapsed(&self) -> Duration {
@@ -364,5 +374,18 @@ mod tests {
                 size: [488, 336],
             }
         );
+    }
+
+    #[test]
+    fn the_frame_after_a_pause_counts_from_its_own_start() {
+        let mut clock = Clock::default();
+        assert_eq!(clock.tick(), Duration::ZERO);
+        std::thread::sleep(Duration::from_millis(1));
+        assert!(clock.tick() > Duration::ZERO);
+        std::thread::sleep(Duration::from_millis(1));
+        clock.resume();
+        assert_eq!(clock.tick(), Duration::ZERO);
+        // The run's time still counts the pause.
+        assert!(clock.elapsed() >= Duration::from_millis(2));
     }
 }
