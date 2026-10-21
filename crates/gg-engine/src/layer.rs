@@ -4,7 +4,7 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::Event;
+use crate::{Event, Input};
 
 /// A part of an app that the main loop drives. Every method has a default that does nothing,
 /// so a layer implements only what it uses.
@@ -31,6 +31,7 @@ pub trait Layer {
 /// What layers can see and change of the running app.
 pub struct Context {
     window: Option<Window>,
+    input: Input,
     clear_color: [f32; 4],
 }
 
@@ -38,6 +39,7 @@ impl Context {
     pub(crate) fn new(window: Option<Window>) -> Self {
         Self {
             window,
+            input: Input::default(),
             clear_color: [0.02, 0.02, 0.02, 1.0],
         }
     }
@@ -45,6 +47,12 @@ impl Context {
     /// The app's window; `None` in a headless run.
     pub fn window(&self) -> Option<&Window> {
         self.window.as_ref()
+    }
+
+    /// What's held down and where the cursor is, for layers that poll input rather than
+    /// follow events.
+    pub fn input(&self) -> &Input {
+        &self.input
     }
 
     /// The color each frame clears to, in linear RGBA.
@@ -125,8 +133,10 @@ impl Stack {
         }
     }
 
-    /// Hands `event` down from the top until a layer handles it. `Break` means one did.
+    /// Records `event` in the input state that layers poll, then hands it down from the top
+    /// until a layer handles it. `Break` means one did.
     pub(crate) fn event(&mut self, cx: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
+        cx.input.record(event);
         for layer in self.layers.iter_mut().rev() {
             layer.event(cx, event)?;
         }
@@ -140,6 +150,7 @@ mod tests {
     use std::rc::Rc;
 
     use super::*;
+    use crate::Key;
 
     /// Records each call it gets, by layer name, and handles events if `handles` is set.
     struct Probe {
@@ -171,6 +182,18 @@ mod tests {
             } else {
                 ControlFlow::Continue(())
             }
+        }
+    }
+
+    /// Notes, for each key event it's sent, whether the input state shows that key held.
+    struct Poll(Rc<RefCell<Vec<bool>>>);
+
+    impl Layer for Poll {
+        fn event(&mut self, cx: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
+            if let Event::Key { key, .. } = *event {
+                self.0.borrow_mut().push(cx.input().key_down(key));
+            }
+            ControlFlow::Continue(())
         }
     }
 
@@ -224,5 +247,22 @@ mod tests {
             ControlFlow::Break(())
         );
         assert_eq!(*calls.borrow(), ["event o", "event b"]);
+    }
+
+    #[test]
+    fn the_input_state_takes_each_event_before_the_layers() {
+        let held = Rc::new(RefCell::new(Vec::new()));
+        let mut stack = Stack::default();
+        stack.push_layer(Box::new(Poll(held.clone())));
+        let mut cx = Context::new(None);
+        for pressed in [true, false] {
+            let key = Event::Key {
+                key: Key::Space,
+                pressed,
+                repeat: false,
+            };
+            let _ = stack.event(&mut cx, &key);
+        }
+        assert_eq!(*held.borrow(), [true, false]);
     }
 }

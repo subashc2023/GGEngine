@@ -220,7 +220,14 @@ have no window events, but their layers update and draw UI all the same.
 egui, the engine's immediate-mode UI, is the top overlay: it sees every event first and keeps
 those it wants, such as a click on one of its panels, and `gg-renderer` draws its meshes over
 the frame. Key and button releases reach the layers regardless, so that none is left holding a
-key or button it saw pressed.
+key or button it saw pressed. Tab reaches egui only while one of its widgets has focus, to move
+between them; otherwise it goes to the layers alone, since egui would take focus with it.
+
+Layers can also poll input, through their `Context` rather than a global: which keys and mouse
+buttons are held, and where the cursor is. That state follows the events the stack is sent, so
+input the UI keeps doesn't count, and a press and release between two frames never shows as
+held. Losing focus lets go of everything, since not every platform reports the releases that
+come while the window is out of focus.
 
 Layers run on the main thread with the event loop. Input that reaches a game's layer enters the
 simulation as commands, as [ECS](#ecs) describes.

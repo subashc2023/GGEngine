@@ -20,6 +20,7 @@ cc = "1.9.0"
 egui = { version = "0.37.0", features = ["default_fonts"] }
 egui-winit = "0.37.0"
 epaint = { version = "0.37.0", features = ["bytemuck"] }
+glam = "0.34.1"
 nu-ansi-term = "0.50.3"
 png = "0.18.1"
 raw-window-handle = { version = "0.6.2", features = ["std"] }

@@ -11,6 +11,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
 use crate::args::Args;
@@ -183,9 +184,17 @@ impl ApplicationHandler for Handler<'_> {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         // egui, the top overlay, sees each event first, and keeps the input it wants: a click
-        // on one of its panels, or keys while one of its text fields has focus.
+        // on one of its panels, or keys while one of its widgets has focus. Tab is the
+        // exception: egui-winit keeps every Tab press, for egui to move focus between its
+        // widgets, so while none has focus, Tab goes past egui to the layers.
+        let tab_for_layers = matches!(
+            &event,
+            WindowEvent::KeyboardInput { event, .. }
+                if event.logical_key == Key::Named(NamedKey::Tab)
+        ) && !self.egui.egui_wants_keyboard_input();
         let mut consumed = false;
         if !matches!(event, WindowEvent::RedrawRequested)
+            && !tab_for_layers
             && let (Some(window), Some(egui_winit)) = (&self.window, &mut self.egui_winit)
         {
             consumed = egui_winit.on_window_event(window, &event).consumed;

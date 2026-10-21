@@ -5,5 +5,6 @@
 
 mod error;
 pub mod log;
+pub mod math;
 
 pub use error::{Error, Result};

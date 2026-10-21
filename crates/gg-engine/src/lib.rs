@@ -5,6 +5,7 @@
 
 mod args;
 mod event;
+mod input;
 mod layer;
 mod window;
 
@@ -21,6 +22,10 @@ use args::Args;
 /// share the engine's version.
 pub use egui;
 pub use event::{Event, Key, MouseButton, Scroll};
+/// The engine's vectors, matrices and quaternions; apps use them from here, so that they share
+/// the engine's version.
+pub use gg_core::math;
+pub use input::Input;
 use layer::Stack;
 pub use layer::{Context, Layer, Window};
 

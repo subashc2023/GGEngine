@@ -91,7 +91,6 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | GPU tests in Windows and macOS CI, which skip them because hosted runners there have no GPU | A self-hosted runner with a GPU, or a Vulkan driver that runs on those runners without one |
 | A gate that compiles the shipping configuration: `cargo clippy -p player --all-targets -- -D warnings` | When `gg-engine` gets its `dev` feature |
 | Waiting for the swapchain image before a frame reads input and the time, not after the layers update, which would cut latency by the wait: up to a refresh under `--vsync` | Phase 3, with input actions |
-| Polling input state (which keys and buttons are down); layers get events only | Phase 3, with input actions |
 | Pushing and popping layers while the app runs; `App` fixes the stack before it starts | A tool or game needs a layer for only part of a run |
 | Composed text from an input method (winit's `Ime` events), for languages typed through one | A game takes text input, such as chat |
 | Steady-state frames that draw UI allocate, in egui's layout and tessellation | Phase 4, with the allocation check; the overlay is for development |
