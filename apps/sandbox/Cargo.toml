@@ -11,6 +11,7 @@ name = "gg-sandbox"
 path = "src/main.rs"
 
 [dependencies]
+bytemuck = { workspace = true, features = ["derive"] }
 gg-engine.workspace = true
 tracing.workspace = true
 

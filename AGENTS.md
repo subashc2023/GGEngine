@@ -40,7 +40,8 @@ cargo build -p player --release   # shipping: the player alone
 ```
 
 Building needs a C++ compiler, for the Vulkan Memory Allocator, and `slangc` for the shaders: the
-Vulkan SDK's, or the one `SLANGC` names.
+Vulkan SDK's, or the one `SLANGC` names. Games' shaders compile with that slangc as they run, so
+it stays where the build found it.
 
 Each run writes a JSON log and logs its path as it starts; filter it on `level`, `code` or
 `vuid`. `RUST_LOG` sets what's logged, such as `RUST_LOG=gg_gpu=trace`.

@@ -1,11 +1,13 @@
 //! Development playground: test scenes and debug tooling for engine work.
 
 use std::ops::ControlFlow;
+use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
+use bytemuck::NoUninit;
 use gg_engine::egui::{ViewportCommand, ViewportId};
-use gg_engine::{Context, Event, Key, Layer, Mesh, Ui, Vertex};
+use gg_engine::{Context, Event, Key, Layer, Mesh, Shader, Ui};
 use tracing::info;
 
 fn main() -> ExitCode {
@@ -13,25 +15,60 @@ fn main() -> ExitCode {
     gg_engine::run(app.layer(Sandbox::new()))
 }
 
+/// A corner of a mesh in one color, which `shaders/flat_color.slang` reads: its position in clip
+/// space.
+#[repr(C)]
+#[derive(Clone, Copy, NoUninit)]
+struct Position {
+    position: [f32; 3],
+}
+
+/// A corner of a mesh in the colors of its corners, which `shaders/vertex_color.slang` reads: its
+/// position in clip space, and its color in linear RGBA.
+#[repr(C)]
+#[derive(Clone, Copy, NoUninit)]
+struct Colored {
+    position: [f32; 3],
+    color: [f32; 4],
+}
+
+/// A square in clip space, as two triangles.
+const SQUARE: [Position; 4] = [
+    Position {
+        position: [-0.75, -0.75, 0.0],
+    },
+    Position {
+        position: [0.75, -0.75, 0.0],
+    },
+    Position {
+        position: [0.75, 0.75, 0.0],
+    },
+    Position {
+        position: [-0.75, 0.75, 0.0],
+    },
+];
+const SQUARE_INDICES: [u32; 6] = [0, 1, 2, 2, 3, 0];
+
 /// A triangle in red, green and blue, pointing up, in clip space.
-const TRIANGLE: [Vertex; 3] = [
-    Vertex {
+const TRIANGLE: [Colored; 3] = [
+    Colored {
         position: [0.0, -0.5, 0.0],
         color: [1.0, 0.0, 0.0, 1.0],
     },
-    Vertex {
+    Colored {
         position: [0.5, 0.5, 0.0],
         color: [0.0, 1.0, 0.0, 1.0],
     },
-    Vertex {
+    Colored {
         position: [-0.5, 0.5, 0.0],
         color: [0.0, 0.0, 1.0, 1.0],
     },
 ];
 
-/// Draws a triangle in the game's view, over a color that drifts slowly, so that a running
-/// sandbox visibly animates, and shows two panels to dock: frame times, and the color, which can
-/// be held or picked. Logs the key and mouse presses that reach it, which those on the panels
+/// Draws a blue square in the game's view, and a triangle in red, green and blue over it, each
+/// with a vertex type and shader of its own, over a color that drifts slowly, so that a running
+/// sandbox visibly animates. Shows two panels to dock: frame times, and the color, which can be
+/// held or picked. Logs the key and mouse presses that reach it, which those on the panels
 /// don't. It polls input too: holding Space pauses the drift, and a panel shows where the cursor
 /// is. The title bar's File menu quits.
 struct Sandbox {
@@ -42,7 +79,8 @@ struct Sandbox {
     /// The last frame's time, shown as it is: smoothing would hide uneven frames.
     frame_time: Duration,
     /// Added once the sandbox attaches.
-    triangle: Option<Mesh>,
+    square: Option<(Mesh<Position>, Shader<Position>)>,
+    triangle: Option<(Mesh<Colored>, Shader<Colored>)>,
 }
 
 impl Sandbox {
@@ -52,6 +90,7 @@ impl Sandbox {
             drift: true,
             color: [0.0; 3],
             frame_time: Duration::ZERO,
+            square: None,
             triangle: None,
         }
     }
@@ -59,13 +98,29 @@ impl Sandbox {
 
 impl Layer for Sandbox {
     fn attach(&mut self, cx: &mut Context) {
+        // A shader that doesn't compile stops the sandbox, with slangc's diagnostics.
+        let shaders = Path::new(env!("CARGO_MANIFEST_DIR")).join("shaders");
+        let flat = cx.add_shader("flat color", shaders.join("flat_color.slang"));
+        let colored = cx.add_shader("vertex color", shaders.join("vertex_color.slang"));
+        let square = cx.add_mesh("square", &SQUARE, &SQUARE_INDICES);
         let triangle = cx.add_mesh("triangle", &TRIANGLE, &[0, 1, 2]);
-        self.triangle = Some(triangle.expect("the triangle is a whole one, of its own vertices"));
+        let whole = "the meshes are whole triangles, of their own vertices";
+        self.square = Some((
+            square.expect(whole),
+            flat.expect("the flat color shader compiles"),
+        ));
+        self.triangle = Some((
+            triangle.expect(whole),
+            colored.expect("the vertex color shader compiles"),
+        ));
     }
 
     fn update(&mut self, cx: &mut Context, dt: Duration) {
-        if let Some(triangle) = self.triangle {
-            cx.draw(triangle);
+        if let Some((mesh, shader)) = self.square {
+            cx.draw(mesh, shader);
+        }
+        if let Some((mesh, shader)) = self.triangle {
+            cx.draw(mesh, shader);
         }
         self.frame_time = dt;
         if self.drift && !cx.input().key_down(Key::Space) {

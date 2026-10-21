@@ -108,9 +108,11 @@ impl Device {
         } else {
             Vec::new()
         };
+        // Scalar block layout lets shaders read vertices laid out as `#[repr(C)]` lays them out.
         let mut vulkan12 = bindless_features()
             .timeline_semaphore(true)
-            .buffer_device_address(true);
+            .buffer_device_address(true)
+            .scalar_block_layout(true);
         let mut vulkan13 = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
             .synchronization2(true);

@@ -1,28 +1,37 @@
 //! Meshes: the handles that the engine draws with, and the vertices and indices behind them in
-//! GPU memory, drawn in the game's view.
+//! GPU memory, drawn with games' shaders in the game's view.
 
+use std::fmt;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
+use bytemuck::NoUninit;
 use gg_core::{Error, Result};
 use gg_gpu::{Blend, Device, Format, Frame, GpuBuffer, GraphicsDesc, Pass, Pipeline};
 
-use crate::Viewport;
+use crate::shader::Shaders;
+use crate::{Draw, Viewport};
 
-static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mesh.spv"));
-
-/// A corner of a mesh's triangles.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Vertex {
-    /// Until there are cameras, in Vulkan's clip space, which spans the game's view: x from -1
-    /// at the left to 1 at the right, y from -1 at the top to 1 at the bottom, and z from 0 to 1.
-    pub position: [f32; 3],
-    /// Linear RGBA, which a triangle blends between its corners.
-    pub color: [f32; 4],
+/// A mesh that [`Meshes::add`] handed out, of vertex type `V`.
+pub struct Mesh<V> {
+    pub(crate) index: u32,
+    vertex: PhantomData<fn() -> V>,
 }
 
-/// A mesh that [`Meshes::add`] handed out.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Mesh(u32);
+// By hand, so that they don't need `V` to be `Clone` or `Debug` too.
+impl<V> Clone for Mesh<V> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<V> Copy for Mesh<V> {}
+
+impl<V> fmt::Debug for Mesh<V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Mesh").field(&self.index).finish()
+    }
+}
 
 /// The meshes a renderer draws. It hands out each one's handle at once, and keeps its vertices
 /// and indices until the next frame that renders copies them to the GPU. A renderer draws the
@@ -36,20 +45,28 @@ pub struct Meshes {
 }
 
 struct Added {
-    mesh: Mesh,
+    index: u32,
     name: String,
-    /// Seven words a vertex: its position, then its color.
-    vertices: Vec<f32>,
+    vertices: Vec<u8>,
+    vertex_size: usize,
     indices: Vec<u32>,
 }
 
 impl Meshes {
     /// Adds a mesh of triangles, three of `indices` each, which index `vertices`. `name` names it
-    /// in errors and GPU captures.
+    /// in errors and GPU captures. It draws with shaders for `V`, which read its vertices as
+    /// [`Shaders::add`] says.
     ///
     /// Fails with `renderer.bad_mesh` if it has no triangles, indices left over from whole
     /// triangles, or an index past its vertices.
-    pub fn add(&mut self, name: &str, vertices: &[Vertex], indices: &[u32]) -> Result<Mesh> {
+    pub fn add<V: NoUninit>(
+        &mut self,
+        name: &str,
+        vertices: &[V],
+        indices: &[u32],
+    ) -> Result<Mesh<V>> {
+        // Vulkan's buffers hold at least a byte.
+        const { assert!(size_of::<V>() > 0, "a vertex type has a size") };
         let bad =
             |problem: String| Error::new("renderer.bad_mesh", format!("mesh {name:?} {problem}"));
         if indices.is_empty() {
@@ -67,29 +84,29 @@ impl Meshes {
                 vertices.len()
             )));
         }
-        let mesh = Mesh(self.count);
+        let index = self.count;
         self.count += 1;
-        let vertices = vertices
-            .iter()
-            .flat_map(|vertex| {
-                let ([x, y, z], [r, g, b, a]) = (vertex.position, vertex.color);
-                [x, y, z, r, g, b, a]
-            })
-            .collect();
         self.added.push(Added {
-            mesh,
+            index,
             name: name.to_owned(),
-            vertices,
+            vertices: bytemuck::cast_slice(vertices).to_vec(),
+            vertex_size: size_of::<V>(),
             indices: indices.to_vec(),
         });
-        Ok(mesh)
+        Ok(Mesh {
+            index,
+            vertex: PhantomData,
+        })
     }
 }
 
-/// Draws meshes, and keeps their vertices and indices on the GPU.
+/// Draws meshes with games' shaders, and keeps the meshes' vertices and indices on the GPU.
 pub(crate) struct MeshPass {
     device: Arc<Device>,
-    pipeline: Pipeline,
+    /// The format of the targets it draws into.
+    format: Format,
+    /// Each shader's pipeline, and the size of the vertices it reads, by its handle.
+    pipelines: Vec<(Pipeline, usize)>,
     /// Each mesh's buffers, by its handle.
     meshes: Vec<GpuMesh>,
 }
@@ -99,27 +116,46 @@ struct GpuMesh {
     indices: GpuBuffer,
     /// How many indices.
     count: u32,
+    vertex_size: usize,
 }
 
 impl MeshPass {
     /// A pass that draws into targets of `format`.
-    pub(crate) fn new(device: &Arc<Device>, format: Format) -> Result<Self> {
-        let pipeline = Pipeline::graphics(
-            device,
-            &GraphicsDesc {
-                name: "mesh",
-                spirv: SPIRV,
-                vertex: c"vertex_main",
-                fragment: c"fragment_main",
-                format,
-                blend: Blend::Opaque,
-            },
-        )?;
-        Ok(Self {
+    pub(crate) fn new(device: &Arc<Device>, format: Format) -> Self {
+        Self {
             device: device.clone(),
-            pipeline,
+            format,
+            pipelines: Vec::new(),
             meshes: Vec::new(),
-        })
+        }
+    }
+
+    /// Makes the pipelines of the shaders added to `shaders` since the pass last took them.
+    ///
+    /// # Panics
+    ///
+    /// If `shaders` isn't the one the pass has been taking shaders from.
+    pub(crate) fn add_shaders(&mut self, shaders: &mut Shaders) -> Result<()> {
+        for added in shaders.added.drain(..) {
+            assert_eq!(
+                added.index as usize,
+                self.pipelines.len(),
+                "a renderer draws with the shaders of one `Shaders`"
+            );
+            let pipeline = Pipeline::graphics(
+                &self.device,
+                &GraphicsDesc {
+                    name: &added.name,
+                    spirv: &added.spirv,
+                    vertex: c"vertex_main",
+                    fragment: c"fragment_main",
+                    format: self.format,
+                    blend: Blend::Opaque,
+                },
+            )?;
+            self.pipelines.push((pipeline, added.vertex_size));
+        }
+        Ok(())
     }
 
     /// Copies the meshes added to `meshes` since a frame last took them to the GPU, which must
@@ -131,22 +167,22 @@ impl MeshPass {
     pub(crate) fn upload(&mut self, frame: &mut Frame<'_>, meshes: &mut Meshes) -> Result<()> {
         for added in meshes.added.drain(..) {
             assert_eq!(
-                added.mesh.0 as usize,
+                added.index as usize,
                 self.meshes.len(),
                 "a renderer draws the meshes of one `Meshes`"
             );
-            let vertices: &[u8] = bytemuck::cast_slice(&added.vertices);
             let indices: &[u8] = bytemuck::cast_slice(&added.indices);
             let buffer = |bytes: &[u8], what| {
                 let name = format!("{} {what}", added.name);
                 GpuBuffer::new(&self.device, bytes.len() as u64, &name)
             };
             let mut mesh = GpuMesh {
-                vertices: buffer(vertices, "vertices")?,
+                vertices: buffer(&added.vertices, "vertices")?,
                 indices: buffer(indices, "indices")?,
                 count: added.indices.len() as u32,
+                vertex_size: added.vertex_size,
             };
-            frame.write_buffer(&mut mesh.vertices, 0, vertices)?;
+            frame.write_buffer(&mut mesh.vertices, 0, &added.vertices)?;
             frame.write_buffer(&mut mesh.indices, 0, indices)?;
             self.meshes.push(mesh);
         }
@@ -158,19 +194,36 @@ impl MeshPass {
     ///
     /// # Panics
     ///
-    /// If a mesh drawn isn't one the pass has uploaded, or the target's format isn't the pass's.
-    pub(crate) fn draw(&self, pass: &mut Pass<'_, '_>, viewport: Viewport, draws: &[Mesh]) {
+    /// If a mesh drawn isn't one the pass has uploaded, a shader isn't one it has made a pipeline
+    /// of, a mesh's vertices aren't the size its shader reads, or the target's format isn't the
+    /// pass's.
+    pub(crate) fn draw(&self, pass: &mut Pass<'_, '_>, viewport: Viewport, draws: &[Draw]) {
         if draws.is_empty() || viewport.size.contains(&0) {
             return;
         }
         pass.set_viewport(viewport.origin, viewport.size);
-        pass.set_pipeline(&self.pipeline);
-        for mesh in draws {
+        let mut bound = None;
+        for draw in draws {
             let mesh = self
                 .meshes
-                .get(mesh.0 as usize)
+                .get(draw.mesh as usize)
                 .expect("a mesh of the renderer's `Meshes`, which the frame uploaded");
-            // The shader's `Push`: the vertices' address.
+            let (pipeline, vertex_size) = self
+                .pipelines
+                .get(draw.shader as usize)
+                .expect("a shader of the renderer's `Shaders`");
+            // A `Draw` pairs a mesh with a shader for its vertex type, but handles from another
+            // `Meshes` or `Shaders` could pair it with one that reads past its vertices.
+            assert_eq!(
+                mesh.vertex_size, *vertex_size,
+                "a mesh draws with a shader for its vertex type, from the renderer's `Meshes` and \
+                 `Shaders`"
+            );
+            if bound != Some(draw.shader) {
+                pass.set_pipeline(pipeline);
+                bound = Some(draw.shader);
+            }
+            // The shader's push constants: the vertices' address.
             pass.push_constants(&mesh.vertices.address().to_ne_bytes());
             pass.draw_indexed(&mesh.indices, 0, mesh.count, 0);
         }
@@ -181,20 +234,7 @@ impl MeshPass {
 mod tests {
     use super::*;
 
-    const TRIANGLE: [Vertex; 3] = [
-        Vertex {
-            position: [0.0, -0.5, 0.0],
-            color: [1.0, 0.0, 0.0, 1.0],
-        },
-        Vertex {
-            position: [0.5, 0.5, 0.0],
-            color: [0.0, 1.0, 0.0, 1.0],
-        },
-        Vertex {
-            position: [-0.5, 0.5, 0.0],
-            color: [0.0, 0.0, 1.0, 1.0],
-        },
-    ];
+    const TRIANGLE: [[f32; 3]; 3] = [[0.0, -0.5, 0.0], [0.5, 0.5, 0.0], [-0.5, 0.5, 0.0]];
 
     #[test]
     fn a_mesh_is_whole_triangles_of_its_own_vertices() {
@@ -207,7 +247,8 @@ mod tests {
             assert_eq!(error.code(), "renderer.bad_mesh", "{indices:?}");
             assert!(error.to_string().contains("\"broken\""), "{error}");
         }
-        assert_eq!(meshes.add("a", &TRIANGLE, &[0, 1, 2]).ok(), Some(Mesh(0)));
-        assert_eq!(meshes.add("b", &TRIANGLE, &[2, 1, 0]).ok(), Some(Mesh(1)));
+        let mut add = |indices: &[u32]| meshes.add("a", &TRIANGLE, indices).map(|mesh| mesh.index);
+        assert_eq!(add(&[0, 1, 2]).ok(), Some(0));
+        assert_eq!(add(&[2, 1, 0]).ok(), Some(1));
     }
 }

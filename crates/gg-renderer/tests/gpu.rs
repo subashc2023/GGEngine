@@ -12,7 +12,7 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
-use gg_renderer::{Meshes, RenderData, Renderer, Settings, Ui, Vertex, Viewport};
+use gg_renderer::{Draw, Meshes, RenderData, Renderer, Settings, Shaders, Ui, Viewport};
 
 fn main() {
     // CI runners without a GPU or a Vulkan driver, Windows' and macOS's, set this. Linux CI runs
@@ -29,10 +29,7 @@ fn main() {
     gg_core::log::init("renderer-gpu-tests", &dir);
 
     run("ui_matches_its_reference", ui_matches_its_reference);
-    run(
-        "triangle_matches_its_reference",
-        triangle_matches_its_reference,
-    );
+    run("meshes_match_their_reference", meshes_match_their_reference);
 }
 
 fn run(name: &str, test: impl FnOnce()) {
@@ -65,6 +62,7 @@ fn ui_matches_its_reference() {
     const HEIGHT: u32 = 200;
     let mut renderer = renderer(WIDTH, HEIGHT);
     let mut meshes = Meshes::default();
+    let mut shaders = Shaders::default();
 
     let egui = egui::Context::default();
     // Without animation, the first frames show the window as it stays.
@@ -103,6 +101,7 @@ fn ui_matches_its_reference() {
                 size: [WIDTH, HEIGHT],
             },
             meshes: &mut meshes,
+            shaders: &mut shaders,
             draws: &[],
         };
         assert!(
@@ -113,24 +112,52 @@ fn ui_matches_its_reference() {
     check(renderer, "ui", WIDTH, HEIGHT);
 }
 
-/// Draws a triangle in red, green and blue into part of an offscreen image, over more frames
-/// than are in flight, so that the later frames draw from what the first copied to the GPU, and
-/// compares it with its reference image.
-fn triangle_matches_its_reference() {
+/// Draws a square in one color, then a triangle in red, green and blue over it, each with its own
+/// vertex type and shader, into part of an offscreen image, and compares it with its reference
+/// image. The triangle is added after the first frame, and the frames outnumber those in flight,
+/// so that later frames draw from what earlier ones copied to the GPU.
+fn meshes_match_their_reference() {
     const WIDTH: u32 = 320;
     const HEIGHT: u32 = 200;
     let mut renderer = renderer(WIDTH, HEIGHT);
     let mut meshes = Meshes::default();
-    let corner = |position, color| Vertex { position, color };
-    let vertices = [
-        corner([0.0, -0.5, 0.0], [1.0, 0.0, 0.0, 1.0]),
-        corner([0.5, 0.5, 0.0], [0.0, 1.0, 0.0, 1.0]),
-        corner([-0.5, 0.5, 0.0], [0.0, 0.0, 1.0, 1.0]),
+    let mut shaders = Shaders::default();
+    let shader = |file| {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/shaders")
+            .join(file)
+    };
+    // Positions.
+    let flat = shaders
+        .add::<[f32; 3]>("flat color", &shader("flat_color.slang"))
+        .expect("a shader");
+    let corners = [
+        [-0.75, -0.75, 0.0],
+        [0.75, -0.75, 0.0],
+        [0.75, 0.75, 0.0],
+        [-0.75, 0.75, 0.0],
     ];
-    let triangle = meshes
-        .add("triangle", &vertices, &[0, 1, 2])
+    let square = meshes
+        .add("square", &corners, &[0, 1, 2, 2, 3, 0])
         .expect("a mesh");
-    for _ in 0..3 {
+    let mut draws = vec![Draw::new(square, flat)];
+    for frame in 0..3 {
+        if frame == 1 {
+            // Positions, then colors.
+            let colored = shaders
+                .add::<[f32; 7]>("vertex color", &shader("vertex_color.slang"))
+                .expect("a shader");
+            let corner = |[x, y, z]: [f32; 3], [r, g, b, a]: [f32; 4]| [x, y, z, r, g, b, a];
+            let vertices = [
+                corner([0.0, -0.5, 0.0], [1.0, 0.0, 0.0, 1.0]),
+                corner([0.5, 0.5, 0.0], [0.0, 1.0, 0.0, 1.0]),
+                corner([-0.5, 0.5, 0.0], [0.0, 0.0, 1.0, 1.0]),
+            ];
+            let triangle = meshes
+                .add("triangle", &vertices, &[0, 1, 2])
+                .expect("a mesh");
+            draws.push(Draw::new(triangle, colored));
+        }
         let data = RenderData {
             clear_color: CLEAR,
             // Off the image's corner, so that the image shows where the view is.
@@ -139,7 +166,8 @@ fn triangle_matches_its_reference() {
                 size: [240, 160],
             },
             meshes: &mut meshes,
-            draws: &[triangle],
+            shaders: &mut shaders,
+            draws: &draws,
         };
         let mut textures = egui::TexturesDelta::default();
         let ui = Ui {
@@ -152,7 +180,7 @@ fn triangle_matches_its_reference() {
             "an offscreen image can always be rendered into"
         );
     }
-    check(renderer, "triangle", WIDTH, HEIGHT);
+    check(renderer, "meshes", WIDTH, HEIGHT);
 }
 
 /// Reads back the last frame `renderer` rendered, shuts it down, checks that validation reported

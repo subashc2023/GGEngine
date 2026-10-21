@@ -1,21 +1,23 @@
 //! Turns the render data the engine hands it each frame into images, built on `gg-gpu`: meshes
-//! in the game's view and the UI over them, and the render graph, materials, lighting and
-//! post-processing to come.
+//! drawn with games' shaders in the game's view and the UI over them, and the render graph,
+//! materials, lighting and post-processing to come.
 //!
 //! It knows nothing about the scene, ECS or gameplay. It receives plain data, so rendering
 //! can run on its own thread, a frame behind simulation.
 
 mod mesh;
+mod shader;
 mod ui;
 
 use std::iter;
 use std::sync::Arc;
 
-use gg_core::Result;
+use gg_core::{Error, Result};
 use gg_gpu::{ColorImage, Device, Frames, Instance, InstanceDesc, Surface, Swapchain, Target};
 
 pub use gg_gpu::{Validation, Window};
-pub use mesh::{Mesh, Meshes, Vertex};
+pub use mesh::{Mesh, Meshes};
+pub use shader::{Shader, Shaders};
 pub use ui::Ui;
 
 use mesh::MeshPass;
@@ -28,6 +30,22 @@ pub struct Viewport {
     pub size: [u32; 2],
 }
 
+/// A mesh, and the shader to draw it with, which reads its vertex type.
+#[derive(Clone, Copy, Debug)]
+pub struct Draw {
+    mesh: u32,
+    shader: u32,
+}
+
+impl Draw {
+    pub fn new<V>(mesh: Mesh<V>, shader: Shader<V>) -> Self {
+        Self {
+            mesh: mesh.index,
+            shader: shader.index,
+        }
+    }
+}
+
 /// What a frame draws besides UI: plain data, which the engine extracts every frame.
 pub struct RenderData<'a> {
     /// The color the whole frame clears to, in linear RGBA.
@@ -36,8 +54,10 @@ pub struct RenderData<'a> {
     pub viewport: Viewport,
     /// The meshes; those added since a frame last rendered reach the GPU first.
     pub meshes: &'a mut Meshes,
-    /// The meshes to draw, in order, each over those before it.
-    pub draws: &'a [Mesh],
+    /// The shaders; those added since the renderer last rendered get their pipelines first.
+    pub shaders: &'a mut Shaders,
+    /// What to draw, in order, each over those before it.
+    pub draws: &'a [Draw],
 }
 
 /// How to set up a renderer.
@@ -65,6 +85,8 @@ pub struct Renderer {
     instance: Arc<Instance>,
     device: Arc<Device>,
     vsync: bool,
+    /// Set once rendering fails, which can leave the GPU's copies of meshes unfinished.
+    failed: bool,
 }
 
 enum Output {
@@ -124,11 +146,12 @@ impl Renderer {
             output,
             window_keys: Vec::new(),
             windows: Vec::new(),
-            meshes: MeshPass::new(device, format)?,
+            meshes: MeshPass::new(device, format),
             ui: UiPass::new(device, format)?,
             instance: instance.clone(),
             device: device.clone(),
             vsync,
+            failed: false,
         })
     }
 
@@ -189,10 +212,32 @@ impl Renderer {
     /// Returns `false` when there was nothing to render into, as when the window is minimized;
     /// the meshes added and the UIs' texture changes wait for the next frame that renders.
     ///
+    /// An error ends the renderer, which can then only be dropped: a frame that failed can leave
+    /// the GPU's copies of meshes unfinished, so every later call fails with `renderer.failed`.
+    ///
     /// # Panics
     ///
-    /// If `data` holds meshes of another [`Meshes`] than the one it held before.
+    /// If `data` holds meshes or shaders of another [`Meshes`] or [`Shaders`] than the ones it
+    /// held before, which could draw a mesh with a shader for another vertex type.
     pub fn render(
+        &mut self,
+        data: RenderData<'_>,
+        ui: Ui<'_>,
+        windows: &mut [(u64, Ui<'_>)],
+    ) -> Result<bool> {
+        if self.failed {
+            return Err(Error::new(
+                "renderer.failed",
+                "a frame failed before, which can leave meshes unfinished on the GPU; the \
+                 renderer can only be dropped",
+            ));
+        }
+        let rendered = self.render_frame(data, ui, windows);
+        self.failed = rendered.is_err();
+        rendered
+    }
+
+    fn render_frame(
         &mut self,
         data: RenderData<'_>,
         ui: Ui<'_>,
@@ -203,6 +248,8 @@ impl Renderer {
             self.ui.queue(window.textures);
         }
         self.ui.queue(ui.textures);
+        // Before the frame begins, which a failure would then present unrendered.
+        self.meshes.add_shaders(data.shaders)?;
         let target = match &mut self.output {
             Output::Window(swapchain) => Target::Swapchain(swapchain),
             Output::Offscreen(image) => Target::Image(image),

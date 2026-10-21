@@ -36,8 +36,9 @@ pub use event::{Event, Key, MouseButton, Scroll};
 /// The engine's vectors, matrices and quaternions; apps use them from here, so that they share
 /// the engine's version.
 pub use gg_core::math;
-/// What layers draw: meshes, which they add and draw through their [`Context`].
-pub use gg_renderer::{Mesh, Vertex};
+/// What layers draw: meshes, with shaders for their vertex types, which they add and draw
+/// through their [`Context`].
+pub use gg_renderer::{Mesh, Shader};
 pub use input::Input;
 use layer::Stack;
 pub use layer::{Context, Layer, Window};
@@ -224,9 +225,9 @@ fn run_frame(
     })
 }
 
-/// The second half: renders the frame, with the meshes the layers drew in the game's view, the
-/// main window's central area `view` in points, and the UI in `output` over them; and into the
-/// windows of their own what their passes drew, in `windows`. Returns whether the frame was
+/// The second half: renders the frame, with what the layers drew in the game's view, the main
+/// window's central area `view` in points, and the UI in `output` over it; and into the windows
+/// of their own what their passes drew, in `windows`. Returns whether the frame was
 /// presented, and egui's requests of the main window, such as the cursor to show.
 fn render_frame(
     egui: &egui::Context,

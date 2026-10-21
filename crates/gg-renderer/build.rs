@@ -1,18 +1,26 @@
 //! Compiles the shaders in `shaders/` to SPIR-V with `slangc`, which the Vulkan SDK ships. The
 //! `SLANGC` environment variable names it; otherwise it's the Vulkan SDK's, under `VULKAN_SDK`,
-//! or the first on the path.
+//! or the first on the path. The crate compiles games' shaders as they're added with the same
+//! one, which `GG_SLANGC` names to it.
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{self, PathBuf};
 use std::process::Command;
 
-const SHADERS: [&str; 2] = ["egui", "mesh"];
+const SHADERS: [&str; 1] = ["egui"];
 
 fn main() {
     println!("cargo::rerun-if-env-changed=SLANGC");
     println!("cargo::rerun-if-env-changed=VULKAN_SDK");
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
     let slangc = slangc();
+    let Some(name) = slangc.to_str() else {
+        panic!(
+            "slangc's path, {}, isn't UTF-8; set SLANGC to one that is",
+            slangc.display()
+        );
+    };
+    println!("cargo::rustc-env=GG_SLANGC={name}");
     for shader in SHADERS {
         let source = format!("shaders/{shader}.slang");
         println!("cargo::rerun-if-changed={source}");
@@ -37,7 +45,23 @@ fn main() {
     }
 }
 
+/// slangc's path, absolute unless it's a bare name to look up on the path: the build runs in the
+/// crate's directory, and games' shaders compile wherever they run.
 fn slangc() -> PathBuf {
+    let found = found();
+    if found.components().count() > 1 {
+        path::absolute(&found).unwrap_or_else(|error| {
+            panic!(
+                "can't make slangc's path, {}, absolute: {error}",
+                found.display()
+            )
+        })
+    } else {
+        found
+    }
+}
+
+fn found() -> PathBuf {
     if let Some(path) = env::var_os("SLANGC") {
         return path.into();
     }

@@ -28,7 +28,10 @@ pub enum Blend {
 pub struct GraphicsDesc<'a> {
     /// The debug name.
     pub name: &'a str,
-    /// A SPIR-V module holding both entry points.
+    /// A SPIR-V module holding both entry points, which slangc compiled. It's trusted to be valid
+    /// and to keep to the pipeline layout: to read only the push constants set before a draw,
+    /// to use only the device's enabled features, and to bind nothing but the bindless set's
+    /// textures and samplers. Vulkan checks none of it; validation does in debug builds.
     pub spirv: &'a [u8],
     pub vertex: &'a CStr,
     pub fragment: &'a CStr,
@@ -57,8 +60,7 @@ impl Pipeline {
         let module_info = vk::ShaderModuleCreateInfo::default().code(&code);
         // SAFETY: the device is live, and the code is a whole number of words that starts with
         // SPIR-V's magic number, which `read_spv` checked. The module itself is trusted to be
-        // valid SPIR-V, as the shaders this workspace compiles with slangc are: Vulkan doesn't
-        // check it, and validation does in debug builds.
+        // valid SPIR-V, as `GraphicsDesc::spirv` says.
         let module = unsafe { raw_device.create_shader_module(&module_info, None) }
             .map_err(|e| vk_error("vkCreateShaderModule", e))?;
         // SAFETY: the module is live.
@@ -118,7 +120,8 @@ impl Pipeline {
             .layout(device.bindless().pipeline_layout())
             .push_next(&mut rendering);
         // SAFETY: the module and layout are live, and the infos outlive the call; the module
-        // can go once the pipeline is made.
+        // can go once the pipeline is made. The module is trusted to have both entry points and
+        // to keep to the layout, as `GraphicsDesc::spirv` says.
         let made = unsafe {
             let made =
                 raw_device.create_graphics_pipelines(vk::PipelineCache::null(), &[info], None);

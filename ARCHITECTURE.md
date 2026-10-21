@@ -265,14 +265,25 @@ simulation as commands, as [ECS](#ecs) describes.
 ## Rendering
 
 Each frame the engine hands `gg-renderer` that frame's render data, as plain data: the color the
-frame clears to, the game's view, and the meshes to draw in it, in order. The view is the main
-window's central area, which the dock leaves the game, and the UI draws over it. Layers add
-meshes and draw them through their `Context`. The renderer's `Meshes` hands out each mesh's
-handle at once and keeps its vertices and indices until the next frame that renders, which
-copies them into GPU memory, where they stay. Shaders read vertices through their buffer's
-address rather than through vertex input, so a mesh's layout is between its data and its shader;
-draws take the indices. Until there are cameras, meshes are in Vulkan's clip space, which spans
-the view.
+frame clears to, the game's view, and what to draw in it, in order: meshes, each with a shader
+for its vertex type. The view is the main window's central area, which the dock leaves the game,
+and the UI draws over it. Layers add shaders and meshes and draw them through their `Context`,
+and the renderer's `Shaders` and `Meshes` hand out their handles at once.
+
+A shader is a Slang file that the engine compiles with slangc as a layer adds it, so one that
+doesn't compile fails there, with slangc's diagnostics naming the file and line; the renderer
+makes its pipeline the next time it renders. A mesh's vertices are any `#[repr(C)]` type without
+padding, and the next frame that renders copies them and the indices into GPU memory, where they
+stay. Shaders read vertices through their buffer's address rather than through vertex input, and
+Slang lays out what a pointer points at as `#[repr(C)]` does, so a mesh's layout is between its
+vertex type and the shader's struct for it; draws take the indices. A shader is added for a
+vertex type, and a mesh draws only with a shader for its own. Vulkan checks nothing about a
+shader, so its interface, which `Shaders::add` describes, is trusted, and validation checks it
+in debug builds. Until there are cameras, shaders place vertices in Vulkan's clip space, which
+spans the view.
+
+An error while rendering ends the renderer, since a failed frame can leave meshes half copied to
+the GPU.
 
 ## Threads
 
@@ -309,7 +320,7 @@ works on up to two frames at once.
 | ECS | Our own; see [ECS](#ecs) |
 | Logs and profiling | `tracing` for logs; Tracy for CPU zones and GPU timestamps |
 | Agent access | MCP and a command-line tool, both clients of the [tool API](#agents-and-tools) |
-| Shaders | Slang, compiled to SPIR-V by the Vulkan SDK's `slangc` rather than linked in |
+| Shaders | Slang, compiled to SPIR-V by the Vulkan SDK's `slangc` rather than linked in: the engine's own as it builds, games' as they're added |
 | Assets | glTF 2.0 in; meshoptimizer for meshes and meshlets; BC-compressed textures in KTX2 |
 
 Areas not listed here are undecided.

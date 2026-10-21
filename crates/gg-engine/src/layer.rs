@@ -1,11 +1,13 @@
 //! The layer stack: how an app's code, and the engine's tools, plug into the main loop.
 
 use std::ops::ControlFlow;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytemuck::NoUninit;
 use gg_core::Result;
-use gg_renderer::{Mesh, Meshes, RenderData, Vertex, Viewport};
+use gg_renderer::{Draw, Mesh, Meshes, RenderData, Shader, Shaders, Viewport};
 
 use crate::{Event, Input, Ui};
 
@@ -38,8 +40,9 @@ pub struct Context {
     input: Input,
     clear_color: [f32; 4],
     meshes: Meshes,
-    /// The meshes to draw this frame, in order.
-    draws: Vec<Mesh>,
+    shaders: Shaders,
+    /// What to draw this frame, in order.
+    draws: Vec<Draw>,
 }
 
 impl Context {
@@ -49,6 +52,7 @@ impl Context {
             input: Input::default(),
             clear_color: [0.02, 0.02, 0.02, 1.0],
             meshes: Meshes::default(),
+            shaders: Shaders::default(),
             draws: Vec::new(),
         }
     }
@@ -73,21 +77,43 @@ impl Context {
         self.clear_color = color;
     }
 
+    /// Compiles the Slang shader at `path` for layers to draw meshes of vertex type `V` with from
+    /// then on. `name` names it in errors and GPU captures. The shader keeps to the contract that
+    /// [`gg_renderer::Shaders::add`] describes: entry points `vertex_main` and `fragment_main`,
+    /// and push constants that hold the address of the vertices, which it reads as `V` is laid
+    /// out.
+    ///
+    /// Fails with `renderer.bad_shader` and slangc's diagnostics if it doesn't compile, and with
+    /// `renderer.no_slangc` if slangc can't be run.
+    pub fn add_shader<V: NoUninit>(
+        &mut self,
+        name: &str,
+        path: impl AsRef<Path>,
+    ) -> Result<Shader<V>> {
+        self.shaders.add(name, path.as_ref())
+    }
+
     /// Adds a mesh for layers to draw from then on: triangles, three of `indices` each, which
-    /// index `vertices`. `name` names it in errors and GPU captures. The GPU has it from the next
-    /// frame that renders.
+    /// index `vertices`. A vertex is any `#[repr(C)]` type without padding, which derives
+    /// bytemuck's `NoUninit`. `name` names the mesh in errors and GPU captures. The GPU has it
+    /// from the next frame that renders.
     ///
     /// Fails with `renderer.bad_mesh` if it has no triangles, indices left over from whole
     /// triangles, or an index past its vertices.
-    pub fn add_mesh(&mut self, name: &str, vertices: &[Vertex], indices: &[u32]) -> Result<Mesh> {
+    pub fn add_mesh<V: NoUninit>(
+        &mut self,
+        name: &str,
+        vertices: &[V],
+        indices: &[u32],
+    ) -> Result<Mesh<V>> {
         self.meshes.add(name, vertices, indices)
     }
 
-    /// Draws `mesh` this frame, over the meshes drawn before it, in the game's view: the main
-    /// window's central area, which the panels dock around. Until there are cameras, its
-    /// positions are in clip space, which spans the view.
-    pub fn draw(&mut self, mesh: Mesh) {
-        self.draws.push(mesh);
+    /// Draws `mesh` with `shader` this frame, over the meshes drawn before it, in the game's
+    /// view: the main window's central area, which the panels dock around. Until there are
+    /// cameras, the shader places it in clip space, which spans the view.
+    pub fn draw<V>(&mut self, mesh: Mesh<V>, shader: Shader<V>) {
+        self.draws.push(Draw::new(mesh, shader));
     }
 
     /// The frame's render data, with the game's view at `viewport`.
@@ -96,6 +122,7 @@ impl Context {
             clear_color: self.clear_color,
             viewport,
             meshes: &mut self.meshes,
+            shaders: &mut self.shaders,
             draws: &self.draws,
         }
     }

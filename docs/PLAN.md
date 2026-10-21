@@ -28,6 +28,11 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   central area; their vertices and indices live in GPU memory, copied there by the next frame
   after they're added, and a Slang shader reads the vertices through their address. The sandbox
   draws a triangle in red, green and blue, and a GPU test checks one against a reference image.
+- **Shaders and vertex types** (2026-10-21): layers bring their own Slang shaders, which the
+  engine compiles with slangc as they're added, and meshes of their own `#[repr(C)]` vertex
+  types; a shader is added for a vertex type, and each draw pairs a mesh with a shader for its
+  own. The sandbox draws a flat blue square behind its triangle, with two shaders and two vertex
+  types, and a GPU test checks the pair against a reference image.
 
 ## Now: Phase 3, runtime core
 
@@ -111,8 +116,13 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Composed text from an input method (winit's `Ime` events), for languages typed through one | A game takes text input, such as chat |
 | Steady-state frames that draw UI allocate: in egui's layout and tessellation, and in the dock's own bookkeeping, which copies each frame's panel and menu names and torn-off windows' titles, and makes its arrangement and its list of groups left to draw anew | Phase 4, with the allocation check; the overlay is for development |
 | Keeping within the GPU's memory budget (`VK_EXT_memory_budget` through VMA) | Phase 7, with streaming |
-| Removing meshes; a mesh lasts until the app ends | Something adds and removes meshes as it runs, such as asset hot reload in Phase 4 |
-| A camera and transforms: meshes are given in clip space, so they stretch with the game's view | Phase 4, which draws moving entities |
+| Removing meshes and shaders; each lasts until the app ends | Something adds and removes them as it runs, such as asset hot reload in Phase 4 |
+| A camera, transforms and other per-draw data: shaders get only the vertices' address, so meshes are given in clip space and stretch with the game's view | Phase 4, which draws moving entities |
+| Checking a game's shader against the contract on `Shaders::add` through Slang reflection: its push constants, its resources, and the size of its vertex struct against its vertex type's; until then it's trusted, and validation checks it in debug builds | Phase 4, with Slang reflection |
+| Games' shaders compile with slangc as they're added, so running a game needs the Vulkan SDK | Phase 7, which cooks shaders |
+| Shader paths are as the game gives them; the sandbox gives its source's | Phase 4, with assets |
+| `Layer::attach` can't fail, so a layer whose shader doesn't compile panics, as the sandbox does | A game loads assets as it starts |
+| 8- and 16-bit vertex fields, whose features Vulkan 1.4 guarantees but the device doesn't enable | A mesh packs its vertices, as Phase 7's cooker will |
 | A swapchain without an sRGB format falls back to the first one offered, where colors come out too dark | A device offers no sRGB swapchain format |
 | Splits in a torn-off window, which holds one tab group | A tool wants panels side by side outside the main window |
 | Closing a panel from its tab; a panel shows while its layer shows it | Panels the user opens and closes, such as the editor's |
