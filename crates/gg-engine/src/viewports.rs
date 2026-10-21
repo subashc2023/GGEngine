@@ -23,6 +23,8 @@ use winit::event_loop::ActiveEventLoop;
 use winit::raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
 use winit::window::{Window, WindowAttributes, WindowId};
 
+use crate::chrome::Chrome;
+
 scoped_tls::scoped_thread_local! {
     /// The event loop while a frame runs, which egui's callback opens windows with.
     static EVENT_LOOP: ActiveEventLoop
@@ -49,6 +51,8 @@ struct Shared {
     passes: Vec<Pass>,
     /// Whether the warning about deferred viewports was logged.
     warned: bool,
+    /// Who draws the windows' frames.
+    chrome: Chrome,
 }
 
 struct Child {
@@ -90,12 +94,14 @@ impl Drawn {
 }
 
 impl Viewports {
-    /// Lets egui open windows of their own, which `main` owns. On Wayland, where windows can't
-    /// be placed, egui keeps its viewports inside the main window instead.
+    /// Lets egui open windows of their own, which `main` owns, framed as `chrome` says. On
+    /// Wayland, where windows can't be placed, egui keeps its viewports inside the main window
+    /// instead.
     pub(crate) fn new(
         egui: &egui::Context,
         event_loop: &ActiveEventLoop,
         main: Arc<Window>,
+        chrome: Chrome,
     ) -> Self {
         let mut main_info = ViewportInfo::default();
         egui_winit::update_viewport_info(&mut main_info, egui, &main, true);
@@ -105,6 +111,7 @@ impl Viewports {
             children: Vec::new(),
             passes: Vec::new(),
             warned: false,
+            chrome,
         }));
         let display = event_loop.display_handle().map(|display| display.as_raw());
         egui.set_embed_viewports(matches!(display, Ok(RawDisplayHandle::Wayland(_))));
@@ -260,8 +267,9 @@ fn run(shared: &RefCell<Shared>, egui: &egui::Context, viewport: ImmediateViewpo
         let mut shared = shared.borrow_mut();
         let shared = &mut *shared;
         if !shared.children.iter().any(|child| child.id == ids.this) {
-            let opened = EVENT_LOOP
-                .with(|event_loop| Child::open(egui, event_loop, &shared.main, ids, &builder));
+            let opened = EVENT_LOOP.with(|event_loop| {
+                Child::open(egui, event_loop, &shared.main, shared.chrome, ids, &builder)
+            });
             match opened {
                 Ok(child) => shared.children.push(child),
                 Err(error) => embed(egui, &error),
@@ -324,6 +332,7 @@ impl Child {
         egui: &egui::Context,
         event_loop: &ActiveEventLoop,
         main: &Window,
+        chrome: Chrome,
         ids: ViewportIdPair,
         builder: &ViewportBuilder,
     ) -> Result<Self> {
@@ -339,6 +348,7 @@ impl Child {
             })?;
         // What egui sets once the window is on a monitor, at that monitor's scale.
         egui_winit::apply_viewport_builder_to_window(egui, &window, builder);
+        os_frame(chrome, &window)?;
         let mut info = ViewportInfo {
             parent: Some(ids.parent),
             ..ViewportInfo::default()
@@ -400,6 +410,20 @@ fn owned_by(attributes: WindowAttributes, main: &Window) -> WindowAttributes {
 #[cfg(not(target_os = "windows"))]
 fn owned_by(attributes: WindowAttributes, _: &Window) -> WindowAttributes {
     attributes
+}
+
+/// On Windows, a window whose title bar the UI draws gets the rest of its frame from the OS.
+#[cfg(target_os = "windows")]
+fn os_frame(chrome: Chrome, window: &Window) -> Result<()> {
+    if chrome == Chrome::InWindowsFrame {
+        crate::windows_frame::Frame::install(window)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn os_frame(_: Chrome, _: &Window) -> Result<()> {
+    Ok(())
 }
 
 /// Keeps egui's viewports inside the main window from the next frame, after a window couldn't

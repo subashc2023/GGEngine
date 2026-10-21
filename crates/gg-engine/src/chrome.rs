@@ -1,9 +1,10 @@
 //! The frame around the app's windows: who draws it, and what the UI draws when it's the UI's:
 //! the main window's title bar, which holds the menus, the buttons that minimize, maximize and
-//! close a window, and the edges that resize one.
+//! close a window, and the edges that resize one. On Windows the rest of the frame stays the
+//! OS's own, which `windows_frame` gives back.
 
 use egui::{
-    Align, Area, Color32, Context, CursorIcon, Frame, Id, Layout, MenuBar, Order, Panel,
+    Align, Area, Color32, Context, CursorIcon, Frame, Id, LayerId, Layout, MenuBar, Order, Panel,
     PointerButton, Pos2, Rect, ResizeDirection, Response, Sense, Shape, Stroke, StrokeKind,
     TextStyle, TextWrapMode, UiBuilder, Vec2, ViewportCommand, WidgetText, pos2, vec2,
 };
@@ -33,9 +34,13 @@ const CLOSE_PRESSED: Color32 = Color32::from_rgb(166, 36, 24);
 pub(crate) enum Chrome {
     /// The OS. The menus get a bar of their own, below its title bar.
     Os,
-    /// The UI: the title bar, with the menus in it, its buttons and the edges. On Windows, X11
-    /// and Wayland.
+    /// The UI: the title bar, with the menus in it, its buttons and the edges. On X11 and
+    /// Wayland.
     Drawn,
+    /// The UI's title bar, with its buttons, in Windows' own frame: the OS's borders resize the
+    /// window, the bar's free space moves it as the OS's own title bar does, and the OS shows
+    /// Snap Layouts over the maximize button. On Windows.
+    InWindowsFrame,
     /// The UI, around the OS's buttons, the traffic lights, which keeps the edges too. On macOS.
     AroundTrafficLights,
 }
@@ -48,28 +53,27 @@ impl Chrome {
             Self::Os
         } else if cfg!(target_os = "macos") {
             Self::AroundTrafficLights
+        } else if cfg!(target_os = "windows") {
+            Self::InWindowsFrame
         } else {
             Self::Drawn
         }
     }
+
+    /// Whether the UI draws the title bar's buttons.
+    fn draws_buttons(self) -> bool {
+        matches!(self, Self::Drawn | Self::InWindowsFrame)
+    }
 }
 
-/// The main window's `attributes` with the frame `chrome` says.
+/// The main window's `attributes` with the frame `chrome` says. On Windows, the OS's frame comes
+/// back once the window is open, around the UI's title bar.
 pub(crate) fn attributes(chrome: Chrome, attributes: WindowAttributes) -> WindowAttributes {
     if chrome == Chrome::Os {
         return attributes;
     }
     // Room for a few menus, the title and the buttons.
     frameless(attributes.with_min_inner_size(LogicalSize::new(480.0, 270.0)))
-}
-
-#[cfg(target_os = "windows")]
-fn frameless(attributes: WindowAttributes) -> WindowAttributes {
-    use winit::platform::windows::WindowAttributesExtWindows;
-    // DWM keeps the window's shadow, at the cost of a line a pixel high along its top.
-    attributes
-        .with_decorations(false)
-        .with_undecorated_shadow(true)
 }
 
 #[cfg(target_os = "macos")]
@@ -82,7 +86,7 @@ fn frameless(attributes: WindowAttributes) -> WindowAttributes {
         .with_title_hidden(true)
 }
 
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+#[cfg(not(target_os = "macos"))]
 fn frameless(attributes: WindowAttributes) -> WindowAttributes {
     attributes.with_decorations(false)
 }
@@ -100,6 +104,20 @@ pub(crate) struct TitleBar {
     had_menus: bool,
     /// Where the bar was right-clicked, in points, for the OS's window menu.
     window_menu: Option<Pos2>,
+    /// The parts of the bar that were the OS's last pass, and how the OS says the maximize
+    /// button looks.
+    caption: Option<Caption>,
+    maximize: Look,
+}
+
+/// The parts of the main window's title bar that are the OS's under
+/// [`Chrome::InWindowsFrame`], in the window's points: the free space, which moves the window as
+/// the OS's own title bar does, and the maximize button, over which the OS shows Snap Layouts.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Caption {
+    /// Left of the menus, and right of them.
+    pub(crate) drag: [Rect; 2],
+    pub(crate) maximize: Rect,
 }
 
 impl TitleBar {
@@ -111,6 +129,8 @@ impl TitleBar {
             shown: Vec::new(),
             had_menus: false,
             window_menu: None,
+            caption: None,
+            maximize: Look::Idle,
         }
     }
 
@@ -174,6 +194,7 @@ impl TitleBar {
     /// Ends the pass: draws the title and, where the UI draws the frame, the buttons and the
     /// window's edges, and has the bar's free space move the window.
     pub(crate) fn end(&mut self) {
+        self.caption = None;
         // Dropped within the pass, since dropping a Ui records its rect in egui.
         let Some(ui) = self.menus.take() else {
             return;
@@ -192,7 +213,7 @@ impl TitleBar {
             )
         });
         let bar = self.bar;
-        let buttons = if self.chrome == Chrome::Drawn {
+        let buttons = if self.chrome.draws_buttons() {
             3.0 * BUTTON
         } else {
             0.0
@@ -224,16 +245,23 @@ impl TitleBar {
         let at = pos2(x - half, bar.center().y - galley.size().y / 2.0);
         ui.painter().galley(at, galley, color);
 
-        // The free space, and the bar left of the menus, where the traffic lights are on macOS,
+        // The bar left of the menus, where the traffic lights are on macOS, and the free space
         // stand for the OS's title bar. Neither covers a menu, which would then take the press
-        // and the free space the drag.
-        let left = bar.with_max_x(menus.min.x);
+        // and the free space the drag. In Windows' frame they're the OS's own title bar, with the
+        // maximize button, and egui sees the pointer over them only while it takes the whole bar.
+        let caption = Caption {
+            drag: [bar.with_max_x(menus.min.x), free],
+            maximize: Rect::from_min_size(
+                pos2(bar.max.x - 2.0 * BUTTON, bar.min.y),
+                vec2(BUTTON, bar.height()),
+            ),
+        };
         let held = ctx.input(|i| {
             let pointer = &i.pointer;
             let moved = pointer.latest_pos()? - pointer.press_origin()?;
             pointer.primary_down().then_some(moved)
         });
-        for (i, rect) in [left, free].into_iter().enumerate() {
+        for (i, rect) in caption.drag.into_iter().enumerate() {
             let id = Id::unique(("gg title bar free space", i));
             let response = ui.interact(rect, id, Sense::click_and_drag());
             // egui starts a drag once the pointer has moved a few points or the button has been
@@ -256,29 +284,55 @@ impl TitleBar {
             }
         }
 
-        if self.chrome == Chrome::Drawn {
+        if self.chrome.draws_buttons() {
             let maximize = if maximized {
                 Icon::Restore
             } else {
                 Icon::Maximize
             };
-            let commands = [
-                (Icon::Minimize, ViewportCommand::Minimized(true)),
-                (maximize, ViewportCommand::Maximized(!maximized)),
-                (Icon::Close, ViewportCommand::Close),
+            // How the OS says the maximize button looks, while egui sees no pointer over it.
+            let buttons = [
+                (Icon::Minimize, ViewportCommand::Minimized(true), Look::Idle),
+                (
+                    maximize,
+                    ViewportCommand::Maximized(!maximized),
+                    self.maximize,
+                ),
+                (Icon::Close, ViewportCommand::Close, Look::Idle),
             ];
-            let mut rect = Rect::from_min_size(
-                pos2(bar.max.x - 3.0 * BUTTON, bar.min.y),
-                vec2(BUTTON, bar.height()),
-            );
-            for (icon, command) in commands {
-                if button(&ui, rect, icon).clicked() {
+            for (i, (icon, command, os)) in buttons.into_iter().enumerate() {
+                let rect = (caption.maximize).translate(vec2((i as f32 - 1.0) * BUTTON, 0.0));
+                if button(&ui, rect, icon, os).clicked() {
                     ctx.send_viewport_cmd(command);
                 }
-                rect = rect.translate(vec2(BUTTON, 0.0));
             }
+        }
+        if self.chrome == Chrome::Drawn {
             edges(&ctx);
         }
+        if self.chrome == Chrome::InWindowsFrame && !covered(&ctx, bar) {
+            self.caption = Some(caption);
+        }
+    }
+
+    /// The parts of the bar that were the OS's last pass: none unless the frame is Windows'
+    /// own, nor while egui shows something over the bar.
+    #[cfg_attr(
+        not(target_os = "windows"),
+        allow(dead_code, reason = "only Windows' frame asks")
+    )]
+    pub(crate) fn caption(&self) -> Option<Caption> {
+        self.caption
+    }
+
+    /// How the maximize button looks from the next pass, as the OS says where it hit-tests the
+    /// button.
+    #[cfg_attr(
+        not(target_os = "windows"),
+        allow(dead_code, reason = "only Windows' frame says")
+    )]
+    pub(crate) fn set_maximize(&mut self, look: Look) {
+        self.maximize = look;
     }
 
     /// Where the bar was right-clicked since this was last asked, in the main window's points,
@@ -286,6 +340,20 @@ impl TitleBar {
     pub(crate) fn take_window_menu(&mut self) -> Option<Pos2> {
         self.window_menu.take()
     }
+}
+
+/// Whether egui shows something over `bar`, such as a window, or has a menu open, which a click
+/// on the bar should close: then the UI takes the whole bar, leaving none of it to the OS.
+fn covered(ctx: &Context, bar: Rect) -> bool {
+    ctx.any_popup_open()
+        || ctx.memory(|memory| {
+            let over = |layer: LayerId| {
+                matches!(layer.order, Order::Middle | Order::Foreground)
+                    && (memory.area_rect(layer.id))
+                        .is_some_and(|rect| rect.intersect(bar).is_positive())
+            };
+            memory.areas().visible_layer_ids().into_iter().any(over)
+        })
 }
 
 /// Has the edges of the window this pass draws resize it: Areas above everything else along
@@ -374,20 +442,42 @@ pub(crate) enum Icon {
     Close,
 }
 
+/// How a title bar's button looks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Look {
+    #[default]
+    Idle,
+    /// Under the pointer.
+    Hovered,
+    Pressed,
+}
+
 /// A title bar's button over `rect`, drawn with its icon, which lights up under the pointer: red
-/// for Close, as on Windows.
-pub(crate) fn button(ui: &egui::Ui, rect: Rect, icon: Icon) -> Response {
+/// for Close, as on Windows. Where the OS hit-tests the button instead, egui sees no pointer over
+/// it, and `os` is how the OS says it looks.
+pub(crate) fn button(ui: &egui::Ui, rect: Rect, icon: Icon, os: Look) -> Response {
     let response = ui.interact(
         rect,
         Id::unique(("gg title bar button", icon)),
         Sense::click(),
     );
-    let visuals = ui.style().interact(&response);
-    let (fill, color) = match icon {
-        Icon::Close if response.is_pointer_button_down_on() => (CLOSE_PRESSED, Color32::WHITE),
-        Icon::Close if response.hovered() => (CLOSE, Color32::WHITE),
-        _ if response.hovered() => (visuals.weak_bg_fill, visuals.fg_stroke.color),
-        _ => (Color32::TRANSPARENT, visuals.fg_stroke.color),
+    let look = if response.is_pointer_button_down_on() {
+        Look::Pressed
+    } else if response.hovered() {
+        Look::Hovered
+    } else {
+        Look::Idle
+    };
+    let widgets = &ui.visuals().widgets;
+    let (fill, color) = match (icon, look.max(os)) {
+        (Icon::Close, Look::Pressed) => (CLOSE_PRESSED, Color32::WHITE),
+        (Icon::Close, Look::Hovered) => (CLOSE, Color32::WHITE),
+        (_, Look::Pressed) => (widgets.active.weak_bg_fill, widgets.active.fg_stroke.color),
+        (_, Look::Hovered) => (
+            widgets.hovered.weak_bg_fill,
+            widgets.hovered.fg_stroke.color,
+        ),
+        (_, Look::Idle) => (Color32::TRANSPARENT, widgets.inactive.fg_stroke.color),
     };
     let painter = ui.painter();
     painter.rect_filled(rect, 0.0, fill);
@@ -427,6 +517,7 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
+    use egui::epaint::ClippedShape;
     use egui::{Event, Key, Modifiers, RawInput, ViewportId, ViewportInfo};
 
     use super::*;
@@ -439,13 +530,17 @@ mod tests {
         bar: TitleBar,
         /// The menus layers add each frame.
         menus: &'static [&'static str],
+        /// Where egui shows an area of a layer's each frame, if anywhere.
+        area: Option<Rect>,
         frame: u32,
         pointer: Pos2,
         /// What egui knows of the window.
         info: ViewportInfo,
-        /// Where the bar leaves the rest of the window, and the menus open, as of the last pass.
+        /// Where the bar leaves the rest of the window, the menus open, and what egui drew, as of
+        /// the last pass.
         top: f32,
         open: Rc<RefCell<Vec<&'static str>>>,
+        shapes: Vec<ClippedShape>,
     }
 
     impl Run {
@@ -459,11 +554,13 @@ mod tests {
                 ctx: crate::egui_context(),
                 bar: TitleBar::new(chrome),
                 menus,
+                area: None,
                 frame: 0,
                 pointer: Pos2::ZERO,
                 info: ViewportInfo::default(),
                 top: 0.0,
                 open: Rc::default(),
+                shapes: Vec::new(),
             };
             run.frames(2);
             run
@@ -481,6 +578,7 @@ mod tests {
             input.viewports.insert(ViewportId::ROOT, self.info.clone());
             self.frame += 1;
             let (bar, menus, top, open) = (&mut self.bar, self.menus, &mut self.top, &self.open);
+            let area = self.area;
             let mut output = self.ctx.run_ui(input, |root| {
                 open.borrow_mut().clear();
                 bar.begin(root);
@@ -491,9 +589,15 @@ mod tests {
                         ui.label(name);
                     });
                 }
+                if let Some(rect) = area {
+                    Area::new(Id::unique("a layer's area"))
+                        .fixed_pos(rect.min)
+                        .show(root.ctx(), |ui| ui.set_min_size(rect.size()));
+                }
                 bar.end();
             });
             output.textures_delta.clear();
+            self.shapes = output.shapes;
             let commands = (output.viewport_output.remove(&ViewportId::ROOT))
                 .map(|output| output.commands)
                 .unwrap_or_default();
@@ -567,6 +671,7 @@ mod tests {
     #[test]
     fn the_bar_takes_the_top_of_the_window() {
         assert_eq!(Run::new(Chrome::Drawn).top, BAR);
+        assert_eq!(Run::new(Chrome::InWindowsFrame).top, BAR);
         assert_eq!(
             Run::new(Chrome::AroundTrafficLights).top,
             BAR_AROUND_TRAFFIC_LIGHTS
@@ -627,17 +732,84 @@ mod tests {
 
     #[test]
     fn the_buttons_minimize_maximize_or_restore_and_close_the_window() {
-        let mut run = Run::new(Chrome::Drawn);
         let at = |i: f32| pos2(SCREEN.x - (3.0 - i) * BUTTON + BUTTON / 2.0, BAR / 2.0);
-        assert_eq!(run.click(at(0.0)), [ViewportCommand::Minimized(true)]);
-        assert_eq!(run.click(at(1.0)), [ViewportCommand::Maximized(true)]);
-        assert_eq!(run.click(at(2.0)), [ViewportCommand::Close]);
-        run.info.maximized = Some(true);
-        run.frames(30);
-        assert_eq!(run.click(at(1.0)), [ViewportCommand::Maximized(false)]);
+        for chrome in [Chrome::Drawn, Chrome::InWindowsFrame] {
+            let mut run = Run::new(chrome);
+            assert_eq!(run.click(at(0.0)), [ViewportCommand::Minimized(true)]);
+            assert_eq!(run.click(at(1.0)), [ViewportCommand::Maximized(true)]);
+            assert_eq!(run.click(at(2.0)), [ViewportCommand::Close]);
+            run.info.maximized = Some(true);
+            run.frames(30);
+            assert_eq!(run.click(at(1.0)), [ViewportCommand::Maximized(false)]);
+        }
         // Around the traffic lights, the OS has the buttons.
         let mut run = Run::new(Chrome::AroundTrafficLights);
         assert_eq!(run.click(at(2.0)), []);
+    }
+
+    #[test]
+    fn in_windows_frame_the_os_has_the_free_space_and_the_maximize_button_unless_egui_covers_the_bar()
+     {
+        let mut run = Run::new(Chrome::InWindowsFrame);
+        let caption = run.bar.caption().expect("the OS has part of the bar");
+        let [left, free] = caption.drag;
+        let bar = run.bar.bar;
+        assert_eq!(left, bar.with_max_x(INSET));
+        // From the menus to the buttons.
+        assert!(free.min.x > FILE.x, "{free:?}");
+        assert_eq!(free.max, pos2(SCREEN.x - 3.0 * BUTTON, bar.max.y));
+        let maximize = bar
+            .with_min_x(SCREEN.x - 2.0 * BUTTON)
+            .with_max_x(SCREEN.x - BUTTON);
+        assert_eq!(caption.maximize, maximize);
+        // A click on the bar closes an open menu, so egui takes the whole bar while one is.
+        run.click(FILE);
+        assert_eq!(run.open(), ["File"]);
+        assert_eq!(run.bar.caption(), None);
+        run.click(FILE);
+        assert_eq!(run.open(), Vec::<&str>::new());
+        // egui counts the menu as shown for a frame after it closes.
+        run.frames(1);
+        assert_eq!(run.bar.caption(), Some(caption));
+        // Or while it shows something over the bar.
+        run.area = Some(Rect::from_min_size(pos2(300.0, 20.0), vec2(100.0, 100.0)));
+        run.frames(2);
+        assert_eq!(run.bar.caption(), None);
+        run.area = Some(Rect::from_min_size(pos2(300.0, BAR), vec2(100.0, 100.0)));
+        run.frames(2);
+        assert_eq!(run.bar.caption(), Some(caption));
+        // Where the UI draws the whole frame, none of the bar is the OS's.
+        assert_eq!(Run::new(Chrome::Drawn).bar.caption(), None);
+    }
+
+    #[test]
+    fn the_maximize_button_looks_as_the_os_says() {
+        let mut run = Run::new(Chrome::InWindowsFrame);
+        let bar = run.bar.bar;
+        let maximize = bar
+            .with_min_x(SCREEN.x - 2.0 * BUTTON)
+            .with_max_x(SCREEN.x - BUTTON);
+        let fill = |run: &Run| {
+            run.shapes.iter().find_map(|clipped| match &clipped.shape {
+                Shape::Rect(shape)
+                    if shape.rect == maximize && shape.fill != Color32::TRANSPARENT =>
+                {
+                    Some(shape.fill)
+                }
+                _ => None,
+            })
+        };
+        let widgets = run.ctx.global_style().visuals.widgets.clone();
+        assert_eq!(fill(&run), None);
+        run.bar.set_maximize(Look::Hovered);
+        run.frames(1);
+        assert_eq!(fill(&run), Some(widgets.hovered.weak_bg_fill));
+        run.bar.set_maximize(Look::Pressed);
+        run.frames(1);
+        assert_eq!(fill(&run), Some(widgets.active.weak_bg_fill));
+        run.bar.set_maximize(Look::Idle);
+        run.frames(1);
+        assert_eq!(fill(&run), None);
     }
 
     #[test]
@@ -697,8 +869,10 @@ mod tests {
         run.frames(2);
         assert_eq!(run.click(pos2(2.0, 300.0)), []);
         assert!(!run.ctx.is_pointer_over_egui());
-        // Around the traffic lights, the OS has the edges.
-        let mut run = Run::new(Chrome::AroundTrafficLights);
-        assert_eq!(run.click(pos2(2.0, 300.0)), []);
+        // Around the traffic lights, and in Windows' frame, the OS has the edges.
+        for chrome in [Chrome::AroundTrafficLights, Chrome::InWindowsFrame] {
+            let mut run = Run::new(chrome);
+            assert_eq!(run.click(pos2(2.0, 300.0)), [], "{chrome:?}");
+        }
     }
 }

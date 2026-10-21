@@ -242,11 +242,14 @@ their own below its title bar, unless the app calls `App::custom_title_bar`, as 
 room: then the UI draws them. The main window's title bar holds the menus, the title and the
 buttons that minimize, maximize and close it, and a torn-off window's tab bar is its title bar,
 with a close button. Dragging the main window's title bar has the OS move it, so snapping works
-as usual, while a torn-off window moves with the dock's drag, so that it can dock; the edges have
-the OS resize a window. On macOS the OS keeps its own buttons and the edges. Games keep the OS's
-frame. A menu quits by sending egui's `Close` to the main window,
-which, like the OS's close button, gives the layers `CloseRequested` first; egui's own Ctrl or
-Cmd+Q is off, since a game may use those keys.
+as usual, while a torn-off window moves with the dock's drag, so that it can dock. On Windows the
+rest of the frame stays the OS's, through a window procedure in front of winit's: the border and
+shadow, the bands just outside a window that resize it, and the main window's free space in its
+title bar and its maximize button, which Windows hit-tests as its own, so that Snap Layouts shows
+over the button. Elsewhere the UI's edges have the OS resize a window, and on macOS the OS keeps
+its own buttons and the edges. Games keep the OS's frame. A menu quits by sending egui's `Close`
+to the main window, which, like the OS's close button, gives the layers `CloseRequested` first;
+egui's own Ctrl or Cmd+Q is off, since a game may use those keys.
 
 Layers can also poll input, through their `Context` rather than a global: which keys and mouse
 buttons are held, and where the cursor is. That state follows the events the stack is sent, so

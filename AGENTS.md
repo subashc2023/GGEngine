@@ -74,8 +74,9 @@ lavapipe; Windows' and macOS's runners have no GPU, so there `GG_SKIP_GPU_TESTS`
   SAFETY-comment lint reaches the crate.
 - Dependencies, internal and third-party, are declared once in the root
   `[workspace.dependencies]`; members write `name.workspace = true`.
-- `unsafe_code` is denied. A crate that needs unsafe opts in at its root with
-  `#![allow(unsafe_code)]` and a comment giving the reason; only `gg-gpu` does today.
+- `unsafe_code` is denied. A crate that needs unsafe opts in at its root with a comment giving
+  the reason: the whole crate with `#![allow(unsafe_code)]`, as `gg-gpu` does, or one module
+  with `#[allow(unsafe_code)]` on its `mod` line, as `gg-engine` does for Windows' window frame.
   Integration tests (`tests/*.rs`) are separate crates and opt in on their own. Every unsafe
   block has a `// SAFETY:` comment (`clippy::undocumented_unsafe_blocks`), and unsafe stays
   behind safe APIs: code that calls `gg-gpu` never needs it.

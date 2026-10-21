@@ -11,6 +11,11 @@ mod input;
 mod layer;
 mod viewports;
 mod window;
+// Windows' own frame around a window whose title bar the UI draws needs a window procedure in
+// front of winit's, which only unsafe code installs: this module alone may use it.
+#[cfg(target_os = "windows")]
+#[allow(unsafe_code)]
+mod windows_frame;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

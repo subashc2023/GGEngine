@@ -786,6 +786,7 @@ dependencies = [
  "scoped-tls",
  "serde",
  "tracing",
+ "windows-sys 0.52.0",
  "winit",
 ]
 

@@ -14,7 +14,9 @@ use tracing::warn;
 
 use super::file;
 use super::tree::{Arrangement, Axis, CENTRAL, Layout, NodeId, Place, Side, Zone};
-use crate::chrome::{self, Chrome, Icon, TitleBar};
+#[cfg(target_os = "windows")]
+use crate::chrome::Caption;
+use crate::chrome::{self, Chrome, Icon, Look, TitleBar};
 
 /// The size of a new floating group, in points.
 const NEW_SIZE: Vec2 = vec2(320.0, 240.0);
@@ -184,6 +186,18 @@ impl Dock {
     /// points, for the OS's window menu.
     pub(crate) fn take_window_menu(&mut self) -> Option<Pos2> {
         self.bar.take_window_menu()
+    }
+
+    /// The parts of the title bar that were the OS's last frame, in the main window's points.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn caption(&self) -> Option<Caption> {
+        self.bar.caption()
+    }
+
+    /// How the title bar's maximize button looks from the next frame, as the OS says.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn set_maximize(&mut self, look: Look) {
+        self.bar.set_maximize(look);
     }
 
     /// Starts a frame: takes the title bar off the top of `root`, then the strips along the main
@@ -415,7 +429,7 @@ impl Dock {
             .with_minimize_button(false);
         builder = match self.chrome {
             Chrome::Os => builder,
-            Chrome::Drawn => builder.with_decorations(false),
+            Chrome::Drawn | Chrome::InWindowsFrame => builder.with_decorations(false),
             // The OS keeps the edges.
             Chrome::AroundTrafficLights => builder
                 .with_fullsize_content_view(true)
@@ -492,7 +506,7 @@ impl Dock {
             .rect_filled(bar, 0.0, ui.visuals().faint_bg_color);
         let bar = if close {
             let (bar, button) = bar.split_left_right_at_x(bar.max.x - chrome::BUTTON);
-            if chrome::button(ui, button, Icon::Close).clicked() {
+            if chrome::button(ui, button, Icon::Close, Look::Idle).clicked() {
                 // The dock floats the group over the main window once its window closes.
                 ui.ctx().send_viewport_cmd(ViewportCommand::Close);
             }

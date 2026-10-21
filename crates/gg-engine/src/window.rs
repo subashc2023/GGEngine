@@ -20,6 +20,8 @@ use crate::args::Args;
 use crate::chrome::{self, Chrome};
 use crate::dock::{self, Dock};
 use crate::viewports::{self, Viewports, WindowInput};
+#[cfg(target_os = "windows")]
+use crate::windows_frame::Frame;
 use crate::{
     App, Clock, Context, Event, Ran, egui_context, event, render_frame, run_frame, settings,
 };
@@ -42,6 +44,8 @@ pub(crate) fn run(app: &mut App, args: &Args) -> Result<Ran> {
         args,
         chrome,
         window: None,
+        #[cfg(target_os = "windows")]
+        frame: None,
         renderer: None,
         egui: egui_context(),
         egui_winit: None,
@@ -74,6 +78,9 @@ struct Handler<'a> {
     /// Who draws the windows' frames.
     chrome: Chrome,
     window: Option<Arc<Window>>,
+    /// Windows' own frame around the main window, when the UI draws its title bar.
+    #[cfg(target_os = "windows")]
+    frame: Option<Frame>,
     renderer: Option<Renderer>,
     egui: egui::Context,
     /// egui's view of the window, which turns its events into egui's input.
@@ -99,6 +106,10 @@ impl Handler<'_> {
         let window = event_loop.create_window(attributes).map_err(|error| {
             Error::new("engine.window", "can't create the window").with_source(error)
         })?;
+        #[cfg(target_os = "windows")]
+        if self.chrome == Chrome::InWindowsFrame {
+            self.frame = Some(Frame::install(&window)?);
+        }
         let window = Arc::new(window);
         let size = window.inner_size();
         info!(
@@ -111,7 +122,12 @@ impl Handler<'_> {
         let renderer = Renderer::windowed(&settings, window.clone(), size.width, size.height)?;
         self.renderer = Some(renderer);
         self.egui_winit = Some(WindowInput::new(&self.egui, ViewportId::ROOT, &window));
-        self.viewports = Some(Viewports::new(&self.egui, event_loop, window.clone()));
+        self.viewports = Some(Viewports::new(
+            &self.egui,
+            event_loop,
+            window.clone(),
+            self.chrome,
+        ));
         self.cx = Context::new(Some(crate::Window::new(window.clone())));
         self.window = Some(window);
         self.app.stack.attach(&mut self.cx);
@@ -128,6 +144,10 @@ impl Handler<'_> {
             return;
         };
         let input = viewports.input(egui_winit);
+        #[cfg(target_os = "windows")]
+        if let Some(frame) = &self.frame {
+            self.dock.set_maximize(frame.maximize());
+        }
         // egui opens the windows of their own during the main window's pass.
         let mut output = viewports::with_event_loop(event_loop, || {
             run_frame(
@@ -141,9 +161,16 @@ impl Handler<'_> {
         });
         let outputs = mem::take(&mut output.viewport_output);
         let (mut windows, close) = viewports.end_frame(&self.egui, egui_winit, outputs, renderer);
+        let ppp = egui_winit::pixels_per_point(&self.egui, window);
         if let Some(pos) = self.dock.take_window_menu() {
-            let ppp = egui_winit::pixels_per_point(&self.egui, window);
             window.show_window_menu(PhysicalPosition::new(pos.x * ppp, pos.y * ppp));
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(frame) = &self.frame {
+            frame.set_caption(self.dock.caption(), ppp);
+            if let Some(pos) = frame.take_window_menu() {
+                window.show_window_menu(pos);
+            }
         }
         let rendered = render_frame(&self.egui, &self.cx, output, &mut windows, renderer);
         let rendered = rendered.map(|(presented, platform_output)| {
