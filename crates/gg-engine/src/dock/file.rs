@@ -80,11 +80,21 @@ mod tests {
     use super::super::tree::{CENTRAL, Place, Side, Zone};
     use super::*;
 
-    /// A directory of the test's own, emptied, which the test removes when it's done.
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("gg-dock-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        dir
+    /// A directory of the test's own, emptied, and removed as the test ends, failed or not.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("gg-dock-{name}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            Self(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
     }
 
     #[test]
@@ -142,23 +152,22 @@ mod tests {
                 size: [320.5, 240.0],
             },
         );
-        let dir = scratch("round-trip");
-        let file = dir.join("layout.ron");
+        let dir = Scratch::new("round-trip");
+        let file = dir.0.join("layout.ron");
         save(&file, &layout).expect("the layout is saved");
         let mut loaded = load(&file).expect("the layout loads");
         layout.renumber();
         loaded.renumber();
         assert_eq!(loaded, layout);
         assert!(!file.with_extension("ron.new").exists());
-        fs::remove_dir_all(&dir).expect("the directory is removed");
     }
 
     #[test]
     fn a_missing_file_is_the_empty_layout_and_a_broken_one_an_error() {
-        let dir = scratch("broken");
-        assert_eq!(load(&dir.join("layout.ron")).ok(), Some(Layout::new()));
-        fs::create_dir_all(&dir).expect("a directory");
-        let file = dir.join("layout.ron");
+        let dir = Scratch::new("broken");
+        let file = dir.0.join("layout.ron");
+        assert_eq!(load(&file).ok(), Some(Layout::new()));
+        fs::create_dir_all(&dir.0).expect("a directory");
         // Text that isn't RON, and RON that isn't a layout the dock can use.
         for text in [
             "not a layout",
@@ -169,6 +178,5 @@ mod tests {
             assert_eq!(error.code(), "engine.dock_layout");
             assert!(error.to_string().contains("layout.ron"), "{error}");
         }
-        fs::remove_dir_all(&dir).expect("the directory is removed");
     }
 }

@@ -813,7 +813,6 @@ dependencies = [
  "gg-core",
  "gg-gpu",
  "png",
- "tracing",
 ]
 
 [[package]]

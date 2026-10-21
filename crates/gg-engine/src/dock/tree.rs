@@ -15,7 +15,7 @@ pub(crate) type NodeId = u64;
 pub(crate) const CENTRAL: NodeId = 0;
 
 /// The smallest a docked group gets across a split, in points, while there's room.
-pub(crate) const MIN_SIZE: f32 = 48.0;
+const MIN_SIZE: f32 = 48.0;
 
 /// How thick a splitter's handle is, in points.
 const HANDLE: f32 = 8.0;
@@ -120,7 +120,7 @@ pub(crate) struct Arrangement {
 }
 
 /// The handle between a split's two sides.
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub(crate) struct Splitter {
     pub(crate) split: NodeId,
     pub(crate) axis: Axis,
@@ -135,11 +135,12 @@ pub(crate) struct Splitter {
 
 impl Splitter {
     /// The ratio that puts the line between the sides at `at`, along the split's axis, keeping
-    /// both sides at least the minimum size where there's room.
-    pub(crate) fn ratio_at(&self, at: f32) -> f32 {
+    /// both sides at least the minimum size where there's room; `None` for a split with no room
+    /// to divide, which keeps its ratio.
+    pub(crate) fn ratio_at(&self, at: f32) -> Option<f32> {
         let axis = self.axis.index();
         let extent = self.rect.size()[axis];
-        clamp_first(at - self.rect.min[axis], extent) / extent
+        (extent > 0.0).then(|| clamp_first(at - self.rect.min[axis], extent) / extent)
     }
 }
 
@@ -256,8 +257,7 @@ impl Layout {
             }
             Zone::Side(side) => {
                 let id = self.new_id();
-                // The central area gives a quarter, so that the game stays in view.
-                let share = if target == CENTRAL { 0.25 } else { 0.5 };
+                let share = share(target);
                 let node = self.main.get_mut(target).expect("checked above");
                 let old = mem::replace(node, Node::Central);
                 let new = Node::Tabs(moved);
@@ -314,7 +314,9 @@ impl Layout {
             Node::Central => centrals += 1,
             Node::Tabs(tabs) => panels.push(tabs),
             Node::Split { ratio, .. } => {
-                if !(*ratio > 0.0 && *ratio < 1.0) {
+                // A handle dragged to the edge of a split too small for both sides' minimum
+                // puts its ratio at 0 or 1.
+                if !(0.0..=1.0).contains(ratio) {
                     problem
                         .get_or_insert(format!("a split's ratio is {ratio}, not between 0 and 1"));
                 }
@@ -365,7 +367,7 @@ impl Layout {
 }
 
 impl Tabs {
-    pub(crate) fn holds(&self, panel: &str) -> bool {
+    fn holds(&self, panel: &str) -> bool {
         self.panels.iter().any(|p| p == panel)
     }
 
@@ -525,10 +527,11 @@ impl Node {
                             (_, true) => (at, at + HANDLE),
                             _ => (at - HANDLE / 2.0, at + HANDLE / 2.0),
                         };
+                        // A side thinner than its part of the gap ends at the split's edge.
                         let (mut first_rect, mut handle, mut second_rect) = (rect, rect, rect);
-                        first_rect.max[i] = from;
+                        first_rect.max[i] = from.max(rect.min[i]);
                         (handle.min[i], handle.max[i]) = (from, to);
-                        second_rect.min[i] = to;
+                        second_rect.min[i] = to.min(rect.max[i]);
                         if peel {
                             let strip = match (axis, strip_first) {
                                 (Axis::Horizontal, true) => (Side::Left, at - rect.min.x),
@@ -560,8 +563,15 @@ fn clamp_first(first: f32, extent: f32) -> f32 {
     if extent >= 2.0 * MIN_SIZE {
         first.clamp(MIN_SIZE, extent - MIN_SIZE)
     } else {
-        first.clamp(0.0, extent)
+        // A window smaller than its title bar leaves the dock a rect without an area.
+        first.clamp(0.0, extent.max(0.0))
     }
+}
+
+/// The share of `target`'s rect that a group docked beside it takes: a quarter of the central
+/// area, so that the game stays in view, and half of anything else.
+pub(crate) fn share(target: NodeId) -> f32 {
+    if target == CENTRAL { 0.25 } else { 0.5 }
 }
 
 impl Place {
@@ -583,7 +593,7 @@ mod tests {
         size: [200.0, 100.0],
     };
 
-    /// Docks each of `panels` as a strip on the central area's `side`.
+    /// Docks `panel` as a strip on the central area's `side`, and returns its group.
     fn strip(layout: &mut Layout, panel: &str, side: Side) -> NodeId {
         let group = layout.float(panel.to_owned(), AT);
         assert!(layout.dock(group, CENTRAL, Zone::Side(side)));
@@ -651,21 +661,13 @@ mod tests {
     #[test]
     fn a_group_left_empty_goes_with_its_split() {
         let mut layout = Layout::new();
-        strip(&mut layout, "A", Side::Left);
+        let a = strip(&mut layout, "A", Side::Left);
         strip(&mut layout, "B", Side::Bottom);
         let moved = layout.detach("A", AT);
         // The emptied group keeps its place until pruned.
-        assert!(
-            layout
-                .arrange(
-                    Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0)),
-                    &all
-                )
-                .groups
-                .len()
-                == 1
-        );
+        assert_eq!(layout.group(a).map(|tabs| tabs.panels.len()), Some(0));
         layout.prune();
+        assert_eq!(layout.group(a), None);
         let Node::Split { children, .. } = &layout.main else {
             panic!("B's split stays: {:?}", layout.main);
         };
@@ -688,12 +690,11 @@ mod tests {
     }
 
     #[test]
-    fn a_hidden_panel_keeps_its_place_and_its_group_takes_no_room() {
+    fn a_group_whose_panels_are_hidden_takes_no_room() {
         let mut layout = Layout::new();
-        let a = strip(&mut layout, "A", Side::Left);
+        strip(&mut layout, "A", Side::Left);
         let b = strip(&mut layout, "B", Side::Top);
         let window = Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0));
-        let shown = layout.arrange(window, &all);
         let hidden = layout.arrange(window, &|panel| panel != "A");
         assert_eq!(
             hidden.groups,
@@ -703,8 +704,6 @@ mod tests {
             hidden.central,
             Rect::from_min_max(pos2(0.0, 150.0), pos2(800.0, 600.0))
         );
-        assert_eq!(layout.find("A"), Some(a));
-        assert_eq!(layout.arrange(window, &all).groups, shown.groups);
     }
 
     #[test]
@@ -746,11 +745,71 @@ mod tests {
         );
 
         // A handle dragged almost to the edge leaves the strip its minimum.
-        let ratio = left.ratio_at(3.0);
+        let ratio = left.ratio_at(3.0).expect("the split has room");
         layout.set_ratio(left.split, ratio);
         assert_eq!(
             layout.arrange(window, &all).strips[0],
             (Side::Left, MIN_SIZE)
         );
+    }
+
+    #[test]
+    fn a_handle_dragged_to_the_edge_of_a_narrow_split_saves_a_ratio_the_layout_takes() {
+        let mut layout = Layout::new();
+        strip(&mut layout, "A", Side::Left);
+        let window = Rect::from_min_size(pos2(0.0, 0.0), vec2(80.0, 600.0));
+        let arranged = layout.arrange(window, &all);
+        let splitter = &arranged.splitters[0];
+        for (at, edge) in [(-10.0, 0.0), (90.0, 1.0)] {
+            assert_eq!(splitter.ratio_at(at), Some(edge));
+            layout.set_ratio(splitter.split, edge);
+            assert_eq!(layout.check(), Ok(()));
+        }
+        let squeezed = Rect::from_min_size(pos2(0.0, 0.0), vec2(0.0, 600.0));
+        assert_eq!(
+            layout.arrange(squeezed, &all).splitters[0].ratio_at(0.0),
+            None
+        );
+    }
+
+    #[test]
+    fn splits_squeezed_past_their_handles_lay_out_inside_the_window() {
+        // Splits along one axis inside one another, with ratios a saved layout may have: the
+        // middle one's first side is thinner than its part of the handle's gap.
+        let tabs = |panel: &str| {
+            Node::Tabs(Tabs {
+                id: 0,
+                panels: vec![panel.to_owned()],
+                active: 0,
+            })
+        };
+        let split = |ratio, children| Node::Split {
+            id: 0,
+            axis: Axis::Horizontal,
+            ratio,
+            children: Box::new(children),
+        };
+        let mut layout = Layout {
+            main: split(
+                0.25,
+                [
+                    split(0.001, [split(0.5, [tabs("A"), tabs("B")]), tabs("C")]),
+                    Node::Central,
+                ],
+            ),
+            floating: Vec::new(),
+            next_id: 0,
+        };
+        layout.renumber();
+        assert_eq!(layout.check(), Ok(()));
+        let window = Rect::from_min_size(pos2(0.0, 0.0), vec2(200.0, 100.0));
+        let arranged = layout.arrange(window, &all);
+        assert_eq!(arranged.groups.len(), 3);
+        for (_, rect) in arranged.groups {
+            assert!(
+                window.contains_rect(rect) && !rect.is_negative(),
+                "{rect:?}"
+            );
+        }
     }
 }

@@ -9,7 +9,6 @@ bytemuck.workspace = true
 epaint.workspace = true
 gg-core.workspace = true
 gg-gpu.workspace = true
-tracing.workspace = true
 
 [dev-dependencies]
 egui.workspace = true

@@ -1,5 +1,5 @@
-//! What apps build on: the main loop, window and input, scene, assets, and handing each
-//! frame's render data to `gg-renderer`.
+//! What apps build on: the main loop, window and input, layers and their UI, and handing each
+//! frame's render data to `gg-renderer`; the scene and assets to come.
 //!
 //! An app's `main` starts the engine; there is no separate entry-point crate.
 
@@ -50,7 +50,7 @@ const BUILD: &str = if cfg!(debug_assertions) {
 };
 
 /// Describes an app to the engine: its name and its layers. An app's `main` is
-/// `gg_engine::run(gg_engine::App::new("Sandbox").layer(Sandbox::default()))`.
+/// `gg_engine::run(gg_engine::App::new("Sandbox").layer(Sandbox::new()))`.
 pub struct App {
     name: &'static str,
     stack: Stack,
@@ -206,8 +206,8 @@ fn egui_context() -> egui::Context {
 /// The first half of a turn of the main loop: updates the layers and has them draw their UI, in
 /// the dock and with egui. [`render_frame`] renders what egui made of it.
 ///
-/// egui allocates as it lays out and tessellates, so frames that draw UI allocate; the UI is a
-/// development overlay.
+/// egui allocates as it lays out here, and as [`render_frame`] tessellates, so frames that draw
+/// UI allocate; the UI is a development overlay.
 fn run_frame(
     stack: &mut Stack,
     cx: &mut Context,

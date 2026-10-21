@@ -99,8 +99,11 @@ impl Swapchain {
                 .create_fence(&vk::FenceCreateInfo::default(), None)
         }
         .map_err(|e| vk_error("vkCreateFence", e))?;
-        // SAFETY: the fence is live.
-        unsafe { device.set_name(available, "swapchain image available") };
+        // SAFETY: the fence is live, and the surface is of the device's instance.
+        unsafe {
+            device.set_name(available, "swapchain image available");
+            device.set_name(surface.raw(), "window surface");
+        }
         // From here on, dropping `swapchain` destroys the fence.
         let mut swapchain = Self {
             device: device.clone(),
@@ -288,7 +291,8 @@ impl Swapchain {
             .expect("a swapchain's device was opened for a surface");
         let first = self.raw == vk::SwapchainKHR::null();
         // SAFETY: the surface is live, and the device is idle, so nothing uses the old swapchain,
-        // its views or its semaphores. Creating the new swapchain retires the old one.
+        // its views or its semaphores. Creating the new swapchain retires the old one; the new
+        // one's objects are live as they're named.
         unsafe {
             let raw = swapchain_fn
                 .create_swapchain(&info, None)
@@ -296,6 +300,7 @@ impl Swapchain {
             self.destroy_views_and_semaphores();
             swapchain_fn.destroy_swapchain(self.raw, None);
             self.raw = raw;
+            device.set_name(raw, "swapchain");
             self.extent = extent;
             self.images = swapchain_fn
                 .get_swapchain_images(raw)

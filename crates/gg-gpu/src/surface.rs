@@ -22,7 +22,7 @@ pub struct Surface {
 }
 
 impl Surface {
-    /// A surface for `window`, which must be the window `instance` was created for.
+    /// A surface for `window`, which must be on the display `instance` was created for.
     pub fn new(instance: &Arc<Instance>, window: Arc<dyn Window>) -> Result<Self> {
         if instance.surface_fn().is_none() {
             return Err(Error::new(

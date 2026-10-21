@@ -63,8 +63,9 @@ where it wrote its own; after an intended change, `GG_UPDATE_REFERENCES=1` rewri
 references, which you look at before committing them.
 
 CI ([ci.yml](.github/workflows/ci.yml)) runs the three gates on every push, on Windows, Linux
-and macOS, x86-64 and ARM64, and the layering check. Its Linux jobs run the GPU tests on
-lavapipe; Windows' and macOS's runners have no GPU, so there `GG_SKIP_GPU_TESTS` skips them.
+and macOS, x86-64 and ARM64, and the layering check. Its Linux jobs run the GPU tests and the
+sandbox headless on lavapipe; Windows' and macOS's runners have no GPU, so there
+`GG_SKIP_GPU_TESTS` skips the GPU tests.
 
 ## Rust
 

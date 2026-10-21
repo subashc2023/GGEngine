@@ -100,7 +100,7 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Shipping profile (LTO, `codegen-units = 1`) | Phase 7, with the player |
 | Compiling trace and debug events out of shipping builds, through `tracing`'s `release_max_level_*` features | Phase 7, with the shipping profile |
 | No console window for shipping builds on Windows (`windows_subsystem = "windows"` on the player); the JSON log still records the run | Phase 7, with the shipping profile |
-| Checking the sandbox by hand on Linux, and on macOS with KosmicKrisp (Vulkan SDK 1.4.363.0 or later, the first conformant build) | Once the sandbox draws a mesh |
+| Checking the sandbox by hand on Linux, and on macOS with KosmicKrisp (Vulkan SDK 1.4.363.0 or later, the first conformant build) | Phase 4, once the sandbox draws a glTF mesh |
 | Deleting old JSON logs; every run's log is kept | Logs pile up enough to matter |
 | A clean shutdown on Ctrl+C, which now ends the process at once; the JSON log keeps every line written until then | A headless run that goes on until it's stopped, such as a dedicated server |
 | GPU tests in Windows and macOS CI, which skip them because hosted runners there have no GPU | A self-hosted runner with a GPU, or a Vulkan driver that runs on those runners without one |
@@ -109,7 +109,7 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Waiting for the swapchain image before a frame reads input and the time, not after the layers update, which would cut latency by the wait: up to a refresh under `--vsync` | Phase 3, with input actions |
 | Pushing and popping layers while the app runs; `App` fixes the stack before it starts | A tool or game needs a layer for only part of a run |
 | Composed text from an input method (winit's `Ime` events), for languages typed through one | A game takes text input, such as chat |
-| Steady-state frames that draw UI allocate, in egui's layout and tessellation | Phase 4, with the allocation check; the overlay is for development |
+| Steady-state frames that draw UI allocate: in egui's layout and tessellation, and in the dock's own bookkeeping, which copies each frame's panel and menu names and torn-off windows' titles, and makes its arrangement and its list of groups left to draw anew | Phase 4, with the allocation check; the overlay is for development |
 | Keeping within the GPU's memory budget (`VK_EXT_memory_budget` through VMA) | Phase 7, with streaming |
 | Removing meshes; a mesh lasts until the app ends | Something adds and removes meshes as it runs, such as asset hot reload in Phase 4 |
 | A camera and transforms: meshes are given in clip space, so they stretch with the game's view | Phase 4, which draws moving entities |

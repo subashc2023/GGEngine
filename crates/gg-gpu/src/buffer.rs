@@ -94,11 +94,9 @@ impl Buffer {
         }
     }
 
-    /// Makes the CPU's writes to `size` bytes at `offset` visible to the GPU.
-    pub(crate) fn flush(&self, offset: u64, size: u64) -> Result<()> {
-        self.device
-            .allocator()
-            .flush(self.allocation(), offset, size)
+    /// Makes the CPU's writes visible to the GPU.
+    pub(crate) fn flush(&self) -> Result<()> {
+        self.device.allocator().flush(self.allocation())
     }
 
     /// Copies the whole buffer out, once the GPU has finished writing it.
@@ -109,9 +107,7 @@ impl Buffer {
     pub(crate) fn read(&self) -> Result<Vec<u8>> {
         let mapped = self.allocation().mapped();
         assert!(!mapped.is_null(), "only mapped buffers can be read");
-        self.device
-            .allocator()
-            .invalidate(self.allocation(), 0, self.size)?;
+        self.device.allocator().invalidate(self.allocation())?;
         // SAFETY: the mapping covers the whole buffer, and the GPU's writes are visible.
         Ok(unsafe { std::slice::from_raw_parts(mapped, self.size as usize) }.to_vec())
     }
@@ -155,7 +151,7 @@ impl GpuBuffer {
         })
     }
 
-    pub fn size(&self) -> u64 {
+    pub(crate) fn size(&self) -> u64 {
         self.buffer.size()
     }
 

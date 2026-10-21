@@ -231,18 +231,21 @@ impl Allocator {
         unsafe { vmaDestroyImage(self.raw, image, allocation.raw) };
     }
 
-    /// Makes the CPU's writes to `size` bytes at `offset` visible to the GPU. Memory the CPU
-    /// writes may not be coherent, and then this is needed before the GPU reads it.
-    pub(crate) fn flush(&self, allocation: &Allocation, offset: u64, size: u64) -> Result<()> {
-        // SAFETY: the allocator and allocation are live; VMA clamps the range to the allocation.
-        let result = unsafe { vmaFlushAllocation(self.raw, allocation.raw, offset, size) };
+    /// Makes the CPU's writes to the allocation visible to the GPU. Memory the CPU writes may not
+    /// be coherent, and then this is needed before the GPU reads it.
+    pub(crate) fn flush(&self, allocation: &Allocation) -> Result<()> {
+        // SAFETY: the allocator and allocation are live, and the range is the whole allocation:
+        // from 0, and to its end for `WHOLE_SIZE`.
+        let result = unsafe { vmaFlushAllocation(self.raw, allocation.raw, 0, vk::WHOLE_SIZE) };
         check("vmaFlushAllocation", result)
     }
 
-    /// Makes the GPU's writes visible to the CPU's reads, for memory that isn't coherent.
-    pub(crate) fn invalidate(&self, allocation: &Allocation, offset: u64, size: u64) -> Result<()> {
+    /// Makes the GPU's writes to the allocation visible to the CPU's reads, for memory that
+    /// isn't coherent.
+    pub(crate) fn invalidate(&self, allocation: &Allocation) -> Result<()> {
         // SAFETY: as in `flush`.
-        let result = unsafe { vmaInvalidateAllocation(self.raw, allocation.raw, offset, size) };
+        let result =
+            unsafe { vmaInvalidateAllocation(self.raw, allocation.raw, 0, vk::WHOLE_SIZE) };
         check("vmaInvalidateAllocation", result)
     }
 }
@@ -308,22 +311,28 @@ extern "C" fn gg_vma_assert_failed(
     file: *const c_char,
     line: c_int,
 ) -> ! {
+    // SAFETY: VMA passes string literals, which end in a nul and live forever.
+    let (expression, file) = unsafe { (literal(expression), literal(file)) };
     error!(
         code = "gpu.vma_assert",
-        expression = %literal(expression),
-        file = %literal(file),
+        %expression,
+        %file,
         line,
         "VMA found a broken invariant; aborting"
     );
     std::process::abort()
 }
 
-/// A C string literal VMA passes, as text.
-fn literal(text: *const c_char) -> String {
+/// A C string VMA passes, as text; empty for null.
+///
+/// # Safety
+///
+/// `text` must be null, or point to a nul-terminated string that lives through the call.
+unsafe fn literal(text: *const c_char) -> String {
     if text.is_null() {
         return String::new();
     }
-    // SAFETY: VMA passes string literals, which end in a nul and live forever.
+    // SAFETY: the caller guarantees the string.
     unsafe { CStr::from_ptr(text) }
         .to_string_lossy()
         .into_owned()

@@ -80,11 +80,12 @@ fn clear_reads_back() {
             .begin(images.iter_mut().map(Target::Image))
             .expect("a frame")
             .expect("an offscreen image can always be rendered into");
+        // In the first two frames, the arena has no buffer yet.
+        frame.upload(&[]).expect("an upload of nothing");
         for (target, srgb) in srgb.iter().enumerate() {
-            frame.clear(
-                target,
-                [linear(srgb[0]), linear(srgb[1]), linear(srgb[2]), 1.0],
-            );
+            let color = [linear(srgb[0]), linear(srgb[1]), linear(srgb[2]), 1.0];
+            // A pass that draws nothing clears its target.
+            drop(frame.begin_pass(target, c"clear", color));
         }
         frame.submit().expect("the frame's submission");
     }

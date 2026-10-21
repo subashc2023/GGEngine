@@ -25,6 +25,8 @@ pub(crate) enum Retired {
 /// Retired resources, each with the last frame that may use it, and how far frames have got.
 #[derive(Default)]
 struct Retirement {
+    /// Whether a [`Frames`](crate::Frames) has numbered the device's frames.
+    claimed: bool,
     /// The last frame that began recording.
     begun: u64,
     /// The last frame the GPU finished, which the frames before it finished first.
@@ -32,7 +34,7 @@ struct Retirement {
     resources: Vec<(u64, Retired)>,
 }
 
-/// A GPU opened for rendering, with its queues and its memory allocator.
+/// A GPU opened for rendering, with its graphics queue and its memory allocator.
 pub struct Device {
     /// The instance, which must outlive the device.
     _instance: Arc<Instance>,
@@ -47,8 +49,6 @@ pub struct Device {
     debug_utils: Option<ext::debug_utils::Device>,
     swapchain_fn: Option<khr::swapchain::Device>,
     graphics: Queue,
-    compute: Option<Queue>,
-    transfer: Option<Queue>,
 }
 
 /// A device queue. Vulkan lets one thread at a time use a queue, hence the lock.
@@ -99,38 +99,10 @@ impl Device {
             .graphics
             .expect("a GPU without problems has a graphics queue");
 
-        // SAFETY: the physical device came from this instance.
-        let families = unsafe {
-            instance
-                .raw()
-                .get_physical_device_queue_family_properties(physical)
-        };
-        let find = |wanted: vk::QueueFlags, unwanted: vk::QueueFlags| {
-            families
-                .iter()
-                .zip(0u32..)
-                .find(|(family, _)| {
-                    family.queue_flags.contains(wanted) && !family.queue_flags.intersects(unwanted)
-                })
-                .map(|(_, index)| index)
-        };
-        // Async compute and transfer get queues of their own where the GPU has queue families
-        // dedicated to them.
-        let compute = find(vk::QueueFlags::COMPUTE, vk::QueueFlags::GRAPHICS);
-        let transfer = find(
-            vk::QueueFlags::TRANSFER,
-            vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE,
-        );
         let priorities = [1.0];
-        let queue_infos: Vec<_> = [Some(graphics), compute, transfer]
-            .into_iter()
-            .flatten()
-            .map(|family| {
-                vk::DeviceQueueCreateInfo::default()
-                    .queue_family_index(family)
-                    .queue_priorities(&priorities)
-            })
-            .collect();
+        let queue_infos = [vk::DeviceQueueCreateInfo::default()
+            .queue_family_index(graphics)
+            .queue_priorities(&priorities)];
         let extensions = if surface.is_some() {
             vec![vk::KHR_SWAPCHAIN_NAME.as_ptr()]
         } else {
@@ -174,15 +146,12 @@ impl Device {
             }
         };
 
-        let queue = |family| Queue {
-            family,
-            // SAFETY: the device was created with one queue in each of these families.
-            raw: Mutex::new(unsafe { raw.get_device_queue(family, 0) }),
-        };
         let device = Self {
-            graphics: queue(graphics),
-            compute: compute.map(queue),
-            transfer: transfer.map(queue),
+            graphics: Queue {
+                family: graphics,
+                // SAFETY: the device was created with one queue in this family.
+                raw: Mutex::new(unsafe { raw.get_device_queue(graphics, 0) }),
+            },
             debug_utils: instance
                 .has_debug_utils()
                 .then(|| ext::debug_utils::Device::new(instance.raw(), &raw)),
@@ -195,21 +164,12 @@ impl Device {
             retirement: Mutex::default(),
             raw,
         };
-        // SAFETY: the device, its queues and the bindless set are live.
+        // SAFETY: the device, its queue and the bindless set are live, and the set is the
+        // device's.
         unsafe {
             device.set_name(device.raw.handle(), &device.name);
-            device.set_name(device.bindless.set(), "bindless set");
-            device.set_name(
-                device.bindless.pipeline_layout(),
-                "bindless pipeline layout",
-            );
             device.set_name(*device.graphics.lock(), "graphics queue");
-            if let Some(queue) = &device.compute {
-                device.set_name(*queue.lock(), "compute queue");
-            }
-            if let Some(queue) = &device.transfer {
-                device.set_name(*queue.lock(), "transfer queue");
-            }
+            device.bindless.set_names(&device);
         }
         info!(
             name = chosen.name,
@@ -219,12 +179,12 @@ impl Device {
             vram_mib = chosen.vram_mib,
             "GPU selected"
         );
-        debug!(graphics, compute, transfer, "Queue families");
+        debug!(graphics, "Queue family");
         Ok(Arc::new(device))
     }
 
     /// The GPU's name, such as `NVIDIA GeForce RTX 4090`. The device has it as its debug name.
-    pub fn name(&self) -> &str {
+    pub(crate) fn name(&self) -> &str {
         &self.name
     }
 
@@ -235,14 +195,10 @@ impl Device {
     }
 
     /// Waits until the GPU has finished all the work submitted to it.
-    pub fn wait_idle(&self) -> Result<()> {
+    pub(crate) fn wait_idle(&self) -> Result<()> {
         // Vulkan requires that nothing uses a queue while the device waits.
-        let _queues = (
-            self.graphics.lock(),
-            self.compute.as_ref().map(Queue::lock),
-            self.transfer.as_ref().map(Queue::lock),
-        );
-        // SAFETY: the device is live, and every queue's lock is held.
+        let _queue = self.graphics.lock();
+        // SAFETY: the device is live, and its one queue's lock is held.
         unsafe { self.raw.device_wait_idle() }.map_err(|e| vk_error("vkDeviceWaitIdle", e))
     }
 
@@ -268,8 +224,23 @@ impl Device {
         }
     }
 
+    /// Notes that a [`Frames`](crate::Frames) numbers the device's frames, from 1.
+    ///
+    /// # Panics
+    ///
+    /// If one has before: frame numbers would repeat, and resources retired by them would be
+    /// destroyed while the GPU may still use them.
+    pub(crate) fn claim_frames(&self) {
+        let mut retirement = self.lock_retirement();
+        assert!(
+            !retirement.claimed,
+            "a device has one Frames for its whole life"
+        );
+        retirement.claimed = true;
+    }
+
     /// Notes that `frame` began recording, so resources retired from now on may be used in it.
-    /// Frames are numbered from 1, and only one [`Frames`](crate::Frames) records them.
+    /// Frames are numbered from 1, by the one [`Frames`](crate::Frames) that claimed them.
     pub(crate) fn frame_begun(&self, frame: u64) {
         self.lock_retirement().begun = frame;
     }
@@ -375,6 +346,8 @@ impl Device {
         // SAFETY: the device is live.
         let pool = unsafe { self.raw.create_command_pool(&pool_info, None) }
             .map_err(|e| vk_error("vkCreateCommandPool", e))?;
+        // SAFETY: the pool is live.
+        unsafe { self.set_name(pool, "one-off commands") };
         let ran = (|| {
             let allocate_info = vk::CommandBufferAllocateInfo::default()
                 .command_pool(pool)
@@ -387,6 +360,7 @@ impl Device {
                     .raw
                     .allocate_command_buffers(&allocate_info)
                     .map_err(|e| vk_error("vkAllocateCommandBuffers", e))?[0];
+                self.set_name(commands, "one-off commands");
                 let begin_info = vk::CommandBufferBeginInfo::default()
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
                 self.raw
@@ -715,15 +689,17 @@ mod tests {
         use vk::PhysicalDeviceType as Kind;
         let mut old = candidate(0, "Old Discrete", Kind::DISCRETE_GPU, 32768);
         old.problem = Some("supports Vulkan 1.3.0, not 1.4".to_owned());
+        // The smaller discrete GPU comes first, so that only memory puts the larger ahead of it.
         let candidates = [
             old,
-            candidate(1, "AMD Radeon(TM) Graphics", Kind::INTEGRATED_GPU, 512),
-            candidate(2, "NVIDIA GeForce RTX 4090", Kind::DISCRETE_GPU, 24000),
-            candidate(3, "llvmpipe", Kind::CPU, 0),
+            candidate(1, "NVIDIA GeForce RTX 3050", Kind::DISCRETE_GPU, 8192),
+            candidate(2, "AMD Radeon(TM) Graphics", Kind::INTEGRATED_GPU, 512),
+            candidate(3, "NVIDIA GeForce RTX 4090", Kind::DISCRETE_GPU, 24000),
+            candidate(4, "llvmpipe", Kind::CPU, 0),
         ];
-        assert_eq!(pick(&candidates, None).unwrap().index, 2);
-        assert_eq!(pick(&candidates, Some("amd")).unwrap().index, 1);
-        assert_eq!(pick(&candidates, Some("LLVMPIPE")).unwrap().index, 3);
+        assert_eq!(pick(&candidates, None).unwrap().index, 3);
+        assert_eq!(pick(&candidates, Some("amd")).unwrap().index, 2);
+        assert_eq!(pick(&candidates, Some("LLVMPIPE")).unwrap().index, 4);
     }
 
     #[test]

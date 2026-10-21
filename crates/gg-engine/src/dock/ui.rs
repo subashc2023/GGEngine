@@ -13,7 +13,7 @@ use egui::{
 use tracing::warn;
 
 use super::file;
-use super::tree::{Arrangement, Axis, CENTRAL, Layout, NodeId, Place, Side, Zone};
+use super::tree::{self, Arrangement, Axis, CENTRAL, Layout, NodeId, Place, Side, Zone};
 #[cfg(target_os = "windows")]
 use crate::chrome::Caption;
 use crate::chrome::{self, Chrome, Icon, Look, TitleBar};
@@ -45,8 +45,9 @@ impl<'a> Ui<'a> {
 
     /// Shows panel `name` this frame, with what `add_contents` draws in it. The user places
     /// panels: in tab groups docked around the central area, or floating, over the main window
-    /// or in windows of their own. A panel shows on the frames that show it, and keeps its place
-    /// while it doesn't; `add_contents` runs when its tab is the one showing. `name` titles the
+    /// or in windows of their own. A panel shows from the frame after its layer starts showing
+    /// it, since the dock lays out a frame before its panels draw, and keeps its place while it
+    /// isn't shown; `add_contents` runs when its tab is the one showing. `name` titles the
     /// panel and is its identity: the dock keeps panels' places by name, between runs too, and
     /// a second panel of the same name in a frame doesn't show.
     pub fn panel(&mut self, name: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
@@ -627,11 +628,9 @@ impl Dock {
             }
             if response.dragged()
                 && let Some(pointer) = response.interact_pointer_pos()
+                && let Some(ratio) = splitter.ratio_at(pointer[i] - self.splitter_grab)
             {
-                self.layout.set_ratio(
-                    splitter.split,
-                    splitter.ratio_at(pointer[i] - self.splitter_grab),
-                );
+                self.layout.set_ratio(splitter.split, ratio);
             }
             stopped |= response.drag_stopped();
         }
@@ -745,8 +744,7 @@ impl Dock {
                 let min = outer
                     .zip(native)
                     .and_then(|(outer, native)| {
-                        let px = outer.min * native * zoom;
-                        from_desktop(ctx, [px.x.round() as i32, px.y.round() as i32])
+                        from_desktop(ctx, rounded(outer.min * native * zoom))
                     })
                     .unwrap_or(pos2(48.0, 48.0));
                 floating.place = Place::Main {
@@ -756,9 +754,8 @@ impl Dock {
             } else if Some(floating.tabs.id) != dragged
                 && let (Some(outer), Some(inner), Some(native)) = (outer, inner, native)
             {
-                let px = outer.min * native * zoom;
                 floating.place = Place::Window {
-                    position: [px.x.round() as i32, px.y.round() as i32],
+                    position: rounded(outer.min * native * zoom),
                     size: inner.size().into(),
                 };
             }
@@ -793,8 +790,7 @@ fn to_main(ctx: &Context, from: ViewportId, pos: Pos2) -> Option<Pos2> {
         return Some(pos);
     }
     let (inner, ppp) = geometry(ctx, from)?;
-    let px = (inner.min + pos.to_vec2()) * ppp;
-    from_desktop(ctx, [px.x.round() as i32, px.y.round() as i32])
+    from_desktop(ctx, rounded((inner.min + pos.to_vec2()) * ppp))
 }
 
 /// `rect`, in viewport `from`'s points, in viewport `to`'s: through where the two are on the
@@ -813,7 +809,7 @@ fn follow(ctx: &Context, id: NodeId, by: Vec2) -> Option<[i32; 2]> {
     ctx.input(|i| {
         let info = i.raw.viewports.get(&window_id(id))?;
         let px = (info.outer_rect?.min + by) * info.native_pixels_per_point? * zoom;
-        Some([px.x.round() as i32, px.y.round() as i32])
+        Some(rounded(px))
     })
 }
 
@@ -841,8 +837,12 @@ fn from_desktop(ctx: &Context, [x, y]: [i32; 2]) -> Option<Pos2> {
 /// A position in the main window's points on the desktop, in physical pixels.
 fn to_desktop(ctx: &Context, pos: Pos2) -> Option<[i32; 2]> {
     let (main, ppp) = geometry(ctx, ViewportId::ROOT)?;
-    let px = (main.min + pos.to_vec2()) * ppp;
-    Some([px.x.round() as i32, px.y.round() as i32])
+    Some(rounded((main.min + pos.to_vec2()) * ppp))
+}
+
+/// A position on the desktop in physical pixels, to the nearest pixel.
+fn rounded(px: Pos2) -> [i32; 2] {
+    [px.x.round() as i32, px.y.round() as i32]
 }
 
 /// Where a group held at `grab` by the pointer at `pointer`, in the main window's points, goes:
@@ -980,9 +980,8 @@ fn paint_hover(ctx: &Context, hover: &Hover) {
     ));
     let visuals = ctx.global_style().visuals.clone();
     let selection = visuals.selection.bg_fill;
-    let share = if hover.node == CENTRAL { 0.25 } else { 0.5 };
     if let Some(zone) = hover.zone {
-        let rect = preview(hover.rect, zone, share);
+        let rect = preview(hover.rect, zone, tree::share(hover.node));
         painter.rect_filled(rect, 0.0, selection.gamma_multiply(0.35));
     }
     for (zone, target) in targets(hover.rect, hover.zones) {
@@ -1109,13 +1108,12 @@ mod tests {
         /// on the desktop, in its points at 1.25 pixels a point. Returns the window's viewport.
         fn tear_off(&mut self, panel: &str, min: Pos2) -> ViewportId {
             let id = self.layout().find(panel).expect("the panel is in the dock");
-            let px = min * 1.25;
             self.dock
                 .layout
                 .floating_mut(id)
                 .expect("the panel floats")
                 .place = Place::Window {
-                position: [px.x.round() as i32, px.y.round() as i32],
+                position: rounded(min * 1.25),
                 size: NEW_SIZE.into(),
             };
             let rect = Rect::from_min_size(min, NEW_SIZE);

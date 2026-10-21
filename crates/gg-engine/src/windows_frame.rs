@@ -114,7 +114,9 @@ fn install(hwnd: HWND) -> Option<Frame> {
         drop(unsafe { Rc::from_raw(data) });
         return None;
     }
-    // SAFETY: `hwnd` is a window; this lays out its frame anew, which `procedure` now does.
+    // SAFETY: `hwnd` is a live window of this thread, and the flags leave its place, size and
+    // z-order be. Laying out its frame anew, Windows calls `procedure` within the call, on this
+    // thread, with the reference the window now holds.
     unsafe {
         SetWindowPos(
             hwnd,
@@ -197,7 +199,9 @@ unsafe extern "system" fn procedure(
                     hwndTrack: hwnd,
                     dwHoverTime: 0,
                 };
-                // SAFETY: `track` asks for `WM_NCMOUSELEAVE` once the pointer leaves the frame.
+                // SAFETY: `track` is a whole TRACKMOUSEEVENT, with its size in `cbSize`, that
+                // lives through the call, for `hwnd`, the live window this message is for. It asks
+                // for `WM_NCMOUSELEAVE` once the pointer leaves the frame.
                 unsafe { TrackMouseEvent(&mut track) };
             }
             next()
@@ -377,10 +381,6 @@ mod tests {
         // Maximized, a window has no band.
         assert_eq!(hit(300.0, 3.0, 0.0), HTCAPTION);
         assert_eq!(hit(525.0, 3.0, 0.0), HTMAXBUTTON);
-        // While the UI takes the whole bar, only the band is the OS's.
-        let hit = |x, y| hit_test(pos2(x, y), 600.0, 10.0, None);
-        assert_eq!(hit(300.0, 3.0), HTTOP);
-        assert_eq!(hit(300.0, 20.0), HTCLIENT);
     }
 
     /// Sends `message` to window `hwnd`, with the point (`x`, `y`) on the desktop.

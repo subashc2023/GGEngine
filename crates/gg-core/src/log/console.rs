@@ -343,3 +343,19 @@ impl fmt::Write for Escape<'_, '_> {
         self.0.write_str(text)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn values_escape_control_characters_and_continue_lines_at_the_message() {
+        assert_eq!(
+            Value::Str("\u{1b}[31mred\tand\nnext").to_string(),
+            format!("\\u{{1b}}[31mred\tand\n{:MESSAGE_COLUMN$}next", "")
+        );
+        assert_eq!(Quoted(Value::Str("two words")).to_string(), "\"two words\"");
+        assert_eq!(Quoted(Value::Str("")).to_string(), "\"\"");
+        assert_eq!(Quoted(Value::Str("one")).to_string(), "one");
+    }
+}

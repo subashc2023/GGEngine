@@ -24,7 +24,8 @@ pub enum Event<'a> {
     /// Physical pixels per logical pixel changed, as when the window moves to another display.
     ScaleChanged(f64),
     /// A key went down or up. `repeat` marks the presses a held key repeats. A layer can get a
-    /// release without its press, when the press went to the UI.
+    /// release without its press, when the press went to the UI, or when the key was already
+    /// down as the window gained focus.
     Key {
         key: Key,
         pressed: bool,
@@ -78,7 +79,17 @@ pub(crate) fn convert<'a>(event: &'a WindowEvent, mut emit: impl FnMut(Event<'a>
         WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
             emit(Event::ScaleChanged(*scale_factor));
         }
-        WindowEvent::KeyboardInput { event, .. } => {
+        WindowEvent::KeyboardInput {
+            event,
+            is_synthetic,
+            ..
+        } => {
+            // winit makes up presses for the keys held as the window gains focus, such as Alt
+            // after Alt+Tab, which weren't pressed in it; egui ignores them too. Its made-up
+            // releases as the window loses focus stay, so that no key is left held.
+            if *is_synthetic && event.state == ElementState::Pressed {
+                return;
+            }
             let PhysicalKey::Code(code) = event.physical_key else {
                 return;
             };

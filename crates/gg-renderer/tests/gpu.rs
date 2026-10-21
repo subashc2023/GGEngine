@@ -2,8 +2,8 @@
 //! which in Linux CI is lavapipe.
 //!
 //! They run in one process with a main of their own, which turns off the Vulkan loader's
-//! implicit layers before any thread exists, then runs the tests one after another. Setting
-//! `GG_UPDATE_REFERENCES` writes each test's output as its new reference instead of comparing.
+//! implicit layers before any thread exists, then runs the tests one after another.
+//! `GG_UPDATE_REFERENCES=1` writes each test's output as its new reference instead of comparing.
 
 // For setting the environment; see the SAFETY comment.
 #![allow(unsafe_code)]
@@ -64,7 +64,6 @@ fn ui_matches_its_reference() {
     const WIDTH: u32 = 320;
     const HEIGHT: u32 = 200;
     let mut renderer = renderer(WIDTH, HEIGHT);
-    let validation = renderer.validation();
     let mut meshes = Meshes::default();
 
     let egui = egui::Context::default();
@@ -111,17 +110,7 @@ fn ui_matches_its_reference() {
             "an offscreen image can always be rendered into"
         );
     }
-    let pixels = renderer
-        .read_back()
-        .expect("the frame's pixels")
-        .expect("a headless renderer's frame can be read back");
-    drop(renderer);
-    assert_eq!(
-        validation.messages(),
-        0,
-        "validation reported problems; the log above says what"
-    );
-    compare("ui", WIDTH, HEIGHT, &pixels);
+    check(renderer, "ui", WIDTH, HEIGHT);
 }
 
 /// Draws a triangle in red, green and blue into part of an offscreen image, over more frames
@@ -131,7 +120,6 @@ fn triangle_matches_its_reference() {
     const WIDTH: u32 = 320;
     const HEIGHT: u32 = 200;
     let mut renderer = renderer(WIDTH, HEIGHT);
-    let validation = renderer.validation();
     let mut meshes = Meshes::default();
     let corner = |position, color| Vertex { position, color };
     let vertices = [
@@ -164,6 +152,13 @@ fn triangle_matches_its_reference() {
             "an offscreen image can always be rendered into"
         );
     }
+    check(renderer, "triangle", WIDTH, HEIGHT);
+}
+
+/// Reads back the last frame `renderer` rendered, shuts it down, checks that validation reported
+/// nothing, and compares the frame with reference image `name`.
+fn check(mut renderer: Renderer, name: &str, width: u32, height: u32) {
+    let validation = renderer.validation();
     let pixels = renderer
         .read_back()
         .expect("the frame's pixels")
@@ -174,7 +169,7 @@ fn triangle_matches_its_reference() {
         0,
         "validation reported problems; the log above says what"
     );
-    compare("triangle", WIDTH, HEIGHT, &pixels);
+    compare(name, width, height, &pixels);
 }
 
 /// Compares RGBA8 `pixels` with the reference image `name`, allowing for how GPUs differ in
@@ -185,7 +180,7 @@ fn compare(name: &str, width: u32, height: u32, pixels: &[u8]) {
     let reference = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/references")
         .join(format!("{name}.png"));
-    if std::env::var_os("GG_UPDATE_REFERENCES").is_some() {
+    if std::env::var_os("GG_UPDATE_REFERENCES").is_some_and(|value| value == "1") {
         write_png(&reference, width, height, pixels);
         println!("wrote {}", reference.display());
         return;

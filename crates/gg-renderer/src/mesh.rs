@@ -89,8 +89,6 @@ impl Meshes {
 /// Draws meshes, and keeps their vertices and indices on the GPU.
 pub(crate) struct MeshPass {
     device: Arc<Device>,
-    /// The format of the target it draws into.
-    format: Format,
     pipeline: Pipeline,
     /// Each mesh's buffers, by its handle.
     meshes: Vec<GpuMesh>,
@@ -119,7 +117,6 @@ impl MeshPass {
         )?;
         Ok(Self {
             device: device.clone(),
-            format,
             pipeline,
             meshes: Vec::new(),
         })
@@ -166,11 +163,6 @@ impl MeshPass {
         if draws.is_empty() || viewport.size.contains(&0) {
             return;
         }
-        assert_eq!(
-            pass.format(),
-            self.format,
-            "meshes draw into the main target"
-        );
         pass.set_viewport(viewport.origin, viewport.size);
         pass.set_pipeline(&self.pipeline);
         for mesh in draws {

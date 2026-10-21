@@ -78,7 +78,7 @@ settings by executable name, and a generic name can match one.
 Cargo's cycle check enforces rule 1, and rule 2's ban on `gg-*` dependencies. It can't see a
 skip-level edge such as `gg-engine` → `gg-gpu`, which forms no cycle, so
 [deny.toml](deny.toml) names the only crates that may depend directly on `gg-gpu`,
-`gg-renderer`, `ash`, `ash-window` and `winit`, and CI checks it with cargo-deny. Rule 4, and
+`gg-renderer`, `ash`, `ash-window`, `winit` and `egui-winit`, and CI checks it with cargo-deny. Rule 4, and
 what a crate does with the dependencies it may have, are left to review.
 
 ### Builds
@@ -228,8 +228,9 @@ engine's own, since egui's docking crates can't put a panel in a window of its o
 in tab groups, docked in strips along the main window's edges around a central area that stays
 the game's, or floating: over the main window, or torn off into a window of their own, which
 holds one group. egui counts only the strips and groups as its own, so input over the central
-area goes to the layers. A panel shows on the frames its layer shows it, and keeps its place
-while it doesn't. The layout is saved as RON in the OS's directory for per-user state, never
+area goes to the layers. A panel shows from the frame after its layer starts showing it, since
+the dock lays out a frame before its panels draw, and keeps its place while it isn't shown. The
+layout is saved as RON in the OS's directory for per-user state, never
 beside the executable; headless runs neither read nor write it.
 
 The torn-off windows are egui's immediate viewports: egui runs each one's pass inside the main
@@ -255,7 +256,8 @@ Layers can also poll input, through their `Context` rather than a global: which 
 buttons are held, and where the cursor is. That state follows the events the stack is sent, so
 input the UI keeps doesn't count, and a press and release between two frames never shows as
 held. Losing focus lets go of everything, since not every platform reports the releases that
-come while the window is out of focus.
+come while the window is out of focus, and a key already down as it regains focus counts from
+its next press.
 
 Layers run on the main thread with the event loop. Input that reaches a game's layer enters the
 simulation as commands, as [ECS](#ecs) describes.

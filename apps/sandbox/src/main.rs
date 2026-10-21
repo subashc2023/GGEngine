@@ -74,8 +74,6 @@ impl Layer for Sandbox {
             let wave = |phase: f32| 0.02 + 0.06 * (0.5 + 0.5 * (t + phase).sin());
             self.color = [wave(0.0), wave(2.1), wave(4.2)];
         }
-        let [r, g, b] = self.color;
-        cx.set_clear_color([r, g, b, 1.0]);
     }
 
     fn event(&mut self, _: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
@@ -120,6 +118,7 @@ impl Layer for Sandbox {
                 }
             });
         });
+        // After the panel, which may have changed it.
         let [r, g, b] = self.color;
         cx.set_clear_color([r, g, b, 1.0]);
     }

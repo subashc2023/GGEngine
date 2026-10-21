@@ -12,8 +12,6 @@ use crate::{COLOR_RANGE, Device, vk_error};
 /// How a texture's 8-bit RGBA channels read in shaders.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextureFormat {
-    /// Color is sRGB-encoded, and shaders read it decoded, as linear values.
-    Rgba8Srgb,
     /// Shaders read the bytes as they are, scaled to 0 to 1: for data, and for color a shader
     /// decodes itself.
     Rgba8Unorm,
@@ -45,7 +43,6 @@ impl Texture {
     ) -> Result<Self> {
         let extent = vk::Extent2D { width, height };
         let format = match format {
-            TextureFormat::Rgba8Srgb => vk::Format::R8G8B8A8_SRGB,
             TextureFormat::Rgba8Unorm => vk::Format::R8G8B8A8_UNORM,
         };
         let info = vk::ImageCreateInfo::default()
@@ -102,7 +99,7 @@ impl Texture {
     }
 
     /// The width and height in pixels.
-    pub fn size(&self) -> [u32; 2] {
+    pub(crate) fn size(&self) -> [u32; 2] {
         [self.extent.width, self.extent.height]
     }
 

@@ -30,7 +30,7 @@ pub enum Target<'a> {
 }
 
 /// The resources of the frames in flight, and the timeline semaphore that paces them. A device
-/// has one; its resources retire by its frames.
+/// has one for its whole life; its resources retire by its frames.
 pub struct Frames {
     device: Arc<Device>,
     /// Reaches N when the Nth frame has finished on the GPU.
@@ -69,7 +69,11 @@ struct Scratch {
 }
 
 impl Frames {
+    /// # Panics
+    ///
+    /// If the device has had a `Frames` before, whose frame numbers this one's would repeat.
     pub fn new(device: &Arc<Device>) -> Result<Self> {
+        device.claim_frames();
         let raw = device.raw();
         let mut timeline_info =
             vk::SemaphoreTypeCreateInfo::default().semaphore_type(vk::SemaphoreType::TIMELINE);
@@ -262,9 +266,10 @@ pub struct Frame<'a> {
 
 impl<'a> Frame<'a> {
     /// Copies `bytes` into the frame's arena, where the GPU reads them during this frame:
-    /// geometry, and data shaders read through its address. Using it in a later frame reads
-    /// whatever has replaced it.
-    pub fn upload(&mut self, bytes: &[u8]) -> Result<Upload> {
+    /// geometry, and data shaders read through its address. The upload borrows the frame's
+    /// [`Frames`], so that no later frame draws from it; its address, pushed to a shader in a
+    /// later frame, reads whatever has replaced it.
+    pub fn upload(&mut self, bytes: &[u8]) -> Result<Upload<'a>> {
         self.frames.arenas[self.slot].upload(&self.frames.device, bytes)
     }
 
@@ -298,6 +303,10 @@ impl<'a> Frame<'a> {
             size[0],
             size[1],
         );
+        // A copy has at least a pixel.
+        if pixels.is_empty() {
+            return Ok(());
+        }
         let staged = self.upload(pixels)?;
         let device = &self.frames.device;
         let commands = self.frames.slots[self.slot].commands;
@@ -443,12 +452,6 @@ impl<'a> Frame<'a> {
         Ok(())
     }
 
-    /// Clears the whole of the `target`th target to `color`, in linear RGBA, if it has an image
-    /// this frame.
-    pub fn clear(&mut self, target: usize, color: [f32; 4]) {
-        drop(self.begin_pass(target, c"clear", color));
-    }
-
     /// Starts rendering into the `target`th of the targets the frame began with, cleared to
     /// `color`, in linear RGBA. `label` names the pass in captures. Rendering ends when the pass
     /// is dropped. Returns `None` for a swapchain that had no image ready this frame; the first
@@ -531,6 +534,7 @@ impl<'a> Frame<'a> {
             frame: self,
             extent,
             format,
+            pipeline_set: false,
         })
     }
 
@@ -672,9 +676,11 @@ pub struct Pass<'p, 'a> {
     frame: &'p mut Frame<'a>,
     extent: vk::Extent2D,
     format: Format,
+    /// Whether a pipeline is set, which draws need.
+    pipeline_set: bool,
 }
 
-impl Pass<'_, '_> {
+impl<'a> Pass<'_, 'a> {
     /// The target's width and height in pixels.
     pub fn size(&self) -> [u32; 2] {
         [self.extent.width, self.extent.height]
@@ -686,13 +692,24 @@ impl Pass<'_, '_> {
     }
 
     /// As [`Frame::upload`].
-    pub fn upload(&mut self, bytes: &[u8]) -> Result<Upload> {
+    pub fn upload(&mut self, bytes: &[u8]) -> Result<Upload<'a>> {
         self.frame.upload(bytes)
     }
 
+    /// Sets the pipeline the draws that follow use.
+    ///
+    /// # Panics
+    ///
+    /// If the pipeline isn't made for the target's format.
     pub fn set_pipeline(&mut self, pipeline: &Pipeline) {
-        // SAFETY: the commands are recording, and the pipeline retires until the frame has
-        // finished.
+        assert_eq!(
+            pipeline.format(),
+            self.format,
+            "a pipeline is made for the format of the target it draws into"
+        );
+        self.pipeline_set = true;
+        // SAFETY: the commands are recording inside a pass whose target has the pipeline's
+        // format, and the pipeline retires until the frame has finished.
         unsafe {
             self.frame.frames.device.raw().cmd_bind_pipeline(
                 self.commands(),
@@ -782,6 +799,10 @@ impl Pass<'_, '_> {
 
     /// Draws `count` of `indices`, starting `first` indices in, with the pipeline set last. Each
     /// index is offset by `vertex_offset` before the vertex shader sees it.
+    ///
+    /// # Panics
+    ///
+    /// If no pipeline is set, or the indices drawn run past the end of `indices`.
     pub fn draw_indexed<'i>(
         &mut self,
         indices: impl Into<Indices<'i>>,
@@ -790,9 +811,15 @@ impl Pass<'_, '_> {
         vertex_offset: i32,
     ) {
         let indices = indices.into();
-        // SAFETY: the commands are recording inside a pass with a pipeline set, and the indices'
-        // buffer lives until the frame has finished: an upload's arena is reset only after that,
-        // and a GPU buffer retires until then.
+        assert!(self.pipeline_set, "a draw needs a pipeline set first");
+        assert!(
+            u64::from(first) + u64::from(count) <= indices.count,
+            "{count} indices from index {first} run past the {} there are",
+            indices.count
+        );
+        // SAFETY: the commands are recording inside a pass with a pipeline set, the indices
+        // drawn are within their buffer, and it lives until the frame has finished: an upload's
+        // arena is reset only after that, and a GPU buffer retires until then.
         unsafe {
             let raw = self.frame.frames.device.raw();
             raw.cmd_bind_index_buffer(
@@ -821,15 +848,17 @@ impl Drop for Pass<'_, '_> {
     }
 }
 
-/// Bytes in a frame's arena, valid for the GPU during that frame.
+/// Bytes in a frame's arena, valid for the GPU during that frame, whose [`Frames`] it borrows.
 #[derive(Clone, Copy, Debug)]
-pub struct Upload {
+pub struct Upload<'a> {
     buffer: vk::Buffer,
     offset: u64,
+    size: u64,
     address: vk::DeviceAddress,
+    frames: PhantomData<&'a ()>,
 }
 
-impl Upload {
+impl Upload<'_> {
     /// Where shaders read the bytes, through a buffer pointer.
     pub fn address(&self) -> u64 {
         self.address
@@ -842,16 +871,19 @@ impl Upload {
 pub struct Indices<'a> {
     buffer: vk::Buffer,
     offset: u64,
-    /// A GPU buffer's indices borrow it, so that it outlives the draw's recording.
-    buffer_life: PhantomData<&'a GpuBuffer>,
+    /// How many indices there are.
+    count: u64,
+    /// The indices borrow what holds them, so that it outlives the draw's recording.
+    holder: PhantomData<&'a ()>,
 }
 
-impl From<Upload> for Indices<'_> {
-    fn from(upload: Upload) -> Self {
+impl<'a> From<Upload<'a>> for Indices<'a> {
+    fn from(upload: Upload<'a>) -> Self {
         Self {
             buffer: upload.buffer,
             offset: upload.offset,
-            buffer_life: PhantomData,
+            count: upload.size / 4,
+            holder: PhantomData,
         }
     }
 }
@@ -861,7 +893,8 @@ impl<'a> From<&'a GpuBuffer> for Indices<'a> {
         Self {
             buffer: buffer.raw(),
             offset: 0,
-            buffer_life: PhantomData,
+            count: buffer.size() / 4,
+            holder: PhantomData,
         }
     }
 }
@@ -904,11 +937,11 @@ impl Arena {
         Ok(())
     }
 
-    fn upload(&mut self, device: &Arc<Device>, bytes: &[u8]) -> Result<Upload> {
+    fn upload<'a>(&mut self, device: &Arc<Device>, bytes: &[u8]) -> Result<Upload<'a>> {
         let size = bytes.len() as u64;
         let mut offset = self.used.next_multiple_of(Self::ALIGNMENT);
         let room = self.buffers.last().map_or(0, Buffer::size);
-        if offset + size > room {
+        if self.buffers.is_empty() || offset + size > room {
             self.grow(device, (room * 2).max(size).max(Self::FIRST_SIZE))?;
             offset = 0;
         }
@@ -918,7 +951,9 @@ impl Arena {
         Ok(Upload {
             buffer: buffer.raw(),
             offset,
+            size,
             address: buffer.address() + offset,
+            frames: PhantomData,
         })
     }
 
@@ -937,7 +972,7 @@ impl Arena {
     /// Makes what the CPU wrote visible to the GPU.
     fn flush(&self) -> Result<()> {
         for buffer in &self.buffers {
-            buffer.flush(0, vk::WHOLE_SIZE)?;
+            buffer.flush()?;
         }
         Ok(())
     }

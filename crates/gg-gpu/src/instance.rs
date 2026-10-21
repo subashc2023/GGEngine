@@ -22,7 +22,8 @@ pub struct InstanceDesc<'a> {
     pub app_name: &'a str,
     /// Run under the Khronos validation layer, with synchronization validation.
     pub validation: bool,
-    /// The window the instance will present to, or `None` to render offscreen only.
+    /// A window on the display the instance will present to, or `None` to render offscreen
+    /// only.
     pub window: Option<&'a dyn HasDisplayHandle>,
 }
 

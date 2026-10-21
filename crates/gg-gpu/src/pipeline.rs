@@ -41,6 +41,7 @@ pub struct GraphicsDesc<'a> {
 pub struct Pipeline {
     device: Arc<Device>,
     raw: vk::Pipeline,
+    format: Format,
 }
 
 impl Pipeline {
@@ -54,9 +55,14 @@ impl Pipeline {
         })?;
         let raw_device = device.raw();
         let module_info = vk::ShaderModuleCreateInfo::default().code(&code);
-        // SAFETY: the device is live, and the code is a whole number of SPIR-V words.
+        // SAFETY: the device is live, and the code is a whole number of words that starts with
+        // SPIR-V's magic number, which `read_spv` checked. The module itself is trusted to be
+        // valid SPIR-V, as the shaders this workspace compiles with slangc are: Vulkan doesn't
+        // check it, and validation does in debug builds.
         let module = unsafe { raw_device.create_shader_module(&module_info, None) }
             .map_err(|e| vk_error("vkCreateShaderModule", e))?;
+        // SAFETY: the module is live.
+        unsafe { device.set_name(module, desc.name) };
 
         let stages = [
             vk::PipelineShaderStageCreateInfo::default()
@@ -125,11 +131,17 @@ impl Pipeline {
         Ok(Self {
             device: device.clone(),
             raw,
+            format: desc.format,
         })
     }
 
     pub(crate) fn raw(&self) -> vk::Pipeline {
         self.raw
+    }
+
+    /// The format of the targets it draws into.
+    pub(crate) fn format(&self) -> Format {
+        self.format
     }
 }
 

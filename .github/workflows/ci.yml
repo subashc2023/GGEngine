@@ -82,11 +82,16 @@ jobs:
       # Installs the release rust-toolchain.toml pins, and caches dependencies.
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
         with:
-          # The gates below are AGENTS.md's, unchanged: clippy already denies warnings.
+          # Clippy, among the gates below, already denies warnings.
           build-warnings: warn
+      # AGENTS.md's gates, kept by --locked to the versions Cargo.lock pins.
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      # Whether the engine runs: rendering offscreen on lavapipe, under validation, it exits 0.
+      - name: Run the sandbox headless
+        if: matrix.container
+        run: cargo run -p sandbox --locked -- --headless --frames 60
 
   layering:
     name: Layering rules

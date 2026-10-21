@@ -443,9 +443,8 @@ pub(crate) enum Icon {
 }
 
 /// How a title bar's button looks.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Look {
-    #[default]
     Idle,
     /// Under the pointer.
     Hovered,

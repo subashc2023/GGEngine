@@ -1,5 +1,6 @@
-//! Turns the render data the engine extracts each frame into images: render graph, passes,
-//! materials, lighting and post-processing, built on `gg-gpu`.
+//! Turns the render data the engine hands it each frame into images, built on `gg-gpu`: meshes
+//! in the game's view and the UI over them, and the render graph, materials, lighting and
+//! post-processing to come.
 //!
 //! It knows nothing about the scene, ECS or gameplay. It receives plain data, so rendering
 //! can run on its own thread, a frame behind simulation.
@@ -64,7 +65,6 @@ pub struct Renderer {
     instance: Arc<Instance>,
     device: Arc<Device>,
     vsync: bool,
-    validation: Validation,
 }
 
 enum Output {
@@ -129,7 +129,6 @@ impl Renderer {
             instance: instance.clone(),
             device: device.clone(),
             vsync,
-            validation: instance.validation(),
         })
     }
 
@@ -251,6 +250,6 @@ impl Renderer {
     /// What validation reports. It outlives the renderer, so it also counts what's reported
     /// while the renderer shuts down.
     pub fn validation(&self) -> Validation {
-        self.validation.clone()
+        self.instance.validation()
     }
 }

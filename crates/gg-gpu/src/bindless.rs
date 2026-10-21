@@ -7,7 +7,7 @@ use std::sync::{Mutex, PoisonError};
 use ash::vk;
 use gg_core::{Error, Result};
 
-use crate::vk_error;
+use crate::{Device, vk_error};
 
 /// How many textures the set holds. A device with descriptor indexing holds at least 500,000.
 pub(crate) const TEXTURES: u32 = 65_536;
@@ -195,6 +195,25 @@ impl Bindless {
 
     pub(crate) fn set(&self) -> vk::DescriptorSet {
         self.set
+    }
+
+    /// Gives the samplers, the set, and the layouts and pool it's made with their debug names.
+    ///
+    /// # Safety
+    ///
+    /// `device` must be the set's.
+    pub(crate) unsafe fn set_names(&self, device: &Device) {
+        // SAFETY: the caller guarantees the objects are the device's, and they live as long as
+        // the set.
+        unsafe {
+            for (&sampler, kind) in self.samplers.iter().zip(Sampler::ALL) {
+                device.set_name(sampler, &format!("{kind:?} sampler"));
+            }
+            device.set_name(self.layout, "bindless set layout");
+            device.set_name(self.pool, "bindless pool");
+            device.set_name(self.set, "bindless set");
+            device.set_name(self.pipeline_layout, "bindless pipeline layout");
+        }
     }
 
     /// The layout every pipeline is made with.
