@@ -11,7 +11,7 @@ use gg_core::{Error, Result};
 use gg_gpu::{Blend, Device, Format, Frame, GpuBuffer, GraphicsDesc, Pass, Pipeline};
 
 use crate::shader::Shaders;
-use crate::{Draw, Viewport};
+use crate::{Draws, Viewport};
 
 /// A mesh that [`Meshes::add`] handed out, of vertex type `V`.
 pub struct Mesh<V> {
@@ -106,10 +106,18 @@ pub(crate) struct MeshPass {
     device: Arc<Device>,
     /// The format of the targets it draws into.
     format: Format,
-    /// Each shader's pipeline, and the size of the vertices it reads, by its handle.
-    pipelines: Vec<(Pipeline, usize)>,
+    /// Each shader's pipeline, by its handle.
+    shaders: Vec<GpuShader>,
     /// Each mesh's buffers, by its handle.
     meshes: Vec<GpuMesh>,
+}
+
+struct GpuShader {
+    pipeline: Pipeline,
+    /// The size of the vertices it reads.
+    vertex_size: usize,
+    /// The size of the parameters it takes.
+    params_size: usize,
 }
 
 struct GpuMesh {
@@ -126,7 +134,7 @@ impl MeshPass {
         Self {
             device: device.clone(),
             format,
-            pipelines: Vec::new(),
+            shaders: Vec::new(),
             meshes: Vec::new(),
         }
     }
@@ -140,7 +148,7 @@ impl MeshPass {
         for added in shaders.added.drain(..) {
             assert_eq!(
                 added.index as usize,
-                self.pipelines.len(),
+                self.shaders.len(),
                 "a renderer draws with the shaders of one `Shaders`"
             );
             let pipeline = Pipeline::graphics(
@@ -154,7 +162,11 @@ impl MeshPass {
                     blend: Blend::Opaque,
                 },
             )?;
-            self.pipelines.push((pipeline, added.vertex_size));
+            self.shaders.push(GpuShader {
+                pipeline,
+                vertex_size: added.vertex_size,
+                params_size: added.params_size,
+            });
         }
         Ok(())
     }
@@ -190,57 +202,67 @@ impl MeshPass {
         Ok(())
     }
 
-    /// Draws `draws` in order, each over those before it, in `viewport` of the pass's target,
-    /// where `view_projection` takes the world to clip space. A viewport without an area draws
-    /// nothing.
+    /// Draws `draws` in `viewport` of the pass's target, where `view_projection` takes the world
+    /// to clip space, and copies each one's parameters into the frame for its shader. A viewport
+    /// without an area draws nothing.
     ///
     /// # Panics
     ///
     /// If a mesh drawn isn't one the pass has uploaded, a shader isn't one it has made a pipeline
-    /// of, a mesh's vertices aren't the size its shader reads, or the target's format isn't the
-    /// pass's.
+    /// of, a mesh's vertices or a draw's parameters aren't the size its shader reads, or the
+    /// target's format isn't the pass's.
     pub(crate) fn draw(
         &self,
         pass: &mut Pass<'_, '_>,
         viewport: Viewport,
         view_projection: Mat4,
-        draws: &[Draw],
-    ) {
-        if draws.is_empty() || viewport.size.contains(&0) {
-            return;
+        draws: &Draws,
+    ) -> Result<()> {
+        if draws.draws.is_empty() || viewport.size.contains(&0) {
+            return Ok(());
         }
         pass.set_viewport(viewport.origin, viewport.size);
         let mut bound = None;
-        for draw in draws {
+        for draw in &draws.draws {
             let mesh = self
                 .meshes
                 .get(draw.mesh as usize)
                 .expect("a mesh of the renderer's `Meshes`, which the frame uploaded");
-            let (pipeline, vertex_size) = self
-                .pipelines
+            let shader = self
+                .shaders
                 .get(draw.shader as usize)
                 .expect("a shader of the renderer's `Shaders`");
-            // A `Draw` pairs a mesh with a shader for its vertex type, but handles from another
-            // `Meshes` or `Shaders` could pair it with one that reads past its vertices.
+            let params = &draws.params[draw.params.clone()];
+            // A draw pairs a mesh and parameters with a shader for their types, but handles from
+            // another `Meshes` or `Shaders` could pair them with one that reads past them.
             assert_eq!(
-                mesh.vertex_size, *vertex_size,
-                "a mesh draws with a shader for its vertex type, from the renderer's `Meshes` and \
-                 `Shaders`"
+                (mesh.vertex_size, params.len()),
+                (shader.vertex_size, shader.params_size),
+                "a mesh draws with a shader for its vertex type, and the parameters that shader \
+                 takes, from the renderer's `Meshes` and `Shaders`"
             );
             if bound != Some(draw.shader) {
-                pass.set_pipeline(pipeline);
+                pass.set_pipeline(&shader.pipeline);
                 bound = Some(draw.shader);
             }
+            // Where the shader reads them during this frame; a shader that takes none gets 0.
+            let params = if params.is_empty() {
+                0
+            } else {
+                pass.upload(params)?.address()
+            };
             // The shader's `Push`: the matrix from the mesh's space to clip space, column-major,
-            // then the vertices' address. The matrix goes first, so that both offsets are the
-            // same under every layout Slang gives push constants.
+            // then the addresses of the vertices and the parameters. The matrix goes first, so
+            // that every offset is the same under every layout Slang gives push constants.
             let clip_from_mesh = view_projection * draw.transform;
-            let mut push = [0u8; 72];
-            push[0..64].copy_from_slice(bytemuck::cast_slice(&clip_from_mesh.to_cols_array()));
+            let mut push = [0u8; 80];
+            push[0..64].copy_from_slice(bytemuck::bytes_of(&clip_from_mesh));
             push[64..72].copy_from_slice(&mesh.vertices.address().to_ne_bytes());
+            push[72..80].copy_from_slice(&params.to_ne_bytes());
             pass.push_constants(&push);
             pass.draw_indexed(&mesh.indices, 0, mesh.count, 0);
         }
+        Ok(())
     }
 }
 

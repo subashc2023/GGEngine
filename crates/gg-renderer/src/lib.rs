@@ -11,8 +11,10 @@ mod shader;
 mod ui;
 
 use std::iter;
+use std::ops::Range;
 use std::sync::Arc;
 
+use bytemuck::NoUninit;
 use gg_core::math::Mat4;
 use gg_core::{Error, Result};
 use gg_gpu::{ColorImage, Device, Frames, Instance, InstanceDesc, Surface, Swapchain, Target};
@@ -33,23 +35,49 @@ pub struct Viewport {
     pub size: [u32; 2],
 }
 
-/// A mesh, the shader to draw it with, which reads its vertex type, and where it is in the world.
-#[derive(Clone, Copy, Debug)]
-pub struct Draw {
+/// What a frame draws besides UI, in order, each over those before it: meshes, each with a shader
+/// for its vertex type, the parameters that shader takes, and where it is in the world. Clearing
+/// it keeps its memory, so that a frame that draws no more than the last allocates nothing.
+#[derive(Default)]
+pub struct Draws {
+    draws: Vec<Draw>,
+    /// Every draw's parameters, one after another.
+    params: Vec<u8>,
+}
+
+struct Draw {
     mesh: u32,
     shader: u32,
     transform: Mat4,
+    /// Where its parameters are in `Draws::params`.
+    params: Range<usize>,
 }
 
-impl Draw {
-    /// `transform` takes the mesh's own space, which its vertices' positions are in, to the
-    /// world's.
-    pub fn new<V>(mesh: Mesh<V>, shader: Shader<V>, transform: Mat4) -> Self {
-        Self {
+impl Draws {
+    /// Draws `mesh` with `shader`, which reads its vertex type and takes `params`, over the
+    /// meshes drawn before it. `transform` takes the mesh's own space, which its vertices'
+    /// positions are in, to the world's.
+    pub fn push<V, P: NoUninit>(
+        &mut self,
+        mesh: Mesh<V>,
+        shader: Shader<V, P>,
+        transform: Mat4,
+        params: P,
+    ) {
+        let start = self.params.len();
+        self.params.extend_from_slice(bytemuck::bytes_of(&params));
+        self.draws.push(Draw {
             mesh: mesh.index,
             shader: shader.index,
             transform,
-        }
+            params: start..self.params.len(),
+        });
+    }
+
+    /// Forgets every draw.
+    pub fn clear(&mut self) {
+        self.draws.clear();
+        self.params.clear();
     }
 }
 
@@ -65,8 +93,8 @@ pub struct RenderData<'a> {
     pub meshes: &'a mut Meshes,
     /// The shaders; those added since the renderer last rendered get their pipelines first.
     pub shaders: &'a mut Shaders,
-    /// What to draw, in order, each over those before it.
-    pub draws: &'a [Draw],
+    /// What to draw.
+    pub draws: &'a Draws,
 }
 
 /// How to set up a renderer.
@@ -227,8 +255,8 @@ impl Renderer {
     /// # Panics
     ///
     /// If `data` holds meshes or shaders of another [`Meshes`] or [`Shaders`] than the ones it
-    /// held before, which could draw a mesh with a shader for another vertex type; or if its
-    /// camera's projection can't project, as [`Projection`] says.
+    /// held before, which could draw a mesh with a shader for another vertex type or parameters of
+    /// another type; or if its camera's projection can't project, as [`Projection`] says.
     pub fn render(
         &mut self,
         data: RenderData<'_>,
@@ -281,7 +309,7 @@ impl Renderer {
             .begin_pass(0, c"frame", data.clear_color)
             .expect("a frame's first target has an image");
         self.meshes
-            .draw(&mut pass, data.viewport, view_projection, data.draws);
+            .draw(&mut pass, data.viewport, view_projection, data.draws)?;
         self.ui
             .draw(&mut pass, ui.primitives, ui.pixels_per_point)?;
         drop(pass);

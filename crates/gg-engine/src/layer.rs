@@ -8,7 +8,7 @@ use std::time::Duration;
 use bytemuck::NoUninit;
 use gg_core::Result;
 use gg_core::math::Mat4;
-use gg_renderer::{Camera, Draw, Mesh, Meshes, RenderData, Shader, Shaders, Viewport};
+use gg_renderer::{Camera, Draws, Mesh, Meshes, RenderData, Shader, Shaders, Viewport};
 
 use crate::{Event, Input, Ui};
 
@@ -43,8 +43,8 @@ pub struct Context {
     camera: Camera,
     meshes: Meshes,
     shaders: Shaders,
-    /// What to draw this frame, in order.
-    draws: Vec<Draw>,
+    /// What to draw this frame.
+    draws: Draws,
 }
 
 impl Context {
@@ -56,7 +56,7 @@ impl Context {
             camera: Camera::default(),
             meshes: Meshes::default(),
             shaders: Shaders::default(),
-            draws: Vec::new(),
+            draws: Draws::default(),
         }
     }
 
@@ -93,18 +93,20 @@ impl Context {
     }
 
     /// Compiles the Slang shader at `path` for layers to draw meshes of vertex type `V` with from
-    /// then on. `name` names it in errors and GPU captures. The shader keeps to the contract that
+    /// then on, which takes parameters of type `P` with each draw, such as a color: `()` for
+    /// none. `name` names it in errors and GPU captures. The shader keeps to the contract that
     /// [`gg_renderer::Shaders::add`] describes: entry points `vertex_main` and `fragment_main`,
-    /// and push constants that hold the matrix from the mesh's space to clip space and the
-    /// address of the vertices, which it reads as `V` is laid out.
+    /// and push constants that hold the matrix from the mesh's space to clip space, the address
+    /// of the vertices, which it reads as `V` is laid out, and the address of the draw's
+    /// parameters, which it reads as `P` is.
     ///
     /// Fails with `renderer.bad_shader` and slangc's diagnostics if it doesn't compile, and with
     /// `renderer.no_slangc` if slangc can't be run.
-    pub fn add_shader<V: NoUninit>(
+    pub fn add_shader<V: NoUninit, P: NoUninit>(
         &mut self,
         name: &str,
         path: impl AsRef<Path>,
-    ) -> Result<Shader<V>> {
+    ) -> Result<Shader<V, P>> {
         self.shaders.add(name, path.as_ref())
     }
 
@@ -125,10 +127,16 @@ impl Context {
     }
 
     /// Draws `mesh` with `shader` this frame, where `transform` places it in the world, over the
-    /// meshes drawn before it, in the game's view as the camera sees it. The view is the main
-    /// window's central area, which the panels dock around.
-    pub fn draw<V>(&mut self, mesh: Mesh<V>, shader: Shader<V>, transform: Mat4) {
-        self.draws.push(Draw::new(mesh, shader, transform));
+    /// meshes drawn before it, in the game's view as the camera sees it; the shader gets
+    /// `params`. The view is the main window's central area, which the panels dock around.
+    pub fn draw<V, P: NoUninit>(
+        &mut self,
+        mesh: Mesh<V>,
+        shader: Shader<V, P>,
+        transform: Mat4,
+        params: P,
+    ) {
+        self.draws.push(mesh, shader, transform, params);
     }
 
     /// The frame's render data, with the game's view at `viewport`.

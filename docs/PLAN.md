@@ -39,6 +39,11 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   a turning triangle, and moves and turns its camera with W, A, S, D, Q and E, by the frame time;
   a unit test checks the camera's matrix, and a GPU test a camera and transforms against a
   reference image.
+- **Shader parameters** (2026-10-21): a shader is added for a vertex type and a type of
+  parameters, any `#[repr(C)]` type, which each draw gives it; the renderer copies them into the
+  frame, and the shader reads them through their address. glam's vectors and matrices can be the
+  fields of vertices and parameters. The sandbox's grid alternates two colors, picked in a panel,
+  and a GPU test gives two squares colors of their own.
 
 ## Now: Phase 3, runtime core
 
@@ -125,11 +130,11 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Removing meshes and shaders; each lasts until the app ends | Something adds and removes them as it runs, such as asset hot reload in Phase 4 |
 | Perspective cameras; a camera is orthographic | Phase 4, with depth |
 | Per-frame data in a buffer: shaders get only the product of the camera's view and projection and each draw's transform, so none sees positions in the world | Phase 6, with lighting |
-| Per-draw data besides the transform, such as a material's constants | Phase 6, with materials |
+| Materials: parameters kept on the GPU and written when they change, rather than copied with every draw, and textures among them | Phase 6, with materials |
 | More than one camera or view, such as split screen or the editor's scene view | A game or the editor draws several |
 | Converting between the view's pixels and the world, to pick what's under the cursor | Something picks with the mouse |
 | A camera controller in the engine; the sandbox steers its own | A second app needs one, such as the editor in Phase 9 |
-| Checking a game's shader against the contract on `Shaders::add` through Slang reflection: its push constants, its resources, and the size of its vertex struct against its vertex type's; until then it's trusted, and validation checks it in debug builds | Phase 4, with Slang reflection |
+| Checking a game's shader against the contract on `Shaders::add` through Slang reflection: its push constants, its resources, and the sizes of its vertex and parameter structs against their types'; until then it's trusted, and validation checks it in debug builds | Phase 4, with Slang reflection |
 | Games' shaders compile with slangc as they're added, so running a game needs the Vulkan SDK | Phase 7, which cooks shaders |
 | Shader paths are as the game gives them; the sandbox gives its source's | Phase 4, with assets |
 | `Layer::attach` can't fail, so a layer whose shader doesn't compile panics, as the sandbox does | A game loads assets as it starts |

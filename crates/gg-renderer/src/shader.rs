@@ -14,22 +14,23 @@ use tracing::{debug, warn};
 /// The slangc that compiled the renderer's own shaders, as the build found it.
 const SLANGC: &str = env!("GG_SLANGC");
 
-/// A shader that [`Shaders::add`] handed out, which draws meshes of vertex type `V`.
-pub struct Shader<V> {
+/// A shader that [`Shaders::add`] handed out, which draws meshes of vertex type `V` and takes
+/// parameters of type `P` with each draw.
+pub struct Shader<V, P = ()> {
     pub(crate) index: u32,
-    vertex: PhantomData<fn() -> V>,
+    types: PhantomData<fn() -> (V, P)>,
 }
 
-// By hand, so that they don't need `V` to be `Clone` or `Debug` too.
-impl<V> Clone for Shader<V> {
+// By hand, so that they don't need `V` and `P` to be `Clone` or `Debug` too.
+impl<V, P> Clone for Shader<V, P> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<V> Copy for Shader<V> {}
+impl<V, P> Copy for Shader<V, P> {}
 
-impl<V> fmt::Debug for Shader<V> {
+impl<V, P> fmt::Debug for Shader<V, P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("Shader").field(&self.index).finish()
     }
@@ -52,30 +53,43 @@ pub(crate) struct Added {
     pub(crate) spirv: Vec<u8>,
     /// The size of the vertices it reads.
     pub(crate) vertex_size: usize,
+    /// The size of the parameters it takes.
+    pub(crate) params_size: usize,
 }
 
 impl Shaders {
-    /// Compiles the Slang shader at `path`, which draws meshes of vertex type `V`. `name` names it
-    /// in errors and GPU captures.
+    /// Compiles the Slang shader at `path`, which draws meshes of vertex type `V` and takes
+    /// parameters of type `P` with each draw, such as a color: `()` for none. `name` names it in
+    /// errors and GPU captures.
     ///
     /// Vulkan checks nothing about a shader, so the engine trusts it to keep to this contract,
     /// which validation checks in debug builds:
     ///
     /// - Its entry points are `vertex_main`, a vertex shader, and `fragment_main`, a fragment
     ///   shader that returns one `float4`: the color, in linear RGBA.
-    /// - Its push constants are `struct { float4x4 clip_from_mesh; V* vertices; }`, the only 72
-    ///   bytes set. The first is the camera's view and projection times the draw's transform,
-    ///   from the mesh's own space to Vulkan's clip space, for `mul(clip_from_mesh,
-    ///   float4(position, 1.0))`; the second, the address of the mesh's vertices. It uses no
+    /// - Its push constants are `struct { float4x4 clip_from_mesh; V* vertices; P* params; }`,
+    ///   the only 80 bytes set. The first is the camera's view and projection times the draw's
+    ///   transform, from the mesh's own space to Vulkan's clip space, for `mul(clip_from_mesh,
+    ///   float4(position, 1.0))`; the second, the address of the mesh's vertices; the third, the
+    ///   address of the draw's parameters, which a shader that takes none leaves out. It uses no
     ///   other resources.
     /// - It reads only the vertex at `SV_VulkanVertexID`, not `SV_VertexID`, which needs a
     ///   feature the engine doesn't enable.
-    /// - Its struct for `V` has `V`'s fields, in order, of 32-bit types: Slang lays out what a
-    ///   pointer points at as `#[repr(C)]` does.
+    /// - Its structs for `V` and `P` have their fields, in order, of 32-bit scalars, vectors and
+    ///   matrices: Slang lays out what a pointer points at as `#[repr(C)]` does, without padding.
+    ///   glam's `Vec2`, `Vec3`, `Vec4`, `Quat`, `Mat3` and `Mat4` are `float2`, `float3`,
+    ///   `float4`, `float4`, `float3x3` and `float4x4`; not `Vec3A` or `Mat3A`, whose columns
+    ///   take 16 bytes to `float3`'s 12. `Vec4`, `Quat` and `Mat4` are 16-byte aligned, so a type
+    ///   with one has padding, which `NoUninit` refuses, unless it starts at a multiple of 16
+    ///   bytes and the type's size is one too.
     ///
     /// Fails with `renderer.bad_shader` and slangc's diagnostics if it doesn't compile, and with
     /// `renderer.no_slangc` if slangc can't be run.
-    pub fn add<V: NoUninit>(&mut self, name: &str, path: &Path) -> Result<Shader<V>> {
+    pub fn add<V: NoUninit, P: NoUninit>(
+        &mut self,
+        name: &str,
+        path: &Path,
+    ) -> Result<Shader<V, P>> {
         let spirv = compile(Path::new(SLANGC), name, path)?;
         let index = self.count;
         self.count += 1;
@@ -84,10 +98,11 @@ impl Shaders {
             name: name.to_owned(),
             spirv,
             vertex_size: size_of::<V>(),
+            params_size: size_of::<P>(),
         });
         Ok(Shader {
             index,
-            vertex: PhantomData,
+            types: PhantomData,
         })
     }
 }
@@ -166,7 +181,7 @@ mod tests {
         for file in ["no_fragment.slang", "missing.slang"] {
             let path = fixture(file);
             let error = shaders
-                .add::<[f32; 3]>("broken", &path)
+                .add::<[f32; 3], ()>("broken", &path)
                 .expect_err("a shader that doesn't compile");
             assert_eq!(error.code(), "renderer.bad_shader", "{file}");
             let message = error.to_string();
@@ -175,7 +190,7 @@ mod tests {
                 "{message}"
             );
         }
-        let mut flat = || shaders.add::<[f32; 3]>("flat", &fixture("flat_color.slang"));
+        let mut flat = || shaders.add::<[f32; 3], [f32; 4]>("flat", &fixture("flat_color.slang"));
         assert_eq!(flat().map(|shader| shader.index).ok(), Some(0));
         assert_eq!(flat().map(|shader| shader.index).ok(), Some(1));
     }

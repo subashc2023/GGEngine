@@ -272,28 +272,31 @@ and scenes, physics and the editor share these axes.
 
 Each frame the engine hands `gg-renderer` that frame's render data, as plain data: the color the
 frame clears to, the game's view, the camera it sees the world from, and what to draw in it, in
-order: meshes, each with a shader for its vertex type and a transform that places it in the
-world. The view is the main window's central area, which the dock leaves the game, and the UI
+order: meshes, each with a shader for its vertex type, the parameters that shader takes, and a
+transform that places it in the world. The view is the main window's central area, which the dock leaves the game, and the UI
 draws over it. Layers add shaders and meshes, draw them and set the camera through their
 `Context`, and the renderer's `Shaders` and `Meshes` hand out their handles at once.
 
 A shader is a Slang file that the engine compiles with slangc as a layer adds it, so one that
 doesn't compile fails there, with slangc's diagnostics naming the file and line; the renderer
 makes its pipeline the next time it renders. A mesh's vertices are any `#[repr(C)]` type without
-padding, and the next frame that renders copies them and the indices into GPU memory, where they
-stay. Shaders read vertices through their buffer's address rather than through vertex input, and
-Slang lays out what a pointer points at as `#[repr(C)]` does, so a mesh's layout is between its
-vertex type and the shader's struct for it; draws take the indices. A shader is added for a
-vertex type, and a mesh draws only with a shader for its own. Vulkan checks nothing about a
-shader, so its interface, which `Shaders::add` describes, is trusted, and validation checks it
-in debug builds.
+padding, with glam's vectors and matrices among its fields, and the next frame that renders
+copies them and the indices into GPU memory, where they stay. Shaders read vertices through their
+buffer's address rather than through vertex input, and Slang lays out what a pointer points at as
+`#[repr(C)]` does, so a mesh's layout is between its vertex type and the shader's struct for it;
+draws take the indices. A shader is added for a vertex type and a type of parameters, such as a
+color, which each draw gives it: a mesh draws only with a shader for its own vertex type, and
+with parameters of that shader's type. Each frame copies every draw's parameters into the frame's
+own memory, where the shader reads them through their address too, so they can be as large as a
+shader needs. Vulkan checks nothing about a shader, so its interface, which `Shaders::add`
+describes, is trusted, and validation checks it in debug builds.
 
 A camera is a position, a rotation and a projection. An orthographic camera, as 2D games use,
 sees as much of the world from bottom to top as the game sets, and as much across as the view's
 aspect ratio makes, so nothing stretches as the dock resizes the view; perspective comes with
 depth. Each frame the renderer multiplies the camera's view and projection by each draw's
-transform, and pushes the product, column-major as glam's matrices are, with the vertices'
-address: a shader places its vertices with one matrix.
+transform, and pushes the product, column-major as glam's matrices are, with the addresses of
+the vertices and of the draw's parameters: a shader places its vertices with one matrix.
 
 An error while rendering ends the renderer, since a failed frame can leave meshes half copied to
 the GPU.

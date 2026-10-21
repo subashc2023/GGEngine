@@ -9,7 +9,7 @@ struct Vertex {
 
 // What the engine pushes for each draw: the matrix from the mesh's space to clip space, which is
 // the camera's view and projection times the draw's transform, then the address of the mesh's
-// vertices.
+// vertices. It takes no parameters, so it leaves out their address, which comes next.
 struct Push {
     float4x4 clip_from_mesh;
     Vertex* vertices;

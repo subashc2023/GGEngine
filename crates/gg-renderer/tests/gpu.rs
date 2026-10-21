@@ -12,9 +12,9 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
-use gg_core::math::{Mat4, Quat, Vec3};
+use gg_core::math::{Mat4, Quat, Vec3, Vec4};
 use gg_renderer::{
-    Camera, Draw, Meshes, Projection, RenderData, Renderer, Settings, Shaders, Ui, Viewport,
+    Camera, Draws, Meshes, Projection, RenderData, Renderer, Settings, Shaders, Ui, Viewport,
 };
 
 fn main() {
@@ -66,6 +66,7 @@ fn ui_matches_its_reference() {
     let mut renderer = renderer(WIDTH, HEIGHT);
     let mut meshes = Meshes::default();
     let mut shaders = Shaders::default();
+    let draws = Draws::default();
 
     let egui = egui::Context::default();
     // Without animation, the first frames show the window as it stays.
@@ -106,7 +107,7 @@ fn ui_matches_its_reference() {
             camera: Camera::default(),
             meshes: &mut meshes,
             shaders: &mut shaders,
-            draws: &[],
+            draws: &draws,
         };
         assert!(
             renderer.render(data, ui, &mut []).expect("a frame"),
@@ -116,13 +117,15 @@ fn ui_matches_its_reference() {
     check(renderer, "ui", WIDTH, HEIGHT);
 }
 
-/// Draws a square in one color, then a triangle in red, green and blue over it, each with its own
-/// vertex type and shader and placed by a transform of its own, into part of an offscreen image,
-/// as a camera away from the origin sees them, and compares it with its reference image. The
-/// square is turned and scaled, and the triangle moved and scaled to cover much of it, so that a
-/// matrix pushed transposed or multiplied in the wrong order, or the meshes drawn out of order,
-/// change thousands of pixels. The triangle is added after the first frame, and the frames
-/// outnumber those in flight, so that later frames draw from what earlier ones copied to the GPU.
+/// Draws two squares in the colors their draws give, then a triangle in red, green and blue over
+/// the first, each mesh with its own vertex type and shader and placed by a transform of its own,
+/// into part of an offscreen image, as a camera away from the origin sees them, and compares it
+/// with its reference image. The first square is turned and scaled, and the triangle moved and
+/// scaled to cover much of it, so that a matrix pushed transposed or multiplied in the wrong
+/// order, or the meshes drawn out of order, change thousands of pixels; the second square is
+/// clear of them, so that a draw given another's parameters changes a thousand. The triangle is
+/// added after the first frame, and the frames outnumber those in flight, so that later frames
+/// draw from what earlier ones copied to the GPU.
 fn meshes_match_their_reference() {
     const WIDTH: u32 = 320;
     const HEIGHT: u32 = 200;
@@ -152,9 +155,9 @@ fn meshes_match_their_reference() {
             Vec3::new(x, y, 0.0),
         )
     };
-    // Positions.
+    // Positions, and a color for each draw.
     let flat = shaders
-        .add::<[f32; 3]>("flat color", &shader("flat_color.slang"))
+        .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"))
         .expect("a shader");
     let corners = [
         [-0.5, -0.5, 0.0],
@@ -165,12 +168,16 @@ fn meshes_match_their_reference() {
     let square = meshes
         .add("square", &corners, &[0, 1, 2, 2, 3, 0])
         .expect("a mesh");
-    let mut draws = vec![Draw::new(square, flat, transform(2.5, 30.0, [0.5, 0.5]))];
+    let mut draws = Draws::default();
+    let blue = Vec4::new(0.2, 0.3, 0.8, 1.0);
+    draws.push(square, flat, transform(2.5, 30.0, [0.5, 0.5]), blue);
+    let orange = Vec4::new(0.9, 0.4, 0.1, 1.0);
+    draws.push(square, flat, transform(0.8, 0.0, [3.2, 1.8]), orange);
     for frame in 0..3 {
         if frame == 1 {
-            // Positions, then colors.
+            // Positions, then colors; no parameters.
             let colored = shaders
-                .add::<[f32; 7]>("vertex color", &shader("vertex_color.slang"))
+                .add::<[f32; 7], ()>("vertex color", &shader("vertex_color.slang"))
                 .expect("a shader");
             let corner = |[x, y, z]: [f32; 3], [r, g, b, a]: [f32; 4]| [x, y, z, r, g, b, a];
             // Pointing up.
@@ -182,11 +189,7 @@ fn meshes_match_their_reference() {
             let triangle = meshes
                 .add("triangle", &vertices, &[0, 1, 2])
                 .expect("a mesh");
-            draws.push(Draw::new(
-                triangle,
-                colored,
-                transform(2.0, 0.0, [1.0, 0.5]),
-            ));
+            draws.push(triangle, colored, transform(2.0, 0.0, [1.0, 0.5]), ());
         }
         let data = RenderData {
             clear_color: CLEAR,

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use bytemuck::NoUninit;
 use gg_engine::egui::{ViewportCommand, ViewportId};
-use gg_engine::math::{Mat4, Quat, Vec3};
+use gg_engine::math::{Mat4, Quat, Vec3, Vec4};
 use gg_engine::{Camera, Context, Event, Key, Layer, Mesh, Projection, Shader, Ui};
 use tracing::info;
 
@@ -22,31 +22,39 @@ fn main() -> ExitCode {
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 struct Position {
-    position: [f32; 3],
+    position: Vec3,
 }
 
 /// A corner of a mesh in the colors of its corners, which `shaders/vertex_color.slang` reads: its
-/// position in the mesh's own space, and its color in linear RGBA.
+/// position in the mesh's own space, and its color in linear RGBA. The color is an array, since a
+/// `Vec4` is 16-byte aligned, which would leave padding after the position.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 struct Colored {
-    position: [f32; 3],
+    position: Vec3,
     color: [f32; 4],
+}
+
+/// What `shaders/flat_color.slang` takes with each draw: the color, in linear RGBA.
+#[repr(C)]
+#[derive(Clone, Copy, NoUninit)]
+struct Tint {
+    color: Vec4,
 }
 
 /// A square a unit across, as two triangles.
 const SQUARE: [Position; 4] = [
     Position {
-        position: [-0.5, -0.5, 0.0],
+        position: Vec3::new(-0.5, -0.5, 0.0),
     },
     Position {
-        position: [0.5, -0.5, 0.0],
+        position: Vec3::new(0.5, -0.5, 0.0),
     },
     Position {
-        position: [0.5, 0.5, 0.0],
+        position: Vec3::new(0.5, 0.5, 0.0),
     },
     Position {
-        position: [-0.5, 0.5, 0.0],
+        position: Vec3::new(-0.5, 0.5, 0.0),
     },
 ];
 const SQUARE_INDICES: [u32; 6] = [0, 1, 2, 2, 3, 0];
@@ -54,15 +62,15 @@ const SQUARE_INDICES: [u32; 6] = [0, 1, 2, 2, 3, 0];
 /// A triangle in red, green and blue, a unit across, pointing up.
 const TRIANGLE: [Colored; 3] = [
     Colored {
-        position: [0.0, 0.5, 0.0],
+        position: Vec3::new(0.0, 0.5, 0.0),
         color: [1.0, 0.0, 0.0, 1.0],
     },
     Colored {
-        position: [0.5, -0.5, 0.0],
+        position: Vec3::new(0.5, -0.5, 0.0),
         color: [0.0, 1.0, 0.0, 1.0],
     },
     Colored {
-        position: [-0.5, -0.5, 0.0],
+        position: Vec3::new(-0.5, -0.5, 0.0),
         color: [0.0, 0.0, 1.0, 1.0],
     },
 ];
@@ -72,18 +80,22 @@ const CAMERA_SPEED: f32 = 1.5;
 /// How fast the camera and the triangle turn, in radians a second: a quarter turn.
 const TURN_SPEED: f32 = FRAC_PI_2;
 
-/// Draws a grid of blue squares in the game's view, and a triangle in red, green and blue turning
-/// over them, each mesh with a vertex type and shader of its own, over a color that drifts slowly,
-/// so that a running sandbox visibly animates. W, A, S and D move the camera along its own axes,
-/// and Q and E turn it left and right, at the same speed whatever the frame rate. Shows two panels
-/// to dock: frame times and the camera, and the color, which can be held or picked. Logs the key
-/// and mouse presses that reach it, which those on the panels don't. It polls input too: holding
-/// Space pauses the drift, and a panel shows where the cursor is. The title bar's File menu quits.
+/// Draws a grid of squares in the game's view, in two colors that alternate, which each square's
+/// draw gives its shader, and a triangle in red, green and blue turning over them, each mesh with
+/// a vertex type and shader of its own, over a color that drifts slowly, so that a running sandbox
+/// visibly animates. W, A, S and D move the camera along its own axes, and Q and E turn it left
+/// and right, at the same speed whatever the frame rate. Shows three panels to dock: frame times
+/// and the camera; the grid's colors, which can be picked; and the clear color, which can be held
+/// or picked. Logs the key and mouse presses that reach it, which those on the panels don't. It
+/// polls input too: holding Space pauses the drift, and a panel shows where the cursor is. The
+/// title bar's File menu quits.
 struct Sandbox {
     time: Duration,
     drift: bool,
     /// The clear color, in linear RGB.
     color: [f32; 3],
+    /// The grid's two colors, in linear RGB.
+    grid_colors: [[f32; 3]; 2],
     /// The last frame's time, shown as it is: smoothing would hide uneven frames.
     frame_time: Duration,
     camera: Camera,
@@ -92,7 +104,7 @@ struct Sandbox {
     camera_turn: f32,
     triangle_turn: f32,
     /// Added once the sandbox attaches.
-    square: Option<(Mesh<Position>, Shader<Position>)>,
+    square: Option<(Mesh<Position>, Shader<Position, Tint>)>,
     triangle: Option<(Mesh<Colored>, Shader<Colored>)>,
 }
 
@@ -102,6 +114,8 @@ impl Sandbox {
             time: Duration::ZERO,
             drift: true,
             color: [0.0; 3],
+            // Blue and red.
+            grid_colors: [[0.2, 0.3, 0.8], [0.8, 0.2, 0.3]],
             frame_time: Duration::ZERO,
             // 3 units from the view's bottom to its top, around the grid's 2.
             camera: Camera {
@@ -157,19 +171,21 @@ impl Layer for Sandbox {
         cx.set_camera(self.camera);
 
         if let Some((mesh, shader)) = self.square {
-            // 10 by 10, 2 units across, each square a little smaller than the spacing.
+            // 10 by 10, 2 units across, each square a little smaller than the spacing, in the
+            // grid's colors in turn, as a checkerboard's.
             for row in 0..10 {
                 for column in 0..10 {
                     let at = Vec3::new(column as f32 - 4.5, row as f32 - 4.5, 0.0) * 0.2;
                     let transform =
                         Mat4::from_translation(at) * Mat4::from_scale(Vec3::splat(0.18));
-                    cx.draw(mesh, shader, transform);
+                    let color = Vec3::from(self.grid_colors[(row + column) % 2]).extend(1.0);
+                    cx.draw(mesh, shader, transform, Tint { color });
                 }
             }
         }
         self.triangle_turn = (self.triangle_turn + TURN_SPEED * seconds).rem_euclid(TAU);
         if let Some((mesh, shader)) = self.triangle {
-            cx.draw(mesh, shader, Mat4::from_rotation_z(self.triangle_turn));
+            cx.draw(mesh, shader, Mat4::from_rotation_z(self.triangle_turn), ());
         }
 
         self.frame_time = dt;
@@ -216,6 +232,14 @@ impl Layer for Sandbox {
             ui.label(match cx.input().cursor() {
                 Some([x, y]) => format!("Cursor at {x:.0}, {y:.0}"),
                 None => "Cursor outside the window".to_owned(),
+            });
+        });
+        ui.panel("Grid", |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Colors");
+                for color in &mut self.grid_colors {
+                    ui.color_edit_button_rgb(color);
+                }
             });
         });
         ui.panel("Clear color", |ui| {
