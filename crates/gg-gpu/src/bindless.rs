@@ -2,6 +2,7 @@
 //! in one descriptor set that every pipeline shares. Shaders pick a texture and a sampler by
 //! index, and read buffers through their device addresses, so nothing else is ever bound.
 
+use std::collections::HashSet;
 use std::sync::{Mutex, PoisonError};
 
 use ash::vk;
@@ -11,6 +12,11 @@ use crate::{Device, vk_error};
 
 /// How many textures the set holds. A device with descriptor indexing holds at least 500,000.
 pub(crate) const TEXTURES: u32 = 65_536;
+
+/// How many of the set's slots, from the first, are placed: the texture made for one names it, as
+/// [`Texture::placed`](crate::Texture::placed) does, so that its index is known before it's made.
+/// The other 4,096 are given out wherever one is free.
+pub const PLACED_TEXTURES: u32 = TEXTURES - 4_096;
 
 /// The bytes of push constants every pipeline gets: 128, the most every device allows. Shaders
 /// see them from offset 0, in every stage.
@@ -81,12 +87,68 @@ pub(crate) struct Bindless {
     slots: Mutex<Slots>,
 }
 
-#[derive(Default)]
+/// Which texture slots are in use: by a texture, or by one retired until the GPU is done with the
+/// frames that may sample it.
 struct Slots {
-    /// Slots whose textures were destroyed, to reuse first.
+    /// The placed slots in use.
+    placed: HashSet<u32>,
+    /// Slots past the placed ones whose textures were destroyed, to reuse first.
     free: Vec<u32>,
-    /// The first slot never used.
+    /// The first slot past the placed ones never used.
     next: u32,
+}
+
+impl Slots {
+    fn new() -> Self {
+        Self {
+            placed: HashSet::new(),
+            free: Vec::new(),
+            next: PLACED_TEXTURES,
+        }
+    }
+
+    /// Takes `slot`, a placed one, or with `None` a free slot past them.
+    ///
+    /// # Panics
+    ///
+    /// If `slot` isn't placed, or is in use.
+    fn take(&mut self, slot: Option<u32>) -> Result<u32> {
+        if let Some(slot) = slot {
+            assert!(
+                slot < PLACED_TEXTURES,
+                "texture slot {slot} isn't one of the {PLACED_TEXTURES} placed ones"
+            );
+            assert!(
+                self.placed.insert(slot),
+                "texture slot {slot} is in use, by a texture or by one the GPU may still sample"
+            );
+            return Ok(slot);
+        }
+        match self.free.pop() {
+            Some(index) => Ok(index),
+            None if self.next < TEXTURES => {
+                self.next += 1;
+                Ok(self.next - 1)
+            }
+            None => Err(Error::new(
+                "gpu.too_many_textures",
+                format!(
+                    "the bindless set gives out {} textures past the placed ones, and all are in \
+                     use",
+                    TEXTURES - PLACED_TEXTURES
+                ),
+            )),
+        }
+    }
+
+    /// Frees `slot` for another texture.
+    fn release(&mut self, slot: u32) {
+        if slot < PLACED_TEXTURES {
+            self.placed.remove(&slot);
+        } else {
+            self.free.push(slot);
+        }
+    }
 }
 
 impl Bindless {
@@ -101,7 +163,7 @@ impl Bindless {
             pool: vk::DescriptorPool::null(),
             set: vk::DescriptorSet::null(),
             pipeline_layout: vk::PipelineLayout::null(),
-            slots: Mutex::default(),
+            slots: Mutex::new(Slots::new()),
         };
         // SAFETY: the caller guarantees the device; on failure, what was made so far is
         // destroyed, null handles included, which Vulkan allows.
@@ -221,27 +283,25 @@ impl Bindless {
         self.pipeline_layout
     }
 
-    /// Puts `view` in a free texture slot, and returns the slot's index.
+    /// Puts `view` in texture slot `slot`, a placed one, or with `None` a free slot past them, and
+    /// returns the slot's index.
     ///
     /// # Safety
     ///
     /// `device` must be the set's, and `view` a live view of a sampled image of it, in the
     /// shader-read-only layout whenever a shader samples it.
-    pub(crate) unsafe fn add(&self, device: &ash::Device, view: vk::ImageView) -> Result<u32> {
+    ///
+    /// # Panics
+    ///
+    /// If `slot` isn't placed, or is in use.
+    pub(crate) unsafe fn add(
+        &self,
+        device: &ash::Device,
+        view: vk::ImageView,
+        slot: Option<u32>,
+    ) -> Result<u32> {
         let mut slots = self.lock();
-        let index = match slots.free.pop() {
-            Some(index) => index,
-            None if slots.next < TEXTURES => {
-                slots.next += 1;
-                slots.next - 1
-            }
-            None => {
-                return Err(Error::new(
-                    "gpu.too_many_textures",
-                    format!("the bindless set holds {TEXTURES} textures, and all are in use"),
-                ));
-            }
-        };
+        let index = slots.take(slot)?;
         let image_info = [vk::DescriptorImageInfo::default()
             .image_view(view)
             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
@@ -259,7 +319,7 @@ impl Bindless {
 
     /// Frees a texture slot, once the GPU is done with the frames that may use it.
     pub(crate) fn remove(&self, index: u32) {
-        self.lock().free.push(index);
+        self.lock().release(index);
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Slots> {
@@ -281,5 +341,46 @@ impl Bindless {
                 device.destroy_sampler(sampler, None);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn placed_slots_come_back_once_released_and_the_rest_are_given_out_past_them() {
+        let mut slots = Slots::new();
+        assert_eq!(slots.take(Some(7)).ok(), Some(7));
+        assert_eq!(slots.take(None).ok(), Some(PLACED_TEXTURES));
+        assert_eq!(slots.take(None).ok(), Some(PLACED_TEXTURES + 1));
+        slots.release(7);
+        slots.release(PLACED_TEXTURES);
+        assert_eq!(slots.take(Some(7)).ok(), Some(7));
+        assert_eq!(slots.take(None).ok(), Some(PLACED_TEXTURES));
+    }
+
+    #[test]
+    #[should_panic(expected = "texture slot 7 is in use")]
+    fn a_placed_slot_in_use_is_refused() {
+        let mut slots = Slots::new();
+        let _ = slots.take(Some(7));
+        let _ = slots.take(Some(7));
+    }
+
+    #[test]
+    #[should_panic(expected = "isn't one of the")]
+    fn only_the_placed_slots_can_be_placed() {
+        let _ = Slots::new().take(Some(PLACED_TEXTURES));
+    }
+
+    #[test]
+    fn the_slots_given_out_run_out_at_the_end_of_the_set() {
+        let mut slots = Slots::new();
+        for _ in PLACED_TEXTURES..TEXTURES {
+            assert!(slots.take(None).is_ok());
+        }
+        let error = slots.take(None).expect_err("no slot left");
+        assert_eq!(error.code(), "gpu.too_many_textures");
     }
 }

@@ -5,7 +5,8 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-bytemuck.workspace = true
+# derive, for the texture handle that shaders' parameters carry.
+bytemuck = { workspace = true, features = ["derive"] }
 epaint.workspace = true
 gg-core.workspace = true
 gg-gpu.workspace = true

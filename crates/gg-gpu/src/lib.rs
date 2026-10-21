@@ -23,7 +23,7 @@ use std::fmt;
 use ash::vk;
 use gg_core::Error;
 
-pub use bindless::Sampler;
+pub use bindless::{PLACED_TEXTURES, Sampler};
 pub use buffer::GpuBuffer;
 pub use device::Device;
 pub use frame::{Frame, Frames, Indices, Pass, Target, Upload};
@@ -32,7 +32,7 @@ pub use instance::{Instance, InstanceDesc, Validation};
 pub use pipeline::{Blend, Format, GraphicsDesc, Pipeline};
 pub use surface::{Surface, Window};
 pub use swapchain::Swapchain;
-pub use texture::{Texture, TextureFormat};
+pub use texture::{MAX_TEXTURE_SIZE, Texture, TextureFormat};
 
 /// The Vulkan version a device must support.
 const REQUIRED_VERSION: u32 = vk::make_api_version(0, 1, 4, 0);

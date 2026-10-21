@@ -8,9 +8,11 @@ use std::time::Duration;
 use bytemuck::NoUninit;
 use gg_core::Result;
 use gg_core::math::Mat4;
-use gg_renderer::{Camera, Draws, Mesh, Meshes, RenderData, Shader, Shaders, Viewport};
+use gg_renderer::{
+    Blend, Camera, Draws, Mesh, Meshes, RenderData, Shader, Shaders, Texture, Textures, Viewport,
+};
 
-use crate::{Event, Input, Ui};
+use crate::{Event, Input, Ui, image};
 
 /// A part of an app that the main loop drives. Every method has a default that does nothing,
 /// so a layer implements only what it uses.
@@ -43,6 +45,7 @@ pub struct Context {
     camera: Camera,
     meshes: Meshes,
     shaders: Shaders,
+    textures: Textures,
     /// What to draw this frame.
     draws: Draws,
 }
@@ -56,6 +59,7 @@ impl Context {
             camera: Camera::default(),
             meshes: Meshes::default(),
             shaders: Shaders::default(),
+            textures: Textures::default(),
             draws: Draws::default(),
         }
     }
@@ -93,12 +97,14 @@ impl Context {
     }
 
     /// Compiles the Slang shader at `path` for layers to draw meshes of vertex type `V` with from
-    /// then on, which takes parameters of type `P` with each draw, such as a color: `()` for
-    /// none. `name` names it in errors and GPU captures. The shader keeps to the contract that
-    /// [`gg_renderer::Shaders::add`] describes: entry points `vertex_main` and `fragment_main`,
-    /// and push constants that hold the matrix from the mesh's space to clip space, the address
-    /// of the vertices, which it reads as `V` is laid out, and the address of the draw's
-    /// parameters, which it reads as `P` is.
+    /// then on, which takes parameters of type `P` with each draw, such as a color or a texture:
+    /// `()` for none. `blend` says how its color goes over what's drawn before it, such as
+    /// [`Blend::Alpha`] for straight alpha, as PNGs store it. `name` names it in errors and GPU
+    /// captures. The shader keeps to the contract that [`gg_renderer::Shaders::add`] describes:
+    /// entry points `vertex_main` and `fragment_main`; push constants that hold the matrix from
+    /// the mesh's space to clip space, the address of the vertices, which it reads as `V` is laid
+    /// out, and the address of the draw's parameters, which it reads as `P` is; and textures
+    /// sampled from the bindless set by the handles in its parameters.
     ///
     /// Fails with `renderer.bad_shader` and slangc's diagnostics if it doesn't compile, and with
     /// `renderer.no_slangc` if slangc can't be run.
@@ -106,8 +112,24 @@ impl Context {
         &mut self,
         name: &str,
         path: impl AsRef<Path>,
+        blend: Blend,
     ) -> Result<Shader<V, P>> {
-        self.shaders.add(name, path.as_ref())
+        self.shaders.add(name, path.as_ref(), blend)
+    }
+
+    /// Loads the PNG file at `path` as a texture for layers' shaders to sample from then on,
+    /// through the handle, which is a field of their parameters as it is. Any PNG loads: its
+    /// colors are taken as sRGB-encoded and its alpha as not multiplied into them, and shaders
+    /// sample its colors decoded to linear, with texture coordinates from (0, 0) at its top left to
+    /// (1, 1) at its bottom right. `name` names the texture in errors and GPU captures. The GPU has
+    /// it from the next frame that renders.
+    ///
+    /// Fails with `engine.bad_texture` if the file can't be read or doesn't decode as a PNG, with
+    /// `renderer.bad_texture` if a side is more than 8,192 pixels, the most every Vulkan 1.4
+    /// device takes, and with `renderer.too_many_textures` past the 61,440 a renderer holds.
+    pub fn add_texture(&mut self, name: &str, path: impl AsRef<Path>) -> Result<Texture> {
+        let image = image::load_png(name, path.as_ref())?;
+        self.textures.add(name, image.size, &image.pixels)
     }
 
     /// Adds a mesh for layers to draw from then on: triangles, three of `indices` each, which
@@ -147,6 +169,7 @@ impl Context {
             camera: self.camera,
             meshes: &mut self.meshes,
             shaders: &mut self.shaders,
+            textures: &mut self.textures,
             draws: &self.draws,
         }
     }

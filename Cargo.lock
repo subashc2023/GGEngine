@@ -783,6 +783,7 @@ dependencies = [
  "egui-winit",
  "gg-core",
  "gg-renderer",
+ "png",
  "ron",
  "scoped-tls",
  "serde",

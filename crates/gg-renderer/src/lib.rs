@@ -1,6 +1,6 @@
 //! Turns the render data the engine hands it each frame into images, built on `gg-gpu`: meshes
-//! drawn with games' shaders in the game's view, as its camera sees them, and the UI over them;
-//! and the render graph, materials, lighting and post-processing to come.
+//! drawn with games' shaders and textures in the game's view, as its camera sees them, and the UI
+//! over them; and the render graph, materials, lighting and post-processing to come.
 //!
 //! It knows nothing about the scene, ECS or gameplay. It receives plain data, so rendering
 //! can run on its own thread, a frame behind simulation.
@@ -8,6 +8,7 @@
 mod camera;
 mod mesh;
 mod shader;
+mod texture;
 mod ui;
 
 use std::iter;
@@ -20,9 +21,10 @@ use gg_core::{Error, Result};
 use gg_gpu::{ColorImage, Device, Frames, Instance, InstanceDesc, Surface, Swapchain, Target};
 
 pub use camera::{Camera, Projection};
-pub use gg_gpu::{Validation, Window};
+pub use gg_gpu::{Blend, Sampler, Validation, Window};
 pub use mesh::{Mesh, Meshes};
 pub use shader::{Shader, Shaders};
+pub use texture::{Texture, Textures};
 pub use ui::Ui;
 
 use mesh::MeshPass;
@@ -93,6 +95,9 @@ pub struct RenderData<'a> {
     pub meshes: &'a mut Meshes,
     /// The shaders; those added since the renderer last rendered get their pipelines first.
     pub shaders: &'a mut Shaders,
+    /// The textures the shaders sample; those added since a frame last rendered reach the GPU
+    /// first.
+    pub textures: &'a mut Textures,
     /// What to draw.
     pub draws: &'a Draws,
 }
@@ -122,7 +127,8 @@ pub struct Renderer {
     instance: Arc<Instance>,
     device: Arc<Device>,
     vsync: bool,
-    /// Set once rendering fails, which can leave the GPU's copies of meshes unfinished.
+    /// Set once rendering fails, which can leave the GPU's copies of meshes and textures
+    /// unfinished.
     failed: bool,
 }
 
@@ -247,16 +253,19 @@ impl Renderer {
     /// was.
     ///
     /// Returns `false` when there was nothing to render into, as when the window is minimized;
-    /// the meshes added and the UIs' texture changes wait for the next frame that renders.
+    /// the meshes and textures added and the UIs' texture changes wait for the next frame that
+    /// renders.
     ///
     /// An error ends the renderer, which can then only be dropped: a frame that failed can leave
-    /// the GPU's copies of meshes unfinished, so every later call fails with `renderer.failed`.
+    /// the GPU's copies of meshes and textures unfinished, so every later call fails with
+    /// `renderer.failed`.
     ///
     /// # Panics
     ///
-    /// If `data` holds meshes or shaders of another [`Meshes`] or [`Shaders`] than the ones it
-    /// held before, which could draw a mesh with a shader for another vertex type or parameters of
-    /// another type; or if its camera's projection can't project, as [`Projection`] says.
+    /// If `data` holds meshes, shaders or textures of another [`Meshes`], [`Shaders`] or
+    /// [`Textures`] than the ones it held before, which could draw a mesh with a shader for
+    /// another vertex type or parameters of another type; or if its camera's projection can't
+    /// project, as [`Projection`] says.
     pub fn render(
         &mut self,
         data: RenderData<'_>,
@@ -266,8 +275,8 @@ impl Renderer {
         if self.failed {
             return Err(Error::new(
                 "renderer.failed",
-                "a frame failed before, which can leave meshes unfinished on the GPU; the \
-                 renderer can only be dropped",
+                "a frame failed before, which can leave meshes and textures unfinished on the \
+                 GPU; the renderer can only be dropped",
             ));
         }
         let rendered = self.render_frame(data, ui, windows);
@@ -303,7 +312,7 @@ impl Renderer {
         let Some(mut frame) = self.frames.begin(iter::once(target).chain(others))? else {
             return Ok(false);
         };
-        self.meshes.upload(&mut frame, data.meshes)?;
+        self.meshes.upload(&mut frame, data.meshes, data.textures)?;
         self.ui.write_textures(&mut frame)?;
         let mut pass = frame
             .begin_pass(0, c"frame", data.clear_color)

@@ -19,6 +19,9 @@ pub struct Format(pub(crate) vk::Format);
 pub enum Blend {
     /// The output replaces it.
     Opaque,
+    /// The output goes over it by its alpha, which its color isn't multiplied by: straight alpha,
+    /// as images store it.
+    Alpha,
     /// The output, whose color is already multiplied by its alpha, goes over it.
     PremultipliedAlpha,
 }
@@ -90,6 +93,14 @@ impl Pipeline {
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
         let attachment = match desc.blend {
             Blend::Opaque => vk::PipelineColorBlendAttachmentState::default(),
+            Blend::Alpha => vk::PipelineColorBlendAttachmentState::default()
+                .blend_enable(true)
+                .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+                .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+                .color_blend_op(vk::BlendOp::ADD)
+                .src_alpha_blend_factor(vk::BlendFactor::ONE)
+                .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+                .alpha_blend_op(vk::BlendOp::ADD),
             Blend::PremultipliedAlpha => vk::PipelineColorBlendAttachmentState::default()
                 .blend_enable(true)
                 .src_color_blend_factor(vk::BlendFactor::ONE)

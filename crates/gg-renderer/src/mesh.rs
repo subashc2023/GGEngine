@@ -1,5 +1,5 @@
 //! Meshes: the handles that the engine draws with, and the vertices and indices behind them in
-//! GPU memory, drawn with games' shaders in the game's view, as its camera sees them.
+//! GPU memory, drawn with games' shaders and textures in the game's view, as its camera sees them.
 
 use std::fmt;
 use std::marker::PhantomData;
@@ -8,9 +8,13 @@ use std::sync::Arc;
 use bytemuck::NoUninit;
 use gg_core::math::Mat4;
 use gg_core::{Error, Result};
-use gg_gpu::{Blend, Device, Format, Frame, GpuBuffer, GraphicsDesc, Pass, Pipeline};
+use gg_gpu::{
+    Device, Format, Frame, GpuBuffer, GraphicsDesc, Pass, Pipeline, Texture as GpuTexture,
+    TextureFormat,
+};
 
 use crate::shader::Shaders;
+use crate::texture::Textures;
 use crate::{Draws, Viewport};
 
 /// A mesh that [`Meshes::add`] handed out, of vertex type `V`.
@@ -101,7 +105,8 @@ impl Meshes {
     }
 }
 
-/// Draws meshes with games' shaders, and keeps the meshes' vertices and indices on the GPU.
+/// Draws meshes with games' shaders, and keeps on the GPU the meshes' vertices and indices and the
+/// textures the shaders sample.
 pub(crate) struct MeshPass {
     device: Arc<Device>,
     /// The format of the targets it draws into.
@@ -110,6 +115,8 @@ pub(crate) struct MeshPass {
     shaders: Vec<GpuShader>,
     /// Each mesh's buffers, by its handle.
     meshes: Vec<GpuMesh>,
+    /// Each texture, by its handle, which is its slot in the bindless set too.
+    textures: Vec<GpuTexture>,
 }
 
 struct GpuShader {
@@ -136,6 +143,7 @@ impl MeshPass {
             format,
             shaders: Vec::new(),
             meshes: Vec::new(),
+            textures: Vec::new(),
         }
     }
 
@@ -159,7 +167,7 @@ impl MeshPass {
                     vertex: c"vertex_main",
                     fragment: c"fragment_main",
                     format: self.format,
-                    blend: Blend::Opaque,
+                    blend: added.blend,
                 },
             )?;
             self.shaders.push(GpuShader {
@@ -171,13 +179,18 @@ impl MeshPass {
         Ok(())
     }
 
-    /// Copies the meshes added to `meshes` since a frame last took them to the GPU, which must
-    /// happen before the frame's passes.
+    /// Copies the meshes and textures added to `meshes` and `textures` since a frame last took them
+    /// to the GPU, which must happen before the frame's passes.
     ///
     /// # Panics
     ///
-    /// If `meshes` isn't the one the pass has been taking meshes from.
-    pub(crate) fn upload(&mut self, frame: &mut Frame<'_>, meshes: &mut Meshes) -> Result<()> {
+    /// If `meshes` or `textures` isn't the one the pass has been taking them from.
+    pub(crate) fn upload(
+        &mut self,
+        frame: &mut Frame<'_>,
+        meshes: &mut Meshes,
+        textures: &mut Textures,
+    ) -> Result<()> {
         for added in meshes.added.drain(..) {
             assert_eq!(
                 added.index as usize,
@@ -198,6 +211,25 @@ impl MeshPass {
             frame.write_buffer(&mut mesh.vertices, 0, &added.vertices)?;
             frame.write_buffer(&mut mesh.indices, 0, indices)?;
             self.meshes.push(mesh);
+        }
+        for added in textures.added.drain(..) {
+            assert_eq!(
+                added.index as usize,
+                self.textures.len(),
+                "a renderer samples the textures of one `Textures`"
+            );
+            // In the slot of its handle's index, which shaders sample it by.
+            let [width, height] = added.size;
+            let mut texture = GpuTexture::placed(
+                &self.device,
+                added.index,
+                width,
+                height,
+                TextureFormat::Rgba8Srgb,
+                &added.name,
+            )?;
+            frame.write_texture(&mut texture, [0, 0], added.size, &added.pixels)?;
+            self.textures.push(texture);
         }
         Ok(())
     }

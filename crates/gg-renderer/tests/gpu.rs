@@ -12,9 +12,11 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
+use bytemuck::NoUninit;
 use gg_core::math::{Mat4, Quat, Vec3, Vec4};
 use gg_renderer::{
-    Camera, Draws, Meshes, Projection, RenderData, Renderer, Settings, Shaders, Ui, Viewport,
+    Blend, Camera, Draws, Meshes, Projection, RenderData, Renderer, Sampler, Settings, Shaders,
+    Texture, Textures, Ui, Viewport,
 };
 
 fn main() {
@@ -33,6 +35,10 @@ fn main() {
 
     run("ui_matches_its_reference", ui_matches_its_reference);
     run("meshes_match_their_reference", meshes_match_their_reference);
+    run(
+        "textures_match_their_reference",
+        textures_match_their_reference,
+    );
 }
 
 fn run(name: &str, test: impl FnOnce()) {
@@ -59,6 +65,13 @@ fn renderer(width: u32, height: u32) -> Renderer {
     renderer
 }
 
+/// A fixture shader's path.
+fn shader(file: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/shaders")
+        .join(file)
+}
+
 /// Draws a window of egui widgets offscreen, and compares it with its reference image.
 fn ui_matches_its_reference() {
     const WIDTH: u32 = 320;
@@ -66,6 +79,7 @@ fn ui_matches_its_reference() {
     let mut renderer = renderer(WIDTH, HEIGHT);
     let mut meshes = Meshes::default();
     let mut shaders = Shaders::default();
+    let mut textures = Textures::default();
     let draws = Draws::default();
 
     let egui = egui::Context::default();
@@ -107,6 +121,7 @@ fn ui_matches_its_reference() {
             camera: Camera::default(),
             meshes: &mut meshes,
             shaders: &mut shaders,
+            textures: &mut textures,
             draws: &draws,
         };
         assert!(
@@ -132,11 +147,7 @@ fn meshes_match_their_reference() {
     let mut renderer = renderer(WIDTH, HEIGHT);
     let mut meshes = Meshes::default();
     let mut shaders = Shaders::default();
-    let shader = |file| {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/shaders")
-            .join(file)
-    };
+    let mut textures = Textures::default();
     // 4 units from the view's bottom to its top, which is 160 pixels, so 40 pixels a unit both
     // ways; the view's center is (1, 0.5).
     let camera = Camera {
@@ -157,7 +168,7 @@ fn meshes_match_their_reference() {
     };
     // Positions, and a color for each draw.
     let flat = shaders
-        .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"))
+        .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
         .expect("a shader");
     let corners = [
         [-0.5, -0.5, 0.0],
@@ -177,7 +188,7 @@ fn meshes_match_their_reference() {
         if frame == 1 {
             // Positions, then colors; no parameters.
             let colored = shaders
-                .add::<[f32; 7], ()>("vertex color", &shader("vertex_color.slang"))
+                .add::<[f32; 7], ()>("vertex color", &shader("vertex_color.slang"), Blend::Opaque)
                 .expect("a shader");
             let corner = |[x, y, z]: [f32; 3], [r, g, b, a]: [f32; 4]| [x, y, z, r, g, b, a];
             // Pointing up.
@@ -201,20 +212,142 @@ fn meshes_match_their_reference() {
             camera,
             meshes: &mut meshes,
             shaders: &mut shaders,
+            textures: &mut textures,
             draws: &draws,
         };
-        let mut textures = egui::TexturesDelta::default();
-        let ui = Ui {
-            primitives: &[],
-            textures: &mut textures,
-            pixels_per_point: 1.0,
-        };
-        assert!(
-            renderer.render(data, ui, &mut []).expect("a frame"),
-            "an offscreen image can always be rendered into"
-        );
+        render_without_ui(&mut renderer, data);
     }
     check(renderer, "meshes", WIDTH, HEIGHT);
+}
+
+/// What `textured.slang` takes with each draw.
+#[repr(C)]
+#[derive(Clone, Copy, NoUninit)]
+struct Sampling {
+    texture: Texture,
+    sampler: u32,
+}
+
+/// Draws a checkerboard texture repeated across a square, then a texture with alpha over part of
+/// it and part of the clear color, into an offscreen image, and compares it with its reference
+/// image. Each draw's parameters give its texture and sampler. The checkerboard repeats twice each
+/// way, sharp, so that a sampler ignored would clamp it and blur it, and its top left is a third
+/// color, so that an image flipped moves it. A texture added first and never drawn takes slot 0,
+/// so that textures put in the wrong slots, or sampled through the wrong ones, show it or each
+/// other; the one with alpha is added after the first frame. Its texels are opaque, half, a
+/// quarter and wholly transparent, so that a shader blended as opaque, or as though its alpha were
+/// multiplied in, changes thousands of pixels; and the textures are sRGB, so that colors sampled
+/// without decoding come out brighter.
+fn textures_match_their_reference() {
+    const WIDTH: u32 = 240;
+    const HEIGHT: u32 = 160;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut meshes = Meshes::default();
+    let mut shaders = Shaders::default();
+    let mut textures = Textures::default();
+    // 4 units from the view's bottom to its top, 40 pixels a unit, and 6 across, around the origin.
+    let camera = Camera {
+        projection: Projection::Orthographic {
+            height: 4.0,
+            near: -1.0,
+            far: 1.0,
+        },
+        ..Camera::default()
+    };
+    // Positions, then texture coordinates.
+    let textured = shaders
+        .add::<[f32; 5], Sampling>("textured", &shader("textured.slang"), Blend::Alpha)
+        .expect("a shader");
+    // A unit square, its texture's top left at its top left, over texture coordinates 0 to
+    // `extent`.
+    let mut square = |name, extent: f32| {
+        let corners = [
+            [-0.5, -0.5, 0.0, 0.0, extent],
+            [0.5, -0.5, 0.0, extent, extent],
+            [0.5, 0.5, 0.0, extent, 0.0],
+            [-0.5, 0.5, 0.0, 0.0, 0.0],
+        ];
+        meshes
+            .add(name, &corners, &[0, 1, 2, 2, 3, 0])
+            .expect("a mesh")
+    };
+    let tiled = square("tiled square", 2.0);
+    let plain = square("square", 1.0);
+    // 2 units across, at `x`.
+    let place =
+        |x| Mat4::from_translation(Vec3::new(x, 0.0, 0.0)) * Mat4::from_scale(Vec3::splat(2.0));
+
+    textures
+        .add("unused", [1, 1], &[255, 0, 255, 255])
+        .expect("a texture");
+    // 4 by 4 texels, sRGB-encoded: a checkerboard of red and blue, with yellow at the top left.
+    let checkerboard: Vec<u8> = (0..16)
+        .flat_map(|i| match (i % 4, i / 4) {
+            (0, 0) => [250, 220, 60, 255],
+            (x, y) if (x + y) % 2 == 0 => [200, 60, 40, 255],
+            _ => [40, 90, 200, 255],
+        })
+        .collect();
+    let checkerboard = textures
+        .add("checkerboard", [4, 4], &checkerboard)
+        .expect("a texture");
+    let mut draws = Draws::default();
+    // x from -2 to 0, pixels 40 to 120, each texel 10 pixels across.
+    let sampling = Sampling {
+        texture: checkerboard,
+        sampler: Sampler::NearestRepeat.index(),
+    };
+    draws.push(tiled, textured, place(-1.0), sampling);
+    for frame in 0..3 {
+        if frame == 1 {
+            // White, opaque and half transparent along the top; red a quarter opaque, then
+            // nothing, along the bottom.
+            let pixels = [
+                [255, 255, 255, 255],
+                [255, 255, 255, 128],
+                [255, 0, 0, 64],
+                [0, 0, 0, 0],
+            ];
+            let translucent = textures
+                .add("translucent", [2, 2], pixels.as_flattened())
+                .expect("a texture");
+            // x from -1 to 1, over the checkerboard's right half and the clear color, each texel
+            // 40 pixels across.
+            let sampling = Sampling {
+                texture: translucent,
+                sampler: Sampler::NearestClamp.index(),
+            };
+            draws.push(plain, textured, place(0.0), sampling);
+        }
+        let data = RenderData {
+            clear_color: CLEAR,
+            viewport: Viewport {
+                origin: [0, 0],
+                size: [WIDTH, HEIGHT],
+            },
+            camera,
+            meshes: &mut meshes,
+            shaders: &mut shaders,
+            textures: &mut textures,
+            draws: &draws,
+        };
+        render_without_ui(&mut renderer, data);
+    }
+    check(renderer, "textures", WIDTH, HEIGHT);
+}
+
+/// Renders a frame of `data`, without UI.
+fn render_without_ui(renderer: &mut Renderer, data: RenderData<'_>) {
+    let mut textures = egui::TexturesDelta::default();
+    let ui = Ui {
+        primitives: &[],
+        textures: &mut textures,
+        pixels_per_point: 1.0,
+    };
+    assert!(
+        renderer.render(data, ui, &mut []).expect("a frame"),
+        "an offscreen image can always be rendered into"
+    );
 }
 
 /// Reads back the last frame `renderer` rendered, shuts it down, checks that validation reported

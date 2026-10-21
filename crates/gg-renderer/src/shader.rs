@@ -9,6 +9,7 @@ use std::time::Instant;
 
 use bytemuck::NoUninit;
 use gg_core::{Error, Result};
+use gg_gpu::Blend;
 use tracing::{debug, warn};
 
 /// The slangc that compiled the renderer's own shaders, as the build found it.
@@ -55,12 +56,14 @@ pub(crate) struct Added {
     pub(crate) vertex_size: usize,
     /// The size of the parameters it takes.
     pub(crate) params_size: usize,
+    pub(crate) blend: Blend,
 }
 
 impl Shaders {
     /// Compiles the Slang shader at `path`, which draws meshes of vertex type `V` and takes
-    /// parameters of type `P` with each draw, such as a color: `()` for none. `name` names it in
-    /// errors and GPU captures.
+    /// parameters of type `P` with each draw, such as a color: `()` for none. `blend` says how its
+    /// color goes over what's drawn before it: [`Blend::Alpha`] blends by the alpha it returns,
+    /// not multiplied into the color. `name` names it in errors and GPU captures.
     ///
     /// Vulkan checks nothing about a shader, so the engine trusts it to keep to this contract,
     /// which validation checks in debug builds:
@@ -71,8 +74,11 @@ impl Shaders {
     ///   the only 80 bytes set. The first is the camera's view and projection times the draw's
     ///   transform, from the mesh's own space to Vulkan's clip space, for `mul(clip_from_mesh,
     ///   float4(position, 1.0))`; the second, the address of the mesh's vertices; the third, the
-    ///   address of the draw's parameters, which a shader that takes none leaves out. It uses no
-    ///   other resources.
+    ///   address of the draw's parameters, which a shader that takes none leaves out.
+    /// - It may sample the bindless set's `[[vk::binding(0, 0)]] Texture2D textures[]`, by a
+    ///   [`Texture`](crate::Texture) in its parameters, a `uint`, with its
+    ///   `[[vk::binding(1, 0)]] SamplerState samplers[]`, by a [`Sampler`](crate::Sampler)'s
+    ///   index, a `uint` too. It uses no other resources.
     /// - It reads only the vertex at `SV_VulkanVertexID`, not `SV_VertexID`, which needs a
     ///   feature the engine doesn't enable.
     /// - Its structs for `V` and `P` have their fields, in order, of 32-bit scalars, vectors and
@@ -89,6 +95,7 @@ impl Shaders {
         &mut self,
         name: &str,
         path: &Path,
+        blend: Blend,
     ) -> Result<Shader<V, P>> {
         let spirv = compile(Path::new(SLANGC), name, path)?;
         let index = self.count;
@@ -99,6 +106,7 @@ impl Shaders {
             spirv,
             vertex_size: size_of::<V>(),
             params_size: size_of::<P>(),
+            blend,
         });
         Ok(Shader {
             index,
@@ -181,7 +189,7 @@ mod tests {
         for file in ["no_fragment.slang", "missing.slang"] {
             let path = fixture(file);
             let error = shaders
-                .add::<[f32; 3], ()>("broken", &path)
+                .add::<[f32; 3], ()>("broken", &path, Blend::Opaque)
                 .expect_err("a shader that doesn't compile");
             assert_eq!(error.code(), "renderer.bad_shader", "{file}");
             let message = error.to_string();
@@ -190,7 +198,9 @@ mod tests {
                 "{message}"
             );
         }
-        let mut flat = || shaders.add::<[f32; 3], [f32; 4]>("flat", &fixture("flat_color.slang"));
+        let mut flat = || {
+            shaders.add::<[f32; 3], [f32; 4]>("flat", &fixture("flat_color.slang"), Blend::Opaque)
+        };
         assert_eq!(flat().map(|shader| shader.index).ok(), Some(0));
         assert_eq!(flat().map(|shader| shader.index).ok(), Some(1));
     }

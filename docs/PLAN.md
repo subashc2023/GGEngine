@@ -44,6 +44,11 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   frame, and the shader reads them through their address. glam's vectors and matrices can be the
   fields of vertices and parameters. The sandbox's grid alternates two colors, picked in a panel,
   and a GPU test gives two squares colors of their own.
+- **Textures and blending** (2026-10-21): layers add textures from PNGs, which their shaders
+  sample as linear color through handles that are the textures' slots in the bindless set, and
+  add each shader with how it blends, opaque or by straight alpha. The sandbox draws a
+  checkerboard over its grid and a translucent logo over that, with the turning triangle between
+  them, and a GPU test checks textures, samplers and blending against a reference image.
 
 ## Now: Phase 3, runtime core
 
@@ -127,17 +132,24 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Composed text from an input method (winit's `Ime` events), for languages typed through one | A game takes text input, such as chat |
 | Steady-state frames that draw UI allocate: in egui's layout and tessellation, and in the dock's own bookkeeping, which copies each frame's panel and menu names and torn-off windows' titles, and makes its arrangement and its list of groups left to draw anew | Phase 4, with the allocation check; the overlay is for development |
 | Keeping within the GPU's memory budget (`VK_EXT_memory_budget` through VMA) | Phase 7, with streaming |
-| Removing meshes and shaders; each lasts until the app ends | Something adds and removes them as it runs, such as asset hot reload in Phase 4 |
+| Removing meshes, shaders and textures; each lasts until the app ends | Something adds and removes them as it runs, such as asset hot reload in Phase 4 |
 | Perspective cameras; a camera is orthographic | Phase 4, with depth |
 | Per-frame data in a buffer: shaders get only the product of the camera's view and projection and each draw's transform, so none sees positions in the world | Phase 6, with lighting |
-| Materials: parameters kept on the GPU and written when they change, rather than copied with every draw, and textures among them | Phase 6, with materials |
+| Materials: parameters kept on the GPU and written when they change, rather than copied with every draw | Phase 6, with materials |
+| Textures of data rather than color, such as normal maps, which shaders read as stored rather than decoded from sRGB | Phase 6, with PBR's maps |
+| Premultiplied alpha for games' textures: with straight alpha, as PNGs store it, a linear filter at an edge mixes in the color of the transparent pixels beside it | A game's art shows dark or colored fringes |
+| Sorting what blends back to front; meshes draw in the order given | Phase 4, with depth |
+| Mipmaps: a texture drawn smaller than it is samples its one level, and shimmers | Phase 4, with the textured glTF mesh |
+| Images other than PNG, such as the JPEGs glTF allows; and PNGs' own color profiles and gamma, which are ignored, every PNG taken as sRGB | Phase 4, with glTF; Phase 7 cooks KTX2 |
+| Decoding images off the main thread; `Context::add_texture` decodes before it returns | Phase 7, with the streaming loader |
+| Pixels and vertices reach the GPU through the frame's arena, which keeps the size of the largest frame: a frame that adds many textures leaves that much host memory held for each frame in flight | Phase 4, with uploads through the transfer queue |
 | More than one camera or view, such as split screen or the editor's scene view | A game or the editor draws several |
 | Converting between the view's pixels and the world, to pick what's under the cursor | Something picks with the mouse |
 | A camera controller in the engine; the sandbox steers its own | A second app needs one, such as the editor in Phase 9 |
 | Checking a game's shader against the contract on `Shaders::add` through Slang reflection: its push constants, its resources, and the sizes of its vertex and parameter structs against their types'; until then it's trusted, and validation checks it in debug builds | Phase 4, with Slang reflection |
 | Games' shaders compile with slangc as they're added, so running a game needs the Vulkan SDK | Phase 7, which cooks shaders |
-| Shader paths are as the game gives them; the sandbox gives its source's | Phase 4, with assets |
-| `Layer::attach` can't fail, so a layer whose shader doesn't compile panics, as the sandbox does | A game loads assets as it starts |
+| A library of assets: shaders and textures load from the paths the game gives, the sandbox giving its source's, and nothing finds one by path or name, so a file added twice loads twice; scenes and the tool API will name them | Phase 4, with assets |
+| `Layer::attach` can't fail, so a layer whose shader doesn't compile, or whose texture doesn't load, panics, as the sandbox does | A game loads assets as it starts |
 | 8- and 16-bit vertex fields, whose features Vulkan 1.4 guarantees but the device doesn't enable | A mesh packs its vertices, as Phase 7's cooker will |
 | A swapchain without an sRGB format falls back to the first one offered, where colors come out too dark | A device offers no sRGB swapchain format |
 | Splits in a torn-off window, which holds one tab group | A tool wants panels side by side outside the main window |

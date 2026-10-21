@@ -9,12 +9,19 @@ use crate::device::Retired;
 use crate::vma::{Allocation, Memory};
 use crate::{COLOR_RANGE, Device, vk_error};
 
+/// The most pixels a side a texture has: what every Vulkan 1.4 device takes, the version the
+/// engine requires.
+pub const MAX_TEXTURE_SIZE: u32 = 8192;
+
 /// How a texture's 8-bit RGBA channels read in shaders.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextureFormat {
     /// Shaders read the bytes as they are, scaled to 0 to 1: for data, and for color a shader
     /// decodes itself.
     Rgba8Unorm,
+    /// Shaders read color decoded from sRGB to linear, before it's filtered, and alpha as it is:
+    /// for color as images store it.
+    Rgba8Srgb,
 }
 
 /// An RGBA image with 8-bit channels, that shaders sample through its index in the bindless
@@ -33,7 +40,12 @@ pub struct Texture {
 }
 
 impl Texture {
-    /// A texture of `width` by `height` pixels, with `name` as its debug name.
+    /// A texture of `width` by `height` pixels, in a free slot of the bindless set past the placed
+    /// ones, with `name` as its debug name.
+    ///
+    /// # Panics
+    ///
+    /// If a side is 0, or more than [`MAX_TEXTURE_SIZE`].
     pub fn new(
         device: &Arc<Device>,
         width: u32,
@@ -41,9 +53,44 @@ impl Texture {
         format: TextureFormat,
         name: &str,
     ) -> Result<Self> {
+        Self::make(device, None, width, height, format, name)
+    }
+
+    /// A texture like [`Texture::new`]'s, in placed slot `slot`, one of the first
+    /// [`PLACED_TEXTURES`](crate::PLACED_TEXTURES), so that its index is known before it's made.
+    ///
+    /// # Panics
+    ///
+    /// As [`Texture::new`] does; and if `slot` isn't placed, or is in use: by a texture, or by one
+    /// dropped while the GPU may still sample it.
+    pub fn placed(
+        device: &Arc<Device>,
+        slot: u32,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+        name: &str,
+    ) -> Result<Self> {
+        Self::make(device, Some(slot), width, height, format, name)
+    }
+
+    fn make(
+        device: &Arc<Device>,
+        slot: Option<u32>,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+        name: &str,
+    ) -> Result<Self> {
+        let sides = 1..=MAX_TEXTURE_SIZE;
+        assert!(
+            sides.contains(&width) && sides.contains(&height),
+            "a {width}x{height} texture, but textures are 1 to {MAX_TEXTURE_SIZE} pixels a side"
+        );
         let extent = vk::Extent2D { width, height };
         let format = match format {
             TextureFormat::Rgba8Unorm => vk::Format::R8G8B8A8_UNORM,
+            TextureFormat::Rgba8Srgb => vk::Format::R8G8B8A8_SRGB,
         };
         let info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
@@ -70,7 +117,7 @@ impl Texture {
         };
         // SAFETY: the view is of a live sampled image, which is in the shader-read-only layout
         // before any shader can sample it: frames write it first.
-        let index = match unsafe { device.bindless().add(device.raw(), view) } {
+        let index = match unsafe { device.bindless().add(device.raw(), view, slot) } {
             Ok(index) => index,
             Err(error) => {
                 device.retire(Retired::Image(raw, view, allocation));

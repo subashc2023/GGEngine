@@ -273,9 +273,10 @@ and scenes, physics and the editor share these axes.
 Each frame the engine hands `gg-renderer` that frame's render data, as plain data: the color the
 frame clears to, the game's view, the camera it sees the world from, and what to draw in it, in
 order: meshes, each with a shader for its vertex type, the parameters that shader takes, and a
-transform that places it in the world. The view is the main window's central area, which the dock leaves the game, and the UI
-draws over it. Layers add shaders and meshes, draw them and set the camera through their
-`Context`, and the renderer's `Shaders` and `Meshes` hand out their handles at once.
+transform that places it in the world. The view is the main window's central area, which the
+dock leaves the game, and the UI draws over it. Layers add shaders, meshes and textures, draw
+them and set the camera through their `Context`, and the renderer's `Shaders`, `Meshes` and
+`Textures` hand out their handles at once.
 
 A shader is a Slang file that the engine compiles with slangc as a layer adds it, so one that
 doesn't compile fails there, with slangc's diagnostics naming the file and line; the renderer
@@ -288,8 +289,21 @@ draws take the indices. A shader is added for a vertex type and a type of parame
 color, which each draw gives it: a mesh draws only with a shader for its own vertex type, and
 with parameters of that shader's type. Each frame copies every draw's parameters into the frame's
 own memory, where the shader reads them through their address too, so they can be as large as a
-shader needs. Vulkan checks nothing about a shader, so its interface, which `Shaders::add`
-describes, is trusted, and validation checks it in debug builds.
+shader needs. A shader is added with how it blends too, since Vulkan bakes blending into its
+pipeline: opaque, or by the alpha it returns, not multiplied into its color. Vulkan checks
+nothing about a shader, so its interface, which `Shaders::add` describes, is trusted, and
+validation checks it in debug builds.
+
+A texture is a PNG that the engine decodes as a layer adds it, to RGBA8 with colors sRGB-encoded
+and alpha not multiplied into them, as images store them; the next frame that renders copies it
+into GPU memory, where it stays, and shaders sample its colors decoded to linear. Texture
+coordinates run from (0, 0) at an image's top left, as glTF's do, and Vulkan samples rows stored
+top first that way, so images load as they're stored, without the flip OpenGL needs. A texture's
+handle is its index in the bindless set, which a draw's parameters carry as it is and the shader
+samples by. The set keeps most of its slots for textures placed at a given index, so that a
+texture's handle is known before the texture reaches the GPU, and gives out the rest, such as the
+UI's, wherever one is free. Shaders pick one of the engine's samplers by its index: nearest or
+linear, clamped, repeated or mirrored.
 
 A camera is a position, a rotation and a projection. An orthographic camera, as 2D games use,
 sees as much of the world from bottom to top as the game sets, and as much across as the view's
@@ -298,8 +312,8 @@ depth. Each frame the renderer multiplies the camera's view and projection by ea
 transform, and pushes the product, column-major as glam's matrices are, with the addresses of
 the vertices and of the draw's parameters: a shader places its vertices with one matrix.
 
-An error while rendering ends the renderer, since a failed frame can leave meshes half copied to
-the GPU.
+An error while rendering ends the renderer, since a failed frame can leave meshes and textures
+half copied to the GPU.
 
 ## Threads
 
@@ -337,6 +351,6 @@ works on up to two frames at once.
 | Logs and profiling | `tracing` for logs; Tracy for CPU zones and GPU timestamps |
 | Agent access | MCP and a command-line tool, both clients of the [tool API](#agents-and-tools) |
 | Shaders | Slang, compiled to SPIR-V by the Vulkan SDK's `slangc` rather than linked in: the engine's own as it builds, games' as they're added |
-| Assets | glTF 2.0 in; meshoptimizer for meshes and meshlets; BC-compressed textures in KTX2 |
+| Assets | glTF 2.0 in; meshoptimizer for meshes and meshlets; BC-compressed textures in KTX2; until cooking, PNGs that the `png` crate decodes as layers add them |
 
 Areas not listed here are undecided.
