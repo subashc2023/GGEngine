@@ -34,10 +34,11 @@ pub struct Swapchain {
 }
 
 impl Swapchain {
-    /// A swapchain for `surface`, the surface `device` was opened for, sized to the window's
-    /// `width` and `height` where the surface doesn't set its own size. With `vsync`, it
-    /// presents at the display's refresh rate; otherwise as fast as frames are rendered, where
-    /// the device can do that without tearing.
+    /// A swapchain for `surface`, sized to the window's `width` and `height` where the surface
+    /// doesn't set its own size. The device's graphics queue must be able to present to the
+    /// surface, as it can to the one the device was opened for. With `vsync`, it presents at
+    /// the display's refresh rate; otherwise as fast as frames are rendered, where the device
+    /// can do that without tearing.
     pub fn new(
         device: &Arc<Device>,
         surface: Surface,
@@ -49,6 +50,24 @@ impl Swapchain {
             return Err(Error::new(
                 "gpu.no_swapchain",
                 "the device was opened without a surface, so it can't present",
+            ));
+        }
+        // SAFETY: the physical device and the surface are live, and the family is the device's.
+        let presents = unsafe {
+            surface.surface_fn().get_physical_device_surface_support(
+                device.physical(),
+                device.graphics_family(),
+                surface.raw(),
+            )
+        }
+        .map_err(|e| vk_error("vkGetPhysicalDeviceSurfaceSupportKHR", e))?;
+        if !presents {
+            return Err(Error::new(
+                "gpu.no_present",
+                format!(
+                    "{}'s graphics queue can't present to the window",
+                    device.name()
+                ),
             ));
         }
         // SAFETY: the physical device and the surface are live.
@@ -115,40 +134,51 @@ impl Swapchain {
         }
     }
 
-    /// Acquires the next image, waiting until the display has let go of it, and signals
-    /// `acquired` for the GPU to wait on. Returns
-    /// `None` when there's nothing to present to this time: the window has no area, or the
-    /// swapchain went out of date and is rebuilt for the next frame.
+    /// Acquires the next image, and signals `acquired` for the GPU to wait on. With `pace`, it
+    /// waits until the display has let go of the image; without, it takes an image only if the
+    /// swapchain has one to give at once. Returns `None` when there's nothing to present to
+    /// this time: the window has no area, the swapchain went out of date and is rebuilt for the
+    /// next frame, or, without `pace`, no image is free yet.
     ///
     /// # Safety
     ///
     /// `acquired` must be unsignaled, with no wait on it pending.
-    pub(crate) unsafe fn acquire(&mut self, acquired: vk::Semaphore) -> Result<Option<u32>> {
+    pub(crate) unsafe fn acquire(
+        &mut self,
+        acquired: vk::Semaphore,
+        pace: bool,
+    ) -> Result<Option<u32>> {
         if self.stale && !self.rebuild()? {
             return Ok(None);
         }
         let swapchain_fn = self.swapchain_fn();
+        let (timeout, fence) = if pace {
+            (u64::MAX, self.available)
+        } else {
+            (0, vk::Fence::null())
+        };
         // SAFETY: the swapchain is live, the caller guarantees the semaphore, and the fence is
         // unsignaled, since it's reset after each wait on it.
-        let acquired = unsafe {
-            swapchain_fn.acquire_next_image(self.raw, u64::MAX, acquired, self.available)
-        };
+        let acquired =
+            unsafe { swapchain_fn.acquire_next_image(self.raw, timeout, acquired, fence) };
         match acquired {
             // A suboptimal image is still presented; the swapchain is rebuilt after it.
             Ok((image, suboptimal)) => {
                 self.stale |= suboptimal;
-                // Waits until the display has let go of the image, which under FIFO is at a
-                // vertical sync, so that frames start once per refresh. Waiting only for the GPU
-                // to finish the frame before last let them start in pairs, 1 ms apart and then
-                // 7 ms at 240 Hz, though the display still showed one per refresh.
-                let fences = [self.available];
-                let raw = self.device.raw();
-                // SAFETY: the acquire signals the fence, which nothing else uses.
-                unsafe {
-                    raw.wait_for_fences(&fences, true, u64::MAX)
-                        .and_then(|()| raw.reset_fences(&fences))
+                if pace {
+                    // Waits until the display has let go of the image, which under FIFO is at a
+                    // vertical sync, so that frames start once per refresh. Waiting only for the
+                    // GPU to finish the frame before last let them start in pairs, 1 ms apart and
+                    // then 7 ms at 240 Hz, though the display still showed one per refresh.
+                    let fences = [self.available];
+                    let raw = self.device.raw();
+                    // SAFETY: the acquire signals the fence, which nothing else uses.
+                    unsafe {
+                        raw.wait_for_fences(&fences, true, u64::MAX)
+                            .and_then(|()| raw.reset_fences(&fences))
+                    }
+                    .map_err(|e| vk_error("vkWaitForFences", e))?;
                 }
-                .map_err(|e| vk_error("vkWaitForFences", e))?;
                 Ok(Some(image))
             }
             // Nothing was acquired, so the semaphore stays unsignaled.
@@ -156,38 +186,28 @@ impl Swapchain {
                 self.stale = true;
                 Ok(None)
             }
+            Err(vk::Result::NOT_READY | vk::Result::TIMEOUT) if !pace => Ok(None),
             Err(e) => Err(vk_error("vkAcquireNextImageKHR", e)),
         }
     }
 
-    /// Presents `image` once the frame rendering into it has signaled its semaphore.
-    ///
-    /// # Safety
-    ///
-    /// `image` must have been acquired, and its frame submitted with its `rendered` semaphore
-    /// signaled.
-    pub(crate) unsafe fn present(&mut self, image: u32) -> Result<()> {
-        let waits = [self.rendered[image as usize]];
-        let swapchains = [self.raw];
-        let images = [image];
-        let info = vk::PresentInfoKHR::default()
-            .wait_semaphores(&waits)
-            .swapchains(&swapchains)
-            .image_indices(&images);
-        // SAFETY: the caller guarantees the image and its semaphore.
-        match unsafe { self.device.present(&info) } {
-            Ok(suboptimal) => {
-                self.stale |= suboptimal;
-                Ok(())
-            }
-            // The present's semaphore wait still happens, so the frame's resources are freed as
-            // usual.
-            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+    /// Notes how presenting one of its images went: a suboptimal or out-of-date swapchain is
+    /// rebuilt before the next frame.
+    pub(crate) fn presented(&mut self, result: vk::Result) -> Result<()> {
+        match result {
+            vk::Result::SUCCESS => Ok(()),
+            // An out-of-date present's semaphore wait still happens, so the frame's resources
+            // are freed as usual.
+            vk::Result::SUBOPTIMAL_KHR | vk::Result::ERROR_OUT_OF_DATE_KHR => {
                 self.stale = true;
                 Ok(())
             }
-            Err(e) => Err(vk_error("vkQueuePresentKHR", e)),
+            e => Err(vk_error("vkQueuePresentKHR", e)),
         }
+    }
+
+    pub(crate) fn raw(&self) -> vk::SwapchainKHR {
+        self.raw
     }
 
     /// The `image`th image, its view and the swapchain's size.

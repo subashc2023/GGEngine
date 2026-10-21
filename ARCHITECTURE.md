@@ -223,6 +223,20 @@ the frame. Key and button releases reach the layers regardless, so that none is 
 key or button it saw pressed. Tab reaches egui only while one of its widgets has focus, to move
 between them; otherwise it goes to the layers alone, since egui would take focus with it.
 
+Layers draw UI through `Ui`: dockable panels, and egui itself for anything else. The dock is the
+engine's own, since egui's docking crates can't put a panel in a window of its own. Panels sit
+in tab groups, docked in strips along the main window's edges around a central area that stays
+the game's, or floating: over the main window, or torn off into a window of their own, which
+holds one group. egui counts only the strips and groups as its own, so input over the central
+area goes to the layers. A panel shows on the frames its layer shows it, and keeps its place
+while it doesn't. The layout is saved as RON in the OS's directory for per-user state, never
+beside the executable; headless runs neither read nor write it.
+
+The torn-off windows are egui's immediate viewports: egui runs each one's pass inside the main
+window's, and the main window's frame renders them all. Only the main window paces frames;
+another with no image free skips the frame. Their events go to egui, never to the layers. On
+Wayland, where windows can't be placed, groups float over the main window instead.
+
 Layers can also poll input, through their `Context` rather than a global: which keys and mouse
 buttons are held, and where the cursor is. That state follows the events the stack is sent, so
 input the UI keeps doesn't count, and a press and release between two frames never shows as
@@ -261,7 +275,7 @@ works on up to two frames at once.
 | GPU API | Vulkan through `ash`: one backend, no multi-API abstraction layer |
 | GPU memory | VMA through our own binding in `gg-gpu`, for its budgets, aliasing, pools and defragmentation |
 | Window and input | `winit`, with `ash-window` for surfaces and `gilrs` for gamepads |
-| UI | egui, drawn by `gg-renderer` |
+| UI | egui, drawn by `gg-renderer`, with a dock of our own |
 | Project state | RON in a canonical form; see [Project state](#project-state) |
 | Math | `glam` |
 | ECS | Our own; see [ECS](#ecs) |

@@ -4,7 +4,7 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::{Event, Input};
+use crate::{Event, Input, Ui};
 
 /// A part of an app that the main loop drives. Every method has a default that does nothing,
 /// so a layer implements only what it uses.
@@ -24,8 +24,9 @@ pub trait Layer {
         ControlFlow::Continue(())
     }
 
-    /// Called every frame, after the updates, to draw UI with egui.
-    fn ui(&mut self, _cx: &mut Context, _ui: &egui::Context) {}
+    /// Called every frame, after the updates, to draw UI: dockable panels, and anything else
+    /// egui draws.
+    fn ui(&mut self, _cx: &mut Context, _ui: &mut Ui<'_>) {}
 }
 
 /// What layers can see and change of the running app.
@@ -127,7 +128,7 @@ impl Stack {
     }
 
     /// Draws UI from the bottom up, so the layers above draw over those below.
-    pub(crate) fn ui(&mut self, cx: &mut Context, ui: &egui::Context) {
+    pub(crate) fn ui(&mut self, cx: &mut Context, ui: &mut Ui<'_>) {
         for layer in &mut self.layers {
             layer.ui(cx, ui);
         }

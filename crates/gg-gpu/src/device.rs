@@ -347,8 +347,8 @@ impl Device {
             .map_err(|e| vk_error("vkQueueSubmit2", e))
     }
 
-    /// Presents through the graphics queue, which can present to the surface the device was
-    /// opened for. Returns whether the swapchain is suboptimal.
+    /// Presents through the graphics queue, which each swapchain checked it can present to.
+    /// Returns whether a swapchain is suboptimal.
     ///
     /// # Safety
     ///

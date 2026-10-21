@@ -14,6 +14,9 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   stack with overlays, and an egui panel over the frame, drawn with VMA memory, bindless
   descriptors, vertex pulling and a Slang pipeline; a GPU test checks the UI against a
   reference image.
+- **Docking and viewports** (2026-10-21): layers show panels, which dock in tabs and splits
+  around the game's central area, float, or tear off into windows of their own; the layout is
+  saved per user; one frame renders every window, paced by the main one.
 
 ## Now: Phase 3, runtime core
 
@@ -85,17 +88,29 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Optimized dependencies in dev builds (`[profile.dev.package."*"] opt-level = 3`) | A heavy dependency (image decoding, physics) makes debug builds slow |
 | Shipping profile (LTO, `codegen-units = 1`) | Phase 7, with the player |
 | Compiling trace and debug events out of shipping builds, through `tracing`'s `release_max_level_*` features | Phase 7, with the shipping profile |
+| No console window for shipping builds on Windows (`windows_subsystem = "windows"` on the player); the JSON log still records the run | Phase 7, with the shipping profile |
 | Checking the sandbox by hand on Linux, and on macOS with KosmicKrisp (Vulkan SDK 1.4.363.0 or later, the first conformant build) | Once the sandbox draws a mesh |
 | Deleting old JSON logs; every run's log is kept | Logs pile up enough to matter |
 | A clean shutdown on Ctrl+C, which now ends the process at once; the JSON log keeps every line written until then | A headless run that goes on until it's stopped, such as a dedicated server |
 | GPU tests in Windows and macOS CI, which skip them because hosted runners there have no GPU | A self-hosted runner with a GPU, or a Vulkan driver that runs on those runners without one |
 | A gate that compiles the shipping configuration: `cargo clippy -p player --all-targets -- -D warnings` | When `gg-engine` gets its `dev` feature |
+| egui and the dock behind `dev`: the player links them and runs an empty UI pass every frame; `Ui`, which `Layer::ui` takes, is the type to turn into a no-op | When `gg-engine` gets its `dev` feature |
 | Waiting for the swapchain image before a frame reads input and the time, not after the layers update, which would cut latency by the wait: up to a refresh under `--vsync` | Phase 3, with input actions |
 | Pushing and popping layers while the app runs; `App` fixes the stack before it starts | A tool or game needs a layer for only part of a run |
 | Composed text from an input method (winit's `Ime` events), for languages typed through one | A game takes text input, such as chat |
 | Steady-state frames that draw UI allocate, in egui's layout and tessellation | Phase 4, with the allocation check; the overlay is for development |
 | Keeping within the GPU's memory budget (`VK_EXT_memory_budget` through VMA) | Phase 7, with streaming |
 | A swapchain without an sRGB format falls back to the first one offered, where colors come out too dark | A device offers no sRGB swapchain format |
+| Splits in a torn-off window, which holds one tab group | A tool wants panels side by side outside the main window |
+| Closing a panel from its tab; a panel shows while its layer shows it | Panels the user opens and closes, such as the editor's |
+| Reordering tabs by dragging them along their bar; a drop among the tabs adds one at the end | Phase 9, the editor |
+| Torn-off windows without the OS's title bar, with one the dock draws, as Dear ImGui does | Phase 9, the editor |
+| Windows of their own on Wayland, where groups float over the main window | winit can place windows on Wayland |
+| egui's deferred viewports, which don't open (`engine.viewport_deferred`); immediate ones do | A tool needs a window that repaints apart from the main one |
+| A saved window position off every monitor, which should be moved onto one | Someone loses a window after their monitors change |
+| Torn-off windows across monitors of different scales: one that opens on another monitor is placed at the main window's scale, away from the cursor | Someone docks across such monitors |
+| In a frame egui runs twice, the torn-off windows' texture changes apply before all of the main window's, so glyphs added then to a font atlas that grows can go missing | It shows, or egui hands over each pass's changes apart |
+| Present fences (`VK_KHR_swapchain_maintenance1`) before a swapchain's semaphores are destroyed, which closing torn-off windows makes more frequent | Validation reports it, or windows open and close often |
 
 ## Open questions
 

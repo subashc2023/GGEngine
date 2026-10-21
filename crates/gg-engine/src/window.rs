@@ -1,9 +1,11 @@
-//! Windowed runs: the winit event loop, which hands events to the layers and renders a frame
-//! whenever the window can show one.
+//! Windowed runs: the winit event loop, which hands the main window's events to the layers and
+//! renders a frame whenever the window can show one.
 
+use std::mem;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
+use egui::ViewportId;
 use gg_core::{Error, Result};
 use gg_renderer::Renderer;
 use tracing::{debug, info, trace};
@@ -15,7 +17,9 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
 use crate::args::Args;
-use crate::{App, Clock, Context, Event, Ran, event, render_frame, settings};
+use crate::dock::{self, Dock};
+use crate::viewports::{self, Viewports, WindowInput};
+use crate::{App, Clock, Context, Event, Ran, event, render_frame, run_frame, settings};
 
 pub(crate) fn run(app: &mut App, args: &Args) -> Result<Ran> {
     let event_loop = EventLoop::new().map_err(|error| {
@@ -25,13 +29,18 @@ pub(crate) fn run(app: &mut App, args: &Args) -> Result<Ran> {
         )
         .with_source(error)
     })?;
+    let layout = dock::path(app.name, std::env::consts::OS, |name| {
+        std::env::var_os(name)
+    });
     let mut handler = Handler {
+        dock: Dock::new(layout),
         app,
         args,
         window: None,
         renderer: None,
         egui: egui::Context::default(),
         egui_winit: None,
+        viewports: None,
         cx: Context::new(None),
         clock: Clock::default(),
         frames: 0,
@@ -61,7 +70,10 @@ struct Handler<'a> {
     renderer: Option<Renderer>,
     egui: egui::Context,
     /// egui's view of the window, which turns its events into egui's input.
-    egui_winit: Option<egui_winit::State>,
+    egui_winit: Option<WindowInput>,
+    /// The windows of their own that panels tear off into.
+    viewports: Option<Viewports>,
+    dock: Dock,
     cx: Context,
     clock: Clock,
     frames: u64,
@@ -90,14 +102,8 @@ impl Handler<'_> {
         let settings = settings(self.app, self.args);
         let renderer = Renderer::windowed(&settings, window.clone(), size.width, size.height)?;
         self.renderer = Some(renderer);
-        self.egui_winit = Some(egui_winit::State::new(
-            self.egui.clone(),
-            egui::ViewportId::ROOT,
-            &window,
-            Some(window.scale_factor() as f32),
-            window.theme(),
-            None,
-        ));
+        self.egui_winit = Some(WindowInput::new(&self.egui, ViewportId::ROOT, &window));
+        self.viewports = Some(Viewports::new(&self.egui, event_loop, window.clone()));
         self.cx = Context::new(Some(crate::Window::new(window.clone())));
         self.window = Some(window);
         self.app.stack.attach(&mut self.cx);
@@ -105,22 +111,33 @@ impl Handler<'_> {
     }
 
     fn frame(&mut self, event_loop: &ActiveEventLoop) {
-        let (Some(window), Some(renderer), Some(egui_winit)) =
-            (&self.window, &mut self.renderer, &mut self.egui_winit)
-        else {
+        let (Some(window), Some(renderer), Some(egui_winit), Some(viewports)) = (
+            &self.window,
+            &mut self.renderer,
+            &mut self.egui_winit,
+            &self.viewports,
+        ) else {
             return;
         };
-        let input = egui_winit.take_egui_input(window);
-        let rendered = render_frame(
-            &mut self.app.stack,
-            &mut self.cx,
-            &mut self.clock,
-            &self.egui,
-            input,
-            renderer,
-        );
+        let input = viewports.input(egui_winit);
+        // egui opens the windows of their own during the main window's pass.
+        let mut output = viewports::with_event_loop(event_loop, || {
+            run_frame(
+                &mut self.app.stack,
+                &mut self.cx,
+                &mut self.clock,
+                &self.egui,
+                &mut self.dock,
+                input,
+            )
+        });
+        let outputs = mem::take(&mut output.viewport_output);
+        let mut windows = viewports.end_frame(&self.egui, outputs, renderer);
+        let rendered = render_frame(&self.egui, &self.cx, output, &mut windows, renderer);
         let rendered = rendered.map(|(presented, platform_output)| {
-            egui_winit.handle_platform_output(window, platform_output);
+            egui_winit
+                .state
+                .handle_platform_output(window, platform_output);
             presented
         });
         match rendered {
@@ -182,7 +199,17 @@ impl ApplicationHandler for Handler<'_> {
         }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if let (Some(window), Some(viewports), Some(renderer)) =
+            (&self.window, &self.viewports, &mut self.renderer)
+            && window.id() != id
+        {
+            viewports.window_event(id, &event, renderer);
+            // Windows doesn't call `about_to_wait` while the user moves or resizes a window, so
+            // frames are requested here as well.
+            window.request_redraw();
+            return;
+        }
         // egui, the top overlay, sees each event first, and keeps the input it wants: a click
         // on one of its panels, or keys while one of its widgets has focus. Tab is the
         // exception: egui-winit keeps every Tab press, for egui to move focus between its
@@ -260,10 +287,12 @@ impl ApplicationHandler for Handler<'_> {
     }
 
     fn exiting(&mut self, _: &ActiveEventLoop) {
+        self.dock.save();
         if let Some(renderer) = self.renderer.take() {
             self.app.stack.detach(&mut self.cx);
             self.ran = Some(Ran::finish(renderer, self.frames, self.clock.elapsed()));
         }
+        self.viewports = None;
         self.cx = Context::new(None);
         self.egui_winit = None;
         self.window = None;

@@ -4,17 +4,17 @@ use std::ops::ControlFlow;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use gg_engine::{Context, Event, Key, Layer, egui};
+use gg_engine::{Context, Event, Key, Layer, Ui};
 use tracing::info;
 
 fn main() -> ExitCode {
     gg_engine::run(gg_engine::App::new("Sandbox").layer(Sandbox::new()))
 }
 
-/// Clears to a color that drifts slowly, so that a running sandbox visibly animates, and shows a
-/// panel with frame times and the color, which can be held or picked. Logs the key and mouse
-/// presses that reach it, which those on the panel don't. It polls input too: holding Space pauses
-/// the drift, and the panel shows where the cursor is.
+/// Clears to a color that drifts slowly, so that a running sandbox visibly animates, and shows two
+/// panels to dock: frame times, and the color, which can be held or picked. Logs the key and mouse
+/// presses that reach it, which those on the panels don't. It polls input too: holding Space
+/// pauses the drift, and a panel shows where the cursor is.
 struct Sandbox {
     time: Duration,
     drift: bool,
@@ -64,8 +64,8 @@ impl Layer for Sandbox {
         ControlFlow::Continue(())
     }
 
-    fn ui(&mut self, cx: &mut Context, ui: &egui::Context) {
-        egui::Window::new("Sandbox").show(ui, |ui| {
+    fn ui(&mut self, cx: &mut Context, ui: &mut Ui<'_>) {
+        ui.panel("Stats", |ui| {
             let ms = self.frame_time.as_secs_f32() * 1000.0;
             let fps = if ms > 0.0 { 1000.0 / ms } else { 0.0 };
             ui.label(format!("{ms:.2} ms a frame, {fps:.0} fps"));
@@ -73,9 +73,11 @@ impl Layer for Sandbox {
                 Some([x, y]) => format!("Cursor at {x:.0}, {y:.0}"),
                 None => "Cursor outside the window".to_owned(),
             });
+        });
+        ui.panel("Clear color", |ui| {
             ui.checkbox(&mut self.drift, "Drift");
             ui.horizontal(|ui| {
-                ui.label("Clear color");
+                ui.label("Color");
                 // Picking a color holds it.
                 if ui.color_edit_button_rgb(&mut self.color).changed() {
                     self.drift = false;

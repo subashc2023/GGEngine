@@ -4,9 +4,11 @@
 //! An app's `main` starts the engine; there is no separate entry-point crate.
 
 mod args;
+mod dock;
 mod event;
 mod input;
 mod layer;
+mod viewports;
 mod window;
 
 use std::path::{Path, PathBuf};
@@ -14,10 +16,12 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use gg_core::Result;
-use gg_renderer::{Renderer, Settings, Ui, Validation};
+use gg_renderer::{Renderer, Settings, Validation};
 use tracing::{debug, error, info};
 
 use args::Args;
+use dock::Dock;
+pub use dock::Ui;
 /// The UI library layers draw with, in [`Layer::ui`]; apps use it from here, so that they
 /// share the engine's version.
 pub use egui;
@@ -28,6 +32,7 @@ pub use gg_core::math;
 pub use input::Input;
 use layer::Stack;
 pub use layer::{Context, Layer, Window};
+use viewports::Drawn;
 
 const BUILD: &str = if cfg!(debug_assertions) {
     "debug"
@@ -135,6 +140,8 @@ fn run_headless(app: &mut App, args: &Args) -> Result<Ran> {
     let mut cx = Context::new(None);
     let mut clock = Clock::default();
     let egui = egui::Context::default();
+    // Headless runs neither read nor save the layout, so that they're reproducible.
+    let mut dock = Dock::new(None);
     let mut frames = 0;
     app.stack.attach(&mut cx);
     let rendered = (|| -> Result<()> {
@@ -148,14 +155,8 @@ fn run_headless(app: &mut App, args: &Args) -> Result<Ran> {
                 time: Some(clock.elapsed().as_secs_f64()),
                 ..Default::default()
             };
-            render_frame(
-                &mut app.stack,
-                &mut cx,
-                &mut clock,
-                &egui,
-                input,
-                &mut renderer,
-            )?;
+            let output = run_frame(&mut app.stack, &mut cx, &mut clock, &egui, &mut dock, input);
+            render_frame(&egui, &cx, output, &mut [], &mut renderer)?;
             frames += 1;
         }
         Ok(())
@@ -165,29 +166,45 @@ fn run_headless(app: &mut App, args: &Args) -> Result<Ran> {
     Ok(Ran::finish(renderer, frames, clock.elapsed()))
 }
 
-/// One turn of the main loop: updates the layers, has them draw their UI with egui, and renders
-/// the frame. Returns whether the frame was presented, and egui's requests of the window, such
-/// as the cursor to show.
+/// The first half of a turn of the main loop: updates the layers and has them draw their UI, in
+/// the dock and with egui. [`render_frame`] renders what egui made of it.
 ///
 /// egui allocates as it lays out and tessellates, so frames that draw UI allocate; the UI is a
 /// development overlay.
-fn render_frame(
+fn run_frame(
     stack: &mut Stack,
     cx: &mut Context,
     clock: &mut Clock,
     egui: &egui::Context,
+    dock: &mut Dock,
     input: egui::RawInput,
+) -> egui::FullOutput {
+    stack.update(cx, clock.tick());
+    egui.run_ui(input, |root| {
+        dock.begin(root);
+        stack.ui(cx, &mut Ui::new(root, dock));
+        dock.end(root);
+    })
+}
+
+/// The second half: renders the frame with the UI in `output` over it, and into the windows of
+/// their own what their passes drew, in `windows`. Returns whether the frame was presented, and
+/// egui's requests of the main window, such as the cursor to show.
+fn render_frame(
+    egui: &egui::Context,
+    cx: &Context,
+    mut output: egui::FullOutput,
+    windows: &mut [Drawn],
     renderer: &mut Renderer,
 ) -> Result<(bool, egui::PlatformOutput)> {
-    stack.update(cx, clock.tick());
-    let mut output = egui.run_pass(input, |ui| stack.ui(cx, ui));
     let primitives = egui.tessellate(output.shapes, output.pixels_per_point);
-    let ui = Ui {
+    let ui = gg_renderer::Ui {
         primitives: &primitives,
         textures: &mut output.textures_delta,
         pixels_per_point: output.pixels_per_point,
     };
-    let presented = renderer.render(cx.clear_color(), ui)?;
+    let mut windows: Vec<_> = windows.iter_mut().map(Drawn::ui).collect();
+    let presented = renderer.render(cx.clear_color(), ui, &mut windows)?;
     Ok((presented, output.platform_output))
 }
 

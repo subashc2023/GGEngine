@@ -6,6 +6,7 @@
 
 mod ui;
 
+use std::iter;
 use std::sync::Arc;
 
 use gg_core::Result;
@@ -28,11 +29,18 @@ pub struct Settings<'a> {
     pub vsync: bool,
 }
 
-/// Renders frames into a window or, headless, into an offscreen image.
+/// Renders frames into a window or, headless, into an offscreen image, and UI into the app's
+/// other windows.
 pub struct Renderer {
     frames: Frames,
     output: Output,
+    /// The keys of the other windows, in the order of their swapchains in `windows`.
+    window_keys: Vec<u64>,
+    windows: Vec<Swapchain>,
     ui: UiPass,
+    instance: Arc<Instance>,
+    device: Arc<Device>,
+    vsync: bool,
     validation: Validation,
 }
 
@@ -57,7 +65,12 @@ impl Renderer {
         let surface = Surface::new(&instance, window)?;
         let device = Device::new(&instance, settings.gpu, Some(&surface))?;
         let swapchain = Swapchain::new(&device, surface, width, height, settings.vsync)?;
-        Self::new(&instance, &device, Output::Window(swapchain))
+        Self::new(
+            &instance,
+            &device,
+            Output::Window(swapchain),
+            settings.vsync,
+        )
     }
 
     /// A renderer without a window, which renders into an offscreen image of `width` by
@@ -70,10 +83,15 @@ impl Renderer {
         })?;
         let device = Device::new(&instance, settings.gpu, None)?;
         let image = ColorImage::new(&device, width, height, "offscreen color")?;
-        Self::new(&instance, &device, Output::Offscreen(image))
+        Self::new(&instance, &device, Output::Offscreen(image), settings.vsync)
     }
 
-    fn new(instance: &Instance, device: &Arc<Device>, output: Output) -> Result<Self> {
+    fn new(
+        instance: &Arc<Instance>,
+        device: &Arc<Device>,
+        output: Output,
+        vsync: bool,
+    ) -> Result<Self> {
         let format = match &output {
             Output::Window(swapchain) => swapchain.format(),
             Output::Offscreen(image) => image.format(),
@@ -81,7 +99,12 @@ impl Renderer {
         Ok(Self {
             frames: Frames::new(device)?,
             output,
+            window_keys: Vec::new(),
+            windows: Vec::new(),
             ui: UiPass::new(device, format)?,
+            instance: instance.clone(),
+            device: device.clone(),
+            vsync,
             validation: instance.validation(),
         })
     }
@@ -93,24 +116,95 @@ impl Renderer {
         }
     }
 
+    /// Starts presenting to another of the app's windows, which `key` names in
+    /// [`Renderer::render`], and whose drawable area is `width` by `height` pixels. A headless
+    /// renderer can't, since its GPU was opened without a window.
+    ///
+    /// # Panics
+    ///
+    /// If a window named `key` is already open.
+    pub fn open_window(
+        &mut self,
+        key: u64,
+        window: Arc<dyn Window>,
+        width: u32,
+        height: u32,
+    ) -> Result<()> {
+        assert!(
+            !self.window_keys.contains(&key),
+            "window {key} is already open"
+        );
+        let surface = Surface::new(&self.instance, window)?;
+        let swapchain = Swapchain::new(&self.device, surface, width, height, self.vsync)?;
+        self.ui.add_format(swapchain.format())?;
+        self.window_keys.push(key);
+        self.windows.push(swapchain);
+        Ok(())
+    }
+
+    /// Stops presenting to window `key`, once the GPU is done with it, if it's open.
+    pub fn close_window(&mut self, key: u64) {
+        if let Some(i) = self.window_keys.iter().position(|&open| open == key) {
+            self.window_keys.swap_remove(i);
+            self.windows.swap_remove(i);
+        }
+    }
+
+    /// Tells the renderer that window `key`'s drawable area changed size.
+    pub fn resize_window(&mut self, key: u64, width: u32, height: u32) {
+        if let Some(i) = self.window_keys.iter().position(|&open| open == key) {
+            self.windows[i].resize(width, height);
+        }
+    }
+
     /// Renders a frame cleared to `clear_color`, in linear RGBA, with `ui` drawn over it, and
-    /// presents it. Returns `false` when there was nothing to render into, as when the window
-    /// is minimized; the UI's texture changes are applied regardless.
-    pub fn render(&mut self, clear_color: [f32; 4], ui: Ui<'_>) -> Result<bool> {
+    /// draws into each of the other windows its UI from `windows`, over black. It presents them
+    /// all. `windows` lists the UIs in the order egui ran their passes, which ran before `ui`'s:
+    /// the order of their texture changes. A window that isn't open, or whose swapchain has no
+    /// image free yet, is left as it was.
+    ///
+    /// Returns `false` when there was nothing to render into, as when the window is minimized;
+    /// the UIs' texture changes are applied regardless.
+    pub fn render(
+        &mut self,
+        clear_color: [f32; 4],
+        ui: Ui<'_>,
+        windows: &mut [(u64, Ui<'_>)],
+    ) -> Result<bool> {
+        // egui sends each texture change once, so changes wait for a frame that renders.
+        for (_, window) in windows.iter_mut() {
+            self.ui.queue(window.textures);
+        }
+        self.ui.queue(ui.textures);
         let target = match &mut self.output {
             Output::Window(swapchain) => Target::Swapchain(swapchain),
             Output::Offscreen(image) => Target::Image(image),
         };
-        // egui sends each texture change once, so changes wait for a frame that renders.
-        self.ui.queue(ui.textures);
-        let Some(mut frame) = self.frames.begin(target)? else {
+        let has_ui = |key: &u64| windows.iter().any(|(drawn, _)| drawn == key);
+        let others = (self.window_keys.iter().zip(&mut self.windows))
+            .filter(|(key, _)| has_ui(key))
+            .map(|(_, swapchain)| Target::Swapchain(swapchain));
+        let Some(mut frame) = self.frames.begin(iter::once(target).chain(others))? else {
             return Ok(false);
         };
         self.ui.write_textures(&mut frame)?;
-        let mut pass = frame.begin_pass(c"frame", clear_color);
+        let mut pass = frame
+            .begin_pass(0, c"frame", clear_color)
+            .expect("a frame's first target has an image");
         self.ui
             .draw(&mut pass, ui.primitives, ui.pixels_per_point)?;
         drop(pass);
+        let drawn = self
+            .window_keys
+            .iter()
+            .filter_map(|key| windows.iter().find(|(drawn, _)| drawn == key));
+        for (target, (_, ui)) in (1..).zip(drawn) {
+            if let Some(mut pass) = frame.begin_pass(target, c"window", [0.0, 0.0, 0.0, 1.0]) {
+                self.ui
+                    .draw(&mut pass, ui.primitives, ui.pixels_per_point)?;
+            }
+        }
+        self.ui.free_textures();
         frame.submit()?;
         Ok(true)
     }

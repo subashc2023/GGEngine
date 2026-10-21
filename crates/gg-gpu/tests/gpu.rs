@@ -53,15 +53,19 @@ fn instance() -> Arc<Instance> {
     instance
 }
 
-/// Clears an offscreen image over more frames than are in flight, then reads the color back.
+/// Clears two offscreen images in the same frames, each to a color of its own, over more frames
+/// than are in flight, then reads the colors back.
 fn clear_reads_back() {
     let instance = instance();
     let validation = instance.validation();
     let device = Device::new(&instance, None, None).expect("a GPU that supports Vulkan 1.4");
-    let mut image = ColorImage::new(&device, 64, 32, "clear test target").expect("an image");
+    let mut images = [
+        ColorImage::new(&device, 64, 32, "clear test target 0").expect("an image"),
+        ColorImage::new(&device, 64, 32, "clear test target 1").expect("an image"),
+    ];
     let mut frames = Frames::new(&device).expect("frames");
 
-    let srgb = [64, 128, 192, 255];
+    let srgb = [[64, 128, 192, 255], [200, 30, 90, 255]];
     // The sRGB encoding's inverse; alpha isn't encoded.
     let linear = |byte: u8| {
         let c = f32::from(byte) / 255.0;
@@ -71,26 +75,32 @@ fn clear_reads_back() {
             ((c + 0.055) / 1.055).powf(2.4)
         }
     };
-    let color = [linear(srgb[0]), linear(srgb[1]), linear(srgb[2]), 1.0];
     for _ in 0..3 {
         let mut frame = frames
-            .begin(Target::Image(&mut image))
+            .begin(images.iter_mut().map(Target::Image))
             .expect("a frame")
             .expect("an offscreen image can always be rendered into");
-        frame.clear(color);
+        for (target, srgb) in srgb.iter().enumerate() {
+            frame.clear(
+                target,
+                [linear(srgb[0]), linear(srgb[1]), linear(srgb[2]), 1.0],
+            );
+        }
         frame.submit().expect("the frame's submission");
     }
-    let pixels = image.read_back().expect("the image's pixels");
-    assert_eq!(pixels.len(), 64 * 32 * 4);
-    for pixel in pixels.as_chunks::<4>().0 {
-        let close = pixel
-            .iter()
-            .zip(srgb)
-            .all(|(&got, want)| got.abs_diff(want) <= 1);
-        assert!(close, "read back {pixel:?}, expected {srgb:?}");
+    for (image, srgb) in images.iter_mut().zip(srgb) {
+        let pixels = image.read_back().expect("the image's pixels");
+        assert_eq!(pixels.len(), 64 * 32 * 4);
+        for pixel in pixels.as_chunks::<4>().0 {
+            let close = pixel
+                .iter()
+                .zip(srgb)
+                .all(|(&got, want)| got.abs_diff(want) <= 1);
+            assert!(close, "read back {pixel:?}, expected {srgb:?}");
+        }
     }
 
-    drop((frames, image, device, instance));
+    drop((frames, images, device, instance));
     assert_eq!(
         validation.messages(),
         0,

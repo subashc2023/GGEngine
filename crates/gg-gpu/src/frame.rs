@@ -1,5 +1,7 @@
 //! Frames in flight. Each frame records one command buffer and submits it, and a timeline
 //! semaphore paces them, so that the CPU gets at most `FRAMES_IN_FLIGHT` frames ahead of the GPU.
+//! A frame can render into several targets, such as an app's windows, and presents all their
+//! swapchains at once.
 
 use std::slice;
 use std::sync::Arc;
@@ -11,7 +13,7 @@ use tracing::error;
 use crate::bindless::PUSH_CONSTANTS;
 use crate::buffer::Buffer;
 use crate::vma::Memory;
-use crate::{COLOR_RANGE, ColorImage, Device, Pipeline, Swapchain, Texture, vk_error};
+use crate::{COLOR_RANGE, ColorImage, Device, Format, Pipeline, Swapchain, Texture, vk_error};
 
 /// How many frames the GPU works on at once.
 const FRAMES_IN_FLIGHT: u64 = 2;
@@ -34,15 +36,33 @@ pub struct Frames {
     slots: Vec<Slot>,
     /// Each slot's arena.
     arenas: Vec<Arena>,
+    /// For each target of the frame being recorded, its image: the swapchain image's index, or 0
+    /// for an offscreen image, and the layout the frame's commands so far leave it in. `None` for
+    /// a swapchain that had no image ready.
+    images: Vec<Option<(u32, vk::ImageLayout)>>,
+    /// The last frame's list of targets, emptied, whose memory the next frame reuses.
+    spare_targets: Vec<Target<'static>>,
+    scratch: Scratch,
 }
 
 /// What one frame in flight records into and synchronizes with.
-#[derive(Clone, Copy)]
 struct Slot {
     pool: vk::CommandPool,
     commands: vk::CommandBuffer,
-    /// Signaled when the swapchain image the frame renders into is ready for it.
-    acquired: vk::Semaphore,
+    /// For each target, signaled when the swapchain image the frame renders into is ready for
+    /// it. There are as many as the most targets a frame has had.
+    acquired: Vec<vk::Semaphore>,
+}
+
+/// The lists a submission and its present are built in, kept so that frames don't allocate.
+#[derive(Default)]
+struct Scratch {
+    waits: Vec<vk::SemaphoreSubmitInfo<'static>>,
+    signals: Vec<vk::SemaphoreSubmitInfo<'static>>,
+    rendered: Vec<vk::Semaphore>,
+    swapchains: Vec<vk::SwapchainKHR>,
+    images: Vec<u32>,
+    results: Vec<vk::Result>,
 }
 
 impl Frames {
@@ -61,6 +81,9 @@ impl Frames {
             submitted: 0,
             slots: Vec::new(),
             arenas: (0..FRAMES_IN_FLIGHT).map(Arena::new).collect(),
+            images: Vec::new(),
+            spare_targets: Vec::new(),
+            scratch: Scratch::default(),
         };
         // SAFETY: the semaphore is live.
         unsafe { device.set_name(timeline, "frame timeline") };
@@ -76,7 +99,7 @@ impl Frames {
                 frames.slots.push(Slot {
                     pool,
                     commands: vk::CommandBuffer::null(),
-                    acquired: vk::Semaphore::null(),
+                    acquired: Vec::new(),
                 });
                 let slot = frames.slots.last_mut().expect("a slot was just pushed");
                 let allocate_info = vk::CommandBufferAllocateInfo::default()
@@ -86,43 +109,73 @@ impl Frames {
                 slot.commands = raw
                     .allocate_command_buffers(&allocate_info)
                     .map_err(|e| vk_error("vkAllocateCommandBuffers", e))?[0];
-                slot.acquired = raw
-                    .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
-                    .map_err(|e| vk_error("vkCreateSemaphore", e))?;
                 device.set_name(pool, &format!("frame {i} commands"));
                 device.set_name(slot.commands, &format!("frame {i} commands"));
-                device.set_name(slot.acquired, &format!("frame {i} image acquired"));
             }
         }
         Ok(frames)
     }
 
-    /// Starts a frame that renders into `target`, once the GPU has finished the frame that last
-    /// used this one's resources. Returns `None` if there's nothing to render into this time,
+    /// Starts a frame that renders into `targets`, once the GPU has finished the frame that last
+    /// used this one's resources. The first target paces the frame: for a swapchain, it waits
+    /// until the display has let go of an image. The others are rendered into only if their
+    /// swapchains have an image to give at once, so that a window on a slower display doesn't
+    /// slow the frame. Returns `None` if the first target has nothing to render into this time,
     /// as with the swapchain of a minimized window.
-    pub fn begin<'a>(&'a mut self, mut target: Target<'a>) -> Result<Option<Frame<'a>>> {
+    ///
+    /// # Panics
+    ///
+    /// If `targets` is empty.
+    pub fn begin<'a>(
+        &'a mut self,
+        targets: impl IntoIterator<Item = Target<'a>>,
+    ) -> Result<Option<Frame<'a>>> {
         let slot = (self.submitted % FRAMES_IN_FLIGHT) as usize;
         if let Some(previous) = self.submitted.checked_sub(FRAMES_IN_FLIGHT) {
             self.wait(previous + 1)?;
             self.device.frames_finished(previous + 1);
         }
-        let Slot {
-            pool,
-            commands,
-            acquired,
-        } = self.slots[slot];
-        let (image, layout) = match &mut target {
-            // SAFETY: the semaphore's last wait was in the frame that last used this slot, which
-            // has finished, so it's unsignaled with no wait pending.
-            Target::Swapchain(swapchain) => match unsafe { swapchain.acquire(acquired) }? {
-                Some(image) => (image, vk::ImageLayout::UNDEFINED),
-                None => return Ok(None),
-            },
-            Target::Image(image) => (0, image.layout()),
-        };
+        let mut list: Vec<Target<'a>> = std::mem::take(&mut self.spare_targets);
+        list.extend(targets);
+        assert!(!list.is_empty(), "a frame renders into at least one target");
+        let acquired = &mut self.slots[slot].acquired;
+        while acquired.len() < list.len() {
+            // SAFETY: the device is live.
+            let semaphore = unsafe {
+                self.device
+                    .raw()
+                    .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
+            }
+            .map_err(|e| vk_error("vkCreateSemaphore", e))?;
+            let name = format!("frame {slot} target {} image acquired", acquired.len());
+            // SAFETY: the semaphore is live.
+            unsafe { self.device.set_name(semaphore, &name) };
+            acquired.push(semaphore);
+        }
+        self.images.clear();
+        for (i, target) in list.iter_mut().enumerate() {
+            let acquired = self.slots[slot].acquired[i];
+            let image = match target {
+                // SAFETY: the semaphore is new, or the frame that last used this slot waited on
+                // it or left it unsignaled and has finished, so it's unsignaled with no wait
+                // pending.
+                Target::Swapchain(swapchain) => unsafe { swapchain.acquire(acquired, i == 0) }?
+                    .map(|image| (image, vk::ImageLayout::UNDEFINED)),
+                Target::Image(image) => Some((0, image.layout())),
+            };
+            if i == 0 && image.is_none() {
+                break;
+            }
+            self.images.push(image);
+        }
+        if self.images.is_empty() {
+            self.spare_targets = recycle(list);
+            return Ok(None);
+        }
         self.device.frame_begun(self.submitted + 1);
         self.arenas[slot].reset(&self.device)?;
         let raw = self.device.raw();
+        let Slot { pool, commands, .. } = self.slots[slot];
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
         let bindless = self.device.bindless();
@@ -144,10 +197,8 @@ impl Frames {
         }
         Ok(Some(Frame {
             frames: self,
-            target,
+            targets: list,
             slot,
-            image,
-            layout,
             submitted: false,
         }))
     }
@@ -165,6 +216,16 @@ impl Frames {
     }
 }
 
+/// Empties `targets` for the next frame's, which borrow for another lifetime. Collecting a
+/// `vec::IntoIter` into a `Vec` of a type with the same layout reuses its memory.
+fn recycle(mut targets: Vec<Target<'_>>) -> Vec<Target<'static>> {
+    targets.clear();
+    targets
+        .into_iter()
+        .map(|_| unreachable!("the list was emptied"))
+        .collect()
+}
+
 impl Drop for Frames {
     fn drop(&mut self) {
         if self.wait(self.submitted).is_err() {
@@ -176,7 +237,9 @@ impl Drop for Frames {
         // left by a failed `new`, are allowed.
         unsafe {
             for slot in &self.slots {
-                raw.destroy_semaphore(slot.acquired, None);
+                for &semaphore in &slot.acquired {
+                    raw.destroy_semaphore(semaphore, None);
+                }
                 raw.destroy_command_pool(slot.pool, None);
             }
             raw.destroy_semaphore(self.timeline, None);
@@ -184,17 +247,13 @@ impl Drop for Frames {
     }
 }
 
-/// A frame being recorded. Submitting it, or dropping it, sends its commands to the GPU and, for
-/// a swapchain, presents the image.
+/// A frame being recorded. Submitting it, or dropping it, sends its commands to the GPU and
+/// presents the images of its swapchains.
 #[must_use = "a frame's commands reach the GPU when it's submitted"]
 pub struct Frame<'a> {
     frames: &'a mut Frames,
-    target: Target<'a>,
+    targets: Vec<Target<'a>>,
     slot: usize,
-    /// The swapchain image the frame renders into, or 0 for an offscreen image.
-    image: u32,
-    /// The layout the frame's commands so far leave the target in.
-    layout: vk::ImageLayout,
     submitted: bool,
 }
 
@@ -310,24 +369,37 @@ impl<'a> Frame<'a> {
         Ok(())
     }
 
-    /// Clears the whole target to `color`, in linear RGBA.
-    pub fn clear(&mut self, color: [f32; 4]) {
-        drop(self.begin_pass(c"clear", color));
+    /// Clears the whole of the `target`th target to `color`, in linear RGBA, if it has an image
+    /// this frame.
+    pub fn clear(&mut self, target: usize, color: [f32; 4]) {
+        drop(self.begin_pass(target, c"clear", color));
     }
 
-    /// Starts rendering into the target, cleared to `color`, in linear RGBA. `label` names the
-    /// pass in captures. Rendering ends when the pass is dropped.
-    pub fn begin_pass(&mut self, label: &std::ffi::CStr, color: [f32; 4]) -> Pass<'_, 'a> {
+    /// Starts rendering into the `target`th of the targets the frame began with, cleared to
+    /// `color`, in linear RGBA. `label` names the pass in captures. Rendering ends when the pass
+    /// is dropped. Returns `None` for a swapchain that had no image ready this frame; the first
+    /// target always has one.
+    ///
+    /// # Panics
+    ///
+    /// If the frame has no `target`th target.
+    pub fn begin_pass(
+        &mut self,
+        target: usize,
+        label: &std::ffi::CStr,
+        color: [f32; 4],
+    ) -> Option<Pass<'_, 'a>> {
+        let (index, _) = self.frames.images[target]?;
         let device = &self.frames.device;
         let commands = self.frames.slots[self.slot].commands;
-        let (image, view, extent) = match &self.target {
-            Target::Swapchain(swapchain) => swapchain.image(self.image),
-            Target::Image(image) => image.parts(),
+        let ((image, view, extent), format) = match &self.targets[target] {
+            Target::Swapchain(swapchain) => (swapchain.image(index), swapchain.format()),
+            Target::Image(image) => (image.parts(), image.format()),
         };
         // The old contents are discarded. A swapchain image is ready once its acquire semaphore
         // is signaled, which the submission waits for at the color-attachment stage; an
         // offscreen image must wait for whatever used it before.
-        let (src_stage, src_access) = match self.target {
+        let (src_stage, src_access) = match self.targets[target] {
             Target::Swapchain(_) => (
                 vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
                 vk::AccessFlags2::NONE,
@@ -380,14 +452,15 @@ impl<'a> Frame<'a> {
             raw.cmd_set_viewport(commands, 0, &[viewport]);
             raw.cmd_set_scissor(commands, 0, &[extent.into()]);
         }
-        self.layout = vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL;
-        Pass {
+        self.frames.images[target] = Some((index, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL));
+        Some(Pass {
             frame: self,
             extent,
-        }
+            format,
+        })
     }
 
-    /// Sends the frame's commands to the GPU and, for a swapchain, presents the image.
+    /// Sends the frame's commands to the GPU and presents the images of its swapchains.
     pub fn submit(mut self) -> Result<()> {
         self.finish()
     }
@@ -395,76 +468,114 @@ impl<'a> Frame<'a> {
     fn finish(&mut self) -> Result<()> {
         // Set first, so that dropping the frame after a failure doesn't submit it again.
         self.submitted = true;
-        let frames = &mut *self.frames;
-        frames.arenas[self.slot].flush()?;
-        let device = &frames.device;
+        let Frames {
+            device,
+            timeline,
+            submitted,
+            slots,
+            arenas,
+            images,
+            scratch,
+            ..
+        } = &mut *self.frames;
+        arenas[self.slot].flush()?;
         let raw = device.raw();
-        let Slot {
-            commands, acquired, ..
-        } = frames.slots[self.slot];
-        if let Target::Swapchain(swapchain) = &self.target {
-            let (image, _, _) = swapchain.image(self.image);
+        let slot = &slots[self.slot];
+        let frame = *submitted + 1;
+        scratch.waits.clear();
+        scratch.signals.clear();
+        scratch.rendered.clear();
+        scratch.swapchains.clear();
+        scratch.images.clear();
+        scratch.signals.push(
+            vk::SemaphoreSubmitInfo::default()
+                .semaphore(*timeline)
+                .value(frame)
+                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
+        );
+        for (i, (target, image)) in self.targets.iter().zip(images.iter_mut()).enumerate() {
+            let (Target::Swapchain(swapchain), Some((index, layout))) = (target, image) else {
+                continue;
+            };
+            let (image, _, _) = swapchain.image(*index);
             // The present waits on a semaphore signaled after every command, the layout change
             // included, so the barrier needs no second scope.
             let barrier = vk::ImageMemoryBarrier2::default()
                 .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
                 .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
-                .old_layout(self.layout)
+                .old_layout(*layout)
                 .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
                 .image(image)
                 .subresource_range(COLOR_RANGE);
             // SAFETY: the commands are recording, and the image is live.
             unsafe {
                 raw.cmd_pipeline_barrier2(
-                    commands,
+                    slot.commands,
                     &vk::DependencyInfo::default().image_memory_barriers(slice::from_ref(&barrier)),
                 );
             }
-            self.layout = vk::ImageLayout::PRESENT_SRC_KHR;
+            *layout = vk::ImageLayout::PRESENT_SRC_KHR;
+            let rendered = swapchain.rendered(*index);
+            scratch.waits.push(
+                vk::SemaphoreSubmitInfo::default()
+                    .semaphore(slot.acquired[i])
+                    .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT),
+            );
+            scratch.signals.push(
+                vk::SemaphoreSubmitInfo::default()
+                    .semaphore(rendered)
+                    .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
+            );
+            scratch.rendered.push(rendered);
+            scratch.swapchains.push(swapchain.raw());
+            scratch.images.push(*index);
         }
         // SAFETY: the commands are recording.
-        unsafe { raw.end_command_buffer(commands) }
+        unsafe { raw.end_command_buffer(slot.commands) }
             .map_err(|e| vk_error("vkEndCommandBuffer", e))?;
 
-        let frame = frames.submitted + 1;
-        let command_infos = [vk::CommandBufferSubmitInfo::default().command_buffer(commands)];
-        let waits = [vk::SemaphoreSubmitInfo::default()
-            .semaphore(acquired)
-            .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)];
-        let rendered = match &self.target {
-            Target::Swapchain(swapchain) => swapchain.rendered(self.image),
-            Target::Image(_) => vk::Semaphore::null(),
-        };
-        let signals = [
-            vk::SemaphoreSubmitInfo::default()
-                .semaphore(frames.timeline)
-                .value(frame)
-                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
-            vk::SemaphoreSubmitInfo::default()
-                .semaphore(rendered)
-                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
-        ];
-        // Only a swapchain image has semaphores to wait on and signal besides the timeline.
-        let (waits, signals) = match self.target {
-            Target::Swapchain(_) => (&waits[..], &signals[..]),
-            Target::Image(_) => (&[][..], &signals[..1]),
-        };
+        let command_infos = [vk::CommandBufferSubmitInfo::default().command_buffer(slot.commands)];
         let submit = vk::SubmitInfo2::default()
-            .wait_semaphore_infos(waits)
+            .wait_semaphore_infos(&scratch.waits)
             .command_buffer_infos(&command_infos)
-            .signal_semaphore_infos(signals);
+            .signal_semaphore_infos(&scratch.signals);
         // SAFETY: what the submission uses lives until the timeline reaches `frame`: the slot and
         // its arena are reused only after waiting for it, and resources retire until then.
         unsafe { device.submit(slice::from_ref(&submit)) }?;
-        frames.submitted = frame;
-        match &mut self.target {
-            // SAFETY: the image was acquired for this frame, whose submission signals its
-            // semaphore.
-            Target::Swapchain(swapchain) => unsafe { swapchain.present(self.image) },
-            Target::Image(image) => {
-                image.set_layout(self.layout);
-                Ok(())
+        *submitted = frame;
+        for (target, image) in self.targets.iter_mut().zip(images.iter()) {
+            if let (Target::Image(target), Some((_, layout))) = (target, image) {
+                target.set_layout(*layout);
             }
+        }
+        if scratch.swapchains.is_empty() {
+            return Ok(());
+        }
+
+        scratch.results.clear();
+        scratch
+            .results
+            .resize(scratch.swapchains.len(), vk::Result::SUCCESS);
+        let info = vk::PresentInfoKHR::default()
+            .wait_semaphores(&scratch.rendered)
+            .swapchains(&scratch.swapchains)
+            .image_indices(&scratch.images)
+            .results(&mut scratch.results);
+        // SAFETY: each image was acquired for this frame, whose submission signals its semaphore.
+        let presented = unsafe { device.present(&info) };
+        let mut results = scratch.results.iter();
+        for (target, image) in self.targets.iter_mut().zip(images.iter()) {
+            if let (Target::Swapchain(swapchain), Some(_)) = (target, image) {
+                let result = results
+                    .next()
+                    .expect("a result for each swapchain presented");
+                swapchain.presented(*result)?;
+            }
+        }
+        match presented {
+            // Each swapchain's own result says how its present went.
+            Ok(_) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => Ok(()),
+            Err(e) => Err(vk_error("vkQueuePresentKHR", e)),
         }
     }
 }
@@ -477,6 +588,7 @@ impl Drop for Frame<'_> {
         {
             error!(code = error.code(), "{error:#}");
         }
+        self.frames.spare_targets = recycle(std::mem::take(&mut self.targets));
     }
 }
 
@@ -485,12 +597,18 @@ impl Drop for Frame<'_> {
 pub struct Pass<'p, 'a> {
     frame: &'p mut Frame<'a>,
     extent: vk::Extent2D,
+    format: Format,
 }
 
 impl Pass<'_, '_> {
     /// The target's width and height in pixels.
     pub fn size(&self) -> [u32; 2] {
         [self.extent.width, self.extent.height]
+    }
+
+    /// The target's format, which the pipelines it draws with must be made for.
+    pub fn format(&self) -> Format {
+        self.format
     }
 
     /// As [`Frame::upload`].

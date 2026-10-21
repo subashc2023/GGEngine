@@ -21,10 +21,11 @@ pub struct Ui<'a> {
     pub pixels_per_point: f32,
 }
 
-/// Draws egui's meshes, and keeps the textures they sample.
+/// Draws egui's meshes, and keeps the textures they sample, which every window's UI shares.
 pub(crate) struct UiPass {
     device: Arc<Device>,
-    pipeline: Pipeline,
+    /// A pipeline for each format of target drawn into.
+    pipelines: Vec<(Format, Pipeline)>,
     textures: HashMap<TextureId, (Texture, Sampler)>,
     /// Texture changes not yet applied, in order: egui sends each once.
     to_set: Vec<(TextureId, ImageDelta)>,
@@ -35,24 +36,38 @@ pub(crate) struct UiPass {
 impl UiPass {
     /// A pass that draws into targets of `format`.
     pub(crate) fn new(device: &Arc<Device>, format: Format) -> Result<Self> {
-        let pipeline = Pipeline::graphics(
-            device,
-            &GraphicsDesc {
-                name: "egui",
-                spirv: SPIRV,
-                vertex: c"vertex_main",
-                fragment: c"fragment_main",
-                format,
-                blend: Blend::PremultipliedAlpha,
-            },
-        )?;
-        Ok(Self {
+        let mut pass = Self {
             device: device.clone(),
-            pipeline,
+            pipelines: Vec::new(),
             textures: HashMap::new(),
             to_set: Vec::new(),
             to_free: Vec::new(),
-        })
+        };
+        pass.add_format(format)?;
+        Ok(pass)
+    }
+
+    /// Lets the pass draw into targets of `format` too.
+    pub(crate) fn add_format(&mut self, format: Format) -> Result<()> {
+        if self
+            .pipelines
+            .iter()
+            .all(|&(made_for, _)| made_for != format)
+        {
+            let pipeline = Pipeline::graphics(
+                &self.device,
+                &GraphicsDesc {
+                    name: "egui",
+                    spirv: SPIRV,
+                    vertex: c"vertex_main",
+                    fragment: c"fragment_main",
+                    format,
+                    blend: Blend::PremultipliedAlpha,
+                },
+            )?;
+            self.pipelines.push((format, pipeline));
+        }
+        Ok(())
     }
 
     /// Takes a frame's texture changes, to apply on the next frame that renders.
@@ -98,17 +113,25 @@ impl UiPass {
         Ok(())
     }
 
-    /// Draws egui's meshes, with `ppp` physical pixels per point, then frees the textures egui
-    /// is done with.
+    /// Draws egui's meshes, with `ppp` physical pixels per point.
+    ///
+    /// # Panics
+    ///
+    /// If the pass's target has a format the pass wasn't given.
     pub(crate) fn draw(
-        &mut self,
+        &self,
         pass: &mut Pass<'_, '_>,
         primitives: &[ClippedPrimitive],
         ppp: f32,
     ) -> Result<()> {
         let [width, height] = pass.size();
         let screen = [width as f32 / ppp, height as f32 / ppp];
-        pass.set_pipeline(&self.pipeline);
+        let (_, pipeline) = self
+            .pipelines
+            .iter()
+            .find(|&&(made_for, _)| made_for == pass.format())
+            .expect("a pipeline for each format of target");
+        pass.set_pipeline(pipeline);
         for ClippedPrimitive {
             clip_rect,
             primitive,
@@ -143,11 +166,15 @@ impl UiPass {
             pass.push_constants(&push);
             pass.draw_indexed(indices, 0, mesh.indices.len() as u32, 0);
         }
+        Ok(())
+    }
+
+    /// Frees the textures egui is done with, once the frame has drawn every target's UI.
+    pub(crate) fn free_textures(&mut self) {
         for id in self.to_free.drain(..) {
             // Retired until the GPU is done with the frames that sample it.
             self.textures.remove(&id);
         }
-        Ok(())
     }
 }
 

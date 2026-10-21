@@ -85,7 +85,7 @@ fn ui_matches_its_reference() {
         };
         assert!(
             renderer
-                .render([0.02, 0.03, 0.05, 1.0], ui)
+                .render([0.02, 0.03, 0.05, 1.0], ui, &mut [])
                 .expect("a frame"),
             "an offscreen image can always be rendered into"
         );
