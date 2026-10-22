@@ -1,6 +1,6 @@
-//! What apps build on: the main loop, window and input, layers and their UI, handing each frame's
-//! render data to `gg-renderer`, and measuring each frame, for the log and the Performance panel;
-//! the scene and assets to come.
+//! What apps build on: the main loop, window and input, layers and their UI, the world of entities
+//! and their components, which it draws, handing each frame's render data to `gg-renderer`, and
+//! measuring each frame, for the log and the Performance panel; scenes and assets to come.
 //!
 //! An app's `main` starts the engine; there is no separate entry-point crate.
 
@@ -8,11 +8,14 @@ mod args;
 mod camera;
 mod chrome;
 mod dock;
+mod draw;
+mod ecs;
 mod event;
 mod image;
 mod input;
 mod layer;
 mod perf;
+mod transform;
 mod viewports;
 mod window;
 // Windows' own frame around a window whose title bar the UI draws needs a window procedure in
@@ -35,6 +38,7 @@ pub use camera::OrthographicCameraController;
 use chrome::Chrome;
 use dock::Dock;
 pub use dock::Ui;
+pub use ecs::{Bundle, Component, Entity, Query, QueryIter, QueryIterMut, ReadOnlyQuery, World};
 /// The UI library layers draw with, in [`Layer::ui`]; apps use it from here, so that they
 /// share the engine's version.
 pub use egui;
@@ -45,6 +49,9 @@ pub use gg_core::math;
 /// The engine's profiling: zones, plots and frame marks for Tracy, which compile to nothing unless
 /// the `tracy` feature is on. Apps use them from here, such as `let _zone = gg_engine::zone!();`.
 pub use gg_core::{plot, profile, zone};
+/// A mesh to draw with a shader and its parameters, without their types, so that an entity can
+/// have one, which the engine draws as it draws the world.
+pub use gg_renderer::MeshDraw;
 /// What layers draw, which they add and draw through their [`Context`]: sprites, and the sprite
 /// sheets whose cells they show; meshes; shaders
 /// for their vertex types, each added with how it blends; the textures those shaders and sprites
@@ -57,6 +64,7 @@ use layer::Stack;
 pub use layer::{Context, Layer, Window};
 pub use perf::PerfPanel;
 use perf::{Perf, Summary};
+pub use transform::Transform;
 use viewports::Drawn;
 
 const BUILD: &str = if cfg!(debug_assertions) {
@@ -224,7 +232,8 @@ fn egui_context() -> egui::Context {
 }
 
 /// The first half of a turn of the main loop: starts the frame, for Tracy and the frame's
-/// measure, updates the layers and has them draw their UI, in the dock and with egui.
+/// measure, updates the layers, draws the world, over what they drew, and has the layers draw
+/// their UI, in the dock and with egui.
 /// [`render_frame`] renders what egui made of it.
 ///
 /// egui allocates as it lays out here, and as [`render_frame`] tessellates, so frames that draw
@@ -243,6 +252,7 @@ fn run_frame(
     let _zone = gg_core::zone!();
     let start = Instant::now();
     stack.update(cx, dt);
+    cx.draw_world();
     let updated = Instant::now();
     let output = {
         let _zone = gg_core::zone!("egui");
@@ -453,7 +463,59 @@ impl Ran {
 
 #[cfg(test)]
 mod tests {
+    use gg_core::math::{Mat4, Vec4};
+    use gg_renderer::Draws;
+
     use super::*;
+
+    /// Spawns a red sprite as it attaches, and draws a sprite of its own each update.
+    struct Drawer;
+
+    fn red() -> Sprite {
+        Sprite {
+            color: Vec4::new(1.0, 0.0, 0.0, 1.0),
+            ..Sprite::default()
+        }
+    }
+
+    impl Layer for Drawer {
+        fn attach(&mut self, cx: &mut Context) {
+            cx.world_mut().spawn((Transform::IDENTITY, red()));
+        }
+
+        fn update(&mut self, cx: &mut Context, _: Duration) {
+            cx.draw_sprite(Mat4::IDENTITY, Sprite::default());
+        }
+    }
+
+    #[test]
+    fn the_world_draws_over_the_layers_draws() {
+        let mut stack = Stack::default();
+        stack.push_layer(Box::new(Drawer));
+        let mut cx = Context::new(None);
+        stack.attach(&mut cx);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(640.0, 360.0),
+            )),
+            ..Default::default()
+        };
+        let mut dock = Dock::new(None, Chrome::Os);
+        let mut clock = Clock::default();
+        let egui = egui_context();
+        let mut output = run_frame(&mut stack, &mut cx, &mut clock, &egui, &mut dock, input);
+        // As the renderer would have.
+        output.textures_delta.clear();
+        let mut expected = Draws::default();
+        expected.push_sprite(Mat4::IDENTITY, Sprite::default());
+        expected.push_sprite(Transform::IDENTITY.matrix(), red());
+        let viewport = Viewport {
+            origin: [0, 0],
+            size: [640, 360],
+        };
+        assert_eq!(*cx.render_data(viewport).draws, expected);
+    }
 
     #[test]
     fn the_games_view_is_the_central_area_in_pixels() {

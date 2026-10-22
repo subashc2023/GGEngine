@@ -14,7 +14,7 @@ use gg_gpu::{
     TextureFormat,
 };
 
-use crate::shader::Shaders;
+use crate::shader::{Shader, Shaders};
 use crate::texture::Textures;
 use crate::{DrawCounts, Draws, sprite};
 
@@ -45,6 +45,49 @@ impl<V> Mesh<V> {
 impl<V> fmt::Debug for Mesh<V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("Mesh").field(&self.index).finish()
+    }
+}
+
+/// A mesh to draw with a shader and the parameters it takes, as [`Draws::push`] draws one, without
+/// their types: they're checked against each other as it's made, then dropped, so that one type
+/// holds a draw of any mesh, as an entity's component does. Its parameters are copied into it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MeshDraw {
+    pub(crate) mesh: u32,
+    pub(crate) shader: u32,
+    params: [u8; MeshDraw::MAX_PARAMS],
+    /// How many bytes of `params` are the parameters'.
+    len: u8,
+}
+
+impl MeshDraw {
+    /// The most bytes of parameters it holds, until materials keep parameters on the GPU; a shader
+    /// that takes more draws through [`Draws::push`].
+    pub const MAX_PARAMS: usize = 64;
+
+    /// A draw of `mesh` with `shader`, which reads its vertex type, giving the shader `params`.
+    /// Parameters of more than [`MAX_PARAMS`](Self::MAX_PARAMS) bytes don't compile.
+    pub fn new<V, P: NoUninit>(mesh: Mesh<V>, shader: Shader<V, P>, params: P) -> Self {
+        const {
+            assert!(
+                size_of::<P>() <= MeshDraw::MAX_PARAMS,
+                "a MeshDraw holds parameters of up to 64 bytes"
+            )
+        };
+        let bytes = bytemuck::bytes_of(&params);
+        let mut copy = [0; Self::MAX_PARAMS];
+        copy[..bytes.len()].copy_from_slice(bytes);
+        Self {
+            mesh: mesh.index,
+            shader: shader.index,
+            params: copy,
+            len: bytes.len() as u8,
+        }
+    }
+
+    /// Its parameters, as bytes.
+    pub(crate) fn params(&self) -> &[u8] {
+        &self.params[..usize::from(self.len)]
     }
 }
 

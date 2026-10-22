@@ -84,14 +84,23 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   which the frame shows there under the UI; games' pipelines are made for the image's format
   rather than the window's. A GPU test checks a view that changes size, shuts and opens again,
   against a reference image.
+- **The ECS core** (2026-10-22): the engine's own ECS, in safe Rust: entities, whose handles stay
+  their own as others come and go, components of any type that implements `Component`, in
+  archetype tables, and queries over them; the engine draws the entities with a transform and a
+  sprite or a mesh back to front by z. The sandbox's sprites and its triangle are entities, which
+  its systems move and color, in the same 3 draws; a unit test checks that entities' handles stay
+  theirs as others are removed, and another checks the world against a model of it through random
+  changes.
 
-## Now: the ECS core
+## Now: reflection
 
-Phase 3's first milestone: the engine's own ECS, with stable entity IDs, components of any type,
-and queries over them.
+Phase 3's second milestone: component types registered at runtime with a description of their
+fields, which saving, operations, the inspector, snapshots and the tool API will reach components
+through. The transform hierarchy follows it.
 
-*Done when* the sandbox's sprites are entities that a system draws, and a unit test checks that
-entities' IDs stay theirs as others are removed. Its plan is made when it starts.
+*Done when* the sandbox's component types are registered with their fields, and an inspector
+panel shows its entities' components and edits their fields while it runs. Its plan is made when
+it starts.
 
 ## Next
 
@@ -179,7 +188,7 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Counts of vertices, indices or triangles, which follow from the instances; the renderer counts draws and instances | Phase 4, with glTF meshes |
 | Textures of data rather than color, such as normal maps, which shaders read as stored rather than decoded from sRGB | Phase 6, with PBR's maps |
 | Premultiplied alpha for games' textures: with straight alpha, as PNGs store it, a linear filter at an edge mixes in the color of the transparent pixels beside it | A game's art shows dark or colored fringes |
-| Sorting what blends back to front; meshes draw in the order given | Phase 4, with depth |
+| Sorting what blends back to front by depth; the world's entities draw back to front by z, and what layers draw themselves in the order given | Phase 4, with depth |
 | Mipmaps, and anisotropic filtering: a texture drawn smaller than it is samples its one level, and shimmers. A sprite sheet's cells, packed edge to edge, will then mix together at the smaller levels and under anisotropy, which reads past the texels the sprite shader keeps to, and need space around each cell or an array layer each | Phase 4, with the textured glTF mesh |
 | Sprite sheets with space between or around their cells, as some tile sets come; `SpriteSheet` takes cells packed edge to edge from the top left | A game's art comes that way |
 | Tiling one cell of a sheet: a repeating sampler repeats the whole texture | A game tiles part of an atlas, such as a background |
@@ -190,6 +199,7 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Layers making textures from their own pixels; `Textures::add` takes pixels, but `Context` adds only PNGs | A game makes its own textures |
 | Pixels, vertices and instances' transforms and parameters reach the GPU through the frame's arena, which merges the buffers it grew into, holding two to three times the largest frame for each frame in flight: by its growth rule, about 20 MB each for 100,000 sprites, which use 10.4 MB a frame; and a frame that adds many textures leaves that much host memory held | Phase 4, with uploads through the transfer queue |
 | More than one camera or view, such as split screen or the editor's scene view | A game or the editor draws several |
+| The camera as a component of an entity, which a scene saves and a parent carries along; layers set the camera through `Context` | Phase 3, with scenes |
 | The game's view in a panel that docks and tabs, and keys reaching the layers only while it has focus, as editors' views do; the view is the central area, and keys reach the layers wherever the pointer is unless one of egui's widgets has focus | A tool in the game's process shows the view among its panels |
 | Converting between the view's pixels and the world, to pick what's under the cursor or zoom toward it; the camera controller zooms about the view's center | Something picks with the mouse, or a tool zooms toward the cursor |
 | The camera controller's keys, W, A, S, D, Q and E, and the mouse wheel, are fixed, and it takes no gamepad | Phase 3, with input actions |
@@ -215,6 +225,15 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | In a frame egui runs twice, the torn-off windows' texture changes apply before all of the main window's, so glyphs added then to a font atlas that grows can go missing | It shows, or egui hands over each pass's changes apart |
 | Present fences (`VK_KHR_swapchain_maintenance1`) before a swapchain's semaphores are destroyed, which closing torn-off windows makes more frequent | Validation reports it, or windows open and close often |
 | egui's own scopes in Tracy, which egui marks for the `profiling` crate: `profiling` 1.0.18 takes tracy-client 0.18, and two Tracy clients don't link together | `profiling` takes tracy-client 0.19; deny.toml's wrappers for tracy-client then add it |
+| Persistent entity IDs, which files, operations, diagnostics and messages name entities by; an entity is its handle | Phase 3, with scenes |
+| Changing the world's tables while a query runs, through a buffer applied after it: Bevy's `Commands`, to be called `Deferred` here, since commands are the simulation's inputs | The first system that spawns or despawns as it iterates |
+| Query filters: `With`, `Without`, `Option` and `Changed` | Each with its first query |
+| Queries that keep the tables they match, and tables that keep where adding or removing each component leads; a query looks over every table, and a change of components finds its table by its types | Tables number in the hundreds, or changes of components show in a profile |
+| Sparse storage for components added and removed often, which move their entity's row between tables | A profile shows those moves |
+| A layer reading the world and drawing in one loop: `Context` lends one at a time | A layer draws from the world itself, such as debug shapes |
+| A tiebreak for entities at one z, which draw in the order queries find them | Persistent IDs, or Phase 4's depth sort |
+| Spawning many entities at once, faster than one by one: the swarm's 100,000 take about 17 ms in release, in one frame | A spawn hitch matters |
+| `MeshDraw` parameters of more than 64 bytes, which draw through `Context::draw` | Phase 6, with materials |
 | Micro-benchmarks, with criterion | A CPU hot path gets a target of its own; batching's is a frame time, which `engine.perf` measures |
 | Gates on time in CI: hosted runners' times vary too much to gate on | A self-hosted runner, as for the GPU tests |
 

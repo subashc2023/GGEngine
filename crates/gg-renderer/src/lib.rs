@@ -27,7 +27,7 @@ use tracing::trace;
 
 pub use camera::{Camera, Projection};
 pub use gg_gpu::{Blend, Sampler, Validation, Window};
-pub use mesh::{Mesh, Meshes};
+pub use mesh::{Mesh, MeshDraw, Meshes};
 pub use shader::{Shader, Shaders};
 pub use sprite::{Sprite, SpriteSheet};
 pub use texture::{Texture, Textures};
@@ -49,7 +49,7 @@ pub struct Viewport {
 /// consecutive draws of one mesh with one shader renders as one instanced draw, whatever their
 /// transforms and parameters, a texture among them. Clearing it keeps its memory, so that a frame
 /// that draws no more than the last allocates nothing.
-#[derive(Default)]
+#[derive(Debug, Default, PartialEq)]
 pub struct Draws {
     /// The runs, in order.
     runs: Vec<Run>,
@@ -60,6 +60,7 @@ pub struct Draws {
 }
 
 /// Consecutive draws of one mesh with one shader: the instances of one instanced draw.
+#[derive(Debug, PartialEq)]
 struct Run {
     mesh: u32,
     shader: u32,
@@ -83,24 +84,56 @@ impl Draws {
         let (instance, start) = (self.transforms.len(), self.params.len());
         self.transforms.push(transform);
         self.params.extend_from_slice(bytemuck::bytes_of(&params));
-        match self.runs.last_mut() {
-            Some(run) if (run.mesh, run.shader) == (mesh.index, shader.index) => {
-                run.instances.end = self.transforms.len();
-                run.params.end = self.params.len();
-            }
-            _ => self.runs.push(Run {
-                mesh: mesh.index,
-                shader: shader.index,
-                instances: instance..self.transforms.len(),
-                params: start..self.params.len(),
-            }),
-        }
+        self.extend_run(mesh.index, shader.index, instance, start);
+    }
+
+    /// Draws `draw` over the meshes drawn before it, as [`push`](Self::push) draws its mesh with
+    /// its shader and parameters.
+    pub fn push_draw(&mut self, transform: Mat4, draw: &MeshDraw) {
+        let (instance, start) = (self.transforms.len(), self.params.len());
+        self.transforms.push(transform);
+        self.params.extend_from_slice(draw.params());
+        self.extend_run(draw.mesh, draw.shader, instance, start);
     }
 
     /// Draws `sprite` over the meshes drawn before it, as [`Sprite`] describes. `transform` takes
     /// the sprite's own space, where it's a unit square around the origin, to the world's.
     pub fn push_sprite(&mut self, transform: Mat4, sprite: Sprite) {
         self.push(sprite::QUAD, sprite::SHADER, transform, sprite.params());
+    }
+
+    /// Draws each of `sprites`, a transform and a sprite, in turn, as
+    /// [`push_sprite`](Self::push_sprite) does, making room for them and joining a run once for
+    /// them all.
+    pub fn extend_sprites(&mut self, sprites: impl ExactSizeIterator<Item = (Mat4, Sprite)>) {
+        let (instance, start) = (self.transforms.len(), self.params.len());
+        self.params
+            .reserve(sprites.len() * size_of::<sprite::Params>());
+        let params = &mut self.params;
+        self.transforms.extend(sprites.map(|(transform, sprite)| {
+            params.extend_from_slice(bytemuck::bytes_of(&sprite.params()));
+            transform
+        }));
+        if self.transforms.len() > instance {
+            self.extend_run(sprite::QUAD.index, sprite::SHADER.index, instance, start);
+        }
+    }
+
+    /// Adds the draws from `instance` on, whose parameters start at `start`, of `mesh` with
+    /// `shader`, to the last run if it's of them too, or as a run of their own.
+    fn extend_run(&mut self, mesh: u32, shader: u32, instance: usize, start: usize) {
+        match self.runs.last_mut() {
+            Some(run) if (run.mesh, run.shader) == (mesh, shader) => {
+                run.instances.end = self.transforms.len();
+                run.params.end = self.params.len();
+            }
+            _ => self.runs.push(Run {
+                mesh,
+                shader,
+                instances: instance..self.transforms.len(),
+                params: start..self.params.len(),
+            }),
+        }
     }
 
     /// Whether there are none.
@@ -500,8 +533,14 @@ mod tests {
         // Another mesh, then another shader.
         draws.push(triangle, flat, at(5.0), blue);
         draws.push(triangle, other, at(6.0), red);
-        // Back to sprites, after the rest.
+        // Back to sprites, after the rest, then more of them at once, which join their run.
         draws.push_sprite(at(7.0), Sprite::default());
+        let more = [at(8.0), at(9.0)].map(|at| (at, Sprite::default()));
+        draws.extend_sprites(more.into_iter());
+        // A draw without its types joins a run of its mesh and shader, as one with them does.
+        draws.push(triangle, other, at(10.0), green);
+        draws.push_draw(at(11.0), &MeshDraw::new(triangle, other, blue));
+        draws.push(triangle, other, at(12.0), red);
         assert_eq!(
             runs(&draws),
             [
@@ -509,7 +548,8 @@ mod tests {
                 (1, 1, 3..5),
                 (2, 1, 5..6),
                 (2, 2, 6..7),
-                (0, 0, 7..8)
+                (0, 0, 7..10),
+                (2, 2, 10..13)
             ]
         );
         // A run's transforms and parameters are its own draws'.
@@ -523,8 +563,17 @@ mod tests {
         assert_eq!(&draws.params[squares.params.clone()], colors);
         let sprites = draws.runs[0].params.clone();
         assert_eq!(sprites, 0..3 * size_of::<sprite::Params>());
+        let triangles = &draws.runs[5];
+        let colors = [green, blue, red];
+        let colors: &[u8] = bytemuck::cast_slice(&colors);
+        assert_eq!(&draws.params[triangles.params.clone()], colors);
+        let sprites = draws.runs[4].params.clone();
+        assert_eq!(sprites.len(), 3 * size_of::<sprite::Params>());
 
         draws.clear();
+        assert!(draws.is_empty());
+        // No sprites make no run.
+        draws.extend_sprites(iter::empty());
         assert!(draws.is_empty());
         draws.push(square, flat, at(0.0), red);
         assert_eq!(runs(&draws), [(1, 1, 0..1)]);

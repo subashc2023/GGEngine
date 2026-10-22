@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 use bytemuck::NoUninit;
 use gg_core::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{
-    Blend, Camera, DrawCounts, Draws, Meshes, Projection, RenderData, Renderer, Sampler, Settings,
-    Shaders, Sprite, SpriteSheet, Texture, Textures, Ui, Viewport,
+    Blend, Camera, DrawCounts, Draws, MeshDraw, Meshes, Projection, RenderData, Renderer, Sampler,
+    Settings, Shaders, Sprite, SpriteSheet, Texture, Textures, Ui, Viewport,
 };
 
 fn main() {
@@ -155,10 +155,12 @@ fn ui_matches_its_reference() {
 /// with its reference image. The first square is turned and scaled, and the triangle moved and
 /// scaled to cover much of it, so that a matrix pushed transposed or multiplied in the wrong
 /// order, or the meshes drawn out of order, change thousands of pixels; the second square is
-/// clear of them, so that a draw given another's parameters changes a thousand. The triangle is
-/// added after the first frame, and the frames outnumber those in flight, so that later frames
-/// draw from what earlier ones copied to the GPU. The view renders into an image of its own, which
-/// the frame shows at the view's place, so that one shown elsewhere changes thousands of pixels.
+/// clear of them, so that a draw given another's parameters changes a thousand; it's drawn through
+/// a `MeshDraw`, which holds its mesh, shader and parameters without their types, as an entity's
+/// does, and joins the first square's instanced draw. The triangle is added after the first frame,
+/// and the frames outnumber those in flight, so that later frames draw from what earlier ones
+/// copied to the GPU. The view renders into an image of its own, which the frame shows at the
+/// view's place, so that one shown elsewhere changes thousands of pixels.
 fn meshes_match_their_reference() {
     const WIDTH: u32 = 320;
     const HEIGHT: u32 = 200;
@@ -201,7 +203,8 @@ fn meshes_match_their_reference() {
     let blue = Vec4::new(0.2, 0.3, 0.8, 1.0);
     draws.push(square, flat, transform(2.5, 30.0, [0.5, 0.5]), blue);
     let orange = Vec4::new(0.9, 0.4, 0.1, 1.0);
-    draws.push(square, flat, transform(0.8, 0.0, [3.2, 1.8]), orange);
+    let second = MeshDraw::new(square, flat, orange);
+    draws.push_draw(transform(0.8, 0.0, [3.2, 1.8]), &second);
     for frame in 0..3 {
         if frame == 1 {
             // Positions, then colors; no parameters.

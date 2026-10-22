@@ -8,10 +8,10 @@ use std::time::Duration;
 
 use bytemuck::NoUninit;
 use gg_engine::egui::{self, ViewportCommand, ViewportId};
-use gg_engine::math::{EulerRot, Mat4, Quat, Vec2, Vec3, Vec4};
+use gg_engine::math::{EulerRot, Quat, Vec2, Vec3, Vec4};
 use gg_engine::{
-    Blend, Camera, Context, Event, Key, Layer, Mesh, OrthographicCameraController, Projection,
-    Sampler, Shader, Sprite, SpriteSheet, Texture, Ui,
+    Blend, Camera, Component, Context, Entity, Event, Key, Layer, MeshDraw,
+    OrthographicCameraController, Projection, Sampler, Sprite, SpriteSheet, Transform, Ui, World,
 };
 use tracing::info;
 
@@ -48,6 +48,17 @@ const TRIANGLE: [Colored; 3] = [
 
 /// How fast the triangle turns, in radians a second: a quarter turn.
 const TURN_SPEED: f32 = FRAC_PI_2;
+
+// How far forward each part of the scene is, which the engine draws back to front: the map's
+// ground, what stands on it, the swarm, the grid, the checkerboard, the triangle and the logo. The
+// camera sees from 1 behind it to 1 in front.
+const GROUND_Z: f32 = 0.0;
+const STANDING_Z: f32 = 0.01;
+const SWARM_Z: f32 = 0.1;
+const GRID_Z: f32 = 0.2;
+const CHECKERBOARD_Z: f32 = 0.3;
+const TRIANGLE_Z: f32 = 0.4;
+const LOGO_Z: f32 = 0.5;
 
 /// The most sprites the swarm has.
 const SWARM_MAX: u32 = 100_000;
@@ -132,20 +143,17 @@ fn overlooking(center: Vec2, height: f32) -> Camera {
     }
 }
 
-/// What the sandbox loads from `assets/`.
-struct Assets {
-    checkerboard: Texture,
-    /// Drawn over the checkerboard.
-    logo: Texture,
+/// What the sandbox spawned as it attached, which it changes as it updates.
+struct Scene {
     /// The swarm's sprites, one for each cell of a sheet of 4 by 4 shapes with transparent
     /// margins, row by row.
     shapes: [Sprite; 16],
-    /// The map's: 4 by 3 cells of 16 by 16 pixels, packed edge to edge, of ground, and of what
-    /// stands on it with transparent backgrounds.
-    tiles: SpriteSheet,
+    checkerboard: Entity,
+    triangle: Entity,
 }
 
-/// One of the swarm's sprites: what it shows and how it moves, picked once from its index.
+/// One of the swarm's sprites: how it moves, picked once from its index.
+#[derive(Clone, Copy)]
 struct Drifter {
     /// Where it is when the swarm starts, from the field's bottom left.
     start: Vec2,
@@ -157,28 +165,29 @@ struct Drifter {
     spin: f32,
     /// How far across it is, in units.
     size: f32,
-    /// Which of the sheet's shapes it shows, row by row.
-    shape: usize,
 }
 
+impl Component for Drifter {}
+
 impl Drifter {
-    fn new(index: u32) -> Self {
+    /// It, and which of the sheet's shapes it shows, row by row.
+    fn new(index: u32) -> (Self, usize) {
         let pick = |salt| pick(index, salt);
         let direction = Vec2::from_angle(pick(0) * TAU);
-        Self {
+        let drifter = Self {
             start: Vec2::new(pick(2), pick(3)) * FIELD,
             velocity: direction * (0.05 + 0.25 * pick(4)),
             turn: pick(5) * TAU,
             spin: (pick(6) - 0.5) * 4.0,
             size: 0.05 + 0.07 * pick(7),
-            shape: (pick(1) * 16.0) as usize % 16,
-        }
+        };
+        (drifter, (pick(1) * 16.0) as usize % 16)
     }
 
     /// Where it is `t` seconds after the swarm starts. Its place and its turn are worked out in
     /// `f64` and wrapped before they're narrowed, so that the swarm moves as smoothly however long
     /// it has run.
-    fn transform(&self, t: f64) -> Mat4 {
+    fn transform(&self, t: f64) -> Transform {
         let wrap = |start: f32, speed: f32, every: f32| {
             (f64::from(start) + f64::from(speed) * t).rem_euclid(f64::from(every)) as f32
         };
@@ -186,11 +195,97 @@ impl Drifter {
             wrap(self.start.x, self.velocity.x, FIELD.x),
             wrap(self.start.y, self.velocity.y, FIELD.y),
         ) - FIELD / 2.0;
-        Mat4::from_scale_rotation_translation(
-            Vec3::splat(self.size),
-            Quat::from_rotation_z(wrap(self.turn, self.spin, TAU)),
-            at.extend(0.0),
-        )
+        Transform {
+            translation: at.extend(SWARM_Z),
+            rotation: Quat::from_rotation_z(wrap(self.turn, self.spin, TAU)),
+            scale: Vec3::splat(self.size),
+        }
+    }
+}
+
+/// One of the map's sprites, which the map's filtering applies to.
+#[derive(Clone, Copy)]
+struct MapTile;
+
+impl Component for MapTile {}
+
+/// One of the grid's squares, in the grid's first color or its second, as a checkerboard's.
+#[derive(Clone, Copy)]
+struct GridCell {
+    color: usize,
+}
+
+impl Component for GridCell {}
+
+/// Moves each drifter to where it is `t` seconds after the swarm starts.
+fn drift(world: &mut World, t: f64) {
+    let _zone = gg_engine::zone!();
+    world
+        .query_mut::<(&Drifter, &mut Transform)>()
+        .for_each(|(drifter, transform)| *transform = drifter.transform(t));
+}
+
+/// Colors the grid's squares in `colors`, in linear RGB.
+fn color_grid(world: &mut World, colors: [[f32; 3]; 2]) {
+    for (cell, sprite) in world.query_mut::<(&GridCell, &mut Sprite)>() {
+        sprite.color = Vec3::from(colors[cell.color]).extend(1.0);
+    }
+}
+
+/// Has the map's sprites sampled with `sampler`.
+fn sample_map(world: &mut World, sampler: Sampler) {
+    for (_, sprite) in world.query_mut::<(&MapTile, &mut Sprite)>() {
+        sprite.sampler = sampler;
+    }
+}
+
+/// Spawns the map from the cells of `tiles`, 4 by 3 of 16 by 16 pixels, packed edge to edge, of
+/// ground, and of what stands on it with transparent backgrounds: every tile's ground, then what
+/// stands on the tiles, each from the top row.
+fn spawn_map(world: &mut World, tiles: &SpriteSheet) {
+    // The top left tile's center.
+    let rows = MAP.len() as f32;
+    let columns = MAP[0].len() as f32;
+    let corner = MAP_CENTER + Vec2::new(1.0 - columns, rows - 1.0) * TILE / 2.0;
+    let mut spawn = |row: usize, column: usize, cell, tall: u32, z: f32| {
+        let at = corner + Vec2::new(column as f32, -(row as f32)) * TILE;
+        // From the tile up.
+        let height = TILE * tall as f32;
+        let center = at + Vec2::new(0.0, (height - TILE) / 2.0);
+        let transform = Transform {
+            translation: center.extend(z),
+            scale: Vec3::new(TILE, height, 1.0),
+            ..Transform::IDENTITY
+        };
+        world.spawn((transform, tiles.sprite(cell, [1, tall]), MapTile));
+    };
+    let tiles = || {
+        let rows = MAP.iter().enumerate();
+        rows.flat_map(|(row, letters)| letters.bytes().enumerate().map(move |(c, l)| (row, c, l)))
+    };
+    for (row, column, letter) in tiles() {
+        spawn(row, column, tile(letter).0, 1, GROUND_Z);
+    }
+    for (row, column, letter) in tiles() {
+        if let Some((cell, tall)) = tile(letter).1 {
+            spawn(row, column, cell, tall, STANDING_Z);
+        }
+    }
+}
+
+/// Spawns the grid: 10 by 10 squares, 2 units across, each a little smaller than the spacing.
+fn spawn_grid(world: &mut World) {
+    for row in 0..10 {
+        for column in 0..10 {
+            let at = Vec2::new(column as f32 - 4.5, row as f32 - 4.5) * 0.2;
+            let transform = Transform {
+                translation: at.extend(GRID_Z),
+                scale: Vec3::splat(0.18),
+                ..Transform::IDENTITY
+            };
+            let color = (row + column) % 2;
+            world.spawn((transform, Sprite::default(), GridCell { color }));
+        }
     }
 }
 
@@ -211,19 +306,21 @@ fn pick(index: u32, salt: u32) -> f32 {
 /// alternate; over the grid's middle, a checkerboard sprite, tiled and tinted, then a triangle in
 /// red, green and blue turning, then a logo sprite whose alpha shows them through it. Below the
 /// swarm, out of its way, a map of tiles from a tile set's cells packed edge to edge, which tests
-/// that none shows any of the cells beside it. The triangle is a mesh with a vertex type and shader
-/// of the sandbox's own, and the rest the engine's sprites, so the map, the swarm, the grid and the
-/// checkerboard are one instanced draw, and the triangle and the logo one each. They're drawn over
-/// a color that drifts slowly, so that a running sandbox visibly animates. The engine's camera
-/// controller steers the camera: W, A, S and D move it along its own axes, Q and E turn it left
-/// and right, at the same speed whatever the frame rate, and the mouse wheel zooms it. Shows six
-/// panels to dock, beside the engine's Performance panel, which counts the draws: the camera; how
-/// many sprites the swarm has; the map's filtering, smooth or sharp, and buttons that look at the
-/// map or back at the swarm; the grid's colors, which can be picked; the checkerboard's filtering,
-/// how many times it repeats, and its tint; and the clear color, which can be held or picked. Logs
-/// the key and mouse presses that reach it, which those on the panels don't. It polls input too:
-/// holding Space pauses the drift, and a panel shows where the cursor is. The title bar's File
-/// menu quits.
+/// that none shows any of the cells beside it. They're entities, spawned as the sandbox attaches,
+/// which the engine draws back to front by their z's; the sandbox's systems move the swarm and
+/// color the grid and filter the map as the panels say. The triangle is a mesh with a vertex type
+/// and shader of the sandbox's own, and the rest the engine's sprites, so the map, the swarm, the
+/// grid and the checkerboard are one instanced draw, and the triangle and the logo one each.
+/// They're drawn over a color that drifts slowly, so that a running sandbox visibly animates. The
+/// engine's camera controller steers the camera: W, A, S and D move it along its own axes, Q and E
+/// turn it left and right, at the same speed whatever the frame rate, and the mouse wheel zooms
+/// it. Shows six panels to dock, beside the engine's Performance panel, which counts the draws:
+/// the camera; how many sprites the swarm has; the map's filtering, smooth or sharp, and buttons
+/// that look at the map or back at the swarm; the grid's colors, which can be picked; the
+/// checkerboard's filtering, how many times it repeats, and its tint; and the clear color, which
+/// can be held or picked. Logs the key and mouse presses that reach it, which those on the panels
+/// don't. It polls input too: holding Space pauses the drift, and a panel shows where the cursor
+/// is. The title bar's File menu quits.
 struct Sandbox {
     time: Duration,
     drift: bool,
@@ -244,14 +341,13 @@ struct Sandbox {
     camera: OrthographicCameraController,
     /// How far the triangle has turned counterclockwise, in radians from 0 to a whole turn.
     triangle_turn: f32,
-    /// Every sprite the swarm can have, of which it draws the first `swarm`.
-    drifters: Vec<Drifter>,
+    /// The swarm's entities, the first spawned first, which it keeps `swarm` of.
+    drifters: Vec<Entity>,
     swarm: u32,
     /// How long the swarm has moved: its own clock, which the drift's pauses don't stop.
     swarm_time: Duration,
-    /// Added once the sandbox attaches.
-    triangle: Option<(Mesh<Colored>, Shader<Colored>)>,
-    assets: Option<Assets>,
+    /// Spawned once the sandbox attaches.
+    scene: Option<Scene>,
 }
 
 impl Sandbox {
@@ -271,11 +367,10 @@ impl Sandbox {
             smooth_map: false,
             camera,
             triangle_turn: 0.0,
-            drifters: (0..SWARM_MAX).map(Drifter::new).collect(),
+            drifters: Vec::new(),
             swarm: SWARM_START,
             swarm_time: Duration::ZERO,
-            triangle: None,
-            assets: None,
+            scene: None,
         }
     }
 
@@ -283,6 +378,27 @@ impl Sandbox {
     /// the grid's 2.
     fn start() -> Camera {
         overlooking(Vec2::ZERO, 3.0)
+    }
+
+    /// Spawns drifters until the swarm has `swarm`, or despawns them until it has, from its end,
+    /// so that no other drifter moves in its table and the swarm draws in the order it always has.
+    fn resize_swarm(&mut self, world: &mut World) {
+        let _zone = gg_engine::zone!();
+        let Some(scene) = &self.scene else {
+            return;
+        };
+        let swarm = self.swarm as usize;
+        for entity in self.drifters.drain(swarm.min(self.drifters.len())..).rev() {
+            world
+                .despawn(entity)
+                .expect("the swarm's drifters are alive");
+        }
+        let t = self.swarm_time.as_secs_f64();
+        for index in self.drifters.len() as u32..self.swarm {
+            let (drifter, shape) = Drifter::new(index);
+            let entity = world.spawn((drifter.transform(t), scene.shapes[shape], drifter));
+            self.drifters.push(entity);
+        }
     }
 }
 
@@ -303,105 +419,77 @@ impl Layer for Sandbox {
         let shapes = cx.add_sprite_sheet("sheet", assets.join("sheet.png"), [32, 32]);
         let tiles = cx.add_sprite_sheet("tiles", assets.join("tiles.png"), [16, 16]);
         let shapes = shapes.expect("the shapes load");
-        self.triangle = Some((
-            triangle.expect("the triangle is a whole triangle, of its own vertices"),
-            colored.expect("the vertex color shader compiles"),
-        ));
-        self.assets = Some(Assets {
-            checkerboard: checkerboard.expect("the checkerboard loads"),
-            logo: logo.expect("the logo loads"),
+        let mesh = triangle.expect("the triangle is a whole triangle, of its own vertices");
+        let shader = colored.expect("the vertex color shader compiles");
+
+        let world = cx.world_mut();
+        spawn_map(world, &tiles.expect("the tiles load"));
+        spawn_grid(world);
+        // 1.5 units across, over the grid's middle.
+        let middle = Vec3::splat(1.5);
+        let checkerboard = Sprite {
+            texture: checkerboard.expect("the checkerboard loads"),
+            ..Sprite::default()
+        };
+        let at = Transform {
+            translation: Vec3::Z * CHECKERBOARD_Z,
+            scale: middle,
+            ..Transform::IDENTITY
+        };
+        let checkerboard = world.spawn((at, checkerboard));
+        let at = Transform {
+            translation: Vec3::Z * TRIANGLE_Z,
+            ..Transform::IDENTITY
+        };
+        let triangle = world.spawn((at, MeshDraw::new(mesh, shader, ())));
+        let logo = Sprite {
+            texture: logo.expect("the logo loads"),
+            ..Sprite::default()
+        };
+        let at = Transform {
+            translation: Vec3::Z * LOGO_Z,
+            scale: middle,
+            ..Transform::IDENTITY
+        };
+        world.spawn((at, logo));
+        self.scene = Some(Scene {
             shapes: std::array::from_fn(|i| shapes.sprite([i as u32 % 4, i as u32 / 4], [1, 1])),
-            tiles: tiles.expect("the tiles load"),
+            checkerboard,
+            triangle,
         });
+        self.resize_swarm(world);
     }
 
     fn update(&mut self, cx: &mut Context, dt: Duration) {
         let _zone = gg_engine::zone!();
         let seconds = dt.as_secs_f32();
         self.camera.update(cx, dt);
-
-        // First, so that the map, the swarm, the grid and the checkerboard are one run of sprites.
-        if let Some(assets) = &self.assets {
-            let sampler = if self.smooth_map {
-                Sampler::LinearClamp
-            } else {
-                Sampler::NearestClamp
-            };
-            // The top left tile's center.
-            let rows = MAP.len() as f32;
-            let columns = MAP[0].len() as f32;
-            let corner = MAP_CENTER + Vec2::new(1.0 - columns, rows - 1.0) * TILE / 2.0;
-            for (row, letters) in MAP.iter().enumerate() {
-                for (column, letter) in letters.bytes().enumerate() {
-                    let at = corner + Vec2::new(column as f32, -(row as f32)) * TILE;
-                    let (ground, standing) = tile(letter);
-                    let mut draw = |cell, tall: u32| {
-                        // From the tile up.
-                        let height = TILE * tall as f32;
-                        let center = at + Vec2::new(0.0, (height - TILE) / 2.0);
-                        let transform = Mat4::from_translation(center.extend(0.0))
-                            * Mat4::from_scale(Vec3::new(TILE, height, 1.0));
-                        let sprite = Sprite {
-                            sampler,
-                            ..assets.tiles.sprite(cell, [1, tall])
-                        };
-                        cx.draw_sprite(transform, sprite);
-                    };
-                    draw(ground, 1);
-                    if let Some((cell, tall)) = standing {
-                        draw(cell, tall);
-                    }
-                }
-            }
-        }
         self.swarm_time += dt;
-        if let Some(assets) = &self.assets {
-            let t = self.swarm_time.as_secs_f64();
-            for drifter in &self.drifters[..self.swarm as usize] {
-                cx.draw_sprite(drifter.transform(t), assets.shapes[drifter.shape]);
-            }
-        }
-
-        // 10 by 10, 2 units across, each square a little smaller than the spacing, in the grid's
-        // colors in turn, as a checkerboard's.
-        for row in 0..10 {
-            for column in 0..10 {
-                let at = Vec3::new(column as f32 - 4.5, row as f32 - 4.5, 0.0) * 0.2;
-                let transform = Mat4::from_translation(at) * Mat4::from_scale(Vec3::splat(0.18));
-                let color = Vec3::from(self.grid_colors[(row + column) % 2]).extend(1.0);
-                let sprite = Sprite {
-                    color,
-                    ..Sprite::default()
-                };
-                cx.draw_sprite(transform, sprite);
-            }
-        }
-        // 1.5 units across, over the grid's middle.
-        let middle = Mat4::from_scale(Vec3::splat(1.5));
-        if let Some(assets) = &self.assets {
-            let sampler = if self.smooth {
-                Sampler::LinearRepeat
-            } else {
-                Sampler::NearestRepeat
-            };
-            let checkerboard = Sprite {
-                color: Vec4::from(self.tint),
-                texture: assets.checkerboard,
-                rect: [Vec2::ZERO, Vec2::splat(self.tiles)],
-                sampler,
-            };
-            cx.draw_sprite(middle, checkerboard);
-        }
         self.triangle_turn = (self.triangle_turn + TURN_SPEED * seconds).rem_euclid(TAU);
-        if let Some((mesh, shader)) = self.triangle {
-            cx.draw(mesh, shader, Mat4::from_rotation_z(self.triangle_turn), ());
-        }
-        if let Some(assets) = &self.assets {
-            let logo = Sprite {
-                texture: assets.logo,
-                ..Sprite::default()
-            };
-            cx.draw_sprite(middle, logo);
+
+        let world = cx.world_mut();
+        self.resize_swarm(world);
+        drift(world, self.swarm_time.as_secs_f64());
+        color_grid(world, self.grid_colors);
+        let sampler = if self.smooth_map {
+            Sampler::LinearClamp
+        } else {
+            Sampler::NearestClamp
+        };
+        sample_map(world, sampler);
+        if let Some(scene) = &self.scene {
+            if let Some(checkerboard) = world.get_mut::<Sprite>(scene.checkerboard) {
+                checkerboard.color = Vec4::from(self.tint);
+                checkerboard.rect = [Vec2::ZERO, Vec2::splat(self.tiles)];
+                checkerboard.sampler = if self.smooth {
+                    Sampler::LinearRepeat
+                } else {
+                    Sampler::NearestRepeat
+                };
+            }
+            if let Some(triangle) = world.get_mut::<Transform>(scene.triangle) {
+                triangle.rotation = Quat::from_rotation_z(self.triangle_turn);
+            }
         }
 
         if self.drift && !cx.input().key_down(Key::Space) {

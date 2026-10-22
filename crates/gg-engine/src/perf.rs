@@ -20,7 +20,7 @@ const GRAPHED: usize = 240;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Sample {
     pub(crate) frame: u64,
-    /// The layers' updates.
+    /// The layers' updates, and drawing the world.
     pub(crate) update: u64,
     /// The UI: the layers' and egui's, and tessellating it.
     pub(crate) ui: u64,
@@ -82,7 +82,7 @@ impl Perf {
         self.pending = Some(Sample::default());
     }
 
-    /// The frame's updates took `update`, and its UI `ui`.
+    /// The frame's updates and drawing its world took `update`, and its UI `ui`.
     pub(crate) fn ran(&mut self, update: Duration, ui: Duration) {
         if let Some(sample) = &mut self.pending {
             sample.update = nanos(update);

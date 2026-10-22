@@ -195,6 +195,21 @@ The world lives in our own ECS, built for what the tools, hot reload and multipl
 Each game picks its own network model, such as an authoritative server, lockstep or
 peer-to-peer rollback; the engine supplies these pieces.
 
+The world is a `World` of entities and their components, in safe Rust. An entity is a handle,
+its slot and which use of the slot it is, so that a despawned entity's handle never names
+another. A component is any type that implements `Component`: `Clone`, for snapshots, and `Send`
+and `Sync`, for the job system. Components live in archetype tables, one for each set of
+component types, whose rows are its entities and whose columns are each type's own `Vec`, which
+the world reaches through a trait object, downcast once a table, rather than through raw
+pointers. Queries borrow the world, shared to read it and exclusively to change it, so that the
+borrow checker keeps them apart, and walk each table's columns as slices. Systems are plain
+functions over the world, run in a fixed order. The order queries find entities in follows only
+from the changes made: tables are kept in the order they were made, despawning an entity or
+changing its components moves its table's last row into its place, the last freed slot is the
+first taken, and no hash map is iterated. So it's the same in every run, as the deterministic
+mode needs, but means nothing a game may rely on: anything ordered, such as what's drawn over
+what, orders by its components' values.
+
 ## Diagnostics
 
 Diagnostics are data, so agents and tools can act on them as reliably as people read them.
@@ -212,11 +227,12 @@ Diagnostics are data, so agents and tools can act on them as reliably as people 
 - **Profiling.** Code marks its work with zones (`gg_core::zone!`), which Tracy lays out on a
   timeline of frames, with plots such as each frame's draws; without the `tracy` feature they
   compile to nothing. The engine also measures every frame itself, always: its time, and how much
-  of it went to the layers' updates, the UI, rendering and waiting for the GPU and the display.
-  The Performance panel, an overlay apps add, shows them, and a run that doesn't end in an error
-  logs `engine.perf` as it ends: the frame times' percentiles, means and maxima, how long the run
-  took to start, its first frame and its shutdown, with the GPU and the build, so that an agent
-  can compare two builds by their runs. GPU timestamps for each pass come with the render graph.
+  of it went to the layers' updates and drawing the world, the UI, rendering and waiting for the
+  GPU and the display. The Performance panel, an overlay apps add, shows them, and a run that
+  doesn't end in an error logs `engine.perf` as it ends: the frame times' percentiles, means and
+  maxima, how long the run took to start, its first frame and its shutdown, with the GPU and the
+  build, so that an agent can compare two builds by their runs. GPU timestamps for each pass come
+  with the render graph.
 
 ## Events and layers
 
@@ -294,7 +310,11 @@ made again as that size changes, which the frame then shows there, with the UI o
 depth, HDR and tonemapping, post-processing and the tool API's captures read the view whole; and
 games' pipelines are made for that image's format, 8-bit sRGB, whatever the window presents.
 Layers add shaders, meshes and textures, draw them and set the camera through their `Context`,
-and the renderer's `Shaders`, `Meshes` and `Textures` hand out their handles at once.
+and the renderer's `Shaders`, `Meshes` and `Textures` hand out their handles at once. After the
+layers' updates, the engine draws the world's entities that have a `Transform` and a sprite or a
+`MeshDraw`, a mesh with its shader and parameters held without their types, over what the layers
+drew, back to front by their translations' z; those at one z draw in the order queries find them,
+which changes as entities come and go, so entities that overlap need different z's.
 
 A game's shader is a Slang file that the engine compiles with slangc as a layer adds it, so one
 that doesn't compile fails there, with slangc's diagnostics naming the file and line; the renderer
