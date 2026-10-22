@@ -81,6 +81,7 @@ impl UiPass {
 
     /// Applies the texture changes queued so far, which must happen before the frame's passes.
     pub(crate) fn write_textures(&mut self, frame: &mut Frame<'_>) -> Result<()> {
+        let _zone = gg_core::zone!();
         for (id, delta) in self.to_set.drain(..) {
             let ImageData::Color(image) = &delta.image;
             let size = [image.size[0] as u32, image.size[1] as u32];
@@ -124,6 +125,7 @@ impl UiPass {
         primitives: &[ClippedPrimitive],
         ppp: f32,
     ) -> Result<()> {
+        let _zone = gg_core::zone!();
         let [width, height] = pass.size();
         let screen = [width as f32 / ppp, height as f32 / ppp];
         let (_, pipeline) = self

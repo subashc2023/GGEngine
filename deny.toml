@@ -1,6 +1,12 @@
 # The layering rules in ARCHITECTURE.md that Cargo can't check, as cargo-deny bans: each crate
 # below may be a direct dependency only of the crates in its `wrappers`, dev-dependencies
-# included. Check with `cargo deny check bans`; CI runs it.
+# included, and optional ones, which `[graph]` turns on. Check with `cargo deny check bans`; CI
+# runs it.
+
+[graph]
+# Every feature of the workspace's crates, so that optional dependencies, such as gg-core's
+# Tracy client, are checked too.
+all-features = true
 
 [bans]
 # Duplicate versions say nothing about layering.
@@ -13,4 +19,6 @@ deny = [
     { crate = "ash-window", wrappers = ["gg-gpu"], reason = "gg-gpu owns Vulkan" },
     { crate = "winit", wrappers = ["gg-engine", "egui-winit"], reason = "gg-engine owns the window and input" },
     { crate = "egui-winit", wrappers = ["gg-engine"], reason = "gg-engine owns the window and input" },
+    { crate = "tracy-client", wrappers = ["gg-core"], reason = "gg-core's profile module is the way into Tracy" },
+    { crate = "tracy-client-sys", wrappers = ["tracy-client", "gg-core"], reason = "gg-core's profile module is the way into Tracy" },
 ]

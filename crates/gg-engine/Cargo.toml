@@ -17,6 +17,10 @@ serde.workspace = true
 tracing.workspace = true
 winit.workspace = true
 
+[features]
+# The engine's zones for Tracy, through gg-core's profile module.
+tracy = ["gg-core/tracy"]
+
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",

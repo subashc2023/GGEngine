@@ -9,6 +9,12 @@ glam.workspace = true
 nu-ansi-term.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+tracy-client = { workspace = true, optional = true }
+tracy-client-sys = { workspace = true, optional = true }
+
+[features]
+# Zones, plots and frame marks for Tracy (src/profile.rs), which compile to nothing without it.
+tracy = ["dep:tracy-client", "dep:tracy-client-sys"]
 
 [lints]
 workspace = true

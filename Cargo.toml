@@ -31,6 +31,20 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["json"] }
+# Tracy's client, for gg-core's zones. Its defaults open a profiler to the network and add
+# sampling, system tracing and a crash handler; these keep its listener on loopback, where the
+# broadcast lets a viewer on this machine list it.
+tracy-client = { version = "0.19.0", default-features = false, features = [
+    "enable",
+    "only-localhost",
+    "broadcast",
+] }
+# Pins Tracy 0.14.1, of which tracy-client takes a range: the viewer and its tools must be that
+# release to read the captures. Its own defaults would come back through feature unification
+# without `default-features = false`. At run time, `TRACY_NO_EXIT=1` has a run wait before it
+# exits until a viewer or `tracy-capture` has taken everything, and `TRACY_NO_INVARIANT_CHECK=1`
+# lets Tracy run on x86 VMs, whose clocks it otherwise refuses.
+tracy-client-sys = { version = "=0.30.1", default-features = false }
 # winit's version, so that the two build once.
 windows-sys = "0.52.0"
 winit = "0.30.13"

@@ -176,6 +176,7 @@ impl Dock {
 
     /// Saves the layout to its file, if it has one. A failure logs a warning.
     pub(crate) fn save(&self) {
+        let _zone = gg_core::zone!();
         if let Some(path) = &self.file
             && let Err(error) = file::save(path, &self.layout)
         {

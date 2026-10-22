@@ -88,11 +88,24 @@ jobs:
       # AGENTS.md's gates, kept by --locked to the versions Cargo.lock pins.
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # With Tracy's C++ client compiled in, as the `tracy` feature builds it.
+      - run: cargo clippy --workspace --all-targets --locked --features sandbox/tracy -- -D warnings
       - run: cargo test --workspace --locked
       # Whether the engine runs: rendering offscreen on lavapipe, under validation, it exits 0.
       - name: Run the sandbox headless
         if: matrix.container
         run: cargo run -p sandbox --locked -- --headless --frames 60
+      # Its frame times, which agents read from the log, before the run below adds a log of its own.
+      - name: Check that the run logged its frame times
+        if: matrix.container
+        run: grep -q '"code":"engine.perf"' target/debug/logs/sandbox-*.jsonl
+      # With Tracy's client, which records into memory with no viewer and exits as usual. Hosted
+      # runners are VMs, whose clocks Tracy otherwise refuses on x86.
+      - name: Run the sandbox headless with Tracy
+        if: matrix.container
+        run: cargo run -p sandbox --locked --features tracy -- --headless --frames 60
+        env:
+          TRACY_NO_INVARIANT_CHECK: "1"
 
   layering:
     name: Layering rules

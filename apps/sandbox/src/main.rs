@@ -17,7 +17,7 @@ use tracing::info;
 
 fn main() -> ExitCode {
     let app = gg_engine::App::new("Sandbox").custom_title_bar();
-    gg_engine::run(app.layer(Sandbox::new()))
+    gg_engine::run(app.layer(Sandbox::new()).overlay(gg_engine::PerfPanel))
 }
 
 /// A corner of a mesh in the colors of its corners, which `shaders/vertex_color.slang` reads: its
@@ -61,12 +61,12 @@ struct Assets {
 /// shader of the sandbox's own, the rest the engine's sprites, and they're drawn over a color that
 /// drifts slowly, so that a running sandbox visibly animates. The engine's camera controller steers
 /// the camera: W, A, S and D move it along its own axes, Q and E turn it left and right, at the
-/// same speed whatever the frame rate, and the mouse wheel zooms it. Shows four panels to dock:
-/// frame times and the camera; the grid's colors, which can be picked; the checkerboard's
-/// filtering, smooth or sharp, how many times it repeats, and its tint; and the clear color, which
-/// can be held or picked. Logs the key and mouse presses that reach it, which those on the panels
-/// don't. It polls input too: holding Space pauses the drift, and a panel shows where the cursor
-/// is. The title bar's File menu quits.
+/// same speed whatever the frame rate, and the mouse wheel zooms it. Shows four panels to dock,
+/// beside the engine's Performance panel: the camera; the grid's colors, which can be picked; the
+/// checkerboard's filtering, smooth or sharp, how many times it repeats, and its tint; and the
+/// clear color, which can be held or picked. Logs the key and mouse presses that reach it, which
+/// those on the panels don't. It polls input too: holding Space pauses the drift, and a panel
+/// shows where the cursor is. The title bar's File menu quits.
 struct Sandbox {
     time: Duration,
     drift: bool,
@@ -81,8 +81,6 @@ struct Sandbox {
     tiles: f32,
     /// What the checkerboard's colors are multiplied by, in linear RGBA, alpha not multiplied in.
     tint: [f32; 4],
-    /// The last frame's time, shown as it is: smoothing would hide uneven frames.
-    frame_time: Duration,
     camera: OrthographicCameraController,
     /// How far the triangle has turned counterclockwise, in radians from 0 to a whole turn.
     triangle_turn: f32,
@@ -113,7 +111,6 @@ impl Sandbox {
             tiles: 2.0,
             // Pink.
             tint: [1.0, 0.8, 0.8, 1.0],
-            frame_time: Duration::ZERO,
             camera,
             triangle_turn: 0.0,
             triangle: None,
@@ -147,6 +144,7 @@ impl Layer for Sandbox {
     }
 
     fn update(&mut self, cx: &mut Context, dt: Duration) {
+        let _zone = gg_engine::zone!();
         let seconds = dt.as_secs_f32();
         self.camera.update(cx, dt);
 
@@ -192,7 +190,6 @@ impl Layer for Sandbox {
             cx.draw_sprite(middle, logo);
         }
 
-        self.frame_time = dt;
         if self.drift && !cx.input().key_down(Key::Space) {
             self.time += dt;
             let t = self.time.as_secs_f32() * 0.4;
@@ -226,9 +223,6 @@ impl Layer for Sandbox {
             }
         });
         ui.panel("Stats", |ui| {
-            let ms = self.frame_time.as_secs_f32() * 1000.0;
-            let fps = if ms > 0.0 { 1000.0 / ms } else { 0.0 };
-            ui.label(format!("{ms:.2} ms a frame, {fps:.0} fps"));
             let camera = self.camera.camera;
             let [x, y, _] = camera.position.to_array();
             let (turn, _, _) = camera.rotation.to_euler(EulerRot::ZYX);

@@ -4,6 +4,7 @@
 use std::mem;
 use std::ops::ControlFlow;
 use std::sync::Arc;
+use std::time::Instant;
 
 use egui::ViewportId;
 use gg_core::{Error, Result};
@@ -99,6 +100,7 @@ struct Handler<'a> {
 
 impl Handler<'_> {
     fn open(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
+        let _zone = gg_core::zone!();
         let attributes = Window::default_attributes()
             .with_title(self.app.name)
             .with_inner_size(LogicalSize::new(1280.0, 720.0));
@@ -135,6 +137,7 @@ impl Handler<'_> {
     }
 
     fn frame(&mut self, event_loop: &ActiveEventLoop) {
+        let _zone = gg_core::zone!();
         let (Some(window), Some(renderer), Some(egui_winit), Some(viewports)) = (
             &self.window,
             &mut self.renderer,
@@ -219,18 +222,20 @@ impl Handler<'_> {
     }
 
     /// Tells the layers when the window loses or regains its area, which is when rendering
-    /// pauses and resumes; the first frame after the pause counts from its own start.
+    /// pauses and resumes. The clock restarts at both, so that no frame counts the pause: neither
+    /// the first after it nor, in the frame times, the last before it, should the app quit while
+    /// it's minimized.
     fn set_minimized(&mut self, minimized: bool) {
         if self.minimized == minimized {
             return;
         }
         self.minimized = minimized;
+        self.clock.resume();
         if minimized {
             debug!("Window minimized; rendering pauses until it's restored");
             let _ = self.dispatch(&Event::Minimized);
         } else {
             debug!("Window restored; rendering resumes");
-            self.clock.resume();
             let _ = self.dispatch(&Event::Restored);
         }
     }
@@ -339,10 +344,19 @@ impl ApplicationHandler for Handler<'_> {
     }
 
     fn exiting(&mut self, _: &ActiveEventLoop) {
+        let stopping = Instant::now();
+        let _zone = gg_core::zone!("shutdown");
         self.dock.save();
         if let Some(renderer) = self.renderer.take() {
             self.app.stack.detach(&mut self.cx);
-            self.ran = Some(Ran::finish(renderer, self.frames, self.clock.elapsed()));
+            let perf = mem::take(&mut self.cx.perf);
+            self.ran = Some(Ran::finish(
+                renderer,
+                self.frames,
+                &self.clock,
+                perf,
+                stopping,
+            ));
         }
         self.viewports = None;
         self.cx = Context::new(None);

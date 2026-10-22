@@ -43,7 +43,7 @@ are in [AGENTS.md](AGENTS.md).
          gg-core               every crate may use gg-core
 ```
 
-- **`gg-core`:** math, handles, logging, timing and error types.
+- **`gg-core`:** math, handles, logging, profiling and error types.
 - **`gg-gpu`:** Vulkan through `ash`. It turns ash's unsafe API into safe types: device, memory,
   buffers, images, descriptors, pipelines, swapchain, synchronization and submission.
 - **`gg-renderer`:** the render graph, passes, materials, lighting and post-processing. It owns
@@ -78,8 +78,9 @@ settings by executable name, and a generic name can match one.
 Cargo's cycle check enforces rule 1, and rule 2's ban on `gg-*` dependencies. It can't see a
 skip-level edge such as `gg-engine` → `gg-gpu`, which forms no cycle, so
 [deny.toml](deny.toml) names the only crates that may depend directly on `gg-gpu`,
-`gg-renderer`, `ash`, `ash-window`, `winit` and `egui-winit`, and CI checks it with cargo-deny. Rule 4, and
-what a crate does with the dependencies it may have, are left to review.
+`gg-renderer`, `ash`, `ash-window`, `winit`, `egui-winit`, `tracy-client` and
+`tracy-client-sys`, and CI checks it with cargo-deny. Rule 4, and what a crate does with the
+dependencies it may have, are left to review.
 
 ### Builds
 
@@ -89,6 +90,10 @@ builds run cooked data only. Cargo merges the features of every package a comman
 `--workspace`, a bare `cargo build` and `--bin gg-player` would all hand the player `dev`.
 Shipping builds therefore select the player alone, with `-p player`, and a game's shipping
 build selects the game alone the same way.
+
+Tracy is a feature of its own, `tracy`, off by default and in no shipping build: it compiles
+Tracy's C++ client, which listens on the machine's loopback and keeps what it records in memory
+until a viewer connects. Apps and games turn it on through `gg-engine`'s, as the sandbox does.
 
 Vulkan validation is a runtime switch rather than a feature, on by default in debug builds, so
 tests run with it whatever the features.
@@ -204,6 +209,14 @@ Diagnostics are data, so agents and tools can act on them as reliably as people 
   a shader file and line.
 - **Validation messages** become events with their VUID and the debug names of the objects
   involved, and a panic is logged with its location before the process ends.
+- **Profiling.** Code marks its work with zones (`gg_core::zone!`), which Tracy lays out on a
+  timeline of frames, with plots such as each frame's draws; without the `tracy` feature they
+  compile to nothing. The engine also measures every frame itself, always: its time, and how much
+  of it went to the layers' updates, the UI, rendering and waiting for the GPU and the display.
+  The Performance panel, an overlay apps add, shows them, and a run that doesn't end in an error
+  logs `engine.perf` as it ends: the frame times' percentiles, means and maxima, how long the run
+  took to start, its first frame and its shutdown, with the GPU and the build, so that an agent
+  can compare two builds by their runs. GPU timestamps for each pass come with the render graph.
 
 ## Events and layers
 
@@ -367,7 +380,7 @@ works on up to two frames at once.
 | Project state | RON in a canonical form; see [Project state](#project-state) |
 | Math | `glam` |
 | ECS | Our own; see [ECS](#ecs) |
-| Logs and profiling | `tracing` for logs; Tracy for CPU zones and GPU timestamps |
+| Logs and profiling | `tracing` for logs; Tracy, through `tracy-client`, for CPU zones and GPU timestamps |
 | Agent access | MCP and a command-line tool, both clients of the [tool API](#agents-and-tools) |
 | Shaders | Slang, compiled to SPIR-V by the Vulkan SDK's `slangc` rather than linked in: the engine's own as it builds, games' as they're added |
 | Assets | glTF 2.0 in; meshoptimizer for meshes and meshlets; BC-compressed textures in KTX2; until cooking, PNGs that the `png` crate decodes as layers add them |

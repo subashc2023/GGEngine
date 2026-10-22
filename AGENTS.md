@@ -14,7 +14,7 @@ crate, or adding or removing a dependency.
 ```text
 Cargo.toml        the workspace: members, shared package settings, lints, internal crates
 crates/           libraries
-  gg-core/        math, handles, logging, timing, errors
+  gg-core/        math, handles, logging, profiling, errors
   gg-gpu/         Vulkan through ash: the only crate that touches Vulkan
   gg-renderer/    render graph, passes, materials; gets plain render data, never the scene
   gg-engine/      main loop, window, input, scene, assets, hot reload, tool API: what games use
@@ -27,7 +27,8 @@ docs/PLAN.md      the roadmap (see Workflow)
 Dependencies point down: apps → `gg-engine` → `gg-renderer` → `gg-gpu` → `gg-core`, and any
 crate may use `gg-core`. Cargo catches only some breaches of the layering rules in
 ARCHITECTURE.md, and `cargo deny check bans` (from [deny.toml](deny.toml)) catches skip-level
-edges and the wrong crate using `ash` or `winit`: check a change against the rest yourself.
+edges and the wrong crate using `ash`, `winit` or Tracy's client: check a change against the rest
+yourself.
 
 ## Commands
 
@@ -36,6 +37,7 @@ cargo build                       # the whole workspace
 cargo run -p sandbox
 cargo run -p sandbox -- --help    # the flags every app shares
 cargo run -p sandbox -- --headless --frames 60   # does the engine run? 0 means cleanly
+cargo run -p sandbox --release --features tracy   # with zones for Tracy
 cargo build -p player --release   # shipping: the player alone
 ```
 
@@ -44,16 +46,24 @@ Vulkan SDK's, or the one `SLANGC` names. Games' shaders compile with that slangc
 it stays where the build found it.
 
 Each run writes a JSON log and logs its path as it starts; filter it on `level`, `code` or
-`vuid`. `RUST_LOG` sets what's logged, such as `RUST_LOG=gg_gpu=trace`.
+`vuid`. `RUST_LOG` sets what's logged, such as `RUST_LOG=gg_gpu=trace`. A run that doesn't end in
+an error logs `engine.perf` as it ends: its frame times and where they went. Compare two builds by
+theirs, from release builds run headless for the same number of frames.
+
+The `tracy` feature sends the engine's zones to Tracy: run the Tracy viewer of the release the
+root Cargo.toml names, and connect it to the running app. To capture a headless run instead,
+start `tracy-capture -o run.tracy` first and give the run `TRACY_NO_EXIT=1`; then
+`tracy-csvexport run.tracy` lists its zones' times.
 
 Build and check shipping configurations with `-p player` alone, since a wider build merges the
 sandbox's features into the player ([Builds](ARCHITECTURE.md#builds)).
 
-A change is done when all three pass:
+A change is done when all four pass:
 
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --features sandbox/tracy -- -D warnings
 cargo test --workspace
 ```
 
@@ -63,10 +73,11 @@ and `vulkan-validationlayers`. When a test's image differs from its reference, t
 where it wrote its own; after an intended change, `GG_UPDATE_REFERENCES=1` rewrites the
 references, which you look at before committing them.
 
-CI ([ci.yml](.github/workflows/ci.yml)) runs the three gates on every push, on Windows, Linux
+CI ([ci.yml](.github/workflows/ci.yml)) runs the four gates on every push, on Windows, Linux
 and macOS, x86-64 and ARM64, and the layering check. Its Linux jobs run the GPU tests and the
-sandbox headless on lavapipe; Windows' and macOS's runners have no GPU, so there
-`GG_SKIP_GPU_TESTS` skips the GPU tests.
+sandbox headless on lavapipe, with and without Tracy, and check that the run logged
+`engine.perf`; Windows' and macOS's runners have no GPU, so there `GG_SKIP_GPU_TESTS` skips the
+GPU tests.
 
 ## Rust
 
@@ -93,11 +104,14 @@ sandbox headless on lavapipe; Windows' and macOS's runners have no GPU, so there
 - GPU tests run headless: they render offscreen and compare against reference images within a
   tolerance, so lavapipe can run them without a GPU.
 - Name and time everything: every Vulkan object gets a debug name, and every render-graph pass
-  a debug label and a GPU timestamp, so captures and Tracy timelines read clearly.
+  a debug label and a GPU timestamp, so captures and Tracy timelines read clearly. Work that
+  takes about 10 µs or more gets a zone (`gg_core::zone!`), and nothing gets one for each draw,
+  sprite or other item of a loop over a frame's content.
 - Diagnostics are data: log through `tracing` with fields rather than printing, and give every
   error and warning a stable code and the thing it is about, as
   [ARCHITECTURE.md](ARCHITECTURE.md#diagnostics) describes.
 - Steady-state frames don't allocate: per-frame data lives in frame arenas and ring buffers.
+  Tracy's client allocates as it records, so check allocations without the `tracy` feature.
 
 ## Workflow
 

@@ -173,6 +173,7 @@ impl MeshPass {
     ///
     /// If `shaders` isn't the one the pass has been taking shaders from.
     pub(crate) fn add_shaders(&mut self, shaders: &mut Shaders) -> Result<()> {
+        let _zone = gg_core::zone!();
         for added in shaders.added.drain(..) {
             assert_eq!(
                 added.index as usize,
@@ -211,6 +212,7 @@ impl MeshPass {
         meshes: &mut Meshes,
         textures: &mut Textures,
     ) -> Result<()> {
+        let _zone = gg_core::zone!();
         for added in meshes.added.drain(..) {
             assert_eq!(
                 added.index as usize,
@@ -270,7 +272,8 @@ impl MeshPass {
         view_projection: Mat4,
         draws: &Draws,
     ) -> Result<()> {
-        if draws.draws.is_empty() || viewport.size.contains(&0) {
+        let _zone = gg_core::zone!();
+        if draws.is_empty() || viewport.size.contains(&0) {
             return Ok(());
         }
         pass.set_viewport(viewport.origin, viewport.size);

@@ -6,6 +6,7 @@
 use std::marker::PhantomData;
 use std::slice;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use ash::vk;
 use gg_core::Result;
@@ -46,6 +47,8 @@ pub struct Frames {
     /// The last frame's list of targets, emptied, whose memory the next frame reuses.
     spare_targets: Vec<Target<'static>>,
     scratch: Scratch,
+    /// How long the last `begin` waited, which [`Frames::waited`] describes.
+    waited: Duration,
 }
 
 /// What one frame in flight records into and synchronizes with.
@@ -91,6 +94,7 @@ impl Frames {
             images: Vec::new(),
             spare_targets: Vec::new(),
             scratch: Scratch::default(),
+            waited: Duration::ZERO,
         };
         // SAFETY: the semaphore is live.
         unsafe { device.set_name(timeline, "frame timeline") };
@@ -138,8 +142,11 @@ impl Frames {
         targets: impl IntoIterator<Item = Target<'a>>,
     ) -> Result<Option<Frame<'a>>> {
         let slot = (self.submitted % FRAMES_IN_FLIGHT) as usize;
+        self.waited = Duration::ZERO;
         if let Some(previous) = self.submitted.checked_sub(FRAMES_IN_FLIGHT) {
+            let start = Instant::now();
             self.wait(previous + 1)?;
+            self.waited = start.elapsed();
             self.device.frames_finished(previous + 1);
         }
         let mut list: Vec<Target<'a>> = std::mem::take(&mut self.spare_targets);
@@ -163,11 +170,13 @@ impl Frames {
         for (i, target) in list.iter_mut().enumerate() {
             let acquired = self.slots[slot].acquired[i];
             let image = match target {
-                // SAFETY: the semaphore is new, or the frame that last used this slot waited on
-                // it or left it unsignaled and has finished, so it's unsignaled with no wait
-                // pending.
-                Target::Swapchain(swapchain) => unsafe { swapchain.acquire(acquired, i == 0) }?
-                    .map(|image| (image, vk::ImageLayout::UNDEFINED)),
+                Target::Swapchain(swapchain) => {
+                    // SAFETY: the semaphore is new, or the frame that last used this slot waited
+                    // on it or left it unsignaled and has finished, so it's unsignaled with no
+                    // wait pending.
+                    unsafe { swapchain.acquire(acquired, i == 0, &mut self.waited) }?
+                        .map(|image| (image, vk::ImageLayout::UNDEFINED))
+                }
                 Target::Image(image) => Some((0, image.layout())),
             };
             if i == 0 && image.is_none() {
@@ -210,8 +219,15 @@ impl Frames {
         }))
     }
 
+    /// How long the last [`Frames::begin`] waited: for the GPU to finish the frame that last used
+    /// this one's resources, and for the display to let go of the first target's image.
+    pub fn waited(&self) -> Duration {
+        self.waited
+    }
+
     /// Waits until the GPU has finished the `frame`th frame.
     fn wait(&self, frame: u64) -> Result<()> {
+        let _zone = gg_core::zone!("wait for the GPU");
         let semaphores = [self.timeline];
         let values = [frame];
         let info = vk::SemaphoreWaitInfo::default()
@@ -617,9 +633,12 @@ impl<'a> Frame<'a> {
             .wait_semaphore_infos(&scratch.waits)
             .command_buffer_infos(&command_infos)
             .signal_semaphore_infos(&scratch.signals);
-        // SAFETY: what the submission uses lives until the timeline reaches `frame`: the slot and
-        // its arena are reused only after waiting for it, and resources retire until then.
-        unsafe { device.submit(slice::from_ref(&submit)) }?;
+        {
+            let _zone = gg_core::zone!("submit");
+            // SAFETY: what the submission uses lives until the timeline reaches `frame`: the slot
+            // and its arena are reused only after waiting for it, and resources retire until then.
+            unsafe { device.submit(slice::from_ref(&submit)) }?;
+        }
         *submitted = frame;
         for (target, image) in self.targets.iter_mut().zip(images.iter()) {
             if let (Target::Image(target), Some((_, layout))) = (target, image) {
@@ -639,8 +658,12 @@ impl<'a> Frame<'a> {
             .swapchains(&scratch.swapchains)
             .image_indices(&scratch.images)
             .results(&mut scratch.results);
-        // SAFETY: each image was acquired for this frame, whose submission signals its semaphore.
-        let presented = unsafe { device.present(&info) };
+        let presented = {
+            let _zone = gg_core::zone!("present");
+            // SAFETY: each image was acquired for this frame, whose submission signals its
+            // semaphore.
+            unsafe { device.present(&info) }
+        };
         let mut results = scratch.results.iter();
         for (target, image) in self.targets.iter_mut().zip(images.iter()) {
             if let (Target::Swapchain(swapchain), Some(_)) = (target, image) {

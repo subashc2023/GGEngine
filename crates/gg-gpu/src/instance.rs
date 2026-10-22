@@ -61,6 +61,7 @@ impl Validation {
 
 impl Instance {
     pub fn new(desc: &InstanceDesc<'_>) -> Result<Arc<Self>> {
+        let _zone = gg_core::zone!();
         // SAFETY: the library ash loads, vulkan-1.dll or libvulkan, is the Khronos loader, whose
         // exports have the signatures ash expects.
         let entry = unsafe { ash::Entry::load() }.map_err(|error| {

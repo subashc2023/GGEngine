@@ -16,6 +16,7 @@ mod ui;
 use std::iter;
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytemuck::NoUninit;
 use gg_core::math::Mat4;
@@ -85,6 +86,16 @@ impl Draws {
         self.push(sprite::QUAD, sprite::SHADER, transform, sprite.params());
     }
 
+    /// How many draws there are.
+    pub fn len(&self) -> usize {
+        self.draws.len()
+    }
+
+    /// Whether there are none.
+    pub fn is_empty(&self) -> bool {
+        self.draws.is_empty()
+    }
+
     /// Forgets every draw.
     pub fn clear(&mut self) {
         self.draws.clear();
@@ -139,6 +150,8 @@ pub struct Renderer {
     /// Set once rendering fails, which can leave the GPU's copies of meshes and textures
     /// unfinished.
     failed: bool,
+    /// How long the last frame waited, which [`Renderer::waited`] describes.
+    waited: Duration,
 }
 
 enum Output {
@@ -154,6 +167,7 @@ impl Renderer {
         width: u32,
         height: u32,
     ) -> Result<Self> {
+        let _zone = gg_core::zone!();
         let instance = Instance::new(&InstanceDesc {
             app_name: settings.app_name,
             validation: settings.validation,
@@ -173,6 +187,7 @@ impl Renderer {
     /// A renderer without a window, which renders into an offscreen image of `width` by
     /// `height` pixels.
     pub fn headless(settings: &Settings<'_>, width: u32, height: u32) -> Result<Self> {
+        let _zone = gg_core::zone!();
         let instance = Instance::new(&InstanceDesc {
             app_name: settings.app_name,
             validation: settings.validation,
@@ -204,6 +219,7 @@ impl Renderer {
             device: device.clone(),
             vsync,
             failed: false,
+            waited: Duration::ZERO,
         })
     }
 
@@ -281,6 +297,7 @@ impl Renderer {
         ui: Ui<'_>,
         windows: &mut [(u64, Ui<'_>)],
     ) -> Result<bool> {
+        self.waited = Duration::ZERO;
         if self.failed {
             return Err(Error::new(
                 "renderer.failed",
@@ -299,6 +316,7 @@ impl Renderer {
         ui: Ui<'_>,
         windows: &mut [(u64, Ui<'_>)],
     ) -> Result<bool> {
+        let _zone = gg_core::zone!();
         // egui sends each texture change once, so changes wait for a frame that renders.
         for (_, window) in windows.iter_mut() {
             self.ui.queue(window.textures);
@@ -343,7 +361,19 @@ impl Renderer {
         }
         self.ui.free_textures();
         frame.submit()?;
+        self.waited = self.frames.waited();
         Ok(true)
+    }
+
+    /// How long the last [`Renderer::render`] waited, if it rendered a frame: for the GPU to
+    /// finish an earlier frame, and for the display to let go of an image. Zero if it didn't.
+    pub fn waited(&self) -> Duration {
+        self.waited
+    }
+
+    /// The GPU's name, such as `NVIDIA GeForce RTX 4090`.
+    pub fn gpu_name(&self) -> &str {
+        self.device.name()
     }
 
     /// Copies the last frame rendered offscreen to the CPU: rows of RGBA8 pixels, sRGB-encoded

@@ -73,6 +73,7 @@ impl Device {
         gpu: Option<&str>,
         surface: Option<&Surface>,
     ) -> Result<Arc<Self>> {
+        let _zone = gg_core::zone!();
         // SAFETY: the instance is live.
         let physicals = unsafe { instance.raw().enumerate_physical_devices() }
             .map_err(|e| vk_error("vkEnumeratePhysicalDevices", e))?;
@@ -186,7 +187,7 @@ impl Device {
     }
 
     /// The GPU's name, such as `NVIDIA GeForce RTX 4090`. The device has it as its debug name.
-    pub(crate) fn name(&self) -> &str {
+    pub fn name(&self) -> &str {
         &self.name
     }
 

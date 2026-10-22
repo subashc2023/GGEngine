@@ -152,6 +152,7 @@ impl Viewports {
         mut outputs: OrderedViewportIdMap<ViewportOutput>,
         renderer: &mut Renderer,
     ) -> (Vec<Drawn>, bool) {
+        let _zone = gg_core::zone!();
         let mut shared = self.shared.borrow_mut();
         let shared = &mut *shared;
         if !shared.warned

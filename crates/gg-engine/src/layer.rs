@@ -13,6 +13,7 @@ use gg_renderer::{
     Viewport,
 };
 
+use crate::perf::Perf;
 use crate::{Event, Input, Ui, image};
 
 /// A part of an app that the main loop drives. Every method has a default that does nothing,
@@ -51,6 +52,9 @@ pub struct Context {
     textures: Textures,
     /// What to draw this frame.
     draws: Draws,
+    /// How long frames take, which the main loop measures and
+    /// [`PerfPanel`](crate::PerfPanel) shows.
+    pub(crate) perf: Perf,
 }
 
 impl Context {
@@ -64,6 +68,7 @@ impl Context {
             shaders: Shaders::default(),
             textures: Textures::default(),
             draws: Draws::default(),
+            perf: Perf::default(),
         }
     }
 
@@ -234,6 +239,7 @@ impl Stack {
     }
 
     pub(crate) fn attach(&mut self, cx: &mut Context) {
+        let _zone = gg_core::zone!();
         for layer in &mut self.layers {
             layer.attach(cx);
         }
@@ -241,12 +247,14 @@ impl Stack {
 
     /// Detaches from the top down, the reverse of attaching.
     pub(crate) fn detach(&mut self, cx: &mut Context) {
+        let _zone = gg_core::zone!();
         for layer in self.layers.iter_mut().rev() {
             layer.detach(cx);
         }
     }
 
     pub(crate) fn update(&mut self, cx: &mut Context, dt: Duration) {
+        let _zone = gg_core::zone!();
         for layer in &mut self.layers {
             layer.update(cx, dt);
         }
@@ -254,6 +262,7 @@ impl Stack {
 
     /// Draws UI from the bottom up, so the layers above draw over those below.
     pub(crate) fn ui(&mut self, cx: &mut Context, ui: &mut Ui<'_>) {
+        let _zone = gg_core::zone!();
         for layer in &mut self.layers {
             layer.ui(cx, ui);
         }

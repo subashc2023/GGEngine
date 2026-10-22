@@ -1,6 +1,7 @@
 //! The swapchain: the images a window shows, rebuilt when the window changes size.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use ash::vk;
 use gg_core::{Error, Result};
@@ -46,6 +47,7 @@ impl Swapchain {
         height: u32,
         vsync: bool,
     ) -> Result<Self> {
+        let _zone = gg_core::zone!();
         if device.swapchain_fn().is_none() {
             return Err(Error::new(
                 "gpu.no_swapchain",
@@ -141,7 +143,8 @@ impl Swapchain {
     /// waits until the display has let go of the image; without, it takes an image only if the
     /// swapchain has one to give at once. Returns `None` when there's nothing to present to
     /// this time: the window has no area, the swapchain went out of date and is rebuilt for the
-    /// next frame, or, without `pace`, no image is free yet.
+    /// next frame, or, without `pace`, no image is free yet. With `pace`, it adds how long it
+    /// waited for the display to `waited`, which a rebuild first isn't part of.
     ///
     /// # Safety
     ///
@@ -150,6 +153,7 @@ impl Swapchain {
         &mut self,
         acquired: vk::Semaphore,
         pace: bool,
+        waited: &mut Duration,
     ) -> Result<Option<u32>> {
         if self.stale && !self.rebuild()? {
             return Ok(None);
@@ -160,11 +164,13 @@ impl Swapchain {
         } else {
             (0, vk::Fence::null())
         };
+        let start = Instant::now();
+        let _zone = pace.then(|| gg_core::zone!("wait for the display"));
         // SAFETY: the swapchain is live, the caller guarantees the semaphore, and the fence is
         // unsignaled, since it's reset after each wait on it.
         let acquired =
             unsafe { swapchain_fn.acquire_next_image(self.raw, timeout, acquired, fence) };
-        match acquired {
+        let image = match acquired {
             // A suboptimal image is still presented; the swapchain is rebuilt after it.
             Ok((image, suboptimal)) => {
                 self.stale |= suboptimal;
@@ -182,16 +188,20 @@ impl Swapchain {
                     }
                     .map_err(|e| vk_error("vkWaitForFences", e))?;
                 }
-                Ok(Some(image))
+                Some(image)
             }
             // Nothing was acquired, so the semaphore stays unsignaled.
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
                 self.stale = true;
-                Ok(None)
+                None
             }
-            Err(vk::Result::NOT_READY | vk::Result::TIMEOUT) if !pace => Ok(None),
-            Err(e) => Err(vk_error("vkAcquireNextImageKHR", e)),
+            Err(vk::Result::NOT_READY | vk::Result::TIMEOUT) if !pace => None,
+            Err(e) => return Err(vk_error("vkAcquireNextImageKHR", e)),
+        };
+        if pace {
+            *waited += start.elapsed();
         }
+        Ok(image)
     }
 
     /// Notes how presenting one of its images went: a suboptimal or out-of-date swapchain is
@@ -233,6 +243,7 @@ impl Swapchain {
     /// Rebuilds the swapchain at the surface's current size. Returns `false`, leaving it stale,
     /// if the window has no area to present to, as when it's minimized.
     fn rebuild(&mut self) -> Result<bool> {
+        let _zone = gg_core::zone!();
         let device = self.device.clone();
         // SAFETY: the physical device and the surface are live.
         let capabilities = unsafe {

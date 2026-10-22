@@ -1,5 +1,6 @@
-//! What apps build on: the main loop, window and input, layers and their UI, and handing each
-//! frame's render data to `gg-renderer`; the scene and assets to come.
+//! What apps build on: the main loop, window and input, layers and their UI, handing each frame's
+//! render data to `gg-renderer`, and measuring each frame, for the log and the Performance panel;
+//! the scene and assets to come.
 //!
 //! An app's `main` starts the engine; there is no separate entry-point crate.
 
@@ -11,6 +12,7 @@ mod event;
 mod image;
 mod input;
 mod layer;
+mod perf;
 mod viewports;
 mod window;
 // Windows' own frame around a window whose title bar the UI draws needs a window procedure in
@@ -19,6 +21,7 @@ mod window;
 #[allow(unsafe_code)]
 mod windows_frame;
 
+use std::mem;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -39,6 +42,9 @@ pub use event::{Event, Key, MouseButton, Scroll};
 /// The engine's vectors, matrices and quaternions; apps use them from here, so that they share
 /// the engine's version.
 pub use gg_core::math;
+/// The engine's profiling: zones, plots and frame marks for Tracy, which compile to nothing unless
+/// the `tracy` feature is on. Apps use them from here, such as `let _zone = gg_engine::zone!();`.
+pub use gg_core::{plot, profile, zone};
 /// What layers draw, which they add and draw through their [`Context`]: sprites; meshes; shaders
 /// for their vertex types, each added with how it blends; the textures those shaders and sprites
 /// sample, and the samplers they sample them with; and the camera the game's view sees them from.
@@ -46,6 +52,8 @@ pub use gg_renderer::{Blend, Camera, Mesh, Projection, Sampler, Shader, Sprite, 
 pub use input::Input;
 use layer::Stack;
 pub use layer::{Context, Layer, Window};
+pub use perf::PerfPanel;
+use perf::{Perf, Summary};
 use viewports::Drawn;
 
 const BUILD: &str = if cfg!(debug_assertions) {
@@ -102,6 +110,7 @@ impl App {
 /// It parses the flags every app shares, which `--help` lists, and starts logging. The status is
 /// 0 on success, 1 on an error or a Vulkan validation message, and 2 on bad arguments.
 pub fn run(mut app: App) -> ExitCode {
+    let started = Instant::now();
     let mut argv = std::env::args_os();
     let program = argv
         .next()
@@ -151,7 +160,7 @@ pub fn run(mut app: App) -> ExitCode {
         window::run(&mut app, &args)
     };
     match ran {
-        Ok(ran) => ran.report(),
+        Ok(ran) => ran.report(started, &args),
         Err(error) => {
             error!(code = error.code(), "{error:#}");
             ExitCode::FAILURE
@@ -195,9 +204,12 @@ fn run_headless(app: &mut App, args: &Args) -> Result<Ran> {
         }
         Ok(())
     })();
+    let stopping = Instant::now();
+    let _zone = gg_core::zone!("shutdown");
     app.stack.detach(&mut cx);
     rendered?;
-    Ok(Ran::finish(renderer, frames, clock.elapsed()))
+    let perf = mem::take(&mut cx.perf);
+    Ok(Ran::finish(renderer, frames, &clock, perf, stopping))
 }
 
 /// egui, without its shortcut that closes the window, Ctrl or Cmd+Q: a game may use those keys,
@@ -208,8 +220,9 @@ fn egui_context() -> egui::Context {
     egui
 }
 
-/// The first half of a turn of the main loop: updates the layers and has them draw their UI, in
-/// the dock and with egui. [`render_frame`] renders what egui made of it.
+/// The first half of a turn of the main loop: starts the frame, for Tracy and the frame's
+/// measure, updates the layers and has them draw their UI, in the dock and with egui.
+/// [`render_frame`] renders what egui made of it.
 ///
 /// egui allocates as it lays out here, and as [`render_frame`] tessellates, so frames that draw
 /// UI allocate; the UI is a development overlay.
@@ -221,12 +234,23 @@ fn run_frame(
     dock: &mut Dock,
     input: egui::RawInput,
 ) -> egui::FullOutput {
-    stack.update(cx, clock.tick());
-    egui.run_ui(input, |root| {
-        dock.begin(root);
-        stack.ui(cx, &mut Ui::new(root, dock));
-        dock.end(root);
-    })
+    let dt = clock.tick();
+    gg_core::profile::frame_mark();
+    cx.perf.tick(dt);
+    let _zone = gg_core::zone!();
+    let start = Instant::now();
+    stack.update(cx, dt);
+    let updated = Instant::now();
+    let output = {
+        let _zone = gg_core::zone!("egui");
+        egui.run_ui(input, |root| {
+            dock.begin(root);
+            stack.ui(cx, &mut Ui::new(root, dock));
+            dock.end(root);
+        })
+    };
+    cx.perf.ran(updated - start, updated.elapsed());
+    output
 }
 
 /// The second half: renders the frame, with what the layers drew in the game's view, the main
@@ -241,7 +265,13 @@ fn render_frame(
     windows: &mut [Drawn],
     renderer: &mut Renderer,
 ) -> Result<(bool, egui::PlatformOutput)> {
-    let primitives = egui.tessellate(output.shapes, output.pixels_per_point);
+    let _zone = gg_core::zone!();
+    let start = Instant::now();
+    let primitives = {
+        let _zone = gg_core::zone!("tessellate UI");
+        egui.tessellate(output.shapes, output.pixels_per_point)
+    };
+    let tessellated = start.elapsed();
     let ui = gg_renderer::Ui {
         primitives: &primitives,
         textures: &mut output.textures_delta,
@@ -249,7 +279,13 @@ fn render_frame(
     };
     let mut windows: Vec<_> = windows.iter_mut().map(Drawn::ui).collect();
     let data = cx.render_data(viewport(view, output.pixels_per_point));
+    let draws = data.draws.len();
+    gg_core::plot!("draws", draws as f64);
     let presented = renderer.render(data, ui, &mut windows);
+    let render = start.elapsed() - tessellated;
+    let rendered = matches!(presented, Ok(true));
+    cx.perf
+        .rendered(tessellated, render, renderer.waited(), draws, rendered);
     cx.clear_draws();
     Ok((presented?, output.platform_output))
 }
@@ -284,15 +320,21 @@ impl Clock {
         dt
     }
 
-    /// Has the next frame count from its own start, as the first does, after a pause in which no
-    /// frames ran, such as while the window was minimized: otherwise the layers would take the
-    /// pause for one long frame.
+    /// Has the next frame count from its own start, as the first does, across a pause in which no
+    /// frames run, such as while the window is minimized, as the pause starts and as it ends:
+    /// otherwise the layers would take the pause for one long frame, and so would the frame times.
     fn resume(&mut self) {
         self.last = None;
     }
 
     fn elapsed(&self) -> Duration {
         self.first.map_or(Duration::ZERO, |first| first.elapsed())
+    }
+
+    /// The time from the last frame's start to `at`; zero before the first frame.
+    fn since_last(&self, at: Instant) -> Duration {
+        self.last
+            .map_or(Duration::ZERO, |last| at.saturating_duration_since(last))
     }
 }
 
@@ -316,24 +358,76 @@ fn log_dir() -> PathBuf {
 /// What a run did, reported when it ends.
 struct Ran {
     frames: u64,
-    time: Duration,
     validation: Validation,
+    /// The GPU it rendered on.
+    gpu: String,
+    /// When its first frame started, if one did.
+    first_tick: Option<Instant>,
+    shutdown: Duration,
+    perf: Summary,
 }
 
 impl Ran {
     /// Shuts the renderer down first, so that what validation reports on the way, such as
-    /// objects left undestroyed, counts too.
-    fn finish(renderer: Renderer, frames: u64, time: Duration) -> Self {
+    /// objects left undestroyed, counts too. `stopping` is when the run began to end, after its
+    /// last frame, and `perf` what it measured of its frames.
+    fn finish(
+        renderer: Renderer,
+        frames: u64,
+        clock: &Clock,
+        mut perf: Perf,
+        stopping: Instant,
+    ) -> Self {
+        perf.finish(clock.since_last(stopping));
         let validation = renderer.validation();
+        let gpu = renderer.gpu_name().to_owned();
         drop(renderer);
         Self {
             frames,
-            time,
             validation,
+            gpu,
+            first_tick: clock.first,
+            shutdown: stopping.elapsed(),
+            perf: perf.summary(),
         }
     }
 
-    fn report(self) -> ExitCode {
+    /// Logs how long the run's frames took, then how it ended: `engine.perf`, whose times are in
+    /// milliseconds, comes first, so that a run that fails validation has it too. `started` is
+    /// when the engine started, and `args` how it ran.
+    fn report(self, started: Instant, args: &Args) -> ExitCode {
+        let perf = &self.perf;
+        info!(
+            code = "engine.perf",
+            frames = self.frames,
+            measured = perf.measured,
+            percentile_frames = perf.percentile_frames,
+            startup_ms = self
+                .first_tick
+                .map(|first| perf::millis(first.saturating_duration_since(started))),
+            first_frame_ms = perf.first_frame,
+            shutdown_ms = perf::millis(self.shutdown),
+            frame_ms_p50 = perf.frame.p50,
+            frame_ms_p95 = perf.frame.p95,
+            frame_ms_p99 = perf.frame.p99,
+            frame_ms_mean = perf.frame.mean,
+            frame_ms_max = perf.frame.max,
+            update_ms_mean = perf.update.mean,
+            update_ms_p95 = perf.update.p95,
+            ui_ms_mean = perf.ui.mean,
+            ui_ms_p95 = perf.ui.p95,
+            render_ms_mean = perf.render.mean,
+            render_ms_p95 = perf.render.p95,
+            wait_ms_mean = perf.wait.mean,
+            wait_ms_p95 = perf.wait.p95,
+            draws_max = perf.draws_max,
+            gpu = self.gpu.as_str(),
+            build = BUILD,
+            headless = args.headless,
+            vsync = args.vsync,
+            validated = self.validation.enabled(),
+            "Frame times"
+        );
         let messages = self.validation.messages();
         if messages > 0 {
             error!(
@@ -343,16 +437,8 @@ impl Ran {
             );
             return ExitCode::FAILURE;
         }
-        let seconds = self.time.as_secs_f64();
-        let fps = if seconds > 0.0 {
-            self.frames as f64 / seconds
-        } else {
-            0.0
-        };
         info!(
             frames = self.frames,
-            seconds = (seconds * 100.0).round() / 100.0,
-            fps = (fps * 10.0).round() / 10.0,
             validated = self.validation.enabled(),
             "Exited cleanly"
         );

@@ -15,5 +15,9 @@ bytemuck = { workspace = true, features = ["derive"] }
 gg-engine.workspace = true
 tracing.workspace = true
 
+[features]
+# Zones for Tracy: `cargo run -p sandbox --release --features tracy`.
+tracy = ["gg-engine/tracy"]
+
 [lints]
 workspace = true

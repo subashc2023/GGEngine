@@ -18,6 +18,8 @@ pub(crate) struct Image {
 ///
 /// Fails with `engine.bad_texture` if the file can't be read, or isn't a PNG that decodes.
 pub(crate) fn load_png(name: &str, path: &Path) -> Result<Image> {
+    let zone = gg_core::zone!();
+    zone.text(path.display());
     let bad = |problem: String| {
         Error::new(
             "engine.bad_texture",

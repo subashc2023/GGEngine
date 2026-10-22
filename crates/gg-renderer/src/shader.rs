@@ -147,6 +147,8 @@ impl Default for Shaders {
 
 /// Compiles the shader `name` at `path` to SPIR-V with `slangc`.
 fn compile(slangc: &Path, name: &str, path: &Path) -> Result<Vec<u8>> {
+    let zone = gg_core::zone!();
+    zone.text(path.display());
     let start = Instant::now();
     let output = Command::new(slangc)
         .arg(path)

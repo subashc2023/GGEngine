@@ -61,6 +61,11 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   reversed; a sprite of only a color shows the engine's white texture, so that one shader draws
   sprites flat and textured. The sandbox's grid, its checkerboard, tiled and tinted, and its logo
   are sprites, around its triangle, and a GPU test checks sprites against a reference image.
+- **Profiling** (2026-10-21): the engine marks its startup, frames and shutdown with zones, which
+  Tracy shows when the `tracy` feature is on and which compile to nothing otherwise; the engine
+  also measures every frame itself, always, which the Performance panel shows and each run that
+  doesn't end in an error logs as `engine.perf`: frame-time percentiles, and where the time went,
+  for agents to compare builds by. The sandbox shows the panel, and CI checks that its headless run logs the summary.
 
 ## Now: 2D renderer
 
@@ -189,6 +194,9 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Torn-off windows across monitors of different scales: one that opens on another monitor is placed at the main window's scale, away from the cursor. Nor is Windows' frame checked there, which grows back around a window as its scale changes | Someone docks across such monitors |
 | In a frame egui runs twice, the torn-off windows' texture changes apply before all of the main window's, so glyphs added then to a font atlas that grows can go missing | It shows, or egui hands over each pass's changes apart |
 | Present fences (`VK_KHR_swapchain_maintenance1`) before a swapchain's semaphores are destroyed, which closing torn-off windows makes more frequent | Validation reports it, or windows open and close often |
+| egui's own scopes in Tracy, which egui marks for the `profiling` crate: `profiling` 1.0.18 takes tracy-client 0.18, and two Tracy clients don't link together | `profiling` takes tracy-client 0.19; deny.toml's wrappers for tracy-client then add it |
+| Micro-benchmarks, with criterion | A CPU hot path gets a target, such as batching's |
+| Gates on time in CI: hosted runners' times vary too much to gate on | A self-hosted runner, as for the GPU tests |
 
 ## Open questions
 
