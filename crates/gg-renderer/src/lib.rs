@@ -42,20 +42,27 @@ pub struct Viewport {
 }
 
 /// What a frame draws besides UI, in order, each over those before it: meshes, each with a shader
-/// for its vertex type, the parameters that shader takes, and where it is in the world. Clearing
-/// it keeps its memory, so that a frame that draws no more than the last allocates nothing.
+/// for its vertex type, the parameters that shader takes, and where it is in the world. Each run of
+/// consecutive draws of one mesh with one shader renders as one instanced draw, whatever their
+/// transforms and parameters, a texture among them. Clearing it keeps its memory, so that a frame
+/// that draws no more than the last allocates nothing.
 #[derive(Default)]
 pub struct Draws {
-    draws: Vec<Draw>,
+    /// The runs, in order.
+    runs: Vec<Run>,
+    /// Every draw's transform, in order.
+    transforms: Vec<Mat4>,
     /// Every draw's parameters, one after another.
     params: Vec<u8>,
 }
 
-struct Draw {
+/// Consecutive draws of one mesh with one shader: the instances of one instanced draw.
+struct Run {
     mesh: u32,
     shader: u32,
-    transform: Mat4,
-    /// Where its parameters are in `Draws::params`.
+    /// Where its draws' transforms are in `Draws::transforms`.
+    instances: Range<usize>,
+    /// Where their parameters are in `Draws::params`.
     params: Range<usize>,
 }
 
@@ -70,14 +77,21 @@ impl Draws {
         transform: Mat4,
         params: P,
     ) {
-        let start = self.params.len();
+        let (instance, start) = (self.transforms.len(), self.params.len());
+        self.transforms.push(transform);
         self.params.extend_from_slice(bytemuck::bytes_of(&params));
-        self.draws.push(Draw {
-            mesh: mesh.index,
-            shader: shader.index,
-            transform,
-            params: start..self.params.len(),
-        });
+        match self.runs.last_mut() {
+            Some(run) if (run.mesh, run.shader) == (mesh.index, shader.index) => {
+                run.instances.end = self.transforms.len();
+                run.params.end = self.params.len();
+            }
+            _ => self.runs.push(Run {
+                mesh: mesh.index,
+                shader: shader.index,
+                instances: instance..self.transforms.len(),
+                params: start..self.params.len(),
+            }),
+        }
     }
 
     /// Draws `sprite` over the meshes drawn before it, as [`Sprite`] describes. `transform` takes
@@ -86,21 +100,26 @@ impl Draws {
         self.push(sprite::QUAD, sprite::SHADER, transform, sprite.params());
     }
 
-    /// How many draws there are.
-    pub fn len(&self) -> usize {
-        self.draws.len()
-    }
-
     /// Whether there are none.
     pub fn is_empty(&self) -> bool {
-        self.draws.is_empty()
+        self.runs.is_empty()
     }
 
     /// Forgets every draw.
     pub fn clear(&mut self) {
-        self.draws.clear();
+        self.runs.clear();
+        self.transforms.clear();
         self.params.clear();
     }
+}
+
+/// What a frame drew in the game's view, which [`Renderer::drawn`] tells.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DrawCounts {
+    /// Instanced draws: one for each run of consecutive draws of one mesh with one shader.
+    pub draws: usize,
+    /// The meshes they drew, one for each draw pushed to [`Draws`].
+    pub instances: usize,
 }
 
 /// What a frame draws besides UI: plain data, which the engine extracts every frame.
@@ -152,6 +171,8 @@ pub struct Renderer {
     failed: bool,
     /// How long the last frame waited, which [`Renderer::waited`] describes.
     waited: Duration,
+    /// What the last frame drew, which [`Renderer::drawn`] describes.
+    drawn: DrawCounts,
 }
 
 enum Output {
@@ -220,6 +241,7 @@ impl Renderer {
             vsync,
             failed: false,
             waited: Duration::ZERO,
+            drawn: DrawCounts::default(),
         })
     }
 
@@ -298,6 +320,7 @@ impl Renderer {
         windows: &mut [(u64, Ui<'_>)],
     ) -> Result<bool> {
         self.waited = Duration::ZERO;
+        self.drawn = DrawCounts::default();
         if self.failed {
             return Err(Error::new(
                 "renderer.failed",
@@ -344,7 +367,8 @@ impl Renderer {
         let mut pass = frame
             .begin_pass(0, c"frame", data.clear_color)
             .expect("a frame's first target has an image");
-        self.meshes
+        let counts = self
+            .meshes
             .draw(&mut pass, data.viewport, view_projection, data.draws)?;
         self.ui
             .draw(&mut pass, ui.primitives, ui.pixels_per_point)?;
@@ -362,6 +386,7 @@ impl Renderer {
         self.ui.free_textures();
         frame.submit()?;
         self.waited = self.frames.waited();
+        self.drawn = counts;
         Ok(true)
     }
 
@@ -369,6 +394,12 @@ impl Renderer {
     /// finish an earlier frame, and for the display to let go of an image. Zero if it didn't.
     pub fn waited(&self) -> Duration {
         self.waited
+    }
+
+    /// What the last [`Renderer::render`] drew in the game's view, if it rendered a frame. Zero if
+    /// it didn't, or if the view had no area. The UI's draws aren't counted.
+    pub fn drawn(&self) -> DrawCounts {
+        self.drawn
     }
 
     /// The GPU's name, such as `NVIDIA GeForce RTX 4090`.
@@ -389,5 +420,72 @@ impl Renderer {
     /// while the renderer shuts down.
     pub fn validation(&self) -> Validation {
         self.instance.validation()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gg_core::math::{Vec3, Vec4};
+
+    use super::*;
+
+    /// Each run's mesh, shader and draws.
+    fn runs(draws: &Draws) -> Vec<(u32, u32, Range<usize>)> {
+        let run = |run: &Run| (run.mesh, run.shader, run.instances.clone());
+        draws.runs.iter().map(run).collect()
+    }
+
+    #[test]
+    fn consecutive_draws_of_one_mesh_with_one_shader_are_one_run() {
+        let square = Mesh::<[f32; 3]>::new(1);
+        let triangle = Mesh::<[f32; 3]>::new(2);
+        let flat = Shader::<[f32; 3], Vec4>::new(1);
+        let other = Shader::<[f32; 3], Vec4>::new(2);
+        let at = |x: f32| Mat4::from_translation(Vec3::new(x, 0.0, 0.0));
+        let (red, green, blue) = (Vec4::X, Vec4::Y, Vec4::Z);
+        let mut draws = Draws::default();
+        // Sprites of three textures, which share a run.
+        for (x, index) in [0, 5, 6].into_iter().enumerate() {
+            let texture = Texture { index };
+            let sprite = Sprite {
+                texture,
+                ..Sprite::default()
+            };
+            draws.push_sprite(at(x as f32), sprite);
+        }
+        draws.push(square, flat, at(3.0), red);
+        draws.push(square, flat, at(4.0), green);
+        // Another mesh, then another shader.
+        draws.push(triangle, flat, at(5.0), blue);
+        draws.push(triangle, other, at(6.0), red);
+        // Back to sprites, after the rest.
+        draws.push_sprite(at(7.0), Sprite::default());
+        assert_eq!(
+            runs(&draws),
+            [
+                (0, 0, 0..3),
+                (1, 1, 3..5),
+                (2, 1, 5..6),
+                (2, 2, 6..7),
+                (0, 0, 7..8)
+            ]
+        );
+        // A run's transforms and parameters are its own draws'.
+        let squares = &draws.runs[1];
+        assert_eq!(
+            draws.transforms[squares.instances.clone()],
+            [at(3.0), at(4.0)]
+        );
+        let colors = [red, green];
+        let colors: &[u8] = bytemuck::cast_slice(&colors);
+        assert_eq!(&draws.params[squares.params.clone()], colors);
+        let sprites = draws.runs[0].params.clone();
+        assert_eq!(sprites, 0..3 * size_of::<sprite::Params>());
+
+        draws.clear();
+        assert!(draws.is_empty());
+        draws.push(square, flat, at(0.0), red);
+        assert_eq!(runs(&draws), [(1, 1, 0..1)]);
+        assert_eq!(draws.params.len(), size_of::<Vec4>());
     }
 }

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use bytemuck::NoUninit;
 use gg_engine::egui::{self, ViewportCommand, ViewportId};
-use gg_engine::math::{EulerRot, Mat4, Vec2, Vec3, Vec4};
+use gg_engine::math::{EulerRot, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_engine::{
     Blend, Camera, Context, Event, Key, Layer, Mesh, OrthographicCameraController, Projection,
     Sampler, Shader, Sprite, Texture, Ui,
@@ -49,21 +49,104 @@ const TRIANGLE: [Colored; 3] = [
 /// How fast the triangle turns, in radians a second: a quarter turn.
 const TURN_SPEED: f32 = FRAC_PI_2;
 
-/// The textures from `assets/`: the checkerboard, and the logo drawn over it.
+/// The most sprites the swarm has.
+const SWARM_MAX: u32 = 100_000;
+
+/// How many sprites the swarm starts with: all of them in a release build, and a tenth in a debug
+/// build, whose unoptimized code would draw them all slowly.
+const SWARM_START: u32 = if cfg!(debug_assertions) {
+    SWARM_MAX / 10
+} else {
+    SWARM_MAX
+};
+
+/// The swarm's field, centered on the origin: a little wider and taller than the view at first,
+/// so that its sprites wrap around out of sight.
+const FIELD: Vec2 = Vec2::new(8.0, 4.5);
+
+/// The textures from `assets/`: the checkerboard, the logo drawn over it, and the sprite sheet the
+/// swarm draws from, 4 by 4 cells of shapes with transparent margins.
 struct Assets {
     checkerboard: Texture,
     logo: Texture,
+    sheet: Texture,
 }
 
-/// Draws a grid of sprites in the game's view, in two colors that alternate; over its middle, a
-/// checkerboard sprite, tiled and tinted, then a triangle in red, green and blue turning, then a
-/// logo sprite whose alpha shows them through it. The triangle is a mesh with a vertex type and
-/// shader of the sandbox's own, the rest the engine's sprites, and they're drawn over a color that
-/// drifts slowly, so that a running sandbox visibly animates. The engine's camera controller steers
-/// the camera: W, A, S and D move it along its own axes, Q and E turn it left and right, at the
-/// same speed whatever the frame rate, and the mouse wheel zooms it. Shows four panels to dock,
-/// beside the engine's Performance panel: the camera; the grid's colors, which can be picked; the
-/// checkerboard's filtering, smooth or sharp, how many times it repeats, and its tint; and the
+/// One of the swarm's sprites: what it shows and how it moves, picked once from its index.
+struct Drifter {
+    /// Where it is when the swarm starts, from the field's bottom left.
+    start: Vec2,
+    /// In units a second.
+    velocity: Vec2,
+    /// How far it's turned when the swarm starts, in radians.
+    turn: f32,
+    /// How fast it turns, in radians a second.
+    spin: f32,
+    /// How far across it is, in units.
+    size: f32,
+    /// Its cell of the sheet, in texture coordinates.
+    rect: [Vec2; 2],
+}
+
+impl Drifter {
+    fn new(index: u32) -> Self {
+        let pick = |salt| pick(index, salt);
+        let direction = Vec2::from_angle(pick(0) * TAU);
+        let cell = (pick(1) * 16.0) as u32 % 16;
+        let top_left = Vec2::new((cell % 4) as f32, (cell / 4) as f32) / 4.0;
+        Self {
+            start: Vec2::new(pick(2), pick(3)) * FIELD,
+            velocity: direction * (0.05 + 0.25 * pick(4)),
+            turn: pick(5) * TAU,
+            spin: (pick(6) - 0.5) * 4.0,
+            size: 0.05 + 0.07 * pick(7),
+            rect: [top_left, top_left + Vec2::splat(0.25)],
+        }
+    }
+
+    /// Where it is `t` seconds after the swarm starts. Its place and its turn are worked out in
+    /// `f64` and wrapped before they're narrowed, so that the swarm moves as smoothly however long
+    /// it has run.
+    fn transform(&self, t: f64) -> Mat4 {
+        let wrap = |start: f32, speed: f32, every: f32| {
+            (f64::from(start) + f64::from(speed) * t).rem_euclid(f64::from(every)) as f32
+        };
+        let at = Vec2::new(
+            wrap(self.start.x, self.velocity.x, FIELD.x),
+            wrap(self.start.y, self.velocity.y, FIELD.y),
+        ) - FIELD / 2.0;
+        Mat4::from_scale_rotation_translation(
+            Vec3::splat(self.size),
+            Quat::from_rotation_z(wrap(self.turn, self.spin, TAU)),
+            at.extend(0.0),
+        )
+    }
+}
+
+/// A number from 0 up to 1 that `index` and `salt` pick, the same every time: Chris Wellons's
+/// lowbias32 hash, its top 24 bits as a fraction.
+fn pick(index: u32, salt: u32) -> f32 {
+    let mut x = index ^ salt.wrapping_mul(0x9e37_79b9);
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x7feb_352d);
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x846c_a68b);
+    x ^= x >> 16;
+    (x >> 8) as f32 / (1 << 24) as f32
+}
+
+/// Draws in the game's view a swarm of sprites from a sheet's cells, drifting and turning, which
+/// tests how many sprites the engine draws; over it, a grid of sprites in two colors that
+/// alternate; over the grid's middle, a checkerboard sprite, tiled and tinted, then a triangle in
+/// red, green and blue turning, then a logo sprite whose alpha shows them through it. The triangle
+/// is a mesh with a vertex type and shader of the sandbox's own, and the rest the engine's sprites,
+/// so the swarm, the grid and the checkerboard are one instanced draw, and the triangle and the
+/// logo one each. They're drawn over a color that drifts slowly, so that a running sandbox visibly
+/// animates. The engine's camera controller steers the camera: W, A, S and D move it along its own
+/// axes, Q and E turn it left and right, at the same speed whatever the frame rate, and the mouse
+/// wheel zooms it. Shows five panels to dock, beside the engine's Performance panel, which counts
+/// the draws: the camera; how many sprites the swarm has; the grid's colors, which can be picked;
+/// the checkerboard's filtering, smooth or sharp, how many times it repeats, and its tint; and the
 /// clear color, which can be held or picked. Logs the key and mouse presses that reach it, which
 /// those on the panels don't. It polls input too: holding Space pauses the drift, and a panel
 /// shows where the cursor is. The title bar's File menu quits.
@@ -84,6 +167,11 @@ struct Sandbox {
     camera: OrthographicCameraController,
     /// How far the triangle has turned counterclockwise, in radians from 0 to a whole turn.
     triangle_turn: f32,
+    /// Every sprite the swarm can have, of which it draws the first `swarm`.
+    drifters: Vec<Drifter>,
+    swarm: u32,
+    /// How long the swarm has moved: its own clock, which the drift's pauses don't stop.
+    swarm_time: Duration,
     /// Added once the sandbox attaches.
     triangle: Option<(Mesh<Colored>, Shader<Colored>)>,
     assets: Option<Assets>,
@@ -113,6 +201,9 @@ impl Sandbox {
             tint: [1.0, 0.8, 0.8, 1.0],
             camera,
             triangle_turn: 0.0,
+            drifters: (0..SWARM_MAX).map(Drifter::new).collect(),
+            swarm: SWARM_START,
+            swarm_time: Duration::ZERO,
             triangle: None,
             assets: None,
         }
@@ -133,6 +224,7 @@ impl Layer for Sandbox {
         let triangle = cx.add_mesh("triangle", &TRIANGLE, &[0, 1, 2]);
         let checkerboard = cx.add_texture("checkerboard", assets.join("checkerboard.png"));
         let logo = cx.add_texture("logo", assets.join("logo.png"));
+        let sheet = cx.add_texture("sheet", assets.join("sheet.png"));
         self.triangle = Some((
             triangle.expect("the triangle is a whole triangle, of its own vertices"),
             colored.expect("the vertex color shader compiles"),
@@ -140,6 +232,7 @@ impl Layer for Sandbox {
         self.assets = Some(Assets {
             checkerboard: checkerboard.expect("the checkerboard loads"),
             logo: logo.expect("the logo loads"),
+            sheet: sheet.expect("the sprite sheet loads"),
         });
     }
 
@@ -147,6 +240,20 @@ impl Layer for Sandbox {
         let _zone = gg_engine::zone!();
         let seconds = dt.as_secs_f32();
         self.camera.update(cx, dt);
+
+        // First, so that the swarm, the grid and the checkerboard are one run of sprites.
+        self.swarm_time += dt;
+        if let Some(assets) = &self.assets {
+            let t = self.swarm_time.as_secs_f64();
+            for drifter in &self.drifters[..self.swarm as usize] {
+                let sprite = Sprite {
+                    texture: assets.sheet,
+                    rect: drifter.rect,
+                    ..Sprite::default()
+                };
+                cx.draw_sprite(drifter.transform(t), sprite);
+            }
+        }
 
         // 10 by 10, 2 units across, each square a little smaller than the spacing, in the grid's
         // colors in turn, as a checkerboard's.
@@ -235,6 +342,10 @@ impl Layer for Sandbox {
                 Some([x, y]) => format!("Cursor at {x:.0}, {y:.0}"),
                 None => "Cursor outside the window".to_owned(),
             });
+        });
+        ui.panel("Sprites", |ui| {
+            let swarm = egui::Slider::new(&mut self.swarm, 0..=SWARM_MAX).logarithmic(true);
+            ui.add(swarm.text("In the swarm"));
         });
         ui.panel("Grid", |ui| {
             ui.horizontal(|ui| {

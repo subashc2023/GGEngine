@@ -279,13 +279,14 @@ fn render_frame(
     };
     let mut windows: Vec<_> = windows.iter_mut().map(Drawn::ui).collect();
     let data = cx.render_data(viewport(view, output.pixels_per_point));
-    let draws = data.draws.len();
-    gg_core::plot!("draws", draws as f64);
     let presented = renderer.render(data, ui, &mut windows);
     let render = start.elapsed() - tessellated;
     let rendered = matches!(presented, Ok(true));
+    let drew = renderer.drawn();
+    gg_core::plot!("draws", drew.draws as f64);
+    gg_core::plot!("instances", drew.instances as f64);
     cx.perf
-        .rendered(tessellated, render, renderer.waited(), draws, rendered);
+        .rendered(tessellated, render, renderer.waited(), drew, rendered);
     cx.clear_draws();
     Ok((presented?, output.platform_output))
 }
@@ -421,6 +422,7 @@ impl Ran {
             wait_ms_mean = perf.wait.mean,
             wait_ms_p95 = perf.wait.p95,
             draws_max = perf.draws_max,
+            instances_max = perf.instances_max,
             gpu = self.gpu.as_str(),
             build = BUILD,
             headless = args.headless,

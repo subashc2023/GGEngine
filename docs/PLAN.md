@@ -66,18 +66,23 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   also measures every frame itself, always, which the Performance panel shows and each run that
   doesn't end in an error logs as `engine.perf`: frame-time percentiles, and where the time went,
   for agents to compare builds by. The sandbox shows the panel, and CI checks that its headless run logs the summary.
+- **Batching** (2026-10-21): each run of consecutive draws of one mesh with one shader is a single
+  instanced draw, and shaders read each instance's transform and parameters by its index, so a
+  change of texture, bindless, doesn't split a run; the renderer counts each frame's draws and
+  instances, which the Performance panel shows and `engine.perf` logs. The sandbox's swarm draws
+  100,000 moving sprites from a sprite sheet in one instanced draw, at a p99 of 4.7 ms in a release
+  build on the RTX 4090, and a GPU test checks three runs, one of them past the frame's first
+  megabyte, against a reference image.
 
-## Now: 2D renderer
+## Now: sprite sheets
 
-Batching, as [ARCHITECTURE.md](../ARCHITECTURE.md#rendering) describes it, which makes each run of
-consecutive draws of one mesh with one shader a single instanced draw, with the shaders' contract
-changed to read their transforms and parameters by instance; sprites from a sprite sheet's cells,
-given in pixels rather than texture coordinates, without the cells beside them bleeding in at the
-edges; and the frame's counts of draws and instances, shown in the sandbox.
+Sprites from a sprite sheet's cells, given in pixels rather than texture coordinates, and packed
+edge to edge without the cells beside them bleeding in at the edges, under a linear or a nearest
+sampler.
 
-*Done when* the sandbox draws 100,000 moving sprites, textured from a sprite sheet, in a single
-instanced draw at 60 fps or more in a release build on the RTX 4090, and a GPU test checks
-batched sprites against a reference image.
+*Done when* the sandbox draws a map of tiles from a packed sprite sheet's cells, with no texel of
+a neighboring cell showing at any zoom, and a GPU test checks cells packed edge to edge against a
+reference image.
 
 ## Next
 
@@ -160,8 +165,9 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Keeping within the GPU's memory budget (`VK_EXT_memory_budget` through VMA) | Phase 7, with streaming |
 | Removing meshes, shaders and textures; each lasts until the app ends | Something adds and removes them as it runs, such as asset hot reload in Phase 4 |
 | Perspective cameras, and a controller for them; a camera is orthographic, and so is the engine's controller | Phase 4, with depth |
-| Per-frame data in a buffer: shaders get only the product of the camera's view and projection and each draw's transform, so none sees positions in the world | Phase 6, with lighting |
-| Materials: parameters kept on the GPU and written when they change, rather than copied with every draw | Phase 6, with materials |
+| Per-frame data in a buffer: shaders get the camera's view and projection as one matrix, and see the world through each draw's transform, but not the camera's position, the time or the lights | Phase 6, with lighting |
+| Materials: parameters kept on the GPU and written when they change, rather than copied every frame with each instance | Phase 6, with materials |
+| Counts of vertices, indices or triangles, which follow from the instances; the renderer counts draws and instances | Phase 4, with glTF meshes |
 | Textures of data rather than color, such as normal maps, which shaders read as stored rather than decoded from sRGB | Phase 6, with PBR's maps |
 | Premultiplied alpha for games' textures: with straight alpha, as PNGs store it, a linear filter at an edge mixes in the color of the transparent pixels beside it | A game's art shows dark or colored fringes |
 | Sorting what blends back to front; meshes draw in the order given | Phase 4, with depth |
@@ -169,7 +175,7 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Images other than PNG, such as the JPEGs glTF allows; and PNGs' own color profiles and gamma, which are ignored, every PNG taken as sRGB | Phase 4, with glTF; Phase 7 cooks KTX2 |
 | Decoding images off the main thread; `Context::add_texture` decodes before it returns | Phase 7, with the streaming loader |
 | Layers making textures from their own pixels; `Textures::add` takes pixels, but `Context` adds only PNGs | A game makes its own textures |
-| Pixels and vertices reach the GPU through the frame's arena, which keeps the size of the largest frame: a frame that adds many textures leaves that much host memory held for each frame in flight | Phase 4, with uploads through the transfer queue |
+| Pixels, vertices and instances' transforms and parameters reach the GPU through the frame's arena, which merges the buffers it grew into, holding two to three times the largest frame for each frame in flight: by its growth rule, about 20 MB each for 100,000 sprites, which use 10.4 MB a frame; and a frame that adds many textures leaves that much host memory held | Phase 4, with uploads through the transfer queue |
 | More than one camera or view, such as split screen or the editor's scene view | A game or the editor draws several |
 | Converting between the view's pixels and the world, to pick what's under the cursor or zoom toward it; the camera controller zooms about the view's center | Something picks with the mouse, or a tool zooms toward the cursor |
 | The camera controller's keys, W, A, S, D, Q and E, and the mouse wheel, are fixed, and it takes no gamepad | Phase 3, with input actions |
@@ -195,7 +201,7 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | In a frame egui runs twice, the torn-off windows' texture changes apply before all of the main window's, so glyphs added then to a font atlas that grows can go missing | It shows, or egui hands over each pass's changes apart |
 | Present fences (`VK_KHR_swapchain_maintenance1`) before a swapchain's semaphores are destroyed, which closing torn-off windows makes more frequent | Validation reports it, or windows open and close often |
 | egui's own scopes in Tracy, which egui marks for the `profiling` crate: `profiling` 1.0.18 takes tracy-client 0.18, and two Tracy clients don't link together | `profiling` takes tracy-client 0.19; deny.toml's wrappers for tracy-client then add it |
-| Micro-benchmarks, with criterion | A CPU hot path gets a target, such as batching's |
+| Micro-benchmarks, with criterion | A CPU hot path gets a target of its own; batching's is a frame time, which `engine.perf` measures |
 | Gates on time in CI: hosted runners' times vary too much to gate on | A self-hosted runner, as for the GPU tests |
 
 ## Open questions

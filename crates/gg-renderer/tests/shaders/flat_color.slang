@@ -10,18 +10,28 @@ struct Params {
 };
 
 struct Push {
-    float4x4 clip_from_mesh;
+    float4x4 clip_from_world;
     Vertex* vertices;
+    float4x4* transforms;
     Params* params;
 };
 [[vk::push_constant]] ConstantBuffer<Push> push;
 
+struct Varyings {
+    float4 position : SV_Position;
+    nointerpolation uint instance;
+};
+
 [shader("vertex")]
-float4 vertex_main(uint index: SV_VulkanVertexID) : SV_Position {
-    return mul(push.clip_from_mesh, float4(push.vertices[index].position, 1.0));
+Varyings vertex_main(uint index: SV_VulkanVertexID, uint instance: SV_VulkanInstanceID) {
+    float4 world = mul(push.transforms[instance], float4(push.vertices[index].position, 1.0));
+    Varyings out;
+    out.position = mul(push.clip_from_world, world);
+    out.instance = instance;
+    return out;
 }
 
 [shader("fragment")]
-float4 fragment_main() : SV_Target {
-    return push.params->color;
+float4 fragment_main(Varyings input) : SV_Target {
+    return push.params[input.instance].color;
 }

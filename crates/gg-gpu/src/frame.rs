@@ -820,8 +820,10 @@ impl<'a> Pass<'_, 'a> {
         }
     }
 
-    /// Draws `count` of `indices`, starting `first` indices in, with the pipeline set last. Each
-    /// index is offset by `vertex_offset` before the vertex shader sees it.
+    /// Draws `count` of `indices`, starting `first` indices in, `instances` times, with the
+    /// pipeline set last: the vertex shader sees each instance's index, from 0, as
+    /// `SV_VulkanInstanceID`. Each index is offset by `vertex_offset` before the vertex shader
+    /// sees it.
     ///
     /// # Panics
     ///
@@ -832,6 +834,7 @@ impl<'a> Pass<'_, 'a> {
         first: u32,
         count: u32,
         vertex_offset: i32,
+        instances: u32,
     ) {
         let indices = indices.into();
         assert!(self.pipeline_set, "a draw needs a pipeline set first");
@@ -851,7 +854,7 @@ impl<'a> Pass<'_, 'a> {
                 indices.offset,
                 vk::IndexType::UINT32,
             );
-            raw.cmd_draw_indexed(self.commands(), count, 1, first, vertex_offset, 0);
+            raw.cmd_draw_indexed(self.commands(), count, instances, first, vertex_offset, 0);
         }
     }
 

@@ -6,9 +6,11 @@ struct Vertex {
     float4 color;
 };
 
+// It takes no parameters, so it leaves out their address, which comes last.
 struct Push {
-    float4x4 clip_from_mesh;
+    float4x4 clip_from_world;
     Vertex* vertices;
+    float4x4* transforms;
 };
 [[vk::push_constant]] ConstantBuffer<Push> push;
 
@@ -18,10 +20,11 @@ struct Varyings {
 };
 
 [shader("vertex")]
-Varyings vertex_main(uint index: SV_VulkanVertexID) {
+Varyings vertex_main(uint index: SV_VulkanVertexID, uint instance: SV_VulkanInstanceID) {
     Vertex vertex = push.vertices[index];
+    float4 world = mul(push.transforms[instance], float4(vertex.position, 1.0));
     Varyings out;
-    out.position = mul(push.clip_from_mesh, float4(vertex.position, 1.0));
+    out.position = mul(push.clip_from_world, world);
     out.color = vertex.color;
     return out;
 }

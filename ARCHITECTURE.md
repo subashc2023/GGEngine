@@ -302,12 +302,12 @@ buffer's address rather than through vertex input, and Slang lays out what a poi
 `#[repr(C)]` does, so a mesh's layout is between its vertex type and the shader's struct for it;
 draws take the indices. A shader is added for a vertex type and a type of parameters, such as a
 color, which each draw gives it: a mesh draws only with a shader for its own vertex type, and
-with parameters of that shader's type. Each frame copies every draw's parameters into the frame's
-own memory, where the shader reads them through their address too, so they can be as large as a
-shader needs. A shader is added with how it blends too, since Vulkan bakes blending into its
-pipeline: opaque, or by the alpha it returns, not multiplied into its color. Vulkan checks
-nothing about a shader, so its interface, which `Shaders::add` describes, is trusted, and
-validation checks it in debug builds.
+with parameters of that shader's type. Each frame copies the draws' transforms and parameters into
+the frame's own memory, where the shader reads them through their addresses too, so parameters can
+be as large as a shader needs. A shader is added with how it blends too, since Vulkan bakes
+blending into its pipeline: opaque, or by the alpha it returns, not multiplied into its color.
+Vulkan checks nothing about a shader, so its interface, which `Shaders::add` describes, is
+trusted, and validation checks it in debug builds.
 
 A game's texture is a PNG that the engine decodes as a layer adds it, to RGBA8 with colors
 sRGB-encoded and alpha not multiplied into them, as images store them; the next frame that renders
@@ -323,9 +323,9 @@ linear, clamped, repeated or mirrored.
 A camera is a position, a rotation and a projection. An orthographic camera, as 2D games use,
 sees as much of the world from bottom to top as the game sets, and as much across as the view's
 aspect ratio makes, so nothing stretches as the dock resizes the view; perspective comes with
-depth. Each frame the renderer multiplies the camera's view and projection by each draw's
-transform, and pushes the product, column-major as glam's matrices are, with the addresses of
-the vertices and of the draw's parameters: a shader places its vertices with one matrix. Layers
+depth. Each frame the renderer pushes the camera's view and projection, column-major as glam's
+matrices are, with the addresses of the vertices and of the draws' transforms and parameters: a
+shader places each vertex by its draw's transform, into the world, then by the camera's. Layers
 can also steer the camera with the engine's orthographic camera controller, which a layer keeps
 and calls from its own update and event, not adding it to the stack, so that the game can still
 place its camera itself or stop steering it.
@@ -338,11 +338,16 @@ edges tiles it under a repeating sampler. Every `Meshes`, `Shaders` and `Texture
 the engine's own: the quad, the sprite shader, which slangc compiles as the engine builds, and a
 white texture a pixel across, which a sprite of only a color shows, so that one shader draws
 sprites flat and textured. They reach the GPU as games' do, and games' handles come after them.
-Batching comes next: each run of consecutive draws of one mesh with one shader becomes a single
-instanced draw, the frame copies the run's transforms and parameters into its memory together,
-and shaders read their own by instance rather than from push constants. A change of texture is a
-change of parameters, which bindless textures make free, so 100,000 sprites take a handful of
-draws, and every mesh is batched, not only quads.
+
+Draws are batched, every mesh and not only quads: each run of consecutive draws of one mesh with
+one shader is a single instanced draw, whose instances are the draws, and the frame copies the
+run's transforms and its parameters into its memory, each in an array of its own, which shaders
+read by the instance's index. A change of texture is a change of parameters, which bindless
+textures make free, so 100,000 sprites take a handful of draws; shaders index their textures
+through `NonUniformResourceIndex`, since the instances of a draw can carry different ones.
+Nothing caps a run: the frame's memory grows to hold it, where a renderer with a buffer of fixed
+size would draw what it holds and start another. The renderer counts each frame's draws and
+instances, which the Performance panel shows and `engine.perf` logs the most of.
 
 An error while rendering ends the renderer, since a failed frame can leave meshes and textures
 half copied to the GPU.

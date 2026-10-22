@@ -16,7 +16,7 @@ use gg_gpu::{
 
 use crate::shader::Shaders;
 use crate::texture::Textures;
-use crate::{Draws, Viewport, sprite};
+use crate::{DrawCounts, Draws, Viewport, sprite};
 
 /// A mesh that [`Meshes::add`] handed out, of vertex type `V`.
 pub struct Mesh<V> {
@@ -257,67 +257,77 @@ impl MeshPass {
     }
 
     /// Draws `draws` in `viewport` of the pass's target, where `view_projection` takes the world
-    /// to clip space, and copies each one's parameters into the frame for its shader. A viewport
-    /// without an area draws nothing.
+    /// to clip space, each run of them as one instanced draw, and copies each run's transforms and
+    /// parameters into the frame for its shader. A viewport without an area draws nothing. Returns
+    /// what it drew.
     ///
     /// # Panics
     ///
     /// If a mesh drawn isn't one the pass has uploaded, a shader isn't one it has made a pipeline
-    /// of, a mesh's vertices or a draw's parameters aren't the size its shader reads, or the
-    /// target's format isn't the pass's.
+    /// of, a mesh's vertices or a draw's parameters aren't the size its shader reads, a run has
+    /// more instances than Vulkan's 32-bit count, or the target's format isn't the pass's.
     pub(crate) fn draw(
         &self,
         pass: &mut Pass<'_, '_>,
         viewport: Viewport,
         view_projection: Mat4,
         draws: &Draws,
-    ) -> Result<()> {
+    ) -> Result<DrawCounts> {
         let _zone = gg_core::zone!();
+        let mut drawn = DrawCounts::default();
         if draws.is_empty() || viewport.size.contains(&0) {
-            return Ok(());
+            return Ok(drawn);
         }
         pass.set_viewport(viewport.origin, viewport.size);
         let mut bound = None;
-        for draw in &draws.draws {
+        for run in &draws.runs {
             let mesh = self
                 .meshes
-                .get(draw.mesh as usize)
+                .get(run.mesh as usize)
                 .expect("a mesh of the renderer's `Meshes`, which the frame uploaded");
             let shader = self
                 .shaders
-                .get(draw.shader as usize)
+                .get(run.shader as usize)
                 .expect("a shader of the renderer's `Shaders`");
-            let params = &draws.params[draw.params.clone()];
+            let transforms = &draws.transforms[run.instances.clone()];
+            let params = &draws.params[run.params.clone()];
             // A draw pairs a mesh and parameters with a shader for their types, but handles from
             // another `Meshes` or `Shaders` could pair them with one that reads past them.
             assert_eq!(
                 (mesh.vertex_size, params.len()),
-                (shader.vertex_size, shader.params_size),
+                (shader.vertex_size, shader.params_size * transforms.len()),
                 "a mesh draws with a shader for its vertex type, and the parameters that shader \
                  takes, from the renderer's `Meshes` and `Shaders`"
             );
-            if bound != Some(draw.shader) {
+            let instances = u32::try_from(transforms.len())
+                .expect("a run's instances fit the 32-bit count Vulkan takes");
+            if bound != Some(run.shader) {
                 pass.set_pipeline(&shader.pipeline);
-                bound = Some(draw.shader);
+                bound = Some(run.shader);
             }
-            // Where the shader reads them during this frame; a shader that takes none gets 0.
+            // Where the shader reads them during this frame, each array in an upload of its own,
+            // so that each starts 16-byte aligned; a shader that takes no parameters gets 0.
+            let transforms = pass.upload(bytemuck::cast_slice(transforms))?.address();
             let params = if params.is_empty() {
                 0
             } else {
                 pass.upload(params)?.address()
             };
-            // The shader's `Push`: the matrix from the mesh's space to clip space, column-major,
-            // then the addresses of the vertices and the parameters. The matrix goes first, so
-            // that every offset is the same under every layout Slang gives push constants.
-            let clip_from_mesh = view_projection * draw.transform;
-            let mut push = [0u8; 80];
-            push[0..64].copy_from_slice(bytemuck::bytes_of(&clip_from_mesh));
+            // The shader's `Push`: the matrix from the world to clip space, column-major, then the
+            // addresses of the vertices, the instances' transforms and their parameters. The
+            // matrix goes first, so that every offset is the same under every layout Slang gives
+            // push constants.
+            let mut push = [0u8; 88];
+            push[0..64].copy_from_slice(bytemuck::bytes_of(&view_projection));
             push[64..72].copy_from_slice(&mesh.vertices.address().to_ne_bytes());
-            push[72..80].copy_from_slice(&params.to_ne_bytes());
+            push[72..80].copy_from_slice(&transforms.to_ne_bytes());
+            push[80..88].copy_from_slice(&params.to_ne_bytes());
             pass.push_constants(&push);
-            pass.draw_indexed(&mesh.indices, 0, mesh.count, 0);
+            pass.draw_indexed(&mesh.indices, 0, mesh.count, 0, instances);
+            drawn.draws += 1;
+            drawn.instances += run.instances.len();
         }
-        Ok(())
+        Ok(drawn)
     }
 }
 

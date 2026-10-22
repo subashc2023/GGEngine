@@ -168,7 +168,7 @@ impl UiPass {
             push[16..20].copy_from_slice(&texture.index().to_ne_bytes());
             push[20..24].copy_from_slice(&sampler.index().to_ne_bytes());
             pass.push_constants(&push);
-            pass.draw_indexed(indices, 0, mesh.indices.len() as u32, 0);
+            pass.draw_indexed(indices, 0, mesh.indices.len() as u32, 0, 1);
         }
         Ok(())
     }

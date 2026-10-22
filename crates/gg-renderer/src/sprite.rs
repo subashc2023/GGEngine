@@ -45,7 +45,7 @@ impl Default for Sprite {
 }
 
 impl Sprite {
-    /// What the sprite shader takes with each draw.
+    /// What the sprite shader takes for the sprite, an instance of its draw.
     pub(crate) fn params(&self) -> Params {
         Params {
             color: self.color.to_array(),
@@ -87,8 +87,8 @@ pub(crate) const CORNERS: [Corner; 4] = [
 ];
 pub(crate) const INDICES: [u32; 6] = [0, 1, 2, 2, 3, 0];
 
-/// What `shaders/sprite.slang` takes with each draw. The color is an array, since a `Vec4` is
-/// 16-byte aligned, which would pad the struct from 40 bytes to 48.
+/// What `shaders/sprite.slang` takes for each sprite, an instance of its draw. The color is an
+/// array, since a `Vec4` is 16-byte aligned, which would pad the struct from 40 bytes to 48.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 pub(crate) struct Params {

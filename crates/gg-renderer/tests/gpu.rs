@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 use bytemuck::NoUninit;
 use gg_core::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{
-    Blend, Camera, Draws, Meshes, Projection, RenderData, Renderer, Sampler, Settings, Shaders,
-    Sprite, Texture, Textures, Ui, Viewport,
+    Blend, Camera, DrawCounts, Draws, Meshes, Projection, RenderData, Renderer, Sampler, Settings,
+    Shaders, Sprite, Texture, Textures, Ui, Viewport,
 };
 
 fn main() {
@@ -48,6 +48,10 @@ fn main() {
     run(
         "sprites_match_their_reference",
         sprites_match_their_reference,
+    );
+    run(
+        "batches_match_their_reference",
+        batches_match_their_reference,
     );
 }
 
@@ -437,6 +441,153 @@ fn sprites_match_their_reference() {
         render_without_ui(&mut renderer, data);
     }
     check(renderer, "sprites", WIDTH, HEIGHT);
+}
+
+/// Draws three runs into an offscreen image, each one instanced draw, which `Renderer::drawn`
+/// counts, and compares it with its reference image: six sprites along the top; a band, a mesh with
+/// a shader of its own; and sprites along the bottom, over the band's lower edge. The sprites cycle
+/// through the engine's white texture, tinted, and two textures of their own, in tints of their
+/// own, scaled unevenly and turned, each 32 by 24 pixels, so that a sprite drawn with its
+/// neighbor's transform or parameters, or not at all, changes more pixels than the comparison
+/// allows; the bottom row's are the top's in reverse, so that one run read as another changes them
+/// too. The last run has 20,000 sprites: its first three and last three along the bottom, and the
+/// rest out of the view, in a look of their own. Only the last frame draws it, in the slot of the
+/// first. A frame's arena merges the buffers it grew into once its slot comes round again, so only
+/// a frame that needs more than its slot has held grows it: the last frame's first run fills a
+/// little of the slot's one buffer, and the big run's transforms and parameters, more than a
+/// megabyte, land in a buffer grown in the middle of the frame.
+fn batches_match_their_reference() {
+    const WIDTH: u32 = 240;
+    const HEIGHT: u32 = 160;
+    /// The last run's sprites.
+    const BIG: usize = 20_000;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut meshes = Meshes::default();
+    let mut shaders = Shaders::default();
+    let mut textures = Textures::default();
+    // 4 units from the view's bottom to its top, 40 pixels a unit, and 6 across, around the origin.
+    let camera = Camera {
+        projection: Projection::Orthographic {
+            height: 4.0,
+            near: -1.0,
+            far: 1.0,
+        },
+        ..Camera::default()
+    };
+    // 2 by 2 texels, sRGB-encoded: red and yellow over green and blue; and a checkerboard of light
+    // and dark.
+    let quadrants = [
+        [220, 50, 40, 255],
+        [240, 200, 40, 255],
+        [40, 170, 70, 255],
+        [40, 80, 220, 255],
+    ];
+    let quadrants = textures
+        .add("quadrants", [2, 2], quadrants.as_flattened())
+        .expect("a texture");
+    let (light, dark) = ([240, 240, 240, 255], [20, 20, 20, 255]);
+    let checker = textures
+        .add("checker", [2, 2], [light, dark, dark, light].as_flattened())
+        .expect("a texture");
+    let white = Sprite::default().texture;
+    // Orange, the quadrants as they are, the checker in cyan, violet, the quadrants half
+    // transparent, and the checker in yellow.
+    let looks = [
+        (white, Vec4::new(0.9, 0.4, 0.1, 1.0)),
+        (quadrants, Vec4::ONE),
+        (checker, Vec4::new(0.3, 0.8, 1.0, 1.0)),
+        (white, Vec4::new(0.6, 0.2, 0.9, 1.0)),
+        (quadrants, Vec4::new(1.0, 1.0, 1.0, 0.5)),
+        (checker, Vec4::new(1.0, 0.9, 0.3, 1.0)),
+    ];
+    // The sprite at `place` of six along a row at height `y`, from x = -2.5 to 2.5, in `look`,
+    // turned 25 degrees more than the one before it, and wider or taller by turns.
+    let sprite = |place: usize, y: f32, look: usize| {
+        let (texture, color) = looks[look];
+        let size = if place.is_multiple_of(2) {
+            Vec3::new(0.8, 0.6, 1.0)
+        } else {
+            Vec3::new(0.6, 0.8, 1.0)
+        };
+        let transform = Mat4::from_scale_rotation_translation(
+            size,
+            Quat::from_rotation_z((place as f32 * 25.0).to_radians()),
+            Vec3::new(place as f32 - 2.5, y, 0.0),
+        );
+        let sprite = Sprite {
+            color,
+            texture,
+            sampler: Sampler::NearestClamp,
+            ..Sprite::default()
+        };
+        (transform, sprite)
+    };
+    // Positions, and a color for each draw.
+    let flat = shaders
+        .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+        .expect("a shader");
+    let corners = [
+        [-0.5, -0.5, 0.0],
+        [0.5, -0.5, 0.0],
+        [0.5, 0.5, 0.0],
+        [-0.5, 0.5, 0.0],
+    ];
+    let square = meshes
+        .add("square", &corners, &[0, 1, 2, 2, 3, 0])
+        .expect("a mesh");
+    // Across the middle, from y = -0.45 to 0.45, in slate.
+    let band = Mat4::from_scale(Vec3::new(5.8, 0.9, 1.0));
+    let slate = Vec4::new(0.25, 0.3, 0.4, 1.0);
+    let away = Mat4::from_translation(Vec3::new(100.0, 100.0, 0.0));
+    let unseen = Sprite {
+        color: Vec4::new(1.0, 0.0, 1.0, 1.0),
+        texture: quadrants,
+        ..Sprite::default()
+    };
+    let mut draws = Draws::default();
+    // More frames than are in flight, the last in the slot of the first.
+    for frame in 0..3 {
+        draws.clear();
+        for place in 0..6 {
+            let (transform, sprite) = sprite(place, 1.2, place);
+            draws.push_sprite(transform, sprite);
+        }
+        draws.push(square, flat, band, slate);
+        if frame == 2 {
+            for i in 0..BIG {
+                // The first three and the last three are seen, at the bottom's six places.
+                let place = match i {
+                    0..3 => i,
+                    _ if i >= BIG - 3 => i + 6 - BIG,
+                    _ => {
+                        draws.push_sprite(away, unseen);
+                        continue;
+                    }
+                };
+                let (transform, sprite) = sprite(place, -0.7, 5 - place);
+                draws.push_sprite(transform, sprite);
+            }
+        }
+        let data = RenderData {
+            clear_color: CLEAR,
+            viewport: Viewport {
+                origin: [0, 0],
+                size: [WIDTH, HEIGHT],
+            },
+            camera,
+            meshes: &mut meshes,
+            shaders: &mut shaders,
+            textures: &mut textures,
+            draws: &draws,
+        };
+        render_without_ui(&mut renderer, data);
+    }
+    let drew = DrawCounts {
+        draws: 3,
+        instances: 6 + 1 + BIG,
+    };
+    assert_eq!(renderer.drawn(), drew, "each run is one instanced draw");
+    check(renderer, "batches", WIDTH, HEIGHT);
 }
 
 /// Renders a frame of `data`, without UI.

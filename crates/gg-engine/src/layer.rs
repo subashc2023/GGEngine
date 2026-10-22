@@ -109,10 +109,11 @@ impl Context {
     /// `()` for none. `blend` says how its color goes over what's drawn before it, such as
     /// [`Blend::Alpha`] for straight alpha, as PNGs store it. `name` names it in errors and GPU
     /// captures. The shader keeps to the contract that [`gg_renderer::Shaders::add`] describes:
-    /// entry points `vertex_main` and `fragment_main`; push constants that hold the matrix from
-    /// the mesh's space to clip space, the address of the vertices, which it reads as `V` is laid
-    /// out, and the address of the draw's parameters, which it reads as `P` is; and textures
-    /// sampled from the bindless set by the handles in its parameters.
+    /// entry points `vertex_main` and `fragment_main`; instanced draws, each run of consecutive
+    /// draws of one mesh with the shader being one, with push constants that hold the matrix from
+    /// the world to clip space and the addresses of the vertices, which it reads as `V` is laid
+    /// out, of the instances' transforms, and of their parameters, which it reads as `P` is; and
+    /// textures sampled from the bindless set by the handles in its parameters.
     ///
     /// Fails with `renderer.bad_shader` and slangc's diagnostics if it doesn't compile, and with
     /// `renderer.no_slangc` if slangc can't be run.
@@ -160,6 +161,8 @@ impl Context {
     /// Draws `mesh` with `shader` this frame, where `transform` places it in the world, over the
     /// meshes drawn before it, in the game's view as the camera sees it; the shader gets
     /// `params`. The view is the main window's central area, which the panels dock around.
+    /// Consecutive draws of one mesh with one shader render as one instanced draw, whatever their
+    /// transforms and parameters, so a frame of many takes few draws on the GPU.
     pub fn draw<V, P: NoUninit>(
         &mut self,
         mesh: Mesh<V>,

@@ -4,10 +4,12 @@
 
 use std::time::Duration;
 
+use gg_renderer::DrawCounts;
+
 use crate::{Context, Layer, Ui};
 
 /// How many frames the percentiles cover: the last 16,384, 68 s at 240 fps, while means and
-/// maxima cover the whole run. They take 768 KiB, from the first frame measured.
+/// maxima cover the whole run. They take 896 KiB, from the first frame measured.
 const KEPT: usize = 16_384;
 
 /// How many frames the Performance panel's graph shows at the fewest, given a pixel for each: its
@@ -26,7 +28,10 @@ pub(crate) struct Sample {
     pub(crate) render: u64,
     /// Waiting for the GPU to finish an earlier frame, and for the display to let go of an image.
     pub(crate) wait: u64,
+    /// Instanced draws in the game's view.
     pub(crate) draws: u64,
+    /// The meshes they drew.
+    pub(crate) instances: u64,
 }
 
 impl Sample {
@@ -45,6 +50,7 @@ impl Sample {
         self.render = f(self.render, other.render);
         self.wait = f(self.wait, other.wait);
         self.draws = f(self.draws, other.draws);
+        self.instances = f(self.instances, other.instances);
     }
 }
 
@@ -84,14 +90,14 @@ impl Perf {
         }
     }
 
-    /// The frame tessellated its UI in `tessellate`, and rendered `draws` draws in `render`, of
+    /// The frame tessellated its UI in `tessellate`, and rendered what it `drew` in `render`, of
     /// which it waited `wait`. A frame that `presented` nothing, or failed, isn't measured.
     pub(crate) fn rendered(
         &mut self,
         tessellate: Duration,
         render: Duration,
         wait: Duration,
-        draws: usize,
+        drew: DrawCounts,
         presented: bool,
     ) {
         if !presented {
@@ -101,7 +107,8 @@ impl Perf {
             sample.ui += nanos(tessellate);
             sample.render = nanos(render.saturating_sub(wait));
             sample.wait = nanos(wait);
-            sample.draws = draws as u64;
+            sample.draws = drew.draws as u64;
+            sample.instances = drew.instances as u64;
         }
     }
 
@@ -172,6 +179,7 @@ impl Perf {
             render: stats(|s| s.render),
             wait: stats(|s| s.wait),
             draws_max: self.max.draws,
+            instances_max: self.max.instances,
         }
     }
 }
@@ -191,6 +199,7 @@ pub(crate) struct Summary {
     pub(crate) render: Stats,
     pub(crate) wait: Stats,
     pub(crate) draws_max: u64,
+    pub(crate) instances_max: u64,
 }
 
 /// One part of the frames, in milliseconds.
@@ -324,9 +333,9 @@ fn show(perf: &Perf, ui: &mut egui::Ui) {
     }
     let mean_ms = frame.sum as f64 / frames as f64 / 1e6;
     ui.label(format!(
-        "{mean_ms:.2} ms a frame, {:.0} fps, {} draws",
+        "{mean_ms:.2} ms a frame, {:.0} fps, {}",
         1000.0 / mean_ms,
-        last.draws
+        draws_text(last)
     ));
     graph(perf, ui);
     egui::Grid::new("performance parts")
@@ -460,6 +469,11 @@ impl Bars {
     }
 }
 
+/// A frame's instanced draws and the meshes they drew, as the panel shows them.
+fn draws_text(sample: &Sample) -> String {
+    format!("{} draws of {} instances", sample.draws, sample.instances)
+}
+
 /// One frame's time, its parts' and its draws, for the graph's tooltip.
 fn frame_tooltip(ui: &mut egui::Ui, sample: &Sample) {
     egui::Grid::new("performance frame").show(ui, |ui| {
@@ -472,7 +486,7 @@ fn frame_tooltip(ui: &mut egui::Ui, sample: &Sample) {
             ui.end_row();
         }
     });
-    ui.label(format!("{} draws", sample.draws));
+    ui.label(draws_text(sample));
 }
 
 /// A row's first two cells: a square of its part's color in the graph, and its name; the frame's
@@ -507,7 +521,8 @@ mod tests {
         for &time in times {
             perf.tick(dt);
             perf.ran(Duration::ZERO, Duration::ZERO);
-            perf.rendered(Duration::ZERO, Duration::ZERO, Duration::ZERO, 0, true);
+            let drew = DrawCounts::default();
+            perf.rendered(Duration::ZERO, Duration::ZERO, Duration::ZERO, drew, true);
             dt = Duration::from_millis(time);
         }
         perf.finish(dt);
@@ -555,7 +570,11 @@ mod tests {
     fn pauses_and_frames_that_presented_nothing_go_unmeasured() {
         let mut perf = Perf::default();
         let present = |perf: &mut Perf, presented| {
-            perf.rendered(Duration::ZERO, MS, Duration::ZERO, 1, presented);
+            let drew = DrawCounts {
+                draws: 1,
+                instances: 1,
+            };
+            perf.rendered(Duration::ZERO, MS, Duration::ZERO, drew, presented);
         };
         perf.tick(Duration::ZERO);
         present(&mut perf, true);
@@ -577,14 +596,19 @@ mod tests {
     #[test]
     fn rendering_leaves_out_its_waits_and_the_ui_takes_tessellation() {
         let mut perf = Perf::default();
+        let none = DrawCounts::default();
         perf.tick(Duration::ZERO);
-        perf.rendered(Duration::ZERO, Duration::ZERO, Duration::ZERO, 0, true);
+        perf.rendered(Duration::ZERO, Duration::ZERO, Duration::ZERO, none, true);
         perf.tick(MS);
         perf.ran(2 * MS, 3 * MS);
-        perf.rendered(MS, 10 * MS, 4 * MS, 7, true);
+        let drew = DrawCounts {
+            draws: 7,
+            instances: 900,
+        };
+        perf.rendered(MS, 10 * MS, 4 * MS, drew, true);
         perf.tick(30 * MS);
         // Waits outlasting the render they're in round down to no rendering.
-        perf.rendered(Duration::ZERO, MS, 4 * MS, 0, true);
+        perf.rendered(Duration::ZERO, MS, 4 * MS, none, true);
         perf.finish(5 * MS);
         let newest: Vec<Sample> = perf.recent().copied().collect();
         let ms = |ms: u64| ms * 1_000_000;
@@ -603,11 +627,13 @@ mod tests {
                     render: ms(6),
                     wait: ms(4),
                     draws: 7,
+                    instances: 900,
                 },
             ]
         );
         assert_eq!(newest[1].other(), ms(14));
-        assert_eq!(perf.summary().draws_max, 7);
+        let summary = perf.summary();
+        assert_eq!((summary.draws_max, summary.instances_max), (7, 900));
     }
 
     #[test]
@@ -650,11 +676,16 @@ mod tests {
 
     #[test]
     fn hovering_over_a_bar_holds_the_graph_and_shows_its_frame() {
-        // Twenty frames measured, the sixth newest with 42 draws and the rest with one.
+        // Twenty frames measured, the sixth newest with 42 draws of 4,200 instances and the rest
+        // with one of 100.
         let mut perf = Perf::default();
         let frame = |perf: &mut Perf, draws| {
+            let drew = DrawCounts {
+                draws,
+                instances: draws * 100,
+            };
             perf.ran(MS, MS);
-            perf.rendered(Duration::ZERO, 2 * MS, MS, draws, true);
+            perf.rendered(Duration::ZERO, 2 * MS, MS, drew, true);
             perf.tick(4 * MS);
         };
         perf.tick(Duration::ZERO);
@@ -692,7 +723,8 @@ mod tests {
             }
         }
         assert!(graph.is_some());
-        assert!(texts.iter().any(|text| text == "42 draws"), "{texts:?}");
+        let drew = "42 draws of 4200 instances";
+        assert!(texts.iter().any(|text| text == drew), "{texts:?}");
     }
 
     #[test]
@@ -715,7 +747,7 @@ mod tests {
             find(&clipped.shape, background, &mut graph, &mut texts);
         }
         // Not the last frame's 12.00 ms, nor the whole run's 2.01.
-        let line = "2.02 ms a frame, 495 fps, 0 draws";
+        let line = "2.02 ms a frame, 495 fps, 0 draws of 0 instances";
         assert!(texts.iter().any(|text| text == line), "{texts:?}");
     }
 

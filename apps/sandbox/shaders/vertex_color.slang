@@ -7,12 +7,14 @@ struct Vertex {
     float4 color;
 };
 
-// What the engine pushes for each draw: the matrix from the mesh's space to clip space, which is
-// the camera's view and projection times the draw's transform, then the address of the mesh's
-// vertices. It takes no parameters, so it leaves out their address, which comes next.
+// What the engine pushes for each instanced draw: the matrix from the world to clip space, which
+// is the camera's view and projection, then the addresses of the mesh's vertices and of the
+// instances' transforms, each from the mesh's space to the world's. It takes no parameters, so it
+// leaves out their address, which comes last.
 struct Push {
-    float4x4 clip_from_mesh;
+    float4x4 clip_from_world;
     Vertex* vertices;
+    float4x4* transforms;
 };
 [[vk::push_constant]] ConstantBuffer<Push> push;
 
@@ -22,10 +24,11 @@ struct Varyings {
 };
 
 [shader("vertex")]
-Varyings vertex_main(uint index: SV_VulkanVertexID) {
+Varyings vertex_main(uint index: SV_VulkanVertexID, uint instance: SV_VulkanInstanceID) {
     Vertex vertex = push.vertices[index];
+    float4 world = mul(push.transforms[instance], float4(vertex.position, 1.0));
     Varyings out;
-    out.position = mul(push.clip_from_mesh, float4(vertex.position, 1.0));
+    out.position = mul(push.clip_from_world, world);
     out.color = vertex.color;
     return out;
 }
