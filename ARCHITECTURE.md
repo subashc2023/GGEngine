@@ -339,6 +339,16 @@ the engine's own: the quad, the sprite shader, which slangc compiles as the engi
 white texture a pixel across, which a sprite of only a color shows, so that one shader draws
 sprites flat and textured. They reach the GPU as games' do, and games' handles come after them.
 
+A sprite sheet is a texture cut into cells of one size, packed edge to edge from its top left,
+which `SpriteSheet` gives in pixels and turns into sprites' rectangles; with cells a pixel across,
+it gives any rectangle of pixels, as an atlas holds images of different sizes. The sprite shader
+samples only the texels a sprite's rectangle covers, wholly or in part, never nearer its edges
+than their centers, so that neither a linear sampler nor a nearest one shows any of the cells
+beside it, and sheets need no space between their cells. So a tiled sprite's outermost texels
+don't blend with those they'd wrap to either, nor, filtered linearly, sprites side by side with
+each other; games' own shaders sample as they choose. It holds while textures have one level and
+no anisotropy, which will read past those texels.
+
 Draws are batched, every mesh and not only quads: each run of consecutive draws of one mesh with
 one shader is a single instanced draw, whose instances are the draws, and the frame copies the
 run's transforms and its parameters into its memory, each in an array of its own, which shaders

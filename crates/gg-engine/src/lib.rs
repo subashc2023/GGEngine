@@ -45,10 +45,13 @@ pub use gg_core::math;
 /// The engine's profiling: zones, plots and frame marks for Tracy, which compile to nothing unless
 /// the `tracy` feature is on. Apps use them from here, such as `let _zone = gg_engine::zone!();`.
 pub use gg_core::{plot, profile, zone};
-/// What layers draw, which they add and draw through their [`Context`]: sprites; meshes; shaders
+/// What layers draw, which they add and draw through their [`Context`]: sprites, and the sprite
+/// sheets whose cells they show; meshes; shaders
 /// for their vertex types, each added with how it blends; the textures those shaders and sprites
 /// sample, and the samplers they sample them with; and the camera the game's view sees them from.
-pub use gg_renderer::{Blend, Camera, Mesh, Projection, Sampler, Shader, Sprite, Texture};
+pub use gg_renderer::{
+    Blend, Camera, Mesh, Projection, Sampler, Shader, Sprite, SpriteSheet, Texture,
+};
 pub use input::Input;
 use layer::Stack;
 pub use layer::{Context, Layer, Window};

@@ -11,7 +11,7 @@ use gg_engine::egui::{self, ViewportCommand, ViewportId};
 use gg_engine::math::{EulerRot, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_engine::{
     Blend, Camera, Context, Event, Key, Layer, Mesh, OrthographicCameraController, Projection,
-    Sampler, Shader, Sprite, Texture, Ui,
+    Sampler, Shader, Sprite, SpriteSheet, Texture, Ui,
 };
 use tracing::info;
 
@@ -64,12 +64,85 @@ const SWARM_START: u32 = if cfg!(debug_assertions) {
 /// so that its sprites wrap around out of sight.
 const FIELD: Vec2 = Vec2::new(8.0, 4.5);
 
-/// The textures from `assets/`: the checkerboard, the logo drawn over it, and the sprite sheet the
-/// swarm draws from, 4 by 4 cells of shapes with transparent margins.
+/// The map, a letter a tile, its rows top first: W water, O deep water, S sand, G grass, F flowers,
+/// D dirt, P paving, H planks; and on grass, R a rock, B a bush, T a tree, a tile across and two
+/// tall, which stands over the tile above its own.
+const MAP: [&str; 14] = [
+    "OOOOOOOOOOOOOOOOOOOOOOOO",
+    "OOWWWWWWWWWWWWWWWWWWWWOO",
+    "OWWSSSSSSSSSSWWWWSSSSWWO",
+    "OWSSGGTGGGGSSSWWSSGTGSWO",
+    "OWSGGGGGFGGGSSWWSGGGGSWO",
+    "OWSGTGGDDDDDDDHHDDDGFSWO",
+    "OWSGGGGDPPPPGSWWSGGBGSWO",
+    "OWSGFGGDPPPPGSWWSGTGGSWO",
+    "OWSGGBGDGGGRGSWWSGGGGSWO",
+    "OWSSGGGDGGTGSSWWSSGGSSWO",
+    "OWWSSSGDGGGSSWWWWSSSSWWO",
+    "OOWWSSSDSSSSWWWOOWWWWWOO",
+    "OOOWWWWWWWWWWWOOOOOOOOOO",
+    "OOOOOOOOOOOOOOOOOOOOOOOO",
+];
+const _: () = {
+    let mut row = 1;
+    while row < MAP.len() {
+        assert!(MAP[row].len() == MAP[0].len(), "the map's rows are as long");
+        row += 1;
+    }
+};
+
+/// How far across and down a tile of the map is, in units: a power of two, with the map's center a
+/// multiple of half of it, so that every corner of every tile is exact in `f32`, and tiles side by
+/// side share their edges exactly, leaving no crack between them.
+const TILE: f32 = 0.25;
+
+/// Where the map's center is: below the swarm's field, whose sprites would hide it.
+const MAP_CENTER: Vec2 = Vec2::new(0.0, -5.0);
+
+/// The cells of `assets/tiles.png` that the map's `letter` draws: its ground's, and what stands on
+/// it, with how many cells tall that is.
+fn tile(letter: u8) -> ([u32; 2], Option<([u32; 2], u32)>) {
+    let on_grass = |standing| ([2, 0], Some(standing));
+    match letter {
+        b'W' => ([0, 0], None),
+        b'O' => ([2, 2], None),
+        b'S' => ([1, 0], None),
+        b'G' => ([2, 0], None),
+        b'F' => ([1, 1], None),
+        b'D' => ([2, 1], None),
+        b'P' => ([0, 1], None),
+        b'H' => ([3, 2], None),
+        b'R' => on_grass(([0, 2], 1)),
+        b'B' => on_grass(([1, 2], 1)),
+        b'T' => on_grass(([3, 0], 2)),
+        _ => panic!("the map has no tile {:?}", char::from(letter)),
+    }
+}
+
+/// A camera, unturned, over `center`, seeing `height` units from the view's bottom to its top.
+fn overlooking(center: Vec2, height: f32) -> Camera {
+    Camera {
+        position: center.extend(0.0),
+        projection: Projection::Orthographic {
+            height,
+            near: -1.0,
+            far: 1.0,
+        },
+        ..Camera::default()
+    }
+}
+
+/// What the sandbox loads from `assets/`.
 struct Assets {
     checkerboard: Texture,
+    /// Drawn over the checkerboard.
     logo: Texture,
-    sheet: Texture,
+    /// The swarm's sprites, one for each cell of a sheet of 4 by 4 shapes with transparent
+    /// margins, row by row.
+    shapes: [Sprite; 16],
+    /// The map's: 4 by 3 cells of 16 by 16 pixels, packed edge to edge, of ground, and of what
+    /// stands on it with transparent backgrounds.
+    tiles: SpriteSheet,
 }
 
 /// One of the swarm's sprites: what it shows and how it moves, picked once from its index.
@@ -84,23 +157,21 @@ struct Drifter {
     spin: f32,
     /// How far across it is, in units.
     size: f32,
-    /// Its cell of the sheet, in texture coordinates.
-    rect: [Vec2; 2],
+    /// Which of the sheet's shapes it shows, row by row.
+    shape: usize,
 }
 
 impl Drifter {
     fn new(index: u32) -> Self {
         let pick = |salt| pick(index, salt);
         let direction = Vec2::from_angle(pick(0) * TAU);
-        let cell = (pick(1) * 16.0) as u32 % 16;
-        let top_left = Vec2::new((cell % 4) as f32, (cell / 4) as f32) / 4.0;
         Self {
             start: Vec2::new(pick(2), pick(3)) * FIELD,
             velocity: direction * (0.05 + 0.25 * pick(4)),
             turn: pick(5) * TAU,
             spin: (pick(6) - 0.5) * 4.0,
             size: 0.05 + 0.07 * pick(7),
-            rect: [top_left, top_left + Vec2::splat(0.25)],
+            shape: (pick(1) * 16.0) as usize % 16,
         }
     }
 
@@ -138,18 +209,21 @@ fn pick(index: u32, salt: u32) -> f32 {
 /// Draws in the game's view a swarm of sprites from a sheet's cells, drifting and turning, which
 /// tests how many sprites the engine draws; over it, a grid of sprites in two colors that
 /// alternate; over the grid's middle, a checkerboard sprite, tiled and tinted, then a triangle in
-/// red, green and blue turning, then a logo sprite whose alpha shows them through it. The triangle
-/// is a mesh with a vertex type and shader of the sandbox's own, and the rest the engine's sprites,
-/// so the swarm, the grid and the checkerboard are one instanced draw, and the triangle and the
-/// logo one each. They're drawn over a color that drifts slowly, so that a running sandbox visibly
-/// animates. The engine's camera controller steers the camera: W, A, S and D move it along its own
-/// axes, Q and E turn it left and right, at the same speed whatever the frame rate, and the mouse
-/// wheel zooms it. Shows five panels to dock, beside the engine's Performance panel, which counts
-/// the draws: the camera; how many sprites the swarm has; the grid's colors, which can be picked;
-/// the checkerboard's filtering, smooth or sharp, how many times it repeats, and its tint; and the
-/// clear color, which can be held or picked. Logs the key and mouse presses that reach it, which
-/// those on the panels don't. It polls input too: holding Space pauses the drift, and a panel
-/// shows where the cursor is. The title bar's File menu quits.
+/// red, green and blue turning, then a logo sprite whose alpha shows them through it. Below the
+/// swarm, out of its way, a map of tiles from a tile set's cells packed edge to edge, which tests
+/// that none shows any of the cells beside it. The triangle is a mesh with a vertex type and shader
+/// of the sandbox's own, and the rest the engine's sprites, so the map, the swarm, the grid and the
+/// checkerboard are one instanced draw, and the triangle and the logo one each. They're drawn over
+/// a color that drifts slowly, so that a running sandbox visibly animates. The engine's camera
+/// controller steers the camera: W, A, S and D move it along its own axes, Q and E turn it left
+/// and right, at the same speed whatever the frame rate, and the mouse wheel zooms it. Shows six
+/// panels to dock, beside the engine's Performance panel, which counts the draws: the camera; how
+/// many sprites the swarm has; the map's filtering, smooth or sharp, and buttons that look at the
+/// map or back at the swarm; the grid's colors, which can be picked; the checkerboard's filtering,
+/// how many times it repeats, and its tint; and the clear color, which can be held or picked. Logs
+/// the key and mouse presses that reach it, which those on the panels don't. It polls input too:
+/// holding Space pauses the drift, and a panel shows where the cursor is. The title bar's File
+/// menu quits.
 struct Sandbox {
     time: Duration,
     drift: bool,
@@ -164,6 +238,9 @@ struct Sandbox {
     tiles: f32,
     /// What the checkerboard's colors are multiplied by, in linear RGBA, alpha not multiplied in.
     tint: [f32; 4],
+    /// Whether the map is filtered linearly rather than sampled at the nearest texel, as pixel art
+    /// is.
+    smooth_map: bool,
     camera: OrthographicCameraController,
     /// How far the triangle has turned counterclockwise, in radians from 0 to a whole turn.
     triangle_turn: f32,
@@ -179,15 +256,7 @@ struct Sandbox {
 
 impl Sandbox {
     fn new() -> Self {
-        // 3 units from the view's bottom to its top, around the grid's 2.
-        let mut camera = OrthographicCameraController::new(Camera {
-            projection: Projection::Orthographic {
-                height: 3.0,
-                near: -1.0,
-                far: 1.0,
-            },
-            ..Camera::default()
-        });
+        let mut camera = OrthographicCameraController::new(Self::start());
         camera.rotation = true;
         Self {
             time: Duration::ZERO,
@@ -199,6 +268,7 @@ impl Sandbox {
             tiles: 2.0,
             // Pink.
             tint: [1.0, 0.8, 0.8, 1.0],
+            smooth_map: false,
             camera,
             triangle_turn: 0.0,
             drifters: (0..SWARM_MAX).map(Drifter::new).collect(),
@@ -207,6 +277,12 @@ impl Sandbox {
             triangle: None,
             assets: None,
         }
+    }
+
+    /// Where the camera starts: over the origin, 3 units from the view's bottom to its top, around
+    /// the grid's 2.
+    fn start() -> Camera {
+        overlooking(Vec2::ZERO, 3.0)
     }
 }
 
@@ -224,7 +300,9 @@ impl Layer for Sandbox {
         let triangle = cx.add_mesh("triangle", &TRIANGLE, &[0, 1, 2]);
         let checkerboard = cx.add_texture("checkerboard", assets.join("checkerboard.png"));
         let logo = cx.add_texture("logo", assets.join("logo.png"));
-        let sheet = cx.add_texture("sheet", assets.join("sheet.png"));
+        let shapes = cx.add_sprite_sheet("sheet", assets.join("sheet.png"), [32, 32]);
+        let tiles = cx.add_sprite_sheet("tiles", assets.join("tiles.png"), [16, 16]);
+        let shapes = shapes.expect("the shapes load");
         self.triangle = Some((
             triangle.expect("the triangle is a whole triangle, of its own vertices"),
             colored.expect("the vertex color shader compiles"),
@@ -232,7 +310,8 @@ impl Layer for Sandbox {
         self.assets = Some(Assets {
             checkerboard: checkerboard.expect("the checkerboard loads"),
             logo: logo.expect("the logo loads"),
-            sheet: sheet.expect("the sprite sheet loads"),
+            shapes: std::array::from_fn(|i| shapes.sprite([i as u32 % 4, i as u32 / 4], [1, 1])),
+            tiles: tiles.expect("the tiles load"),
         });
     }
 
@@ -241,17 +320,45 @@ impl Layer for Sandbox {
         let seconds = dt.as_secs_f32();
         self.camera.update(cx, dt);
 
-        // First, so that the swarm, the grid and the checkerboard are one run of sprites.
+        // First, so that the map, the swarm, the grid and the checkerboard are one run of sprites.
+        if let Some(assets) = &self.assets {
+            let sampler = if self.smooth_map {
+                Sampler::LinearClamp
+            } else {
+                Sampler::NearestClamp
+            };
+            // The top left tile's center.
+            let rows = MAP.len() as f32;
+            let columns = MAP[0].len() as f32;
+            let corner = MAP_CENTER + Vec2::new(1.0 - columns, rows - 1.0) * TILE / 2.0;
+            for (row, letters) in MAP.iter().enumerate() {
+                for (column, letter) in letters.bytes().enumerate() {
+                    let at = corner + Vec2::new(column as f32, -(row as f32)) * TILE;
+                    let (ground, standing) = tile(letter);
+                    let mut draw = |cell, tall: u32| {
+                        // From the tile up.
+                        let height = TILE * tall as f32;
+                        let center = at + Vec2::new(0.0, (height - TILE) / 2.0);
+                        let transform = Mat4::from_translation(center.extend(0.0))
+                            * Mat4::from_scale(Vec3::new(TILE, height, 1.0));
+                        let sprite = Sprite {
+                            sampler,
+                            ..assets.tiles.sprite(cell, [1, tall])
+                        };
+                        cx.draw_sprite(transform, sprite);
+                    };
+                    draw(ground, 1);
+                    if let Some((cell, tall)) = standing {
+                        draw(cell, tall);
+                    }
+                }
+            }
+        }
         self.swarm_time += dt;
         if let Some(assets) = &self.assets {
             let t = self.swarm_time.as_secs_f64();
             for drifter in &self.drifters[..self.swarm as usize] {
-                let sprite = Sprite {
-                    texture: assets.sheet,
-                    rect: drifter.rect,
-                    ..Sprite::default()
-                };
-                cx.draw_sprite(drifter.transform(t), sprite);
+                cx.draw_sprite(drifter.transform(t), assets.shapes[drifter.shape]);
             }
         }
 
@@ -346,6 +453,18 @@ impl Layer for Sandbox {
         ui.panel("Sprites", |ui| {
             let swarm = egui::Slider::new(&mut self.swarm, 0..=SWARM_MAX).logarithmic(true);
             ui.add(swarm.text("In the swarm"));
+        });
+        ui.panel("Map", |ui| {
+            ui.checkbox(&mut self.smooth_map, "Smooth the map");
+            ui.horizontal(|ui| {
+                // 5 units high, so that the map, 6 across and 3.5 down, fits a view of most shapes.
+                if ui.button("Look at the map").clicked() {
+                    self.camera.camera = overlooking(MAP_CENTER, 5.0);
+                }
+                if ui.button("Look at the swarm").clicked() {
+                    self.camera.camera = Self::start();
+                }
+            });
         });
         ui.panel("Grid", |ui| {
             ui.horizontal(|ui| {

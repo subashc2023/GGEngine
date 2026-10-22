@@ -6,15 +6,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytemuck::NoUninit;
-use gg_core::Result;
 use gg_core::math::Mat4;
+use gg_core::{Error, Result};
 use gg_renderer::{
-    Blend, Camera, Draws, Mesh, Meshes, RenderData, Shader, Shaders, Sprite, Texture, Textures,
-    Viewport,
+    Blend, Camera, Draws, Mesh, Meshes, RenderData, Shader, Shaders, Sprite, SpriteSheet, Texture,
+    Textures, Viewport,
 };
 
+use crate::image::{self, Image};
 use crate::perf::Perf;
-use crate::{Event, Input, Ui, image};
+use crate::{Event, Input, Ui};
 
 /// A part of an app that the main loop drives. Every method has a default that does nothing,
 /// so a layer implements only what it uses.
@@ -142,6 +143,23 @@ impl Context {
         self.textures.add(name, image.size, &image.pixels)
     }
 
+    /// Loads the PNG file at `path` as a sprite sheet: a texture, as
+    /// [`add_texture`](Self::add_texture) loads one, cut into cells `cell` pixels across and down,
+    /// packed edge to edge from its top left, which [`SpriteSheet::sprite`] draws.
+    ///
+    /// Fails as `add_texture` does, and with `engine.bad_sprite_sheet` if a side of `cell` is 0
+    /// or more than the image's.
+    pub fn add_sprite_sheet(
+        &mut self,
+        name: &str,
+        path: impl AsRef<Path>,
+        cell: [u32; 2],
+    ) -> Result<SpriteSheet> {
+        let path = path.as_ref();
+        let image = image::load_png(name, path)?;
+        add_sheet(&mut self.textures, name, path, image, cell)
+    }
+
     /// Adds a mesh for layers to draw from then on: triangles, three of `indices` each, which
     /// index `vertices`. A vertex is any `#[repr(C)]` type without padding, which derives
     /// bytemuck's `NoUninit`. `name` names the mesh in errors and GPU captures. The GPU has it
@@ -197,6 +215,36 @@ impl Context {
     pub(crate) fn clear_draws(&mut self) {
         self.draws.clear();
     }
+}
+
+/// Adds `image`, sprite sheet `name`'s from `path`, to `textures` as a sheet of cells `cell` pixels
+/// across and down, if they fit it; one that doesn't takes no texture.
+fn add_sheet(
+    textures: &mut Textures,
+    name: &str,
+    path: &Path,
+    image: Image,
+    cell: [u32; 2],
+) -> Result<SpriteSheet> {
+    let [width, height] = image.size;
+    if !(1..=width).contains(&cell[0]) || !(1..=height).contains(&cell[1]) {
+        return Err(Error::new(
+            "engine.bad_sprite_sheet",
+            format!(
+                "sprite sheet {name:?} at {} is {width}x{height} pixels, but its cells are {}x{}, \
+                 where each side is 1 pixel up to the image's",
+                path.display(),
+                cell[0],
+                cell[1]
+            ),
+        ));
+    }
+    let texture = textures.add(name, image.size, &image.pixels)?;
+    Ok(SpriteSheet {
+        texture,
+        size: image.size,
+        cell,
+    })
 }
 
 /// The app's window, as layers see it.
@@ -402,5 +450,33 @@ mod tests {
             let _ = stack.event(&mut cx, &key);
         }
         assert_eq!(*held.borrow(), [true, false]);
+    }
+
+    #[test]
+    fn a_sprite_sheet_loads_only_if_its_cells_fit_its_image() {
+        let mut textures = Textures::default();
+        let path = Path::new("assets/tiles.png");
+        let image = || Image {
+            size: [64, 32],
+            pixels: vec![0; 64 * 32 * 4],
+        };
+        for cell in [[0, 16], [16, 0], [65, 16], [16, 33]] {
+            let error = add_sheet(&mut textures, "tiles", path, image(), cell)
+                .expect_err("cells that don't fit");
+            assert_eq!(error.code(), "engine.bad_sprite_sheet", "{cell:?}");
+            let message = error.to_string();
+            assert!(
+                message.contains("\"tiles\"")
+                    && message.contains(&path.display().to_string())
+                    && message.contains("64x32"),
+                "{message}"
+            );
+        }
+        let sheet = add_sheet(&mut textures, "tiles", path, image(), [64, 32]).expect("a sheet");
+        assert_eq!((sheet.size, sheet.cell), ([64, 32], [64, 32]));
+        // The sheets that didn't load took no texture, so this one's comes first after the
+        // engine's white one.
+        let first = Textures::default().add("first", [1, 1], &[0; 4]);
+        assert_eq!(sheet.texture, first.expect("a texture"));
     }
 }

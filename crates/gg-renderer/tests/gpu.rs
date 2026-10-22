@@ -8,6 +8,7 @@
 // For setting the environment; see the SAFETY comment.
 #![allow(unsafe_code)]
 
+use std::f32::consts::{FRAC_PI_2, PI};
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
@@ -16,7 +17,7 @@ use bytemuck::NoUninit;
 use gg_core::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{
     Blend, Camera, DrawCounts, Draws, Meshes, Projection, RenderData, Renderer, Sampler, Settings,
-    Shaders, Sprite, Texture, Textures, Ui, Viewport,
+    Shaders, Sprite, SpriteSheet, Texture, Textures, Ui, Viewport,
 };
 
 fn main() {
@@ -53,6 +54,7 @@ fn main() {
         "batches_match_their_reference",
         batches_match_their_reference,
     );
+    run("sheets_match_their_reference", sheets_match_their_reference);
 }
 
 fn run(name: &str, test: impl FnOnce()) {
@@ -588,6 +590,174 @@ fn batches_match_their_reference() {
     };
     assert_eq!(renderer.drawn(), drew, "each run is one instanced draw");
     check(renderer, "batches", WIDTH, HEIGHT);
+}
+
+/// Draws a sprite sheet's cells, packed edge to edge, into an offscreen image, magnified, and
+/// compares it with its reference image. Each cell is 2 by 2 texels in a hue unlike those of the
+/// cells beside it, so that a sample of a neighbor's texel shows. In four rows: filtered linearly,
+/// two cells, two side by side, which blend into each other across their seam, and one flipped; by
+/// the nearest texel, the same, the first two turned a quarter and a half; a rectangle of pixels
+/// across cells, filtered linearly, and a rectangle that cuts texels 0.3 of a texel from its edges,
+/// by the nearest texel and linearly, whose slivers of those texels still show; and filtered
+/// linearly, a cell of a sheet 46 texels across, whose edges' texture coordinates times 46 round
+/// to just past them, the sheet tiled past its edge by a repeating sampler, whose outermost texels
+/// don't blend with those they'd wrap to, and a rectangle of no width, which shows the texel to its
+/// right. Every edge, and every texel's edge, falls between pixels: whether a nearest sampler takes
+/// a neighbor's texel where an edge lies on a pixel's center depends on how a GPU rounds, so the
+/// linear sprites check the bounds the shader keeps to, which are the same for both.
+fn sheets_match_their_reference() {
+    const WIDTH: u32 = 240;
+    const HEIGHT: u32 = 200;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut meshes = Meshes::default();
+    let mut shaders = Shaders::default();
+    let mut textures = Textures::default();
+    // 5 units from the view's bottom to its top, 40 pixels a unit, and 6 across, around the origin.
+    let camera = Camera {
+        projection: Projection::Orthographic {
+            height: 5.0,
+            near: -1.0,
+            far: 1.0,
+        },
+        ..Camera::default()
+    };
+    // 4 by 2 cells, sRGB-encoded: red, cyan, yellow and blue over green, magenta, slate and orange,
+    // each lightest at its top left and darkest at its bottom right.
+    let hues: [[u8; 3]; 8] = [
+        [220, 40, 40],
+        [40, 200, 220],
+        [230, 210, 40],
+        [40, 60, 220],
+        [40, 190, 60],
+        [210, 50, 200],
+        [60, 60, 70],
+        [240, 140, 30],
+    ];
+    let pixels: Vec<u8> = (0..32_usize)
+        .flat_map(|i| {
+            let (x, y) = (i % 8, i / 8);
+            let shade = 1.0 - 0.2 * (x % 2 + y % 2) as f32;
+            let [r, g, b] = hues[y / 2 * 4 + x / 2].map(|c| (f32::from(c) * shade) as u8);
+            [r, g, b, 255]
+        })
+        .collect();
+    let sheet = SpriteSheet {
+        texture: textures.add("sheet", [8, 4], &pixels).expect("a texture"),
+        size: [8, 4],
+        cell: [2, 2],
+    };
+    // 23 cells of 2 by 2 texels, yellow and blue by turns, sRGB-encoded. Cell 14's edges are
+    // texels 28 and 30, whose texture coordinates times 46 come to 27.999998 and 30.000002.
+    let strip: Vec<u8> = (0..92_usize)
+        .flat_map(|i| {
+            if i % 46 / 2 % 2 == 0 {
+                [230, 210, 40, 255]
+            } else {
+                [40, 60, 220, 255]
+            }
+        })
+        .collect();
+    let strip = SpriteSheet {
+        texture: textures.add("strip", [46, 2], &strip).expect("a texture"),
+        size: [46, 2],
+        cell: [2, 2],
+    };
+    // `width` by `height` units, turned `turn` counterclockwise, centered at (`x`, `y`).
+    let place = |[x, y]: [f32; 2], [width, height]: [f32; 2], turn: f32| {
+        Mat4::from_scale_rotation_translation(
+            Vec3::new(width, height, 1.0),
+            Quat::from_rotation_z(turn),
+            Vec3::new(x, y, 0.0),
+        )
+    };
+    let mut flipped = sheet.sprite([2, 0], [1, 1]);
+    let [top_left, bottom_right] = flipped.rect;
+    flipped.rect = [
+        Vec2::new(bottom_right.x, top_left.y),
+        Vec2::new(top_left.x, bottom_right.y),
+    ];
+    let mut draws = Draws::default();
+    // Each cell 0.8 units, 32 pixels, across: 16 pixels a texel.
+    for (y, sampler, turns) in [
+        (1.8, Sampler::LinearClamp, [0.0, 0.0]),
+        (0.6, Sampler::NearestClamp, [FRAC_PI_2, PI]),
+    ] {
+        let cells = [
+            (
+                sheet.sprite([1, 0], [1, 1]),
+                [-2.2, y],
+                [0.8, 0.8],
+                turns[0],
+            ),
+            (
+                sheet.sprite([2, 1], [1, 1]),
+                [-1.0, y],
+                [0.8, 0.8],
+                turns[1],
+            ),
+            (sheet.sprite([1, 1], [2, 1]), [0.6, y], [1.6, 0.8], 0.0),
+            (flipped, [2.2, y], [0.8, 0.8], 0.0),
+        ];
+        for (sprite, at, size, turn) in cells {
+            draws.push_sprite(place(at, size, turn), Sprite { sampler, ..sprite });
+        }
+    }
+    // Texels 1 to 5 across and 1 to 3 down, 16 pixels a texel.
+    let pixel_cells = SpriteSheet {
+        cell: [1, 1],
+        ..sheet
+    };
+    let across = pixel_cells.sprite([1, 1], [4, 2]);
+    draws.push_sprite(place([-1.8, -0.6], [1.6, 0.8], 0.0), across);
+    // Texels 1.7 to 3.3 across and 0.7 to 2.3 down, 20 pixels a texel, so that 6 pixels of each
+    // edge show the texel the edge cuts.
+    let cut = Sprite {
+        texture: sheet.texture,
+        rect: [
+            Vec2::new(1.7 / 8.0, 0.7 / 4.0),
+            Vec2::new(3.3 / 8.0, 2.3 / 4.0),
+        ],
+        ..Sprite::default()
+    };
+    for (x, sampler) in [(0.0, Sampler::NearestClamp), (1.6, Sampler::LinearClamp)] {
+        draws.push_sprite(place([x, -0.6], [0.8, 0.8], 0.0), Sprite { sampler, ..cut });
+    }
+    // 24 pixels a texel across.
+    let between = strip.sprite([14, 0], [1, 1]);
+    draws.push_sprite(place([-2.0, -1.8], [1.2, 0.8], 0.0), between);
+    // Texels 6 to 10 across, past the sheet's right edge, and all 4 down: 12 pixels a texel across
+    // and 8 down.
+    let tiled = Sprite {
+        texture: sheet.texture,
+        rect: [Vec2::new(0.75, 0.0), Vec2::new(1.25, 1.0)],
+        sampler: Sampler::LinearRepeat,
+        ..Sprite::default()
+    };
+    draws.push_sprite(place([-0.4, -1.8], [1.2, 0.8], 0.0), tiled);
+    // On the edge between texels 3 and 4, down the whole sheet.
+    let line = Sprite {
+        texture: sheet.texture,
+        rect: [Vec2::new(0.5, 0.0), Vec2::new(0.5, 1.0)],
+        ..Sprite::default()
+    };
+    draws.push_sprite(place([0.8, -1.8], [0.4, 0.8], 0.0), line);
+    // More frames than are in flight.
+    for _ in 0..3 {
+        let data = RenderData {
+            clear_color: CLEAR,
+            viewport: Viewport {
+                origin: [0, 0],
+                size: [WIDTH, HEIGHT],
+            },
+            camera,
+            meshes: &mut meshes,
+            shaders: &mut shaders,
+            textures: &mut textures,
+            draws: &draws,
+        };
+        render_without_ui(&mut renderer, data);
+    }
+    check(renderer, "sheets", WIDTH, HEIGHT);
 }
 
 /// Renders a frame of `data`, without UI.

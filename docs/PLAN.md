@@ -73,16 +73,20 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   100,000 moving sprites from a sprite sheet in one instanced draw, at a p99 of 4.7 ms in a release
   build on the RTX 4090, and a GPU test checks three runs, one of them past the frame's first
   megabyte, against a reference image.
+- **Sprite sheets** (2026-10-21): layers load sprite sheets, whose cells `SpriteSheet` gives in
+  pixels, a cell or several, and the sprite shader samples only the texels a sprite's rectangle
+  covers, so that cells packed edge to edge show none of their neighbors under a linear or a
+  nearest sampler, at any zoom. The sandbox draws a map of tiles from a tile set, and its swarm
+  from a sheet; a GPU test checks cells packed edge to edge, side by side, flipped, turned and cut
+  across, against a reference image.
 
-## Now: sprite sheets
+## Now: the ECS core
 
-Sprites from a sprite sheet's cells, given in pixels rather than texture coordinates, and packed
-edge to edge without the cells beside them bleeding in at the edges, under a linear or a nearest
-sampler.
+Phase 3's first milestone: the engine's own ECS, with stable entity IDs, components of any type,
+and queries over them.
 
-*Done when* the sandbox draws a map of tiles from a packed sprite sheet's cells, with no texel of
-a neighboring cell showing at any zoom, and a GPU test checks cells packed edge to edge against a
-reference image.
+*Done when* the sandbox's sprites are entities that a system draws, and a unit test checks that
+entities' IDs stay theirs as others are removed. Its plan is made when it starts.
 
 ## Next
 
@@ -171,7 +175,11 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Textures of data rather than color, such as normal maps, which shaders read as stored rather than decoded from sRGB | Phase 6, with PBR's maps |
 | Premultiplied alpha for games' textures: with straight alpha, as PNGs store it, a linear filter at an edge mixes in the color of the transparent pixels beside it | A game's art shows dark or colored fringes |
 | Sorting what blends back to front; meshes draw in the order given | Phase 4, with depth |
-| Mipmaps: a texture drawn smaller than it is samples its one level, and shimmers | Phase 4, with the textured glTF mesh |
+| Mipmaps, and anisotropic filtering: a texture drawn smaller than it is samples its one level, and shimmers. A sprite sheet's cells, packed edge to edge, will then mix together at the smaller levels and under anisotropy, which reads past the texels the sprite shader keeps to, and need space around each cell or an array layer each | Phase 4, with the textured glTF mesh |
+| Sprite sheets with space between or around their cells, as some tile sets come; `SpriteSheet` takes cells packed edge to edge from the top left | A game's art comes that way |
+| Tiling one cell of a sheet: a repeating sampler repeats the whole texture | A game tiles part of an atlas, such as a background |
+| A sprite that samples past its rectangle, so that a seamless texture tiled across sprites side by side blends across their edges under a linear sampler | A game tiles one texture across sprites |
+| A tile map in the engine, which scenes save; the sandbox's map is code of its own | Phase 3, with scenes |
 | Images other than PNG, such as the JPEGs glTF allows; and PNGs' own color profiles and gamma, which are ignored, every PNG taken as sRGB | Phase 4, with glTF; Phase 7 cooks KTX2 |
 | Decoding images off the main thread; `Context::add_texture` decodes before it returns | Phase 7, with the streaming loader |
 | Layers making textures from their own pixels; `Textures::add` takes pixels, but `Context` adds only PNGs | A game makes its own textures |

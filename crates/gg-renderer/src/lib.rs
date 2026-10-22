@@ -27,7 +27,7 @@ pub use camera::{Camera, Projection};
 pub use gg_gpu::{Blend, Sampler, Validation, Window};
 pub use mesh::{Mesh, Meshes};
 pub use shader::{Shader, Shaders};
-pub use sprite::Sprite;
+pub use sprite::{Sprite, SpriteSheet};
 pub use texture::{Texture, Textures};
 pub use ui::Ui;
 
