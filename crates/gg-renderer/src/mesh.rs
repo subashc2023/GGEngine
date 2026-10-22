@@ -10,13 +10,13 @@ use bytemuck::NoUninit;
 use gg_core::math::Mat4;
 use gg_core::{Error, Result};
 use gg_gpu::{
-    Device, Format, Frame, GpuBuffer, GraphicsDesc, Pass, Pipeline, Texture as GpuTexture,
+    ColorImage, Device, Frame, GpuBuffer, GraphicsDesc, Pass, Pipeline, Texture as GpuTexture,
     TextureFormat,
 };
 
 use crate::shader::Shaders;
 use crate::texture::Textures;
-use crate::{DrawCounts, Draws, Viewport, sprite};
+use crate::{DrawCounts, Draws, sprite};
 
 /// A mesh that [`Meshes::add`] handed out, of vertex type `V`.
 pub struct Mesh<V> {
@@ -125,12 +125,11 @@ impl Default for Meshes {
     }
 }
 
-/// Draws meshes with their shaders, and keeps on the GPU the meshes' vertices and indices and the
-/// textures the shaders sample.
+/// Draws meshes with their shaders into the game's view, an image whose format is
+/// [`ColorImage::FORMAT`], and keeps on the GPU the meshes' vertices and indices and the textures
+/// the shaders sample.
 pub(crate) struct MeshPass {
     device: Arc<Device>,
-    /// The format of the targets it draws into.
-    format: Format,
     /// Each shader's pipeline, by its handle.
     shaders: Vec<GpuShader>,
     /// Each mesh's buffers, by its handle.
@@ -156,11 +155,9 @@ struct GpuMesh {
 }
 
 impl MeshPass {
-    /// A pass that draws into targets of `format`.
-    pub(crate) fn new(device: &Arc<Device>, format: Format) -> Self {
+    pub(crate) fn new(device: &Arc<Device>) -> Self {
         Self {
             device: device.clone(),
-            format,
             shaders: Vec::new(),
             meshes: Vec::new(),
             textures: Vec::new(),
@@ -187,7 +184,7 @@ impl MeshPass {
                     spirv: &added.spirv,
                     vertex: c"vertex_main",
                     fragment: c"fragment_main",
-                    format: self.format,
+                    format: ColorImage::FORMAT,
                     blend: added.blend,
                 },
             )?;
@@ -256,29 +253,24 @@ impl MeshPass {
         Ok(())
     }
 
-    /// Draws `draws` in `viewport` of the pass's target, where `view_projection` takes the world
+    /// Draws `draws` over the whole of the pass's target, where `view_projection` takes the world
     /// to clip space, each run of them as one instanced draw, and copies each run's transforms and
-    /// parameters into the frame for its shader. A viewport without an area draws nothing. Returns
-    /// what it drew.
+    /// parameters into the frame for its shader. Returns what it drew.
     ///
     /// # Panics
     ///
     /// If a mesh drawn isn't one the pass has uploaded, a shader isn't one it has made a pipeline
     /// of, a mesh's vertices or a draw's parameters aren't the size its shader reads, a run has
-    /// more instances than Vulkan's 32-bit count, or the target's format isn't the pass's.
+    /// more instances than Vulkan's 32-bit count, or the target's format isn't
+    /// [`ColorImage::FORMAT`].
     pub(crate) fn draw(
         &self,
         pass: &mut Pass<'_, '_>,
-        viewport: Viewport,
         view_projection: Mat4,
         draws: &Draws,
     ) -> Result<DrawCounts> {
         let _zone = gg_core::zone!();
         let mut drawn = DrawCounts::default();
-        if draws.is_empty() || viewport.size.contains(&0) {
-            return Ok(drawn);
-        }
-        pass.set_viewport(viewport.origin, viewport.size);
         let mut bound = None;
         for run in &draws.runs {
             let mesh = self

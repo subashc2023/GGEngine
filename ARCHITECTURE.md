@@ -286,12 +286,15 @@ and scenes, physics and the editor share these axes.
 ## Rendering
 
 Each frame the engine hands `gg-renderer` that frame's render data, as plain data: the color the
-frame clears to, the game's view, the camera it sees the world from, and what to draw in it, in
+view clears to, the game's view, the camera it sees the world from, and what to draw in it, in
 order: meshes, each with a shader for its vertex type, the parameters that shader takes, and a
 transform that places it in the world. The view is the main window's central area, which the
-dock leaves the game, and the UI draws over it. Layers add shaders, meshes and textures, draw
-them and set the camera through their `Context`, and the renderer's `Shaders`, `Meshes` and
-`Textures` hand out their handles at once.
+dock leaves the game. It renders into an image of its own, the central area's size in pixels,
+made again as that size changes, which the frame then shows there, with the UI over it, so that
+depth, HDR and tonemapping, post-processing and the tool API's captures read the view whole; and
+games' pipelines are made for that image's format, 8-bit sRGB, whatever the window presents.
+Layers add shaders, meshes and textures, draw them and set the camera through their `Context`,
+and the renderer's `Shaders`, `Meshes` and `Textures` hand out their handles at once.
 
 A game's shader is a Slang file that the engine compiles with slangc as a layer adds it, so one
 that doesn't compile fails there, with slangc's diagnostics naming the file and line; the renderer

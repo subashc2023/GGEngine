@@ -1,7 +1,7 @@
 //! Frames in flight. Each frame records one command buffer and submits it, and a timeline
 //! semaphore paces them, so that the CPU gets at most `FRAMES_IN_FLIGHT` frames ahead of the GPU.
 //! A frame can render into several targets, such as an app's windows, and presents all their
-//! swapchains at once.
+//! swapchains at once; its later passes can sample what its earlier ones rendered offscreen.
 
 use std::marker::PhantomData;
 use std::slice;
@@ -131,8 +131,8 @@ impl Frames {
     /// used this one's resources. The first target paces the frame: for a swapchain, it waits
     /// until the display has let go of an image. The others are rendered into only if their
     /// swapchains have an image to give at once, so that a window on a slower display doesn't
-    /// slow the frame. Returns `None` if the first target has nothing to render into this time,
-    /// as with the swapchain of a minimized window.
+    /// slow the frame; an offscreen image is always rendered into. Returns `None` if the first
+    /// target has nothing to render into this time, as with the swapchain of a minimized window.
     ///
     /// # Panics
     ///
@@ -487,7 +487,7 @@ impl<'a> Frame<'a> {
         let commands = self.frames.slots[self.slot].commands;
         let ((image, view, extent), format) = match &self.targets[target] {
             Target::Swapchain(swapchain) => (swapchain.image(index), swapchain.format()),
-            Target::Image(image) => (image.parts(), image.format()),
+            Target::Image(image) => (image.parts(), ColorImage::FORMAT),
         };
         // The old contents are discarded. A swapchain image is ready once its acquire semaphore
         // is signaled, which the submission waits for at the color-attachment stage; an
@@ -552,6 +552,52 @@ impl<'a> Frame<'a> {
             format,
             pipeline_set: false,
         })
+    }
+
+    /// Lets the frame's later passes sample the `target`th target, as its last pass left it, from
+    /// their fragment shaders, through the index this returns in the bindless set. Shaders may
+    /// sample through the index only until the image's next pass, which renders into it and so
+    /// takes it out of the layout the bindless set declares: after that pass, call this again.
+    ///
+    /// # Panics
+    ///
+    /// If the frame has no `target`th target, the target is a swapchain's, or it's an offscreen
+    /// image no pass has rendered into since it was made or read back.
+    pub fn begin_sampling(&mut self, target: usize) -> u32 {
+        let Target::Image(image) = &self.targets[target] else {
+            panic!("target {target} is a swapchain's, and only offscreen images are sampled");
+        };
+        let (index, layout) =
+            self.frames.images[target].expect("an offscreen image is always there");
+        match layout {
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL => {}
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => return image.index(),
+            _ => panic!("target {target} is sampled before a pass renders into it"),
+        }
+        let (raw_image, _, _) = image.parts();
+        let barrier = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+            .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+            .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
+            .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .image(raw_image)
+            .subresource_range(COLOR_RANGE);
+        let device = &self.frames.device;
+        let commands = self.frames.slots[self.slot].commands;
+        // SAFETY: the commands are recording outside a pass, which `Pass` borrowing the frame
+        // ensures, and the image lives until the frame has finished: it retires until then.
+        unsafe {
+            device.begin_label(commands, c"begin sampling");
+            device.raw().cmd_pipeline_barrier2(
+                commands,
+                &vk::DependencyInfo::default().image_memory_barriers(slice::from_ref(&barrier)),
+            );
+            device.end_label(commands);
+        }
+        self.frames.images[target] = Some((index, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL));
+        image.index()
     }
 
     /// Sends the frame's commands to the GPU and presents the images of its swapchains.
@@ -817,6 +863,25 @@ impl<'a> Pass<'_, 'a> {
                 0,
                 bytes,
             );
+        }
+    }
+
+    /// Draws `vertices` vertices, `instances` times, with the pipeline set last: the vertex shader
+    /// sees each vertex's index, from 0, as `SV_VulkanVertexID`, and each instance's as
+    /// `SV_VulkanInstanceID`.
+    ///
+    /// # Panics
+    ///
+    /// If no pipeline is set.
+    pub fn draw(&mut self, vertices: u32, instances: u32) {
+        assert!(self.pipeline_set, "a draw needs a pipeline set first");
+        // SAFETY: the commands are recording inside a pass with a pipeline set.
+        unsafe {
+            self.frame
+                .frames
+                .device
+                .raw()
+                .cmd_draw(self.commands(), vertices, instances, 0, 0);
         }
     }
 

@@ -35,6 +35,14 @@ fn main() {
     let log = gg_core::log::init("gpu-tests", &dir).expect("the tests read the JSON log");
 
     run("clear_reads_back", clear_reads_back);
+    run(
+        "sampled_images_keep_their_layout",
+        sampled_images_keep_their_layout,
+    );
+    run(
+        "dropped_images_free_their_slots",
+        dropped_images_free_their_slots,
+    );
     run("validation_errors_reach_the_json_log", || {
         validation_errors_reach_the_json_log(&log);
     });
@@ -108,6 +116,57 @@ fn clear_reads_back() {
     }
 
     drop((frames, images, device, instance));
+    assert_eq!(
+        validation.messages(),
+        0,
+        "validation reported problems; the log above says what"
+    );
+}
+
+/// Clears an image, then lets the frame's later passes sample it, in more frames than are in
+/// flight, and reads it back. The read-back's barrier starts from the layout the frames recorded,
+/// so validation reports sampling that didn't change the image's layout, or didn't record the
+/// change.
+fn sampled_images_keep_their_layout() {
+    let instance = instance();
+    let validation = instance.validation();
+    let device = Device::new(&instance, None, None).expect("a GPU that supports Vulkan 1.4");
+    let mut image = ColorImage::new(&device, 16, 16, "sampled test target").expect("an image");
+    let mut frames = Frames::new(&device).expect("frames");
+    for _ in 0..3 {
+        let mut frame = frames
+            .begin([Target::Image(&mut image)])
+            .expect("a frame")
+            .expect("an offscreen image can always be rendered into");
+        drop(frame.begin_pass(0, c"clear", [1.0, 0.0, 0.0, 1.0]));
+        frame.begin_sampling(0);
+        frame.submit().expect("the frame's submission");
+    }
+    let pixels = image.read_back().expect("the image's pixels");
+    for pixel in pixels.as_chunks::<4>().0 {
+        assert_eq!(*pixel, [255, 0, 0, 255]);
+    }
+
+    drop((frames, image, device, instance));
+    assert_eq!(
+        validation.messages(),
+        0,
+        "validation reported problems; the log above says what"
+    );
+}
+
+/// Makes and drops more images, one at a time, than the bindless set has slots to give out past
+/// the placed ones, 4,096, which works only if each gives its slot back.
+fn dropped_images_free_their_slots() {
+    let instance = instance();
+    let validation = instance.validation();
+    let device = Device::new(&instance, None, None).expect("a GPU that supports Vulkan 1.4");
+    for i in 0..5_000 {
+        let image = ColorImage::new(&device, 4, 4, "dropped test image");
+        drop(image.unwrap_or_else(|error| panic!("image {i}: {error:#}")));
+    }
+
+    drop((device, instance));
     assert_eq!(
         validation.messages(),
         0,

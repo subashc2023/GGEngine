@@ -55,6 +55,7 @@ fn main() {
         batches_match_their_reference,
     );
     run("sheets_match_their_reference", sheets_match_their_reference);
+    run("views_match_their_reference", views_match_their_reference);
 }
 
 fn run(name: &str, test: impl FnOnce()) {
@@ -156,7 +157,8 @@ fn ui_matches_its_reference() {
 /// order, or the meshes drawn out of order, change thousands of pixels; the second square is
 /// clear of them, so that a draw given another's parameters changes a thousand. The triangle is
 /// added after the first frame, and the frames outnumber those in flight, so that later frames
-/// draw from what earlier ones copied to the GPU.
+/// draw from what earlier ones copied to the GPU. The view renders into an image of its own, which
+/// the frame shows at the view's place, so that one shown elsewhere changes thousands of pixels.
 fn meshes_match_their_reference() {
     const WIDTH: u32 = 320;
     const HEIGHT: u32 = 200;
@@ -758,6 +760,157 @@ fn sheets_match_their_reference() {
         render_without_ui(&mut renderer, data);
     }
     check(renderer, "sheets", WIDTH, HEIGHT);
+}
+
+/// Draws the `meshes` test's squares and triangle, then along the bottom of the last view a band
+/// one texel a pixel, into a view that changes size from frame to frame, and compares the view as
+/// it shows in the frame with its reference image. The view is the whole image, then shut, which
+/// draws nothing and leaves the frame its clear color alone, then 160 by 180 pixels, then 160 by
+/// 160 at [100, 20], 40 pixels a unit, as the reference shows it from the frame that gives it that
+/// size; then 200 by 140, 200 by 160, and 160 by 160 again for three frames, which must show it as
+/// before. Each side changes alone somewhere, so that an image made again only when one side
+/// changes shows too. Against the reference, an image left the size it first had makes 15,217
+/// pixels differ, an aspect ratio taken from the whole image's shape 8,917, the view shown at the
+/// image's corner 22,662, shown past its place 38,400, and its image made again a frame late, or
+/// only for a new width, 8,523; shown a pixel off, across, down or both, the band's texels, of
+/// four colors, change its 3,200 pixels. The fourth frame makes the view's image again while the
+/// third may still draw with the one before, which validation sees destroyed only once the GPU is
+/// done with it.
+fn views_match_their_reference() {
+    const WIDTH: u32 = 320;
+    const HEIGHT: u32 = 200;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut meshes = Meshes::default();
+    let mut shaders = Shaders::default();
+    let mut textures = Textures::default();
+    // 4 units from the view's bottom to its top; the view's center is (1, 0.5).
+    let camera = Camera {
+        position: Vec3::new(1.0, 0.5, 0.0),
+        projection: Projection::Orthographic {
+            height: 4.0,
+            near: -1.0,
+            far: 1.0,
+        },
+        ..Camera::default()
+    };
+    let transform = |scale, turn: f32, [x, y]: [f32; 2]| {
+        Mat4::from_scale_rotation_translation(
+            Vec3::splat(scale),
+            Quat::from_rotation_z(turn.to_radians()),
+            Vec3::new(x, y, 0.0),
+        )
+    };
+    let flat = shaders
+        .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+        .expect("a shader");
+    let colored = shaders
+        .add::<[f32; 7], ()>("vertex color", &shader("vertex_color.slang"), Blend::Opaque)
+        .expect("a shader");
+    let corners = [
+        [-0.5, -0.5, 0.0],
+        [0.5, -0.5, 0.0],
+        [0.5, 0.5, 0.0],
+        [-0.5, 0.5, 0.0],
+    ];
+    let square = meshes
+        .add("square", &corners, &[0, 1, 2, 2, 3, 0])
+        .expect("a mesh");
+    let corner = |[x, y, z]: [f32; 3], [r, g, b, a]: [f32; 4]| [x, y, z, r, g, b, a];
+    let vertices = [
+        corner([0.0, 0.5, 0.0], [1.0, 0.0, 0.0, 1.0]),
+        corner([0.5, -0.5, 0.0], [0.0, 1.0, 0.0, 1.0]),
+        corner([-0.5, -0.5, 0.0], [0.0, 0.0, 1.0, 1.0]),
+    ];
+    let triangle = meshes
+        .add("triangle", &vertices, &[0, 1, 2])
+        .expect("a mesh");
+    // White, red, blue and black, each unlike the others, so that a texel shifted to its neighbor's
+    // place, across, down or both, shows another color.
+    let tile = [
+        [255, 255, 255, 255],
+        [255, 0, 0, 255],
+        [0, 0, 255, 255],
+        [0, 0, 0, 255],
+    ];
+    let tile = textures
+        .add("tile", [2, 2], tile.as_flattened())
+        .expect("a texture");
+    let mut draws = Draws::default();
+    let blue = Vec4::new(0.2, 0.3, 0.8, 1.0);
+    draws.push(square, flat, transform(2.5, 30.0, [0.5, 0.5]), blue);
+    let orange = Vec4::new(0.9, 0.4, 0.1, 1.0);
+    draws.push(square, flat, transform(0.8, 0.0, [3.2, 1.8]), orange);
+    draws.push(triangle, colored, transform(2.0, 0.0, [1.0, 0.5]), ());
+    // Across the last view's bottom, 4 units by half a unit: 160 by 20 pixels, the tile repeated
+    // to a texel each, whose centers are the pixels' centers.
+    let band = Sprite {
+        texture: tile,
+        rect: [Vec2::ZERO, Vec2::new(80.0, 10.0)],
+        sampler: Sampler::NearestRepeat,
+        ..Sprite::default()
+    };
+    let along = Mat4::from_translation(Vec3::new(1.0, -1.25, 0.0))
+        * Mat4::from_scale(Vec3::new(4.0, 0.5, 1.0));
+    draws.push_sprite(along, band);
+
+    let view = |origin, size| Viewport { origin, size };
+    let views = [
+        view([0, 0], [WIDTH, HEIGHT]),
+        view([100, 20], [0, 160]),
+        view([40, 10], [160, 180]),
+        view([100, 20], [160, 160]),
+        view([100, 20], [200, 140]),
+        view([100, 20], [200, 160]),
+        view([100, 20], [160, 160]),
+        view([100, 20], [160, 160]),
+        view([100, 20], [160, 160]),
+    ];
+    let read_back = |renderer: &mut Renderer| {
+        (renderer.read_back())
+            .expect("the frame's pixels")
+            .expect("a headless renderer's frame can be read back")
+    };
+    let mut shown = None;
+    for (frame, viewport) in views.into_iter().enumerate() {
+        let data = RenderData {
+            clear_color: CLEAR,
+            viewport,
+            camera,
+            meshes: &mut meshes,
+            shaders: &mut shaders,
+            textures: &mut textures,
+            draws: &draws,
+        };
+        render_without_ui(&mut renderer, data);
+        match frame {
+            1 => {
+                assert_eq!(renderer.drawn(), DrawCounts::default());
+                let pixels = read_back(&mut renderer);
+                // `CLEAR`, encoded.
+                let clear = [39, 48, 63, 255];
+                for pixel in pixels.as_chunks::<4>().0 {
+                    let close = pixel.iter().zip(clear).all(|(&a, b)| a.abs_diff(b) <= 1);
+                    assert!(close, "a shut view left {pixel:?}, not the clear color");
+                }
+            }
+            3 => {
+                let pixels = read_back(&mut renderer);
+                compare("views", WIDTH, HEIGHT, &pixels);
+                shown = Some(pixels);
+            }
+            _ => {}
+        }
+    }
+    let drawn = DrawCounts {
+        draws: 3,
+        instances: 4,
+    };
+    assert_eq!(renderer.drawn(), drawn);
+    assert!(
+        Some(read_back(&mut renderer)) == shown,
+        "the view showed otherwise once it was 160 by 160 again and kept that size"
+    );
+    check(renderer, "views", WIDTH, HEIGHT);
 }
 
 /// Renders a frame of `data`, without UI.

@@ -12,6 +12,7 @@ mod shader;
 mod sprite;
 mod texture;
 mod ui;
+mod view;
 
 use std::iter;
 use std::ops::Range;
@@ -22,6 +23,7 @@ use bytemuck::NoUninit;
 use gg_core::math::Mat4;
 use gg_core::{Error, Result};
 use gg_gpu::{ColorImage, Device, Frames, Instance, InstanceDesc, Surface, Swapchain, Target};
+use tracing::trace;
 
 pub use camera::{Camera, Projection};
 pub use gg_gpu::{Blend, Sampler, Validation, Window};
@@ -33,6 +35,7 @@ pub use ui::Ui;
 
 use mesh::MeshPass;
 use ui::UiPass;
+use view::ViewPass;
 
 /// The `size` pixels of a frame whose top left is at `origin`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,9 +127,11 @@ pub struct DrawCounts {
 
 /// What a frame draws besides UI: plain data, which the engine extracts every frame.
 pub struct RenderData<'a> {
-    /// The color the whole frame clears to, in linear RGBA.
+    /// The color the game's view clears to before the meshes are drawn, and the frame around it,
+    /// in linear RGBA.
     pub clear_color: [f32; 4],
-    /// The game's view, which the meshes are drawn in.
+    /// Where the game's view shows in the frame. The meshes are drawn into an image of the view's
+    /// own, its size, which the frame then shows there.
     pub viewport: Viewport,
     /// What the view sees the world from.
     pub camera: Camera,
@@ -162,6 +167,9 @@ pub struct Renderer {
     window_keys: Vec<u64>,
     windows: Vec<Swapchain>,
     meshes: MeshPass,
+    view: ViewPass,
+    /// What the game's view renders into, the size it last had, which has an area.
+    view_image: Option<ColorImage>,
     ui: UiPass,
     instance: Arc<Instance>,
     device: Arc<Device>,
@@ -207,6 +215,10 @@ impl Renderer {
 
     /// A renderer without a window, which renders into an offscreen image of `width` by
     /// `height` pixels.
+    ///
+    /// # Panics
+    ///
+    /// If a side is 0.
     pub fn headless(settings: &Settings<'_>, width: u32, height: u32) -> Result<Self> {
         let _zone = gg_core::zone!();
         let instance = Instance::new(&InstanceDesc {
@@ -227,14 +239,16 @@ impl Renderer {
     ) -> Result<Self> {
         let format = match &output {
             Output::Window(swapchain) => swapchain.format(),
-            Output::Offscreen(image) => image.format(),
+            Output::Offscreen(_) => ColorImage::FORMAT,
         };
         Ok(Self {
             frames: Frames::new(device)?,
             output,
             window_keys: Vec::new(),
             windows: Vec::new(),
-            meshes: MeshPass::new(device, format),
+            meshes: MeshPass::new(device),
+            view: ViewPass::new(device, format)?,
+            view_image: None,
             ui: UiPass::new(device, format)?,
             instance: instance.clone(),
             device: device.clone(),
@@ -351,6 +365,18 @@ impl Renderer {
         // always panics. A view without an area draws nothing, so its aspect ratio doesn't matter.
         let [width, height] = data.viewport.size;
         let view_projection = data.camera.view_projection(width as f32 / height as f32);
+        // The view renders into an image of its own size, made again in the frame that changes
+        // its size, so that it never shows stretched; the old one retires until the frames that
+        // use it have finished. A drag that resizes the view makes an image every frame, which
+        // growing it in steps, and rendering into part of it, would not. A view without an area
+        // renders nothing, and keeps the image it had.
+        let has_view = width > 0 && height > 0;
+        if has_view
+            && (self.view_image.as_ref()).is_none_or(|image| image.size() != data.viewport.size)
+        {
+            self.view_image = Some(ColorImage::new(&self.device, width, height, "view")?);
+            trace!(width, height, "View image made");
+        }
         let target = match &mut self.output {
             Output::Window(swapchain) => Target::Swapchain(swapchain),
             Output::Offscreen(image) => Target::Image(image),
@@ -359,17 +385,33 @@ impl Renderer {
         let others = (self.window_keys.iter().zip(&mut self.windows))
             .filter(|(key, _)| has_ui(key))
             .map(|(_, swapchain)| Target::Swapchain(swapchain));
-        let Some(mut frame) = self.frames.begin(iter::once(target).chain(others))? else {
+        // After the output and the other windows, which keep their places.
+        let view_target = 1 + self.window_keys.iter().filter(|key| has_ui(key)).count();
+        let view = (self.view_image.as_mut())
+            .filter(|_| has_view)
+            .map(Target::Image);
+        let targets = iter::once(target).chain(others).chain(view);
+        let Some(mut frame) = self.frames.begin(targets)? else {
             return Ok(false);
         };
         self.meshes.upload(&mut frame, data.meshes, data.textures)?;
         self.ui.write_textures(&mut frame)?;
+        let (counts, view) = if has_view {
+            let mut pass = frame
+                .begin_pass(view_target, c"view", data.clear_color)
+                .expect("an offscreen image is always there");
+            let counts = self.meshes.draw(&mut pass, view_projection, data.draws)?;
+            drop(pass);
+            (counts, Some(frame.begin_sampling(view_target)))
+        } else {
+            (DrawCounts::default(), None)
+        };
         let mut pass = frame
             .begin_pass(0, c"frame", data.clear_color)
             .expect("a frame's first target has an image");
-        let counts = self
-            .meshes
-            .draw(&mut pass, data.viewport, view_projection, data.draws)?;
+        if let Some(image) = view {
+            self.view.draw(&mut pass, data.viewport, image);
+        }
         self.ui
             .draw(&mut pass, ui.primitives, ui.pixels_per_point)?;
         drop(pass);

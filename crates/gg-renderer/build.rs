@@ -7,7 +7,7 @@ use std::env;
 use std::path::{self, PathBuf};
 use std::process::Command;
 
-const SHADERS: [&str; 2] = ["egui", "sprite"];
+const SHADERS: [&str; 3] = ["egui", "sprite", "view"];
 
 fn main() {
     println!("cargo::rerun-if-env-changed=SLANGC");

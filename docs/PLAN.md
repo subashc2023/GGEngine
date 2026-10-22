@@ -79,6 +79,11 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   nearest sampler, at any zoom. The sandbox draws a map of tiles from a tile set, and its swarm
   from a sheet; a GPU test checks cells packed edge to edge, side by side, flipped, turned and cut
   across, against a reference image.
+- **The game's view offscreen** (2026-10-22): the game's view renders into an image of its own,
+  the size of the dock's central area in pixels, made again in the frame that changes that size,
+  which the frame shows there under the UI; games' pipelines are made for the image's format
+  rather than the window's. A GPU test checks a view that changes size, shuts and opens again,
+  against a reference image.
 
 ## Now: the ECS core
 
@@ -185,6 +190,7 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Layers making textures from their own pixels; `Textures::add` takes pixels, but `Context` adds only PNGs | A game makes its own textures |
 | Pixels, vertices and instances' transforms and parameters reach the GPU through the frame's arena, which merges the buffers it grew into, holding two to three times the largest frame for each frame in flight: by its growth rule, about 20 MB each for 100,000 sprites, which use 10.4 MB a frame; and a frame that adds many textures leaves that much host memory held | Phase 4, with uploads through the transfer queue |
 | More than one camera or view, such as split screen or the editor's scene view | A game or the editor draws several |
+| The game's view in a panel that docks and tabs, and keys reaching the layers only while it has focus, as editors' views do; the view is the central area, and keys reach the layers wherever the pointer is unless one of egui's widgets has focus | A tool in the game's process shows the view among its panels |
 | Converting between the view's pixels and the world, to pick what's under the cursor or zoom toward it; the camera controller zooms about the view's center | Something picks with the mouse, or a tool zooms toward the cursor |
 | The camera controller's keys, W, A, S, D, Q and E, and the mouse wheel, are fixed, and it takes no gamepad | Phase 3, with input actions |
 | Checking a game's shader against the contract on `Shaders::add` through Slang reflection: its push constants, its resources, and the sizes of its vertex and parameter structs against their types'; until then it's trusted, and validation checks it in debug builds | Phase 4, with Slang reflection |

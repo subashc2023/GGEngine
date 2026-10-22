@@ -1,4 +1,5 @@
-//! Offscreen color images: what headless runs render into, and what tests read back.
+//! Offscreen color images: what headless runs render into, what tests read back, and what later
+//! passes of a frame sample, such as the game's view.
 
 use std::sync::Arc;
 
@@ -8,14 +9,11 @@ use gg_core::Result;
 use crate::buffer::Buffer;
 use crate::device::Retired;
 use crate::vma::{Allocation, Memory};
-use crate::{COLOR_RANGE, Device, vk_error};
+use crate::{COLOR_RANGE, Device, Format, vk_error};
 
-/// The format of offscreen images: 8-bit sRGB, as windows usually present, so what's read back
-/// matches what a window would show.
-pub(crate) const FORMAT: vk::Format = vk::Format::R8G8B8A8_SRGB;
-
-/// A color image in GPU memory, which frames render into and the CPU can read back. Dropping it
-/// retires it until the GPU is done with it.
+/// A color image in GPU memory, which frames render into, their later passes sample through its
+/// slot in the bindless set, and the CPU can read back. Dropping it retires it, and its slot,
+/// until the GPU is done with it.
 pub struct ColorImage {
     device: Arc<Device>,
     raw: vk::Image,
@@ -25,46 +23,79 @@ pub struct ColorImage {
     extent: vk::Extent2D,
     /// The layout the work submitted so far leaves the image in.
     layout: vk::ImageLayout,
+    /// Its slot in the bindless set, past the placed ones.
+    index: u32,
 }
 
 impl ColorImage {
-    /// An image of `width` by `height` pixels, with `name` as its debug name.
+    /// The format of every color image: 8-bit sRGB, as windows usually present, so what's read
+    /// back matches what a window would show. The game's view is one, so games' pipelines are
+    /// made for it.
+    pub const FORMAT: Format = Format(vk::Format::R8G8B8A8_SRGB);
+
+    /// An image of `width` by `height` pixels, in a free slot of the bindless set past the placed
+    /// ones, with `name` as its debug name.
+    ///
+    /// # Panics
+    ///
+    /// If a side is 0.
     pub fn new(device: &Arc<Device>, width: u32, height: u32, name: &str) -> Result<Self> {
+        assert!(
+            width > 0 && height > 0,
+            "a {width}x{height} image, but an image has an area"
+        );
         let extent = vk::Extent2D { width, height };
         let info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
-            .format(FORMAT)
+            .format(Self::FORMAT.0)
             .extent(extent.into())
             .mip_levels(1)
             .array_layers(1)
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC);
+            .usage(
+                vk::ImageUsageFlags::COLOR_ATTACHMENT
+                    | vk::ImageUsageFlags::SAMPLED
+                    | vk::ImageUsageFlags::TRANSFER_SRC,
+            );
         let (raw, allocation) = device.allocator().create_image(&info, Memory::Gpu)?;
-        // From here on, dropping the image retires what has been made so far.
-        let mut image = Self {
-            device: device.clone(),
-            raw,
-            view: vk::ImageView::null(),
-            allocation: Some(allocation),
-            extent,
-            layout: vk::ImageLayout::UNDEFINED,
-        };
         let view_info = vk::ImageViewCreateInfo::default()
             .image(raw)
             .view_type(vk::ImageViewType::TYPE_2D)
-            .format(FORMAT)
+            .format(info.format)
             .subresource_range(COLOR_RANGE);
         // SAFETY: the image is live and bound to memory.
+        let view = match unsafe { device.raw().create_image_view(&view_info, None) } {
+            Ok(view) => view,
+            Err(error) => {
+                device.retire(Retired::Image(raw, vk::ImageView::null(), allocation));
+                return Err(vk_error("vkCreateImageView", error));
+            }
+        };
+        // SAFETY: the view is of a live sampled image, which shaders sample only through the index
+        // `Frame::begin_sampling` returns, once it has put the image in the shader-read-only
+        // layout.
+        let index = match unsafe { device.bindless().add(device.raw(), view, None) } {
+            Ok(index) => index,
+            Err(error) => {
+                device.retire(Retired::Image(raw, view, allocation));
+                return Err(error);
+            }
+        };
+        // SAFETY: the image and view are live.
         unsafe {
-            image.view = device
-                .raw()
-                .create_image_view(&view_info, None)
-                .map_err(|e| vk_error("vkCreateImageView", e))?;
             device.set_name(raw, name);
-            device.set_name(image.view, name);
+            device.set_name(view, name);
         }
-        Ok(image)
+        Ok(Self {
+            device: device.clone(),
+            raw,
+            view,
+            allocation: Some(allocation),
+            extent,
+            layout: vk::ImageLayout::UNDEFINED,
+            index,
+        })
     }
 
     /// Copies the image to the CPU as rows of RGBA8 pixels, sRGB-encoded and tightly packed, top
@@ -130,9 +161,9 @@ impl ColorImage {
         buffer.read()
     }
 
-    /// The image's format, which pipelines that draw into it are made for.
-    pub fn format(&self) -> crate::Format {
-        crate::Format(FORMAT)
+    /// The width and height in pixels.
+    pub fn size(&self) -> [u32; 2] {
+        [self.extent.width, self.extent.height]
     }
 
     /// The image's handle, for code that breaks the safe API's rules on purpose, such as tests
@@ -154,13 +185,20 @@ impl ColorImage {
     pub(crate) fn set_layout(&mut self, layout: vk::ImageLayout) {
         self.layout = layout;
     }
+
+    /// Its slot in the bindless set, which shaders may sample only as `Frame::begin_sampling`
+    /// says.
+    pub(crate) fn index(&self) -> u32 {
+        self.index
+    }
 }
 
 impl Drop for ColorImage {
     fn drop(&mut self) {
         if let Some(allocation) = self.allocation.take() {
-            self.device
-                .retire(Retired::Image(self.raw, self.view, allocation));
+            self.device.retire(Retired::Texture(
+                self.raw, self.view, allocation, self.index,
+            ));
         }
     }
 }
