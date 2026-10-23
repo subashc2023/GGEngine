@@ -6,7 +6,7 @@
 
 mod read;
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
 mod write;
 
 use std::borrow::Cow;
@@ -24,7 +24,7 @@ use read::Loaded;
 const MAX_DEPTH: u32 = 64;
 
 /// The hints of a component's value, which has no field's.
-static NO_HINTS: Meta = Meta {
+pub(super) static NO_HINTS: Meta = Meta {
     min: None,
     max: None,
     show: Show::Plain,

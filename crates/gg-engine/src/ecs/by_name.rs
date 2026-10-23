@@ -168,7 +168,7 @@ impl World {
     }
 
     /// Which column of the table at `at` holds the entity's `component`, whose id is `id`.
-    fn column(&self, at: Location, id: ComponentId, component: &str) -> Result<usize> {
+    pub(super) fn column(&self, at: Location, id: ComponentId, component: &str) -> Result<usize> {
         let table = &self.tables[at.table as usize];
         let Some(column) = table.position(id) else {
             let names = table.components.iter().map(|&id| self.components.name(id));

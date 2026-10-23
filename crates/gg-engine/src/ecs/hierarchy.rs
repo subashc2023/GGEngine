@@ -1,8 +1,9 @@
 //! The hierarchy: entities with parents, which carry their children along. A child has its parent
 //! as its [`Parent`] component, and the world keeps each entity's links to its children, so that
 //! despawning one takes its descendants with it; both change only through [`World::set_parent`]
-//! and [`World::despawn`], and as a scene's entities are spawned with theirs, by
-//! [`World::load_scene`] and [`World::place_prefab`].
+//! and [`World::despawn`]; as a scene's entities are spawned with theirs, by
+//! [`World::load_scene`] and [`World::place_prefab`]; and through operations, as a create spawns
+//! an entity with its parent, and a delete takes a subtree out, which its undo puts back.
 
 use std::iter;
 
@@ -111,8 +112,8 @@ impl World {
     /// `None`, and returns its old parent, which sets it back, as that parent's last child. It
     /// keeps its [`Transform`](crate::Transform), which is relative to its parent's, so that it
     /// moves in the world as its new parent is placed. Making it a child of the parent it has
-    /// changes nothing, not even its place among its siblings. Spawning a child is spawning it,
-    /// then setting its parent, which moves it to another table.
+    /// changes nothing, not even its place among its siblings. Spawning a child from code is
+    /// spawning it, then setting its parent, which moves it to another table.
     ///
     /// Fails with `ecs.no_entity` if `child` or `parent` isn't alive, and with `ecs.parent_cycle`
     /// if `parent` is `child` or one of its descendants. A refusal changes nothing.
@@ -183,6 +184,18 @@ impl World {
     /// Fails with `ecs.no_entity` if it isn't alive, removing nothing.
     pub fn despawn(&mut self, entity: Entity) -> Result<()> {
         self.locate(entity)?;
+        self.take_apart(entity, |world, taken, _| world.remove_slot(taken.index));
+        Ok(())
+    }
+
+    /// Takes `entity`, which is alive, and its descendants out of the hierarchy, children before
+    /// their parents, each parent's first to last: each is unlinked, a root without children, and
+    /// given to `out` beside its parent, if it had one, to take it out of the world.
+    pub(super) fn take_apart(
+        &mut self,
+        entity: Entity,
+        mut out: impl FnMut(&mut Self, Entity, Option<Entity>),
+    ) {
         // Leaves first: down through first children to one without any, which is removed, and
         // then from its parent again, which needs no stack. Each removal moves a table's last row,
         // which may be one of the subtree's, so each is found where it is as it's removed.
@@ -192,10 +205,11 @@ impl World {
                 at = first;
             }
             let up = self.meta[at as usize].links.parent;
+            let (taken, parent) = (self.entity_at(at), self.parent_of(at));
             self.unlink(at);
-            self.remove_slot(at);
+            out(self, taken, parent);
             if at == entity.index {
-                return Ok(());
+                return;
             }
             at = up;
         }
@@ -288,7 +302,7 @@ pub(super) mod tests {
     /// Panics unless the world's links agree with its `Parent`s: each living entity's parent, as
     /// its links have it, is the one its `Parent` names, which is alive and lists it among its
     /// children once, between siblings who list it as theirs; a root has no siblings; no entity is
-    /// its own ancestor; and a free or retired slot has no links.
+    /// its own ancestor; and a free, vacant or retired slot has no links.
     pub(in crate::ecs) fn check_links(world: &World) {
         let slots = world.meta.len();
         for (index, meta) in world.meta.iter().enumerate() {

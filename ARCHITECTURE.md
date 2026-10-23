@@ -193,10 +193,18 @@ A project's state is text that people and agents edit, diff and merge with ordin
   than sequential, so entities added on two branches neither collide nor land on the same
   lines.
 - **Operations.** Every authoring change, by a person or an agent, is an operation with an
-  inverse: create or delete an entity, add or remove a component, set a field, reparent. A
-  running game applies operations in the order they arrive, so several clients can edit it at
-  once, and their log gives undo, review and replay. Editing a scene file while the game runs
-  is an edit too: the engine applies the difference as operations.
+  inverse: create or delete an entity, add or remove a component, set a field, reparent. An
+  operation names entities by their IDs and carries values as reflection's. Applying one checks
+  everything before anything changes, and gives what undoes it: another operation, but for a
+  delete and a remove, whose inverses keep what they took out, typed, so that what's opaque
+  comes back too. A delete keeps its entities' slots, so that undoing it gives each back under
+  its handle, and every reference to it is whole again. The log keeps the operations applied, in
+  order, with their inverses: it undoes and redoes them, merges a gesture's sets of one field,
+  such as a drag's, into one edit, and drops an entry whose undo the world refuses, since the
+  world has moved on from it. A running game applies operations in the order they arrive, so
+  several clients can edit it at once, and their log gives undo, review and replay. Editing a
+  scene file while the game runs is an edit too: the engine applies the difference as
+  operations.
 
 ## ECS
 
@@ -222,19 +230,21 @@ peer-to-peer rollback; the engine supplies these pieces.
 
 The world is a `World` of entities and their components, in safe Rust. An entity is a handle,
 its slot and which use of the slot it is, so that a despawned entity's handle never names
-another. A component is a struct or an enum that derives `Component`, which describes it to
-reflection; it's `Clone`, for snapshots, and `Send` and `Sync`, for the job system. Components
-live in archetype tables, one for each set of component types, whose rows are its entities and
-whose columns are each type's own `Vec`, which the world reaches through a trait object,
-downcast once a table, rather than through raw pointers. Queries borrow the world, shared to read
-it and exclusively to change it, so that the borrow checker keeps them apart, and walk each
-table's columns as slices. Systems are plain functions over the world, run in a fixed order. The
-order queries find entities in follows only from the changes made: tables are kept in the order
-they were made, despawning an entity or changing its components moves its table's last row into
-its place, the last freed slot is the first taken, and no hash map is iterated. So it's the same
-in every run, as the deterministic mode needs, but means nothing a game may rely on: anything
-ordered, such as what's drawn over what, orders by its components' values, or by its entities'
-IDs.
+another. A delete operation leaves its entities' slots vacant rather than free, their uses as
+they were, until its inverse puts them back or is dropped, so that an undone delete's entities
+have their handles again. A component is a struct or an enum that derives `Component`, which
+describes it to reflection; it's `Clone`, for snapshots, and `Send` and `Sync`, for the job
+system. Components live in archetype tables, one for each set of component types, whose rows are
+its entities and whose columns are each type's own `Vec`, which the world reaches through a trait
+object, downcast once a table, rather than through raw pointers. Queries borrow the world, shared
+to read it and exclusively to change it, so that the borrow checker keeps them apart, and walk
+each table's columns as slices. Systems are plain functions over the world, run in a fixed order.
+The order queries find entities in follows only from the changes made: tables are kept in the
+order they were made, despawning an entity or changing its components moves its table's last row
+into its place, the last freed slot is the first taken, and no hash map is iterated. So it's the
+same in every run, as the deterministic mode needs, but means nothing a game may rely on:
+anything ordered, such as what's drawn over what, orders by its components' values, or by its
+entities' IDs.
 
 Each entity has a persistent ID, an `EntityId`: a nonzero 64-bit number, written as 16 lowercase
 hex digits, so that IDs sort as their text does and never read as a handle. Each world draws its
@@ -265,21 +275,25 @@ such as a texture's handle, which no value may make. The world reads and sets a 
 component's name and a path, such as `rect[1].y`: a set checks the whole value against the
 description before anything changes, refuses a number outside its field's bounds, and returns
 the old value, which sets it back unless code stored one that a set refuses. The Inspector edits
-components through these calls alone, which the tool API will serve.
+components through these calls alone, as operations its log undoes, which the tool API will
+serve.
 
 Entities form a hierarchy, as scenes, prefabs and the camera as a component need: a child has its
 parent as its `Parent` component, and its `Transform` is relative to its parent's, so that a
 parent carries its children along. The world keeps the hierarchy whole. A scene's entities, loaded
-or placed as a prefab, are spawned with their `Parent`s, and after that only `World::set_parent`
-gives, changes or takes away a `Parent`: it keeps the child's own transform, refuses a parent that
-is the child or one of its descendants, and returns the old parent, which sets it back. The typed
-calls that change components take only `Writable` ones, which the derive implements, as does a
-component implemented by hand, and `Parent` doesn't, so that code changing a `Parent` any other
-way doesn't compile; `set_field` refuses it by name. Each slot keeps its entity's links, by slot:
-its parent, as its `Parent` has it, and its children, in the order they became its children,
-which means no more than the order queries find entities in; a load makes each parent's children
-its own in the order of their IDs. So despawning an entity despawns its descendants, children
-first, and the links allocate nothing, though giving or taking away a `Parent` moves the child to
+or placed as a prefab, and those an operation creates or an undo puts back, are spawned with
+their `Parent`s, and after that only `World::set_parent` gives, changes or takes away a
+`Parent`: it keeps the child's own transform, refuses a parent that is the child or one of its
+descendants, and returns the old parent, which sets it back. The typed calls that change
+components take only `Writable` ones, which the derive implements, as does a component
+implemented by hand, and `Parent` doesn't, so that code changing a `Parent` any other way
+doesn't compile; `set_field` and operations refuse it by name. Each slot keeps its entity's
+links, by slot: its parent, as its `Parent` has it, and its children, in the order they became
+its children, which means no more than the order queries find entities in; a load makes each
+parent's children its own in the order of their IDs, an undone delete puts a subtree back in
+its order, the root the last of its parent's children, and an undone reparent makes the child
+the last of its old parent's. So despawning an entity despawns its descendants, children first,
+and the links allocate nothing, though giving or taking away a `Parent` moves the child to
 another table, as `insert` and `remove` do; snapshots will copy the links with the tables. World
 transforms aren't stored: drawing computes each child's from its ancestors, every frame, while a
 table of roots draws by its transforms alone, for one check a frame; the links cost each slot 16

@@ -21,7 +21,7 @@ use super::{MAX_DEPTH, NO_HINTS};
 use crate::Reflect;
 use crate::ecs::by_name::about;
 use crate::ecs::id::Named;
-use crate::ecs::table::{AnyColumn, ComponentId};
+use crate::ecs::table::{AnyColumn, ComponentId, Row};
 use crate::ecs::{Entity, EntityId, Parent, World};
 use crate::reflect::{self, Field, Meta, Name, Shape, Type, Types, Value, Variant};
 
@@ -30,8 +30,7 @@ pub(super) struct Loaded {
     pub(super) id: EntityId,
     /// The handle it takes as it's spawned.
     pub(super) handle: Entity,
-    /// Its components, a one-row column each, sorted by their ids.
-    pub(super) row: Vec<(ComponentId, Box<dyn AnyColumn>)>,
+    pub(super) row: Row,
     /// Its parent's index among the scene's entities, and the item its `Parent` is.
     pub(super) parent: Option<(usize, u32)>,
     /// The item its key is, once it's read.
@@ -485,7 +484,7 @@ impl<'de> Visitor<'de> for Components<'_, '_> {
         let id = self.load.entities[self.index].id;
         let parent = self.load.world.component::<Parent>();
         let parent = parent.expect("every world has registered `Parent`");
-        let mut row: Vec<(ComponentId, Box<dyn AnyColumn>)> = Vec::new();
+        let mut row: Row = Vec::new();
         loop {
             let key = ComponentKey {
                 load: &mut *self.load,

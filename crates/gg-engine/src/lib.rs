@@ -1,8 +1,10 @@
 //! What apps build on: the main loop, window and input, layers and their UI, the world of entities
 //! and their components, which it draws, handing each frame's render data to `gg-renderer`;
 //! reflection, which describes the components' types so that tools reach them by name, and the
-//! Inspector, which edits them; scenes and prefabs, the world's entities as canonical text; and
-//! measuring each frame, for the log and the Performance panel. Assets to come.
+//! Inspector, which edits them; scenes and prefabs, the world's entities as canonical text;
+//! operations, the authoring changes made to the world, each with its inverse, and their log, which
+//! undoes and redoes them; and measuring each frame, for the log and the Performance panel. Assets
+//! to come.
 //!
 //! An app's `main` starts the engine; there is no separate entry-point crate.
 
@@ -46,8 +48,8 @@ use chrome::Chrome;
 use dock::Dock;
 pub use dock::Ui;
 pub use ecs::{
-    Bundle, Component, Entities, Entity, EntityId, Parent, Query, QueryIter, QueryIterMut,
-    ReadOnlyQuery, World, Writable,
+    Bundle, Component, Entities, Entity, EntityId, Log, Operation, Parent, Query, QueryIter,
+    QueryIterMut, ReadOnlyQuery, World, Writable,
 };
 /// The UI library layers draw with, in [`Layer::ui`]; apps use it from here, so that they
 /// share the engine's version.

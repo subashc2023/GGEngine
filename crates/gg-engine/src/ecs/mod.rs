@@ -1,11 +1,14 @@
 //! The engine's ECS: entities, which are handles, and their components, data of any reflected type,
 //! kept in archetype tables, a table for each set of component types, and found by queries, or by
 //! name; entities' persistent IDs; the hierarchy, in which entities' parents carry their children
-//! along; and scenes, the world's entities as text.
+//! along; scenes, the world's entities as text; and operations, the authoring changes made to it,
+//! each with its inverse, and their log.
 
 mod by_name;
 mod hierarchy;
 mod id;
+mod log;
+mod ops;
 mod query;
 mod scene;
 mod table;
@@ -26,8 +29,10 @@ use hierarchy::Links;
 pub use hierarchy::Parent;
 pub use id::EntityId;
 use id::IdStream;
+pub use log::Log;
+pub use ops::Operation;
 pub use query::{Query, QueryIter, QueryIterMut, ReadOnlyQuery};
-use table::{AnyColumn, ComponentId, Components, Table};
+use table::{AnyColumn, ComponentId, Components, Row, Table};
 
 use crate::reflect::Reflect;
 
@@ -117,7 +122,7 @@ pub struct World {
     /// of a handle reads `Meta`, and only drawing, as it sorts the rows at one z, and diagnostics,
     /// tools and files read IDs: written as an entity is spawned into the slot and removed from it,
     /// and read through [`World::id`], which checks the handle first. `None` while the slot is
-    /// free, or retired.
+    /// free, vacant or retired.
     entity_ids: Vec<Option<EntityId>>,
     /// Each living entity by its ID; looked up, never iterated. Hashed with SipHash, keyed at
     /// random, so that IDs from files can't be chosen to collide.
@@ -157,7 +162,8 @@ static WORLDS: AtomicU64 = AtomicU64::new(0);
 
 struct Meta {
     generation: NonZeroU32,
-    /// `None` while the slot is free, or retired.
+    /// `None` while the slot is free; vacant, kept for the entity a delete took, which its inverse
+    /// puts back; or retired.
     location: Option<Location>,
     /// Its entity's parent and children, which a free slot has none of.
     links: Links,
@@ -249,28 +255,29 @@ impl World {
     /// Spawns an entity with ID `id`, which no living entity has, and the components in `row`, a
     /// one-row column each, sorted by their ids, which a scene built: the entity `expected`, the
     /// handle [`next_slots`](Self::next_slots) predicted for it.
-    fn spawn_built(
-        &mut self,
-        id: EntityId,
-        row: Vec<(ComponentId, Box<dyn AnyColumn>)>,
-        expected: Entity,
-    ) {
-        let mut signature = mem::take(&mut self.scratch);
-        signature.clear();
-        signature.extend(row.iter().map(|&(component, _)| component));
-        let table = self.table(&signature);
-        self.scratch = signature;
+    fn spawn_built(&mut self, id: EntityId, row: Row, expected: Entity) {
         let entity = self.take_slot();
         assert_eq!(
             entity, expected,
             "a scene's entity takes the handle predicted for it"
         );
-        self.entity_ids[entity.index as usize] = Some(id);
         let given = self.by_id.insert(id, entity);
         assert!(
             given.is_none(),
             "a scene gives ID {id}, which a living entity has"
         );
+        self.place(entity, id, row);
+    }
+
+    /// Puts `entity`, whose slot holds none, with ID `id`, which the world finds it by already,
+    /// into the table of the components in `row`, a one-row column each, sorted by their ids.
+    fn place(&mut self, entity: Entity, id: EntityId, row: Row) {
+        let mut signature = mem::take(&mut self.scratch);
+        signature.clear();
+        signature.extend(row.iter().map(|&(component, _)| component));
+        let table = self.table(&signature);
+        self.scratch = signature;
+        self.entity_ids[entity.index as usize] = Some(id);
         let into = &mut self.tables[table as usize];
         let row_at = into.entities.len() as u32;
         for ((_, mut from), to) in row.into_iter().zip(into.columns.iter_mut()) {
@@ -301,13 +308,7 @@ impl World {
             column[at.row as usize] = component;
             return Ok(());
         }
-        let mut signature = mem::take(&mut self.scratch);
-        signature.clear();
-        signature.extend_from_slice(&self.tables[at.table as usize].components);
-        let place = signature.binary_search(&id).unwrap_err();
-        signature.insert(place, id);
-        let to = self.table(&signature);
-        self.scratch = signature;
+        let to = self.table_with(at, id);
         self.move_entity(entity, at, to);
         let column = self.tables[to as usize].column_mut::<T>(id);
         column.expect("the table has the component").push(component);
@@ -331,14 +332,60 @@ impl World {
             return Ok(None);
         };
         let component = column.swap_remove(at.row as usize);
+        let to = self.table_without(at, id);
+        self.move_entity(entity, at, to);
+        Ok(Some(component))
+    }
+
+    /// Gives `entity`, at `at`, which has no component `id`, the value in `column`, a one-row
+    /// column of it: as [`put`](Self::put) does, for a component whose type isn't known.
+    fn give(
+        &mut self,
+        entity: Entity,
+        at: Location,
+        id: ComponentId,
+        mut column: Box<dyn AnyColumn>,
+    ) {
+        let to = self.table_with(at, id);
+        self.move_entity(entity, at, to);
+        let into = &mut self.tables[to as usize];
+        let position = into.position(id).expect("the table has the component");
+        column.move_row(0, &mut *into.columns[position]);
+    }
+
+    /// Takes `entity`'s component `id` away, at `at`, and returns it in a one-row column of its
+    /// own: as [`take`](Self::take) does, for a component whose type isn't known.
+    fn take_out(&mut self, entity: Entity, at: Location, id: ComponentId) -> Box<dyn AnyColumn> {
+        let mut column = self.components.new_column(id);
+        let from = &mut self.tables[at.table as usize];
+        let position = from.position(id).expect("the entity has the component");
+        from.columns[position].move_row(at.row as usize, &mut *column);
+        let to = self.table_without(at, id);
+        self.move_entity(entity, at, to);
+        column
+    }
+
+    /// The table of the component types of the entity at `at`, and `id`, which it hasn't.
+    fn table_with(&mut self, at: Location, id: ComponentId) -> u32 {
+        let mut signature = mem::take(&mut self.scratch);
+        signature.clear();
+        signature.extend_from_slice(&self.tables[at.table as usize].components);
+        let place = signature.binary_search(&id).unwrap_err();
+        signature.insert(place, id);
+        let to = self.table(&signature);
+        self.scratch = signature;
+        to
+    }
+
+    /// The table of the component types of the entity at `at`, but `id`.
+    fn table_without(&mut self, at: Location, id: ComponentId) -> u32 {
         let mut signature = mem::take(&mut self.scratch);
         signature.clear();
         let from = &self.tables[at.table as usize].components;
         signature.extend(from.iter().filter(|&&other| other != id));
         let to = self.table(&signature);
         self.scratch = signature;
-        self.move_entity(entity, at, to);
-        Ok(Some(component))
+        to
     }
 
     /// `entity`'s component of type `T`; `None` if it has none, or isn't alive.
@@ -475,15 +522,39 @@ impl World {
         let at = self.meta[index as usize].location;
         let at = at.expect("the slot's entity is alive");
         let moved = self.tables[at.table as usize].swap_remove(at.row as usize);
+        self.leave(index, at, moved);
+        self.free_slot(index);
+    }
+
+    /// As [`remove_slot`](Self::remove_slot), but returns the entity's components, a one-row column
+    /// each, sorted by their ids, and leaves its slot vacant rather than free: its generation as it
+    /// was, and taken by no entity until it's freed, so that the entity can come back into it under
+    /// its handle, as an undone delete does.
+    fn vacate(&mut self, index: u32) -> Row {
+        let at = self.meta[index as usize].location;
+        let at = at.expect("the slot's entity is alive");
+        let table = &mut self.tables[at.table as usize];
+        let (row, moved) = table.take_row(at.row as usize, &self.components);
+        self.leave(index, at, moved);
+        row
+    }
+
+    /// The rest of taking slot `index`'s entity, at `at`, out of its table, whose entity `moved`,
+    /// if any, took its row: it goes from the world, and its ID with it.
+    fn leave(&mut self, index: u32, at: Location, moved: Option<Entity>) {
         if let Some(moved) = moved {
             self.meta[moved.index as usize].location = Some(at);
         }
-        // Before the slot retires, so that a retired slot's ID goes too.
         let id = self.entity_ids[index as usize].take();
         self.by_id.remove(&id.expect("a living entity has an ID"));
         self.version += 1;
+        self.meta[index as usize].location = None;
+    }
+
+    /// Frees slot `index`, which no entity is in, for the next spawned: under its next generation,
+    /// so that the handle of the entity it held never names another.
+    fn free_slot(&mut self, index: u32) {
         let meta = &mut self.meta[index as usize];
-        meta.location = None;
         // A slot whose generation can't go higher retires, so that no handle names another
         // entity: its `Meta` stays, for every 4 billion entities spawned in the slot.
         if let Some(next) = meta.generation.checked_add(1) {
@@ -789,12 +860,12 @@ mod tests {
         }
     }
 
-    /// SplitMix64, seeded, so that the test takes the same steps every run.
-    struct Rng(u64);
+    /// SplitMix64, seeded, so that a test takes the same steps every run.
+    pub(in crate::ecs) struct Rng(pub(in crate::ecs) u64);
 
     impl Rng {
         /// A number below `n`.
-        fn below(&mut self, n: usize) -> usize {
+        pub(in crate::ecs) fn below(&mut self, n: usize) -> usize {
             (splitmix64(&mut self.0) % n as u64) as usize
         }
     }

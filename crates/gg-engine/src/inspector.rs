@@ -7,19 +7,21 @@ use std::f64::consts::PI;
 
 use egui::color_picker::Alpha;
 use egui::ecolor::{Hsva, HsvaGamma};
+use egui::{KeyboardShortcut, Modifiers};
 use gg_core::math::{EulerRot, Quat, Vec2, Vec3, Vec4};
 use tracing::warn;
 
 use crate::reflect::{self, Bound, Field, Meta, Name, Shape, Show, Type, Types, Value};
-use crate::{Context, Entity, EntityId, Layer, Ui, World};
+use crate::{Context, Entity, EntityId, Layer, Log, Operation, Ui, World};
 
 /// The Entities and Inspector panels, which an app adds as an overlay,
 /// `.overlay(gg_engine::Inspector::default())`. The Entities panel lists the world's entities, all
 /// of them or those with one component, to pick one from, and finds one by an ID pasted into its
 /// Find field, from a scene or a log; the Inspector panel shows the picked
 /// entity's components, each field with a widget for its type and hints, and sets a field as its
-/// widget changes it, through [`World::set_field`]. That checks the value: a value refused shows
-/// beside its field, and is logged. Edits apply at once, with no undo yet.
+/// widget changes it, through a [`Log`] of the edits, as [`World::set_field`] does. That checks the
+/// value: a value refused shows beside its field, and is logged. The Edit menu, Ctrl+Z (Cmd+Z on
+/// macOS) and Ctrl+Shift+Z or Ctrl+Y undo and redo them, a drag, or a number typed, as one edit.
 #[derive(Default)]
 pub struct Inspector {
     /// By its ID, which outlives it, so that a pick despawned is still named as it was shown.
@@ -32,6 +34,61 @@ pub struct Inspector {
     not_found: Option<String>,
     /// The last value refused of each field of the picked entity.
     refusals: Vec<Refusal>,
+    /// The edits made, which undo and redo step through.
+    log: Log,
+    /// Why the last undo or redo was refused, until the next edit, undo or redo.
+    not_stepped: Option<String>,
+}
+
+/// Undoes the last edit.
+const UNDO: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, egui::Key::Z);
+
+/// Redo the last edit undone; the Edit menu shows the first.
+const REDO: [KeyboardShortcut; 2] = [
+    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), egui::Key::Z),
+    KeyboardShortcut::new(Modifiers::COMMAND, egui::Key::Y),
+];
+
+/// A step through the log of edits, as the Edit menu or a key asks for one.
+#[derive(Clone, Copy)]
+enum Step {
+    Undo,
+    Redo,
+}
+
+/// What a frame's input, in the windows the panels draw in, says of the edits: a press, which
+/// starts another, and a release, which ends one; whether a widget has the pointer or the keys,
+/// which keeps one going; and the step through them a key asks for.
+#[derive(Default)]
+struct Cues {
+    pressed: bool,
+    released: bool,
+    held: bool,
+    step: Option<Step>,
+}
+
+impl Cues {
+    /// Adds what `egui`'s input says, as the window that's drawing has it: a panel's own, if it's
+    /// torn off, or the main one. Its keys ask for a step unless a text field there has them, which
+    /// undo its own text.
+    fn read(&mut self, egui: &egui::Context) {
+        let pointer =
+            egui.input(|input| (input.pointer.any_pressed(), input.pointer.any_released()));
+        self.pressed |= pointer.0;
+        self.released |= pointer.1;
+        self.held |= egui.egui_is_using_pointer() || egui.egui_wants_keyboard_input();
+        if self.step.is_some() || egui.text_edit_focused() {
+            return;
+        }
+        self.step = egui.input_mut(|input| {
+            // Redo's first, since a shortcut matches with Shift held as well.
+            if REDO.iter().any(|redo| input.consume_shortcut(redo)) {
+                Some(Step::Redo)
+            } else {
+                input.consume_shortcut(&UNDO).then_some(Step::Undo)
+            }
+        });
+    }
 }
 
 /// A value [`World::set_field`] refused, at `path` of `component`.
@@ -49,27 +106,83 @@ struct Edit {
 }
 
 impl Layer for Inspector {
+    fn detach(&mut self, cx: &mut Context) {
+        self.log.clear(cx.world_mut());
+    }
+
     fn ui(&mut self, cx: &mut Context, ui: &mut Ui<'_>) {
         let _zone = gg_core::zone!("inspector");
+        let mut chosen = None;
+        ui.menu("Edit", |ui| chosen = self.edit_menu(ui));
         let world = cx.world();
-        ui.panel("Entities", |ui| self.entities(world, ui));
+        let mut cues = Cues::default();
+        ui.panel("Entities", |ui| self.entities(world, ui, &mut cues));
         let mut edits = Vec::new();
         ui.panel("Inspector", |ui| {
             // A new panel floats smaller than its contents.
-            egui::ScrollArea::vertical().show(ui, |ui| self.inspect(world, ui, &mut edits));
+            let scroll = egui::ScrollArea::vertical();
+            scroll.show(ui, |ui| self.inspect(world, ui, &mut edits, &mut cues));
         });
-        let world = cx.world_mut();
-        for edit in edits {
-            self.apply(world, edit);
-        }
+        // The Edit menu's keys, wherever the panels are.
+        cues.read(ui.egui());
+        self.finish(cx.world_mut(), edits, cues, chosen);
     }
 }
 
 impl Inspector {
+    /// The Edit menu: Undo and Redo, each naming the edit it steps through; returns the one
+    /// clicked.
+    fn edit_menu(&self, ui: &mut egui::Ui) -> Option<Step> {
+        let items = [
+            (Step::Undo, "Undo", self.log.undoable(), UNDO),
+            (Step::Redo, "Redo", self.log.redoable(), REDO[0]),
+        ];
+        let mut chosen = None;
+        for (step, name, edit, shortcut) in items {
+            let label = match edit {
+                Some(edit) => format!("{name} {edit}"),
+                None => name.to_owned(),
+            };
+            let shortcut = ui.ctx().format_shortcut(&shortcut);
+            let item = egui::Button::new(label).shortcut_text(shortcut);
+            if ui.add_enabled(edit.is_some(), item).clicked() {
+                chosen = Some(step);
+            }
+        }
+        chosen
+    }
+
+    /// The end of a frame of the panels: sets the fields `edits` changed, as one edit from a
+    /// press of the pointer to its release, or while a widget has the keys, as `cues` say, so that
+    /// a drag, or a number typed, is one edit; and undoes or redoes as `chosen` in the Edit menu,
+    /// or a key, asks.
+    fn finish(&mut self, world: &mut World, edits: Vec<Edit>, cues: Cues, chosen: Option<Step>) {
+        // Before this frame's sets: a press begins another edit, even while a text field keeps
+        // the keys.
+        if cues.pressed {
+            self.log.seal();
+        }
+        for edit in edits {
+            self.apply(world, edit);
+        }
+        if cues.released || !cues.held {
+            self.log.seal();
+        }
+        let Some(step) = chosen.or(cues.step) else {
+            return;
+        };
+        let stepped = match step {
+            Step::Undo => self.log.undo(world),
+            Step::Redo => self.log.redo(world),
+        };
+        self.not_stepped = stepped.err().map(|error| error.to_string());
+    }
+
     /// The Entities panel: a field that finds an entity by its ID, which component the entities
     /// listed have, how many there are, and a row for each that picks it, of which only those in
-    /// view are drawn.
-    fn entities(&mut self, world: &World, ui: &mut egui::Ui) {
+    /// view are drawn; what the input of the window it draws in says of the edits goes in `cues`.
+    fn entities(&mut self, world: &World, ui: &mut egui::Ui, cues: &mut Cues) {
+        cues.read(ui.ctx());
         ui.horizontal(|ui| {
             ui.label("Find");
             let field = egui::TextEdit::singleline(&mut self.find).hint_text("an entity's ID");
@@ -142,8 +255,13 @@ impl Inspector {
     }
 
     /// The Inspector panel: the picked entity's components, each under a header that collapses,
-    /// with its fields' widgets; the fields they change go in `edits`.
-    fn inspect(&self, world: &World, ui: &mut egui::Ui, edits: &mut Vec<Edit>) {
+    /// with its fields' widgets; the fields they change go in `edits`, and what the input of the
+    /// window it draws in says of them in `cues`.
+    fn inspect(&self, world: &World, ui: &mut egui::Ui, edits: &mut Vec<Edit>, cues: &mut Cues) {
+        cues.read(ui.ctx());
+        if let Some(not_stepped) = &self.not_stepped {
+            ui.label(not_stepped.as_str());
+        }
         let Some(id) = self.picked else {
             ui.label("Nothing picked: pick an entity in the Entities panel");
             return;
@@ -159,8 +277,10 @@ impl Inspector {
             ui.label(children);
         }
         // So that what's typed into a field of one entity never lands in the field of the next
-        // one picked.
-        ui.push_id(id, |ui| {
+        // one picked; and, being its own, so that the fields keep their widgets' IDs, and a drag
+        // or a number being typed, as the labels above them come and go.
+        let scope = egui::UiBuilder::new().scope_id(ui.make_persistent_id(id));
+        ui.scope_builder(scope, |ui| {
             for component in components {
                 let types = world.types();
                 let (Ok(value), Some(index)) = (
@@ -195,9 +315,10 @@ impl Inspector {
         });
     }
 
-    /// Sets the field `edit` changed, and keeps the refusal if it's refused.
+    /// Sets the field `edit` changed, as part of the edit going on, and keeps the refusal if it's
+    /// refused.
     fn apply(&mut self, world: &mut World, edit: Edit) {
-        let Some((id, entity)) = self.picked.and_then(|id| Some((id, world.entity(id)?))) else {
+        let Some(id) = self.picked.filter(|&id| world.entity(id).is_some()) else {
             return;
         };
         let Edit {
@@ -207,7 +328,14 @@ impl Inspector {
         } = edit;
         self.refusals
             .retain(|refusal| refusal.component != component || refusal.path != path);
-        if let Err(error) = world.set_field(entity, &component, &path, &value) {
+        self.not_stepped = None;
+        let set = Operation::Set {
+            entity: id,
+            component: component.clone().into(),
+            path: path.clone(),
+            value,
+        };
+        if let Err(error) = self.log.amend(world, set) {
             warn!(
                 code = error.code(),
                 entity = %id,
@@ -669,6 +797,10 @@ fn vector<const N: usize>(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::mem;
+    use std::rc::Rc;
+
     use super::*;
     use crate::reflect::tests::{Everything, Form, Inner, everything, same_snapshots, snapshot};
     use crate::{Sprite, Transform};
@@ -697,16 +829,16 @@ mod tests {
             events,
             ..egui::RawInput::default()
         };
-        let mut edits = Vec::new();
+        let mut made = 0;
         let mut output = ctx.run_ui(input, |ui| {
-            inspector.entities(world, ui);
-            inspector.inspect(world, ui, &mut edits);
+            let mut cues = Cues::default();
+            inspector.entities(world, ui, &mut cues);
+            let mut edits = Vec::new();
+            inspector.inspect(world, ui, &mut edits, &mut cues);
+            made = edits.len();
+            inspector.finish(world, edits, cues, None);
         });
         output.textures_delta.clear();
-        let made = edits.len();
-        for edit in edits {
-            inspector.apply(world, edit);
-        }
         let mut texts = Vec::new();
         for clipped in &output.shapes {
             find_texts(&clipped.shape, &mut texts);
@@ -1239,5 +1371,365 @@ mod tests {
         let texts = frames(&mut inspector, &mut world, &ctx);
         let despawned = format!("Entity {picked} was despawned");
         assert!(texts.contains(&despawned), "{texts:?}");
+    }
+
+    /// `key` pressed with Ctrl, or Cmd on macOS, and with Shift too if `shift`.
+    fn shortcut(key: egui::Key, shift: bool) -> Vec<egui::Event> {
+        let modifiers = match shift {
+            true => Modifiers::COMMAND.plus(Modifiers::SHIFT),
+            false => Modifiers::COMMAND,
+        };
+        vec![egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }]
+    }
+
+    /// The pointer pressed at `at`, moved right three times and released, each in a frame of its
+    /// own, so that a drag sets its field in several frames.
+    fn slide(at: egui::Pos2) -> Vec<Vec<egui::Event>> {
+        let button = |pressed, pos| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        let to = |step: f32| at + egui::vec2(10.0 * step, 0.0);
+        let mut gesture = vec![vec![egui::Event::PointerMoved(at), button(true, at)]];
+        gesture.extend([1.0, 2.0, 3.0].map(|step| vec![egui::Event::PointerMoved(to(step))]));
+        gesture.push(vec![button(false, to(3.0))]);
+        gesture
+    }
+
+    #[test]
+    fn a_drag_is_one_edit_which_the_keys_undo_and_redo() {
+        let mut world = World::default();
+        let entity = world.spawn(everything());
+        let ctx = crate::egui_context();
+        let mut inspector = Inspector::default();
+        inspector.pick(id(&world, entity));
+        let mut time = 0.0;
+        let mut run = |inspector: &mut Inspector, world: &mut World, events| {
+            time += 1.0;
+            frame(inspector, world, &ctx, time, events)
+        };
+        // Shown above the fields until the drag's first set, so that they move as it goes on.
+        inspector.not_stepped = Some("can't undo it".to_owned());
+        let mut texts = Vec::new();
+        for _ in 0..3 {
+            texts = run(&mut inspector, &mut world, Vec::new()).0;
+        }
+        let at = beside(&texts, find(&texts, "Everything", "weight"));
+        let weight = |world: &World| world.get::<Everything>(entity).expect("everything").weight;
+        let mut sets = 0;
+        for events in slide(at) {
+            sets += run(&mut inspector, &mut world, events).1;
+        }
+        let dragged = weight(&world);
+        assert!(sets > 1 && dragged != 2.5, "{sets} sets, to {dragged}");
+        assert_eq!(inspector.log.operations().len(), 1, "one edit");
+        for (keys, expected) in [
+            (shortcut(egui::Key::Z, false), 2.5),
+            (shortcut(egui::Key::Z, true), dragged),
+            (shortcut(egui::Key::Z, false), 2.5),
+            (shortcut(egui::Key::Y, false), dragged),
+        ] {
+            run(&mut inspector, &mut world, keys);
+            assert_eq!(weight(&world).to_bits(), expected.to_bits());
+        }
+    }
+
+    #[test]
+    fn a_number_typed_is_one_edit() {
+        let mut world = World::default();
+        let entity = world.spawn(everything());
+        let ctx = crate::egui_context();
+        let mut inspector = Inspector::default();
+        inspector.pick(id(&world, entity));
+        let mut time = 0.0;
+        let mut run = |inspector: &mut Inspector, world: &mut World, events| {
+            time += 1.0;
+            frame(inspector, world, &ctx, time, events)
+        };
+        let mut texts = Vec::new();
+        for _ in 0..3 {
+            texts = run(&mut inspector, &mut world, Vec::new()).0;
+        }
+        let at = beside(&texts, find(&texts, "Everything", "weight"));
+        let weight = |world: &World| world.get::<Everything>(entity).expect("everything").weight;
+        // Clicked, which selects its text, typed over a key a frame, and entered.
+        run(&mut inspector, &mut world, click(at));
+        let mut sets = 0;
+        for typed in ["0", ".", "7", "5"] {
+            let text = vec![egui::Event::Text(typed.to_owned())];
+            sets += run(&mut inspector, &mut world, text).1;
+        }
+        sets += run(&mut inspector, &mut world, enter()).1;
+        assert!(sets > 1 && weight(&world) == 0.75, "{sets} sets");
+        assert_eq!(inspector.log.operations().len(), 1, "one edit");
+        run(&mut inspector, &mut world, shortcut(egui::Key::Z, false));
+        assert_eq!(weight(&world).to_bits(), 2.5f64.to_bits());
+    }
+
+    /// What the window of its own that [`in_window`] gives the panels gets and gives: its pass's
+    /// time and events, and its texts.
+    #[derive(Default)]
+    struct Window {
+        time: f64,
+        events: Vec<egui::Event>,
+        texts: Vec<Text>,
+    }
+
+    /// Runs `ctx`'s windows of their own as the engine runs a torn-off panel's: each in a pass of
+    /// its own inside the main window's, with its own input, which the returned `Window` gives.
+    fn in_window(ctx: &egui::Context) -> Rc<RefCell<Window>> {
+        ctx.set_embed_viewports(false);
+        let window = Rc::new(RefCell::new(Window::default()));
+        let shared = window.clone();
+        // The callback is the test thread's.
+        egui::Context::set_immediate_viewport_renderer(move |ctx, viewport| {
+            let egui::ImmediateViewport {
+                ids,
+                mut viewport_ui_cb,
+                ..
+            } = viewport;
+            let input = {
+                let mut window = shared.borrow_mut();
+                let screen =
+                    egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 4000.0));
+                let mut viewports = egui::ViewportIdMap::default();
+                viewports.insert(ids.this, egui::ViewportInfo::default());
+                egui::RawInput {
+                    viewport_id: ids.this,
+                    viewports,
+                    screen_rect: Some(screen),
+                    time: Some(window.time),
+                    events: mem::take(&mut window.events),
+                    ..egui::RawInput::default()
+                }
+            };
+            let mut output = ctx.run_ui(input, |ui| viewport_ui_cb(ui));
+            output.textures_delta.clear();
+            let mut texts = Vec::new();
+            for clipped in &output.shapes {
+                find_texts(&clipped.shape, &mut texts);
+            }
+            shared.borrow_mut().texts = texts;
+        });
+        window
+    }
+
+    /// A frame of the main window, in whose pass the two panels draw in `window`, a window of
+    /// their own, given `events`; returns that window's texts, and how many edits it made.
+    fn window_frame(
+        inspector: &mut Inspector,
+        world: &mut World,
+        ctx: &egui::Context,
+        window: &RefCell<Window>,
+        time: f64,
+        events: Vec<egui::Event>,
+    ) -> (Vec<Text>, usize) {
+        *window.borrow_mut() = Window {
+            time,
+            events,
+            texts: Vec::new(),
+        };
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 900.0));
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            time: Some(time),
+            ..egui::RawInput::default()
+        };
+        let mut made = 0;
+        let id = egui::ViewportId::from_hash_of("the panels' window");
+        let mut output = ctx.run_ui(input, |root| {
+            let mut edits = Vec::new();
+            let mut cues = Cues::default();
+            let builder = egui::ViewportBuilder::default();
+            root.ctx().show_viewport_immediate(id, builder, |ui, _| {
+                inspector.entities(world, ui, &mut cues);
+                inspector.inspect(world, ui, &mut edits, &mut cues);
+            });
+            cues.read(root.ctx());
+            made = edits.len();
+            inspector.finish(world, edits, cues, None);
+        });
+        output.textures_delta.clear();
+        let texts = mem::take(&mut window.borrow_mut().texts);
+        (texts, made)
+    }
+
+    #[test]
+    fn a_torn_off_inspector_keeps_its_drags_and_keys() {
+        let mut world = World::default();
+        let entity = world.spawn(everything());
+        let ctx = crate::egui_context();
+        let window = in_window(&ctx);
+        let mut inspector = Inspector::default();
+        inspector.pick(id(&world, entity));
+        let mut time = 0.0;
+        let mut run = |inspector: &mut Inspector, world: &mut World, events| {
+            time += 1.0;
+            window_frame(inspector, world, &ctx, &window, time, events)
+        };
+        let mut texts = Vec::new();
+        for _ in 0..3 {
+            texts = run(&mut inspector, &mut world, Vec::new()).0;
+        }
+        let at = beside(&texts, find(&texts, "Everything", "weight"));
+        let weight = |world: &World| world.get::<Everything>(entity).expect("everything").weight;
+        let mut sets = 0;
+        for events in slide(at) {
+            sets += run(&mut inspector, &mut world, events).1;
+        }
+        let dragged = weight(&world);
+        assert!(sets > 1 && dragged != 2.5, "{sets} sets, to {dragged}");
+        assert_eq!(inspector.log.operations().len(), 1, "one edit");
+        // Pressed in that window, the keys step through the edits.
+        run(&mut inspector, &mut world, shortcut(egui::Key::Z, false));
+        assert_eq!(weight(&world).to_bits(), 2.5f64.to_bits());
+        run(&mut inspector, &mut world, shortcut(egui::Key::Z, true));
+        assert_eq!(weight(&world).to_bits(), dragged.to_bits());
+    }
+
+    #[test]
+    fn each_click_is_an_edit_and_a_text_field_keeps_its_keys() {
+        let mut world = World::default();
+        let entity = world.spawn(everything());
+        let ctx = crate::egui_context();
+        let mut inspector = Inspector::default();
+        inspector.pick(id(&world, entity));
+        let mut time = 0.0;
+        let mut run = |inspector: &mut Inspector, world: &mut World, events| {
+            time += 1.0;
+            frame(inspector, world, &ctx, time, events).0
+        };
+        let mut texts = Vec::new();
+        for _ in 0..3 {
+            texts = run(&mut inspector, &mut world, Vec::new());
+        }
+        let on = |world: &World| world.get::<Everything>(entity).expect("everything").on;
+        // Its checkbox, which has no text, in the column its neighbor's number starts.
+        let checkbox = egui::pos2(
+            find(&texts, "count", "42").min.x + 4.0,
+            find(&texts, "Everything", "on").center().y,
+        );
+        // Clicked in frames one after the other, each click is an edit of its own.
+        run(&mut inspector, &mut world, click(checkbox));
+        run(&mut inspector, &mut world, click(checkbox));
+        assert!(on(&world));
+        assert_eq!(inspector.log.operations().len(), 2);
+        // While the Find field has the keys, they undo its own text, not an edit.
+        let field = beside(&texts, find(&texts, "Find", "Find"));
+        run(&mut inspector, &mut world, click(field));
+        run(&mut inspector, &mut world, shortcut(egui::Key::Z, false));
+        assert_eq!(inspector.log.operations().len(), 2);
+        let away = click(egui::pos2(1500.0, 3900.0));
+        run(&mut inspector, &mut world, away);
+        run(&mut inspector, &mut world, shortcut(egui::Key::Z, false));
+        assert_eq!(inspector.log.operations().len(), 1);
+        assert!(!on(&world));
+        // Two drags while the Find field keeps the keys are two edits, a press beginning each.
+        run(&mut inspector, &mut world, click(field));
+        let weight = beside(&texts, find(&texts, "Everything", "weight"));
+        for events in [slide(weight), slide(weight)].concat() {
+            run(&mut inspector, &mut world, events);
+        }
+        assert_eq!(inspector.log.operations().len(), 3);
+    }
+
+    /// A frame of the Edit menu's items alone, as the open menu shows them, given `events`, and
+    /// then the step the one clicked takes; returns its texts.
+    fn menu(
+        inspector: &mut Inspector,
+        world: &mut World,
+        ctx: &egui::Context,
+        time: f64,
+        events: Vec<egui::Event>,
+    ) -> Vec<Text> {
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 400.0));
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            time: Some(time),
+            events,
+            ..egui::RawInput::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            let chosen = inspector.edit_menu(ui);
+            let mut cues = Cues::default();
+            cues.read(ui.ctx());
+            inspector.finish(world, Vec::new(), cues, chosen);
+        });
+        output.textures_delta.clear();
+        let mut texts = Vec::new();
+        for clipped in &output.shapes {
+            find_texts(&clipped.shape, &mut texts);
+        }
+        texts
+    }
+
+    #[test]
+    fn the_edit_menu_names_its_steps_and_a_refused_one_says_why() {
+        let mut world = World::default();
+        let entity = world.spawn(everything());
+        let picked = id(&world, entity);
+        let ctx = crate::egui_context();
+        let mut inspector = Inspector::default();
+        inspector.pick(picked);
+        let count = |world: &World| world.get::<Everything>(entity).expect("everything").count;
+        let edit = Edit {
+            component: "Everything".to_owned(),
+            path: "count".to_owned(),
+            value: Value::UInt(99),
+        };
+        inspector.apply(&mut world, edit);
+        let mut time = 0.0;
+        let mut run = |inspector: &mut Inspector, world: &mut World, events| {
+            time += 1.0;
+            menu(inspector, world, &ctx, time, events)
+        };
+        let undo = format!("Undo set `Everything.count` of {picked}");
+        let redo = format!("Redo set `Everything.count` of {picked}");
+        let texts = run(&mut inspector, &mut world, Vec::new());
+        for item in [undo.as_str(), "Redo"] {
+            assert!(
+                texts.iter().any(|(text, _)| text == item),
+                "{item}: {texts:?}"
+            );
+        }
+        run(
+            &mut inspector,
+            &mut world,
+            click(find(&texts, &undo, &undo).center()),
+        );
+        assert_eq!(count(&world), 42);
+        let texts = run(&mut inspector, &mut world, Vec::new());
+        for item in ["Undo", redo.as_str()] {
+            assert!(
+                texts.iter().any(|(text, _)| text == item),
+                "{item}: {texts:?}"
+            );
+        }
+        run(
+            &mut inspector,
+            &mut world,
+            click(find(&texts, &redo, &redo).center()),
+        );
+        assert_eq!(count(&world), 99);
+        // With its entity gone, the edit can't be undone, which the Inspector panel says.
+        world.despawn(entity).expect("alive");
+        run(&mut inspector, &mut world, shortcut(egui::Key::Z, false));
+        assert_eq!(inspector.log.undoable(), None);
+        let mut texts = Vec::new();
+        for _ in 0..3 {
+            time += 1.0;
+            texts = frame(&mut inspector, &mut world, &ctx, time, Vec::new()).0;
+        }
+        let says = format!("can't undo set `Everything.count` of {picked}: ");
+        let said = texts.iter().any(|(text, _)| text.starts_with(&says));
+        assert!(said, "{texts:?}");
     }
 }

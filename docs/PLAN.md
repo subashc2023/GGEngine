@@ -125,15 +125,23 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   every kind of value coming back bit for bit, a field set changing only its lines, refusals at
   their lines and columns changing nothing, and placements' IDs, and the model test saves and
   loads its world every 100 steps.
+- **Operations with inverses and their log** (2026-10-23): creating and deleting an entity, adding
+  and removing a component by name, setting a field and reparenting are operations, which name
+  entities by their IDs; applied, each checks everything before it changes anything, and gives
+  its inverse; a delete keeps its entities' slots and components, typed, so that undoing it gives
+  each back under its handle, with what's opaque; and the log applies them in order, undoes and
+  redoes them, and merges a gesture's sets of one field into one edit. The Inspector's edits go
+  through it, with an Edit menu, Ctrl+Z, Ctrl+Shift+Z and Ctrl+Y; unit tests check each operation
+  undone and redone by handle, refusals changing nothing, undos the world has moved past refused
+  whole, and 1,000 random steps, of operations and of undos and redos, undone back to the first
+  scene, byte for byte.
 
-## Now: operations with inverses and their log
+## Now: whole-world snapshots and restores
 
-Phase 3's sixth milestone: operations with inverses and their log. Creating and deleting an
-entity, adding and removing a component by name, setting a field and reparenting, each returning
-its inverse, applied in order and logged.
-
-*Done when* undoing a log of random operations gives back the world's scene byte for byte, which
-stands in for the world's hash until the deterministic mode. Its plan is made when it starts.
+Phase 3's seventh milestone: whole-world snapshots and restores. *Done when* a restored snapshot
+matches the world it was taken from. Its plan is made when it starts, and decides what a snapshot
+does with the slots kept for the entities the log can put back, by undoing a delete or redoing a
+create, whose inverses a copy, with another serial, refuses.
 
 ## Next
 
@@ -267,34 +275,41 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | `MeshDraw` parameters of more than 64 bytes, which draw through `Context::draw` | Phase 6, with materials |
 | Micro-benchmarks, with criterion | A CPU hot path gets a target of its own; batching's is a frame time, which `engine.perf` measures |
 | Gates on time in CI: hosted runners' times vary too much to gate on | A self-hosted runner, as for the GPU tests |
-| Adding and removing components by name, each returning its inverse, and each type's default as a value | Phase 3, with operations |
+| A component type's default as a value, to add one without giving every field; `Create` and `Add` take whole values | The Inspector or the tool API adds components |
 | Moving values to a type that changed: matching fields by name and by alias, defaults for fields added, and fields dropped; a scene with a field its type hasn't, or without one it has, is refused | Phase 4, when `Sprite` gains its texture's name, or Phase 5's hot reload |
-| Undo, and an Inspector drag merged into one edit; edits apply at once | Phase 3, with operations |
 | In the Inspector, turning an option on or off, switching to a variant with fields, and adding or removing a list's elements; by path, a value sets them whole | A component needs one edited |
 | `Sprite.texture` and `MeshDraw` are opaque: shown, but not set, saved or carried across a rebuild | Phase 4, which names assets |
 | Flags for fields that saving, the world's hash or replication skip, and fields that are read only; `Parent` is read only as a whole type, which `set_field` refuses | Each with its first user |
 | Generic types deriving `Reflect` or `Component` | A game needs one |
 | Drag speeds as hints; the Inspector picks them from a field's bounds and kind | A field drags too coarsely or too finely |
-| Paths resolved once and kept, for sets made again and again | Operation logs, or a profile |
+| Paths resolved once and kept, for sets made again and again | A profile |
 | Picking an entity for a field, a parent or a child picked by clicking it, the Entities panel as a tree, names in the Inspector, and picking in the view; entities are shown by their IDs, and found by an ID pasted in | Picking in the view, or Phase 9's scene tree |
 | World transforms stored and propagated after the updates, with change detection; drawing computes each child's from its ancestors, every frame | Physics, or a profile showing the walks up the hierarchy |
 | A world matrix for game code; the engine's drawing computes its own | The camera as a component, or a system that needs a child's place in the world, once the deterministic mode settles its math |
 | Reparenting that keeps where a child is in the world, by decomposing its matrix, which loses any shear; `set_parent` keeps its own transform | The editor's scene tree, or an agent attaching something where it stands |
-| Spawning a child into its table at once from code: `spawn`, then `set_parent`, moves it to another table; a load spawns one there | A profile |
-| Children in an order that means something: reordering them, and saving their order | The editor's scene tree, or UI laid out by the hierarchy |
-| Spawning with a given ID from code; loads and placements spawn with theirs, and a drawn ID that's taken reseeds | An operation undoes a delete |
+| Spawning a child into its table at once from code: `spawn`, then `set_parent`, moves it to another table; a load and a create operation spawn one there | A profile |
+| Children in an order that means something: reordering them, and saving their order; an undo puts a child back last | The editor's scene tree, or UI laid out by the hierarchy |
 | Seeding a world's IDs, and the stream's state in snapshots and the world hash; a seed for authoring is never fixed, or every session would draw the same IDs | The deterministic mode, or snapshots |
 | Each session's seed and count saved with the world and merged with it, so that an ID maps back to its session and when it was drawn, and a load refuses IDs no session drew | The tool API refusing an ID an agent made up |
 | An `EntityId` query term | The first system that reads IDs as it iterates, such as the world hash or replication |
 | Errors carrying their entity, and a scene's line and column, as fields, not only in their message | The tool API returns errors as data |
 | Drawing rows at one z in ID order for less. Every frame reads them in that order rather than their tables', about 0.9 ms of the swarm's 4.3 ms frame in release; a frame that changes rows or z's sorts them by ID again, about 2.5 ms more for 100,000; and 100,000 sprites each at a z of their own, as sorting by y gives them, take about 2 ms more than before, for a group and an item each. Tables kept in ID order would make the reads a sweep, and a radix sort the sort quicker | A game's frames need the time |
 | Linked prefab instances, with overrides, nesting, apply and revert; a placement is a flattened copy, each ID mixed from its instance's and its own, which links will keep | The editor, or a game editing a prefab its scenes hold many copies of |
-| A derive hint for `Component::base`, and opaque values in lists and options, which saving refuses; a type with opaque fields implements `Component` by hand to load, as `Sprite` does | A game's component holds something opaque |
+| A derive hint for `Component::base`, and opaque values in lists and options, which saving refuses, as does a set's undo (`reflect.opaque`) where the old value holds something opaque in a variant, an option or a list; a type with opaque fields implements `Component` by hand to load, as `Sprite` does | A game's component holds something opaque |
 | Names in scenes beyond ASCII identifiers, which saving refuses (`scene.bad_name`) | A game names a type or a field so |
 | Loading a scene in place of the entities it replaces, in one step; a load refuses IDs the world has | The editor, or Phase 5's scene files applied as operations |
 | A version in scene files, a file without one reading as the first | The first change to the format that old files can't be read by |
 | Comments in scene files, which a save drops | People annotate scenes |
 | Reading and writing scene files in the engine, atomically; the engine takes and gives text, and the sandbox writes its own | Phase 4, with assets |
+| The log in `Context`, every layer's and the tool API's clients each undoing their own, and an undo logged as an operation; the Inspector keeps a log of its own | Phase 5, the tool API |
+| Replaying a log into another world, which maps values' handles to IDs; `set_field` and operations store a dead handle without complaint | Phase 5, the tool API |
+| A delete saying what refers to its entities from outside, or refusing; those references dangle until it's undone, and the world doesn't save in between | An agent deletes through the tool API |
+| Layers holding handles that an operation deletes, as the sandbox's swarm, whose `expect` panics then | The Inspector or the tool API deletes |
+| Creating, deleting, adding, removing and reparenting from the Inspector, which sets fields | The editor, or a game's tools |
+| A bound on the log, which keeps a session's entries, a delete's components and slots among them, until it's cleared | A session's memory shows it |
+| A log that outlives a run: inverses that keep components typed can't be saved | Phase 5's restart from a snapshot |
+| A depth limit on values set or created by name, as scenes' 64; a deeper one recurses without one | The tool API takes values from outside |
+| An undo giving back the ID stream's state and the tables' order: an undone create's ID stays drawn, and what an undo puts back goes last in its table, so a world hash of either differs after a log is undone, though its scene comes back byte for byte | The deterministic mode's world hash |
 
 ## Open questions
 

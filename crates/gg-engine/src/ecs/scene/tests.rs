@@ -108,15 +108,15 @@ fn id(text: &str) -> EntityId {
 }
 
 /// Panics unless `world` is as `twin` is: its entities, their components and IDs, how many times
-/// its rows have changed, and the next ID it draws.
-fn unchanged(world: &mut World, twin: &mut World, case: &str) {
+/// its rows have changed, and the next entity it spawns, and the ID it draws for it.
+pub(in crate::ecs) fn unchanged(world: &mut World, twin: &mut World, case: &str) {
     assert!(same_snapshots(&snapshot(world), &snapshot(twin)), "{case}");
     assert_eq!(world.version().1, twin.version().1, "{case}");
     let [drawn, twins] = [world, twin].map(|world| {
         let entity = world.spawn(());
         let id = world.id(entity);
         world.despawn(entity).expect("alive");
-        id
+        (entity, id)
     });
     assert_eq!(drawn, twins, "{case}");
 }

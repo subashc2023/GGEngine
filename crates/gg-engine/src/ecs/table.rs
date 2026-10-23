@@ -15,6 +15,10 @@ use crate::reflect::{Name, Reflect, Type, TypeIndex, Types, Value};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ComponentId(u32);
 
+/// An entity's components out of their table: each in a one-row column of its own, beside its id,
+/// sorted by id, as a table's columns are.
+pub type Row = Vec<(ComponentId, Box<dyn AnyColumn>)>;
+
 /// The component types a world has seen, and the descriptions of them and their fields' types.
 #[derive(Default)]
 pub struct Components {
@@ -181,6 +185,23 @@ impl Table {
         }
         self.entities.swap_remove(row);
         self.entities.get(row).copied()
+    }
+
+    /// As [`swap_remove`](Self::swap_remove), but keeps `row`: each of its values in a one-row
+    /// column of its own, beside its component's id, in the table's order, which is the id's.
+    pub(super) fn take_row(
+        &mut self,
+        row: usize,
+        components: &Components,
+    ) -> (Row, Option<Entity>) {
+        let mut taken = Vec::with_capacity(self.columns.len());
+        for (&id, column) in self.components.iter().zip(&mut self.columns) {
+            let mut one = components.new_column(id);
+            column.move_row(row, &mut *one);
+            taken.push((id, one));
+        }
+        self.entities.swap_remove(row);
+        (taken, self.entities.get(row).copied())
     }
 }
 
