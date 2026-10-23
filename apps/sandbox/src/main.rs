@@ -17,7 +17,8 @@ use tracing::info;
 
 fn main() -> ExitCode {
     let app = gg_engine::App::new("Sandbox").custom_title_bar();
-    gg_engine::run(app.layer(Sandbox::new()).overlay(gg_engine::PerfPanel))
+    let app = app.layer(Sandbox::new()).overlay(gg_engine::PerfPanel);
+    gg_engine::run(app.overlay(gg_engine::Inspector::default()))
 }
 
 /// A corner of a mesh in the colors of its corners, which `shaders/vertex_color.slang` reads: its
@@ -143,31 +144,30 @@ fn overlooking(center: Vec2, height: f32) -> Camera {
     }
 }
 
-/// What the sandbox spawned as it attached, which it changes as it updates.
+/// What the sandbox spawned as it attached, which it changes as its panels say.
 struct Scene {
     /// The swarm's sprites, one for each cell of a sheet of 4 by 4 shapes with transparent
     /// margins, row by row.
     shapes: [Sprite; 16],
     checkerboard: Entity,
-    triangle: Entity,
 }
 
 /// One of the swarm's sprites: how it moves, picked once from its index.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Component)]
 struct Drifter {
     /// Where it is when the swarm starts, from the field's bottom left.
     start: Vec2,
     /// In units a second.
     velocity: Vec2,
-    /// How far it's turned when the swarm starts, in radians.
+    /// How far it's turned when the swarm starts.
+    #[reflect(degrees)]
     turn: f32,
-    /// How fast it turns, in radians a second.
+    /// How far it turns a second.
+    #[reflect(degrees)]
     spin: f32,
     /// How far across it is, in units.
     size: f32,
 }
-
-impl Component for Drifter {}
 
 impl Drifter {
     /// It, and which of the sheet's shapes it shows, row by row.
@@ -204,18 +204,24 @@ impl Drifter {
 }
 
 /// One of the map's sprites, which the map's filtering applies to.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Component)]
 struct MapTile;
 
-impl Component for MapTile {}
-
-/// One of the grid's squares, in the grid's first color or its second, as a checkerboard's.
-#[derive(Clone, Copy)]
+/// One of the grid's squares, which its sprite's color follows.
+#[derive(Clone, Copy, Component)]
 struct GridCell {
-    color: usize,
+    /// The grid's first color or its second, alternating as a checkerboard's.
+    #[reflect(max = 1)]
+    color: u32,
 }
 
-impl Component for GridCell {}
+/// Turns an entity about z.
+#[derive(Clone, Copy, Component)]
+struct Spin {
+    /// How far it turns a second, counterclockwise.
+    #[reflect(degrees)]
+    speed: f32,
+}
 
 /// Moves each drifter to where it is `t` seconds after the swarm starts.
 fn drift(world: &mut World, t: f64) {
@@ -228,14 +234,15 @@ fn drift(world: &mut World, t: f64) {
 /// Colors the grid's squares in `colors`, in linear RGB.
 fn color_grid(world: &mut World, colors: [[f32; 3]; 2]) {
     for (cell, sprite) in world.query_mut::<(&GridCell, &mut Sprite)>() {
-        sprite.color = Vec3::from(colors[cell.color]).extend(1.0);
+        sprite.color = Vec3::from(colors[cell.color as usize]).extend(1.0);
     }
 }
 
-/// Has the map's sprites sampled with `sampler`.
-fn sample_map(world: &mut World, sampler: Sampler) {
-    for (_, sprite) in world.query_mut::<(&MapTile, &mut Sprite)>() {
-        sprite.sampler = sampler;
+/// Turns each entity that spins as far as it does in `dt`.
+fn spin(world: &mut World, dt: Duration) {
+    for (spin, transform) in world.query_mut::<(&Spin, &mut Transform)>() {
+        let turn = Quat::from_rotation_z(spin.speed * dt.as_secs_f32());
+        transform.rotation = (turn * transform.rotation).normalize();
     }
 }
 
@@ -307,20 +314,23 @@ fn pick(index: u32, salt: u32) -> f32 {
 /// red, green and blue turning, then a logo sprite whose alpha shows them through it. Below the
 /// swarm, out of its way, a map of tiles from a tile set's cells packed edge to edge, which tests
 /// that none shows any of the cells beside it. They're entities, spawned as the sandbox attaches,
-/// which the engine draws back to front by their z's; the sandbox's systems move the swarm and
-/// color the grid and filter the map as the panels say. The triangle is a mesh with a vertex type
-/// and shader of the sandbox's own, and the rest the engine's sprites, so the map, the swarm, the
-/// grid and the checkerboard are one instanced draw, and the triangle and the logo one each.
-/// They're drawn over a color that drifts slowly, so that a running sandbox visibly animates. The
-/// engine's camera controller steers the camera: W, A, S and D move it along its own axes, Q and E
-/// turn it left and right, at the same speed whatever the frame rate, and the mouse wheel zooms
-/// it. Shows six panels to dock, beside the engine's Performance panel, which counts the draws:
-/// the camera; how many sprites the swarm has; the map's filtering, smooth or sharp, and buttons
-/// that look at the map or back at the swarm; the grid's colors, which can be picked; the
-/// checkerboard's filtering, how many times it repeats, and its tint; and the clear color, which
-/// can be held or picked. Logs the key and mouse presses that reach it, which those on the panels
-/// don't. It polls input too: holding Space pauses the drift, and a panel shows where the cursor
-/// is. The title bar's File menu quits.
+/// which the engine draws back to front by their z's; the sandbox's systems move the swarm by its
+/// drifters, color the grid by its cells and turn the triangle by its spin, every frame, and
+/// filter the map and set the checkerboard's sprite when the panels change them, so that what the
+/// Inspector sets stays until then. The triangle is a mesh with a vertex type and shader of the
+/// sandbox's own, and the rest the engine's sprites, so the map, the swarm, the grid and the
+/// checkerboard are one instanced draw, and the triangle and the logo one each. They're drawn over
+/// a color that drifts slowly, so that a running sandbox visibly animates. The engine's camera
+/// controller steers the camera: W, A, S and D move it along its own axes, Q and E turn it left and
+/// right, at the same speed whatever the frame rate, and the mouse wheel zooms it. Shows six
+/// panels to dock, beside the engine's Performance panel, which counts the draws, and its Entities
+/// and Inspector panels, which list the entities and edit the picked one's components: the camera;
+/// how many sprites the swarm has; the map's filtering, smooth or sharp, and buttons that look at
+/// the map or back at the swarm; the grid's colors, which can be picked; the checkerboard's
+/// filtering, how many times it repeats, and its tint; and the clear color, which can be held or
+/// picked. Logs the key and mouse presses that reach it, which those on the panels don't. It polls
+/// input too: holding Space pauses the drift, and a panel shows where the cursor is. The title
+/// bar's File menu quits.
 struct Sandbox {
     time: Duration,
     drift: bool,
@@ -339,8 +349,6 @@ struct Sandbox {
     /// is.
     smooth_map: bool,
     camera: OrthographicCameraController,
-    /// How far the triangle has turned counterclockwise, in radians from 0 to a whole turn.
-    triangle_turn: f32,
     /// The swarm's entities, the first spawned first, which it keeps `swarm` of.
     drifters: Vec<Entity>,
     swarm: u32,
@@ -366,7 +374,6 @@ impl Sandbox {
             tint: [1.0, 0.8, 0.8, 1.0],
             smooth_map: false,
             camera,
-            triangle_turn: 0.0,
             drifters: Vec::new(),
             swarm: SWARM_START,
             swarm_time: Duration::ZERO,
@@ -398,6 +405,31 @@ impl Sandbox {
             let (drifter, shape) = Drifter::new(index);
             let entity = world.spawn((drifter.transform(t), scene.shapes[shape], drifter));
             self.drifters.push(entity);
+        }
+    }
+
+    /// Has the map's sprites and the checkerboard's as the panels say, as the sandbox attaches and
+    /// when the panels change: between, the Inspector may set them otherwise.
+    fn apply_settings(&self, world: &mut World) {
+        let sampler = if self.smooth_map {
+            Sampler::LinearClamp
+        } else {
+            Sampler::NearestClamp
+        };
+        for (_, sprite) in world.query_mut::<(&MapTile, &mut Sprite)>() {
+            sprite.sampler = sampler;
+        }
+        let Some(scene) = &self.scene else {
+            return;
+        };
+        if let Some(checkerboard) = world.get_mut::<Sprite>(scene.checkerboard) {
+            checkerboard.color = Vec4::from(self.tint);
+            checkerboard.rect = [Vec2::ZERO, Vec2::splat(self.tiles)];
+            checkerboard.sampler = if self.smooth {
+                Sampler::LinearRepeat
+            } else {
+                Sampler::NearestRepeat
+            };
         }
     }
 }
@@ -441,7 +473,8 @@ impl Layer for Sandbox {
             translation: Vec3::Z * TRIANGLE_Z,
             ..Transform::IDENTITY
         };
-        let triangle = world.spawn((at, MeshDraw::new(mesh, shader, ())));
+        let spin = Spin { speed: TURN_SPEED };
+        world.spawn((at, MeshDraw::new(mesh, shader, ()), spin));
         let logo = Sprite {
             texture: logo.expect("the logo loads"),
             ..Sprite::default()
@@ -455,42 +488,21 @@ impl Layer for Sandbox {
         self.scene = Some(Scene {
             shapes: std::array::from_fn(|i| shapes.sprite([i as u32 % 4, i as u32 / 4], [1, 1])),
             checkerboard,
-            triangle,
         });
+        self.apply_settings(world);
         self.resize_swarm(world);
     }
 
     fn update(&mut self, cx: &mut Context, dt: Duration) {
         let _zone = gg_engine::zone!();
-        let seconds = dt.as_secs_f32();
         self.camera.update(cx, dt);
         self.swarm_time += dt;
-        self.triangle_turn = (self.triangle_turn + TURN_SPEED * seconds).rem_euclid(TAU);
 
         let world = cx.world_mut();
         self.resize_swarm(world);
         drift(world, self.swarm_time.as_secs_f64());
         color_grid(world, self.grid_colors);
-        let sampler = if self.smooth_map {
-            Sampler::LinearClamp
-        } else {
-            Sampler::NearestClamp
-        };
-        sample_map(world, sampler);
-        if let Some(scene) = &self.scene {
-            if let Some(checkerboard) = world.get_mut::<Sprite>(scene.checkerboard) {
-                checkerboard.color = Vec4::from(self.tint);
-                checkerboard.rect = [Vec2::ZERO, Vec2::splat(self.tiles)];
-                checkerboard.sampler = if self.smooth {
-                    Sampler::LinearRepeat
-                } else {
-                    Sampler::NearestRepeat
-                };
-            }
-            if let Some(triangle) = world.get_mut::<Transform>(scene.triangle) {
-                triangle.rotation = Quat::from_rotation_z(self.triangle_turn);
-            }
-        }
+        spin(world, dt);
 
         if self.drift && !cx.input().key_down(Key::Space) {
             self.time += dt;
@@ -542,8 +554,11 @@ impl Layer for Sandbox {
             let swarm = egui::Slider::new(&mut self.swarm, 0..=SWARM_MAX).logarithmic(true);
             ui.add(swarm.text("In the swarm"));
         });
+        let mut changed = false;
         ui.panel("Map", |ui| {
-            ui.checkbox(&mut self.smooth_map, "Smooth the map");
+            changed |= ui
+                .checkbox(&mut self.smooth_map, "Smooth the map")
+                .changed();
             ui.horizontal(|ui| {
                 // 5 units high, so that the map, 6 across and 3.5 down, fits a view of most shapes.
                 if ui.button("Look at the map").clicked() {
@@ -563,13 +578,21 @@ impl Layer for Sandbox {
             });
         });
         ui.panel("Textures", |ui| {
-            ui.checkbox(&mut self.smooth, "Smooth the checkerboard");
-            ui.add(egui::Slider::new(&mut self.tiles, 1.0..=10.0).text("Tiles"));
+            changed |= ui
+                .checkbox(&mut self.smooth, "Smooth the checkerboard")
+                .changed();
+            let tiles = egui::Slider::new(&mut self.tiles, 1.0..=10.0).text("Tiles");
+            changed |= ui.add(tiles).changed();
             ui.horizontal(|ui| {
                 ui.label("Tint");
-                ui.color_edit_button_rgba_unmultiplied(&mut self.tint);
+                changed |= ui
+                    .color_edit_button_rgba_unmultiplied(&mut self.tint)
+                    .changed();
             });
         });
+        if changed {
+            self.apply_settings(cx.world_mut());
+        }
         ui.panel("Clear color", |ui| {
             ui.checkbox(&mut self.drift, "Drift");
             ui.horizontal(|ui| {

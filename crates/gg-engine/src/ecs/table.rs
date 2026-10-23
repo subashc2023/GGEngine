@@ -1,42 +1,93 @@
 //! Where components live: a table for each set of component types, whose columns are each
 //! component's own `Vec`, reached through a trait object and downcast once per table, so that the
-//! world needs no unsafe code; and the component types a world has seen.
+//! world needs no unsafe code; and the component types a world has seen, described to reflection.
 
 use std::any::{Any, TypeId, type_name};
 use std::collections::HashMap;
 
+use gg_core::{Error, Result};
+
 use super::{Component, Entity};
+use crate::reflect::{Name, Reflect, Type, TypeIndex, Types};
 
 /// A component type's index among those a world has seen, in the order it first saw them: the
 /// world's own, which never leaves it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ComponentId(u32);
 
-/// The component types a world has seen.
+/// The component types a world has seen, and the descriptions of them and their fields' types.
 #[derive(Default)]
 pub struct Components {
     ids: HashMap<TypeId, ComponentId>,
     /// By id.
     infos: Vec<Info>,
+    /// By name; looked up, never iterated.
+    by_name: HashMap<Name, ComponentId>,
+    types: Types,
 }
 
 struct Info {
-    name: &'static str,
+    /// Its name in its description.
+    name: Name,
+    index: TypeIndex,
     /// Makes an empty column of the type, for a new table.
     new_column: fn() -> Box<dyn AnyColumn>,
 }
 
 impl Components {
-    /// `T`'s id, which it gets the first time it's asked for.
+    /// `T`'s id, which it gets once it's described, the first time it's asked for.
+    ///
+    /// Fails as describing it does, such as with `reflect.name_taken`.
+    pub fn register<T: Component>(&mut self) -> Result<ComponentId> {
+        if let Some(&id) = self.ids.get(&TypeId::of::<T>()) {
+            return Ok(id);
+        }
+        let index = match T::describe(&mut self.types)? {
+            Type::Named(index) => index,
+            other => {
+                return Err(Error::new(
+                    "reflect.unnamed",
+                    format!(
+                        "`{}` describes itself as {other:?}, but a component is a struct or an \
+                         enum, which reflection names",
+                        type_name::<T>()
+                    ),
+                ));
+            }
+        };
+        let id = ComponentId(u32::try_from(self.infos.len()).expect("fewer than 2^32 types"));
+        let name = self.types.info(index).name.clone();
+        // Another type's description, as one that passes everything to a field might give: two
+        // component types would share a name, whichever registered first.
+        let (owner, rust) = self.types.rust_type(index);
+        if owner != TypeId::of::<T>() {
+            return Err(Error::new(
+                "reflect.name_taken",
+                format!(
+                    "`{}` describes itself as `{name}`, which is `{rust}`'s description, but each \
+                     component type describes itself, under a name of its own",
+                    type_name::<T>()
+                ),
+            ));
+        }
+        self.infos.push(Info {
+            name: name.clone(),
+            index,
+            new_column: || Box::new(Vec::<T>::new()),
+        });
+        self.ids.insert(TypeId::of::<T>(), id);
+        self.by_name.insert(name, id);
+        Ok(id)
+    }
+
+    /// `T`'s id, as [`register`](Self::register) gives it.
+    ///
+    /// # Panics
+    ///
+    /// If `T` fails to register, as when another type has its name.
     pub fn id<T: Component>(&mut self) -> ComponentId {
-        *self.ids.entry(TypeId::of::<T>()).or_insert_with(|| {
-            let id = ComponentId(u32::try_from(self.infos.len()).expect("fewer than 2^32 types"));
-            self.infos.push(Info {
-                name: type_name::<T>(),
-                new_column: || Box::new(Vec::<T>::new()),
-            });
-            id
-        })
+        self.register::<T>()
+            .unwrap_or_else(|error| panic!("{error:?}"))
     }
 
     /// The id of the type `type_id` names, if it has one yet.
@@ -44,8 +95,28 @@ impl Components {
         self.ids.get(&type_id).copied()
     }
 
-    pub fn name(&self, id: ComponentId) -> &'static str {
-        self.infos[id.0 as usize].name
+    /// The id of the type named `name`, if it has one yet.
+    pub fn named(&self, name: &str) -> Option<ComponentId> {
+        self.by_name.get(name).copied()
+    }
+
+    /// Its name in its description.
+    pub fn name(&self, id: ComponentId) -> &str {
+        &self.infos[id.0 as usize].name
+    }
+
+    /// Every component type's name, in the order they registered.
+    pub fn names(&self) -> impl ExactSizeIterator<Item = &str> {
+        self.infos.iter().map(|info| &*info.name)
+    }
+
+    /// Its type, as reflection describes it.
+    pub fn ty(&self, id: ComponentId) -> Type {
+        Type::Named(self.infos[id.0 as usize].index)
+    }
+
+    pub fn types(&self) -> &Types {
+        &self.types
     }
 }
 
@@ -112,6 +183,11 @@ pub trait AnyColumn: Any + Send + Sync {
     /// Moves `row`'s value onto the end of `to`, a column of the same type, the last row's taking
     /// its place.
     fn move_row(&mut self, row: usize, to: &mut dyn AnyColumn);
+
+    /// `row`'s value, for reflection.
+    fn row(&self, row: usize) -> &dyn Reflect;
+
+    fn row_mut(&mut self, row: usize) -> &mut dyn Reflect;
 }
 
 impl<T: Component> AnyColumn for Vec<T> {
@@ -122,6 +198,14 @@ impl<T: Component> AnyColumn for Vec<T> {
     fn move_row(&mut self, row: usize, to: &mut dyn AnyColumn) {
         let value = Vec::swap_remove(self, row);
         to.vec_mut::<T>().push(value);
+    }
+
+    fn row(&self, row: usize) -> &dyn Reflect {
+        &self[row]
+    }
+
+    fn row_mut(&mut self, row: usize) -> &mut dyn Reflect {
+        &mut self[row]
     }
 }
 

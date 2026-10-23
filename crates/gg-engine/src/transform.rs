@@ -9,7 +9,7 @@ use crate::Component;
 /// rotation, then translation. The engine draws the world's entities back to front by
 /// `translation.z`, so entities that overlap need different z's: those at one z draw in an order
 /// that changes as entities are despawned or change components.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Component)]
 pub struct Transform {
     pub translation: Vec3,
     /// As a unit quaternion.
@@ -36,5 +36,3 @@ impl Default for Transform {
         Self::IDENTITY
     }
 }
-
-impl Component for Transform {}

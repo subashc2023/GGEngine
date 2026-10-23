@@ -16,7 +16,7 @@ use gg_renderer::{
 use crate::draw::{self, Segment};
 use crate::image::{self, Image};
 use crate::perf::Perf;
-use crate::{Event, Input, Ui, World};
+use crate::{Event, Input, MeshDraw, Transform, Ui, World};
 
 /// A part of an app that the main loop drives. Every method has a default that does nothing,
 /// so a layer implements only what it uses.
@@ -64,6 +64,14 @@ pub struct Context {
 
 impl Context {
     pub(crate) fn new(window: Option<Window>) -> Self {
+        // The engine's names first, so that a game's types can't take them, listed before any
+        // entity has one.
+        let mut world = World::default();
+        let registered = world.register::<Transform>().and_then(|()| {
+            world.register::<Sprite>()?;
+            world.register::<MeshDraw>()
+        });
+        registered.expect("the engine's components describe themselves");
         Self {
             window,
             input: Input::default(),
@@ -73,7 +81,7 @@ impl Context {
             shaders: Shaders::default(),
             textures: Textures::default(),
             draws: Draws::default(),
-            world: World::default(),
+            world,
             segments: Vec::new(),
             perf: Perf::default(),
         }

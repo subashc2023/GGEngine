@@ -12,6 +12,7 @@ gg-core = { path = "crates/gg-core" }
 gg-gpu = { path = "crates/gg-gpu" }
 gg-renderer = { path = "crates/gg-renderer" }
 gg-engine = { path = "crates/gg-engine" }
+gg-macros = { path = "crates/gg-macros" }
 
 ash = "0.38.0"
 ash-window = "0.13.0"
@@ -24,11 +25,15 @@ epaint = { version = "0.37.0", features = ["bytemuck"] }
 glam = { version = "0.34.1", features = ["bytemuck"] }
 nu-ansi-term = "0.50.3"
 png = "0.18.1"
+proc-macro2 = "1.0.107"
+quote = "1.0.47"
 raw-window-handle = { version = "0.6.2", features = ["std"] }
 ron = "0.12.2"
 scoped-tls = "1.0.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+# serde_derive's version, so that the two build once.
+syn = "3.0.9"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["json"] }
 # Tracy's client, for gg-core's zones. Its defaults open a profiler to the network and add

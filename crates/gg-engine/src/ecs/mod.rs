@@ -1,6 +1,8 @@
-//! The engine's ECS: entities, which are handles, and their components, data of any type, kept in
-//! archetype tables, a table for each set of component types, and found by queries.
+//! The engine's ECS: entities, which are handles, and their components, data of any reflected type,
+//! kept in archetype tables, a table for each set of component types, and found by queries, or by
+//! name.
 
+mod by_name;
 mod query;
 mod table;
 
@@ -12,25 +14,32 @@ use std::num::NonZeroU32;
 
 use gg_core::{Error, Result};
 
+pub use by_name::Entities;
 pub use query::{Query, QueryIter, QueryIterMut, ReadOnlyQuery};
 use table::{ComponentId, Components, Table};
 
-/// Data an entity can have: any type that implements it, with `impl Component for Health {}`.
-/// Clone, so that the world can be copied whole, as snapshots will; and `Send` and `Sync`, so that
-/// it can move to the threads that will run the simulation.
+use crate::reflect::Reflect;
+
+/// Data an entity can have: a struct or an enum that derives it, with `#[derive(Clone,
+/// Component)]`, which describes it to reflection too, as [`Reflect`] says, so that tools reach it
+/// by name. Clone, so that the world can be copied whole, as snapshots will; and, through
+/// `Reflect`, `Send` and `Sync`, so that it can move to the threads that will run the simulation.
+/// A type registers the first time an entity has one, or with [`World::register`].
 #[diagnostic::on_unimplemented(
     message = "`{Self}` isn't a component",
-    note = "a type becomes one with `impl gg_engine::Component for {Self} {{}}`, if it's \
-            `Clone`, `Send` and `Sync`"
+    note = "a type becomes one with `#[derive(Clone, gg_engine::Component)]`"
 )]
-pub trait Component: Clone + Send + Sync + 'static {}
+pub trait Component: Reflect + Clone {}
+
+/// Makes a struct or an enum a component, describing it to reflection: [`Component`] says how.
+pub use gg_macros::Component;
 
 /// Components that an entity is spawned with: a component, or a tuple of up to 8 of different
 /// types.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` isn't a bundle of components",
-    note = "`World::spawn` takes a component, a type with `impl gg_engine::Component`, or a \
-            tuple of up to 8 of different types; `World::insert` takes one"
+    note = "`World::spawn` takes a component, a type that derives `gg_engine::Component`, or \
+            a tuple of up to 8 of different types; `World::insert` takes one"
 )]
 pub trait Bundle: seal::Bundle {}
 
@@ -98,7 +107,8 @@ impl World {
     ///
     /// # Panics
     ///
-    /// If `components` has a type twice, since an entity has one of each.
+    /// If `components` has a type twice, since an entity has one of each; and if a type of them
+    /// fails to [`register`](Self::register).
     pub fn spawn<B: Bundle>(&mut self, components: B) -> Entity {
         let mut ids = [ComponentId::default(); MOST];
         let ids = &mut ids[..B::COUNT];
@@ -146,6 +156,10 @@ impl World {
     /// Gives `entity` `component`, in place of the one of its type it has.
     ///
     /// Fails with `ecs.no_entity` if it isn't alive.
+    ///
+    /// # Panics
+    ///
+    /// If `T` fails to [`register`](Self::register).
     pub fn insert<T: Component>(&mut self, entity: Entity, component: T) -> Result<()> {
         let at = self.locate(entity)?;
         let id = self.components.id::<T>();
@@ -392,14 +406,13 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
+    use crate::reflect::Value;
 
-    #[derive(Clone, Copy, Debug, PartialEq)]
+    #[derive(Clone, Copy, Debug, PartialEq, Component)]
     struct Index(u32);
-    impl Component for Index {}
 
-    #[derive(Clone, Copy, Debug, PartialEq)]
+    #[derive(Clone, Copy, Debug, PartialEq, Component)]
     struct Marked;
-    impl Component for Marked {}
 
     #[test]
     fn entities_keep_their_ids_as_others_are_removed() {
@@ -464,22 +477,18 @@ mod tests {
         assert_eq!(world.get::<Index>(next), Some(&Index(1)));
     }
 
-    #[derive(Clone, Copy, Debug, PartialEq)]
+    #[derive(Clone, Copy, Debug, PartialEq, Component)]
     struct A(u32);
-    impl Component for A {}
 
-    #[derive(Clone, Copy, Debug, PartialEq)]
+    #[derive(Clone, Copy, Debug, PartialEq, Component)]
     struct B(u64);
-    impl Component for B {}
 
-    #[derive(Clone, Copy, Debug, PartialEq)]
+    #[derive(Clone, Copy, Debug, PartialEq, Component)]
     struct C;
-    impl Component for C {}
 
     /// Not `Copy`, and on the heap, so that a value dropped or cloned where it should move shows.
-    #[derive(Clone, Debug, PartialEq)]
+    #[derive(Clone, Debug, PartialEq, Component)]
     struct D(String);
-    impl Component for D {}
 
     /// An entity's components, as the model keeps them.
     #[derive(Clone, Debug, Default, PartialEq)]
@@ -516,8 +525,8 @@ mod tests {
     }
 
     /// Takes random steps, spawning, despawning, giving and taking components and changing them
-    /// through queries, and after each checks the world against a model of it: a list of each
-    /// living entity's components.
+    /// through queries and by name, and after each checks the world against a model of it: a list
+    /// of each living entity's components.
     #[test]
     fn the_world_matches_a_model() {
         let mut world = World::default();
@@ -536,7 +545,7 @@ mod tests {
         live.push((first, all(0)));
         for step in 1..2000 {
             let n = step as u32;
-            match rng.below(9) {
+            match rng.below(10) {
                 0 | 1 if live.len() < 200 => {
                     let (entity, has) = match rng.below(6) {
                         0 => (world.spawn(()), Has::default()),
@@ -671,6 +680,37 @@ mod tests {
                         d.0.push('!');
                     }
                 }
+                9 if !dead.is_empty() && rng.below(4) == 0 => {
+                    let entity = dead[rng.below(dead.len())];
+                    let set = world.set_field(entity, "A", "0", &Value::UInt(n.into()));
+                    let code = set.map_err(|error| error.code());
+                    assert_eq!(code, Err("ecs.no_entity"), "{entity} at step {step}");
+                }
+                9 if !live.is_empty() => {
+                    // As tools set fields, on an entity with the component or without it.
+                    let picked = rng.below(live.len());
+                    let (entity, has) = &mut live[picked];
+                    let (component, value, old) = match rng.below(3) {
+                        0 => {
+                            let old = has.a.as_mut().map(|a| mem::replace(&mut a.0, n).into());
+                            ("A", Value::UInt(n.into()), old.map(Value::UInt))
+                        }
+                        1 => {
+                            let old = has.b.as_mut().map(|b| mem::replace(&mut b.0, n.into()));
+                            ("B", Value::UInt(n.into()), old.map(Value::UInt))
+                        }
+                        _ => {
+                            let text = n.to_string();
+                            let old = has.d.as_mut().map(|d| mem::replace(&mut d.0, text.clone()));
+                            ("D", Value::String(text), old.map(Value::String))
+                        }
+                    };
+                    let set = world.set_field(*entity, component, "0", &value);
+                    let expected = old.ok_or("reflect.missing_component");
+                    assert_eq!(set.map_err(|error| error.code()), expected, "step {step}");
+                    let got = world.get_field(*entity, component, "0").ok();
+                    assert_eq!(got, expected.is_ok().then_some(value), "step {step}");
+                }
                 8 => {
                     // A query of one term.
                     let query = world.query_mut::<&mut B>();
@@ -727,6 +767,8 @@ mod tests {
             expected.sort_by_key(|&(entity, _)| entity);
             assert_eq!(found, expected, "step {step}");
             assert_eq!(world.query::<Entity>().count(), live.len(), "step {step}");
+            let listed = world.entities(None).expect("every entity");
+            assert_eq!(listed.len(), live.len(), "step {step}");
             assert_eq!(
                 world.query_mut::<Entity>().count(),
                 live.len(),
@@ -751,7 +793,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "a bundle has `gg_engine::ecs::tests::A` twice")]
+    #[should_panic(expected = "a bundle has `A` twice")]
     fn a_bundle_of_a_component_twice_is_a_bug() {
         World::default().spawn((A(0), B(0), A(1)));
     }

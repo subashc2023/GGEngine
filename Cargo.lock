@@ -808,6 +808,7 @@ dependencies = [
  "egui",
  "egui-winit",
  "gg-core",
+ "gg-macros",
  "gg-renderer",
  "png",
  "ron",
@@ -829,6 +830,15 @@ dependencies = [
  "raw-window-handle",
  "serde_json",
  "tracing",
+]
+
+[[package]]
+name = "gg-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
 ]
 
 [[package]]

@@ -15,6 +15,7 @@ deny = [
     # No skip-level edges: each layer is reached only from the one above it.
     { crate = "gg-gpu", wrappers = ["gg-renderer"], reason = "the engine reaches the GPU only through gg-renderer" },
     { crate = "gg-renderer", wrappers = ["gg-engine"], reason = "apps and games build on gg-engine" },
+    { crate = "gg-macros", wrappers = ["gg-engine"], reason = "games derive through gg-engine's re-exports" },
     { crate = "ash", wrappers = ["gg-gpu", "ash-window"], reason = "gg-gpu owns Vulkan" },
     { crate = "ash-window", wrappers = ["gg-gpu"], reason = "gg-gpu owns Vulkan" },
     { crate = "winit", wrappers = ["gg-engine", "egui-winit"], reason = "gg-engine owns the window and input" },

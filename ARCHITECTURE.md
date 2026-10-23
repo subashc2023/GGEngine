@@ -34,7 +34,7 @@ are in [AGENTS.md](AGENTS.md).
 ```text
    sandbox     player          apps/: executables
         \       /
-        gg-engine              crates/: libraries
+        gg-engine - gg-macros  crates/: libraries
             |
        gg-renderer
             |
@@ -50,6 +50,9 @@ are in [AGENTS.md](AGENTS.md).
   the GPU resources and hands out handles to them.
 - **`gg-engine`:** the main loop, window and input, scene and assets, plus hot reload and the
   tool API in development builds: what apps and games build on.
+- **`gg-macros`:** the derives `gg-engine` re-exports beside its traits of the same names,
+  `Reflect` and `Component`. Rust builds a derive as a crate of its own; only `gg-engine`
+  depends on it, and games derive through `gg-engine`.
 - **`sandbox`:** the development playground for engine features.
 - **`player`:** the reference player. It runs a cooked scene without game code and shows how a
   game builds its own player.
@@ -78,7 +81,7 @@ settings by executable name, and a generic name can match one.
 Cargo's cycle check enforces rule 1, and rule 2's ban on `gg-*` dependencies. It can't see a
 skip-level edge such as `gg-engine` → `gg-gpu`, which forms no cycle, so
 [deny.toml](deny.toml) names the only crates that may depend directly on `gg-gpu`,
-`gg-renderer`, `ash`, `ash-window`, `winit`, `egui-winit`, `tracy-client` and
+`gg-renderer`, `gg-macros`, `ash`, `ash-window`, `winit`, `egui-winit`, `tracy-client` and
 `tracy-client-sys`, and CI checks it with cargo-deny. Rule 4, and what a crate does with the
 dependencies it may have, are left to review.
 
@@ -197,18 +200,33 @@ peer-to-peer rollback; the engine supplies these pieces.
 
 The world is a `World` of entities and their components, in safe Rust. An entity is a handle,
 its slot and which use of the slot it is, so that a despawned entity's handle never names
-another. A component is any type that implements `Component`: `Clone`, for snapshots, and `Send`
-and `Sync`, for the job system. Components live in archetype tables, one for each set of
-component types, whose rows are its entities and whose columns are each type's own `Vec`, which
-the world reaches through a trait object, downcast once a table, rather than through raw
-pointers. Queries borrow the world, shared to read it and exclusively to change it, so that the
-borrow checker keeps them apart, and walk each table's columns as slices. Systems are plain
-functions over the world, run in a fixed order. The order queries find entities in follows only
-from the changes made: tables are kept in the order they were made, despawning an entity or
-changing its components moves its table's last row into its place, the last freed slot is the
-first taken, and no hash map is iterated. So it's the same in every run, as the deterministic
-mode needs, but means nothing a game may rely on: anything ordered, such as what's drawn over
-what, orders by its components' values.
+another. A component is a struct or an enum that derives `Component`, which describes it to
+reflection; it's `Clone`, for snapshots, and `Send` and `Sync`, for the job system. Components
+live in archetype tables, one for each set of component types, whose rows are its entities and
+whose columns are each type's own `Vec`, which the world reaches through a trait object,
+downcast once a table, rather than through raw pointers. Queries borrow the world, shared to read
+it and exclusively to change it, so that the borrow checker keeps them apart, and walk each
+table's columns as slices. Systems are plain functions over the world, run in a fixed order. The
+order queries find entities in follows only from the changes made: tables are kept in the order
+they were made, despawning an entity or changing its components moves its table's last row into
+its place, the last freed slot is the first taken, and no hash map is iterated. So it's the same
+in every run, as the deterministic mode needs, but means nothing a game may rely on: anything
+ordered, such as what's drawn over what, orders by its components' values.
+
+Reflection names each component type by its identifier, unless `#[reflect(name = "...")]` gives
+another, and two types of one name are an error rather than a guess. The derive writes the
+description, with hints for bounds, angles, colors and fields kept opaque. The engine's own
+components register as it starts, so that their names are taken first, and a game's the first time
+an entity has one; each struct or enum among their fields is described once, so a type can hold
+itself. Values cross as a closed `Value`: integers of fixed sizes only, so that a value means the
+same on every machine; `f32` apart from `f64`, so that bits come back as they went; an entity
+as its handle, which files, the tool API and replication will map to persistent IDs; and
+`Opaque` for what reflection keeps but doesn't read, such as a texture's handle, which no value
+may make. The world reads and sets a field by its component's name and a path, such as
+`rect[1].y`: a set checks the whole value against the description before anything changes,
+refuses a number outside its field's bounds, and returns the old value, which sets it back unless
+code stored one that a set refuses. The Inspector edits components through these calls alone,
+which the tool API will serve.
 
 ## Diagnostics
 

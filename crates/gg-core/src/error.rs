@@ -32,6 +32,14 @@ impl Error {
         self
     }
 
+    /// This error with `message` in place of its own, keeping its code and what caused it: for an
+    /// error that says more of where it happened as it's passed up.
+    #[must_use]
+    pub fn with_message(mut self, message: impl Into<String>) -> Self {
+        self.message = message.into();
+        self
+    }
+
     pub fn code(&self) -> &'static str {
         self.code
     }

@@ -9,6 +9,7 @@ bytemuck.workspace = true
 egui.workspace = true
 egui-winit.workspace = true
 gg-core.workspace = true
+gg-macros.workspace = true
 gg-renderer.workspace = true
 png.workspace = true
 ron.workspace = true

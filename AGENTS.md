@@ -18,6 +18,7 @@ crates/           libraries
   gg-gpu/         Vulkan through ash: the only crate that touches Vulkan
   gg-renderer/    render graph, passes, materials; gets plain render data, never the scene
   gg-engine/      main loop, window, input, scene, assets, hot reload, tool API: what games use
+  gg-macros/      the derives gg-engine re-exports
 apps/             executables
   sandbox/        development playground
   player/         reference player: runs cooked scenes without game code

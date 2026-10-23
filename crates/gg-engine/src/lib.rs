@@ -1,8 +1,13 @@
 //! What apps build on: the main loop, window and input, layers and their UI, the world of entities
-//! and their components, which it draws, handing each frame's render data to `gg-renderer`, and
-//! measuring each frame, for the log and the Performance panel; scenes and assets to come.
+//! and their components, which it draws, handing each frame's render data to `gg-renderer`;
+//! reflection, which describes the components' types so that tools reach them by name, and the
+//! Inspector, which edits them; and measuring each frame, for the log and the Performance panel.
+//! Scenes and assets to come.
 //!
 //! An app's `main` starts the engine; there is no separate entry-point crate.
+
+// So that the derives' code, which names `::gg_engine`, works here too.
+extern crate self as gg_engine;
 
 mod args;
 mod camera;
@@ -13,8 +18,10 @@ mod ecs;
 mod event;
 mod image;
 mod input;
+mod inspector;
 mod layer;
 mod perf;
+pub mod reflect;
 mod transform;
 mod viewports;
 mod window;
@@ -38,7 +45,9 @@ pub use camera::OrthographicCameraController;
 use chrome::Chrome;
 use dock::Dock;
 pub use dock::Ui;
-pub use ecs::{Bundle, Component, Entity, Query, QueryIter, QueryIterMut, ReadOnlyQuery, World};
+pub use ecs::{
+    Bundle, Component, Entities, Entity, Query, QueryIter, QueryIterMut, ReadOnlyQuery, World,
+};
 /// The UI library layers draw with, in [`Layer::ui`]; apps use it from here, so that they
 /// share the engine's version.
 pub use egui;
@@ -60,10 +69,12 @@ pub use gg_renderer::{
     Blend, Camera, Mesh, Projection, Sampler, Shader, Sprite, SpriteSheet, Texture,
 };
 pub use input::Input;
+pub use inspector::Inspector;
 use layer::Stack;
 pub use layer::{Context, Layer, Window};
 pub use perf::PerfPanel;
 use perf::{Perf, Summary};
+pub use reflect::Reflect;
 pub use transform::Transform;
 use viewports::Drawn;
 
@@ -515,6 +526,53 @@ mod tests {
             size: [640, 360],
         };
         assert_eq!(*cx.render_data(viewport).draws, expected);
+    }
+
+    #[test]
+    fn the_inspector_lists_the_world_in_the_dock() {
+        let mut stack = Stack::default();
+        stack.push_layer(Box::new(Drawer));
+        stack.push_overlay(Box::new(Inspector::default()));
+        let mut cx = Context::new(None);
+        stack.attach(&mut cx);
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1600.0, 1200.0),
+            )),
+            ..Default::default()
+        };
+        let mut dock = Dock::new(None, Chrome::Os);
+        let mut clock = Clock::default();
+        let egui = egui_context();
+        let mut texts = Vec::new();
+        // The dock places a panel in its first frame, and draws it from the next.
+        for _ in 0..3 {
+            let mut output = run_frame(&mut stack, &mut cx, &mut clock, &egui, &mut dock, input());
+            output.textures_delta.clear();
+            texts.clear();
+            for clipped in output.shapes {
+                find_texts(clipped.shape, &mut texts);
+            }
+        }
+        for text in [
+            "1 entity",
+            "Nothing picked: pick an entity in the Entities panel",
+        ] {
+            assert!(texts.iter().any(|shown| shown == text), "{text}: {texts:?}");
+        }
+    }
+
+    fn find_texts(shape: egui::Shape, texts: &mut Vec<String>) {
+        match shape {
+            egui::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    find_texts(shape, texts);
+                }
+            }
+            egui::Shape::Text(text) => texts.push(text.galley.text().to_owned()),
+            _ => {}
+        }
     }
 
     #[test]

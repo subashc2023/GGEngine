@@ -1,0 +1,380 @@
+//! Reflection of the types fields hold: `bool`, the integers of fixed sizes, `f32`, `f64` and
+//! `String`; glam's vectors and quaternion; entities; and options, lists and arrays of any
+//! reflected type. `usize` and `isize` aren't, since their size differs by platform, and a value
+//! saved or sent must mean the same everywhere.
+
+use gg_core::math::{Quat, Vec2, Vec3, Vec4};
+
+use super::{Angle, Color, Error, Ranged, Reflect, Result, Type, Types, Value, within, wrong_kind};
+use crate::Entity;
+
+/// `set_value` as all of them have it, and no parts.
+macro_rules! whole {
+    () => {
+        fn set_value(&mut self, value: &Value) -> Result<()> {
+            *self = self.with_value(value)?;
+            Ok(())
+        }
+
+        fn part(&self, _: u32) -> Option<&dyn Reflect> {
+            None
+        }
+
+        fn part_mut(&mut self, _: u32) -> Option<&mut dyn Reflect> {
+            None
+        }
+    };
+}
+
+macro_rules! integers {
+    ($($T:ident $signed:literal $Variant:ident,)*) => {$(
+        impl Reflect for $T {
+            fn describe(_: &mut Types) -> Result<Type> {
+                Ok(Type::Int { bits: $T::BITS as u8, signed: $signed })
+            }
+
+            fn to_value(&self) -> Value {
+                Value::$Variant((*self).into())
+            }
+
+            fn from_value(value: &Value) -> Result<Self> {
+                let fits = match *value {
+                    Value::Int(n) => Self::try_from(n).map_err(|_| n.to_string()),
+                    Value::UInt(n) => Self::try_from(n).map_err(|_| n.to_string()),
+                    ref other => return Err(wrong_kind("Int or UInt", other)),
+                };
+                fits.map_err(|n| {
+                    Error::new(
+                        "reflect.out_of_range",
+                        format!(
+                            "{n} doesn't fit {}, from {} to {}",
+                            stringify!($T),
+                            $T::MIN,
+                            $T::MAX
+                        ),
+                    )
+                })
+            }
+
+            fn with_value(&self, value: &Value) -> Result<Self> {
+                Self::from_value(value)
+            }
+
+            whole!();
+        }
+
+        impl Ranged for $T {}
+    )*};
+}
+
+integers! {
+    i8 true Int, i16 true Int, i32 true Int, i64 true Int,
+    u8 false UInt, u16 false UInt, u32 false UInt, u64 false UInt,
+}
+
+/// Types whose values are one variant of [`Value`], taken as they are: such as `bool`, by
+/// `Value::Bool`, which reflection describes as `Type::Bool`.
+macro_rules! plain {
+    ($($T:ty => $Variant:ident,)*) => {$(
+        impl Reflect for $T {
+            fn describe(_: &mut Types) -> Result<Type> {
+                Ok(Type::$Variant)
+            }
+
+            fn to_value(&self) -> Value {
+                Value::$Variant(*self)
+            }
+
+            fn from_value(value: &Value) -> Result<Self> {
+                match value {
+                    Value::$Variant(value) => Ok(*value),
+                    other => Err(wrong_kind(stringify!($Variant), other)),
+                }
+            }
+
+            fn with_value(&self, value: &Value) -> Result<Self> {
+                Self::from_value(value)
+            }
+
+            whole!();
+        }
+    )*};
+}
+
+plain! {
+    bool => Bool,
+    f32 => F32,
+    f64 => F64,
+    Entity => Entity,
+}
+
+impl Reflect for String {
+    fn describe(_: &mut Types) -> Result<Type> {
+        Ok(Type::String)
+    }
+
+    fn to_value(&self) -> Value {
+        Value::String(self.clone())
+    }
+
+    fn from_value(value: &Value) -> Result<Self> {
+        match value {
+            Value::String(value) => Ok(value.clone()),
+            other => Err(wrong_kind("String", other)),
+        }
+    }
+
+    fn with_value(&self, value: &Value) -> Result<Self> {
+        Self::from_value(value)
+    }
+
+    whole!();
+}
+
+impl Ranged for f32 {}
+impl Ranged for f64 {}
+impl Angle for f32 {}
+
+/// Vectors, whose components are their parts.
+macro_rules! vectors {
+    ($($T:ident,)*) => {$(
+        impl Reflect for $T {
+            fn describe(_: &mut Types) -> Result<Type> {
+                Ok(Type::$T)
+            }
+
+            fn to_value(&self) -> Value {
+                Value::$T(*self)
+            }
+
+            fn from_value(value: &Value) -> Result<Self> {
+                match value {
+                    Value::$T(value) => Ok(*value),
+                    other => Err(wrong_kind(stringify!($T), other)),
+                }
+            }
+
+            fn with_value(&self, value: &Value) -> Result<Self> {
+                Self::from_value(value)
+            }
+
+            fn set_value(&mut self, value: &Value) -> Result<()> {
+                *self = self.with_value(value)?;
+                Ok(())
+            }
+
+            fn part(&self, index: u32) -> Option<&dyn Reflect> {
+                let components: &[f32] = self.as_ref();
+                Some(components.get(index as usize)?)
+            }
+
+            fn part_mut(&mut self, index: u32) -> Option<&mut dyn Reflect> {
+                let components: &mut [f32] = self.as_mut();
+                Some(components.get_mut(index as usize)?)
+            }
+        }
+
+        impl Ranged for $T {}
+    )*};
+}
+
+vectors! {
+    Vec2,
+    Vec3,
+    Vec4,
+}
+
+impl Color for Vec3 {}
+impl Color for Vec4 {}
+
+/// Set whole, and never to one that isn't a unit, so that it has no parts.
+impl Reflect for Quat {
+    fn describe(_: &mut Types) -> Result<Type> {
+        Ok(Type::Quat)
+    }
+
+    fn to_value(&self) -> Value {
+        Value::Quat(*self)
+    }
+
+    fn from_value(value: &Value) -> Result<Self> {
+        match value {
+            Value::Quat(q) if q.is_normalized() => Ok(*q),
+            Value::Quat(q) => Err(Error::new(
+                "reflect.not_normalized",
+                format!(
+                    "a rotation is a unit quaternion, but {q} is {} long",
+                    q.length()
+                ),
+            )),
+            other => Err(wrong_kind("Quat", other)),
+        }
+    }
+
+    fn with_value(&self, value: &Value) -> Result<Self> {
+        Self::from_value(value)
+    }
+
+    whole!();
+}
+
+/// Set whole: `None` and `Some` aren't parts.
+impl<T: Reflect> Reflect for Option<T> {
+    fn describe(types: &mut Types) -> Result<Type> {
+        Ok(Type::Option(Box::new(T::describe(types)?)))
+    }
+
+    fn to_value(&self) -> Value {
+        Value::Option(self.as_ref().map(|value| Box::new(value.to_value())))
+    }
+
+    fn from_value(value: &Value) -> Result<Self> {
+        match value {
+            Value::Option(None) => Ok(None),
+            Value::Option(Some(value)) => T::from_value(value).map(Some),
+            other => Err(wrong_kind("Option", other)),
+        }
+    }
+
+    fn with_value(&self, value: &Value) -> Result<Self> {
+        match (self, value) {
+            (Some(current), Value::Option(Some(value))) => current.with_value(value).map(Some),
+            _ => Self::from_value(value),
+        }
+    }
+
+    whole!();
+}
+
+impl<T: Ranged> Ranged for Option<T> {}
+impl<T: Angle> Angle for Option<T> {}
+impl<T: Color> Color for Option<T> {}
+
+/// The elements of a value of [`Value::List`], or the error that it isn't one.
+fn elements(value: &Value) -> Result<&[Value]> {
+    match value {
+        Value::List(items) => Ok(items),
+        other => Err(wrong_kind("List", other)),
+    }
+}
+
+fn index(i: usize) -> String {
+    format!("[{i}]")
+}
+
+/// Its elements are its parts.
+impl<T: Reflect> Reflect for Vec<T> {
+    fn describe(types: &mut Types) -> Result<Type> {
+        Ok(Type::List(Box::new(T::describe(types)?)))
+    }
+
+    fn to_value(&self) -> Value {
+        Value::List(self.iter().map(Reflect::to_value).collect())
+    }
+
+    fn from_value(value: &Value) -> Result<Self> {
+        let items = elements(value)?.iter().enumerate();
+        let made = items.map(|(i, item)| T::from_value(item).map_err(|e| within(e, &index(i))));
+        made.collect()
+    }
+
+    fn with_value(&self, value: &Value) -> Result<Self> {
+        let items = elements(value)?.iter().enumerate();
+        let kept = items.map(|(i, item)| {
+            match self.get(i) {
+                Some(current) => current.with_value(item),
+                None => T::from_value(item),
+            }
+            .map_err(|e| within(e, &index(i)))
+        });
+        kept.collect()
+    }
+
+    fn set_value(&mut self, value: &Value) -> Result<()> {
+        *self = self.with_value(value)?;
+        Ok(())
+    }
+
+    fn part(&self, index: u32) -> Option<&dyn Reflect> {
+        Some(self.get(index as usize)?)
+    }
+
+    fn part_mut(&mut self, index: u32) -> Option<&mut dyn Reflect> {
+        Some(self.get_mut(index as usize)?)
+    }
+}
+
+impl<T: Ranged> Ranged for Vec<T> {}
+impl<T: Angle> Angle for Vec<T> {}
+impl<T: Color> Color for Vec<T> {}
+
+/// Its elements are its parts, and a value of it has `N` of them.
+impl<T: Reflect, const N: usize> Reflect for [T; N] {
+    fn describe(types: &mut Types) -> Result<Type> {
+        let len = const {
+            assert!(
+                N <= u32::MAX as usize,
+                "reflected arrays have fewer than 2^32 elements"
+            );
+            N as u32
+        };
+        Ok(Type::Array(Box::new(T::describe(types)?), len))
+    }
+
+    fn to_value(&self) -> Value {
+        Value::List(self.iter().map(Reflect::to_value).collect())
+    }
+
+    fn from_value(value: &Value) -> Result<Self> {
+        let items = sized::<N>(value)?.iter().enumerate();
+        let made = items.map(|(i, item)| T::from_value(item).map_err(|e| within(e, &index(i))));
+        array(made.collect::<Result<_>>()?)
+    }
+
+    fn with_value(&self, value: &Value) -> Result<Self> {
+        let items = self.iter().zip(sized::<N>(value)?).enumerate();
+        let kept = items
+            .map(|(i, (current, item))| current.with_value(item).map_err(|e| within(e, &index(i))));
+        array(kept.collect::<Result<_>>()?)
+    }
+
+    fn set_value(&mut self, value: &Value) -> Result<()> {
+        *self = self.with_value(value)?;
+        Ok(())
+    }
+
+    fn part(&self, index: u32) -> Option<&dyn Reflect> {
+        Some(self.get(index as usize)?)
+    }
+
+    fn part_mut(&mut self, index: u32) -> Option<&mut dyn Reflect> {
+        Some(self.get_mut(index as usize)?)
+    }
+}
+
+impl<T: Ranged, const N: usize> Ranged for [T; N] {}
+impl<T: Angle, const N: usize> Angle for [T; N] {}
+impl<T: Color, const N: usize> Color for [T; N] {}
+
+/// The elements of `value`, a list of `N` of them.
+fn sized<const N: usize>(value: &Value) -> Result<&[Value]> {
+    let items = elements(value)?;
+    if items.len() != N {
+        return Err(Error::new(
+            "reflect.wrong_length",
+            format!("an array of {N} is given {} elements", items.len()),
+        ));
+    }
+    Ok(items)
+}
+
+/// `items`, `N` of them, as an array.
+fn array<T, const N: usize>(items: Vec<T>) -> Result<[T; N]> {
+    let len = items.len();
+    items.try_into().map_err(|_| {
+        Error::new(
+            "reflect.wrong_length",
+            format!("an array of {N} is given {len} elements"),
+        )
+    })
+}

@@ -91,16 +91,21 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   its systems move and color, in the same 3 draws; a unit test checks that entities' handles stay
   theirs as others are removed, and another checks the world against a model of it through random
   changes.
+- **Reflection** (2026-10-22): component types derive `Component`, which describes their fields
+  to the engine under their own names, with hints for bounds, angles and colors; the world lists
+  its component types and entities, and gets and sets any field by name and path, checked against
+  the description, a set refused changing nothing and one made returning the old value. The
+  sandbox's Entities and Inspector panels show any entity's components and edit their fields while
+  it runs; unit tests check descriptions, paths, values coming back bit for bit and values refused,
+  and the model test sets fields by name too.
 
-## Now: reflection
+## Now: the transform hierarchy
 
-Phase 3's second milestone: component types registered at runtime with a description of their
-fields, which saving, operations, the inspector, snapshots and the tool API will reach components
-through. The transform hierarchy follows it.
+Phase 3's third milestone: entities with parents, which carry their children along, as scenes,
+prefabs and the camera as a component will need.
 
-*Done when* the sandbox's component types are registered with their fields, and an inspector
-panel shows its entities' components and edits their fields while it runs. Its plan is made when
-it starts.
+*Done when* the sandbox draws children that move and turn with their parent, and the Inspector
+shows each entity's parent. Its plan is made when it starts.
 
 ## Next
 
@@ -175,11 +180,11 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | A clean shutdown on Ctrl+C, which now ends the process at once; the JSON log keeps every line written until then | A headless run that goes on until it's stopped, such as a dedicated server |
 | GPU tests in Windows and macOS CI, which skip them because hosted runners there have no GPU | A self-hosted runner with a GPU, or a Vulkan driver that runs on those runners without one |
 | A gate that compiles the shipping configuration: `cargo clippy -p player --all-targets -- -D warnings` | When `gg-engine` gets its `dev` feature |
-| egui and the dock behind `dev`: the player links them and runs an empty UI pass every frame; `Ui`, which `Layer::ui` takes, is the type to turn into a no-op | When `gg-engine` gets its `dev` feature |
+| egui, the dock and the Inspector behind `dev`: the player links them and runs an empty UI pass every frame; `Ui`, which `Layer::ui` takes, is the type to turn into a no-op | When `gg-engine` gets its `dev` feature |
 | Waiting for the swapchain image before a frame reads input and the time, not after the layers update, which would cut latency by the wait: up to a refresh under `--vsync` | Phase 3, with input actions |
 | Pushing and popping layers while the app runs; `App` fixes the stack before it starts | A tool or game needs a layer for only part of a run |
 | Composed text from an input method (winit's `Ime` events), for languages typed through one | A game takes text input, such as chat |
-| Steady-state frames that draw UI allocate: in egui's layout and tessellation, and in the dock's own bookkeeping, which copies each frame's panel and menu names and torn-off windows' titles, and makes its arrangement and its list of groups left to draw anew | Phase 4, with the allocation check; the overlay is for development |
+| Steady-state frames that draw UI allocate: in egui's layout and tessellation, in the dock's own bookkeeping, which copies each frame's panel and menu names and torn-off windows' titles, and makes its arrangement and its list of groups left to draw anew, and in the Inspector, which reads its rows' names and the picked entity's components as values anew | Phase 4, with the allocation check; the overlay is for development |
 | Keeping within the GPU's memory budget (`VK_EXT_memory_budget` through VMA) | Phase 7, with streaming |
 | Removing meshes, shaders and textures; each lasts until the app ends | Something adds and removes them as it runs, such as asset hot reload in Phase 4 |
 | Perspective cameras, and a controller for them; a camera is orthographic, and so is the engine's controller | Phase 4, with depth |
@@ -236,6 +241,16 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | `MeshDraw` parameters of more than 64 bytes, which draw through `Context::draw` | Phase 6, with materials |
 | Micro-benchmarks, with criterion | A CPU hot path gets a target of its own; batching's is a frame time, which `engine.perf` measures |
 | Gates on time in CI: hosted runners' times vary too much to gate on | A self-hosted runner, as for the GPU tests |
+| Adding and removing components by name, each returning its inverse, and each type's default as a value | Phase 3, with operations |
+| Moving values to a type that changed: matching fields by name and by alias, defaults for fields added, and fields dropped | Phase 3's scenes, or Phase 5's hot reload |
+| Undo, and an Inspector drag merged into one edit; edits apply at once | Phase 3, with operations |
+| In the Inspector, turning an option on or off, switching to a variant with fields, and adding or removing a list's elements; by path, a value sets them whole | A component needs one edited |
+| `Sprite.texture` and `MeshDraw` are opaque: shown, but not set, saved or carried across a rebuild | Phase 4, which names assets |
+| Flags for fields that saving, the world's hash or replication skip, and fields that are read only | Each with its first user; read only with the hierarchy's parent |
+| Generic types deriving `Reflect` or `Component` | A game needs one |
+| Drag speeds as hints; the Inspector picks them from a field's bounds and kind | A field drags too coarsely or too finely |
+| Paths resolved once and kept, for sets made again and again | Operation logs, or a profile |
+| Picking an entity for a field, names in the Inspector, and picking in the view; entities are shown by handle | Persistent IDs, or picking |
 
 ## Open questions
 
