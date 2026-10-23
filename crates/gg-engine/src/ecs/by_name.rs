@@ -2,12 +2,13 @@
 //! their fields by path, and their values as reflection's [`Value`]s. The inspector is built on
 //! these alone, and so will the tool API be.
 
+use std::any::TypeId;
 use std::slice;
 
 use gg_core::{Error, Result};
 
 use super::table::{ComponentId, Table};
-use super::{Component, Entity, Location, World};
+use super::{Component, Entity, Location, Parent, World};
 use crate::reflect::{self, Types, Value};
 
 impl World {
@@ -72,7 +73,8 @@ impl World {
     /// to no field. Every error names the entity, the component and the path.
     pub fn get_field(&self, entity: Entity, component: &str, path: &str) -> Result<Value> {
         let about = |error: Error| about(error, "get", entity, component, path);
-        let (id, at, column) = self.find(entity, component).map_err(about)?;
+        let (id, at) = self.find(entity, component).map_err(about)?;
+        let column = self.column(at, id, component).map_err(about)?;
         let types = self.components.types();
         let to = reflect::resolve(types, &self.components.ty(id), path).map_err(about)?;
         let row = self.tables[at.table as usize].columns[column].row(at.row as usize);
@@ -89,9 +91,11 @@ impl World {
     /// is checked against the component's description, all of it before anything changes, so that a
     /// value refused changes nothing: its kinds, the bounds of its fields, which it's outside of if
     /// a number isn't finite, and a rotation being a unit quaternion. What's opaque is set only to
-    /// [`Value::Opaque`], which keeps it as it is.
+    /// [`Value::Opaque`], which keeps it as it is. A [`Parent`] isn't set by name: the world keeps
+    /// it, and [`World::set_parent`] changes it.
     ///
-    /// Fails as `get_field` does; with `reflect.out_of_range` for a number outside its field's
+    /// Fails as `get_field` does; with `reflect.read_only` for `Parent`, at any path, whether the
+    /// entity has one or not; with `reflect.out_of_range` for a number outside its field's
     /// bounds or its type's; and as [`Reflect::with_value`](crate::Reflect::with_value) does for
     /// a value that doesn't fit the field. Every error names the entity, the component and the
     /// path, down to the part refused.
@@ -103,7 +107,15 @@ impl World {
         value: &Value,
     ) -> Result<Value> {
         let about = |error: Error| about(error, "set", entity, component, path);
-        let (id, at, column) = self.find(entity, component).map_err(about)?;
+        let (id, at) = self.find(entity, component).map_err(about)?;
+        if Some(id) == self.components.get(TypeId::of::<Parent>()) {
+            return Err(about(Error::new(
+                "reflect.read_only",
+                "the world keeps it, so that the hierarchy stays whole; `World::set_parent` \
+                 changes it",
+            )));
+        }
+        let column = self.column(at, id, component).map_err(about)?;
         let types = self.components.types();
         let to = reflect::resolve(types, &self.components.ty(id), path).map_err(about)?;
         if to.ty.is_opaque(types) {
@@ -139,16 +151,19 @@ impl World {
         })
     }
 
-    /// Where `entity` is, the id of its component type `component`, and which of its table's
-    /// columns holds it.
-    fn find(&self, entity: Entity, component: &str) -> Result<(ComponentId, Location, usize)> {
+    /// Where `entity` is, and the id of component type `component`.
+    fn find(&self, entity: Entity, component: &str) -> Result<(ComponentId, Location)> {
         let at = self.location(entity).ok_or_else(|| {
             Error::new(
                 "ecs.no_entity",
                 "the entity isn't in the world: it was despawned, or is another world's",
             )
         })?;
-        let id = self.named(component)?;
+        Ok((self.named(component)?, at))
+    }
+
+    /// Which column of the table at `at` holds the entity's `component`, whose id is `id`.
+    fn column(&self, at: Location, id: ComponentId, component: &str) -> Result<usize> {
         let table = &self.tables[at.table as usize];
         let Some(column) = table.position(id) else {
             let names = table.components.iter().map(|&id| self.components.name(id));
@@ -160,7 +175,7 @@ impl World {
                 ),
             ));
         };
-        Ok((id, at, column))
+        Ok(column)
     }
 }
 
@@ -806,6 +821,10 @@ mod tests {
         #[derive(Clone, crate::Component)]
         #[reflect(name = "Armor")]
         pub(super) struct Health2(pub(super) f32);
+
+        /// Named as the world's own component.
+        #[derive(Clone, crate::Component)]
+        pub(super) struct Parent;
     }
 
     #[test]
@@ -823,6 +842,11 @@ mod tests {
             "{message}"
         );
         world.register::<second::Health2>().expect("renamed");
+        // Nor does a type take the name of the world's own, which it has from the start.
+        let error = world
+            .register::<second::Parent>()
+            .expect_err("the world's own name");
+        assert_eq!(error.code(), "reflect.name_taken");
         // Nor does a type take another's description, and with it its name, whichever registers
         // first.
         for _ in 0..2 {
@@ -839,7 +863,7 @@ mod tests {
             world.register::<Transform>().expect("registered");
         }
         let names: Vec<&str> = world.component_types().collect();
-        assert_eq!(names, ["Health", "Armor", "Transform"]);
+        assert_eq!(names, ["Parent", "Health", "Armor", "Transform"]);
     }
 
     /// Describes itself as a transform, as a type that passes everything to its field might.
@@ -877,6 +901,43 @@ mod tests {
     }
 
     impl Component for Posing {}
+    impl crate::Writable for Posing {}
+
+    /// Tools read a child's parent by name, but only the world sets it, whether the entity has one
+    /// or not.
+    #[test]
+    fn a_parent_is_read_by_name_but_not_set() {
+        let mut world = World::default();
+        let [parent, child, root] = [0.0, 1.0, 2.0].map(|x| {
+            let at = Transform {
+                translation: Vec3::splat(x),
+                ..Transform::IDENTITY
+            };
+            world.spawn(at)
+        });
+        // Refused from the start, before any entity has a parent.
+        let early = world.set_field(root, "Parent", "0", &Value::Entity(parent));
+        let early = early.expect_err("the world's to set");
+        assert_eq!(early.code(), "reflect.read_only", "{early}");
+        world.set_parent(child, Some(parent)).expect("no cycle");
+        let read = world.get_field(child, "Parent", "0");
+        assert_eq!(read.ok(), Some(Value::Entity(parent)));
+        assert!(world.component_types().any(|name| name == "Parent"));
+        let before = snapshot(&world);
+        let whole = Value::Struct(vec![named("0", Value::Entity(root))]);
+        for (entity, path, value) in [
+            (child, "", &whole),
+            (child, "0", &Value::Entity(root)),
+            (root, "", &whole),
+            (root, "0", &Value::Entity(child)),
+        ] {
+            let error = world.set_field(entity, "Parent", path, value);
+            let error = error.expect_err("the world's to set");
+            assert_eq!(error.code(), "reflect.read_only", "{error}");
+            assert!(error.to_string().contains("World::set_parent"), "{error}");
+        }
+        assert!(same_snapshots(&snapshot(&world), &before));
+    }
 
     #[test]
     #[should_panic(expected = "[reflect.name_taken] ")]

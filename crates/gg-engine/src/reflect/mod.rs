@@ -1151,6 +1151,7 @@ pub(crate) mod tests {
         // Each as it's first reached, the types of a type's fields after it.
         let names: Vec<&str> = types.iter().map(|(_, info)| &*info.name).collect();
         let expected = [
+            "Parent",
             "Transform",
             "Sprite",
             "Sampler",

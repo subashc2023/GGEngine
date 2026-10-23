@@ -4,13 +4,14 @@
 use std::ops::Range;
 
 use gg_core::Error;
-use gg_core::math::Vec2;
+use gg_core::math::{Mat4, Vec2};
 use gg_renderer::{Draws, MeshDraw, Sampler, Sprite};
 
 use crate::reflect::{self, Field, Meta, Reflect, Result, Shape, Show, Type, Types, Value};
-use crate::{Component, Transform, World};
+use crate::{Component, Parent, Transform, World, Writable};
 
 impl Component for Sprite {}
+impl Writable for Sprite {}
 
 /// Taken apart whole, so that a field `gg-renderer` adds fails to compile here until it's
 /// described. Its texture is opaque, so that no value makes the index of a texture, which shaders
@@ -209,6 +210,7 @@ impl Reflect for Sampler {
 }
 
 impl Component for MeshDraw {}
+impl Writable for MeshDraw {}
 
 /// Opaque: its mesh and its shader are indices private to `gg-renderer`, which no value may make.
 impl Reflect for MeshDraw {
@@ -243,8 +245,17 @@ impl Reflect for MeshDraw {
     }
 }
 
+/// What drawing the world sorts and computes, kept from frame to frame so that it allocates nothing
+/// once it's grown.
+#[derive(Default)]
+pub(crate) struct Scratch {
+    segments: Vec<Segment>,
+    /// The world matrices of the rows of tables of children, which draw by them.
+    matrices: Vec<Mat4>,
+}
+
 /// Rows of one table at one z, drawn together.
-pub(crate) struct Segment {
+struct Segment {
     z: f32,
     /// Which segment it was found as: tables in the order they were made, then a table's sprites
     /// before its meshes, then its rows in order.
@@ -252,7 +263,13 @@ pub(crate) struct Segment {
     kind: Kind,
     table: u32,
     rows: Range<u32>,
+    /// Where its table's world matrices start among the scratch's, for a table of children;
+    /// [`ROOTS`] for a table of roots, whose rows draw by their transforms.
+    matrices: u32,
 }
+
+/// A [`Segment`] of roots.
+const ROOTS: u32 = u32::MAX;
 
 #[derive(Clone, Copy)]
 enum Kind {
@@ -261,30 +278,70 @@ enum Kind {
 }
 
 /// Draws into `draws` every entity of `world` with a [`Transform`] and a [`Sprite`] or a
-/// [`MeshDraw`], back to front by its translation's z; at one z, in the order queries find them,
-/// and an entity with both draws its sprite under its mesh. `segments` is the scratch it sorts,
-/// kept from frame to frame so that it allocates nothing once it's grown.
+/// [`MeshDraw`], back to front by its z in the world; at one z, in the order queries find them,
+/// and an entity with both draws its sprite under its mesh. A child draws where its ancestors carry
+/// it, by its world matrix, which it computes into `scratch` for each child once a frame; roots,
+/// in tables without a [`Parent`], draw by their transforms alone.
 ///
 /// It sorts runs of consecutive rows at one z, so it's quick while each table's rows at one z stay
 /// together. Spawning entities of a table at mixed z's, or despawning, which moves a table's last
 /// row into the gap, splits those runs; at worst, as when sprites each have their own z, as sorting
 /// by y gives them, it sorts every sprite every frame, until the renderer sorts by depth, with
 /// Phase 4.
-pub(crate) fn draw_world(world: &World, draws: &mut Draws, segments: &mut Vec<Segment>) {
+pub(crate) fn draw_world(world: &World, draws: &mut Draws, scratch: &mut Scratch) {
     let _zone = gg_core::zone!();
+    let Scratch { segments, matrices } = scratch;
     segments.clear();
+    matrices.clear();
     let Some(transform) = world.component::<Transform>() else {
         return;
     };
     let sprite = world.component::<Sprite>();
     let mesh = world.component::<MeshDraw>();
+    let parent = world.component::<Parent>();
+    // A child's matrix from its own space to the world's: its transform's, then each ancestor's in
+    // turn up to its root, an ancestor without a transform carrying its children as though it
+    // were at the origin, unturned, at its own size. It walks up from each child, every frame, so
+    // children of one parent each take the steps they share, and a deep hierarchy costs its depth
+    // for each of them, until world transforms are stored and propagated, as physics or a profile
+    // will need.
+    let carry = |local: &Transform, parent: &Parent| {
+        world
+            .lineage(*parent)
+            .fold(local.matrix(), |m, (table, row)| {
+                match table.column::<Transform>(transform) {
+                    Some(transforms) => transforms[row].matrix() * m,
+                    None => m,
+                }
+            })
+    };
     for (table, rows) in world.tables().iter().enumerate() {
         let Some(transforms) = rows.column::<Transform>(transform) else {
             continue;
         };
-        for (kind, id) in [(Kind::Sprite, sprite), (Kind::Mesh, mesh)] {
-            if id.is_some_and(|id| rows.has(id)) {
-                cut(segments, transforms, kind, table as u32);
+        let drawn = [(Kind::Sprite, sprite), (Kind::Mesh, mesh)]
+            .map(|(kind, id)| (kind, id.is_some_and(|id| rows.has(id))));
+        if drawn.iter().all(|&(_, drawn)| !drawn) {
+            continue;
+        }
+        let table = table as u32;
+        let len = transforms.len();
+        match parent.and_then(|id| rows.column::<Parent>(id)) {
+            None => {
+                let z = |row: usize| transforms[row].translation.z;
+                for (kind, _) in drawn.into_iter().filter(|&(_, drawn)| drawn) {
+                    cut(segments, len, z, kind, table, ROOTS);
+                }
+            }
+            Some(parents) => {
+                let start = matrices.len();
+                let carried = transforms.iter().zip(parents);
+                matrices.extend(carried.map(|(local, parent)| carry(local, parent)));
+                let z = |row: usize| matrices[start + row].w_axis.z;
+                let start = u32::try_from(start).expect("fewer than 2^32 children drawn");
+                for (kind, _) in drawn.into_iter().filter(|&(_, drawn)| drawn) {
+                    cut(segments, len, z, kind, table, start);
+                }
             }
         }
     }
@@ -296,36 +353,58 @@ pub(crate) fn draw_world(world: &World, draws: &mut Draws, segments: &mut Vec<Se
         let transforms = &table
             .column::<Transform>(transform)
             .expect("it has transforms")[rows.clone()];
+        // Its children's world matrices, unless they're roots.
+        let carried = (segment.matrices != ROOTS).then(|| {
+            let start = segment.matrices as usize;
+            &matrices[start + rows.start..start + rows.end]
+        });
         match segment.kind {
             Kind::Sprite => {
                 let sprites = sprite.and_then(|id| table.column::<Sprite>(id));
                 let sprites = &sprites.expect("it has sprites")[rows];
-                let both = transforms.iter().zip(sprites);
-                draws.extend_sprites(both.map(|(transform, sprite)| (transform.matrix(), *sprite)));
+                match carried {
+                    Some(carried) => {
+                        draws.extend_sprites(carried.iter().copied().zip(sprites.iter().copied()));
+                    }
+                    None => {
+                        let both = transforms.iter().zip(sprites);
+                        let both = both.map(|(transform, sprite)| (transform.matrix(), *sprite));
+                        draws.extend_sprites(both);
+                    }
+                }
             }
             Kind::Mesh => {
                 let meshes = mesh.and_then(|id| table.column::<MeshDraw>(id));
                 let meshes = &meshes.expect("it has meshes")[rows];
-                for (transform, mesh) in transforms.iter().zip(meshes) {
-                    draws.push_draw(transform.matrix(), mesh);
+                for (row, mesh) in meshes.iter().enumerate() {
+                    let matrix = carried.map_or_else(|| transforms[row].matrix(), |m| m[row]);
+                    draws.push_draw(matrix, mesh);
                 }
             }
         }
     }
 }
 
-/// Adds to `segments` the runs of rows at one z among `transforms`, table `table`'s, of `kind`.
-fn cut(segments: &mut Vec<Segment>, transforms: &[Transform], kind: Kind, table: u32) {
-    let z = |row: usize| transforms[row].translation.z;
+/// Adds to `segments` the runs of rows at one z, which `z` gives, among table `table`'s `len` rows,
+/// of `kind`, whose world matrices start at `matrices` among the scratch's.
+fn cut(
+    segments: &mut Vec<Segment>,
+    len: usize,
+    z: impl Fn(usize) -> f32,
+    kind: Kind,
+    table: u32,
+    matrices: u32,
+) {
     let mut start = 0;
-    for row in 1..=transforms.len() {
-        if row == transforms.len() || z(row).total_cmp(&z(start)).is_ne() {
+    for row in 1..=len {
+        if row == len || z(row).total_cmp(&z(start)).is_ne() {
             segments.push(Segment {
                 z: z(start),
                 order: segments.len() as u32,
                 kind,
                 table,
                 rows: start as u32..row as u32,
+                matrices,
             });
             start = row;
         }
@@ -336,7 +415,7 @@ fn cut(segments: &mut Vec<Segment>, transforms: &[Transform], kind: Kind, table:
 mod tests {
     use std::path::Path;
 
-    use gg_core::math::{Vec3, Vec4};
+    use gg_core::math::{Quat, Vec3, Vec4};
     use gg_renderer::{Blend, Meshes, Shaders};
 
     use super::*;
@@ -425,7 +504,104 @@ mod tests {
             }
         }
         let mut draws = Draws::default();
-        draw_world(&world, &mut draws, &mut Vec::new());
+        draw_world(&world, &mut draws, &mut Scratch::default());
         assert_eq!(draws, want);
+    }
+
+    /// Draws children where their ancestors carry them, back to front by their z's in the world: a
+    /// child of a pivot that draws nothing, between two roots, where its own z would put it under
+    /// both; a grandchild whose table was made before its parent's; children with a sprite and a
+    /// mesh each, two of them at one z after the first in their table; and the child of an
+    /// ancestor without a transform. Their ancestors turn and scale unevenly, which doesn't
+    /// commute, so that matrices multiplied the wrong way round show. Drawing again in the same
+    /// scratch takes no more memory.
+    #[test]
+    fn children_draw_where_their_ancestors_carry_them() {
+        let mut shaders = Shaders::default();
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/shaders/flat_color.slang");
+        let flat = shaders
+            .add::<[f32; 3], Vec4>("flat color", &fixture, Blend::Opaque)
+            .expect("the shader compiles");
+        let corners = [[-0.5, -0.5, 0.0], [0.5, -0.5, 0.0], [0.0, 0.5, 0.0]];
+        let triangle = Meshes::default().add("triangle", &corners, &[0, 1, 2]);
+        let triangle = triangle.expect("a mesh");
+        let placed = |x: f32, z: f32, turn: f32, scale: [f32; 2]| Transform {
+            translation: Vec3::new(x, 0.25 * x, z),
+            rotation: Quat::from_rotation_z(turn),
+            scale: Vec3::new(scale[0], scale[1], 1.0),
+        };
+        let sprite = |n: f32| Sprite {
+            color: Vec4::splat(n),
+            ..Sprite::default()
+        };
+        let mut world = World::default();
+        let low = placed(1.0, 0.3, 0.0, [1.0; 2]);
+        world.spawn((low, sprite(1.0)));
+        let high = placed(2.0, 0.5, 0.0, [1.0; 2]);
+        world.spawn((high, sprite(2.0)));
+        let pivot_at = placed(0.5, 0.4, 0.7, [2.0, 0.5]);
+        let pivot = world.spawn(pivot_at);
+        let grand_at = placed(0.25, 0.02, -1.1, [0.5, 1.5]);
+        let grand = world.spawn((grand_at, sprite(3.0), Marked));
+        let middle_at = placed(1.0, 0.01, 0.3, [1.5, 0.75]);
+        let middle = world.spawn((middle_at, sprite(4.0)));
+        let mesh_at = placed(-0.5, 0.03, 0.2, [0.5, 2.0]);
+        let mesh = MeshDraw::new(triangle, flat, Vec4::splat(5.0));
+        let meshed = world.spawn((mesh_at, sprite(5.0), mesh));
+        let twins_at = [-1.5, -2.5].map(|x| placed(x, 0.035, 0.9, [1.0, 0.5]));
+        let twins = twins_at.map(|at| world.spawn((at, sprite(7.0), mesh)));
+        let bare = world.spawn(Marked);
+        let kid_at = placed(-1.0, 0.05, -0.4, [1.0, 3.0]);
+        let kid = world.spawn((kid_at, sprite(6.0)));
+        for (child, parent) in [
+            (grand, middle),
+            (middle, pivot),
+            (meshed, middle),
+            (twins[0], middle),
+            (twins[1], middle),
+            (bare, pivot),
+            (kid, bare),
+        ] {
+            world.set_parent(child, Some(parent)).expect("no cycle");
+        }
+
+        // Back to front: 0.3, 0.41, 0.43, 0.44, 0.445, 0.45 and 0.5 in the world, each child's
+        // matrix its own, then each ancestor's in turn; at one z, a table's sprites under its
+        // meshes.
+        let [pivot, middle] = [pivot_at.matrix(), middle_at.matrix()];
+        let twins = twins_at.map(|at| pivot * (middle * at.matrix()));
+        let mut want = Draws::default();
+        want.push_sprite(low.matrix(), sprite(1.0));
+        want.push_sprite(pivot * middle, sprite(4.0));
+        want.push_sprite(pivot * (middle * grand_at.matrix()), sprite(3.0));
+        let meshed = pivot * (middle * mesh_at.matrix());
+        want.push_sprite(meshed, sprite(5.0));
+        want.push_draw(meshed, &mesh);
+        for twin in twins {
+            want.push_sprite(twin, sprite(7.0));
+        }
+        for twin in twins {
+            want.push_draw(twin, &mesh);
+        }
+        want.push_sprite(pivot * kid_at.matrix(), sprite(6.0));
+        want.push_sprite(high.matrix(), sprite(2.0));
+        let mut scratch = Scratch::default();
+        let mut draws = Draws::default();
+        draw_world(&world, &mut draws, &mut scratch);
+        assert_eq!(draws, want);
+        let held = |scratch: &Scratch| {
+            let Scratch { segments, matrices } = scratch;
+            (
+                segments.as_ptr(),
+                segments.capacity(),
+                matrices.as_ptr(),
+                matrices.capacity(),
+            )
+        };
+        let before = held(&scratch);
+        let mut again = Draws::default();
+        draw_world(&world, &mut again, &mut scratch);
+        assert_eq!(again, want);
+        assert_eq!(held(&scratch), before, "drawing again takes no more memory");
     }
 }

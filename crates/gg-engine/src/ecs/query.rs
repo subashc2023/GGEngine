@@ -5,16 +5,17 @@ use std::iter::{Copied, Zip};
 use std::slice;
 
 use super::table::{AnyColumn, ComponentId, Components, Table};
-use super::{Component, Entity};
+use super::{Component, Entity, Writable};
 
-/// What a query takes of each entity: `&T` reads its `T`, `&mut T` changes it, and `Entity` is the
-/// entity itself; or a tuple of up to 8 of them, each component named once.
-/// [`World::query_mut`](super::World::query_mut) takes any, and
+/// What a query takes of each entity: `&T` reads its `T`, `&mut T` changes it, if it's
+/// [`Writable`], and `Entity` is the entity itself; or a tuple of up to 8 of them, each component
+/// named once. [`World::query_mut`](super::World::query_mut) takes any, and
 /// [`World::query`](super::World::query) those that only read.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` isn't a query",
     note = "a query's terms are `&T` and `&mut T` for components `T`, and `Entity`, alone or in a \
-            tuple of up to 8, such as `(Entity, &Transform, &mut Sprite)`"
+            tuple of up to 8, such as `(Entity, &Transform, &mut Sprite)`; `&mut` doesn't take \
+            `Parent`, which the world keeps"
 )]
 pub trait Query: seal::Query {}
 
@@ -161,7 +162,8 @@ mod seal {
     /// A query's term: `&T`, `&mut T` or `Entity`.
     #[diagnostic::on_unimplemented(
         message = "`{Self}` isn't a query's term",
-        note = "a query's terms are `&T` and `&mut T` for components `T`, and `Entity`"
+        note = "a query's terms are `&T` and `&mut T` for components `T`, and `Entity`; `&mut` \
+                doesn't take `Parent`, which the world keeps"
     )]
     pub trait Term {
         type Item<'w>;
@@ -235,7 +237,7 @@ impl<T: Component> ReadTerm for &T {
     }
 }
 
-impl<T: Component> Term for &mut T {
+impl<T: Writable> Term for &mut T {
     type Item<'w> = &'w mut T;
     type Fetch<'w> = slice::IterMut<'w, T>;
     type Need = ComponentId;
@@ -337,7 +339,7 @@ macro_rules! term_query {
     )*};
 }
 
-term_query!(&'a T => ['a, T: Component], &'a mut T => ['a, T: Component], Entity => []);
+term_query!(&'a T => ['a, T: Component], &'a mut T => ['a, T: Writable], Entity => []);
 
 impl<'a, T: Component> seal::ReadOnlyQuery for &'a T {
     fn fetch<'w>(needs: ComponentId, table: &'w Table) -> slice::Iter<'w, T> {

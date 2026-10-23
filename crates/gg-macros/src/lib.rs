@@ -1,5 +1,6 @@
 //! The derives that `gg-engine` re-exports beside its traits of the same names: `Reflect`, which
-//! describes a type to the engine's reflection, and `Component`, which makes it a component too.
+//! describes a type to the engine's reflection, and `Component`, which makes it a component too,
+//! one that code changes.
 //! Rust builds a derive as a crate of its own; games use them from `gg-engine`, as
 //! `#[derive(Clone, gg_engine::Component)]`, and the code they write names everything through
 //! `::gg_engine`.
@@ -21,7 +22,8 @@ pub fn derive_reflect(input: proc_macro::TokenStream) -> proc_macro::TokenStream
         .into()
 }
 
-/// Makes the type a component, which `Reflect` describes: `gg_engine::Component` says how.
+/// Makes the type a component, one that code changes, which `Reflect` describes:
+/// `gg_engine::Component` says how.
 #[proc_macro_derive(Component, attributes(reflect))]
 pub fn derive_component(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = syn::parse_macro_input!(input as DeriveInput);
@@ -75,7 +77,12 @@ fn expand(input: &DeriveInput, component: bool) -> syn::Result<TokenStream> {
         (Data::Union(_), None) => unreachable!("unions are refused above"),
     };
     let r = reflect();
-    let component = component.then(|| quote!(impl ::gg_engine::Component for #ident {}));
+    let component = component.then(|| {
+        quote! {
+            impl ::gg_engine::Component for #ident {}
+            impl ::gg_engine::Writable for #ident {}
+        }
+    });
     Ok(quote! {
         #(#checks)*
 

@@ -98,14 +98,23 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   sandbox's Entities and Inspector panels show any entity's components and edit their fields while
   it runs; unit tests check descriptions, paths, values coming back bit for bit and values refused,
   and the model test sets fields by name too.
+- **The transform hierarchy** (2026-10-22): entities have parents, which carry their children
+  along: a child's `Parent`, which only `World::set_parent` changes, refusing cycles, which typed
+  code changing any other way doesn't compile, and which `set_field` refuses by name; despawning an
+  entity takes its descendants with it; and the engine draws children by their matrices and z's in
+  the world, computed from their ancestors. The sandbox's triangle carries two moons around as it
+  turns, one with a moonlet of its own, and the Inspector shows a child's parent and a parent's
+  children; unit tests check the links through table moves, despawns and slots taken again, and
+  the model test sets parents at random.
 
-## Now: the transform hierarchy
+## Now: persistent entity IDs
 
-Phase 3's third milestone: entities with parents, which carry their children along, as scenes,
-prefabs and the camera as a component will need.
+Phase 3's fourth milestone: every entity gets a persistent ID, random rather than sequential,
+which files, operations, diagnostics and messages name it by, as
+[ARCHITECTURE.md](../ARCHITECTURE.md#project-state) describes; handles stay the world's own.
 
-*Done when* the sandbox draws children that move and turn with their parent, and the Inspector
-shows each entity's parent. Its plan is made when it starts.
+*Done when* the world finds each entity by its ID, and the Inspector and the engine's logs name
+entities by their IDs. Its plan is made when it starts.
 
 ## Next
 
@@ -184,7 +193,7 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Waiting for the swapchain image before a frame reads input and the time, not after the layers update, which would cut latency by the wait: up to a refresh under `--vsync` | Phase 3, with input actions |
 | Pushing and popping layers while the app runs; `App` fixes the stack before it starts | A tool or game needs a layer for only part of a run |
 | Composed text from an input method (winit's `Ime` events), for languages typed through one | A game takes text input, such as chat |
-| Steady-state frames that draw UI allocate: in egui's layout and tessellation, in the dock's own bookkeeping, which copies each frame's panel and menu names and torn-off windows' titles, and makes its arrangement and its list of groups left to draw anew, and in the Inspector, which reads its rows' names and the picked entity's components as values anew | Phase 4, with the allocation check; the overlay is for development |
+| Steady-state frames that draw UI allocate: in egui's layout and tessellation, in the dock's own bookkeeping, which copies each frame's panel and menu names and torn-off windows' titles, and makes its arrangement and its list of groups left to draw anew, and in the Inspector, which reads its rows' names, the picked entity's components as values and its children's handles anew | Phase 4, with the allocation check; the overlay is for development |
 | Keeping within the GPU's memory budget (`VK_EXT_memory_budget` through VMA) | Phase 7, with streaming |
 | Removing meshes, shaders and textures; each lasts until the app ends | Something adds and removes them as it runs, such as asset hot reload in Phase 4 |
 | Perspective cameras, and a controller for them; a camera is orthographic, and so is the engine's controller | Phase 4, with depth |
@@ -193,7 +202,7 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Counts of vertices, indices or triangles, which follow from the instances; the renderer counts draws and instances | Phase 4, with glTF meshes |
 | Textures of data rather than color, such as normal maps, which shaders read as stored rather than decoded from sRGB | Phase 6, with PBR's maps |
 | Premultiplied alpha for games' textures: with straight alpha, as PNGs store it, a linear filter at an edge mixes in the color of the transparent pixels beside it | A game's art shows dark or colored fringes |
-| Sorting what blends back to front by depth; the world's entities draw back to front by z, and what layers draw themselves in the order given | Phase 4, with depth |
+| Sorting what blends back to front by depth; the world's entities draw back to front by their z's in the world, and what layers draw themselves in the order given | Phase 4, with depth |
 | Mipmaps, and anisotropic filtering: a texture drawn smaller than it is samples its one level, and shimmers. A sprite sheet's cells, packed edge to edge, will then mix together at the smaller levels and under anisotropy, which reads past the texels the sprite shader keeps to, and need space around each cell or an array layer each | Phase 4, with the textured glTF mesh |
 | Sprite sheets with space between or around their cells, as some tile sets come; `SpriteSheet` takes cells packed edge to edge from the top left | A game's art comes that way |
 | Tiling one cell of a sheet: a repeating sampler repeats the whole texture | A game tiles part of an atlas, such as a background |
@@ -230,7 +239,6 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | In a frame egui runs twice, the torn-off windows' texture changes apply before all of the main window's, so glyphs added then to a font atlas that grows can go missing | It shows, or egui hands over each pass's changes apart |
 | Present fences (`VK_KHR_swapchain_maintenance1`) before a swapchain's semaphores are destroyed, which closing torn-off windows makes more frequent | Validation reports it, or windows open and close often |
 | egui's own scopes in Tracy, which egui marks for the `profiling` crate: `profiling` 1.0.18 takes tracy-client 0.18, and two Tracy clients don't link together | `profiling` takes tracy-client 0.19; deny.toml's wrappers for tracy-client then add it |
-| Persistent entity IDs, which files, operations, diagnostics and messages name entities by; an entity is its handle | Phase 3, with scenes |
 | Changing the world's tables while a query runs, through a buffer applied after it: Bevy's `Commands`, to be called `Deferred` here, since commands are the simulation's inputs | The first system that spawns or despawns as it iterates |
 | Query filters: `With`, `Without`, `Option` and `Changed` | Each with its first query |
 | Queries that keep the tables they match, and tables that keep where adding or removing each component leads; a query looks over every table, and a change of components finds its table by its types | Tables number in the hundreds, or changes of components show in a profile |
@@ -246,11 +254,16 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Undo, and an Inspector drag merged into one edit; edits apply at once | Phase 3, with operations |
 | In the Inspector, turning an option on or off, switching to a variant with fields, and adding or removing a list's elements; by path, a value sets them whole | A component needs one edited |
 | `Sprite.texture` and `MeshDraw` are opaque: shown, but not set, saved or carried across a rebuild | Phase 4, which names assets |
-| Flags for fields that saving, the world's hash or replication skip, and fields that are read only | Each with its first user; read only with the hierarchy's parent |
+| Flags for fields that saving, the world's hash or replication skip, and fields that are read only; `Parent` is read only as a whole type, which `set_field` refuses | Each with its first user |
 | Generic types deriving `Reflect` or `Component` | A game needs one |
 | Drag speeds as hints; the Inspector picks them from a field's bounds and kind | A field drags too coarsely or too finely |
 | Paths resolved once and kept, for sets made again and again | Operation logs, or a profile |
-| Picking an entity for a field, names in the Inspector, and picking in the view; entities are shown by handle | Persistent IDs, or picking |
+| Picking an entity for a field, a parent or a child picked by clicking it, the Entities panel as a tree, names in the Inspector, and picking in the view; entities are shown by handle | Persistent IDs, or picking |
+| World transforms stored and propagated after the updates, with change detection; drawing computes each child's from its ancestors, every frame | Physics, or a profile showing the walks up the hierarchy |
+| A world matrix for game code; the engine's drawing computes its own | The camera as a component, or a system that needs a child's place in the world, once the deterministic mode settles its math |
+| Reparenting that keeps where a child is in the world, by decomposing its matrix, which loses any shear; `set_parent` keeps its own transform | The editor's scene tree, or an agent attaching something where it stands |
+| Spawning a child into its table at once: `spawn`, then `set_parent`, moves it to another table | Prefabs, or a profile |
+| Children in an order that means something: reordering them, and saving their order | The editor's scene tree, or UI laid out by the hierarchy |
 
 ## Open questions
 

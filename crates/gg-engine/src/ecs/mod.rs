@@ -1,8 +1,9 @@
 //! The engine's ECS: entities, which are handles, and their components, data of any reflected type,
 //! kept in archetype tables, a table for each set of component types, and found by queries, or by
-//! name.
+//! name; and the hierarchy, in which entities' parents carry their children along.
 
 mod by_name;
+mod hierarchy;
 mod query;
 mod table;
 
@@ -15,6 +16,8 @@ use std::num::NonZeroU32;
 use gg_core::{Error, Result};
 
 pub use by_name::Entities;
+use hierarchy::Links;
+pub use hierarchy::Parent;
 pub use query::{Query, QueryIter, QueryIterMut, ReadOnlyQuery};
 use table::{ComponentId, Components, Table};
 
@@ -24,22 +27,38 @@ use crate::reflect::Reflect;
 /// Component)]`, which describes it to reflection too, as [`Reflect`] says, so that tools reach it
 /// by name. Clone, so that the world can be copied whole, as snapshots will; and, through
 /// `Reflect`, `Send` and `Sync`, so that it can move to the threads that will run the simulation.
-/// A type registers the first time an entity has one, or with [`World::register`].
+/// A type registers the first time an entity has one, or with [`World::register`]. The derive makes
+/// it [`Writable`] too, a component that code changes.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` isn't a component",
     note = "a type becomes one with `#[derive(Clone, gg_engine::Component)]`"
 )]
 pub trait Component: Reflect + Clone {}
 
-/// Makes a struct or an enum a component, describing it to reflection: [`Component`] says how.
+/// A component that code changes: gives an entity, takes away and changes in place, through
+/// [`World::spawn`], [`World::insert`], [`World::remove`], [`World::get_mut`] and `&mut T` in
+/// [`World::query_mut`]. `#[derive(Component)]` implements it, and a component implemented by hand
+/// implements it beside `Component`. Each of the engine's components is one but [`Parent`], which
+/// the world keeps, so that the hierarchy stays whole: [`World::set_parent`] alone changes it.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` isn't a component that code changes",
+    note = "a type becomes one with `#[derive(Clone, gg_engine::Component)]`, or with \
+            `impl gg_engine::Writable` beside its own `impl Component`; the world keeps `Parent`, \
+            which `World::set_parent` changes"
+)]
+pub trait Writable: Component {}
+
+/// Makes a struct or an enum a component, one that code changes, describing it to reflection:
+/// [`Component`] says how.
 pub use gg_macros::Component;
 
-/// Components that an entity is spawned with: a component, or a tuple of up to 8 of different
-/// types.
+/// Components that an entity is spawned with: a [`Writable`] component, or a tuple of up to 8 of
+/// different types.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` isn't a bundle of components",
     note = "`World::spawn` takes a component, a type that derives `gg_engine::Component`, or \
-            a tuple of up to 8 of different types; `World::insert` takes one"
+            a tuple of up to 8 of different types; `World::insert` takes one; the world keeps \
+            `Parent`, which `World::set_parent` gives"
 )]
 pub trait Bundle: seal::Bundle {}
 
@@ -71,7 +90,6 @@ impl fmt::Debug for Entity {
 /// table's last row into its place. So the order queries find entities in follows from the changes
 /// made, the same every time, but means nothing a game should depend on: anything ordered, such as
 /// what's drawn over what, orders by its components' values.
-#[derive(Default)]
 pub struct World {
     /// Each slot's generation, and where its entity is if it's alive.
     meta: Vec<Meta>,
@@ -87,10 +105,31 @@ pub struct World {
     scratch: Vec<ComponentId>,
 }
 
+impl Default for World {
+    /// An empty world, which has registered [`Parent`], so that tools find it and `set_field`
+    /// refuses it by name in any world, and no game's type takes its name.
+    fn default() -> Self {
+        let mut components = Components::default();
+        components
+            .register::<Parent>()
+            .expect("the world's own component describes itself");
+        Self {
+            meta: Vec::new(),
+            free: Vec::new(),
+            tables: Vec::new(),
+            by_signature: HashMap::new(),
+            components,
+            scratch: Vec::new(),
+        }
+    }
+}
+
 struct Meta {
     generation: NonZeroU32,
     /// `None` while the slot is free, or retired.
     location: Option<Location>,
+    /// Its entity's parent and children, which a free slot has none of.
+    links: Links,
 }
 
 #[derive(Clone, Copy)]
@@ -133,26 +172,6 @@ impl World {
         entity
     }
 
-    /// Removes `entity` and its components.
-    ///
-    /// Fails with `ecs.no_entity` if it isn't alive.
-    pub fn despawn(&mut self, entity: Entity) -> Result<()> {
-        let at = self.locate(entity)?;
-        let moved = self.tables[at.table as usize].swap_remove(at.row as usize);
-        if let Some(moved) = moved {
-            self.meta[moved.index as usize].location = Some(at);
-        }
-        let meta = &mut self.meta[entity.index as usize];
-        meta.location = None;
-        // A slot whose generation can't go higher retires, so that no handle names another
-        // entity: its `Meta` stays, for every 4 billion entities spawned in the slot.
-        if let Some(next) = meta.generation.checked_add(1) {
-            meta.generation = next;
-            self.free.push(entity.index);
-        }
-        Ok(())
-    }
-
     /// Gives `entity` `component`, in place of the one of its type it has.
     ///
     /// Fails with `ecs.no_entity` if it isn't alive.
@@ -160,7 +179,12 @@ impl World {
     /// # Panics
     ///
     /// If `T` fails to [`register`](Self::register).
-    pub fn insert<T: Component>(&mut self, entity: Entity, component: T) -> Result<()> {
+    pub fn insert<T: Writable>(&mut self, entity: Entity, component: T) -> Result<()> {
+        self.put(entity, component)
+    }
+
+    /// As [`insert`](Self::insert), for any component, such as the [`Parent`] the world keeps.
+    fn put<T: Component>(&mut self, entity: Entity, component: T) -> Result<()> {
         let at = self.locate(entity)?;
         let id = self.components.id::<T>();
         if let Some(column) = self.tables[at.table as usize].column_mut::<T>(id) {
@@ -183,7 +207,12 @@ impl World {
     /// Takes `entity`'s component of type `T` away, and returns it; `None` if it has none.
     ///
     /// Fails with `ecs.no_entity` if it isn't alive.
-    pub fn remove<T: Component>(&mut self, entity: Entity) -> Result<Option<T>> {
+    pub fn remove<T: Writable>(&mut self, entity: Entity) -> Result<Option<T>> {
+        self.take(entity)
+    }
+
+    /// As [`remove`](Self::remove), for any component, such as the [`Parent`] the world keeps.
+    fn take<T: Component>(&mut self, entity: Entity) -> Result<Option<T>> {
         let at = self.locate(entity)?;
         let Some(id) = self.components.get(TypeId::of::<T>()) else {
             return Ok(None);
@@ -211,7 +240,7 @@ impl World {
             .get(at.row as usize)
     }
 
-    pub fn get_mut<T: Component>(&mut self, entity: Entity) -> Option<&mut T> {
+    pub fn get_mut<T: Writable>(&mut self, entity: Entity) -> Option<&mut T> {
         let at = self.location(entity)?;
         let id = self.components.get(TypeId::of::<T>())?;
         self.tables[at.table as usize]
@@ -292,13 +321,37 @@ impl World {
             let generation = self.meta[index as usize].generation;
             return Entity { index, generation };
         }
-        let index = u32::try_from(self.meta.len()).expect("fewer than 2^32 entities");
+        // The last index is the hierarchy's for none.
+        let index = u32::try_from(self.meta.len())
+            .ok()
+            .filter(|&index| index != u32::MAX)
+            .expect("fewer than 2^32 - 1 entities");
         let generation = NonZeroU32::MIN;
         self.meta.push(Meta {
             generation,
             location: None,
+            links: Links::NONE,
         });
         Entity { index, generation }
+    }
+
+    /// Removes the entity in slot `index`, which is alive, without parent or children, and its
+    /// components, its table's last row taking its place.
+    fn remove_slot(&mut self, index: u32) {
+        let at = self.meta[index as usize].location;
+        let at = at.expect("the slot's entity is alive");
+        let moved = self.tables[at.table as usize].swap_remove(at.row as usize);
+        if let Some(moved) = moved {
+            self.meta[moved.index as usize].location = Some(at);
+        }
+        let meta = &mut self.meta[index as usize];
+        meta.location = None;
+        // A slot whose generation can't go higher retires, so that no handle names another
+        // entity: its `Meta` stays, for every 4 billion entities spawned in the slot.
+        if let Some(next) = meta.generation.checked_add(1) {
+            meta.generation = next;
+            self.free.push(index);
+        }
     }
 
     /// Moves `entity`, at `at`, to the end of table `to`, with its components that `to` has. Its
@@ -346,7 +399,7 @@ mod seal {
     }
 }
 
-impl<T: Component> seal::Bundle for T {
+impl<T: Writable> seal::Bundle for T {
     const COUNT: usize = 1;
 
     fn ids(components: &mut Components, ids: &mut [ComponentId]) {
@@ -359,7 +412,7 @@ impl<T: Component> seal::Bundle for T {
     }
 }
 
-impl<T: Component> Bundle for T {}
+impl<T: Writable> Bundle for T {}
 
 impl seal::Bundle for () {
     const COUNT: usize = 0;
@@ -373,7 +426,7 @@ impl Bundle for () {}
 
 macro_rules! tuple_bundle {
     ($($T:ident $i:tt),+) => {
-        impl<$($T: Component),+> seal::Bundle for ($($T,)+) {
+        impl<$($T: Writable),+> seal::Bundle for ($($T,)+) {
             const COUNT: usize = <[&str]>::len(&[$(stringify!($T)),+]);
 
             fn ids(components: &mut Components, ids: &mut [ComponentId]) {
@@ -388,7 +441,7 @@ macro_rules! tuple_bundle {
             }
         }
 
-        impl<$($T: Component),+> Bundle for ($($T,)+) {}
+        impl<$($T: Writable),+> Bundle for ($($T,)+) {}
     };
 }
 
@@ -404,7 +457,9 @@ tuple_bundle!(A 0, B 1, C 2, D 3, E 4, F 5, G 6, H 7);
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::iter;
 
+    use super::hierarchy::tests::check_links;
     use super::*;
     use crate::reflect::Value;
 
@@ -497,6 +552,7 @@ mod tests {
         b: Option<B>,
         c: bool,
         d: Option<D>,
+        parent: Option<Entity>,
     }
 
     impl Has {
@@ -506,6 +562,7 @@ mod tests {
                 b: world.get(entity).copied(),
                 c: world.get::<C>(entity).is_some(),
                 d: world.get(entity).cloned(),
+                parent: world.get::<Parent>(entity).map(|parent| parent.0),
             }
         }
     }
@@ -525,14 +582,17 @@ mod tests {
     }
 
     /// Takes random steps, spawning, despawning, giving and taking components and changing them
-    /// through queries and by name, and after each checks the world against a model of it: a list
-    /// of each living entity's components.
+    /// through queries and by name, and setting parents, and after each checks the world against a
+    /// model of it: a list of each living entity's components and parent, and when it became its
+    /// parent's child.
     #[test]
     fn the_world_matches_a_model() {
         let mut world = World::default();
         let mut rng = Rng(7);
         let mut live: Vec<(Entity, Has)> = Vec::new();
         let mut dead: Vec<Entity> = Vec::new();
+        // The step at which each child became its parent's, which orders its siblings.
+        let mut joined: HashMap<Entity, usize> = HashMap::new();
         // Its types in the order A, C, B, D, so that C's column comes between A's and B's, and a
         // query of B then A takes them out of their order in the tables.
         let first = world.spawn((A(0), C, B(0), D("0".to_owned())));
@@ -541,11 +601,12 @@ mod tests {
             b: Some(B(n.into())),
             c: true,
             d: Some(D(n.to_string())),
+            parent: None,
         };
         live.push((first, all(0)));
         for step in 1..2000 {
             let n = step as u32;
-            match rng.below(10) {
+            match rng.below(11) {
                 0 | 1 if live.len() < 200 => {
                     let (entity, has) = match rng.below(6) {
                         0 => (world.spawn(()), Has::default()),
@@ -588,9 +649,18 @@ mod tests {
                     live.push((entity, has));
                 }
                 2 if !live.is_empty() => {
-                    let (entity, _) = live.swap_remove(rng.below(live.len()));
+                    // With its descendants.
+                    let entity = live[rng.below(live.len())].0;
                     world.despawn(entity).expect("alive");
-                    dead.push(entity);
+                    let mut gone = vec![entity];
+                    let mut next = 0;
+                    while let Some(&parent) = gone.get(next) {
+                        let children = live.iter().filter(|(_, has)| has.parent == Some(parent));
+                        gone.extend(children.map(|&(child, _)| child));
+                        next += 1;
+                    }
+                    live.retain(|(entity, _)| !gone.contains(entity));
+                    dead.extend(gone);
                 }
                 3 if !dead.is_empty() => {
                     let entity = dead[rng.below(dead.len())];
@@ -604,6 +674,12 @@ mod tests {
                     let removed = world.remove::<A>(entity).map_err(code);
                     assert_eq!(removed, Err("ecs.no_entity".into()));
                     assert_eq!(world.get_mut::<A>(entity), None);
+                    let orphaned = world.set_parent(entity, None).map_err(code);
+                    assert_eq!(orphaned, Err("ecs.no_entity".into()));
+                    if let Some(&(child, _)) = live.first() {
+                        let adopted = world.set_parent(child, Some(entity)).map_err(code);
+                        assert_eq!(adopted, Err("ecs.no_entity".into()));
+                    }
                 }
                 4 if !live.is_empty() => {
                     let picked = rng.below(live.len());
@@ -711,6 +787,37 @@ mod tests {
                     let got = world.get_field(*entity, component, "0").ok();
                     assert_eq!(got, expected.is_ok().then_some(value), "step {step}");
                 }
+                10 if !live.is_empty() => {
+                    // A parent, or none; a cycle, as the model predicts it, is refused.
+                    let child = live[rng.below(live.len())].0;
+                    let parent = match rng.below(4) {
+                        0 => None,
+                        _ => Some(live[rng.below(live.len())].0),
+                    };
+                    let parent_of = |entity: Entity| {
+                        let found = live.iter().find(|&&(other, _)| other == entity);
+                        found.and_then(|(_, has)| has.parent)
+                    };
+                    let mut up = iter::successors(parent, |&at| parent_of(at));
+                    let cycle = up.any(|ancestor| ancestor == child);
+                    let old = parent_of(child);
+                    let set = world.set_parent(child, parent);
+                    if cycle {
+                        let code = set.map_err(|error| error.code());
+                        assert_eq!(code, Err("ecs.parent_cycle"), "step {step}");
+                    } else {
+                        assert_eq!(set.expect("no cycle"), old, "step {step}");
+                        if parent != old {
+                            let at = live.iter_mut().find(|(entity, _)| *entity == child);
+                            at.expect("alive").1.parent = parent;
+                            joined.insert(child, step);
+                        }
+                    }
+                    let by_name = Value::Entity(child);
+                    let set = world.set_field(child, "Parent", "0", &by_name);
+                    let code = set.map_err(|error| error.code());
+                    assert_eq!(code, Err("reflect.read_only"), "step {step}");
+                }
                 8 => {
                     // A query of one term.
                     let query = world.query_mut::<&mut B>();
@@ -732,6 +839,19 @@ mod tests {
 
             for (entity, has) in &live {
                 assert_eq!(Has::of(&world, *entity), *has, "{entity} at step {step}");
+            }
+            check_links(&world);
+            // Each parent's children in the order they became its.
+            let mut children: Vec<(Entity, usize, Entity)> = live
+                .iter()
+                .filter_map(|&(child, ref has)| Some((has.parent?, joined[&child], child)))
+                .collect();
+            children.sort();
+            for siblings in children.chunk_by(|a, b| a.0 == b.0) {
+                let parent = siblings[0].0;
+                let listed: Vec<Entity> = world.children(parent).expect("alive").collect();
+                let expected: Vec<Entity> = siblings.iter().map(|&(_, _, child)| child).collect();
+                assert_eq!(listed, expected, "{parent}'s children at step {step}");
             }
             // Every dead entity now and then, and some of them every step.
             let checked: Vec<Entity> = if step % 100 == 0 {

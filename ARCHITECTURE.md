@@ -228,6 +228,22 @@ refuses a number outside its field's bounds, and returns the old value, which se
 code stored one that a set refuses. The Inspector edits components through these calls alone,
 which the tool API will serve.
 
+Entities form a hierarchy, as scenes, prefabs and the camera as a component need: a child has its
+parent as its `Parent` component, and its `Transform` is relative to its parent's, so that a
+parent carries its children along. The world keeps the hierarchy whole. Only `World::set_parent`
+gives, changes or takes away a `Parent`: it keeps the child's own transform, refuses a parent that
+is the child or one of its descendants, and returns the old parent, which sets it back. The typed
+calls that change components take only `Writable` ones, which the derive implements, as does a
+component implemented by hand, and `Parent` doesn't, so that code changing a `Parent` any other
+way doesn't compile; `set_field` refuses it by name. Each slot keeps its entity's links, by slot:
+its parent, as its `Parent` has it, and its children, in the order they became its children,
+which means no more than the order queries find entities in. So despawning an entity despawns
+its descendants, children first, and the links allocate nothing, though giving or taking away a
+`Parent` moves the child to another table, as `insert` and `remove` do; snapshots will copy the
+links with the tables. World transforms aren't stored: drawing computes each child's from its
+ancestors, every frame, while a table of roots draws by its transforms alone, for one check a
+frame; the links cost each slot 16 bytes, whether its entity has a parent or not.
+
 ## Diagnostics
 
 Diagnostics are data, so agents and tools can act on them as reliably as people read them.
@@ -331,8 +347,9 @@ Layers add shaders, meshes and textures, draw them and set the camera through th
 and the renderer's `Shaders`, `Meshes` and `Textures` hand out their handles at once. After the
 layers' updates, the engine draws the world's entities that have a `Transform` and a sprite or a
 `MeshDraw`, a mesh with its shader and parameters held without their types, over what the layers
-drew, back to front by their translations' z; those at one z draw in the order queries find them,
-which changes as entities come and go, so entities that overlap need different z's.
+drew, back to front by their z's in the world, children where their ancestors carry them; those
+at one z draw in the order queries find them, which changes as entities come and go, so entities
+that overlap need different z's.
 
 A game's shader is a Slang file that the engine compiles with slangc as a layer adds it, so one
 that doesn't compile fails there, with slangc's diagnostics naming the file and line; the renderer

@@ -13,7 +13,7 @@ use gg_renderer::{
     Textures, Viewport,
 };
 
-use crate::draw::{self, Segment};
+use crate::draw::{self, Scratch};
 use crate::image::{self, Image};
 use crate::perf::Perf;
 use crate::{Event, Input, MeshDraw, Transform, Ui, World};
@@ -55,8 +55,8 @@ pub struct Context {
     /// What to draw this frame.
     draws: Draws,
     world: World,
-    /// What drawing the world sorts, kept between frames.
-    segments: Vec<Segment>,
+    /// What drawing the world sorts and computes, kept between frames.
+    scratch: Scratch,
     /// How long frames take, which the main loop measures and
     /// [`PerfPanel`](crate::PerfPanel) shows.
     pub(crate) perf: Perf,
@@ -82,7 +82,7 @@ impl Context {
             textures: Textures::default(),
             draws: Draws::default(),
             world,
-            segments: Vec::new(),
+            scratch: Scratch::default(),
             perf: Perf::default(),
         }
     }
@@ -214,8 +214,8 @@ impl Context {
 
     /// The world: its entities and their components. After the layers' updates each frame, the
     /// engine draws those with a [`Transform`](crate::Transform) and a [`Sprite`] or a
-    /// [`MeshDraw`](crate::MeshDraw), back to front by their translations' z, over what the layers
-    /// drew themselves.
+    /// [`MeshDraw`](crate::MeshDraw), back to front by their z's in the world, children where their
+    /// parents carry them, over what the layers drew themselves.
     pub fn world(&self) -> &World {
         &self.world
     }
@@ -226,7 +226,7 @@ impl Context {
 
     /// Draws the world's entities, after what the layers drew this frame.
     pub(crate) fn draw_world(&mut self) {
-        draw::draw_world(&self.world, &mut self.draws, &mut self.segments);
+        draw::draw_world(&self.world, &mut self.draws, &mut self.scratch);
     }
 
     /// The frame's render data, with the game's view at `viewport`.

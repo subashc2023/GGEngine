@@ -50,9 +50,9 @@ const TRIANGLE: [Colored; 3] = [
 /// How fast the triangle turns, in radians a second: a quarter turn.
 const TURN_SPEED: f32 = FRAC_PI_2;
 
-// How far forward each part of the scene is, which the engine draws back to front: the map's
-// ground, what stands on it, the swarm, the grid, the checkerboard, the triangle and the logo. The
-// camera sees from 1 behind it to 1 in front.
+// How far forward each part of the scene is, which the engine draws back to front by its z in the
+// world: the map's ground, what stands on it, the swarm, the grid, the checkerboard, the triangle,
+// its moons and the logo. The camera sees from 1 behind it to 1 in front.
 const GROUND_Z: f32 = 0.0;
 const STANDING_Z: f32 = 0.01;
 const SWARM_Z: f32 = 0.1;
@@ -60,6 +60,10 @@ const GRID_Z: f32 = 0.2;
 const CHECKERBOARD_Z: f32 = 0.3;
 const TRIANGLE_Z: f32 = 0.4;
 const LOGO_Z: f32 = 0.5;
+/// How far in front of its parent each moon is, and the moonlet in front of its moon: in the world,
+/// between the triangle and the logo, though by their own z's they'd be among what stands on the
+/// map.
+const MOON_Z: f32 = 0.01;
 
 /// The most sprites the swarm has.
 const SWARM_MAX: u32 = 100_000;
@@ -223,6 +227,33 @@ struct Spin {
     speed: f32,
 }
 
+/// Spawns two moons, children of `triangle`, which carries them around it as it turns, each
+/// turning too, and a moonlet, a child of one of them, which carries it around in turn.
+fn spawn_moons(world: &mut World, triangle: Entity) {
+    let mut child = |parent, x: f32, size: f32, color: Vec4, speed: f32| {
+        let transform = Transform {
+            translation: Vec3::new(x, 0.0, MOON_Z),
+            // Not in z, so that each is as far in front of its parent in the world.
+            scale: Vec3::new(size, size, 1.0),
+            ..Transform::IDENTITY
+        };
+        let sprite = Sprite {
+            color,
+            ..Sprite::default()
+        };
+        let moon = world.spawn((transform, sprite, Spin { speed }));
+        world
+            .set_parent(moon, Some(parent))
+            .expect("a moon and its parent are alive, and it has no children");
+        moon
+    };
+    let yellow = Vec4::new(1.0, 0.8, 0.2, 1.0);
+    let moon = child(triangle, 0.75, 0.3, yellow, -2.0 * TURN_SPEED);
+    let cyan = Vec4::new(0.2, 0.8, 1.0, 1.0);
+    child(triangle, -0.75, 0.3, cyan, 3.0 * TURN_SPEED);
+    child(moon, 1.0, 0.4, Vec4::ONE, TURN_SPEED);
+}
+
 /// Moves each drifter to where it is `t` seconds after the swarm starts.
 fn drift(world: &mut World, t: f64) {
     let _zone = gg_engine::zone!();
@@ -311,15 +342,17 @@ fn pick(index: u32, salt: u32) -> f32 {
 /// Draws in the game's view a swarm of sprites from a sheet's cells, drifting and turning, which
 /// tests how many sprites the engine draws; over it, a grid of sprites in two colors that
 /// alternate; over the grid's middle, a checkerboard sprite, tiled and tinted, then a triangle in
-/// red, green and blue turning, then a logo sprite whose alpha shows them through it. Below the
-/// swarm, out of its way, a map of tiles from a tile set's cells packed edge to edge, which tests
-/// that none shows any of the cells beside it. They're entities, spawned as the sandbox attaches,
-/// which the engine draws back to front by their z's; the sandbox's systems move the swarm by its
-/// drifters, color the grid by its cells and turn the triangle by its spin, every frame, and
-/// filter the map and set the checkerboard's sprite when the panels change them, so that what the
-/// Inspector sets stays until then. The triangle is a mesh with a vertex type and shader of the
-/// sandbox's own, and the rest the engine's sprites, so the map, the swarm, the grid and the
-/// checkerboard are one instanced draw, and the triangle and the logo one each. They're drawn over
+/// red, green and blue turning, with two moons, its children, which it carries around as it turns,
+/// one of them carrying a moonlet of its own, then a logo sprite whose alpha shows them through it.
+/// Below the swarm, out of its way, a map of tiles from a tile set's cells packed edge to edge,
+/// which tests that none shows any of the cells beside it. They're entities, spawned as the sandbox
+/// attaches, which the engine draws back to front by their z's in the world; the sandbox's systems
+/// move the swarm by its drifters, color the grid by its cells and turn the triangle, its moons and
+/// the moonlet by their spins, every frame, and filter the map and set the checkerboard's sprite
+/// when the panels change them, so that what the Inspector sets stays until then. The triangle is a
+/// mesh with a vertex type and shader of the sandbox's own, and the rest the engine's sprites, so
+/// the map, the swarm, the grid and the checkerboard are one instanced draw, the triangle another,
+/// and the moons, the moonlet and the logo a third. They're drawn over
 /// a color that drifts slowly, so that a running sandbox visibly animates. The engine's camera
 /// controller steers the camera: W, A, S and D move it along its own axes, Q and E turn it left and
 /// right, at the same speed whatever the frame rate, and the mouse wheel zooms it. Shows six
@@ -474,7 +507,8 @@ impl Layer for Sandbox {
             ..Transform::IDENTITY
         };
         let spin = Spin { speed: TURN_SPEED };
-        world.spawn((at, MeshDraw::new(mesh, shader, ()), spin));
+        let triangle = world.spawn((at, MeshDraw::new(mesh, shader, ()), spin));
+        spawn_moons(world, triangle);
         let logo = Sprite {
             texture: logo.expect("the logo loads"),
             ..Sprite::default()

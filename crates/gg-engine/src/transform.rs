@@ -4,11 +4,13 @@ use gg_core::math::{Mat4, Quat, Vec3};
 
 use crate::Component;
 
-/// Where an entity is in the world, how it's turned and how big it is: its translation, rotation
-/// and scale, as glTF's nodes have them, which [`matrix`](Self::matrix) applies scale first, then
-/// rotation, then translation. The engine draws the world's entities back to front by
-/// `translation.z`, so entities that overlap need different z's: those at one z draw in an order
-/// that changes as entities are despawned or change components.
+/// Where an entity is, how it's turned and how big it is, in its parent's space if it has a
+/// [`Parent`](crate::Parent), and otherwise in the world's: its translation, rotation and scale, as
+/// glTF's nodes have them, which [`matrix`](Self::matrix) applies scale first, then rotation, then
+/// translation. A parent carries its children along: a child is placed in the world by its own
+/// transform, then by each of its ancestors' in turn. The engine draws the world's entities back to
+/// front by their z's in the world, so entities that overlap need different z's: those at one z
+/// draw in an order that changes as entities are despawned or change components.
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
 pub struct Transform {
     pub translation: Vec3,
@@ -25,7 +27,7 @@ impl Transform {
         scale: Vec3::ONE,
     };
 
-    /// The matrix from the entity's own space to the world's.
+    /// The matrix from the entity's own space to its parent's, or to the world's if it has none.
     pub fn matrix(&self) -> Mat4 {
         Mat4::from_scale_rotation_translation(self.scale, self.rotation, self.translation)
     }

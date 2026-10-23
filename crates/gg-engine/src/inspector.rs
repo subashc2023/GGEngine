@@ -120,6 +120,9 @@ impl Inspector {
             return;
         };
         ui.label(format!("Entity {entity}"));
+        if let Some(children) = children(world, entity) {
+            ui.label(children);
+        }
         // So that what's typed into a field of one entity never lands in the field of the next
         // one picked.
         ui.push_id(entity, |ui| {
@@ -502,6 +505,24 @@ fn same_rotation(a: Quat, b: Quat) -> bool {
     near(b) || near(-b)
 }
 
+/// `entity`'s children, as "Children: 4v1, 5v1": the first 16 of them, then how many more there
+/// are; `None` if it has none.
+fn children(world: &World, entity: Entity) -> Option<String> {
+    let mut children = world.children(entity).ok()?.peekable();
+    children.peek()?;
+    let shown: Vec<String> = children
+        .by_ref()
+        .take(16)
+        .map(|child| child.to_string())
+        .collect();
+    let mut line = format!("Children: {}", shown.join(", "));
+    let more = children.count();
+    if more > 0 {
+        line += &format!(" and {more} more");
+    }
+    Some(line)
+}
+
 /// What's opaque: shown, but not read or set.
 fn opaque(ui: &mut egui::Ui) -> Option<Value> {
     ui.add_enabled(false, egui::Label::new("opaque"));
@@ -707,12 +728,16 @@ mod tests {
             ..everything()
         };
         let odd = world.spawn(odd);
+        let [first, second] = [0, 1].map(|_| world.spawn(Transform::IDENTITY));
+        for child in [first, second] {
+            world.set_parent(child, Some(turned)).expect("no cycle");
+        }
         let before = snapshot(&world);
         let ctx = crate::egui_context();
         let mut inspector = Inspector::default();
         let texts = frames(&mut inspector, &mut world, &ctx);
         for text in [
-            "4 entities",
+            "6 entities",
             "Nothing picked: pick an entity in the Entities panel",
         ] {
             assert!(texts.iter().any(|shown| shown == text), "{text}: {texts:?}");
@@ -758,7 +783,39 @@ mod tests {
             let clash = texts.iter().find(|text| text.contains(" use of "));
             assert_eq!(clash, None, "egui saw an ID twice");
         }
+        // A parent lists its children, and a child shows its parent.
+        let children = format!("Children: {first}, {second}");
+        let parent = turned.to_string();
+        for (entity, names) in [
+            (turned, [children.as_str(), "Transform"]),
+            (first, ["Parent", parent.as_str()]),
+        ] {
+            inspector.pick(entity);
+            let texts = frames(&mut inspector, &mut world, &ctx);
+            for name in names {
+                assert!(texts.iter().any(|text| text == name), "{name}: {texts:?}");
+            }
+        }
         assert!(same_snapshots(&snapshot(&world), &before));
+    }
+
+    #[test]
+    fn a_parent_lists_its_first_16_children() {
+        let mut world = World::default();
+        let parent = world.spawn(Transform::IDENTITY);
+        assert_eq!(children(&world, parent), None);
+        let kids: Vec<Entity> = (0..18).map(|_| world.spawn(Transform::IDENTITY)).collect();
+        for &kid in &kids {
+            world.set_parent(kid, Some(parent)).expect("no cycle");
+        }
+        let shown: Vec<String> = kids[..16].iter().map(ToString::to_string).collect();
+        let shown = format!("Children: {}", shown.join(", "));
+        let listed = children(&world, parent);
+        assert_eq!(listed, Some(format!("{shown} and 2 more")));
+        for &kid in &kids[16..] {
+            world.set_parent(kid, None).expect("a root");
+        }
+        assert_eq!(children(&world, parent), Some(shown));
     }
 
     /// A click at `at`: the pointer there, pressed and released in one frame, as egui takes a tap.
