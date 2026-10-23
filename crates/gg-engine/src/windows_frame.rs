@@ -8,9 +8,9 @@
 //! winit has no hook for the messages that takes, so this subclasses the window procedure.
 //!
 //! winit takes a window without decorations to have no frame, and sizes the whole window as the
-//! inside it means. The frame grows back around that inside wherever winit sizes the window this
-//! way: as it opens, and as its scale changes. An inner size asked of winit after that comes out
-//! a frame smaller; nothing in the engine asks for one.
+//! inside it means. The frame grows back around that inside as the window opens, and goes around
+//! it as its scale changes. An inner size asked of winit after that comes out a frame smaller;
+//! nothing in the engine asks for one.
 
 use std::cell::Cell;
 use std::mem;
@@ -18,19 +18,21 @@ use std::rc::Rc;
 
 use egui::{Pos2, pos2};
 use gg_core::{Error, Result};
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
+use windows_sys::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT, TrackMouseEvent,
 };
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DefWindowProcW, GetClientRect, GetWindowRect, HTCAPTION, HTCLIENT, HTMAXBUTTON, HTTOP,
-    HTTOPLEFT, HTTOPRIGHT, IsIconic, IsZoomed, MINMAXINFO, PostMessageW, SC_MAXIMIZE, SC_RESTORE,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
-    WM_DPICHANGED, WM_GETMINMAXINFO, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK,
+    DefWindowProcW, GWL_EXSTYLE, GWL_STYLE, GetClientRect, GetWindowLongW, GetWindowRect,
+    HTCAPTION, HTCLIENT, HTMAXBUTTON, HTTOP, HTTOPLEFT, HTTOPRIGHT, IsIconic, IsZoomed, MINMAXINFO,
+    PostMessageW, SC_MAXIMIZE, SC_RESTORE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SetWindowPos, WINDOWPOS, WM_DPICHANGED, WM_GETDPISCALEDSIZE,
+    WM_GETMINMAXINFO, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK,
     WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_NCRBUTTONUP,
-    WM_SYSCOMMAND,
+    WM_SYSCOMMAND, WM_WINDOWPOSCHANGING,
 };
 use winit::dpi::PhysicalPosition;
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -57,6 +59,9 @@ struct State {
     tracking: Cell<bool>,
     /// Where the title bar's free space was right-clicked, in the inside's pixels.
     window_menu: Cell<Option<POINT>>,
+    /// Where Windows places the window as its scale changes, and how thick the frame's borders
+    /// are at the new scale, until winit has sized the window there.
+    placing: Cell<Option<(POINT, i32)>>,
 }
 
 impl Frame {
@@ -248,11 +253,55 @@ unsafe extern "system" fn procedure(
             }
             result
         }
+        WM_GETDPISCALEDSIZE if !sized_by_os(hwnd) => {
+            // The window's size at its new scale, `wparam` dots per inch, at which Windows places
+            // it: its inside the same size in points, in the frame at that scale. Windows' default
+            // scales the whole window, whose frame doesn't scale with it.
+            // SAFETY: `lparam` points to the window's size for this message, which takes its size
+            // at the new scale.
+            let size = unsafe { &mut *(lparam as *mut SIZE) };
+            // SAFETY: a plain query of a window.
+            let (old, new) = (unsafe { GetDpiForWindow(hwnd) }, wparam as u32);
+            let scale =
+                |length: i32| (f64::from(length) * f64::from(new) / f64::from(old)).round() as i32;
+            let (border, new_border) = (state.border.get(), border_at(hwnd, new));
+            size.cx = scale(size.cx - 2 * border) + 2 * new_border;
+            size.cy = scale(size.cy - border) + new_border;
+            1
+        }
         WM_DPICHANGED => {
-            // winit sizes the window for its new scale, which it does at every change of scale.
+            // winit sizes the whole window as the inside it means at the new scale, and places it
+            // by the cursor. It goes where Windows places it instead, with that inside in the frame
+            // at the new scale: anywhere else, or growing the frame back after, can tip it onto the
+            // monitor it's leaving, whose scale it takes back within this message. A drag's move
+            // loop misses that change, and later scales the window itself.
+            if !sized_by_os(hwnd) {
+                // SAFETY: `lparam` points to where Windows places the window for this message.
+                let place = unsafe { *(lparam as *const RECT) };
+                let corner = POINT {
+                    x: place.left,
+                    y: place.top,
+                };
+                let dpi = u32::from(wparam as u16);
+                state.placing.set(Some((corner, border_at(hwnd, dpi))));
+            }
             let result = next();
-            fit(hwnd);
+            state.placing.set(None);
             result
+        }
+        WM_WINDOWPOSCHANGING => {
+            // SAFETY: `lparam` points to where the window goes for this message, which may change
+            // it.
+            let pos = unsafe { &mut *(lparam as *mut WINDOWPOS) };
+            if pos.flags & (SWP_NOMOVE | SWP_NOSIZE) == 0
+                && let Some((corner, border)) = state.placing.take()
+            {
+                pos.x = corner.x;
+                pos.y = corner.y;
+                pos.cx += 2 * border;
+                pos.cy += border;
+            }
+            next()
         }
         WM_NCDESTROY => {
             // SAFETY: the subclass goes with the window, and no other call of `procedure` holds
@@ -292,8 +341,7 @@ fn hit_test(pos: Pos2, width: f32, band: f32, caption: Option<Caption>) -> u32 {
 /// the window keeps its corner, and its inside the window's size. Not while the window is
 /// minimized or maximized, when the OS sizes it.
 fn fit(hwnd: HWND) {
-    // SAFETY: plain queries of a window.
-    if unsafe { IsIconic(hwnd) != 0 || IsZoomed(hwnd) != 0 } {
+    if sized_by_os(hwnd) {
         return;
     }
     let (window, inside) = rects(hwnd);
@@ -310,6 +358,30 @@ fn fit(hwnd: HWND) {
             SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
         )
     };
+}
+
+/// Whether window `hwnd` is minimized or maximized, when the OS sizes it.
+fn sized_by_os(hwnd: HWND) -> bool {
+    // SAFETY: plain queries of a window.
+    unsafe { IsIconic(hwnd) != 0 || IsZoomed(hwnd) != 0 }
+}
+
+/// How thick window `hwnd`'s frame's borders are at `dpi` dots per inch, in pixels, as Windows
+/// lays out a frame for the window's styles.
+fn border_at(hwnd: HWND, dpi: u32) -> i32 {
+    let mut rect = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    // SAFETY: plain queries of a window, and a calculation into `rect`, which lives through it.
+    unsafe {
+        let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+        let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        AdjustWindowRectExForDpi(&mut rect, style, 0, ex_style, dpi);
+    }
+    -rect.left
 }
 
 /// The point on the desktop that a non-client mouse message's `lparam` holds, in window `hwnd`'s
@@ -383,6 +455,28 @@ mod tests {
         assert_eq!(hit(525.0, 3.0, 0.0), HTMAXBUTTON);
     }
 
+    /// Windows' default procedure, but at a change of scale, where it sizes the whole window as an
+    /// inside 300 by 200 pixels, in the desktop's corner, as winit sizes a window without
+    /// decorations.
+    ///
+    /// # Safety
+    ///
+    /// Windows calls it for a window of this thread.
+    unsafe extern "system" fn like_winit(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        if message == WM_DPICHANGED {
+            // SAFETY: a plain call on a window.
+            unsafe { SetWindowPos(hwnd, 0, 0, 0, 300, 200, SWP_NOZORDER | SWP_NOACTIVATE) };
+            return 0;
+        }
+        // SAFETY: passes the message on to Windows' default.
+        unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+    }
+
     /// Sends `message` to window `hwnd`, with the point (`x`, `y`) on the desktop.
     fn send(hwnd: HWND, message: u32, wparam: u32, x: i32, y: i32) -> u32 {
         let lparam = ((y as u16 as u32) << 16 | x as u16 as u32) as LPARAM;
@@ -393,13 +487,13 @@ mod tests {
     #[test]
     fn a_window_keeps_its_inside_and_windows_frame_goes_around_it() {
         let class: Vec<u16> = "gg window frame test\0".encode_utf16().collect();
-        // SAFETY: a hidden window, of a class whose procedure is Windows' default, styled as
-        // winit styles a window; the class may be registered already.
+        // SAFETY: a hidden window, of a class whose procedure is Windows' default but at a change
+        // of scale, styled as winit styles a window; the class may be registered already.
         let hwnd = unsafe {
             let instance = GetModuleHandleW(ptr::null());
             RegisterClassW(&WNDCLASSW {
                 style: 0,
-                lpfnWndProc: Some(DefWindowProcW),
+                lpfnWndProc: Some(like_winit),
                 cbClsExtra: 0,
                 cbWndExtra: 0,
                 hInstance: instance,
@@ -500,6 +594,34 @@ mod tests {
             Some(PhysicalPosition::new(320, 20))
         );
         assert_eq!(frame.take_window_menu(), None);
+
+        // As its scale changes, the window goes where Windows places it, with the inside winit
+        // means in the frame at the new scale, here the scale it has.
+        // SAFETY: a plain query of a window.
+        let dpi = unsafe { GetDpiForWindow(hwnd) };
+        assert_eq!(border_at(hwnd, dpi), border);
+        let place = RECT {
+            left: 150,
+            top: 120,
+            right: 700,
+            bottom: 500,
+        };
+        let lparam = &place as *const RECT as LPARAM;
+        // SAFETY: where Windows places the window, as it tells a window whose scale changes.
+        unsafe { SendMessageW(hwnd, WM_DPICHANGED, dpi as WPARAM, lparam) };
+        let (window, inside) = rects(hwnd);
+        assert_eq!((window.left, window.top), (150, 120));
+        assert_eq!((inside.right, inside.bottom), (300, 200));
+        // Its size at another scale is its inside's at that scale, in the frame at that scale.
+        let mut size = SIZE {
+            cx: 300 + 2 * border,
+            cy: 200 + border,
+        };
+        let lparam = &mut size as *mut SIZE as LPARAM;
+        // SAFETY: the window's size to scale, as Windows asks for it.
+        unsafe { SendMessageW(hwnd, WM_GETDPISCALEDSIZE, 2 * dpi as WPARAM, lparam) };
+        let wide = border_at(hwnd, 2 * dpi);
+        assert_eq!((size.cx, size.cy), (600 + 2 * wide, 400 + wide));
 
         // The window lets go of what it shares with the frame as it goes.
         // SAFETY: the window is this thread's.
