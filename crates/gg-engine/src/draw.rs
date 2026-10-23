@@ -528,6 +528,9 @@ const AT_HAND: usize = 16;
 
 /// What `find` gives for segment `index`: what `at` keeps for it, or else found, and kept in its
 /// slot.
+// Called for each item drawn, so asked to be inlined: left to LLVM, whether it is turns on how
+// the crate splits into codegen units, and a frame of the swarm's 100,000 sprites shows the calls.
+#[inline]
 fn found<T: Copy>(
     at: &mut [Option<(u32, T)>; AT_HAND],
     index: u32,
