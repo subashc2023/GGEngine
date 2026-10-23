@@ -1,12 +1,13 @@
 //! The world as tools reach it, without the Rust types of its components: component types by name,
 //! their fields by path, and their values as reflection's [`Value`]s. The inspector is built on
-//! these alone, and so will the tool API be.
+//! these, the world's IDs and its hierarchy, and so will the tool API be.
 
 use std::any::TypeId;
 use std::slice;
 
 use gg_core::{Error, Result};
 
+use super::id::Named;
 use super::table::{ComponentId, Table};
 use super::{Component, Entity, Location, Parent, World};
 use crate::reflect::{self, Types, Value};
@@ -70,9 +71,11 @@ impl World {
     /// Fails with `ecs.no_entity` if `entity` isn't alive; `reflect.unknown_type` if no component
     /// type is named `component`; `reflect.missing_component` if `entity` hasn't one;
     /// `reflect.bad_path` for a path that can't be read; and `reflect.no_field` for one that leads
-    /// to no field. Every error names the entity, the component and the path.
+    /// to no field. Every error names the entity, by its ID while it's alive, the component and the
+    /// path.
     pub fn get_field(&self, entity: Entity, component: &str, path: &str) -> Result<Value> {
-        let about = |error: Error| about(error, "get", entity, component, path);
+        let name = self.name_of(entity);
+        let about = |error: Error| about(error, "get", name, component, path);
         let (id, at) = self.find(entity, component).map_err(about)?;
         let column = self.column(at, id, component).map_err(about)?;
         let types = self.components.types();
@@ -97,8 +100,8 @@ impl World {
     /// Fails as `get_field` does; with `reflect.read_only` for `Parent`, at any path, whether the
     /// entity has one or not; with `reflect.out_of_range` for a number outside its field's
     /// bounds or its type's; and as [`Reflect::with_value`](crate::Reflect::with_value) does for
-    /// a value that doesn't fit the field. Every error names the entity, the component and the
-    /// path, down to the part refused.
+    /// a value that doesn't fit the field. Every error names the entity, by its ID while it's
+    /// alive, the component and the path, down to the part refused.
     pub fn set_field(
         &mut self,
         entity: Entity,
@@ -106,7 +109,9 @@ impl World {
         path: &str,
         value: &Value,
     ) -> Result<Value> {
-        let about = |error: Error| about(error, "set", entity, component, path);
+        // Named before the closure, which would otherwise still borrow the world at `row_mut`.
+        let name = self.name_of(entity);
+        let about = |error: Error| about(error, "set", name, component, path);
         let (id, at) = self.find(entity, component).map_err(about)?;
         if Some(id) == self.components.get(TypeId::of::<Parent>()) {
             return Err(about(Error::new(
@@ -181,7 +186,7 @@ impl World {
 
 /// `error`, from getting or setting the field at `path` of `entity`'s `component`, naming them and
 /// the whole path, down to the part where it happened.
-fn about(error: Error, doing: &str, entity: Entity, component: &str, path: &str) -> Error {
+fn about(error: Error, doing: &str, entity: Named, component: &str, path: &str) -> Error {
     let (inner, what) = reflect::located(&error);
     let at = reflect::join(&reflect::join(component, path), &inner);
     let message = format!("can't {doing} `{at}` of entity {entity}: {what}");
@@ -684,7 +689,11 @@ mod tests {
                 .expect_err(path);
             let message = error.to_string();
             assert_eq!(error.code(), code, "{message}");
-            let says = format!("can't set `{location}` of entity {at}: ");
+            // By its ID while it's alive, and by its handle once it isn't.
+            let named = world
+                .id(at)
+                .map_or_else(|| at.to_string(), |id| id.to_string());
+            let says = format!("can't set `{location}` of entity {named}: ");
             assert!(message.starts_with(&says), "{message}");
             assert!(same_snapshots(&snapshot(&world), &before), "{message}");
         }
@@ -696,7 +705,8 @@ mod tests {
             .expect_err("past the end");
         assert_eq!(error.code(), "reflect.no_field");
         let message = error.to_string();
-        let says = format!("can't get `Everything.list[2]` of entity {entity}: ");
+        let id = world.id(entity).expect("alive");
+        let says = format!("can't get `Everything.list[2]` of entity {id}: ");
         assert!(
             message.starts_with(&says) && message.ends_with("it has 2"),
             "{message}"

@@ -1,23 +1,29 @@
 //! The engine's ECS: entities, which are handles, and their components, data of any reflected type,
 //! kept in archetype tables, a table for each set of component types, and found by queries, or by
-//! name; and the hierarchy, in which entities' parents carry their children along.
+//! name; entities' persistent IDs; and the hierarchy, in which entities' parents carry their
+//! children along.
 
 mod by_name;
 mod hierarchy;
+mod id;
 mod query;
 mod table;
 
 use std::any::TypeId;
 use std::collections::HashMap;
 use std::fmt;
+use std::hash::{BuildHasher, RandomState};
 use std::mem;
 use std::num::NonZeroU32;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use gg_core::{Error, Result};
 
 pub use by_name::Entities;
 use hierarchy::Links;
 pub use hierarchy::Parent;
+pub use id::EntityId;
+use id::IdStream;
 pub use query::{Query, QueryIter, QueryIterMut, ReadOnlyQuery};
 use table::{ComponentId, Components, Table};
 
@@ -64,6 +70,7 @@ pub trait Bundle: seal::Bundle {}
 
 /// An entity: a handle to it, which stays its own as other entities come and go, and never names
 /// another once it's despawned. It's printed as its slot and the slot's generation, such as `7v2`.
+/// It's the world's own: files, tools and diagnostics name an entity by its [`EntityId`].
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Entity {
     /// Its slot.
@@ -89,12 +96,30 @@ impl fmt::Debug for Entity {
 /// type's values; despawning an entity, or giving it a component or taking one away, moves the
 /// table's last row into its place. So the order queries find entities in follows from the changes
 /// made, the same every time, but means nothing a game should depend on: anything ordered, such as
-/// what's drawn over what, orders by its components' values.
+/// what's drawn over what, orders by its components' values, or by its entities' IDs.
 pub struct World {
     /// Each slot's generation, and where its entity is if it's alive.
     meta: Vec<Meta>,
     /// The slots free for new entities, the last freed taken first.
     free: Vec<u32>,
+    /// Each slot's entity's persistent ID, beside its `Meta` rather than in it, since every lookup
+    /// of a handle reads `Meta`, and only drawing, as it sorts the rows at one z, and diagnostics,
+    /// tools and files read IDs: written as an entity is spawned into the slot and removed from it,
+    /// and read through [`World::id`], which checks the handle first. `None` while the slot is
+    /// free, or retired.
+    entity_ids: Vec<Option<EntityId>>,
+    /// Each living entity by its ID; looked up, never iterated. Hashed with SipHash, keyed at
+    /// random, so that IDs from files can't be chosen to collide.
+    by_id: HashMap<EntityId, Entity>,
+    /// Where the next entity's ID comes from.
+    stream: IdStream,
+    /// Which world this is among the process's, so that the order drawing keeps for one world never
+    /// passes for another's, as when a game replaces its world; a world copied, as snapshots will
+    /// copy one, takes another.
+    serial: u64,
+    /// How many times entities' rows have changed, as entities are spawned, despawned or moved to
+    /// other tables: drawing keeps the order it sorted while it and `serial` stay.
+    version: u64,
     /// In the order they were made, which is the order queries search them in.
     tables: Vec<Table>,
     /// Each table, by its sorted component types; looked up, never iterated, so that its random
@@ -107,22 +132,17 @@ pub struct World {
 
 impl Default for World {
     /// An empty world, which has registered [`Parent`], so that tools find it and `set_field`
-    /// refuses it by name in any world, and no game's type takes its name.
+    /// refuses it by name in any world, and no game's type takes its name; and which draws its
+    /// entities' IDs from a stream seeded at random, so that each world's are its own.
     fn default() -> Self {
-        let mut components = Components::default();
-        components
-            .register::<Parent>()
-            .expect("the world's own component describes itself");
-        Self {
-            meta: Vec::new(),
-            free: Vec::new(),
-            tables: Vec::new(),
-            by_signature: HashMap::new(),
-            components,
-            scratch: Vec::new(),
-        }
+        // std seeds its hashers' keys from the OS's randomness, once a thread, and steps them for
+        // each `RandomState`, so that each world gets another seed.
+        Self::seeded(RandomState::new().hash_one(()))
     }
 }
+
+/// How many worlds the process has made, which numbers each.
+static WORLDS: AtomicU64 = AtomicU64::new(0);
 
 struct Meta {
     generation: NonZeroU32,
@@ -142,6 +162,27 @@ struct Location {
 const MOST: usize = 8;
 
 impl World {
+    /// An empty world, as [`World::default`] makes one, whose entities' IDs are drawn from `seed`.
+    fn seeded(seed: u64) -> Self {
+        let mut components = Components::default();
+        components
+            .register::<Parent>()
+            .expect("the world's own component describes itself");
+        Self {
+            meta: Vec::new(),
+            free: Vec::new(),
+            entity_ids: Vec::new(),
+            by_id: HashMap::new(),
+            stream: IdStream::new(seed),
+            serial: WORLDS.fetch_add(1, Ordering::Relaxed),
+            version: 0,
+            tables: Vec::new(),
+            by_signature: HashMap::new(),
+            components,
+            scratch: Vec::new(),
+        }
+    }
+
     /// Makes an entity with `components`, and returns it.
     ///
     /// # Panics
@@ -164,11 +205,16 @@ impl World {
         }
         let table = self.table(signature);
         let entity = self.take_slot();
+        let id = self.stream.draw();
+        self.entity_ids[entity.index as usize] = Some(id);
+        let drawn = self.by_id.insert(id, entity);
+        assert!(drawn.is_none(), "the world drew ID {id} twice");
         let into = &mut self.tables[table as usize];
         let row = into.entities.len() as u32;
         components.push(into, ids);
         into.entities.push(entity);
         self.meta[entity.index as usize].location = Some(Location { table, row });
+        self.version += 1;
         entity
     }
 
@@ -285,6 +331,12 @@ impl World {
         self.components.get(TypeId::of::<T>())
     }
 
+    /// Which world this is, and how many times its entities' rows have changed, for drawing, which
+    /// keeps the order it sorted while both stay.
+    pub(crate) fn version(&self) -> (u64, u64) {
+        (self.serial, self.version)
+    }
+
     /// Where `entity` is, if it's alive.
     fn location(&self, entity: Entity) -> Option<Location> {
         let meta = self.meta.get(entity.index as usize)?;
@@ -332,6 +384,7 @@ impl World {
             location: None,
             links: Links::NONE,
         });
+        self.entity_ids.push(None);
         Entity { index, generation }
     }
 
@@ -344,6 +397,10 @@ impl World {
         if let Some(moved) = moved {
             self.meta[moved.index as usize].location = Some(at);
         }
+        // Before the slot retires, so that a retired slot's ID goes too.
+        let id = self.entity_ids[index as usize].take();
+        self.by_id.remove(&id.expect("a living entity has an ID"));
+        self.version += 1;
         let meta = &mut self.meta[index as usize];
         meta.location = None;
         // A slot whose generation can't go higher retires, so that no handle names another
@@ -374,6 +431,7 @@ impl World {
         let row = into.entities.len() as u32;
         into.entities.push(entity);
         self.meta[entity.index as usize].location = Some(Location { table: to, row });
+        self.version += 1;
     }
 }
 
@@ -460,6 +518,8 @@ mod tests {
     use std::iter;
 
     use super::hierarchy::tests::check_links;
+    use super::id::splitmix64;
+    use super::id::tests::check_ids;
     use super::*;
     use crate::reflect::Value;
 
@@ -470,9 +530,11 @@ mod tests {
     struct Marked;
 
     #[test]
-    fn entities_keep_their_ids_as_others_are_removed() {
+    fn entities_keep_their_handles_and_ids_as_others_are_removed() {
         let mut world = World::default();
         let first: Vec<Entity> = (0..1000).map(|i| world.spawn(Index(i))).collect();
+        let id = |world: &World, entity: Entity| world.id(entity).expect("alive");
+        let ids: Vec<EntityId> = first.iter().map(|&entity| id(&world, entity)).collect();
         let gone = |i: usize| i.is_multiple_of(3);
         let marked = |i: usize| !gone(i) && i.is_multiple_of(5);
         for (i, &entity) in first.iter().enumerate() {
@@ -496,18 +558,27 @@ mod tests {
             if gone(i) {
                 assert!(!world.contains(entity), "{entity}");
                 assert_eq!(world.get::<Index>(entity), None, "{entity}");
+                assert_eq!(world.id(entity), None, "{entity}");
+                assert_eq!(world.entity(ids[i]), None, "{entity}'s ID");
                 let error = world.despawn(entity).expect_err("a dead entity");
                 assert_eq!(error.code(), "ecs.no_entity");
                 assert!(error.to_string().contains(&entity.to_string()), "{error}");
             } else {
                 assert_eq!(world.get::<Index>(entity), Some(&Index(i as u32)));
                 assert_eq!(world.get::<Marked>(entity).is_some(), marked(i), "{entity}");
+                assert_eq!(world.id(entity), Some(ids[i]), "{entity}");
+                assert_eq!(world.entity(ids[i]), Some(entity), "{entity}'s ID");
             }
         }
         for (i, &entity) in (1000..).zip(&second) {
             assert_eq!(world.get::<Index>(entity), Some(&Index(i)));
         }
         assert_eq!(world.query::<Entity>().count(), 1000 - 334 + 400);
+        // Each drawn once, the new entities in reused slots among them.
+        let seconds = second.iter().map(|&entity| id(&world, entity));
+        let drawn: HashSet<EntityId> = ids.iter().copied().chain(seconds).collect();
+        assert_eq!(drawn.len(), 1400);
+        check_ids(&world);
     }
 
     #[test]
@@ -520,7 +591,10 @@ mod tests {
             index: first.index,
             generation: NonZeroU32::MAX,
         };
+        let id = world.id(last).expect("alive");
         world.despawn(last).expect("alive");
+        assert_eq!(world.entity(id), None, "a retired slot's ID");
+        check_ids(&world);
         let next = world.spawn(Index(1));
         assert_ne!(next.index, last.index, "a retired slot takes no entity");
         for entity in [first, last] {
@@ -553,6 +627,7 @@ mod tests {
         c: bool,
         d: Option<D>,
         parent: Option<Entity>,
+        id: Option<EntityId>,
     }
 
     impl Has {
@@ -563,34 +638,40 @@ mod tests {
                 c: world.get::<C>(entity).is_some(),
                 d: world.get(entity).cloned(),
                 parent: world.get::<Parent>(entity).map(|parent| parent.0),
+                id: world.id(entity),
             }
         }
     }
 
-    /// Sebastiano Vigna's SplitMix64, seeded, so that the test takes the same steps every run.
+    /// SplitMix64, seeded, so that the test takes the same steps every run.
     struct Rng(u64);
 
     impl Rng {
         /// A number below `n`.
         fn below(&mut self, n: usize) -> usize {
-            self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
-            let mut z = self.0;
-            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-            ((z ^ (z >> 31)) % n as u64) as usize
+            (splitmix64(&mut self.0) % n as u64) as usize
         }
     }
 
     /// Takes random steps, spawning, despawning, giving and taking components and changing them
     /// through queries and by name, and setting parents, and after each checks the world against a
-    /// model of it: a list of each living entity's components and parent, and when it became its
-    /// parent's child.
+    /// model of it: a list of each living entity's components, parent and ID, and when it became
+    /// its parent's child.
     #[test]
     fn the_world_matches_a_model() {
-        let mut world = World::default();
+        // Seeded, so that its IDs are the same every run too.
+        let mut world = World::seeded(0x5eed);
         let mut rng = Rng(7);
         let mut live: Vec<(Entity, Has)> = Vec::new();
-        let mut dead: Vec<Entity> = Vec::new();
+        let mut dead: Vec<(Entity, EntityId)> = Vec::new();
+        // Each ID drawn, which none is again.
+        let mut seen = HashSet::new();
+        let mut spawned = |world: &World, entity: Entity, mut has: Has| {
+            let id = world.id(entity).expect("alive");
+            assert!(seen.insert(id), "{id} drawn twice");
+            has.id = Some(id);
+            (entity, has)
+        };
         // The step at which each child became its parent's, which orders its siblings.
         let mut joined: HashMap<Entity, usize> = HashMap::new();
         // Its types in the order A, C, B, D, so that C's column comes between A's and B's, and a
@@ -602,8 +683,9 @@ mod tests {
             c: true,
             d: Some(D(n.to_string())),
             parent: None,
+            id: None,
         };
-        live.push((first, all(0)));
+        live.push(spawned(&world, first, all(0)));
         for step in 1..2000 {
             let n = step as u32;
             match rng.below(11) {
@@ -646,7 +728,7 @@ mod tests {
                             all(n),
                         ),
                     };
-                    live.push((entity, has));
+                    live.push(spawned(&world, entity, has));
                 }
                 2 if !live.is_empty() => {
                     // With its descendants.
@@ -659,11 +741,18 @@ mod tests {
                         gone.extend(children.map(|&(child, _)| child));
                         next += 1;
                     }
-                    live.retain(|(entity, _)| !gone.contains(entity));
+                    let id = |entity: &Entity| {
+                        let found = live.iter().find(|(other, _)| other == entity);
+                        found
+                            .and_then(|(_, has)| has.id)
+                            .expect("drawn as it spawned")
+                    };
+                    let gone: Vec<(Entity, EntityId)> = gone.iter().map(|e| (*e, id(e))).collect();
+                    live.retain(|(entity, _)| gone.iter().all(|(gone, _)| gone != entity));
                     dead.extend(gone);
                 }
                 3 if !dead.is_empty() => {
-                    let entity = dead[rng.below(dead.len())];
+                    let entity = dead[rng.below(dead.len())].0;
                     let code = |error: Error| error.code().to_owned();
                     assert_eq!(
                         world.despawn(entity).map_err(code),
@@ -757,10 +846,18 @@ mod tests {
                     }
                 }
                 9 if !dead.is_empty() && rng.below(4) == 0 => {
-                    let entity = dead[rng.below(dead.len())];
+                    let entity = dead[rng.below(dead.len())].0;
                     let set = world.set_field(entity, "A", "0", &Value::UInt(n.into()));
-                    let code = set.map_err(|error| error.code());
-                    assert_eq!(code, Err("ecs.no_entity"), "{entity} at step {step}");
+                    let error = set.expect_err("a dead entity");
+                    assert_eq!(error.code(), "ecs.no_entity", "{entity} at step {step}");
+                    // By its handle, never by the ID of the entity now in its slot.
+                    let message = error.to_string();
+                    assert!(message.contains(&entity.to_string()), "{message}");
+                    let occupant = live.iter().find(|(other, _)| other.index == entity.index);
+                    if let Some((_, has)) = occupant {
+                        let id = has.id.expect("drawn as it spawned").to_string();
+                        assert!(!message.contains(&id), "{message}");
+                    }
                 }
                 9 if !live.is_empty() => {
                     // As tools set fields, on an entity with the component or without it.
@@ -839,8 +936,11 @@ mod tests {
 
             for (entity, has) in &live {
                 assert_eq!(Has::of(&world, *entity), *has, "{entity} at step {step}");
+                let id = has.id.expect("drawn as it spawned");
+                assert_eq!(world.entity(id), Some(*entity), "{id} at step {step}");
             }
             check_links(&world);
+            check_ids(&world);
             // Each parent's children in the order they became its.
             let mut children: Vec<(Entity, usize, Entity)> = live
                 .iter()
@@ -854,15 +954,16 @@ mod tests {
                 assert_eq!(listed, expected, "{parent}'s children at step {step}");
             }
             // Every dead entity now and then, and some of them every step.
-            let checked: Vec<Entity> = if step % 100 == 0 {
+            let checked: Vec<(Entity, EntityId)> = if step % 100 == 0 {
                 dead.clone()
             } else {
                 let recent = dead.iter().rev().take(64).copied();
                 let some = (0..16.min(dead.len())).map(|_| dead[rng.below(dead.len())]);
                 recent.chain(some).collect()
             };
-            for entity in checked {
+            for (entity, id) in checked {
                 assert!(!world.contains(entity), "{entity} at step {step}");
+                assert_eq!(world.entity(id), None, "{id} at step {step}");
                 assert_eq!(
                     Has::of(&world, entity),
                     Has::default(),

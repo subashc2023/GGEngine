@@ -1,7 +1,7 @@
 //! The inspector: the Entities panel, which lists the world's entities, and the Inspector panel,
 //! which shows the picked entity's components and edits their fields. It reaches the world only
-//! through its by-name calls, as the tool API will, so that an editor can show it for a game in
-//! another process.
+//! through its by-name calls, its IDs and its hierarchy, as the tool API will, so that an editor
+//! can show it for a game in another process, and names entities by their IDs.
 
 use std::f64::consts::PI;
 
@@ -11,7 +11,7 @@ use gg_core::math::{EulerRot, Quat, Vec2, Vec3, Vec4};
 use tracing::warn;
 
 use crate::reflect::{self, Bound, Field, Meta, Name, Shape, Show, Type, Types, Value};
-use crate::{Context, Entity, Layer, Ui, World};
+use crate::{Context, Entity, EntityId, Layer, Ui, World};
 
 /// The Entities and Inspector panels, which an app adds as an overlay,
 /// `.overlay(gg_engine::Inspector::default())`. The Entities panel lists the world's entities, all
@@ -21,7 +21,8 @@ use crate::{Context, Entity, Layer, Ui, World};
 /// beside its field, and is logged. Edits apply at once, with no undo yet.
 #[derive(Default)]
 pub struct Inspector {
-    picked: Option<Entity>,
+    /// By its ID, which outlives it, so that a pick despawned is still named as it was shown.
+    picked: Option<EntityId>,
     /// The component type the Entities panel lists the entities of; all of them if `None`.
     with: Option<String>,
     /// The last value refused of each field of the picked entity.
@@ -89,21 +90,22 @@ impl Inspector {
         let rows = entities.len();
         egui::ScrollArea::vertical().show_rows(ui, height, rows, |ui, shown| {
             for entity in entities.skip(shown.start).take(shown.len()) {
+                let id = world.id(entity).expect("the world lists living entities");
                 let components = world.components_of(entity).into_iter().flatten();
-                let label = format!("{entity}  {}", components.collect::<Vec<_>>().join(", "));
+                let label = format!("{id}  {}", components.collect::<Vec<_>>().join(", "));
                 if ui
-                    .selectable_label(self.picked == Some(entity), label)
+                    .selectable_label(self.picked == Some(id), label)
                     .clicked()
                 {
-                    self.pick(entity);
+                    self.pick(id);
                 }
             }
         });
     }
 
-    fn pick(&mut self, entity: Entity) {
-        if self.picked != Some(entity) {
-            self.picked = Some(entity);
+    fn pick(&mut self, id: EntityId) {
+        if self.picked != Some(id) {
+            self.picked = Some(id);
             self.refusals.clear();
         }
     }
@@ -111,21 +113,23 @@ impl Inspector {
     /// The Inspector panel: the picked entity's components, each under a header that collapses,
     /// with its fields' widgets; the fields they change go in `edits`.
     fn inspect(&self, world: &World, ui: &mut egui::Ui, edits: &mut Vec<Edit>) {
-        let Some(entity) = self.picked else {
+        let Some(id) = self.picked else {
             ui.label("Nothing picked: pick an entity in the Entities panel");
             return;
         };
-        let Ok(components) = world.components_of(entity) else {
-            ui.label(format!("Entity {entity} was despawned"));
+        let Some(entity) = world.entity(id) else {
+            ui.label(format!("Entity {id} was despawned"));
             return;
         };
-        ui.label(format!("Entity {entity}"));
+        let components = world.components_of(entity);
+        let components = components.expect("the entity of an ID is alive");
+        ui.label(format!("Entity {id}"));
         if let Some(children) = children(world, entity) {
             ui.label(children);
         }
         // So that what's typed into a field of one entity never lands in the field of the next
         // one picked.
-        ui.push_id(entity, |ui| {
+        ui.push_id(id, |ui| {
             for component in components {
                 let types = world.types();
                 let (Ok(value), Some(index)) = (
@@ -139,6 +143,7 @@ impl Inspector {
                     .default_open(true)
                     .show(ui, |ui| {
                         let mut fields = Fields {
+                            world,
                             types,
                             component,
                             refusals: &self.refusals,
@@ -161,7 +166,7 @@ impl Inspector {
 
     /// Sets the field `edit` changed, and keeps the refusal if it's refused.
     fn apply(&mut self, world: &mut World, edit: Edit) {
-        let Some(entity) = self.picked else {
+        let Some((id, entity)) = self.picked.and_then(|id| Some((id, world.entity(id)?))) else {
             return;
         };
         let Edit {
@@ -174,7 +179,7 @@ impl Inspector {
         if let Err(error) = world.set_field(entity, &component, &path, &value) {
             warn!(
                 code = error.code(),
-                %entity,
+                entity = %id,
                 component = component.as_str(),
                 path = path.as_str(),
                 "{error}"
@@ -190,6 +195,7 @@ impl Inspector {
 
 /// Draws the fields of one component, and keeps the edits they make.
 struct Fields<'a> {
+    world: &'a World,
     types: &'a Types,
     component: &'a str,
     refusals: &'a [Refusal],
@@ -297,7 +303,11 @@ impl Fields<'_> {
             }
             (Type::Quat, &Value::Quat(q)) => self.rotation(ui, q, path),
             (Type::Entity, Value::Entity(entity)) => {
-                ui.label(entity.to_string());
+                // A despawned entity has no ID, only its handle.
+                match self.world.id(*entity) {
+                    Some(id) => ui.label(id.to_string()),
+                    None => ui.label(entity.to_string()),
+                };
                 None
             }
             _ => opaque(ui),
@@ -505,15 +515,15 @@ fn same_rotation(a: Quat, b: Quat) -> bool {
     near(b) || near(-b)
 }
 
-/// `entity`'s children, as "Children: 4v1, 5v1": the first 16 of them, then how many more there
-/// are; `None` if it has none.
+/// `entity`'s children, by their IDs, as "Children: 5f3a9c0e12b47d68, 0c41b2e79d6a3f15": the
+/// first 16 of them, then how many more there are; `None` if it has none.
 fn children(world: &World, entity: Entity) -> Option<String> {
     let mut children = world.children(entity).ok()?.peekable();
     children.peek()?;
     let shown: Vec<String> = children
         .by_ref()
         .take(16)
-        .map(|child| child.to_string())
+        .map(|child| world.id(child).expect("a child is alive").to_string())
         .collect();
     let mut line = format!("Children: {}", shown.join(", "));
     let more = children.count();
@@ -632,6 +642,11 @@ mod tests {
     use crate::reflect::tests::{Everything, Form, Inner, everything, same_snapshots, snapshot};
     use crate::{Sprite, Transform};
 
+    /// `entity`'s ID, which the Inspector picks it by and names it by.
+    fn id(world: &World, entity: Entity) -> EntityId {
+        world.id(entity).expect("alive")
+    }
+
     /// A text drawn, and where.
     type Text = (String, egui::Rect);
 
@@ -736,8 +751,10 @@ mod tests {
         let ctx = crate::egui_context();
         let mut inspector = Inspector::default();
         let texts = frames(&mut inspector, &mut world, &ctx);
+        let row = format!("{}  Transform", id(&world, turned));
         for text in [
             "6 entities",
+            row.as_str(),
             "Nothing picked: pick an entity in the Entities panel",
         ] {
             assert!(texts.iter().any(|shown| shown == text), "{text}: {texts:?}");
@@ -774,23 +791,24 @@ mod tests {
             ),
         ];
         for (entity, names) in shown {
-            inspector.pick(entity);
+            inspector.pick(id(&world, entity));
             let texts = frames(&mut inspector, &mut world, &ctx);
-            let header = format!("Entity {entity}");
+            let header = format!("Entity {}", id(&world, entity));
             for name in names.iter().copied().chain([header.as_str()]) {
                 assert!(texts.iter().any(|text| text == name), "{name}: {texts:?}");
             }
             let clash = texts.iter().find(|text| text.contains(" use of "));
             assert_eq!(clash, None, "egui saw an ID twice");
         }
-        // A parent lists its children, and a child shows its parent.
-        let children = format!("Children: {first}, {second}");
-        let parent = turned.to_string();
+        // A parent lists its children, and a child shows its parent, by their IDs.
+        let [one, two] = [first, second].map(|child| id(&world, child));
+        let children = format!("Children: {one}, {two}");
+        let parent = id(&world, turned).to_string();
         for (entity, names) in [
             (turned, [children.as_str(), "Transform"]),
             (first, ["Parent", parent.as_str()]),
         ] {
-            inspector.pick(entity);
+            inspector.pick(id(&world, entity));
             let texts = frames(&mut inspector, &mut world, &ctx);
             for name in names {
                 assert!(texts.iter().any(|text| text == name), "{name}: {texts:?}");
@@ -808,7 +826,8 @@ mod tests {
         for &kid in &kids {
             world.set_parent(kid, Some(parent)).expect("no cycle");
         }
-        let shown: Vec<String> = kids[..16].iter().map(ToString::to_string).collect();
+        let shown = kids[..16].iter().map(|&kid| id(&world, kid).to_string());
+        let shown: Vec<String> = shown.collect();
         let shown = format!("Children: {}", shown.join(", "));
         let listed = children(&world, parent);
         assert_eq!(listed, Some(format!("{shown} and 2 more")));
@@ -908,7 +927,7 @@ mod tests {
             }
             texts
         };
-        inspector.pick(entity);
+        inspector.pick(id(&world, entity));
         let mut texts = run(&mut inspector, &mut world, Vec::new());
         // Each number typed in as a person would: clicked, which selects its text, typed over and
         // entered.
@@ -949,7 +968,7 @@ mod tests {
         };
         assert_eq!(all, &expected);
 
-        inspector.pick(sprite);
+        inspector.pick(id(&world, sprite));
         let texts = run(&mut inspector, &mut world, Vec::new());
         // Its color's button, in the column the texture's "opaque" starts: its popup opens.
         let at = egui::pos2(
@@ -1005,7 +1024,7 @@ mod tests {
             }
             texts
         };
-        inspector.pick(sprite);
+        inspector.pick(id(&world, sprite));
         let texts = run(&mut inspector, &mut world, Vec::new());
         let at = egui::pos2(
             find(&texts, "texture", "opaque").min.x + 10.0,
@@ -1055,7 +1074,7 @@ mod tests {
         let entity = world.spawn(turned);
         let ctx = crate::egui_context();
         let mut inspector = Inspector::default();
-        inspector.pick(entity);
+        inspector.pick(id(&world, entity));
         // As the widget keeps them once 200° is typed: from the rotation alone, it shows -160°.
         let id = egui::Id::unique(("inspector rotation", "Transform", "rotation"));
         ctx.data_mut(|data| data.insert_temp(id, (typed, [0.0f32, 0.0, 200.0])));
@@ -1083,7 +1102,7 @@ mod tests {
         let entity = world.spawn(everything());
         let ctx = crate::egui_context();
         let mut inspector = Inspector::default();
-        inspector.pick(entity);
+        inspector.pick(id(&world, entity));
         let count = |value| Edit {
             component: "Everything".to_owned(),
             path: "count".to_owned(),
@@ -1091,7 +1110,8 @@ mod tests {
         };
         inspector.apply(&mut world, count(Value::UInt(200)));
         let refused = format!(
-            "can't set `Everything.count` of entity {entity}: 200 is above the field's max, 100"
+            "can't set `Everything.count` of entity {}: 200 is above the field's max, 100",
+            id(&world, entity)
         );
         let texts = frames(&mut inspector, &mut world, &ctx);
         assert!(texts.contains(&refused), "{texts:?}");
@@ -1108,7 +1128,35 @@ mod tests {
         assert!(!texts.contains(&refused), "{texts:?}");
         // Another entity picked starts without the last one's.
         inspector.apply(&mut world, count(Value::UInt(200)));
-        inspector.pick(world.spawn(everything()));
+        let other = world.spawn(everything());
+        inspector.pick(id(&world, other));
         assert!(inspector.refusals.is_empty());
+    }
+
+    /// A pick despawned is named by the ID it was shown by, and an entity field holding a handle
+    /// whose entity is gone shows the handle, not the ID of the entity now in its slot.
+    #[test]
+    fn the_despawned_are_named_by_what_they_were_shown_by() {
+        let mut world = World::default();
+        let gone = world.spawn(Transform::IDENTITY);
+        world.despawn(gone).expect("alive");
+        // In the slot `gone` left, the last freed being taken first.
+        let occupant = world.spawn(Transform::IDENTITY);
+        let holder = world.spawn(Everything {
+            target: Some(gone),
+            ..everything()
+        });
+        let ctx = crate::egui_context();
+        let mut inspector = Inspector::default();
+        inspector.pick(id(&world, holder));
+        let texts = frames(&mut inspector, &mut world, &ctx);
+        assert!(texts.contains(&gone.to_string()), "{texts:?}");
+        let taken = id(&world, occupant).to_string();
+        assert!(!texts.contains(&taken), "{texts:?}");
+        let picked = id(&world, holder);
+        world.despawn(holder).expect("alive");
+        let texts = frames(&mut inspector, &mut world, &ctx);
+        let despawned = format!("Entity {picked} was despawned");
+        assert!(texts.contains(&despawned), "{texts:?}");
     }
 }

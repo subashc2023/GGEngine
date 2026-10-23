@@ -153,6 +153,11 @@ impl Table {
         self.position(id).is_some()
     }
 
+    /// Which entity each row is.
+    pub fn entities(&self) -> &[Entity] {
+        &self.entities
+    }
+
     /// Component `id`'s values, of type `T`, if the table has them.
     pub fn column<T: Component>(&self, id: ComponentId) -> Option<&[T]> {
         Some(self.columns[self.position(id)?].vec())

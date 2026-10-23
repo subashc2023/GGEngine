@@ -9,8 +9,8 @@ use crate::Component;
 /// glTF's nodes have them, which [`matrix`](Self::matrix) applies scale first, then rotation, then
 /// translation. A parent carries its children along: a child is placed in the world by its own
 /// transform, then by each of its ancestors' in turn. The engine draws the world's entities back to
-/// front by their z's in the world, so entities that overlap need different z's: those at one z
-/// draw in an order that changes as entities are despawned or change components.
+/// front by their z's in the world; those at one z draw sprites under meshes, each in the order of
+/// their entities' IDs, which overlapping entities keep as others come and go.
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
 pub struct Transform {
     pub translation: Vec3,

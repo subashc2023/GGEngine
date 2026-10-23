@@ -982,7 +982,7 @@ fn past_end(list: &dyn Reflect, index: u32) -> Error {
 pub(crate) mod tests {
     use super::*;
     use crate::draw::SAMPLERS;
-    use crate::{Component, MeshDraw, Sprite, Transform, World};
+    use crate::{Component, EntityId, MeshDraw, Sprite, Transform, World};
 
     /// A struct a field holds.
     #[derive(Clone, Debug, PartialEq, Reflect)]
@@ -1100,26 +1100,27 @@ pub(crate) mod tests {
         }
     }
 
-    /// Every component of every entity of `world`, read by name.
-    pub(crate) fn snapshot(world: &World) -> Vec<(Entity, String, Value)> {
+    /// Every component of every entity of `world`, read by name, beside the entity's handle and ID.
+    pub(crate) fn snapshot(world: &World) -> Vec<(Entity, EntityId, String, Value)> {
         let mut all = Vec::new();
         for entity in world.entities(None).expect("every entity") {
+            let id = world.id(entity).expect("alive");
             for component in world.components_of(entity).expect("alive") {
                 let value = world.get_field(entity, component, "").expect("readable");
-                all.push((entity, component.to_owned(), value));
+                all.push((entity, id, component.to_owned(), value));
             }
         }
         all
     }
 
     pub(crate) fn same_snapshots(
-        a: &[(Entity, String, Value)],
-        b: &[(Entity, String, Value)],
+        a: &[(Entity, EntityId, String, Value)],
+        b: &[(Entity, EntityId, String, Value)],
     ) -> bool {
         a.len() == b.len()
             && a.iter()
                 .zip(b)
-                .all(|(a, b)| a.0 == b.0 && a.1 == b.1 && same(&a.2, &b.2))
+                .all(|(a, b)| a.0 == b.0 && a.1 == b.1 && a.2 == b.2 && same(&a.3, &b.3))
     }
 
     fn field<'a>(types: &'a Types, ty: &Type, name: &str) -> &'a Field {

@@ -421,7 +421,7 @@ impl Sandbox {
     }
 
     /// Spawns drifters until the swarm has `swarm`, or despawns them until it has, from its end,
-    /// so that no other drifter moves in its table and the swarm draws in the order it always has.
+    /// so that those left are the first `swarm`, each moving as its index has it.
     fn resize_swarm(&mut self, world: &mut World) {
         let _zone = gg_engine::zone!();
         let Some(scene) = &self.scene else {
