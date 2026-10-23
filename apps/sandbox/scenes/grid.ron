@@ -1,0 +1,1804 @@
+(
+    entities: {
+        "005cb2779f43fb70": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.90000004, -0.3, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "0839e2f89de73732": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.3, 0.1, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "0b966e8663c7a7f4": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.5, 0.3, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "11b6f9ee8dd7b4e9": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.1, 0.3, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "11d387350a604cf9": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.7, -0.3, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "14d3e62d993846ca": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.3, -0.5, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "15c073e3bd083f0d": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.5, 0.3, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "1b931c3ae57ea2e1": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.7, 0.90000004, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "1cc46fd88bce7e91": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.90000004, -0.1, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "1cc5f75e2ae7a85f": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.5, -0.90000004, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "1dbae8380c3a0028": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.90000004, 0.5, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "1fc7bcc2228450ae": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.7, 0.7, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "21a82354a814d7c5": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.1, 0.1, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "256209298c407d03": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.3, 0.5, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "308cec0eebc58b03": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.1, 0.3, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "3244ecffefa888f8": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.3, 0.1, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "3613735b66399464": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.3, -0.3, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "362b739c6323ec0f": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.3, 0.3, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "3c271e1002af1ad2": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.1, -0.3, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "3d439840b07e9480": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.5, 0.7, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "4149c768fefd0ddc": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.1, -0.5, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "45120c37fc1377a3": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.3, -0.1, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "483e29e5e6a87b81": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.1, -0.5, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "48facbeb1319160c": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.1, 0.5, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "4f5793bb1a2dd968": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.90000004, -0.5, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "5097422c38d996b7": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.1, -0.1, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "52d1446a5a8b0ae0": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.5, 0.90000004, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "56334870a7623c91": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.90000004, 0.90000004, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "56be57b366c5c837": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.7, -0.3, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "5974bcfeadf898eb": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.90000004, -0.7, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "5d8f6a9f30952e9b": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.3, 0.7, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "603f0b841b7dde09": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.7, 0.90000004, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "628b8dbd98d26ff1": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.7, -0.7, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "696f54a05552855c": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.7, 0.1, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "715182f738e4d235": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.90000004, 0.1, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "720068c84d70d8e2": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.3, 0.90000004, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "741ab7de40169650": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.90000004, 0.3, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "7825fb88191b40ba": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.3, -0.90000004, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "785ad73b1779db87": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.7, -0.90000004, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "787a0c02d11b72c9": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.90000004, 0.5, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "7e4dc0bf682933c2": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.3, 0.90000004, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "7e76d0471d959c77": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.1, 0.7, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "80e00628aa5f3849": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.1, -0.90000004, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "80e5f566b17b6e26": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.90000004, 0.7, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "822425f13f7cf433": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.5, -0.3, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "857e07de975040d0": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.7, -0.5, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "888aa29b7c2f44f6": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.5, -0.1, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "8dd2fe64decba54d": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.7, -0.7, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "8eebf32335a4d725": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.3, -0.7, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "9035d0807b13d547": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.5, 0.7, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "925babbf6f020843": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.1, -0.7, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "9320944128e0e2b3": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.5, -0.5, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "94828023527f0783": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.3, -0.3, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "98e15df070e957cb": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.7, 0.3, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "9abe856493b18679": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.7, 0.5, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "9b018aa0e367edfc": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.1, 0.90000004, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "9c183364e1314f72": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.5, 0.1, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "9e005bbc734bfa44": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.7, -0.90000004, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "9f5fd6a75abc4a84": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.3, -0.5, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "a447788f6b8482ab": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.3, 0.3, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "a560ceebbd1d69e3": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.5, -0.1, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "a6816bb978fbc609": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.90000004, -0.1, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "a930a1ef4a8b6a52": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.7, 0.3, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "aba6635c242c0e4d": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.1, -0.90000004, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "abb9ba5e253b4ff8": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.3, 0.5, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "b3cba30dbbc0fd48": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.1, 0.1, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "b60f16cc1439e2a5": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.7, 0.1, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "b9c02b8719c68afd": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.5, 0.5, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "ba661c04c757c164": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.3, 0.7, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "be8ee879a02726c4": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.5, -0.90000004, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "c52ac85ace3262f9": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.3, -0.1, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "c5d0412b786fc3be": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.3, -0.7, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "c62f1f16b69506e8": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.1, 0.7, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "c826ff6088afe879": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.90000004, -0.5, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "c87783fcf780db77": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.1, -0.3, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "c8e265ce85fd03d6": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.7, 0.7, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "cb64bbb4707f9b97": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.90000004, -0.90000004, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "cc09ade9ce7e6452": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.5, 0.90000004, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "cee0e7526f04b439": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.90000004, 0.7, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "d41dc3519bbc68d8": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.5, -0.7, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "d5bf39d610aa7912": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.90000004, -0.3, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "d5d3f959753e830c": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.90000004, 0.1, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "d746d7a5d096f086": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.7, -0.1, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "de8cbb48e743054e": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.7, -0.1, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "df24170dc79f16ba": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.1, 0.5, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "dff4b75aafb8addf": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.5, 0.5, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "e037e93340ec3e76": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.7, 0.5, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "e424a3c6a5ab6ea7": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.1, 0.90000004, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "e7ac386aeaef5941": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.5, 0.1, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "e9374ee37fd386d4": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.5, -0.7, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "eb2985d32402bcaf": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.1, -0.1, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "ed572e6437696c73": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.90000004, 0.90000004, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "f1afdad744bf9ef0": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.5, -0.5, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "f300569965963d8f": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.90000004, 0.3, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "f5819bdb8fc3ff9b": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.7, -0.5, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "f7a4d20eaae1e031": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.5, -0.3, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "f92295b95e3342fb": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.3, -0.90000004, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "fc340b52e04417fa": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.90000004, -0.90000004, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "ff01f2ae5499adee": (
+            GridCell: (
+                color: 1,
+            ),
+            Sprite: (
+                color: (0.8, 0.2, 0.3000005, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.1, -0.7, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+        "ff63ee743ba9feb5": (
+            GridCell: (
+                color: 0,
+            ),
+            Sprite: (
+                color: (0.2, 0.3000002, 0.8, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.90000004, -0.7, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.18, 0.18, 0.18),
+            ),
+        ),
+    },
+)

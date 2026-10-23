@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use gg_core::{Error, Result};
 
 use super::{Component, Entity};
-use crate::reflect::{Name, Reflect, Type, TypeIndex, Types};
+use crate::reflect::{Name, Reflect, Type, TypeIndex, Types, Value};
 
 /// A component type's index among those a world has seen, in the order it first saw them: the
 /// world's own, which never leaves it.
@@ -110,6 +110,11 @@ impl Components {
         self.infos.iter().map(|info| &*info.name)
     }
 
+    /// An empty column of its type.
+    pub fn new_column(&self, id: ComponentId) -> Box<dyn AnyColumn> {
+        (self.infos[id.0 as usize].new_column)()
+    }
+
     /// Its type, as reflection describes it.
     pub fn ty(&self, id: ComponentId) -> Type {
         Type::Named(self.infos[id.0 as usize].index)
@@ -193,6 +198,12 @@ pub trait AnyColumn: Any + Send + Sync {
     fn row(&self, row: usize) -> &dyn Reflect;
 
     fn row_mut(&mut self, row: usize) -> &mut dyn Reflect;
+
+    /// Pushes the component `value` makes, as a scene's is made: on its type's
+    /// [`base`](Component::base), if it has one.
+    ///
+    /// Fails as [`Reflect::with_value`] and [`Reflect::from_value`] do.
+    fn push_value(&mut self, value: &Value) -> Result<()>;
 }
 
 impl<T: Component> AnyColumn for Vec<T> {
@@ -211,6 +222,15 @@ impl<T: Component> AnyColumn for Vec<T> {
 
     fn row_mut(&mut self, row: usize) -> &mut dyn Reflect {
         &mut self[row]
+    }
+
+    fn push_value(&mut self, value: &Value) -> Result<()> {
+        let made = match T::base() {
+            Some(base) => base.with_value(value)?,
+            None => T::from_value(value)?,
+        };
+        self.push(made);
+        Ok(())
     }
 }
 

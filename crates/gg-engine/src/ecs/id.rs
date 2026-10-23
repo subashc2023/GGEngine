@@ -4,13 +4,18 @@
 
 use std::fmt;
 use std::num::NonZeroU64;
+use std::str::FromStr;
+
+use gg_core::{Error, Result};
 
 use super::{Entity, World};
 
 /// An entity's persistent ID: what files, operations, diagnostics and the tool API name it by,
-/// where its [`Entity`] handle is the world's own. A world draws one at random for each entity it
-/// spawns, and never draws the same one twice. It's written as 16 lowercase hex digits, such as
-/// `5f3a9c0e12b47d68`, so that IDs sort as their text does and never read as a handle.
+/// where its [`Entity`] handle is the world's own. A world draws one at random for each entity
+/// code spawns, a loaded scene's entities keep theirs, and a placed prefab's are mixed from
+/// theirs; no two living entities have the same one. It's written as 16 lowercase hex digits,
+/// such as `5f3a9c0e12b47d68`, so that IDs sort as their text does and never read as a handle,
+/// and parsed from them alone.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EntityId(NonZeroU64);
 
@@ -26,6 +31,31 @@ impl fmt::Debug for EntityId {
     }
 }
 
+/// Exactly as `Display` writes one, so that each ID has one text: 16 lowercase hex digits, not all
+/// zero.
+///
+/// Fails with `ecs.bad_id` for any other text.
+impl FromStr for EntityId {
+    type Err = Error;
+
+    fn from_str(text: &str) -> Result<Self> {
+        let hex = |b: u8| matches!(b, b'0'..=b'9' | b'a'..=b'f');
+        let n = (text.len() == 16 && text.bytes().all(hex))
+            .then(|| u64::from_str_radix(text, 16).ok())
+            .flatten()
+            .and_then(NonZeroU64::new);
+        n.map(Self).ok_or_else(|| {
+            Error::new(
+                "ecs.bad_id",
+                format!(
+                    "`{text}` isn't an entity's ID: an ID is 16 lowercase hex digits, not all \
+                     zero, such as `5f3a9c0e12b47d68`"
+                ),
+            )
+        })
+    }
+}
+
 /// What SplitMix64's state steps by.
 const GAMMA: u64 = 0x9e37_79b9_7f4a_7c15;
 
@@ -37,15 +67,37 @@ const GAMMA: u64 = 0x9e37_79b9_7f4a_7c15;
 /// its stream: they're not secrets.
 pub(super) fn splitmix64(state: &mut u64) -> u64 {
     *state = state.wrapping_add(GAMMA);
-    let mut z = *state;
+    mix64(*state)
+}
+
+/// SplitMix64's mix, of xorshifts and multiplications by odd constants: a bijection of the 64-bit
+/// numbers, which spreads each bit of `z` over all of them.
+fn mix64(mut z: u64) -> u64 {
     z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
     z ^ (z >> 31)
 }
 
+/// What a reseed mixes into the stream's state, and what a placement mixes into its instance: each
+/// 64 bits of pi's fraction, as constants that hide nothing. Both are fixed, since seeded worlds
+/// reseed the same way every run, and linked prefab instances will mix their IDs again.
+const RESEED: u64 = 0x243f_6a88_85a3_08d3;
+const PLACE: u64 = 0x1319_8a2e_0370_7344;
+
+/// The ID of a prefab's entity `local` in the copy of it placed as `instance`: a permutation of
+/// the local IDs for each instance, so that a copy's IDs are as distinct as its prefab's, and a
+/// mix that spreads each instance's over the 64-bit numbers, so that copies' IDs meet only by
+/// chance. `None` for the one local ID it mixes to zero.
+pub(super) fn placed(instance: EntityId, local: EntityId) -> Option<EntityId> {
+    let key = mix64(instance.0.get() ^ PLACE);
+    NonZeroU64::new(mix64(local.0.get() ^ key)).map(EntityId)
+}
+
 /// The stream a world draws its entities' IDs from: SplitMix64, from a seed. A stream never gives
-/// an ID twice. Two worlds' streams, seeded apart, are windows on the one cycle of 2^64 states,
-/// which give the same IDs only where they overlap: for n and m IDs, about (n + m) / 2^64.
+/// an ID twice until it's reseeded, which moves it to another window on its cycle. Two worlds'
+/// streams, seeded apart, are windows on the one cycle of 2^64 states, which give the same IDs
+/// only where they overlap, as a stream's before and after a reseed do: for n and m IDs, about
+/// (n + m) / 2^64.
 pub(super) struct IdStream(u64);
 
 impl IdStream {
@@ -60,6 +112,13 @@ impl IdStream {
                 return EntityId(id);
             }
         }
+    }
+
+    /// Moves the stream to another place in its cycle, as one that has walked into another
+    /// session's run, drawing IDs that a loaded scene's entities have, does: the same place for
+    /// the same state, so that a seeded world stays the same every run.
+    pub(super) fn reseed(&mut self) {
+        self.0 = mix64(self.0.rotate_left(32) ^ RESEED);
     }
 }
 
@@ -118,6 +177,8 @@ impl fmt::Display for Named {
 
 #[cfg(test)]
 pub(super) mod tests {
+    use std::collections::HashSet;
+
     use super::*;
 
     /// Panics unless the world's IDs agree with its slots: each slot has an ID exactly while its
@@ -176,6 +237,62 @@ pub(super) mod tests {
         by_text.sort();
         let sorted: Vec<String> = by_value.iter().map(ToString::to_string).collect();
         assert_eq!(sorted, by_text);
+    }
+
+    #[test]
+    fn an_id_is_parsed_from_its_text_alone() {
+        let mut stream = IdStream::new(3);
+        for _ in 0..100 {
+            let id = stream.draw();
+            assert_eq!(id.to_string().parse::<EntityId>().ok(), Some(id));
+        }
+        let parsed: EntityId = "00000000000000ff".parse().expect("an ID");
+        assert_eq!(parsed.0.get(), 0xff);
+        for text in [
+            "",
+            "5f3a9c0e12b47d6",
+            "5f3a9c0e12b47d680",
+            "5F3A9C0E12B47D68",
+            "0000000000000000",
+            " 5f3a9c0e12b47d6",
+            "5f3a9c0e12b47d6g",
+            "+f3a9c0e12b47d68",
+            "0x3a9c0e12b47d68",
+            "5f3a9c0e12b47d6é",
+            "\"5f3a9c0e12b47d68\"",
+        ] {
+            let error = text.parse::<EntityId>().expect_err(text);
+            assert_eq!(error.code(), "ecs.bad_id", "{text}");
+            let says = format!("`{text}` isn't an entity's ID: an ID is 16 lowercase hex digits");
+            assert!(error.to_string().starts_with(&says), "{error}");
+        }
+    }
+
+    /// Pinned, since seeded worlds reseed the same way every run, and linked prefab instances
+    /// will mix their IDs again.
+    #[test]
+    fn reseeding_and_placing_mix_as_they_always_have() {
+        let mut stream = IdStream::new(0);
+        stream.reseed();
+        let drawn = [0; 2].map(|_| stream.draw().to_string());
+        assert_eq!(drawn, ["74d28e025ceaac29", "890710ced7fbc4af"]);
+        let id = |n| EntityId(NonZeroU64::new(n).expect("not zero"));
+        let mixed = [(1, 1), (1, 2), (2, 1), (u64::MAX, 0x5f3a_9c0e_12b4_7d68)];
+        let mixed = mixed.map(|(instance, local)| {
+            let placed = placed(id(instance), id(local)).expect("not zero");
+            placed.to_string()
+        });
+        let pinned = [
+            "7ef7947dab2f6a6f",
+            "c0f6b07d9e7819fb",
+            "37275696e7b56e52",
+            "776f67f8ae5c03a9",
+        ];
+        assert_eq!(mixed, pinned);
+        // A permutation of the local IDs for each instance.
+        let locals: Vec<EntityId> = (1..=1000).map(id).collect();
+        let copies: HashSet<EntityId> = locals.iter().filter_map(|&l| placed(id(9), l)).collect();
+        assert_eq!(copies.len(), 1000);
     }
 
     #[test]

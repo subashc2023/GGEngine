@@ -114,15 +114,26 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   panels show IDs; unit tests check IDs through table moves, subtree despawns, and slots taken
   again and retired, and that drawing kept from frame to frame draws as drawing afresh does, and
   the model test checks every ID after every step.
+- **Scenes and prefabs in canonical text** (2026-10-23): the world saves entities and their
+  descendants as RON in the canonical form, which the engine writes itself and `ron` reads
+  through seeds that reflection's descriptions drive, and loads a scene all or nothing, a refusal
+  saying the line and column and, but for a syntax error, the entity, the component and the field;
+  a prefab is placed as a copy under a parent, its IDs mixed from its own and one drawn for the
+  copy; a drawn ID that a loaded entity has reseeds the stream; and the Entities panel finds an
+  entity by an ID pasted in. The sandbox loads its grid from a scene and places its moons from a
+  prefab, and its File menu saves and reloads the grid; unit tests check the text byte for byte,
+  every kind of value coming back bit for bit, a field set changing only its lines, refusals at
+  their lines and columns changing nothing, and placements' IDs, and the model test saves and
+  loads its world every 100 steps.
 
-## Now: scenes and prefabs in canonical text
+## Now: operations with inverses and their log
 
-Phase 3's fifth milestone: scenes and prefabs saved and loaded as RON in the canonical form
-[ARCHITECTURE.md](../ARCHITECTURE.md#project-state) describes, entities ordered by their IDs and
-a child's `Parent` saved as its parent's ID.
+Phase 3's sixth milestone: operations with inverses and their log. Creating and deleting an
+entity, adding and removing a component by name, setting a field and reparenting, each returning
+its inverse, applied in order and logged.
 
-*Done when* a scene saved, loaded and saved again is byte-identical. Its plan is made when it
-starts.
+*Done when* undoing a log of random operations gives back the world's scene byte for byte, which
+stands in for the world's hash until the deterministic mode. Its plan is made when it starts.
 
 ## Next
 
@@ -215,13 +226,13 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Sprite sheets with space between or around their cells, as some tile sets come; `SpriteSheet` takes cells packed edge to edge from the top left | A game's art comes that way |
 | Tiling one cell of a sheet: a repeating sampler repeats the whole texture | A game tiles part of an atlas, such as a background |
 | A sprite that samples past its rectangle, so that a seamless texture tiled across sprites side by side blends across their edges under a linear sampler | A game tiles one texture across sprites |
-| A tile map in the engine, which scenes save; the sandbox's map is code of its own | Phase 3, with scenes |
+| A tile map in the engine, which scenes save; the sandbox's map is code of its own | Phase 4, which names assets |
 | Images other than PNG, such as the JPEGs glTF allows; and PNGs' own color profiles and gamma, which are ignored, every PNG taken as sRGB | Phase 4, with glTF; Phase 7 cooks KTX2 |
 | Decoding images off the main thread; `Context::add_texture` decodes before it returns | Phase 7, with the streaming loader |
 | Layers making textures from their own pixels; `Textures::add` takes pixels, but `Context` adds only PNGs | A game makes its own textures |
 | Pixels, vertices and instances' transforms and parameters reach the GPU through the frame's arena, which merges the buffers it grew into, holding two to three times the largest frame for each frame in flight: by its growth rule, about 20 MB each for 100,000 sprites, which use 10.4 MB a frame; and a frame that adds many textures leaves that much host memory held | Phase 4, with uploads through the transfer queue |
 | More than one camera or view, such as split screen or the editor's scene view | A game or the editor draws several |
-| The camera as a component of an entity, which a scene saves and a parent carries along; layers set the camera through `Context` | Phase 3, with scenes |
+| The camera as a component of an entity, which a scene saves and a parent carries along; layers set the camera through `Context` | Phase 4, with perspective cameras |
 | The game's view in a panel that docks and tabs, and keys reaching the layers only while it has focus, as editors' views do; the view is the central area, and keys reach the layers wherever the pointer is unless one of egui's widgets has focus | A tool in the game's process shows the view among its panels |
 | Converting between the view's pixels and the world, to pick what's under the cursor or zoom toward it; the camera controller zooms about the view's center | Something picks with the mouse, or a tool zooms toward the cursor |
 | The camera controller's keys, W, A, S, D, Q and E, and the mouse wheel, are fixed, and it takes no gamepad | Phase 3, with input actions |
@@ -252,12 +263,12 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Queries that keep the tables they match, and tables that keep where adding or removing each component leads; a query looks over every table, and a change of components finds its table by its types | Tables number in the hundreds, or changes of components show in a profile |
 | Sparse storage for components added and removed often, which move their entity's row between tables | A profile shows those moves |
 | A layer reading the world and drawing in one loop: `Context` lends one at a time | A layer draws from the world itself, such as debug shapes |
-| Spawning many entities at once, faster than one by one: 100,000 sprites take about 16 ms in release, 5.5 ms of it their IDs, and the swarm spawns its 100,000 in one frame | A spawn hitch matters |
+| Spawning many entities at once, faster than one by one: 100,000 sprites take about 16 ms in release, 5.5 ms of it their IDs, and the swarm spawns its 100,000 in one frame. A load spawns its entities one by one too, building each component from a value into a column of its own: 100,000 sprites, 45 MB of text, load in about 650 ms in release, and save in about 170 ms | A spawn hitch matters, or a scene's load time |
 | `MeshDraw` parameters of more than 64 bytes, which draw through `Context::draw` | Phase 6, with materials |
 | Micro-benchmarks, with criterion | A CPU hot path gets a target of its own; batching's is a frame time, which `engine.perf` measures |
 | Gates on time in CI: hosted runners' times vary too much to gate on | A self-hosted runner, as for the GPU tests |
 | Adding and removing components by name, each returning its inverse, and each type's default as a value | Phase 3, with operations |
-| Moving values to a type that changed: matching fields by name and by alias, defaults for fields added, and fields dropped | Phase 3's scenes, or Phase 5's hot reload |
+| Moving values to a type that changed: matching fields by name and by alias, defaults for fields added, and fields dropped; a scene with a field its type hasn't, or without one it has, is refused | Phase 4, when `Sprite` gains its texture's name, or Phase 5's hot reload |
 | Undo, and an Inspector drag merged into one edit; edits apply at once | Phase 3, with operations |
 | In the Inspector, turning an option on or off, switching to a variant with fields, and adding or removing a list's elements; by path, a value sets them whole | A component needs one edited |
 | `Sprite.texture` and `MeshDraw` are opaque: shown, but not set, saved or carried across a rebuild | Phase 4, which names assets |
@@ -265,19 +276,25 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Generic types deriving `Reflect` or `Component` | A game needs one |
 | Drag speeds as hints; the Inspector picks them from a field's bounds and kind | A field drags too coarsely or too finely |
 | Paths resolved once and kept, for sets made again and again | Operation logs, or a profile |
-| Picking an entity for a field, a parent or a child picked by clicking it, the Entities panel as a tree, names in the Inspector, and picking in the view; entities are shown by their IDs | Picking in the view, prefabs, or Phase 9's scene tree |
+| Picking an entity for a field, a parent or a child picked by clicking it, the Entities panel as a tree, names in the Inspector, and picking in the view; entities are shown by their IDs, and found by an ID pasted in | Picking in the view, or Phase 9's scene tree |
 | World transforms stored and propagated after the updates, with change detection; drawing computes each child's from its ancestors, every frame | Physics, or a profile showing the walks up the hierarchy |
 | A world matrix for game code; the engine's drawing computes its own | The camera as a component, or a system that needs a child's place in the world, once the deterministic mode settles its math |
 | Reparenting that keeps where a child is in the world, by decomposing its matrix, which loses any shear; `set_parent` keeps its own transform | The editor's scene tree, or an agent attaching something where it stands |
-| Spawning a child into its table at once: `spawn`, then `set_parent`, moves it to another table | Prefabs, or a profile |
+| Spawning a child into its table at once from code: `spawn`, then `set_parent`, moves it to another table; a load spawns one there | A profile |
 | Children in an order that means something: reordering them, and saving their order | The editor's scene tree, or UI laid out by the hierarchy |
-| Spawning with a given ID, refused with `ecs.id_taken` if an entity has it; then a drawn ID that's taken reseeds the stream rather than drawing again, since it has walked into another session's run. The two land together, since IDs from files or a restored snapshot can meet ones the world draws | Scenes load IDs, or an operation undoes a delete |
-| Parsing an ID from its text (`ecs.bad_id`), and finding an entity in the Entities panel by an ID pasted in | Scenes write IDs as text, or the tool API |
+| Spawning with a given ID from code; loads and placements spawn with theirs, and a drawn ID that's taken reseeds | An operation undoes a delete |
 | Seeding a world's IDs, and the stream's state in snapshots and the world hash; a seed for authoring is never fixed, or every session would draw the same IDs | The deterministic mode, or snapshots |
-| Each session's seed and count saved with the world and merged with it, so that an ID maps back to its session and when it was drawn, and a load refuses IDs no session drew | Scenes, or the tool API refusing an ID an agent made up |
+| Each session's seed and count saved with the world and merged with it, so that an ID maps back to its session and when it was drawn, and a load refuses IDs no session drew | The tool API refusing an ID an agent made up |
 | An `EntityId` query term | The first system that reads IDs as it iterates, such as the world hash or replication |
-| Errors carrying their entity as a field, not only in their message | The tool API returns errors as data |
+| Errors carrying their entity, and a scene's line and column, as fields, not only in their message | The tool API returns errors as data |
 | Drawing rows at one z in ID order for less. Every frame reads them in that order rather than their tables', about 0.9 ms of the swarm's 4.3 ms frame in release; a frame that changes rows or z's sorts them by ID again, about 2.5 ms more for 100,000; and 100,000 sprites each at a z of their own, as sorting by y gives them, take about 2 ms more than before, for a group and an item each. Tables kept in ID order would make the reads a sweep, and a radix sort the sort quicker | A game's frames need the time |
+| Linked prefab instances, with overrides, nesting, apply and revert; a placement is a flattened copy, each ID mixed from its instance's and its own, which links will keep | The editor, or a game editing a prefab its scenes hold many copies of |
+| A derive hint for `Component::base`, and opaque values in lists and options, which saving refuses; a type with opaque fields implements `Component` by hand to load, as `Sprite` does | A game's component holds something opaque |
+| Names in scenes beyond ASCII identifiers, which saving refuses (`scene.bad_name`) | A game names a type or a field so |
+| Loading a scene in place of the entities it replaces, in one step; a load refuses IDs the world has | The editor, or Phase 5's scene files applied as operations |
+| A version in scene files, a file without one reading as the first | The first change to the format that old files can't be read by |
+| Comments in scene files, which a save drops | People annotate scenes |
+| Reading and writing scene files in the engine, atomically; the engine takes and gives text, and the sandbox writes its own | Phase 4, with assets |
 
 ## Open questions
 

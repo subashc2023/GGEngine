@@ -10,7 +10,14 @@ use gg_renderer::{Draws, MeshDraw, Sampler, Sprite};
 use crate::reflect::{self, Field, Meta, Reflect, Result, Shape, Show, Type, Types, Value};
 use crate::{Component, EntityId, Parent, Transform, World, Writable};
 
-impl Component for Sprite {}
+/// Built on the default sprite, so that a scene's sprite, which leaves its texture out, shows the
+/// white texture until code sets another.
+impl Component for Sprite {
+    fn base() -> Option<Self> {
+        Some(Self::default())
+    }
+}
+
 impl Writable for Sprite {}
 
 /// Taken apart whole, so that a field `gg-renderer` adds fails to compile here until it's

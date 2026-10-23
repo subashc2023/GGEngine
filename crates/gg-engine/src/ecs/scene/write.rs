@@ -1,0 +1,398 @@
+//! The canonical writer: a scene's text as the engine writes it, so that its bytes depend on the
+//! entities alone, never on a library's formatting, the platform's line endings or the escapes of
+//! a Rust release.
+
+use std::collections::{HashMap, HashSet};
+use std::fmt::{self, Write as _};
+
+use gg_core::{Error, Result};
+
+use super::{MAX_DEPTH, NO_HINTS};
+use crate::ecs::by_name::about;
+use crate::ecs::id::Named;
+use crate::ecs::table::{AnyColumn, ComponentId};
+use crate::ecs::{Entity, EntityId, Parent, World};
+use crate::reflect::{self, Field, Shape, Type, Types, Value};
+
+/// RON's words, which no name a scene writes is, so that a name never reads as a value.
+const WORDS: [&str; 10] = [
+    "true", "false", "Some", "None", "inf", "inff32", "inff64", "NaN", "NaNf32", "NaNf64",
+];
+
+/// `roots` and their descendants as a scene's text, as [`World::save_scene`] says.
+pub(super) fn save(world: &World, roots: &[Entity]) -> Result<String> {
+    for &root in roots {
+        world.locate(root)?;
+    }
+    // Each once, in the order of their IDs.
+    let mut saved = Vec::new();
+    let mut seen = HashSet::new();
+    let mut next = roots.to_vec();
+    while let Some(entity) = next.pop() {
+        if seen.insert(entity) {
+            saved.push((world.id(entity).expect("a saved entity is alive"), entity));
+            next.extend(world.children(entity).expect("a saved entity is alive"));
+        }
+    }
+    saved.sort_unstable_by_key(|&(id, _)| id);
+    let mut writer = Writer {
+        world,
+        types: world.types(),
+        saved: &saved,
+        out: String::new(),
+        built: HashMap::new(),
+    };
+    writer.scene()?;
+    Ok(writer.out)
+}
+
+struct Writer<'w> {
+    world: &'w World,
+    types: &'w Types,
+    /// The entities saved, by ID.
+    saved: &'w [(EntityId, Entity)],
+    out: String,
+    /// A column of each component type saved, in which each component is made again, as a load
+    /// makes it, and taken out of again.
+    built: HashMap<ComponentId, Box<dyn AnyColumn>>,
+}
+
+impl Writer<'_> {
+    fn scene(&mut self) -> Result<()> {
+        if self.saved.is_empty() {
+            self.out.push_str("(\n    entities: {},\n)\n");
+            return Ok(());
+        }
+        self.out.push_str("(\n    entities: {\n");
+        for &(id, entity) in self.saved {
+            self.entity(id, entity)?;
+        }
+        self.out.push_str("    },\n)\n");
+        Ok(())
+    }
+
+    /// Writes entity `id` and its components, in the order of their names.
+    fn entity(&mut self, id: EntityId, entity: Entity) -> Result<()> {
+        let world = self.world;
+        let at = world.location(entity).expect("a saved entity is alive");
+        let table = &world.tables[at.table as usize];
+        let parent = world.component::<Parent>();
+        let mut components = Vec::new();
+        for (column, &component) in table.components.iter().enumerate() {
+            if world.components.ty(component).is_opaque(self.types) {
+                continue;
+            }
+            if Some(component) == parent {
+                let up = world
+                    .get::<Parent>(entity)
+                    .expect("the entity has a parent")
+                    .0;
+                if !self.is_saved(up) {
+                    continue;
+                }
+            }
+            components.push((world.components.name(component), column));
+        }
+        components.sort_unstable_by_key(|&(name, _)| name);
+        write!(self.out, "        \"{id}\": ").expect("a string takes any text");
+        if components.is_empty() {
+            self.out.push_str("(),\n");
+            return Ok(());
+        }
+        self.out.push_str("(\n");
+        for (name, column) in components {
+            let about = |error: Error| about(error, "save", Named::Id(id), name, "");
+            let component = table.components[column];
+            let ty = world.components.ty(component);
+            let value = table.columns[column].row(at.row as usize).to_value();
+            reflect::check(self.types, &ty, &NO_HINTS, &value).map_err(about)?;
+            let built = self
+                .built
+                .entry(component)
+                .or_insert_with(|| world.components.new_column(component));
+            built.push_value(&value).map_err(about)?;
+            built.swap_remove(0);
+            writable(name).map_err(about)?;
+            pad(&mut self.out, 3);
+            self.out.push_str(name);
+            self.out.push_str(": ");
+            self.value(&ty, &value, 3, 1).map_err(about)?;
+            self.out.push_str(",\n");
+        }
+        self.out.push_str("        ),\n");
+        Ok(())
+    }
+
+    /// Whether `entity` is alive and saved.
+    fn is_saved(&self, entity: Entity) -> bool {
+        let id = self.world.id(entity);
+        id.is_some_and(|id| self.saved.binary_search_by_key(&id, |&(id, _)| id).is_ok())
+    }
+
+    /// Writes `value`, of type `ty`, which is `depth` levels deep, from a line indented `indent`
+    /// levels: a block, which a struct or a variant with saved fields and a list with elements
+    /// are, opens at the line's end, its parts on their own lines a level deeper, and closes on a
+    /// line of its own, so that each part has lines of its own.
+    fn value(&mut self, ty: &Type, value: &Value, indent: usize, depth: u32) -> Result<()> {
+        if depth > MAX_DEPTH {
+            return Err(Error::new(
+                "scene.too_deep",
+                format!("it's more than {MAX_DEPTH} levels deep, the most a scene nests"),
+            ));
+        }
+        let types = self.types;
+        let out = &mut self.out;
+        let text = "a string takes any text";
+        match (ty, value) {
+            (_, Value::Bool(b)) => write!(out, "{b}").expect(text),
+            (_, Value::Int(n)) => write!(out, "{n}").expect(text),
+            (_, Value::UInt(n)) => write!(out, "{n}").expect(text),
+            (_, &Value::F32(x)) => float(out, x, x.is_nan(), x.is_sign_negative(), x.is_finite()),
+            (_, &Value::F64(x)) => float(out, x, x.is_nan(), x.is_sign_negative(), x.is_finite()),
+            (_, Value::String(string)) => quote(out, string),
+            (_, Value::Vec2(v)) => floats(out, v.as_ref()),
+            (_, Value::Vec3(v)) => floats(out, v.as_ref()),
+            (_, Value::Vec4(v)) => floats(out, v.as_ref()),
+            (_, Value::Quat(q)) => floats(out, &q.to_array()),
+            (_, &Value::Entity(entity)) => self.reference(entity)?,
+            (Type::Option(_), Value::Option(None)) => out.push_str("None"),
+            (Type::Option(inner), Value::Option(Some(value))) => {
+                if **value == Value::Opaque {
+                    return Err(opaque_part());
+                }
+                out.push_str("Some(");
+                self.value(inner, value, indent, depth + 1)?;
+                self.out.push(')');
+            }
+            (Type::List(_) | Type::Array(..), Value::List(items)) if items.is_empty() => {
+                out.push_str("[]");
+            }
+            (Type::List(inner) | Type::Array(inner, _), Value::List(items)) => {
+                out.push_str("[\n");
+                for (i, item) in items.iter().enumerate() {
+                    let at = |error| reflect::within(error, &format!("[{i}]"));
+                    if *item == Value::Opaque {
+                        return Err(at(opaque_part()));
+                    }
+                    pad(&mut self.out, indent + 1);
+                    self.value(inner, item, indent + 1, depth + 1).map_err(at)?;
+                    self.out.push_str(",\n");
+                }
+                pad(&mut self.out, indent);
+                self.out.push(']');
+            }
+            (&Type::Named(index), Value::Struct(given)) => {
+                let Shape::Struct { fields, tuple } = &types.info(index).shape else {
+                    return Err(mismatch(value));
+                };
+                let parts = self.saved_parts(fields, given)?;
+                if parts.is_empty() {
+                    self.out.push_str("()");
+                } else {
+                    self.block(&parts, *tuple, indent, depth)?;
+                }
+            }
+            (&Type::Named(index), Value::Variant(name, given)) => {
+                let Shape::Enum(variants) = &types.info(index).shape else {
+                    return Err(mismatch(value));
+                };
+                let Some(variant) = variants.iter().find(|variant| variant.name == *name) else {
+                    let names: Vec<&str> = variants.iter().map(|variant| &*variant.name).collect();
+                    return Err(reflect::no_variant(name, &names));
+                };
+                writable(name)?;
+                let parts = self.saved_parts(&variant.fields, given)?;
+                self.out.push_str(name);
+                if !parts.is_empty() {
+                    self.block(&parts, variant.tuple, indent, depth)?;
+                }
+            }
+            _ => return Err(mismatch(value)),
+        }
+        Ok(())
+    }
+
+    /// The fields of `given` that a scene saves, those of `fields` that aren't opaque, in their
+    /// order.
+    fn saved_parts<'v>(
+        &self,
+        fields: &'v [Field],
+        given: &'v [(reflect::Name, Value)],
+    ) -> Result<Vec<(&'v Field, &'v Value)>> {
+        let saved = fields
+            .iter()
+            .filter(|field| !field.ty.is_opaque(self.types));
+        let parts = saved.map(|field| {
+            let found = given.iter().find(|(name, _)| *name == field.name);
+            let missing = || {
+                Error::new(
+                    "reflect.missing_field",
+                    format!("field `{}` isn't given, but each field is", field.name),
+                )
+            };
+            found.map(|(_, value)| (field, value)).ok_or_else(missing)
+        });
+        parts.collect()
+    }
+
+    /// Writes `parts`, at least one, of a struct or a variant, a tuple's by position: one part of a
+    /// tuple around it, keeping its own form, as `(v)`; more as a block.
+    fn block(
+        &mut self,
+        parts: &[(&Field, &Value)],
+        tuple: bool,
+        indent: usize,
+        depth: u32,
+    ) -> Result<()> {
+        if let [(field, value)] = parts
+            && tuple
+        {
+            self.out.push('(');
+            self.value(&field.ty, value, indent, depth + 1)
+                .map_err(|error| reflect::within(error, &field.name))?;
+            self.out.push(')');
+            return Ok(());
+        }
+        self.out.push_str("(\n");
+        for (field, value) in parts {
+            let at = |error| reflect::within(error, &field.name);
+            pad(&mut self.out, indent + 1);
+            if !tuple {
+                writable(&field.name).map_err(at)?;
+                self.out.push_str(&field.name);
+                self.out.push_str(": ");
+            }
+            self.value(&field.ty, value, indent + 1, depth + 1)
+                .map_err(at)?;
+            self.out.push_str(",\n");
+        }
+        pad(&mut self.out, indent);
+        self.out.push(')');
+        Ok(())
+    }
+
+    /// Writes a reference to `entity` as its ID, which it must be saved for.
+    fn reference(&mut self, entity: Entity) -> Result<()> {
+        let Some(id) = self.world.id(entity) else {
+            return Err(Error::new(
+                "ecs.no_entity",
+                format!(
+                    "it refers to entity {entity}, which isn't in the world: it was despawned, or \
+                     is another world's"
+                ),
+            ));
+        };
+        if !self.is_saved(entity) {
+            return Err(Error::new(
+                "scene.outside",
+                format!(
+                    "it refers to entity {id}, which isn't saved with it: a scene's entities refer \
+                     only to each other"
+                ),
+            ));
+        }
+        write!(self.out, "\"{id}\"").expect("a string takes any text");
+        Ok(())
+    }
+}
+
+/// Indents a line `indent` levels, of 4 spaces each.
+fn pad(out: &mut String, indent: usize) {
+    for _ in 0..indent {
+        out.push_str("    ");
+    }
+}
+
+/// Writes a float as Rust's `Display` does, the shortest text that reads back to the same bits and
+/// never an exponent, with `.0` if it has no point; `inf` and `-inf`; and `NaN` and `-NaN`, which
+/// keep a NaN's sign but not its payload.
+fn float(out: &mut String, x: impl fmt::Display, nan: bool, negative: bool, finite: bool) {
+    if nan {
+        out.push_str(if negative { "-NaN" } else { "NaN" });
+        return;
+    }
+    let start = out.len();
+    write!(out, "{x}").expect("a string takes any text");
+    if finite && !out[start..].contains('.') {
+        out.push_str(".0");
+    }
+}
+
+/// Writes a vector's or a quaternion's components, as `(x, y, z)`.
+fn floats(out: &mut String, xs: &[f32]) {
+    out.push('(');
+    for (i, &x) in xs.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        float(out, x, x.is_nan(), x.is_sign_negative(), x.is_finite());
+    }
+    out.push(')');
+}
+
+/// Writes `text` quoted, by the scene's own escapes, which depend on no Unicode tables: `\\`, `\"`,
+/// `\n`, `\r` and `\t`; `\u{..}` for the other control characters, and for those that would
+/// reorder or hide text, bidirectional controls and invisible separators; and everything else as
+/// it is.
+fn quote(out: &mut String, text: &str) {
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\0'..='\u{1f}'
+            | '\u{7f}'..='\u{9f}'
+            | '\u{61c}'
+            | '\u{200e}'
+            | '\u{200f}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{feff}' => {
+                write!(out, "\\u{{{:x}}}", u32::from(c)).expect("a string takes any text")
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
+/// Refuses a name that a scene can't write: one that isn't an ASCII identifier, or is one of RON's
+/// words.
+fn writable(name: &str) -> Result<()> {
+    let mut bytes = name.bytes();
+    let identifier = bytes
+        .next()
+        .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    if identifier && !WORDS.contains(&name) {
+        return Ok(());
+    }
+    Err(Error::new(
+        "scene.bad_name",
+        format!(
+            "`{name}` isn't a name a scene writes: those are ASCII identifiers, and none of RON's \
+             words, `true`, `false`, `Some`, `None`, `inf` and `NaN`"
+        ),
+    ))
+}
+
+/// The error that something opaque is where a scene can't leave it out.
+fn opaque_part() -> Error {
+    Error::new(
+        "reflect.opaque",
+        "it's opaque, which a scene leaves out, but can't in a list or an option",
+    )
+}
+
+/// The error that `value` isn't of its type, as a hand-written description's might not be.
+fn mismatch(value: &Value) -> Error {
+    Error::new(
+        "reflect.wrong_kind",
+        format!("it's {}, which isn't of its type", reflect::kind(value)),
+    )
+}

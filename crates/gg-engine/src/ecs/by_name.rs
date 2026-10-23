@@ -142,7 +142,7 @@ impl World {
     /// The id of component type `name`.
     ///
     /// Fails with `reflect.unknown_type` if there's none.
-    fn named(&self, name: &str) -> Result<ComponentId> {
+    pub(super) fn named(&self, name: &str) -> Result<ComponentId> {
         self.components.named(name).ok_or_else(|| {
             let names = reflect::list(self.component_types());
             let what = match self.types().find(name) {
@@ -184,9 +184,15 @@ impl World {
     }
 }
 
-/// `error`, from getting or setting the field at `path` of `entity`'s `component`, naming them and
-/// the whole path, down to the part where it happened.
-fn about(error: Error, doing: &str, entity: Named, component: &str, path: &str) -> Error {
+/// `error`, from `doing`, such as getting or setting, the field at `path` of `entity`'s
+/// `component`, naming them and the whole path, down to the part where it happened.
+pub(super) fn about(
+    error: Error,
+    doing: &str,
+    entity: Named,
+    component: &str,
+    path: &str,
+) -> Error {
     let (inner, what) = reflect::located(&error);
     let at = reflect::join(&reflect::join(component, path), &inner);
     let message = format!("can't {doing} `{at}` of entity {entity}: {what}");

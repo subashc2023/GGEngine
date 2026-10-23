@@ -15,7 +15,8 @@ use crate::{Context, Entity, EntityId, Layer, Ui, World};
 
 /// The Entities and Inspector panels, which an app adds as an overlay,
 /// `.overlay(gg_engine::Inspector::default())`. The Entities panel lists the world's entities, all
-/// of them or those with one component, to pick one from; the Inspector panel shows the picked
+/// of them or those with one component, to pick one from, and finds one by an ID pasted into its
+/// Find field, from a scene or a log; the Inspector panel shows the picked
 /// entity's components, each field with a widget for its type and hints, and sets a field as its
 /// widget changes it, through [`World::set_field`]. That checks the value: a value refused shows
 /// beside its field, and is logged. Edits apply at once, with no undo yet.
@@ -25,6 +26,10 @@ pub struct Inspector {
     picked: Option<EntityId>,
     /// The component type the Entities panel lists the entities of; all of them if `None`.
     with: Option<String>,
+    /// What's typed into the Find field.
+    find: String,
+    /// Why the last ID entered there found no entity.
+    not_found: Option<String>,
     /// The last value refused of each field of the picked entity.
     refusals: Vec<Refusal>,
 }
@@ -61,9 +66,21 @@ impl Layer for Inspector {
 }
 
 impl Inspector {
-    /// The Entities panel: which component the entities listed have, how many there are, and a
-    /// row for each that picks it, of which only those in view are drawn.
+    /// The Entities panel: a field that finds an entity by its ID, which component the entities
+    /// listed have, how many there are, and a row for each that picks it, of which only those in
+    /// view are drawn.
     fn entities(&mut self, world: &World, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Find");
+            let field = egui::TextEdit::singleline(&mut self.find).hint_text("an entity's ID");
+            let field = ui.add(field);
+            if field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+                self.not_found = self.find(world).err();
+            }
+        });
+        if let Some(not_found) = &self.not_found {
+            ui.label(not_found.as_str());
+        }
         egui::ComboBox::from_label("With")
             .selected_text(self.with.as_deref().unwrap_or("Any component"))
             .show_ui(ui, |ui| {
@@ -101,6 +118,20 @@ impl Inspector {
                 }
             }
         });
+    }
+
+    /// Picks the entity whose ID is in the Find field, which may be quoted, as a scene writes it;
+    /// or says why it finds none.
+    fn find(&mut self, world: &World) -> Result<(), String> {
+        let text = self.find.trim().trim_matches('"');
+        let id: EntityId = text
+            .parse()
+            .map_err(|error: reflect::Error| error.to_string())?;
+        if world.entity(id).is_none() {
+            return Err(format!("no entity has ID {id}"));
+        }
+        self.pick(id);
+        Ok(())
     }
 
     fn pick(&mut self, id: EntityId) {
@@ -888,6 +919,56 @@ mod tests {
         let right = right.filter(|rect| row(rect) && rect.min.x > label.max.x);
         let nearest = right.min_by(|a, b| a.min.x.total_cmp(&b.min.x));
         nearest.expect("a widget beside the label").center()
+    }
+
+    #[test]
+    fn the_find_field_picks_an_entity_by_a_pasted_id() {
+        let mut world = World::default();
+        let [first, second, gone] = [0, 1, 2].map(|_| world.spawn(Transform::IDENTITY));
+        let [first, second, gone] = [first, second, gone].map(|entity| id(&world, entity));
+        world
+            .despawn(world.entity(gone).expect("alive"))
+            .expect("alive");
+        let ctx = crate::egui_context();
+        let mut inspector = Inspector::default();
+        let mut time = 0.0;
+        let mut run = |inspector: &mut Inspector, world: &mut World, events| {
+            let mut texts = Vec::new();
+            for events in [events, Vec::new(), Vec::new()] {
+                time += 1.0;
+                texts = frame(inspector, world, &ctx, time, events).0;
+            }
+            texts
+        };
+        let texts = run(&mut inspector, &mut world, Vec::new());
+        let field = beside(&texts, find(&texts, "Find", "Find"));
+        let bad = "`5F3A9C0E12B47D68` isn't an entity's ID: an ID is 16 lowercase hex digits, not \
+                   all zero, such as `5f3a9c0e12b47d68`";
+        let missing = format!("no entity has ID {gone}");
+        // Quoted, as a scene writes it; refused, keeping the pick; and another.
+        for (typed, picked, says) in [
+            (format!(" \"{first}\" "), first, None),
+            ("5F3A9C0E12B47D68".to_owned(), first, Some(bad)),
+            (gone.to_string(), first, Some(missing.as_str())),
+            (second.to_string(), second, None),
+        ] {
+            inspector.find.clear();
+            run(&mut inspector, &mut world, click(field));
+            run(
+                &mut inspector,
+                &mut world,
+                vec![egui::Event::Text(typed.clone())],
+            );
+            let texts = run(&mut inspector, &mut world, enter());
+            assert_eq!(inspector.picked, Some(picked), "{typed}");
+            let header = format!("Entity {picked}");
+            assert!(texts.iter().any(|(text, _)| *text == header), "{texts:?}");
+            let shown = |says: &str| texts.iter().any(|(text, _)| text == says);
+            match says {
+                Some(says) => assert!(shown(says), "{says}: {texts:?}"),
+                None => assert!(!shown(bad) && !shown(&missing), "{texts:?}"),
+            }
+        }
     }
 
     #[test]

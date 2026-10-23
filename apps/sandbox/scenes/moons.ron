@@ -1,0 +1,68 @@
+(
+    entities: {
+        "0c9440a3b309785b": (
+            Parent: ("7dfd4b9f30e01e40"),
+            Spin: (
+                speed: -3.1415927,
+            ),
+            Sprite: (
+                color: (1.0, 0.8, 0.2, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.75, 0.0, 0.01),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.3, 0.3, 1.0),
+            ),
+        ),
+        "4b43d37ddf93deda": (
+            Parent: ("7dfd4b9f30e01e40"),
+            Spin: (
+                speed: 4.712389,
+            ),
+            Sprite: (
+                color: (0.2, 0.8, 1.0, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-0.75, 0.0, 0.01),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.3, 0.3, 1.0),
+            ),
+        ),
+        "7dfd4b9f30e01e40": (
+            Transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "fdbf929b147ec9bb": (
+            Parent: ("0c9440a3b309785b"),
+            Spin: (
+                speed: 1.5707964,
+            ),
+            Sprite: (
+                color: (1.0, 1.0, 1.0, 1.0),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (1.0, 0.0, 0.01),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.4, 0.4, 1.0),
+            ),
+        ),
+    },
+)

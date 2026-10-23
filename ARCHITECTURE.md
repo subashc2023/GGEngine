@@ -165,7 +165,29 @@ A project's state is text that people and agents edit, diff and merge with ordin
 - **Canonical text files.** Scenes, prefabs and project settings are saved as RON in a
   canonical form: saving what was loaded gives the same bytes, entities are ordered by ID, and
   changing a field changes only that field's lines. RON maps Rust's enums and tuples directly,
-  and its trailing commas mean adding an entry never touches its neighbors' lines.
+  and its trailing commas mean adding an entry never touches its neighbors' lines. A scene is
+  `(entities: {...})`, each entity by its ID, as a string, with its components by name in the
+  order of their names, and each one's fields in its description's order, every field written,
+  and no type's name, so that a rename touches only its keys. A struct or a variant with fields
+  and a list with elements are blocks, a part to a line; a value of one part, `Some(v)` or a
+  one-field tuple's `(v)`, wraps it; and leaves are inline: a float as the shortest text that
+  reads back to its bits, never an exponent, with `.0`, and `inf` and `NaN` keeping their sign;
+  a string by escapes of the scene's own, which leave no control or bidirectional character
+  bare; names ASCII identifiers; at most 64 levels deep. The engine writes the text itself, so
+  that the bytes depend on no library's formatting, line endings or Rust release, and `ron`
+  only reads it, through seeds that reflection's descriptions drive, never its untyped values.
+  What's opaque, such as a sprite's texture or a `MeshDraw`, isn't saved: a load builds each
+  component on its type's `Component::base`, which gives it that, or from the scene alone. A
+  child's `Parent` is saved as its parent's ID, and a root's isn't. A save makes each component
+  again as a load would, so that every scene saved loads; a load checks everything before it
+  spawns anything, all or nothing, and a refusal begins with the line and column where the text
+  is refused, and, but for a syntax error, names the entity, the component and the field.
+- **Prefabs.** A prefab is a scene of one subtree, placed as a copy under a parent. Each of the
+  copy's IDs is mixed from one drawn for the copy and the prefab's own, `mix64(local ^
+  mix64(instance ^ PLACE))`, a permutation of the prefab's IDs for each copy, fixed for good, so
+  that a copy's IDs are as distinct as its prefab's, and two copies' meet only by chance;
+  references inside the prefab are to the copy's own entities. A scene saves the copies as
+  entities like any others; linked instances are to come.
 - **Stable IDs.** Every entity has a persistent ID, separate from its runtime handle, that
   files, operations, diagnostics and network messages use to name it. IDs are random rather
   than sequential, so entities added on two branches neither collide nor land on the same
@@ -217,15 +239,18 @@ IDs.
 Each entity has a persistent ID, an `EntityId`: a nonzero 64-bit number, written as 16 lowercase
 hex digits, so that IDs sort as their text does and never read as a handle. Each world draws its
 IDs from SplitMix64, whose 2^64 states each mix to a different number, seeded from the OS's
-randomness through std's `RandomState`, so that a world never draws an ID twice, and two sessions'
-IDs meet only where their runs of the one cycle overlap; the deterministic mode will seed it, and
-snapshots will copy its state. The world keeps each slot's ID in an array beside the slots' `Meta`
-rather than in it, since every lookup of a handle reads `Meta`, and IDs are read only where they
-cross into files, tools and diagnostics, and as drawing sorts the rows at one z: written only as
-an entity is spawned into the slot and removed from it, and read through the entity's handle,
-checked first, so that a stale handle never names the entity now in its slot. A map hashed with
-SipHash, so that IDs from files can't be chosen to collide, finds an entity by its ID; it's looked
-up, never iterated.
+randomness through std's `RandomState`, so that a run of the cycle never gives an ID twice, and two
+runs, two sessions' or a world's on either side of a reseed, meet only where they overlap; the
+deterministic mode will seed it, and snapshots will copy its state. A scene's entities keep the IDs
+it gives them, and a load refuses one a living entity has. A draw that meets a living entity's ID,
+as a stream that walks into the run of the session that saved a loaded scene does, reseeds the
+stream, the same way for the same state, and draws again. The world keeps each slot's ID in an
+array beside the slots' `Meta` rather than in it, since every lookup of a handle reads `Meta`, and
+IDs are read only where they cross into files, tools and diagnostics, and as drawing sorts the rows
+at one z: written only as an entity is spawned into the slot and removed from it, and read through
+the entity's handle, checked first, so that a stale handle never names the entity now in its slot.
+A map hashed with SipHash, so that IDs from files can't be chosen to collide, finds an entity by
+its ID; it's looked up, never iterated.
 
 Reflection names each component type by its identifier, unless `#[reflect(name = "...")]` gives
 another, and two types of one name are an error rather than a guess. The derive writes the
@@ -234,8 +259,8 @@ components register as it starts, so that their names are taken first, and a gam
 an entity has one; each struct or enum among their fields is described once, so a type can hold
 itself. Values cross as a closed `Value`: integers of fixed sizes only, so that a value means the
 same on every machine; `f32` apart from `f64`, so that bits come back as they went; an entity
-as its handle, as components hold one, `Parent` among them, which files, the tool API and
-replication will map to persistent IDs; and `Opaque` for what reflection keeps but doesn't read,
+as its handle, as components hold one, `Parent` among them, which scenes write as IDs, and the tool
+API and replication will map to them; and `Opaque` for what reflection keeps but doesn't read,
 such as a texture's handle, which no value may make. The world reads and sets a field by its
 component's name and a path, such as `rect[1].y`: a set checks the whole value against the
 description before anything changes, refuses a number outside its field's bounds, and returns
@@ -244,19 +269,21 @@ components through these calls alone, which the tool API will serve.
 
 Entities form a hierarchy, as scenes, prefabs and the camera as a component need: a child has its
 parent as its `Parent` component, and its `Transform` is relative to its parent's, so that a
-parent carries its children along. The world keeps the hierarchy whole. Only `World::set_parent`
+parent carries its children along. The world keeps the hierarchy whole. A scene's entities, loaded
+or placed as a prefab, are spawned with their `Parent`s, and after that only `World::set_parent`
 gives, changes or takes away a `Parent`: it keeps the child's own transform, refuses a parent that
 is the child or one of its descendants, and returns the old parent, which sets it back. The typed
 calls that change components take only `Writable` ones, which the derive implements, as does a
 component implemented by hand, and `Parent` doesn't, so that code changing a `Parent` any other
 way doesn't compile; `set_field` refuses it by name. Each slot keeps its entity's links, by slot:
 its parent, as its `Parent` has it, and its children, in the order they became its children,
-which means no more than the order queries find entities in. So despawning an entity despawns
-its descendants, children first, and the links allocate nothing, though giving or taking away a
-`Parent` moves the child to another table, as `insert` and `remove` do; snapshots will copy the
-links with the tables. World transforms aren't stored: drawing computes each child's from its
-ancestors, every frame, while a table of roots draws by its transforms alone, for one check a
-frame; the links cost each slot 16 bytes, whether its entity has a parent or not.
+which means no more than the order queries find entities in; a load makes each parent's children
+its own in the order of their IDs. So despawning an entity despawns its descendants, children
+first, and the links allocate nothing, though giving or taking away a `Parent` moves the child to
+another table, as `insert` and `remove` do; snapshots will copy the links with the tables. World
+transforms aren't stored: drawing computes each child's from its ancestors, every frame, while a
+table of roots draws by its transforms alone, for one check a frame; the links cost each slot 16
+bytes, whether its entity has a parent or not.
 
 ## Diagnostics
 
@@ -269,7 +296,8 @@ Diagnostics are data, so agents and tools can act on them as reliably as people 
   it starts.
 - **Errors and warnings name their subject.** Each carries a stable code, a dotted name such as
   `gpu.device_lost`, and the thing it is about: an entity's ID, or a despawned entity's handle,
-  since it has none; an asset path, a render pass, or a shader file and line. What outlives an
+  since it has none; an asset path, a render pass, a shader file and line, or a scene's line and
+  column. What outlives an
   entity, such as a pick or a queued message, keeps its ID, not its handle.
 - **Validation messages** become events with their VUID and the debug names of the objects
   involved, and a panic is logged with its location before the process ends.

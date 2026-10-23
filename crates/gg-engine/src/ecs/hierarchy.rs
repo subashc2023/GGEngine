@@ -1,7 +1,8 @@
 //! The hierarchy: entities with parents, which carry their children along. A child has its parent
 //! as its [`Parent`] component, and the world keeps each entity's links to its children, so that
 //! despawning one takes its descendants with it; both change only through [`World::set_parent`]
-//! and [`World::despawn`].
+//! and [`World::despawn`], and as a scene's entities are spawned with theirs, by
+//! [`World::load_scene`] and [`World::place_prefab`].
 
 use std::iter;
 
@@ -13,8 +14,8 @@ use crate::reflect::Reflect;
 
 /// The entity this one is a child of, which carries it along: its
 /// [`Transform`](crate::Transform) is relative to its parent's. The world keeps it, so that the
-/// hierarchy stays whole: [`World::set_parent`] gives it, changes it and takes it away, and code
-/// reads it but can't change it, nor can tools by name.
+/// hierarchy stays whole: a scene's entities are spawned with theirs, [`World::set_parent`] gives
+/// it, changes it and takes it away, and code reads it but can't change it, nor can tools by name.
 ///
 /// ```
 /// use gg_engine::{Parent, Transform, World};
@@ -251,7 +252,7 @@ impl World {
     }
 
     /// Makes slot `child`, a root, the last of slot `parent`'s children.
-    fn append(&mut self, parent: u32, child: u32) {
+    pub(super) fn append(&mut self, parent: u32, child: u32) {
         let first = self.meta[parent as usize].links.first;
         let (prev, next) = match some(first) {
             None => {

@@ -1,16 +1,18 @@
 //! The engine's ECS: entities, which are handles, and their components, data of any reflected type,
 //! kept in archetype tables, a table for each set of component types, and found by queries, or by
-//! name; entities' persistent IDs; and the hierarchy, in which entities' parents carry their
-//! children along.
+//! name; entities' persistent IDs; the hierarchy, in which entities' parents carry their children
+//! along; and scenes, the world's entities as text.
 
 mod by_name;
 mod hierarchy;
 mod id;
 mod query;
+mod scene;
 mod table;
 
 use std::any::TypeId;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fmt;
 use std::hash::{BuildHasher, RandomState};
 use std::mem;
@@ -25,7 +27,7 @@ pub use hierarchy::Parent;
 pub use id::EntityId;
 use id::IdStream;
 pub use query::{Query, QueryIter, QueryIterMut, ReadOnlyQuery};
-use table::{ComponentId, Components, Table};
+use table::{AnyColumn, ComponentId, Components, Table};
 
 use crate::reflect::Reflect;
 
@@ -39,7 +41,16 @@ use crate::reflect::Reflect;
     message = "`{Self}` isn't a component",
     note = "a type becomes one with `#[derive(Clone, gg_engine::Component)]`"
 )]
-pub trait Component: Reflect + Clone {}
+pub trait Component: Reflect + Clone {
+    /// What a scene's component of the type is built on, which gives it what's opaque, since
+    /// scenes leave that out, as [`Sprite`](crate::Sprite)'s white texture: it's made with
+    /// [`with_value`](Reflect::with_value). `None`, the derive's, makes it with
+    /// [`from_value`](Reflect::from_value) alone, which fails where it has something opaque, so
+    /// that a type with an opaque field implements `Component` by hand to load.
+    fn base() -> Option<Self> {
+        None
+    }
+}
 
 /// A component that code changes: gives an entity, takes away and changes in place, through
 /// [`World::spawn`], [`World::insert`], [`World::remove`], [`World::get_mut`] and `&mut T` in
@@ -205,10 +216,8 @@ impl World {
         }
         let table = self.table(signature);
         let entity = self.take_slot();
-        let id = self.stream.draw();
+        let id = self.draw_id(entity);
         self.entity_ids[entity.index as usize] = Some(id);
-        let drawn = self.by_id.insert(id, entity);
-        assert!(drawn.is_none(), "the world drew ID {id} twice");
         let into = &mut self.tables[table as usize];
         let row = into.entities.len() as u32;
         components.push(into, ids);
@@ -216,6 +225,61 @@ impl World {
         self.meta[entity.index as usize].location = Some(Location { table, row });
         self.version += 1;
         entity
+    }
+
+    /// An ID for `entity`, drawn from the stream, by which the world now finds it. A draw that meets
+    /// a living entity's ID, as a stream that has walked into the run of the session that saved a
+    /// loaded scene does, reseeds the stream and draws again.
+    fn draw_id(&mut self, entity: Entity) -> EntityId {
+        loop {
+            let id = self.stream.draw();
+            match self.by_id.entry(id) {
+                Entry::Vacant(vacant) => {
+                    vacant.insert(entity);
+                    return id;
+                }
+                Entry::Occupied(_) => {
+                    tracing::debug!(code = "ecs.reseed", id = %id, "Drew a living entity's ID");
+                    self.stream.reseed();
+                }
+            }
+        }
+    }
+
+    /// Spawns an entity with ID `id`, which no living entity has, and the components in `row`, a
+    /// one-row column each, sorted by their ids, which a scene built: the entity `expected`, the
+    /// handle [`next_slots`](Self::next_slots) predicted for it.
+    fn spawn_built(
+        &mut self,
+        id: EntityId,
+        row: Vec<(ComponentId, Box<dyn AnyColumn>)>,
+        expected: Entity,
+    ) {
+        let mut signature = mem::take(&mut self.scratch);
+        signature.clear();
+        signature.extend(row.iter().map(|&(component, _)| component));
+        let table = self.table(&signature);
+        self.scratch = signature;
+        let entity = self.take_slot();
+        assert_eq!(
+            entity, expected,
+            "a scene's entity takes the handle predicted for it"
+        );
+        self.entity_ids[entity.index as usize] = Some(id);
+        let given = self.by_id.insert(id, entity);
+        assert!(
+            given.is_none(),
+            "a scene gives ID {id}, which a living entity has"
+        );
+        let into = &mut self.tables[table as usize];
+        let row_at = into.entities.len() as u32;
+        for ((_, mut from), to) in row.into_iter().zip(into.columns.iter_mut()) {
+            from.move_row(0, &mut **to);
+        }
+        into.entities.push(entity);
+        let at = Location { table, row: row_at };
+        self.meta[entity.index as usize].location = Some(at);
+        self.version += 1;
     }
 
     /// Gives `entity` `component`, in place of the one of its type it has.
@@ -386,6 +450,23 @@ impl World {
         });
         self.entity_ids.push(None);
         Entity { index, generation }
+    }
+
+    /// The handles the next entities spawned take, in order, as [`take_slot`](Self::take_slot) gives
+    /// them: the free slots, the last freed first, and then new ones.
+    fn next_slots(&self) -> impl Iterator<Item = Entity> + '_ {
+        let free = self.free.iter().rev().map(|&index| Entity {
+            index,
+            generation: self.meta[index as usize].generation,
+        });
+        let new = (self.meta.len()..).map(|index| Entity {
+            index: u32::try_from(index)
+                .ok()
+                .filter(|&index| index != u32::MAX)
+                .expect("fewer than 2^32 - 1 entities"),
+            generation: NonZeroU32::MIN,
+        });
+        free.chain(new)
     }
 
     /// Removes the entity in slot `index`, which is alive, without parent or children, and its
@@ -640,6 +721,71 @@ mod tests {
                 parent: world.get::<Parent>(entity).map(|parent| parent.0),
                 id: world.id(entity),
             }
+        }
+    }
+
+    /// Saves `world`'s every root, as the model has them, and loads the scene into a world of its
+    /// own, whose types registered in another order and whose slots were freed; and checks it
+    /// against the model, each entity by ID, with its components and parent, and its children in
+    /// the order of their IDs; and that it saves again as it was.
+    fn scene_matches_the_model(world: &World, live: &[(Entity, Has)], step: usize) {
+        let roots = live.iter().filter(|(_, has)| has.parent.is_none());
+        let roots: Vec<Entity> = roots.map(|&(entity, _)| entity).collect();
+        let text = world
+            .save_scene(&roots)
+            .unwrap_or_else(|error| panic!("step {step}: {error}"));
+        let mut other = World::seeded(step as u64);
+        let registered = [
+            other.register::<D>(),
+            other.register::<C>(),
+            other.register::<B>(),
+            other.register::<A>(),
+        ];
+        registered
+            .into_iter()
+            .for_each(|done| done.expect("registered"));
+        let spare: Vec<Entity> = (0..step % 7).map(|_| other.spawn(())).collect();
+        for entity in spare {
+            other.despawn(entity).expect("alive");
+        }
+        let loaded = other
+            .load_scene(&text)
+            .unwrap_or_else(|error| panic!("step {step}: {error}"));
+        check_ids(&other);
+        check_links(&other);
+        assert_eq!(
+            other.save_scene(&loaded).expect("saved"),
+            text,
+            "step {step}"
+        );
+        assert_eq!(other.query::<Entity>().count(), live.len(), "step {step}");
+        let copy = |entity: Entity| {
+            let id = world.id(entity).expect("alive");
+            other.entity(id).expect("loaded")
+        };
+        let ids = |world: &World, entity| -> Vec<EntityId> {
+            let children = world.children(entity).expect("alive");
+            children
+                .map(|child| world.id(child).expect("alive"))
+                .collect()
+        };
+        for (entity, has) in live {
+            let expected = Has {
+                parent: has.parent.map(copy),
+                ..has.clone()
+            };
+            assert_eq!(
+                Has::of(&other, copy(*entity)),
+                expected,
+                "{entity} at step {step}"
+            );
+            let mut kids = ids(world, *entity);
+            kids.sort();
+            assert_eq!(
+                ids(&other, copy(*entity)),
+                kids,
+                "{entity}'s children at step {step}"
+            );
         }
     }
 
@@ -941,6 +1087,9 @@ mod tests {
             }
             check_links(&world);
             check_ids(&world);
+            if step % 100 == 0 {
+                scene_matches_the_model(&world, &live, step);
+            }
             // Each parent's children in the order they became its.
             let mut children: Vec<(Entity, usize, Entity)> = live
                 .iter()

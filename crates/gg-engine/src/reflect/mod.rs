@@ -1019,7 +1019,7 @@ pub(crate) mod tests {
     /// A field of everything reflection describes.
     ///
     /// Its doc is two paragraphs.
-    #[derive(Clone, Debug, PartialEq, Component)]
+    #[derive(Clone, Debug, PartialEq, Reflect)]
     pub(crate) struct Everything {
         /// Whether it's on.
         pub(crate) on: bool,
@@ -1046,6 +1046,15 @@ pub(crate) mod tests {
         #[reflect(opaque)]
         pub(crate) handle: Handle,
     }
+
+    /// Built on [`everything`], which gives it its handle, as a component with an opaque field is.
+    impl Component for Everything {
+        fn base() -> Option<Self> {
+            Some(everything())
+        }
+    }
+
+    impl crate::Writable for Everything {}
 
     pub(crate) fn everything() -> Everything {
         Everything {

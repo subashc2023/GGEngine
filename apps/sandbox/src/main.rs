@@ -2,18 +2,20 @@
 
 use std::f32::consts::{FRAC_PI_2, TAU};
 use std::ops::ControlFlow;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
+use std::{fs, io};
 
 use bytemuck::NoUninit;
 use gg_engine::egui::{self, ViewportCommand, ViewportId};
 use gg_engine::math::{EulerRot, Quat, Vec2, Vec3, Vec4};
+use gg_engine::reflect::Error;
 use gg_engine::{
     Blend, Camera, Component, Context, Entity, Event, Key, Layer, MeshDraw,
     OrthographicCameraController, Projection, Sampler, Sprite, SpriteSheet, Transform, Ui, World,
 };
-use tracing::info;
+use tracing::{error, info};
 
 fn main() -> ExitCode {
     let app = gg_engine::App::new("Sandbox").custom_title_bar();
@@ -51,19 +53,16 @@ const TRIANGLE: [Colored; 3] = [
 const TURN_SPEED: f32 = FRAC_PI_2;
 
 // How far forward each part of the scene is, which the engine draws back to front by its z in the
-// world: the map's ground, what stands on it, the swarm, the grid, the checkerboard, the triangle,
-// its moons and the logo. The camera sees from 1 behind it to 1 in front.
+// world: the map's ground, what stands on it, the swarm, the grid, at 0.2 in its scene, the
+// checkerboard, the triangle, its moons, each 0.01 in front of its parent in theirs, so that
+// they're between the triangle and the logo, and the logo. The camera sees from 1 behind it to 1
+// in front.
 const GROUND_Z: f32 = 0.0;
 const STANDING_Z: f32 = 0.01;
 const SWARM_Z: f32 = 0.1;
-const GRID_Z: f32 = 0.2;
 const CHECKERBOARD_Z: f32 = 0.3;
 const TRIANGLE_Z: f32 = 0.4;
 const LOGO_Z: f32 = 0.5;
-/// How far in front of its parent each moon is, and the moonlet in front of its moon: in the world,
-/// between the triangle and the logo, though by their own z's they'd be among what stands on the
-/// map.
-const MOON_Z: f32 = 0.01;
 
 /// The most sprites the swarm has.
 const SWARM_MAX: u32 = 100_000;
@@ -227,31 +226,95 @@ struct Spin {
     speed: f32,
 }
 
-/// Spawns two moons, children of `triangle`, which carries them around it as it turns, each
-/// turning too, and a moonlet, a child of one of them, which carries it around in turn.
-fn spawn_moons(world: &mut World, triangle: Entity) {
-    let mut child = |parent, x: f32, size: f32, color: Vec4, speed: f32| {
-        let transform = Transform {
-            translation: Vec3::new(x, 0.0, MOON_Z),
-            // Not in z, so that each is as far in front of its parent in the world.
-            scale: Vec3::new(size, size, 1.0),
-            ..Transform::IDENTITY
-        };
-        let sprite = Sprite {
-            color,
-            ..Sprite::default()
-        };
-        let moon = world.spawn((transform, sprite, Spin { speed }));
-        world
-            .set_parent(moon, Some(parent))
-            .expect("a moon and its parent are alive, and it has no children");
-        moon
+/// Registers the sandbox's component types, as a game does before it loads a scene of them.
+fn register(world: &mut World) {
+    for registered in [
+        world.register::<Drifter>(),
+        world.register::<MapTile>(),
+        world.register::<GridCell>(),
+        world.register::<Spin>(),
+    ] {
+        registered.expect("the sandbox's types describe themselves");
+    }
+}
+
+/// The sandbox's scenes, in `scenes/` beside its shaders and assets: `grid.ron`, the grid, 10 by
+/// 10 squares 2 units across; and `moons.ron`, a prefab of a pivot with two moons, which the
+/// triangle carries around it as it turns, each turning too, and a moonlet, which one of them
+/// carries around in turn.
+fn scene(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("scenes")
+        .join(name)
+}
+
+/// The text of scene `name`, and its path; the sandbox stops without it, saying why.
+fn read_scene(name: &str) -> (String, PathBuf) {
+    let path = scene(name);
+    let text = fs::read_to_string(&path);
+    let text = text.unwrap_or_else(|e| panic!("can't read {}: {e}", path.display()));
+    (text, path)
+}
+
+/// The grid's squares.
+fn grid(world: &World) -> Vec<Entity> {
+    let cells = world.query::<(Entity, &GridCell)>();
+    cells.map(|(cell, _)| cell).collect()
+}
+
+/// Saves the grid to `scenes/grid.ron`, through a file beside it that then replaces it, so that a
+/// save cut short leaves the last grid whole.
+fn save_grid(world: &World) -> Result<(), Error> {
+    let path = scene("grid.ron");
+    let text = world.save_scene(&grid(world))?;
+    let error = |e: io::Error| {
+        let message = format!("can't save the grid to {}: {e}", path.display());
+        Error::new("sandbox.grid_file", message).with_source(e)
     };
-    let yellow = Vec4::new(1.0, 0.8, 0.2, 1.0);
-    let moon = child(triangle, 0.75, 0.3, yellow, -2.0 * TURN_SPEED);
-    let cyan = Vec4::new(0.2, 0.8, 1.0, 1.0);
-    child(triangle, -0.75, 0.3, cyan, 3.0 * TURN_SPEED);
-    child(moon, 1.0, 0.4, Vec4::ONE, TURN_SPEED);
+    let temporary = path.with_extension("ron.new");
+    fs::write(&temporary, text).map_err(error)?;
+    fs::rename(&temporary, &path).map_err(error)
+}
+
+/// Loads the grid from `scenes/grid.ron` in place of the one there is. If the file is refused,
+/// logs where and why, and the grid stays as it was.
+fn reload_grid(world: &mut World) {
+    let path = scene("grid.ron");
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) => {
+            let path = path.display();
+            error!(code = "sandbox.grid_file", %path, "Can't read the grid from {path}: {e}");
+            return;
+        }
+    };
+    if let Err(refused) = replace_grid(world, &text) {
+        let path = path.display();
+        error!(code = refused.code(), %path, "{path}:{refused}; the grid stays as it was");
+    }
+}
+
+/// Loads the grid scene `text` in place of the grid there is; or, if it's refused, loads the grid
+/// there was back, so that it stays as it was, its IDs and the Inspector's pick of one of its
+/// squares too.
+fn replace_grid(world: &mut World, text: &str) -> Result<(), Error> {
+    let cells = grid(world);
+    let kept = world
+        .save_scene(&cells)
+        .expect("the grid saves, since its squares refer to nothing outside it");
+    for cell in cells {
+        // A square that's another's descendant went with it.
+        if world.contains(cell) {
+            world.despawn(cell).expect("the square is alive");
+        }
+    }
+    let loaded = world.load_scene(text);
+    if loaded.is_err() {
+        world
+            .load_scene(&kept)
+            .expect("the grid saved a moment ago loads again");
+    }
+    loaded.map(drop)
 }
 
 /// Moves each drifter to where it is `t` seconds after the swarm starts.
@@ -311,22 +374,6 @@ fn spawn_map(world: &mut World, tiles: &SpriteSheet) {
     }
 }
 
-/// Spawns the grid: 10 by 10 squares, 2 units across, each a little smaller than the spacing.
-fn spawn_grid(world: &mut World) {
-    for row in 0..10 {
-        for column in 0..10 {
-            let at = Vec2::new(column as f32 - 4.5, row as f32 - 4.5) * 0.2;
-            let transform = Transform {
-                translation: at.extend(GRID_Z),
-                scale: Vec3::splat(0.18),
-                ..Transform::IDENTITY
-            };
-            let color = (row + column) % 2;
-            world.spawn((transform, Sprite::default(), GridCell { color }));
-        }
-    }
-}
-
 /// A number from 0 up to 1 that `index` and `salt` pick, the same every time: Chris Wellons's
 /// lowbias32 hash, its top 24 bits as a fraction.
 fn pick(index: u32, salt: u32) -> f32 {
@@ -342,18 +389,19 @@ fn pick(index: u32, salt: u32) -> f32 {
 /// Draws in the game's view a swarm of sprites from a sheet's cells, drifting and turning, which
 /// tests how many sprites the engine draws; over it, a grid of sprites in two colors that
 /// alternate; over the grid's middle, a checkerboard sprite, tiled and tinted, then a triangle in
-/// red, green and blue turning, with two moons, its children, which it carries around as it turns,
+/// red, green and blue turning, with two moons, which it carries around as it turns,
 /// one of them carrying a moonlet of its own, then a logo sprite whose alpha shows them through it.
 /// Below the swarm, out of its way, a map of tiles from a tile set's cells packed edge to edge,
 /// which tests that none shows any of the cells beside it. They're entities, spawned as the sandbox
-/// attaches, which the engine draws back to front by their z's in the world; the sandbox's systems
-/// move the swarm by its drifters, color the grid by its cells and turn the triangle, its moons and
-/// the moonlet by their spins, every frame, and filter the map and set the checkerboard's sprite
-/// when the panels change them, so that what the Inspector sets stays until then. The triangle is a
-/// mesh with a vertex type and shader of the sandbox's own, and the rest the engine's sprites, so
-/// the map, the swarm, the grid and the checkerboard are one instanced draw, the triangle another,
-/// and the moons, the moonlet and the logo a third. They're drawn over
-/// a color that drifts slowly, so that a running sandbox visibly animates. The engine's camera
+/// attaches, the grid loaded from a scene and the moons placed from a prefab, under a pivot that
+/// the triangle carries, which the engine draws back to front by their z's in the world; the
+/// sandbox's systems move the swarm by its drifters, color the grid by its cells and turn the
+/// triangle, its moons and the moonlet by their spins, every frame, and filter the map and set the
+/// checkerboard's sprite when the panels change them, so that what the Inspector sets stays until
+/// then. The triangle is a mesh with a vertex type and shader of the sandbox's own, and the rest the
+/// engine's sprites, so the map, the swarm, the grid and the checkerboard are one instanced draw,
+/// the triangle another, and the moons, the moonlet and the logo a third. They're drawn over a
+/// color that drifts slowly, so that a running sandbox visibly animates. The engine's camera
 /// controller steers the camera: W, A, S and D move it along its own axes, Q and E turn it left and
 /// right, at the same speed whatever the frame rate, and the mouse wheel zooms it. Shows six
 /// panels to dock, beside the engine's Performance panel, which counts the draws, and its Entities
@@ -363,7 +411,8 @@ fn pick(index: u32, salt: u32) -> f32 {
 /// filtering, how many times it repeats, and its tint; and the clear color, which can be held or
 /// picked. Logs the key and mouse presses that reach it, which those on the panels don't. It polls
 /// input too: holding Space pauses the drift, and a panel shows where the cursor is. The title
-/// bar's File menu quits.
+/// bar's File menu saves the grid to its scene, loads it again from the scene, which a refusal of
+/// leaves it as it was, and quits.
 struct Sandbox {
     time: Duration,
     drift: bool,
@@ -469,8 +518,8 @@ impl Sandbox {
 
 impl Layer for Sandbox {
     fn attach(&mut self, cx: &mut Context) {
-        // A shader that doesn't compile, or a texture that doesn't load, stops the sandbox, with
-        // what went wrong.
+        // A shader that doesn't compile, a texture that doesn't load, or a scene that's refused
+        // stops the sandbox, with what went wrong.
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let assets = root.join("assets");
         let colored = cx.add_shader(
@@ -488,8 +537,11 @@ impl Layer for Sandbox {
         let shader = colored.expect("the vertex color shader compiles");
 
         let world = cx.world_mut();
+        register(world);
         spawn_map(world, &tiles.expect("the tiles load"));
-        spawn_grid(world);
+        let (grid, path) = read_scene("grid.ron");
+        let loaded = world.load_scene(&grid);
+        loaded.unwrap_or_else(|error| panic!("{}:{error}", path.display()));
         // 1.5 units across, over the grid's middle.
         let middle = Vec3::splat(1.5);
         let checkerboard = Sprite {
@@ -508,7 +560,9 @@ impl Layer for Sandbox {
         };
         let spin = Spin { speed: TURN_SPEED };
         let triangle = world.spawn((at, MeshDraw::new(mesh, shader, ()), spin));
-        spawn_moons(world, triangle);
+        let (moons, path) = read_scene("moons.ron");
+        let placed = world.place_prefab(&moons, Some(triangle));
+        placed.unwrap_or_else(|error| panic!("{}:{error}", path.display()));
         let logo = Sprite {
             texture: logo.expect("the logo loads"),
             ..Sprite::default()
@@ -564,12 +618,22 @@ impl Layer for Sandbox {
     }
 
     fn ui(&mut self, cx: &mut Context, ui: &mut Ui<'_>) {
+        let (mut save, mut reload) = (false, false);
         ui.menu("File", |ui| {
+            save = ui.button("Save the grid").clicked();
+            reload = ui.button("Reload the grid").clicked();
             if ui.button("Quit").clicked() {
                 ui.ctx()
                     .send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Close);
             }
         });
+        // Once the menu has closed.
+        if save && let Err(error) = save_grid(cx.world()) {
+            error!(code = error.code(), "{error:#}");
+        }
+        if reload {
+            reload_grid(cx.world_mut());
+        }
         ui.panel("Stats", |ui| {
             let camera = self.camera.camera;
             let [x, y, _] = camera.position.to_array();
@@ -640,5 +704,59 @@ impl Layer for Sandbox {
         // After the panel, which may have changed it.
         let [r, g, b] = self.color;
         cx.set_clear_color([r, g, b, 1.0]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A world that knows the sandbox's types, and the engine's, as the app's does.
+    fn world() -> World {
+        let mut world = World::default();
+        world.register::<Transform>().expect("registered");
+        world.register::<Sprite>().expect("registered");
+        register(&mut world);
+        world
+    }
+
+    /// Each scene loads and saves to its own bytes, so that a type of the sandbox's that changes
+    /// under its files fails here; and the moons are placed as a prefab.
+    #[test]
+    fn the_scenes_save_as_they_are() {
+        for name in ["grid.ron", "moons.ron"] {
+            let (text, _) = read_scene(name);
+            let mut world = world();
+            let roots = world.load_scene(&text);
+            let roots = roots.unwrap_or_else(|error| panic!("{name}:{error}"));
+            assert_eq!(world.save_scene(&roots).expect("saved"), text, "{name}");
+        }
+        let mut world = world();
+        world.load_scene(&read_scene("grid.ron").0).expect("loaded");
+        assert_eq!(grid(&world).len(), 100);
+        let parent = world.spawn(Transform::IDENTITY);
+        let pivot = world.place_prefab(&read_scene("moons.ron").0, Some(parent));
+        let pivot = pivot.expect("placed");
+        let moons = world.children(pivot).expect("alive").count();
+        assert_eq!(moons, 2);
+        assert_eq!(world.query::<&Spin>().count(), 3);
+    }
+
+    /// A reload replaces the grid whole, a square that's another's descendant too, or, if it's
+    /// refused, leaves the grid there was.
+    #[test]
+    fn a_reload_replaces_the_grid_whole_or_not_at_all() {
+        let mut world = world();
+        world.load_scene(&read_scene("grid.ron").0).expect("loaded");
+        let cells = grid(&world);
+        world
+            .set_parent(cells[1], Some(cells[0]))
+            .expect("parented");
+        let nested = world.save_scene(&cells).expect("saved");
+        replace_grid(&mut world, &nested).expect("replaced");
+        assert_eq!(world.save_scene(&grid(&world)).expect("saved"), nested);
+        let refused = replace_grid(&mut world, "(entities: {").expect_err("refused");
+        assert_eq!(refused.code(), "scene.syntax");
+        assert_eq!(world.save_scene(&grid(&world)).expect("saved"), nested);
     }
 }
