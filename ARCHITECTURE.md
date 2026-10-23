@@ -211,7 +211,21 @@ order queries find entities in follows only from the changes made: tables are ke
 they were made, despawning an entity or changing its components moves its table's last row into
 its place, the last freed slot is the first taken, and no hash map is iterated. So it's the same
 in every run, as the deterministic mode needs, but means nothing a game may rely on: anything
-ordered, such as what's drawn over what, orders by its components' values.
+ordered, such as what's drawn over what, orders by its components' values, or by its entities'
+IDs.
+
+Each entity has a persistent ID, an `EntityId`: a nonzero 64-bit number, written as 16 lowercase
+hex digits, so that IDs sort as their text does and never read as a handle. Each world draws its
+IDs from SplitMix64, whose 2^64 states each mix to a different number, seeded from the OS's
+randomness through std's `RandomState`, so that a world never draws an ID twice, and two sessions'
+IDs meet only where their runs of the one cycle overlap; the deterministic mode will seed it, and
+snapshots will copy its state. The world keeps each slot's ID in an array beside the slots' `Meta`
+rather than in it, since every lookup of a handle reads `Meta`, and IDs are read only where they
+cross into files, tools and diagnostics, and as drawing sorts the rows at one z: written only as
+an entity is spawned into the slot and removed from it, and read through the entity's handle,
+checked first, so that a stale handle never names the entity now in its slot. A map hashed with
+SipHash, so that IDs from files can't be chosen to collide, finds an entity by its ID; it's looked
+up, never iterated.
 
 Reflection names each component type by its identifier, unless `#[reflect(name = "...")]` gives
 another, and two types of one name are an error rather than a guess. The derive writes the
@@ -220,13 +234,13 @@ components register as it starts, so that their names are taken first, and a gam
 an entity has one; each struct or enum among their fields is described once, so a type can hold
 itself. Values cross as a closed `Value`: integers of fixed sizes only, so that a value means the
 same on every machine; `f32` apart from `f64`, so that bits come back as they went; an entity
-as its handle, which files, the tool API and replication will map to persistent IDs; and
-`Opaque` for what reflection keeps but doesn't read, such as a texture's handle, which no value
-may make. The world reads and sets a field by its component's name and a path, such as
-`rect[1].y`: a set checks the whole value against the description before anything changes,
-refuses a number outside its field's bounds, and returns the old value, which sets it back unless
-code stored one that a set refuses. The Inspector edits components through these calls alone,
-which the tool API will serve.
+as its handle, as components hold one, `Parent` among them, which files, the tool API and
+replication will map to persistent IDs; and `Opaque` for what reflection keeps but doesn't read,
+such as a texture's handle, which no value may make. The world reads and sets a field by its
+component's name and a path, such as `rect[1].y`: a set checks the whole value against the
+description before anything changes, refuses a number outside its field's bounds, and returns
+the old value, which sets it back unless code stored one that a set refuses. The Inspector edits
+components through these calls alone, which the tool API will serve.
 
 Entities form a hierarchy, as scenes, prefabs and the camera as a component need: a child has its
 parent as its `Parent` component, and its `Transform` is relative to its parent's, so that a
@@ -254,8 +268,9 @@ Diagnostics are data, so agents and tools can act on them as reliably as people 
   `logs/<app>-<UTC time>-<process ID>.jsonl` beside the executable, whose path the run logs as
   it starts.
 - **Errors and warnings name their subject.** Each carries a stable code, a dotted name such as
-  `gpu.device_lost`, and the thing it is about: an entity ID, an asset path, a render pass, or
-  a shader file and line.
+  `gpu.device_lost`, and the thing it is about: an entity's ID, or a despawned entity's handle,
+  since it has none; an asset path, a render pass, or a shader file and line. What outlives an
+  entity, such as a pick or a queued message, keeps its ID, not its handle.
 - **Validation messages** become events with their VUID and the debug names of the objects
   involved, and a panic is logged with its location before the process ends.
 - **Profiling.** Code marks its work with zones (`gg_core::zone!`), which Tracy lays out on a
@@ -348,8 +363,11 @@ and the renderer's `Shaders`, `Meshes` and `Textures` hand out their handles at 
 layers' updates, the engine draws the world's entities that have a `Transform` and a sprite or a
 `MeshDraw`, a mesh with its shader and parameters held without their types, over what the layers
 drew, back to front by their z's in the world, children where their ancestors carry them; those
-at one z draw in the order queries find them, which changes as entities come and go, so entities
-that overlap need different z's.
+at one z draw sprites under meshes, each in the order of their IDs, which overlapping entities
+keep as others come and go. That sorts the rows at each z, which drawing keeps until a row or a z
+changes, and draws them out of their tables' order; so meshes of different meshes or shaders at
+one z interleave, each change between them another draw, and meshes meant to batch take a z of
+their own.
 
 A game's shader is a Slang file that the engine compiles with slangc as a layer adds it, so one
 that doesn't compile fails there, with slangc's diagnostics naming the file and line; the renderer

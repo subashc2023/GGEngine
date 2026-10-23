@@ -214,8 +214,9 @@ impl Context {
 
     /// The world: its entities and their components. After the layers' updates each frame, the
     /// engine draws those with a [`Transform`](crate::Transform) and a [`Sprite`] or a
-    /// [`MeshDraw`](crate::MeshDraw), back to front by their z's in the world, children where their
-    /// parents carry them, over what the layers drew themselves.
+    /// [`MeshDraw`](crate::MeshDraw), back to front by their z's in the world, and at one z sprites
+    /// under meshes, each in the order of their IDs, children where their parents carry them, over
+    /// what the layers drew themselves.
     pub fn world(&self) -> &World {
         &self.world
     }

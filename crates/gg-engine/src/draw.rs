@@ -8,7 +8,7 @@ use gg_core::math::{Mat4, Vec2};
 use gg_renderer::{Draws, MeshDraw, Sampler, Sprite};
 
 use crate::reflect::{self, Field, Meta, Reflect, Result, Shape, Show, Type, Types, Value};
-use crate::{Component, Parent, Transform, World, Writable};
+use crate::{Component, EntityId, Parent, Transform, World, Writable};
 
 impl Component for Sprite {}
 impl Writable for Sprite {}
@@ -246,15 +246,27 @@ impl Reflect for MeshDraw {
 }
 
 /// What drawing the world sorts and computes, kept from frame to frame so that it allocates nothing
-/// once it's grown.
+/// once it's grown, and so that a frame that changes no entity's row and no z draws in the order
+/// the last one sorted its rows by ID, without sorting them by ID again.
 #[derive(Default)]
 pub(crate) struct Scratch {
+    /// This frame's runs of rows at one z, back to front.
     segments: Vec<Segment>,
+    /// The segments `items` were sorted from, which each frame's are compared with.
+    last: Vec<Segment>,
     /// The world matrices of the rows of tables of children, which draw by them.
     matrices: Vec<Mat4>,
+    /// Each row drawn, in the order they draw.
+    items: Vec<Item>,
+    /// The rows of each z and kind, back to front.
+    groups: Vec<Group>,
+    /// The world and its version when `items` were sorted, if they are.
+    sorted: Option<(u64, u64)>,
 }
 
-/// Rows of one table at one z, drawn together.
+/// A run of one table's rows at one z, of one kind, whose rows `sort` puts among the others of
+/// their z and kind.
+#[derive(Clone)]
 struct Segment {
     z: f32,
     /// Which segment it was found as: tables in the order they were made, then a table's sprites
@@ -268,29 +280,69 @@ struct Segment {
     matrices: u32,
 }
 
+/// The same segment, its z bit for bit, so that a z that only changes its sign shows.
+impl PartialEq for Segment {
+    fn eq(&self, other: &Self) -> bool {
+        self.z.to_bits() == other.z.to_bits()
+            && self.order == other.order
+            && self.kind == other.kind
+            && self.table == other.table
+            && self.rows == other.rows
+            && self.matrices == other.matrices
+    }
+}
+
 /// A [`Segment`] of roots.
 const ROOTS: u32 = u32::MAX;
 
-#[derive(Clone, Copy)]
+/// What a row draws: at one z, sprites draw under meshes.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Kind {
     Sprite,
     Mesh,
 }
 
+/// A row drawn: its entity's ID, which orders it among the rows of its z and kind, and where it is.
+struct Item {
+    id: EntityId,
+    /// Its segment, among the scratch's.
+    segment: u32,
+    /// Its row in its segment's table.
+    row: u32,
+}
+
+/// The rows of one z and one kind, a range of the scratch's items.
+struct Group {
+    kind: Kind,
+    items: Range<u32>,
+}
+
 /// Draws into `draws` every entity of `world` with a [`Transform`] and a [`Sprite`] or a
-/// [`MeshDraw`], back to front by its z in the world; at one z, in the order queries find them,
-/// and an entity with both draws its sprite under its mesh. A child draws where its ancestors carry
-/// it, by its world matrix, which it computes into `scratch` for each child once a frame; roots,
-/// in tables without a [`Parent`], draw by their transforms alone.
+/// [`MeshDraw`], back to front by its z in the world; at one z, sprites under meshes, each in the
+/// order of their entities' IDs, so that entities that overlap at one z keep how they stack as
+/// others come and go. A child draws where its ancestors carry it, by its world matrix, which it
+/// computes into `scratch` for each child once a frame; roots, in tables without a [`Parent`], draw
+/// by their transforms alone.
 ///
-/// It sorts runs of consecutive rows at one z, so it's quick while each table's rows at one z stay
-/// together. Spawning entities of a table at mixed z's, or despawning, which moves a table's last
-/// row into the gap, splits those runs; at worst, as when sprites each have their own z, as sorting
-/// by y gives them, it sorts every sprite every frame, until the renderer sorts by depth, with
-/// Phase 4.
+/// It sorts runs of consecutive rows at one z every frame, so it's quick while each table's rows at
+/// one z stay together. Spawning entities of a table at mixed z's, or despawning, which moves a
+/// table's last row into the gap, splits those runs; at worst, as when sprites each have their own
+/// z, as sorting by y gives them, it sorts every sprite every frame, until the renderer sorts by
+/// depth, with Phase 4. The rows of each z are sorted by ID, and kept sorted in `scratch` while no
+/// entity's row and no z changes. A frame that changes them sorts every row at a shared z again,
+/// O(n log n), as the swarm's 100,000 at one z are; and every frame draws them in that order,
+/// reading their tables' rows out of order rather than in a sweep. A radix sort, or tables kept in
+/// ID order, waits for a game whose frames need the time.
 pub(crate) fn draw_world(world: &World, draws: &mut Draws, scratch: &mut Scratch) {
     let _zone = gg_core::zone!();
-    let Scratch { segments, matrices } = scratch;
+    let Scratch {
+        segments,
+        last,
+        matrices,
+        items,
+        groups,
+        sorted,
+    } = scratch;
     segments.clear();
     matrices.clear();
     let Some(transform) = world.component::<Transform>() else {
@@ -345,40 +397,59 @@ pub(crate) fn draw_world(world: &World, draws: &mut Draws, scratch: &mut Scratch
             }
         }
     }
-    segments.sort_unstable_by(|a, b| a.z.total_cmp(&b.z).then(a.order.cmp(&b.order)));
+    segments.sort_unstable_by(|a, b| {
+        let z = a.z.total_cmp(&b.z);
+        z.then(a.kind.cmp(&b.kind)).then(a.order.cmp(&b.order))
+    });
+    if *sorted != Some(world.version()) || segments != last {
+        sort(world, segments, items, groups);
+        *sorted = Some(world.version());
+        last.clone_from(segments);
+    }
     let tables = world.tables();
-    for segment in segments.iter() {
+    // A segment's table, its transforms, and its rows' world matrices if they're children.
+    let placed = |index: u32| {
+        let segment = &segments[index as usize];
         let table = &tables[segment.table as usize];
-        let rows = segment.rows.start as usize..segment.rows.end as usize;
-        let transforms = &table
-            .column::<Transform>(transform)
-            .expect("it has transforms")[rows.clone()];
-        // Its children's world matrices, unless they're roots.
-        let carried = (segment.matrices != ROOTS).then(|| {
-            let start = segment.matrices as usize;
-            &matrices[start + rows.start..start + rows.end]
-        });
-        match segment.kind {
+        let transforms = table.column::<Transform>(transform);
+        let transforms = transforms.expect("it has transforms");
+        let carried = (segment.matrices != ROOTS).then(|| &matrices[segment.matrices as usize..]);
+        (table, transforms, carried)
+    };
+    let matrix = |transforms: &[Transform], carried: Option<&[Mat4]>, row: usize| {
+        carried.map_or_else(|| transforms[row].matrix(), |carried| carried[row])
+    };
+    // Kept across groups, whose segments' indices differ.
+    let (mut sprites_at, mut meshes_at) = ([None; AT_HAND], [None; AT_HAND]);
+    for group in groups.iter() {
+        let items = &items[group.items.start as usize..group.items.end as usize];
+        match group.kind {
             Kind::Sprite => {
-                let sprites = sprite.and_then(|id| table.column::<Sprite>(id));
-                let sprites = &sprites.expect("it has sprites")[rows];
-                match carried {
-                    Some(carried) => {
-                        draws.extend_sprites(carried.iter().copied().zip(sprites.iter().copied()));
-                    }
-                    None => {
-                        let both = transforms.iter().zip(sprites);
-                        let both = both.map(|(transform, sprite)| (transform.matrix(), *sprite));
-                        draws.extend_sprites(both);
-                    }
-                }
+                let sprite = sprite.expect("a table has sprites");
+                let columns = |index: u32| {
+                    let (table, transforms, carried) = placed(index);
+                    let sprites = table.column::<Sprite>(sprite).expect("it has sprites");
+                    (transforms, sprites, carried)
+                };
+                draws.extend_sprites(items.iter().map(|item| {
+                    let found = found(&mut sprites_at, item.segment, columns);
+                    let (transforms, sprites, carried) = found;
+                    let row = item.row as usize;
+                    (matrix(transforms, carried, row), sprites[row])
+                }));
             }
             Kind::Mesh => {
-                let meshes = mesh.and_then(|id| table.column::<MeshDraw>(id));
-                let meshes = &meshes.expect("it has meshes")[rows];
-                for (row, mesh) in meshes.iter().enumerate() {
-                    let matrix = carried.map_or_else(|| transforms[row].matrix(), |m| m[row]);
-                    draws.push_draw(matrix, mesh);
+                let mesh = mesh.expect("a table has meshes");
+                let columns = |index: u32| {
+                    let (table, transforms, carried) = placed(index);
+                    let meshes = table.column::<MeshDraw>(mesh).expect("it has meshes");
+                    (transforms, meshes, carried)
+                };
+                for item in items {
+                    let found = found(&mut meshes_at, item.segment, columns);
+                    let (transforms, meshes, carried) = found;
+                    let row = item.row as usize;
+                    draws.push_draw(matrix(transforms, carried, row), &meshes[row]);
                 }
             }
         }
@@ -411,6 +482,57 @@ fn cut(
     }
 }
 
+/// Puts each row of `segments`, sorted back to front, into `items`, a group of them for each z and
+/// kind, each group's in the order of its entities' IDs.
+fn sort(world: &World, segments: &[Segment], items: &mut Vec<Item>, groups: &mut Vec<Group>) {
+    items.clear();
+    groups.clear();
+    let tables = world.tables();
+    let mut first = 0;
+    for group in segments.chunk_by(|a, b| a.z.total_cmp(&b.z).is_eq() && a.kind == b.kind) {
+        let start = items.len();
+        for (index, segment) in (first..).zip(group) {
+            let entities = tables[segment.table as usize].entities();
+            for row in segment.rows.clone() {
+                let id = world.id(entities[row as usize]);
+                let id = id.expect("a table's rows are alive");
+                items.push(Item {
+                    id,
+                    segment: index,
+                    row,
+                });
+            }
+        }
+        // Each entity's ID is its own, so that the order is the same however it's sorted.
+        items[start..].sort_unstable_by_key(|item| item.id);
+        let end = u32::try_from(items.len()).expect("fewer than 2^32 rows drawn");
+        groups.push(Group {
+            kind: group[0].kind,
+            items: start as u32..end,
+        });
+        first += group.len() as u32;
+    }
+}
+
+/// How many segments' columns drawing keeps at hand, each in the slot its index picks. A group's
+/// segments have consecutive indices, so a group of this many or fewer, whose rows interleave in ID
+/// order, finds each one's columns once.
+const AT_HAND: usize = 16;
+
+/// What `find` gives for segment `index`: what `at` keeps for it, or else found, and kept in its
+/// slot.
+fn found<T: Copy>(
+    at: &mut [Option<(u32, T)>; AT_HAND],
+    index: u32,
+    find: impl FnOnce(u32) -> T,
+) -> T {
+    let at = &mut at[index as usize % AT_HAND];
+    match *at {
+        Some((segment, columns)) if segment == index => columns,
+        _ => at.insert((index, find(index))).1,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -419,20 +541,40 @@ mod tests {
     use gg_renderer::{Blend, Meshes, Shaders};
 
     use super::*;
+    use crate::Entity;
 
     #[derive(Clone, Copy, Component)]
     struct Marked;
 
+    /// Where a scratch's buffers are, and how big, which drawing again without taking more memory
+    /// leaves as they were.
+    fn held(scratch: &Scratch) -> [(usize, usize); 5] {
+        let Scratch {
+            segments,
+            last,
+            matrices,
+            items,
+            groups,
+            sorted: _,
+        } = scratch;
+        [
+            (segments.as_ptr().addr(), segments.capacity()),
+            (last.as_ptr().addr(), last.capacity()),
+            (matrices.as_ptr().addr(), matrices.capacity()),
+            (items.as_ptr().addr(), items.capacity()),
+            (groups.as_ptr().addr(), groups.capacity()),
+        ]
+    }
+
     enum Expected {
-        Sprite(Transform, Sprite),
-        Mesh(Transform, MeshDraw),
+        Sprite(Entity, Transform, Sprite),
+        Mesh(Entity, Transform, MeshDraw),
     }
 
     /// Spawns sprites and meshes at several z's across tables, and checks that they're drawn back
-    /// to front, and at one z in the order queries find them: tables in the order they were made,
-    /// a table's sprites before its meshes, then its rows in order. Two tables' rows alternate
-    /// between two z's, so that dozens of runs share each, enough for a sort that loses that
-    /// order to show it.
+    /// to front, and at one z sprites under meshes, each in the order of their entities' IDs,
+    /// whatever tables they're in. Two tables' rows alternate between two z's, so that dozens of
+    /// runs share each, enough for an order by table or by row to show.
     #[test]
     fn the_world_draws_back_to_front_by_z() {
         let mut shaders = Shaders::default();
@@ -458,49 +600,48 @@ mod tests {
             (at, sprite, MeshDraw::new(triangle, flat, Vec4::splat(next)))
         };
         let mut world = World::default();
-        // In the order of their tables, each table's sprites before its meshes, then its rows.
         let mut expected = Vec::new();
         let alternating = |row: usize| if row.is_multiple_of(2) { 0.5 } else { 0.6 };
         for z in [0.3, 0.1, 0.1].into_iter().chain((0..20).map(alternating)) {
             let (at, sprite, _) = new(z);
-            world.spawn((at, sprite));
-            expected.push(Expected::Sprite(at, sprite));
+            let entity = world.spawn((at, sprite));
+            expected.push(Expected::Sprite(entity, at, sprite));
         }
         for z in (0..20).map(alternating).chain([0.1]) {
             let (at, sprite, _) = new(z);
-            world.spawn((Marked, sprite, at));
-            expected.push(Expected::Sprite(at, sprite));
+            let entity = world.spawn((Marked, sprite, at));
+            expected.push(Expected::Sprite(entity, at, sprite));
         }
         for z in [0.2, 0.1] {
             let (at, _, mesh) = new(z);
-            world.spawn((at, mesh));
-            expected.push(Expected::Mesh(at, mesh));
+            let entity = world.spawn((at, mesh));
+            expected.push(Expected::Mesh(entity, at, mesh));
         }
-        let mut meshes = Vec::new();
-        for z in [0.2, 0.0] {
+        for z in [0.2, 0.0, 0.1] {
             let (at, sprite, mesh) = new(z);
-            world.spawn((at, sprite, mesh));
-            expected.push(Expected::Sprite(at, sprite));
-            meshes.push(Expected::Mesh(at, mesh));
+            let entity = world.spawn((at, sprite, mesh));
+            expected.push(Expected::Sprite(entity, at, sprite));
+            expected.push(Expected::Mesh(entity, at, mesh));
         }
-        expected.append(&mut meshes);
         // Nothing to draw, or nowhere to draw it.
         let (at, sprite, _) = new(0.0);
         world.spawn(at);
         world.spawn(sprite);
 
-        // A stable sort, which keeps that order among each z's.
+        // Back to front; at one z, sprites under meshes, each by ID.
+        let key = |expected: &Expected| match expected {
+            Expected::Sprite(entity, at, _) => (at.translation.z, 0, world.id(*entity)),
+            Expected::Mesh(entity, at, _) => (at.translation.z, 1, world.id(*entity)),
+        };
         expected.sort_by(|a, b| {
-            let z = |expected: &Expected| match expected {
-                Expected::Sprite(at, _) | Expected::Mesh(at, _) => at.translation.z,
-            };
-            z(a).total_cmp(&z(b))
+            let (a, b) = (key(a), key(b));
+            a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2))
         });
         let mut want = Draws::default();
         for expected in &expected {
             match expected {
-                Expected::Sprite(at, sprite) => want.push_sprite(at.matrix(), *sprite),
-                Expected::Mesh(at, mesh) => want.push_draw(at.matrix(), mesh),
+                Expected::Sprite(_, at, sprite) => want.push_sprite(at.matrix(), *sprite),
+                Expected::Mesh(_, at, mesh) => want.push_draw(at.matrix(), mesh),
             }
         }
         let mut draws = Draws::default();
@@ -566,10 +707,12 @@ mod tests {
         }
 
         // Back to front: 0.3, 0.41, 0.43, 0.44, 0.445, 0.45 and 0.5 in the world, each child's
-        // matrix its own, then each ancestor's in turn; at one z, a table's sprites under its
-        // meshes.
+        // matrix its own, then each ancestor's in turn; at one z, sprites under meshes, each in the
+        // order of their IDs.
+        let mut twins = [0, 1].map(|i| (world.id(twins[i]), twins_at[i]));
+        twins.sort_by_key(|&(id, _)| id);
         let [pivot, middle] = [pivot_at.matrix(), middle_at.matrix()];
-        let twins = twins_at.map(|at| pivot * (middle * at.matrix()));
+        let twins = twins.map(|(_, at)| pivot * (middle * at.matrix()));
         let mut want = Draws::default();
         want.push_sprite(low.matrix(), sprite(1.0));
         want.push_sprite(pivot * middle, sprite(4.0));
@@ -589,19 +732,109 @@ mod tests {
         let mut draws = Draws::default();
         draw_world(&world, &mut draws, &mut scratch);
         assert_eq!(draws, want);
-        let held = |scratch: &Scratch| {
-            let Scratch { segments, matrices } = scratch;
-            (
-                segments.as_ptr(),
-                segments.capacity(),
-                matrices.as_ptr(),
-                matrices.capacity(),
-            )
-        };
         let before = held(&scratch);
         let mut again = Draws::default();
         draw_world(&world, &mut again, &mut scratch);
         assert_eq!(again, want);
         assert_eq!(held(&scratch), before, "drawing again takes no more memory");
+    }
+
+    /// Sprites, some with meshes, at one z across four tables, drawn after each change by a scratch
+    /// kept from frame to frame and by a fresh one, which draw the same each time: after nothing,
+    /// which takes no more memory; after the world is replaced by another spawned the same way,
+    /// which has the same tables, rows and z's and as many changes, but other IDs; after entities
+    /// despawned and others spawned in their tables,
+    /// which keep their lengths, so that only which entity is in a row shows; after two entities
+    /// trade tables; after a z is set, which moves no row; and after a spawn and a despawn alone.
+    #[test]
+    fn a_kept_scratch_draws_as_a_fresh_one_does() {
+        let mut shaders = Shaders::default();
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/shaders/flat_color.slang");
+        let flat = shaders
+            .add::<[f32; 3], Vec4>("flat color", &fixture, Blend::Opaque)
+            .expect("the shader compiles");
+        let corners = [[-0.5, -0.5, 0.0], [0.5, -0.5, 0.0], [0.0, 0.5, 0.0]];
+        let triangle = Meshes::default().add("triangle", &corners, &[0, 1, 2]);
+        let triangle = triangle.expect("a mesh");
+        // Each told apart by its x and its color.
+        let mut n = 0.0;
+        let mut spawn = |world: &mut World, meshed: bool, marked: bool| {
+            n += 1.0;
+            let at = Transform {
+                translation: Vec3::new(n, 0.0, 0.5),
+                ..Transform::IDENTITY
+            };
+            let sprite = Sprite {
+                color: Vec4::splat(n),
+                ..Sprite::default()
+            };
+            let mesh = MeshDraw::new(triangle, flat, Vec4::splat(n));
+            match (meshed, marked) {
+                (false, false) => world.spawn((at, sprite)),
+                (true, false) => world.spawn((at, sprite, mesh)),
+                (false, true) => world.spawn((at, sprite, Marked)),
+                (true, true) => world.spawn((at, sprite, mesh, Marked)),
+            }
+        };
+        // The same tables, rows and z's in any world.
+        let mut populate = |world: &mut World| -> Vec<Entity> {
+            (0..12)
+                .map(|i| spawn(world, i % 2 == 0, i % 3 == 0))
+                .collect()
+        };
+        let mut world = World::default();
+        populate(&mut world);
+        let step = |world: &World, kept: &mut Scratch, what: &str| {
+            let mut draws = Draws::default();
+            draw_world(world, &mut draws, kept);
+            let mut fresh = Draws::default();
+            draw_world(world, &mut fresh, &mut Scratch::default());
+            assert_eq!(draws, fresh, "after {what}");
+        };
+        let mut kept = Scratch::default();
+        step(&world, &mut kept, "the first frame");
+        let before = held(&kept);
+        step(&world, &mut kept, "nothing");
+        assert_eq!(held(&kept), before, "drawing again takes no more memory");
+        world = World::default();
+        let mut entities = populate(&mut world);
+        step(&world, &mut kept, "the world replaced");
+        // Each round despawns one entity and spawns another into its table, which keeps its length,
+        // so that the order a stale scratch kept would draw other entities' rows.
+        for round in 0..20 {
+            let gone = entities.swap_remove(round * 7 % entities.len());
+            let meshed = world.get::<MeshDraw>(gone).is_some();
+            let marked = world.get::<Marked>(gone).is_some();
+            world.despawn(gone).expect("alive");
+            entities.push(spawn(&mut world, meshed, marked));
+            step(
+                &world,
+                &mut kept,
+                "one despawned and another spawned in its table",
+            );
+        }
+        let of = |meshed: bool, marked: bool| {
+            let found = entities.iter().copied().find(|&entity| {
+                world.get::<MeshDraw>(entity).is_some() == meshed
+                    && world.get::<Marked>(entity).is_some() == marked
+            });
+            found.expect("one of each")
+        };
+        let (plain, marked, lowered) = (of(false, false), of(false, true), of(true, true));
+        world.insert(plain, Marked).expect("alive");
+        world.remove::<Marked>(marked).expect("alive");
+        step(&world, &mut kept, "two entities trading tables");
+        let z = |world: &mut World, z| {
+            let at = world.get_mut::<Transform>(lowered).expect("placed");
+            at.translation.z = z;
+        };
+        z(&mut world, 0.25);
+        step(&world, &mut kept, "a z set");
+        z(&mut world, 0.5);
+        step(&world, &mut kept, "the z set back");
+        entities.push(spawn(&mut world, true, false));
+        step(&world, &mut kept, "a spawn");
+        world.despawn(entities.swap_remove(1)).expect("alive");
+        step(&world, &mut kept, "a despawn");
     }
 }

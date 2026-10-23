@@ -106,15 +106,23 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   turns, one with a moonlet of its own, and the Inspector shows a child's parent and a parent's
   children; unit tests check the links through table moves, despawns and slots taken again, and
   the model test sets parents at random.
+- **Persistent entity IDs** (2026-10-23): every entity has a persistent ID, a random 64-bit
+  number, written as 16 hex digits, that its world draws as it spawns and never draws again; the
+  world finds each entity by its ID; errors, the Inspector and its log name entities by their IDs,
+  and a handle whose entity is gone by that handle; and at one z, entities draw sprites under
+  meshes, each in the order of their IDs, which they keep as others come and go. The sandbox's
+  panels show IDs; unit tests check IDs through table moves, subtree despawns, and slots taken
+  again and retired, and that drawing kept from frame to frame draws as drawing afresh does, and
+  the model test checks every ID after every step.
 
-## Now: persistent entity IDs
+## Now: scenes and prefabs in canonical text
 
-Phase 3's fourth milestone: every entity gets a persistent ID, random rather than sequential,
-which files, operations, diagnostics and messages name it by, as
-[ARCHITECTURE.md](../ARCHITECTURE.md#project-state) describes; handles stay the world's own.
+Phase 3's fifth milestone: scenes and prefabs saved and loaded as RON in the canonical form
+[ARCHITECTURE.md](../ARCHITECTURE.md#project-state) describes, entities ordered by their IDs and
+a child's `Parent` saved as its parent's ID.
 
-*Done when* the world finds each entity by its ID, and the Inspector and the engine's logs name
-entities by their IDs. Its plan is made when it starts.
+*Done when* a scene saved, loaded and saved again is byte-identical. Its plan is made when it
+starts.
 
 ## Next
 
@@ -193,7 +201,7 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Waiting for the swapchain image before a frame reads input and the time, not after the layers update, which would cut latency by the wait: up to a refresh under `--vsync` | Phase 3, with input actions |
 | Pushing and popping layers while the app runs; `App` fixes the stack before it starts | A tool or game needs a layer for only part of a run |
 | Composed text from an input method (winit's `Ime` events), for languages typed through one | A game takes text input, such as chat |
-| Steady-state frames that draw UI allocate: in egui's layout and tessellation, in the dock's own bookkeeping, which copies each frame's panel and menu names and torn-off windows' titles, and makes its arrangement and its list of groups left to draw anew, and in the Inspector, which reads its rows' names, the picked entity's components as values and its children's handles anew | Phase 4, with the allocation check; the overlay is for development |
+| Steady-state frames that draw UI allocate: in egui's layout and tessellation, in the dock's own bookkeeping, which copies each frame's panel and menu names and torn-off windows' titles, and makes its arrangement and its list of groups left to draw anew, and in the Inspector, which reads its rows' names, the picked entity's components as values and its children's IDs anew | Phase 4, with the allocation check; the overlay is for development |
 | Keeping within the GPU's memory budget (`VK_EXT_memory_budget` through VMA) | Phase 7, with streaming |
 | Removing meshes, shaders and textures; each lasts until the app ends | Something adds and removes them as it runs, such as asset hot reload in Phase 4 |
 | Perspective cameras, and a controller for them; a camera is orthographic, and so is the engine's controller | Phase 4, with depth |
@@ -202,7 +210,7 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Counts of vertices, indices or triangles, which follow from the instances; the renderer counts draws and instances | Phase 4, with glTF meshes |
 | Textures of data rather than color, such as normal maps, which shaders read as stored rather than decoded from sRGB | Phase 6, with PBR's maps |
 | Premultiplied alpha for games' textures: with straight alpha, as PNGs store it, a linear filter at an edge mixes in the color of the transparent pixels beside it | A game's art shows dark or colored fringes |
-| Sorting what blends back to front by depth; the world's entities draw back to front by their z's in the world, and what layers draw themselves in the order given | Phase 4, with depth |
+| Sorting what blends back to front by depth, and what doesn't by its mesh and shader, so that it batches; the world's entities draw back to front by their z's in the world, at one z sprites under meshes, each by ID, so that meshes of different meshes or shaders at one z don't batch, and what layers draw themselves in the order given | Phase 4, with depth |
 | Mipmaps, and anisotropic filtering: a texture drawn smaller than it is samples its one level, and shimmers. A sprite sheet's cells, packed edge to edge, will then mix together at the smaller levels and under anisotropy, which reads past the texels the sprite shader keeps to, and need space around each cell or an array layer each | Phase 4, with the textured glTF mesh |
 | Sprite sheets with space between or around their cells, as some tile sets come; `SpriteSheet` takes cells packed edge to edge from the top left | A game's art comes that way |
 | Tiling one cell of a sheet: a repeating sampler repeats the whole texture | A game tiles part of an atlas, such as a background |
@@ -244,8 +252,7 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Queries that keep the tables they match, and tables that keep where adding or removing each component leads; a query looks over every table, and a change of components finds its table by its types | Tables number in the hundreds, or changes of components show in a profile |
 | Sparse storage for components added and removed often, which move their entity's row between tables | A profile shows those moves |
 | A layer reading the world and drawing in one loop: `Context` lends one at a time | A layer draws from the world itself, such as debug shapes |
-| A tiebreak for entities at one z, which draw in the order queries find them | Persistent IDs, or Phase 4's depth sort |
-| Spawning many entities at once, faster than one by one: the swarm's 100,000 take about 17 ms in release, in one frame | A spawn hitch matters |
+| Spawning many entities at once, faster than one by one: 100,000 sprites take about 16 ms in release, 5.5 ms of it their IDs, and the swarm spawns its 100,000 in one frame | A spawn hitch matters |
 | `MeshDraw` parameters of more than 64 bytes, which draw through `Context::draw` | Phase 6, with materials |
 | Micro-benchmarks, with criterion | A CPU hot path gets a target of its own; batching's is a frame time, which `engine.perf` measures |
 | Gates on time in CI: hosted runners' times vary too much to gate on | A self-hosted runner, as for the GPU tests |
@@ -258,12 +265,19 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Generic types deriving `Reflect` or `Component` | A game needs one |
 | Drag speeds as hints; the Inspector picks them from a field's bounds and kind | A field drags too coarsely or too finely |
 | Paths resolved once and kept, for sets made again and again | Operation logs, or a profile |
-| Picking an entity for a field, a parent or a child picked by clicking it, the Entities panel as a tree, names in the Inspector, and picking in the view; entities are shown by handle | Persistent IDs, or picking |
+| Picking an entity for a field, a parent or a child picked by clicking it, the Entities panel as a tree, names in the Inspector, and picking in the view; entities are shown by their IDs | Picking in the view, prefabs, or Phase 9's scene tree |
 | World transforms stored and propagated after the updates, with change detection; drawing computes each child's from its ancestors, every frame | Physics, or a profile showing the walks up the hierarchy |
 | A world matrix for game code; the engine's drawing computes its own | The camera as a component, or a system that needs a child's place in the world, once the deterministic mode settles its math |
 | Reparenting that keeps where a child is in the world, by decomposing its matrix, which loses any shear; `set_parent` keeps its own transform | The editor's scene tree, or an agent attaching something where it stands |
 | Spawning a child into its table at once: `spawn`, then `set_parent`, moves it to another table | Prefabs, or a profile |
 | Children in an order that means something: reordering them, and saving their order | The editor's scene tree, or UI laid out by the hierarchy |
+| Spawning with a given ID, refused with `ecs.id_taken` if an entity has it; then a drawn ID that's taken reseeds the stream rather than drawing again, since it has walked into another session's run. The two land together, since IDs from files or a restored snapshot can meet ones the world draws | Scenes load IDs, or an operation undoes a delete |
+| Parsing an ID from its text (`ecs.bad_id`), and finding an entity in the Entities panel by an ID pasted in | Scenes write IDs as text, or the tool API |
+| Seeding a world's IDs, and the stream's state in snapshots and the world hash; a seed for authoring is never fixed, or every session would draw the same IDs | The deterministic mode, or snapshots |
+| Each session's seed and count saved with the world and merged with it, so that an ID maps back to its session and when it was drawn, and a load refuses IDs no session drew | Scenes, or the tool API refusing an ID an agent made up |
+| An `EntityId` query term | The first system that reads IDs as it iterates, such as the world hash or replication |
+| Errors carrying their entity as a field, not only in their message | The tool API returns errors as data |
+| Drawing rows at one z in ID order for less. Every frame reads them in that order rather than their tables', about 0.9 ms of the swarm's 4.3 ms frame in release; a frame that changes rows or z's sorts them by ID again, about 2.5 ms more for 100,000; and 100,000 sprites each at a z of their own, as sorting by y gives them, take about 2 ms more than before, for a group and an item each. Tables kept in ID order would make the reads a sweep, and a radix sort the sort quicker | A game's frames need the time |
 
 ## Open questions
 

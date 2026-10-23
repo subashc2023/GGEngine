@@ -116,8 +116,9 @@ impl World {
     /// Fails with `ecs.no_entity` if `child` or `parent` isn't alive, and with `ecs.parent_cycle`
     /// if `parent` is `child` or one of its descendants. A refusal changes nothing.
     pub fn set_parent(&mut self, child: Entity, parent: Option<Entity>) -> Result<Option<Entity>> {
+        let name = self.name_of(child);
         let refused = |error: Error| {
-            let message = format!("can't set entity {child}'s parent: {error}");
+            let message = format!("can't set entity {name}'s parent: {error}");
             error.with_message(message)
         };
         self.locate(child).map_err(refused)?;
@@ -137,10 +138,11 @@ impl World {
                     } else {
                         "one of its descendants"
                     };
+                    let parent = self.name_of(parent);
                     return Err(Error::new(
                         "ecs.parent_cycle",
                         format!(
-                            "can't make entity {child} a child of {parent}, which is {what}: \
+                            "can't make entity {name} a child of {parent}, which is {what}: \
                              an entity is never its own ancestor"
                         ),
                     ));
@@ -275,9 +277,9 @@ pub(super) mod tests {
     use std::num::NonZeroU32;
 
     use super::*;
-    use crate::Transform;
     use crate::reflect::Value;
     use crate::reflect::tests::{same_snapshots, snapshot};
+    use crate::{EntityId, Transform};
 
     #[derive(Clone, Copy, Debug, PartialEq, crate::Component)]
     struct Mark(u32);
@@ -335,9 +337,9 @@ pub(super) mod tests {
     }
 
     /// Every component of every entity, by entity, whichever tables they're in.
-    fn state(world: &World) -> Vec<(Entity, String, Value)> {
+    fn state(world: &World) -> Vec<(Entity, EntityId, String, Value)> {
         let mut state = snapshot(world);
-        state.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+        state.sort_by(|a, b| (a.0, &a.2).cmp(&(b.0, &b.2)));
         state
     }
 
@@ -401,33 +403,48 @@ pub(super) mod tests {
         };
         let before = seen(&world);
         let (root, last) = (chain[0], chain[3]);
+        // Each refusal, and the entities its message names: the living by their IDs alone, and the
+        // dead by their handles.
         let refusals = [
             (
                 root,
                 Some(last),
                 "ecs.parent_cycle",
-                "one of its descendants".to_owned(),
+                "one of its descendants",
+                vec![root, last],
             ),
             (
                 chain[1],
                 Some(chain[2]),
                 "ecs.parent_cycle",
-                "descendants".to_owned(),
+                "descendants",
+                vec![chain[1], chain[2]],
             ),
             (
                 chain[1],
                 Some(chain[1]),
                 "ecs.parent_cycle",
-                "itself".to_owned(),
+                "itself",
+                vec![chain[1]],
             ),
-            (dead, Some(root), "ecs.no_entity", dead.to_string()),
-            (root, Some(dead), "ecs.no_entity", dead.to_string()),
-            (dead, None, "ecs.no_entity", dead.to_string()),
+            (dead, Some(root), "ecs.no_entity", "", vec![dead]),
+            (root, Some(dead), "ecs.no_entity", "", vec![root, dead]),
+            (dead, None, "ecs.no_entity", "", vec![dead]),
         ];
-        for (child, parent, code, says) in refusals {
+        for (child, parent, code, says, named) in refusals {
             let error = world.set_parent(child, parent).expect_err("refused");
             assert_eq!(error.code(), code, "{error}");
-            assert!(error.to_string().contains(&says), "{error}");
+            let message = error.to_string();
+            assert!(message.contains(says), "{message}");
+            for entity in named {
+                match world.id(entity) {
+                    Some(id) => {
+                        assert!(message.contains(&id.to_string()), "{message}");
+                        assert!(!message.contains(&entity.to_string()), "{message}");
+                    }
+                    None => assert!(message.contains(&entity.to_string()), "{message}"),
+                }
+            }
             let after = seen(&world);
             assert!(same_snapshots(&after.0, &before.0), "{error}");
             assert_eq!(after.1, before.1, "{error}");
@@ -482,12 +499,19 @@ pub(super) mod tests {
             world.set_parent(child, Some(parent)).expect("no cycle");
         }
         let after = world.spawn(Mark(7));
+        let id = |entity: Entity| world.id(entity).expect("alive");
+        let subtree = [root, middle, first, second].map(|gone| (gone, id(gone)));
+        let kept = [(top, 0), (other, 1), (bystander, 2), (after, 7)];
+        let kept = kept.map(|(kept, mark)| (kept, id(kept), mark));
         world.despawn(root).expect("alive");
-        for gone in [root, middle, first, second] {
+        for (gone, id) in subtree {
             assert!(!world.contains(gone), "{gone}");
+            assert_eq!(world.entity(id), None, "{gone}'s ID");
         }
-        for (kept, mark) in [(top, 0), (other, 1), (bystander, 2), (after, 7)] {
+        for (kept, id, mark) in kept {
             assert_eq!(world.get::<Mark>(kept), Some(&Mark(mark)), "{kept}");
+            assert_eq!(world.id(kept), Some(id), "{kept}");
+            assert_eq!(world.entity(id), Some(kept), "{kept}");
         }
         assert!(kids(&world, top).is_empty());
         assert_eq!(kids(&world, other), [bystander]);

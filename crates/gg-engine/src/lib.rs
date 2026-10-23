@@ -46,8 +46,8 @@ use chrome::Chrome;
 use dock::Dock;
 pub use dock::Ui;
 pub use ecs::{
-    Bundle, Component, Entities, Entity, Parent, Query, QueryIter, QueryIterMut, ReadOnlyQuery,
-    World, Writable,
+    Bundle, Component, Entities, Entity, EntityId, Parent, Query, QueryIter, QueryIterMut,
+    ReadOnlyQuery, World, Writable,
 };
 /// The UI library layers draw with, in [`Layer::ui`]; apps use it from here, so that they
 /// share the engine's version.

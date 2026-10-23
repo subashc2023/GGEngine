@@ -249,6 +249,16 @@ impl Handler<'_> {
         self.error.get_or_insert(error);
         event_loop.exit();
     }
+
+    /// Asks for a frame, unless the window has no area to render into or the run is ending.
+    fn request_frame(&self, event_loop: &ActiveEventLoop) {
+        if !self.minimized
+            && !event_loop.exiting()
+            && let Some(window) = &self.window
+        {
+            window.request_redraw();
+        }
+    }
 }
 
 impl ApplicationHandler for Handler<'_> {
@@ -270,9 +280,6 @@ impl ApplicationHandler for Handler<'_> {
             && window.id() != id
         {
             viewports.window_event(id, &event, renderer);
-            // Windows doesn't call `about_to_wait` while the user moves or resizes a window, so
-            // frames are requested here as well.
-            window.request_redraw();
             return;
         }
         // egui, the top overlay, sees each event first, and keeps the input it wants: a click
@@ -318,13 +325,17 @@ impl ApplicationHandler for Handler<'_> {
                     width: size.width,
                     height: size.height,
                 });
-                // Windows doesn't call `about_to_wait` while the user drags the window's edge,
-                // so frames are requested here as well.
-                if let Some(window) = &self.window {
-                    window.request_redraw();
-                }
+                // Frames stop while the window has no area, and while the user drags its edge,
+                // Windows doesn't call `about_to_wait` to start them again.
+                self.request_frame(event_loop);
             }
-            WindowEvent::RedrawRequested => self.frame(event_loop),
+            WindowEvent::RedrawRequested => {
+                self.frame(event_loop);
+                // Windows doesn't call `about_to_wait` while it moves or resizes one of the app's
+                // windows, in a loop of its own, so each frame asks for the next. winit calls
+                // `about_to_wait` between two frames otherwise, and the two requests make one.
+                self.request_frame(event_loop);
+            }
             _ if consumed => trace!(?event, "Event kept by the UI"),
             WindowEvent::CloseRequested => self.close(event_loop),
             other => event::convert(&other, |event| {
@@ -333,14 +344,10 @@ impl ApplicationHandler for Handler<'_> {
         }
     }
 
-    fn about_to_wait(&mut self, _: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         // Frames render back to back, paced by presentation: mailbox's to the GPU, FIFO's
         // (`--vsync`) to the display.
-        if !self.minimized
-            && let Some(window) = &self.window
-        {
-            window.request_redraw();
-        }
+        self.request_frame(event_loop);
     }
 
     fn exiting(&mut self, _: &ActiveEventLoop) {
