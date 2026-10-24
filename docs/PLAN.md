@@ -181,12 +181,26 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   `Sprite.color.x`; CI records a headless run and replays it; unit tests check values' text bit
   for bit, a recorded run against command and hash changes and a cut-off copy, the difference and
   the dump, the Inspector's commands, and a restored world simulating the swarm as before.
+- **Input actions** (2026-10-24): a layer's actions, of a type of its own, bind keys, by their
+  position, and mouse buttons as buttons, axes and pairs of axes, a key pair an axis; the layer
+  feeds them the events it's sent, so that one above that handles a press hides it from them, and
+  queues each change of their values as a command of its own as the event comes, which the next
+  tick applies; and what an action holds is a component, so that a tap between two frames
+  applies at one tick, a hold at every tick until its release, and snapshots and replays keep it.
+  The camera controller moves and turns by its actions, which bind to other keys from code. The
+  sandbox's arrows steer its triangle and R reverses its spin, at ticks, in a new live recording
+  that replays to its hashes; unit tests check buttons of several sources, axes adding up and
+  stopping at 1, focus, repeats and refusals, each change applying at the first tick after its
+  event at frame times from 1 to 130 ms, the sandbox's keys queuing as they come, and the camera's
+  keys bound again.
 
-## Now: input actions
+## Now: gamepads
 
-Phase 3's eleventh milestone: input actions, which name what a game does and the keys, buttons and
-axes that do it, for its layers to queue as commands. Its plan is made when it starts, and says
-when it's done.
+Phase 3's twelfth milestone: gamepads, through gilrs, as
+[ARCHITECTURE.md](../ARCHITECTURE.md#technology) has it: their buttons and axes as the engine's
+own events and as the sources of actions, dead zones, the focus rule for every pad, and the camera
+controller's pad bindings, checked by hand with a controller on Windows. Its plan is made when it
+starts, and says when it's done.
 
 ## Next
 
@@ -197,12 +211,12 @@ Each phase ends in something you can run and check.
    with inverses and their log, and whole-world snapshots and restores. A fixed timestep, with
    commands as the only way into the simulation; the deterministic mode, with a world hash per
    tick, recordings and replays, and math that is identical everywhere (glam's `scalar-math`
-   and `libm` features); input actions; a job system. All of it runs headless. *Done when* a
-   scene saved, loaded and saved again is byte-identical; undoing a log of operations gives back
-   the original world's content hash; a restored snapshot matches the world it was taken from;
-   steady-state ticks don't allocate; and a recording replays to the same hashes on all three
-   OSes and both architectures, with a forced divergence reported as its first tick, entity and
-   field.
+   and `libm` features); input actions and gamepads; a job system. All of it runs headless.
+   *Done when* a scene saved, loaded and saved again is byte-identical; undoing a log of
+   operations gives back the original world's content hash; a restored snapshot matches the world
+   it was taken from; steady-state ticks don't allocate; and a recording replays to the same
+   hashes on all three OSes and both architectures, with a forced divergence reported as its first
+   tick, entity and field.
 4. **First mesh.** Uploads of whole assets through the transfer queue, or by host image copy
    where a device has no separate transfer queue; depth; Slang reflection; an on-disk pipeline
    cache; shader hot reload. Render extraction, with the render thread a frame behind
@@ -262,7 +276,7 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | GPU tests in Windows and macOS CI, which skip them because hosted runners there have no GPU | A self-hosted runner with a GPU, or a Vulkan driver that runs on those runners without one |
 | A gate that compiles the shipping configuration: `cargo clippy -p player --all-targets -- -D warnings` | When `gg-engine` gets its `dev` feature |
 | egui, the dock and the Inspector behind `dev`: the player links them and runs an empty UI pass every frame; `Ui`, which `Layer::ui` takes, is the type to turn into a no-op | When `gg-engine` gets its `dev` feature |
-| Waiting for the swapchain image before a frame reads input and the time, not after the layers update, which would cut latency by the wait: up to a refresh under `--vsync` | Phase 3, with input actions |
+| Waiting for the swapchain image before a frame reads input and the time, not after the layers update, which would cut latency by the wait: up to a refresh under `--vsync`. Events come before the frame that reads them, so a wait moved to the frame's start would freshen only its time: the next image has to be acquired after the last frame's present, and held across the event loop | Phase 4, with the render thread |
 | Pushing and popping layers while the app runs; `App` fixes the stack before it starts | A tool or game needs a layer for only part of a run |
 | Composed text from an input method (winit's `Ime` events), for languages typed through one | A game takes text input, such as chat |
 | Steady-state frames that draw UI allocate: in egui's layout and tessellation, in the dock's own bookkeeping, which copies each frame's panel and menu names and torn-off windows' titles, and makes its arrangement and its list of groups left to draw anew, and in the Inspector, which reads its rows' names, the picked entity's components as values and its children's IDs anew | Phase 4, with the allocation check; the overlay is for development |
@@ -288,7 +302,14 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | The camera as a component of an entity, which a scene saves and a parent carries along; layers set the camera through `Context` | Phase 4, with perspective cameras |
 | The game's view in a panel that docks and tabs, and keys reaching the layers only while it has focus, as editors' views do; the view is the central area, and keys reach the layers wherever the pointer is unless one of egui's widgets has focus | A tool in the game's process shows the view among its panels |
 | Converting between the view's pixels and the world, to pick what's under the cursor or zoom toward it; the camera controller zooms about the view's center | Something picks with the mouse, or a tool zooms toward the cursor |
-| The camera controller's keys, W, A, S, D, Q and E, and the mouse wheel, are fixed, and it takes no gamepad | Phase 3, with input actions |
+| The camera controller takes no gamepad | Now: gamepads |
+| Zooming from keys or a gamepad, as a rate beside the wheel's lines; the camera controller zooms by the wheel alone, in its own event handling | A game binds zoom elsewhere |
+| Per-user bindings, kept as RON in the per-user directory beside the dock's layout, and a UI that binds them; a game binds its actions in code | A game ships its settings |
+| Chords, modifiers and triggers, such as Ctrl and a key, a hold or a double tap: there's no modifier state, and Ctrl+Z reaches layers as `ControlLeft` and `KeyZ` | A game binds a combination |
+| Keys' labels, for prompts that show a binding: keys are positions, and the engine drops what a keyboard's layout makes of them | A game shows its bindings |
+| A hold of an axis shorter than a tick, which moves nothing: its two changes apply at one tick | A game needs one, as a flag that the tick clears |
+| An engine type for what an action holds in the world, such as a button's held flag and its presses this tick; each game writes its own component | A second game writes the same |
+| Pressing and setting actions from code, ahead of the commands, and listing a game's actions by name, for the tool API and agents | Phase 5, the tool API |
 | Checking a game's shader against the contract on `Shaders::add` through Slang reflection: its push constants, its resources, and the sizes of its vertex and parameter structs against their types'; until then it's trusted, and validation checks it in debug builds | Phase 4, with Slang reflection |
 | Games' shaders compile with slangc as they're added, so running a game needs the Vulkan SDK | Phase 7, which cooks shaders |
 | A library of assets: shaders and textures load from the paths the game gives, the sandbox giving its source's, and nothing finds one by path or name, so a file added twice loads twice; scenes and the tool API will name them | Phase 4, with assets |

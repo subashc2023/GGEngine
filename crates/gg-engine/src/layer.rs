@@ -60,7 +60,8 @@ pub trait Layer {
     fn update(&mut self, _cx: &mut Context, _dt: Duration) {}
 
     /// Called for each event that the layers above didn't handle. `Break` handles it, so the
-    /// layers below don't see it.
+    /// layers below don't see it; but a release of a key or a mouse button, and the loss of focus,
+    /// reach every layer, so that none is left holding what it saw pressed.
     fn event(&mut self, _cx: &mut Context, _event: &Event<'_>) -> ControlFlow<()> {
         ControlFlow::Continue(())
     }
@@ -543,13 +544,27 @@ impl Stack {
     }
 
     /// Records `event` in the input state that layers poll, then hands it down from the top
-    /// until a layer handles it. `Break` means one did.
+    /// until a layer handles it. `Break` means one did. A release, and the loss of focus, go on to
+    /// the layers below one that handles them, as releases go past the UI, so that none is left
+    /// holding a key or button it saw pressed: a release without its press changes nothing.
     pub(crate) fn event(&mut self, cx: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
         cx.input.record(event);
+        let lets_go = matches!(
+            event,
+            Event::Key { pressed: false, .. }
+                | Event::MouseButton { pressed: false, .. }
+                | Event::Focused(false)
+        );
+        let mut handled = ControlFlow::Continue(());
         for layer in self.layers.iter_mut().rev() {
-            layer.event(cx, event)?;
+            if layer.event(cx, event).is_break() {
+                handled = ControlFlow::Break(());
+                if !lets_go {
+                    break;
+                }
+            }
         }
-        ControlFlow::Continue(())
+        handled
     }
 }
 
@@ -690,7 +705,7 @@ mod tests {
     }
 
     #[test]
-    fn events_go_down_the_stack_until_a_layer_handles_them() {
+    fn events_go_down_the_stack_until_a_layer_handles_them_but_releases_go_on() {
         let mut cx = Context::new(None);
         let (mut stack, calls) = probes(false);
         assert_eq!(
@@ -705,6 +720,28 @@ mod tests {
             ControlFlow::Break(())
         );
         assert_eq!(*calls.borrow(), ["event o", "event b"]);
+
+        // So that the layers below let go too.
+        for lets_go in [
+            Event::Key {
+                key: Key::Space,
+                pressed: false,
+                repeat: false,
+            },
+            Event::MouseButton {
+                button: crate::MouseButton::Left,
+                pressed: false,
+            },
+            Event::Focused(false),
+        ] {
+            let (mut stack, calls) = probes(true);
+            assert_eq!(stack.event(&mut cx, &lets_go), ControlFlow::Break(()));
+            assert_eq!(
+                *calls.borrow(),
+                ["event o", "event b", "event a"],
+                "{lets_go:?}"
+            );
+        }
     }
 
     #[test]

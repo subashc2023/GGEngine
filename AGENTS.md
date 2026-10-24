@@ -88,8 +88,9 @@ a reference to rewrite. Some changes need a new recording, since rewriting the h
 what they break: a change to the sandbox's layers, to a command's type that its lines no longer
 read as, or to what its commands name, the grid scene's types and the field the Inspector sets,
 whose reload and set would then be refused at their ticks. Make one with a windowed run and
-`--record` that uses the panels, File > Reload the grid and the Inspector, undoing and redoing an
-edit, and closes; not File > Save, since the attach reads the grid's scene.
+`--record` that holds the arrows and taps R, uses the panels, File > Reload the grid and the
+Inspector, undoing and redoing an edit, and closes; not File > Save, since the attach reads the
+grid's scene.
 
 CI ([ci.yml](.github/workflows/ci.yml)) runs the four gates on every push, on Windows, Linux
 and macOS, x86-64 and ARM64, and the layering check. Its Linux jobs run the GPU tests and the

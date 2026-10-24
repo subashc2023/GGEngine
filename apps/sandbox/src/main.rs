@@ -12,9 +12,9 @@ use gg_engine::egui::{self, ViewportCommand, ViewportId};
 use gg_engine::math::{self, EulerRot, Quat, Vec2, Vec3, Vec4};
 use gg_engine::reflect::Error;
 use gg_engine::{
-    App, Blend, Camera, Commands, Component, Context, Entity, Event, Key, Layer, MeshDraw,
-    OrthographicCameraController, Projection, Reflect, Sampler, Sprite, SpriteSheet, Tick,
-    Transform, Ui, World,
+    Actions, App, Binding, Blend, Camera, Change, Commands, Component, Context, Entity, Event, Key,
+    Layer, MeshDraw, OrthographicCameraController, Projection, Reflect, Sampler, Source, Sprite,
+    SpriteSheet, Tick, Transform, Ui, World,
 };
 use tracing::{error, info};
 
@@ -57,6 +57,9 @@ const TRIANGLE: [Colored; 3] = [
 
 /// How fast the triangle turns, in radians a second: a quarter turn.
 const TURN_SPEED: f32 = FRAC_PI_2;
+
+/// How fast the arrows move the triangle, in units a second.
+const STEER_SPEED: f32 = 1.0;
 
 // How far forward each part of the scene is, which the engine draws back to front by its z in the
 // world: the map's ground, what stands on it, the swarm, the grid, at 0.2 in its scene, the
@@ -237,6 +240,13 @@ struct Spin {
     speed: f32,
 }
 
+/// Moves an entity, the triangle, as the arrows steer it.
+#[derive(Clone, Copy, Component)]
+struct Steer {
+    /// Where it's going, no longer than 1: a unit vector for one arrow or two, zero for none.
+    heading: Vec2,
+}
+
 /// Registers the sandbox's component types, as a game does before it loads a scene of them.
 fn register(world: &mut World) {
     for registered in [
@@ -245,6 +255,7 @@ fn register(world: &mut World) {
         world.register::<Checkerboard>(),
         world.register::<GridCell>(),
         world.register::<Spin>(),
+        world.register::<Steer>(),
     ] {
         registered.expect("the sandbox's types describe themselves");
     }
@@ -360,6 +371,17 @@ fn spin(world: &mut World, dt: Duration) {
     }
 }
 
+/// Moves each entity that steers along its heading, as far as it goes in `dt`.
+fn steer(world: &mut World, dt: Duration) {
+    for (steer, transform) in world.query_mut::<(&Steer, &mut Transform)>() {
+        // One that isn't going anywhere stays where it is, to a zero's sign.
+        if steer.heading != Vec2::ZERO {
+            let by = steer.heading * STEER_SPEED * dt.as_secs_f32();
+            transform.translation += by.extend(0.0);
+        }
+    }
+}
+
 /// Spawns the map from the cells of `tiles`, 4 by 3 of 16 by 16 pixels, packed edge to edge, of
 /// ground, and of what stands on it with transparent backgrounds: every tile's ground, then what
 /// stands on the tiles, each from the top row.
@@ -416,26 +438,30 @@ fn pick(index: u32, salt: u32) -> f32 {
 /// attaches but for the swarm, at its first tick, the grid loaded from a scene and the moons placed
 /// from a prefab, under a pivot that the triangle carries, which the engine draws back to front by
 /// their z's in the world; the world holds all of the simulation, so that a snapshot of it restores
-/// it, and a recording of the commands replays it. At each
-/// tick, 64 a second whatever the frame rate, the sandbox's systems move the swarm by its drifters
-/// and turn the triangle, its moons and the moonlet by their spins, after the commands its panels
-/// and File menu queued since the last: they resize the swarm, color the grid by its cells, filter
-/// the map and set the checkerboard's sprite, so that what the Inspector sets stays until a panel
-/// changes it, and load the grid again. The triangle is a mesh with a vertex type and shader of the
-/// sandbox's own, and the rest the engine's sprites, so the map, the swarm, the grid and the
-/// checkerboard are one instanced draw, the triangle another, and the moons, the moonlet and the
-/// logo a third. They're drawn over a color that drifts slowly, so that a running sandbox visibly
-/// animates. The engine's camera controller steers the camera: W, A, S and D move it along its own
-/// axes, Q and E turn it left and right, at the same speed whatever the frame rate, and the mouse
-/// wheel zooms it. Shows six panels to dock, beside the engine's Performance panel, which counts
-/// the draws, and its Entities and Inspector panels, which list the entities and edit the picked
-/// one's components: the camera; how many sprites the swarm has; the map's filtering, smooth or
-/// sharp, and buttons that look at the map or back at the swarm; the grid's colors, which can be
-/// picked; the checkerboard's filtering, how many times it repeats, and its tint; and the clear
-/// color, which can be held or picked. Logs the key and mouse presses that reach it, which those on
-/// the panels don't. It polls input too: holding Space pauses the drift, and a panel shows where
-/// the cursor is. The title bar's File menu saves the grid to its scene, loads it again from the
-/// scene, which a refusal of leaves it as it was, and quits.
+/// it, and a recording of the commands replays it. At each tick, 64 a second whatever the frame
+/// rate, the sandbox's systems move the swarm by its drifters, turn the triangle, its moons and the
+/// moonlet by their spins, and move the triangle along its heading, after the commands its panels,
+/// File menu and actions queued since the last: they steer the triangle and reverse its spin,
+/// resize the swarm, color the grid by its cells, filter the map and set the checkerboard's
+/// sprite, so that what the Inspector sets stays until a panel changes it, and load the grid
+/// again. The triangle is a mesh with a vertex type and shader of the sandbox's own, and the rest
+/// the engine's sprites, so the map, the swarm, the grid and the checkerboard are one instanced
+/// draw, the triangle another, and the moons, the moonlet and the logo a third. They're drawn over
+/// a color that drifts slowly, so that a running sandbox visibly animates. The engine's camera
+/// controller steers the camera: W, A, S and D move it along its own axes, Q and E turn it left
+/// and right, at the same speed whatever the frame rate, and the mouse wheel zooms it. The arrows
+/// steer the triangle, a unit a second, and R reverses its spin: the sandbox's actions, whose
+/// changes it queues as commands as they come, so that its ticks move the triangle for as long as
+/// an arrow is held, and reverse it once for each press, however short. Shows six panels to dock,
+/// beside the engine's Performance panel, which counts the draws, and its Entities and Inspector
+/// panels, which list the entities and edit the picked one's components: the camera; how many
+/// sprites the swarm has; the map's filtering, smooth or sharp, and buttons that look at the map or
+/// back at the swarm; the grid's colors, which can be picked; the checkerboard's filtering, how
+/// many times it repeats, and its tint; and the clear color, which can be held or picked. Logs the
+/// key and mouse presses that reach it, which those on the panels don't. It polls input too:
+/// holding Space pauses the drift, and a panel shows where the cursor is. The title bar's File menu
+/// saves the grid to its scene, loads it again from the scene, which a refusal of leaves it as it
+/// was, and quits.
 struct Sandbox {
     time: Duration,
     drift: bool,
@@ -445,12 +471,22 @@ struct Sandbox {
     grid_colors: [[f32; 3]; 2],
     settings: Settings,
     camera: OrthographicCameraController,
+    actions: Actions<Act>,
     /// How many sprites the swarm has, as its panel says.
     swarm: u32,
     /// Spawned once the sandbox attaches.
     scene: Option<Scene>,
-    /// What the panels and the File menu changed since the last tick.
+    /// What the panels, the File menu and the actions changed since the last tick.
     commands: Vec<Command>,
+}
+
+/// What the sandbox's keys do, beside the camera controller's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Act {
+    /// The arrows: which way the triangle goes.
+    Steer,
+    /// R: turns the triangle the other way.
+    Reverse,
 }
 
 /// How the map and the checkerboard are drawn, as their panels say.
@@ -468,10 +504,14 @@ struct Settings {
     tint: [f32; 4],
 }
 
-/// What the sandbox's panels and File menu change of its world, queued as they change it and
-/// applied at its next tick, before its systems: its commands, which a recording keeps.
+/// What the sandbox's panels, File menu and actions change of its world, queued as they change it
+/// and applied at its next tick, before its systems: its commands, which a recording keeps.
 #[derive(Reflect)]
 enum Command {
+    /// Has the triangle go this way, until the next.
+    Steer(Vec2),
+    /// Turns the triangle, but not its moons, the other way.
+    Reverse,
     /// Spawns or despawns drifters until the swarm has this many.
     Swarm(u32),
     /// Colors the grid's squares in these, in linear RGB.
@@ -487,6 +527,15 @@ impl Sandbox {
     fn new() -> Self {
         let mut camera = OrthographicCameraController::new(Self::start());
         camera.rotation = true;
+        let mut actions = Actions::default();
+        let arrows = Binding::Axis2 {
+            x: [Key::ArrowLeft, Key::ArrowRight].map(Source::Key),
+            y: [Key::ArrowDown, Key::ArrowUp].map(Source::Key),
+        };
+        let reverse = Binding::Button(Source::Key(Key::KeyR));
+        let bound = actions.bind(Act::Steer, arrows);
+        let bound = bound.and_then(|()| actions.bind(Act::Reverse, reverse));
+        bound.expect("the sandbox's bindings are each of one kind, of other keys");
         Self {
             time: Duration::ZERO,
             drift: true,
@@ -501,6 +550,7 @@ impl Sandbox {
                 tint: [1.0, 0.8, 0.8, 1.0],
             },
             camera,
+            actions,
             swarm: SWARM_START,
             scene: None,
             commands: Vec::new(),
@@ -607,7 +657,10 @@ impl Layer for Sandbox {
             ..Transform::IDENTITY
         };
         let spin = Spin { speed: TURN_SPEED };
-        let triangle = world.spawn((at, MeshDraw::new(mesh, shader, ()), spin));
+        let steer = Steer {
+            heading: Vec2::ZERO,
+        };
+        let triangle = world.spawn((at, MeshDraw::new(mesh, shader, ()), spin, steer));
         let (moons, path) = read_scene("moons.ron");
         let placed = world.place_prefab(&moons, Some(triangle));
         placed.unwrap_or_else(|error| panic!("{}:{error}", path.display()));
@@ -639,6 +692,16 @@ impl Layer for Sandbox {
         let mut swarm = None;
         for command in commands.drain(..) {
             match command {
+                Command::Steer(heading) => {
+                    for steer in world.query_mut::<&mut Steer>() {
+                        steer.heading = heading;
+                    }
+                }
+                Command::Reverse => {
+                    for (_, spin) in world.query_mut::<(&Steer, &mut Spin)>() {
+                        spin.speed = -spin.speed;
+                    }
+                }
                 Command::Swarm(count) => swarm = Some(count),
                 Command::GridColors(colors) => color_grid(world, colors),
                 Command::Settings(settings) => self.apply_settings(world, settings),
@@ -652,6 +715,7 @@ impl Layer for Sandbox {
         }
         drift(world, t);
         spin(world, Tick::DT);
+        steer(world, Tick::DT);
     }
 
     fn commands(&mut self) -> Option<&mut dyn Commands> {
@@ -670,6 +734,15 @@ impl Layer for Sandbox {
 
     fn event(&mut self, cx: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
         self.camera.event(cx, event)?;
+        // Queued now, rather than at the next update, so that the next tick applies them.
+        let Self {
+            actions, commands, ..
+        } = self;
+        actions.event(event, |change| match change {
+            Change::Axis2(Act::Steer, heading) => commands.push(Command::Steer(heading)),
+            Change::Pressed(Act::Reverse) => commands.push(Command::Reverse),
+            _ => {}
+        });
         match *event {
             Event::Key {
                 key,
@@ -907,6 +980,39 @@ mod tests {
         assert_eq!(swarm(&world), before[..2]);
     }
 
+    /// The arrows and R queue their changes as commands as they come, rather than at the next
+    /// update, so that the frame's ticks apply them: the arrows each heading they make, and R a
+    /// reverse for each press, not for its repeats or its release.
+    #[test]
+    fn its_keys_queue_commands_as_they_come() {
+        let mut cx = Context::seeded(0x5eed);
+        let mut sandbox = Sandbox::new();
+        let key = |key, pressed, repeat| Event::Key {
+            key,
+            pressed,
+            repeat,
+        };
+        for event in [
+            key(Key::ArrowRight, true, false),
+            key(Key::ArrowUp, true, false),
+            key(Key::KeyR, true, false),
+            key(Key::KeyR, true, true),
+            key(Key::KeyR, false, false),
+            key(Key::ArrowRight, false, false),
+        ] {
+            assert_eq!(sandbox.event(&mut cx, &event), ControlFlow::Continue(()));
+        }
+        // Each steer's heading, and `None` for a reverse.
+        let queued = sandbox.commands.iter().map(|command| match *command {
+            Command::Steer(heading) => Some(heading),
+            Command::Reverse => None,
+            _ => panic!("the keys queue steers and reverses alone"),
+        });
+        let diagonal = Vec2::ONE.clamp_length_max(1.0);
+        let expected = [Some(Vec2::X), Some(diagonal), None, Some(Vec2::Y)];
+        assert_eq!(queued.collect::<Vec<_>>(), expected);
+    }
+
     /// The live recording, `tests/references/live.recording`, of a windowed run whose panels and
     /// Inspector were used, replays without a GPU to the hashes it recorded, as the deterministic
     /// mode needs, in a debug build as in a release one and on every platform.
@@ -996,10 +1102,11 @@ mod tests {
         assert_eq!(difference.theirs, Some(gg_engine::reflect::Value::F32(new)));
     }
 
-    /// A world restored from a snapshot simulates the swarm as it did from there, through a resize:
-    /// the sandbox keeps none of the swarm, which the world holds.
+    /// A world restored from a snapshot simulates as it did from there, through a resize of the
+    /// swarm, a steer of the triangle and a reverse of its spin: the sandbox keeps none of the
+    /// swarm, or of where the triangle is going, which the world holds.
     #[test]
-    fn a_restored_world_simulates_the_swarm_as_before() {
+    fn a_restored_world_simulates_as_before() {
         let mut cx = Context::seeded(0x5eed);
         let mut sandbox = Sandbox {
             swarm: 1_000,
@@ -1008,13 +1115,21 @@ mod tests {
         sandbox.attach(&mut cx);
         let world = cx.world_mut();
         for number in 0..64 {
+            // Going up and right as the snapshot is taken.
+            if number == 32 {
+                let heading = Vec2::ONE.normalize();
+                sandbox.commands.push(Command::Steer(heading));
+            }
             sandbox.tick(world, Tick { number });
         }
         let snapshot = world.clone();
         let run = |sandbox: &mut Sandbox, world: &mut World| {
             let hashes = (64..128).map(|number| {
-                if number == 96 {
-                    sandbox.commands.push(Command::Swarm(250));
+                match number {
+                    72 => sandbox.commands.push(Command::Reverse),
+                    80 => sandbox.commands.push(Command::Steer(-Vec2::X)),
+                    96 => sandbox.commands.push(Command::Swarm(250)),
+                    _ => {}
                 }
                 sandbox.tick(world, Tick { number });
                 world.hash()
@@ -1079,10 +1194,12 @@ mod tests {
             let world = cx.world_mut();
             match number {
                 32 => sandbox.commands.push(Command::Swarm(1_500)),
+                48 => sandbox.commands.push(Command::Steer(Vec2::X)),
                 64 => {
                     let colors = [[0.9, 0.6, 0.1], [0.1, 0.6, 0.9]];
                     sandbox.commands.push(Command::GridColors(colors));
                 }
+                80 => sandbox.commands.push(Command::Steer(Vec2::ZERO)),
                 96 => sandbox.commands.push(Command::Swarm(250)),
                 // An infinite spin, which turns the drifter by a NaN that an invalid operation
                 // makes, whose sign each CPU gives it, and the hash takes as one.
@@ -1108,6 +1225,7 @@ mod tests {
                     let colors = sandbox.grid_colors;
                     sandbox.commands.push(Command::ReloadGrid { text, colors });
                 }
+                176 => sandbox.commands.push(Command::Reverse),
                 192 => sandbox.commands.push(Command::Swarm(1_000)),
                 _ => {}
             }

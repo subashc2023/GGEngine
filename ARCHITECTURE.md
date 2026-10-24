@@ -359,9 +359,10 @@ from the bottom up. Once they've attached, the world changes only there: `Contex
 panics outside attaching and detaching, and a tick is given the world but not the `Context`, so
 that it goes by the world, its commands and what its layer set up, never by the frame's time,
 input or drawing. A replay runs the ticks alone, with no update, UI or event between them, so a
-layer keeps between ticks only what it set up as it attached and its queue, and the world holds
-the rest of the simulation, as a snapshot restores it: the sandbox finds its swarm by its
-drifters' indexes. The Inspector's log is the exception, which a replay from the attach rebuilds
+layer keeps between ticks only what it set up as it attached and its queue, its actions being the
+frame's, as its UI is, and the world holds the rest of the simulation, as a snapshot restores it:
+the sandbox finds its swarm by its drifters' indexes, and which way its triangle goes in a
+component. The Inspector's log is the exception, which a replay from the attach rebuilds
 from the recorded edits; it can't be a component, since its inverses hold typed columns tied to
 the world they were made in. Operations are the commands of authoring: the Inspector's edits,
 undos and redos wait for its next tick, its panel drawing a field set as the set will make it
@@ -405,9 +406,10 @@ them. Each layer attaches when the app starts and detaches when it ends, ticks w
 simulation, as [ECS](#ecs) describes, updates every frame with the time since the last, for what's
 presented, handles events and draws UI. Frames pause while the main window is minimized, and the
 first update after it's restored is given no time, rather than the length of the pause. An event
-goes down the stack from the top overlay until a layer handles it; ticks, updates and UI go up
-from the bottom. Headless runs have no window events, but their layers tick, update and draw UI
-all the same.
+goes down the stack from the top overlay until a layer handles it, but for a key's or a button's
+release and the loss of focus, which go to every layer, so that none is left holding what it saw
+pressed; ticks, updates and UI go up from the bottom. Headless runs have no window events, but
+their layers tick, update and draw UI all the same.
 
 egui, the engine's immediate-mode UI, is the top overlay: it sees every event first and keeps
 those it wants, such as a click on one of its panels, and `gg-renderer` draws its meshes over
@@ -444,16 +446,24 @@ its own buttons and the edges. Games keep the OS's frame. A menu quits by sendin
 to the main window, which, like the OS's close button, gives the layers `CloseRequested` first;
 egui's own Ctrl or Cmd+Q is off, since a game may use those keys.
 
-Layers can also poll input, through their `Context` rather than a global: which keys and mouse
-buttons are held, and where the cursor is. That state follows the events the stack is sent, so
-input the UI keeps doesn't count, and a press and release between two frames never shows as
-held. Losing focus lets go of everything, since not every platform reports the releases that
-come while the window is out of focus, and a key already down as it regains focus counts from
-its next press.
+Layers can also poll input, through their `Context` rather than a global, for what's presented:
+which keys and mouse buttons are held, and where the cursor is. That state follows the events the
+stack is sent, before any layer handles them, so input the UI keeps doesn't count, and a press
+and release between two frames never shows as held. Losing focus lets go of everything, since not
+every platform reports the releases that come while the window is out of focus, and a key
+already down as it regains focus counts from its next press, or from its first repeat.
 
-Layers run on the main thread with the event loop. Input that reaches a game's layer enters the
-simulation as its commands, which its next tick applies, as [ECS](#ecs) describes: a tick polls no
-input, so that a press between two ticks isn't lost.
+A game names what it does as actions, which a layer binds to keys, by their position, and mouse
+buttons: buttons, axes, such as a key pair, and pairs of axes, which go as far diagonally as
+straight. The layer feeds its actions the events it's sent, so that a layer above that handles a
+press hides it from them, and queues each change of an action's value as a command of its own as
+the event comes, rather than at its update, so that the next tick applies it. Repeats don't count,
+so a key already down as the window regains focus counts from its next press. Layers run on the
+main thread with the event loop, and input enters the simulation only so, as [ECS](#ecs)
+describes: a tick polls no input, and what an action holds, such as which way a player is going,
+is a component that its commands set, so that a tap between two frames applies at one tick, a hold
+at every tick until its release, and snapshots and replays keep it. A recording holds the actions'
+changes, never keys, so binding them to others changes none.
 
 ## World space
 

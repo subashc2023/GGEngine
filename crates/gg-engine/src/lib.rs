@@ -1,18 +1,20 @@
 //! What apps build on: the main loop, which steps the simulation at a fixed rate whatever the frame
-//! rate, window and input, and layers, which change the world at its ticks, and their UI; the world
-//! of entities and their components, which it draws, handing each frame's render data to
-//! `gg-renderer`; reflection, which describes the components' types so that tools reach them by
-//! name, and the Inspector, which edits them; scenes and prefabs, the world's entities as canonical
-//! text; operations, the authoring changes made to the world, each with its inverse, and their log,
-//! which undoes and redoes them; recordings of runs, the commands their ticks applied, which replay
-//! without a GPU to the same world, naming where one goes another way; and measuring each frame,
-//! for the log and the Performance panel. Assets to come.
+//! rate, window and input, and the actions that name what a game does with it, and layers, which
+//! change the world at its ticks, and their UI; the world of entities and their components, which
+//! it draws, handing each frame's render data to `gg-renderer`; reflection, which describes the
+//! components' types so that tools reach them by name, and the Inspector, which edits them; scenes
+//! and prefabs, the world's entities as canonical text; operations, the authoring changes made to
+//! the world, each with its inverse, and their log, which undoes and redoes them; recordings of
+//! runs, the commands their ticks applied, which replay without a GPU to the same world, naming
+//! where one goes another way; and measuring each frame, for the log and the Performance panel.
+//! Assets to come.
 //!
 //! An app's `main` starts the engine; there is no separate entry-point crate.
 
 // So that the derives' code, which names `::gg_engine`, works here too.
 extern crate self as gg_engine;
 
+mod actions;
 mod args;
 mod camera;
 mod chrome;
@@ -45,8 +47,9 @@ use gg_core::Result;
 use gg_renderer::{Renderer, Settings, Validation, Viewport};
 use tracing::{debug, error, info};
 
+pub use actions::{Actions, Binding, Change, Source};
 use args::Args;
-pub use camera::OrthographicCameraController;
+pub use camera::{CameraAction, OrthographicCameraController};
 use chrome::Chrome;
 use dock::Dock;
 pub use dock::Ui;
@@ -595,6 +598,7 @@ impl Ran {
 mod tests {
     use std::cell::{Cell, RefCell};
     use std::f32::consts::FRAC_PI_2;
+    use std::ops::ControlFlow;
     use std::rc::Rc;
 
     use gg_core::math::{Mat4, Quat, Vec4};
@@ -690,6 +694,98 @@ mod tests {
         }
     }
 
+    /// What [`Pilot`]'s keys do.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Act {
+        Push,
+        Tap,
+    }
+
+    /// A command of [`Pilot`]'s: a change of one of its actions.
+    #[derive(Reflect)]
+    enum Control {
+        Push(f32),
+        Tap,
+    }
+
+    /// What [`Pilot`]'s commands leave: how it's pushed, how many ticks it was pushed at, and its
+    /// taps.
+    #[derive(Clone, Copy, Component)]
+    struct Piloted {
+        push: f32,
+        pushed: u32,
+        taps: u32,
+    }
+
+    /// Pushes its entity while the left or the right arrow is held, and counts Space's taps,
+    /// queuing its actions' changes as its events come, and noting the tick each applies at.
+    struct Pilot {
+        actions: Actions<Act>,
+        commands: Vec<Control>,
+        applied: Rc<RefCell<Vec<u64>>>,
+    }
+
+    impl Pilot {
+        fn new(applied: Rc<RefCell<Vec<u64>>>) -> Self {
+            let mut actions = Actions::default();
+            let push = Binding::Axis {
+                negative: Source::Key(Key::ArrowLeft),
+                positive: Source::Key(Key::ArrowRight),
+            };
+            let tap = Binding::Button(Source::Key(Key::Space));
+            let bound = actions.bind(Act::Push, push);
+            bound
+                .and_then(|()| actions.bind(Act::Tap, tap))
+                .expect("bound");
+            Self {
+                actions,
+                commands: Vec::new(),
+                applied,
+            }
+        }
+    }
+
+    impl Layer for Pilot {
+        fn attach(&mut self, cx: &mut Context) {
+            cx.world_mut().spawn(Piloted {
+                push: 0.0,
+                pushed: 0,
+                taps: 0,
+            });
+        }
+
+        fn tick(&mut self, world: &mut World, tick: Tick) {
+            let mut piloted = world.query_mut::<&mut Piloted>();
+            let piloted = piloted.next().expect("the pilot's entity");
+            for command in self.commands.drain(..) {
+                match command {
+                    Control::Push(by) => piloted.push = by,
+                    Control::Tap => piloted.taps += 1,
+                }
+                self.applied.borrow_mut().push(tick.number);
+            }
+            if piloted.push != 0.0 {
+                piloted.pushed += 1;
+            }
+        }
+
+        fn commands(&mut self) -> Option<&mut dyn Commands> {
+            Some(&mut self.commands)
+        }
+
+        fn event(&mut self, _: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
+            let Self {
+                actions, commands, ..
+            } = self;
+            actions.event(event, |change| match change {
+                Change::Axis(Act::Push, by) => commands.push(Control::Push(by)),
+                Change::Pressed(Act::Tap) => commands.push(Control::Tap),
+                _ => {}
+            });
+            ControlFlow::Continue(())
+        }
+    }
+
     #[test]
     fn the_simulation_steps_at_a_fixed_rate_whatever_the_frame_rate() {
         let ms = Duration::from_millis;
@@ -734,7 +830,18 @@ mod tests {
 
     /// A run of `app` recorded as it goes, frames `frames` apart, as a windowed run steps them:
     /// its recording, the ticks it ran, and its world's hash as it ended.
-    fn recorded(mut app: App, frames: &[Duration]) -> (String, u64, WorldHash) {
+    fn recorded(app: App, frames: &[Duration]) -> (String, u64, WorldHash) {
+        let (text, ticks, world) = recorded_with(app, frames, |_, _, _| {});
+        (text, ticks, world.hash())
+    }
+
+    /// As [`recorded`], with `between` sending the stack events before each frame, given the ticks
+    /// run before it; and the world as it ended.
+    fn recorded_with(
+        mut app: App,
+        frames: &[Duration],
+        mut between: impl FnMut(&mut Stack, &mut Context, u64),
+    ) -> (String, u64, World) {
         let path = std::env::temp_dir().join(format!(
             "gg-engine-test-{}-{:?}.recording",
             std::process::id(),
@@ -746,15 +853,33 @@ mod tests {
         app.stack.attach(&mut cx);
         let mut stepper = Stepper::default();
         for &dt in frames {
+            between(&mut app.stack, &mut cx, stepper.ticks);
             stepper.step(dt, |tick| app.stack.tick(&mut cx, tick), || Duration::ZERO);
             app.stack.update(&mut cx, dt);
         }
-        let ended = cx.world().hash();
+        let ended = cx.world().clone();
         app.stack.detach(&mut cx);
         app.stack.recorded().expect("written");
         let text = std::fs::read_to_string(&path).expect("written");
         std::fs::remove_file(&path).expect("removed");
         (text, stepper.ticks, ended)
+    }
+
+    /// A replay of `text` by `app` to its end: the ticks it ran and its world's hash, or the ticks
+    /// it ran before the error it stopped at.
+    fn replay_all(app: App, text: &str) -> Result<(u64, WorldHash), (u64, gg_core::Error)> {
+        let mut replay = Replay::new(app, text).map_err(|error| (0, error))?;
+        let mut ticks = 0;
+        loop {
+            match replay.step() {
+                Ok(Some(tick)) => {
+                    assert_eq!(tick.number, ticks);
+                    ticks += 1;
+                }
+                Ok(None) => return Ok((ticks, replay.world().hash())),
+                Err(error) => return Err((ticks, error)),
+            }
+        }
     }
 
     /// `text` with its line `at`, from 0, in place of `line`.
@@ -785,20 +910,7 @@ mod tests {
             "the last update's waits for a tick: {text}"
         );
 
-        let replayed = |text: &str| {
-            let mut replay = Replay::new(app(), text).unwrap_or_else(|error| panic!("{error}"));
-            let mut ticks = 0;
-            loop {
-                match replay.step() {
-                    Ok(Some(tick)) => {
-                        assert_eq!(tick.number, ticks);
-                        ticks += 1;
-                    }
-                    Ok(None) => return Ok((ticks, replay.world().hash())),
-                    Err(error) => return Err((ticks, error)),
-                }
-            }
-        };
+        let replayed = |text: &str| replay_all(app(), text);
         assert_eq!(replayed(&text).ok(), Some((ticks, ended)));
         assert_eq!(Replay::rewrite(app(), &text).expect("rewritten"), text);
 
@@ -831,6 +943,69 @@ mod tests {
         let cut = whole + &lines[hash][..10];
         let (ticks, _) = replayed(&cut).unwrap_or_else(|(_, error)| panic!("{error}"));
         assert_eq!(ticks, tick + 1);
+    }
+
+    /// A layer's actions, fed key events between frames of a rate of their own, change at the
+    /// first tick after the events come, as the commands its event queues: an axis is held at every
+    /// tick until its release, from either key, a tap shorter than a frame applies once, and a
+    /// repeat, a release without its press and a key not bound queue none; and the run replays to
+    /// its hashes.
+    #[test]
+    fn actions_change_at_the_first_tick_after_their_events() {
+        let ms = Duration::from_millis;
+        let key = |key, pressed| Event::Key {
+            key,
+            pressed,
+            repeat: false,
+        };
+        let repeat = Event::Key {
+            key: Key::ArrowRight,
+            pressed: true,
+            repeat: true,
+        };
+        // After how many ticks each event comes, and whether the layer queues a command for it:
+        // not for Space's release, which it doesn't apply.
+        let script = [
+            (4, key(Key::ArrowRight, true), true),
+            (6, repeat, false),
+            (12, key(Key::ArrowRight, false), true),
+            (20, key(Key::Space, true), true),
+            (20, key(Key::Space, false), false),
+            (24, key(Key::Space, false), false),
+            (30, key(Key::ArrowLeft, true), true),
+            (34, key(Key::KeyW, true), false),
+            (40, Event::Focused(false), true),
+        ];
+        let app = |applied| App::new("Piloted").layer(Pilot::new(applied));
+        for frame in [ms(1), ms(10), ms(40), ms(130)] {
+            let count = (Tick::DT * 50).as_nanos().div_ceil(frame.as_nanos());
+            let frames = vec![frame; count as usize];
+            let applied = Rc::new(RefCell::new(Vec::new()));
+            let (mut next, mut arrived) = (0, Vec::new());
+            let between = |stack: &mut Stack, cx: &mut Context, ran| {
+                while let Some(&(after, event, changes)) = script.get(next)
+                    && after <= ran
+                {
+                    let _ = stack.event(cx, &event);
+                    if changes {
+                        arrived.push(ran);
+                    }
+                    next += 1;
+                }
+            };
+            let (text, ticks, world) = recorded_with(app(applied.clone()), &frames, between);
+            assert_eq!(next, script.len(), "each event came, at {frame:?}");
+            assert_eq!(*applied.borrow(), arrived, "at {frame:?}");
+            let [pushed, let_go, _, left, unfocused] = arrived[..] else {
+                panic!("{arrived:?} at {frame:?}");
+            };
+            let piloted = world.query::<&Piloted>().next().copied();
+            let piloted = piloted.map(|p| (p.push, u64::from(p.pushed), p.taps));
+            let pushed = let_go - pushed + unfocused - left;
+            assert_eq!(piloted, Some((0.0, pushed, 1)), "at {frame:?}");
+            let replayed = replay_all(app(Rc::default()), &text);
+            assert_eq!(replayed.ok(), Some((ticks, world.hash())), "at {frame:?}");
+        }
     }
 
     /// A recording of an app without layers, as the player is, replays too.
