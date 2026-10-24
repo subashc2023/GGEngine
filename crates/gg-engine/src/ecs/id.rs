@@ -162,6 +162,12 @@ impl World {
         self.by_id.get(&id).copied()
     }
 
+    /// Where the stream the world draws its IDs from is, which a world seeded with it goes on
+    /// from: its seed, until it draws one.
+    pub(crate) fn stream_state(&self) -> u64 {
+        self.stream.state()
+    }
+
     /// How diagnostics name `entity`: by its ID while it's alive, and by its handle once it isn't,
     /// since then it has none.
     pub(super) fn name_of(&self, entity: Entity) -> Named {

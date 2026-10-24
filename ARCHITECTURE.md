@@ -218,19 +218,30 @@ The world lives in our own ECS, built for what the tools, hot reload and multipl
 - **Snapshots:** the whole world can be saved and restored fast enough to take one every
   frame, for rollback and client-side prediction as well as hot reload.
 - **Commands:** nothing outside the simulation changes its state except a command applied at a
-  tick: player input, a network message or an [operation](#project-state). A run's seed and the
-  commands after its app attaches make a recording, which replays it without a GPU, for bug
-  reports an agent can rerun, as a snapshot and the commands after it replay from there, for
-  rollback; so a command is data, never a closure.
+  tick: player input, a network message or an [operation](#project-state). Each layer queues its
+  own, which the engine reads and fills as reflection's values at each tick through
+  `Layer::commands`: a `Vec` of a reflected type, or a queue that maps its own, as the Inspector's
+  does.
+  A recorded run (`--record`) writes its seed, each layer's commands just before its tick applies
+  them, with the entities they hold by their IDs, and the world's hash after each tick, a line at a
+  time, so that a run that crashes or is killed keeps what it ran. A replay (`--replay`) runs the
+  ticks again alone, without a window or a GPU, each layer's with the commands recorded for it in
+  place of its own, for bug reports an agent can rerun; it refuses a recording of another format,
+  app or stack of layers, and replays one from another build, naming both builds where it goes
+  another way. A snapshot and the commands after it will replay from there, for rollback; so a
+  command is data, never a closure.
 - **A deterministic mode:** the fixed timestep, a fixed order of systems and of iteration, and
   math that gives identical results on every platform, so lockstep games and rollback netcode
   stay in sync. So glam is built without SIMD, whose SSE2 and NEON paths add in different orders
   and fuse multiplications with additions only on ARM, and with libm's functions in place of the
   platform's C math library: for the whole build, drawing too, since Cargo merges features. And
   clippy refuses std's float methods whose precision is the platform's across the workspace
-  ([clippy.toml](clippy.toml)), for `gg_core::math`'s. A deterministic run hashes the world every
-  tick, so two runs or two machines find the first tick where they diverge, and comparing their
-  snapshots through reflection names the entity and field that differ.
+  ([clippy.toml](clippy.toml)), for `gg_core::math`'s. A recorded run hashes the world once its
+  layers attach and after every tick, so that its replay, on another machine or after a change,
+  finds the first tick where it goes another way. `World::difference`, which walks two worlds
+  field by field and tells values apart as the hash does, names the entity and field in one
+  process; across two machines, `--dump` writes the world there a field a line, and the two dumps
+  diff to them.
 
 Each game picks its own network model, such as an authoritative server, lockstep or
 peer-to-peer rollback; the engine supplies these pieces.
@@ -347,9 +358,15 @@ since its last, data of its own, in the order it queued them, then runs its syst
 from the bottom up. Once they've attached, the world changes only there: `Context::world_mut`
 panics outside attaching and detaching, and a tick is given the world but not the `Context`, so
 that it goes by the world, its commands and what its layer set up, never by the frame's time,
-input or drawing. Operations are the commands of authoring: the Inspector's edits, undos and
-redos wait for its next tick, its panel drawing a field set as the set will make it until then,
-and a refusal and the Edit menu's names show from the tick.
+input or drawing. A replay runs the ticks alone, with no update, UI or event between them, so a
+layer keeps between ticks only what it set up as it attached and its queue, and the world holds
+the rest of the simulation, as a snapshot restores it: the sandbox finds its swarm by its
+drifters' indexes. The Inspector's log is the exception, which a replay from the attach rebuilds
+from the recorded edits; it can't be a component, since its inverses hold typed columns tied to
+the world they were made in. Operations are the commands of authoring: the Inspector's edits,
+undos and redos wait for its next tick, its panel drawing a field set as the set will make it
+until then, and a refusal and the Edit menu's names show from the tick; it queues no seal that
+would end no edit, so that frames that change nothing queue nothing.
 
 ## Diagnostics
 

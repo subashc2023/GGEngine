@@ -2,10 +2,12 @@
 //! kept in archetype tables, a table for each set of component types, and found by queries, or by
 //! name; entities' persistent IDs; the hierarchy, in which entities' parents carry their children
 //! along; scenes, the world's entities as text; operations, the authoring changes made to it, each
-//! with its inverse, and their log; snapshots, the world copied whole, which restore it; and the
-//! world's hash, of what it holds and how, which two runs compare at each tick.
+//! with its inverse, and their log; snapshots, the world copied whole, which restore it; the
+//! world's hash, of what it holds and how, which two runs compare at each tick; and what tells two
+//! worlds apart, field by field.
 
 mod by_name;
+mod diff;
 mod hash;
 mod hierarchy;
 mod id;
@@ -28,6 +30,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use gg_core::{Error, Result};
 
 pub use by_name::Entities;
+pub use diff::Difference;
 pub use hash::{Digest, WorldHash};
 use hierarchy::Links;
 pub use hierarchy::Parent;
@@ -36,6 +39,7 @@ use id::IdStream;
 pub use log::Log;
 pub use ops::Operation;
 pub use query::{Query, QueryIter, QueryIterMut, ReadOnlyQuery};
+pub(crate) use scene::{MAX_DEPTH, float, quote};
 use table::{AnyColumn, ComponentId, Components, Row, Table};
 
 use crate::reflect::Reflect;
@@ -98,6 +102,15 @@ pub struct Entity {
     index: u32,
     /// Which use of the slot it is.
     generation: NonZeroU32,
+}
+
+impl Entity {
+    /// A handle that names no entity in any world, for one that's dead where it's read: its slot is
+    /// the one the hierarchy keeps for none, which no entity takes.
+    pub(crate) const DEAD: Self = Self {
+        index: u32::MAX,
+        generation: NonZeroU32::MIN,
+    };
 }
 
 impl fmt::Display for Entity {

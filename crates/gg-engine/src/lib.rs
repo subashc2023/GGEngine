@@ -4,8 +4,9 @@
 //! `gg-renderer`; reflection, which describes the components' types so that tools reach them by
 //! name, and the Inspector, which edits them; scenes and prefabs, the world's entities as canonical
 //! text; operations, the authoring changes made to the world, each with its inverse, and their log,
-//! which undoes and redoes them; and measuring each frame, for the log and the Performance panel.
-//! Assets to come.
+//! which undoes and redoes them; recordings of runs, the commands their ticks applied, which replay
+//! without a GPU to the same world, naming where one goes another way; and measuring each frame,
+//! for the log and the Performance panel. Assets to come.
 //!
 //! An app's `main` starts the engine; there is no separate entry-point crate.
 
@@ -24,6 +25,7 @@ mod input;
 mod inspector;
 mod layer;
 mod perf;
+mod recording;
 pub mod reflect;
 mod transform;
 mod viewports;
@@ -49,8 +51,8 @@ use chrome::Chrome;
 use dock::Dock;
 pub use dock::Ui;
 pub use ecs::{
-    Bundle, Component, Entities, Entity, EntityId, Log, Operation, Parent, Query, QueryIter,
-    QueryIterMut, ReadOnlyQuery, World, WorldHash, Writable,
+    Bundle, Component, Difference, Entities, Entity, EntityId, Log, Operation, Parent, Query,
+    QueryIter, QueryIterMut, ReadOnlyQuery, World, WorldHash, Writable,
 };
 /// The UI library layers draw with, in [`Layer::ui`]; apps use it from here, so that they
 /// share the engine's version.
@@ -75,9 +77,12 @@ pub use gg_renderer::{
 pub use input::Input;
 pub use inspector::Inspector;
 use layer::Stack;
-pub use layer::{Context, Layer, Tick, Window};
+pub use layer::{Commands, Context, Layer, Tick, Window};
 pub use perf::PerfPanel;
 use perf::{Perf, Summary};
+use recording::Recorder;
+#[doc(hidden)]
+pub use recording::Replay;
 pub use reflect::Reflect;
 pub use transform::Transform;
 use viewports::Drawn;
@@ -109,14 +114,14 @@ impl App {
     /// Adds a layer above the layers added before it, and below every overlay.
     #[must_use]
     pub fn layer(mut self, layer: impl Layer + 'static) -> Self {
-        self.stack.push_layer(Box::new(layer));
+        self.stack.push_layer(layer);
         self
     }
 
     /// Adds an overlay above everything added before it.
     #[must_use]
     pub fn overlay(mut self, overlay: impl Layer + 'static) -> Self {
-        self.stack.push_overlay(Box::new(overlay));
+        self.stack.push_overlay(overlay);
         self
     }
 
@@ -131,10 +136,12 @@ impl App {
     }
 }
 
-/// Runs `app` until its window closes or `--frames` runs out, and returns the exit status.
+/// Runs `app` until its window closes or `--frames` runs out, and returns the exit status; or,
+/// with `--replay`, replays a recording of it.
 ///
 /// It parses the flags every app shares, which `--help` lists, and starts logging. The status is
-/// 0 on success, 1 on an error or a Vulkan validation message, and 2 on bad arguments.
+/// 0 on success, 1 on an error, a Vulkan validation message or a replay that goes another way,
+/// and 2 on bad arguments.
 pub fn run(mut app: App) -> ExitCode {
     let started = Instant::now();
     let mut argv = std::env::args_os();
@@ -177,14 +184,30 @@ pub fn run(mut app: App) -> ExitCode {
         frames = args.frames,
         gpu = args.gpu.as_deref(),
         validation = args.validation,
+        record = args.record.as_ref().map(|path| path.display().to_string()),
+        replay = args.replay.as_ref().map(|path| path.display().to_string()),
         "Options"
     );
 
-    let ran = if args.headless {
-        run_headless(&mut app, &args)
-    } else {
-        window::run(&mut app, &args)
-    };
+    // Before any renderer, which a replay doesn't need, and which a recording that can't be
+    // written would keep from starting.
+    if let Some(path) = &args.replay {
+        return recording::replay(app, path, args.dump);
+    }
+    let recorder = args
+        .record
+        .as_deref()
+        .map(|path| Recorder::create(path, app.name));
+    let ran = recorder.transpose().and_then(|recorder| {
+        if let Some(recorder) = recorder {
+            app.stack.record(recorder);
+        }
+        if args.headless {
+            run_headless(&mut app, &args)
+        } else {
+            window::run(&mut app, &args)
+        }
+    });
     match ran {
         Ok(ran) => ran.report(started, &args),
         Err(error) => {
@@ -236,6 +259,7 @@ fn run_headless(app: &mut App, args: &Args) -> Result<Ran> {
                 &mut [],
                 &mut renderer,
             )?;
+            app.stack.recorded()?;
             frames += 1;
         }
         Ok(())
@@ -244,6 +268,7 @@ fn run_headless(app: &mut App, args: &Args) -> Result<Ran> {
     let _zone = gg_core::zone!("shutdown");
     app.stack.detach(&mut cx);
     rendered?;
+    app.stack.recorded()?;
     let perf = mem::take(&mut cx.perf);
     Ok(Ran::finish(
         renderer, frames, &clock, &stepper, perf, stopping,
@@ -615,6 +640,43 @@ mod tests {
         }
     }
 
+    /// A command of [`Queuer`]'s: spawns an entity turned by this angle.
+    #[derive(Reflect)]
+    struct Spawn(f32);
+
+    /// Queues a spawn as it attaches, and at every third update, which its next tick makes.
+    #[derive(Default)]
+    struct Queuer {
+        commands: Vec<Spawn>,
+        updates: u32,
+    }
+
+    impl Layer for Queuer {
+        fn attach(&mut self, _: &mut Context) {
+            self.commands.push(Spawn(0.5));
+        }
+
+        fn tick(&mut self, world: &mut World, _: Tick) {
+            for Spawn(angle) in self.commands.drain(..) {
+                world.spawn(Transform {
+                    rotation: Quat::from_rotation_z(angle),
+                    ..Transform::IDENTITY
+                });
+            }
+        }
+
+        fn commands(&mut self) -> Option<&mut dyn Commands> {
+            Some(&mut self.commands)
+        }
+
+        fn update(&mut self, _: &mut Context, _: Duration) {
+            self.updates += 1;
+            if self.updates.is_multiple_of(3) {
+                self.commands.push(Spawn(self.updates as f32 * 0.25));
+            }
+        }
+    }
+
     /// Notes its ticks and its updates, in the order they come.
     struct Order(Rc<RefCell<Vec<String>>>);
 
@@ -643,7 +705,7 @@ mod tests {
         for frames in runs {
             let ticks = Rc::new(RefCell::new(Vec::new()));
             let mut stack = Stack::default();
-            stack.push_layer(Box::new(Turner(ticks.clone())));
+            stack.push_layer(Turner(ticks.clone()));
             let mut cx = Context::new(None);
             stack.attach(&mut cx);
             let mut stepper = Stepper::default();
@@ -662,6 +724,248 @@ mod tests {
             let turned = turned.map(|transform| transform.rotation.to_array().map(f32::to_bits));
             assert_eq!(turned, *first.get_or_insert(turned));
         }
+    }
+
+    /// An app of a layer whose commands its updates queue, under one without.
+    fn two_layers() -> App {
+        let app = App::new("Recorded").layer(Queuer::default());
+        app.layer(Turner(Rc::default()))
+    }
+
+    /// A run of `app` recorded as it goes, frames `frames` apart, as a windowed run steps them:
+    /// its recording, the ticks it ran, and its world's hash as it ended.
+    fn recorded(mut app: App, frames: &[Duration]) -> (String, u64, WorldHash) {
+        let path = std::env::temp_dir().join(format!(
+            "gg-engine-test-{}-{:?}.recording",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let recorder = Recorder::create(&path, app.name).expect("created");
+        app.stack.record(recorder);
+        let mut cx = Context::new(None);
+        app.stack.attach(&mut cx);
+        let mut stepper = Stepper::default();
+        for &dt in frames {
+            stepper.step(dt, |tick| app.stack.tick(&mut cx, tick), || Duration::ZERO);
+            app.stack.update(&mut cx, dt);
+        }
+        let ended = cx.world().hash();
+        app.stack.detach(&mut cx);
+        app.stack.recorded().expect("written");
+        let text = std::fs::read_to_string(&path).expect("written");
+        std::fs::remove_file(&path).expect("removed");
+        (text, stepper.ticks, ended)
+    }
+
+    /// `text` with its line `at`, from 0, in place of `line`.
+    fn changed(text: &str, at: usize, line: &str) -> String {
+        let mut lines: Vec<&str> = text.lines().collect();
+        lines[at] = line;
+        lines.iter().map(|line| format!("{line}\n")).collect()
+    }
+
+    /// A run recorded as it goes at a frame rate of its own, of a layer whose commands its updates
+    /// queue, under one without, replays without a frame to the hashes it recorded, and to the
+    /// world it ended with; a copy of it with a command changed, or a hash, goes another way at
+    /// that tick; and a copy cut off partway through a line replays its whole lines.
+    #[test]
+    fn a_recorded_run_replays_to_its_hashes() {
+        let app = two_layers;
+        let ms = Duration::from_millis;
+        // Some frames run no tick, and some several.
+        let frames = [ms(1), ms(10), ms(40), Tick::DT, ms(2), ms(48), ms(130)].repeat(6);
+        let (text, ticks, ended) = recorded(app(), &frames);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[3], "layers Queuer Turner", "{text}");
+        assert_eq!(lines.last(), Some(&"end"), "{text}");
+        let commands = lines.iter().filter(|line| line.starts_with("> 0 ")).count();
+        assert_eq!(
+            commands,
+            1 + 42 / 3 - 1,
+            "the last update's waits for a tick: {text}"
+        );
+
+        let replayed = |text: &str| {
+            let mut replay = Replay::new(app(), text).unwrap_or_else(|error| panic!("{error}"));
+            let mut ticks = 0;
+            loop {
+                match replay.step() {
+                    Ok(Some(tick)) => {
+                        assert_eq!(tick.number, ticks);
+                        ticks += 1;
+                    }
+                    Ok(None) => return Ok((ticks, replay.world().hash())),
+                    Err(error) => return Err((ticks, error)),
+                }
+            }
+        };
+        assert_eq!(replayed(&text).ok(), Some((ticks, ended)));
+        assert_eq!(Replay::rewrite(app(), &text).expect("rewritten"), text);
+
+        let tick_of = |line: &str| line.split_once(' ')?.0.parse::<u64>().ok();
+        let changed = |at: usize, line: &str| changed(&text, at, line);
+        // The last command's tick, which its next hash is of.
+        let command = lines.iter().rposition(|line| line.starts_with("> 0 "));
+        let command = command.expect("a command");
+        let hash = lines[command..]
+            .iter()
+            .position(|line| tick_of(line).is_some());
+        let hash = command + hash.expect("its tick's hash");
+        let tick = tick_of(lines[hash]).expect("a tick");
+        let (ran, error) = replayed(&changed(command, "> 0 Struct([(\"0\", F32(9.0))])"))
+            .expect_err("another way");
+        assert_eq!((ran, error.code()), (tick, "replay.diverged"), "{error}");
+        let layout = lines[hash].rsplit(' ').next().expect("a layout");
+        let rehashed = format!("{tick} 0000000000000000 {layout}");
+        let (ran, error) = replayed(&changed(hash, &rehashed)).expect_err("another way");
+        assert_eq!((ran, error.code()), (tick, "replay.diverged"), "{error}");
+        let says = format!("the world's content goes another way after tick {tick}");
+        assert!(error.to_string().contains(&says), "{error}");
+        let rewritten = Replay::rewrite(app(), &changed(hash, &rehashed)).expect("rewritten");
+        assert_eq!(rewritten, text);
+        // Cut off in its hash, the tick runs its commands, unchecked.
+        let whole: String = lines[..hash]
+            .iter()
+            .map(|line| format!("{line}\n"))
+            .collect();
+        let cut = whole + &lines[hash][..10];
+        let (ticks, _) = replayed(&cut).unwrap_or_else(|(_, error)| panic!("{error}"));
+        assert_eq!(ticks, tick + 1);
+    }
+
+    /// A recording of an app without layers, as the player is, replays too.
+    #[test]
+    fn a_recording_of_no_layers_replays() {
+        let (text, ticks, ended) = recorded(App::new("Empty"), &[Tick::DT; 3]);
+        assert_eq!(text.lines().nth(3), Some("layers "));
+        let mut replay = Replay::new(App::new("Empty"), &text).unwrap_or_else(|e| panic!("{e}"));
+        let mut ran = 0;
+        while replay
+            .step()
+            .unwrap_or_else(|error| panic!("{error}"))
+            .is_some()
+        {
+            ran += 1;
+        }
+        assert_eq!((ran, replay.world().hash()), (ticks, ended));
+    }
+
+    /// Each line a recording can get wrong is refused with its code, and, but for what's wrong with
+    /// the recording as a whole, its line; and a value's column is the line's.
+    #[test]
+    fn a_recording_is_refused_where_it_goes_wrong() {
+        let (text, ..) = recorded(two_layers(), &[Tick::DT; 4]);
+        let lines: Vec<&str> = text.lines().collect();
+        let command = lines.iter().position(|line| line.starts_with("> 0 "));
+        let command = command.expect("the command its attach queued");
+        let second = lines.iter().position(|line| line.starts_with("1 "));
+        let second = second.expect("tick 1's hash");
+        let hash = lines[second].split_once(' ').expect("a hash").1;
+        let bad_value = "> 0 Struct([(\"0\", F32(1.0)]";
+        let after_end = format!("{text}0 {hash}\n");
+        let cases = [
+            (changed(&text, 0, "gg-recording 2"), "replay.format", None),
+            (changed(&text, 0, "(entities: {})"), "replay.format", None),
+            (
+                lines[..3].iter().map(|line| format!("{line}\n")).collect(),
+                "replay.format",
+                None,
+            ),
+            (changed(&text, 1, "app Other"), "replay.format", None),
+            (changed(&text, 3, "layers Queuer"), "replay.format", None),
+            (changed(&text, 4, "attach"), "replay.syntax", Some(5)),
+            (changed(&text, 4, "seed 12"), "replay.syntax", Some(5)),
+            (changed(&text, 5, "attach 00 00"), "replay.syntax", Some(6)),
+            (
+                changed(&text, second, &format!("2 {hash}")),
+                "replay.syntax",
+                Some(second + 1),
+            ),
+            (
+                changed(&text, second, "1 tick"),
+                "replay.syntax",
+                Some(second + 1),
+            ),
+            (after_end.clone(), "replay.syntax", Some(lines.len() + 1)),
+            (
+                changed(&text, command, bad_value),
+                "replay.syntax",
+                Some(command + 1),
+            ),
+            (
+                changed(&text, command, "> 2 Opaque"),
+                "replay.bad_command",
+                Some(command + 1),
+            ),
+            (
+                changed(&text, command, "> 1 Opaque"),
+                "replay.bad_command",
+                Some(command + 1),
+            ),
+            (
+                changed(&text, command, "> 0 UInt(1)"),
+                "replay.bad_command",
+                Some(command + 1),
+            ),
+        ];
+        for (text, code, line) in cases {
+            let replayed = Replay::new(two_layers(), &text).and_then(|mut replay| {
+                while replay.step()?.is_some() {}
+                Ok(())
+            });
+            let error = replayed.expect_err(&text);
+            let message = error.to_string();
+            assert_eq!(error.code(), code, "{message}\n{text}");
+            if let Some(line) = line {
+                assert!(message.starts_with(&format!("line {line}: ")), "{message}");
+            }
+        }
+        // The value's column, from the start of its line, after `> 0 `.
+        let alone = recording::text::Text::parse(&bad_value[4..], 1).expect_err("refused");
+        let alone = alone.to_string();
+        let column = |message: &str| {
+            let column = message.split("column ").nth(1).expect("a column");
+            column
+                .split(':')
+                .next()
+                .expect("a number")
+                .parse::<usize>()
+                .expect("a number")
+        };
+        let text = changed(&text, command, bad_value);
+        let error = Replay::new(two_layers(), &text).err().expect("refused");
+        assert_eq!(column(&error.to_string()), column(&alone) + 4, "{error}");
+    }
+
+    /// `--replay` checks every hash to the end, and stops where `--dump` says, failing where a
+    /// hash goes another way, or where no tick is the one it names.
+    #[test]
+    fn a_replay_runs_to_its_end_or_its_dump() {
+        let (text, ..) = recorded(two_layers(), &[Tick::DT; 4]);
+        let run = |text: &str, dump| {
+            let mut replay = Replay::new(two_layers(), text).expect("attached");
+            let ran = replay.run(dump).map_err(|error| error.code());
+            (ran, replay.step().ok().flatten().map(|tick| tick.number))
+        };
+        assert_eq!(run(&text, None), (Ok(()), None));
+        // Stopped after tick 1, it goes on from tick 2.
+        assert_eq!(run(&text, Some(args::Dump::Tick(1))), (Ok(()), Some(2)));
+        assert_eq!(run(&text, Some(args::Dump::Attach)), (Ok(()), Some(0)));
+        assert_eq!(
+            run(&text, Some(args::Dump::Tick(4))).0,
+            Err("replay.no_tick")
+        );
+        let lines: Vec<&str> = text.lines().collect();
+        let at = lines.iter().position(|line| line.starts_with("2 "));
+        let at = at.expect("tick 2's hash");
+        let layout = lines[at].rsplit(' ').next().expect("a layout");
+        let wrong = changed(&text, at, &format!("2 0000000000000000 {layout}"));
+        assert_eq!(run(&wrong, None).0, Err("replay.diverged"));
+        assert_eq!(run(&wrong, Some(args::Dump::Tick(1))).0, Ok(()));
+        assert_eq!(
+            run(&wrong, Some(args::Dump::Tick(2))).0,
+            Err("replay.diverged")
+        );
     }
 
     #[test]
@@ -707,7 +1011,7 @@ mod tests {
 
         let calls = Rc::new(RefCell::new(Vec::new()));
         let mut stack = Stack::default();
-        stack.push_layer(Box::new(Order(calls.clone())));
+        stack.push_layer(Order(calls.clone()));
         let mut cx = Context::new(None);
         stack.attach(&mut cx);
         let input = || egui::RawInput {
@@ -733,7 +1037,7 @@ mod tests {
     #[test]
     fn the_world_draws_over_the_layers_draws() {
         let mut stack = Stack::default();
-        stack.push_layer(Box::new(Drawer));
+        stack.push_layer(Drawer);
         let mut cx = Context::new(None);
         stack.attach(&mut cx);
         let input = egui::RawInput {
@@ -764,8 +1068,8 @@ mod tests {
     #[test]
     fn the_inspector_lists_the_world_in_the_dock() {
         let mut stack = Stack::default();
-        stack.push_layer(Box::new(Drawer));
-        stack.push_overlay(Box::new(Inspector::default()));
+        stack.push_layer(Drawer);
+        stack.push_overlay(Inspector::default());
         let mut cx = Context::new(None);
         stack.attach(&mut cx);
         let input = || egui::RawInput {

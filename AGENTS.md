@@ -38,6 +38,8 @@ cargo build                       # the whole workspace
 cargo run -p sandbox
 cargo run -p sandbox -- --help    # the flags every app shares
 cargo run -p sandbox -- --headless --frames 60   # does the engine run? 0 means cleanly
+cargo run -p sandbox -- --record run.recording   # a run's seed, commands and hashes
+cargo run -p sandbox -- --replay run.recording   # without a GPU: 0 means every hash matched
 cargo run -p sandbox --release --features tracy   # with zones for Tracy
 cargo build -p player --release   # shipping: the player alone
 ```
@@ -50,6 +52,11 @@ Each run writes a JSON log and logs its path as it starts; filter it on `level`,
 `vuid`. `RUST_LOG` sets what's logged, such as `RUST_LOG=gg_gpu=trace`. A run that doesn't end in
 an error logs `engine.perf` as it ends: its frame times and where they went. Compare two builds by
 theirs, from release builds run headless for the same number of frames.
+
+A replay that goes another way names the tick and the part of the hash; `--replay <path> --dump
+<tick>`, run where it goes another way and where it doesn't, prints each world's content there a
+field a line, and the two diff to the field where they part. Where the layout alone goes another
+way, they're the same.
 
 The `tracy` feature sends the engine's zones to Tracy: run the Tracy viewer of the release the
 root Cargo.toml names, and connect it to the running app. To capture a headless run instead,
@@ -75,14 +82,20 @@ where it wrote its own; after an intended change, `GG_UPDATE_REFERENCES=1` rewri
 references, which you look at before committing them. The sandbox's world hashes, at each tick of
 a seeded run, are a reference too, which CI checks on every platform: a change to its simulation,
 to what the hash reads, or to glam or libm changes them, and `GG_UPDATE_REFERENCES=1 cargo test -p
-sandbox` rewrites them alone. A difference on some platforms only is a bug, not a reference to
-rewrite.
+sandbox` rewrites them alone, with those of its live recording,
+`apps/sandbox/tests/references/live.recording`. A difference on some platforms only is a bug, not
+a reference to rewrite. Some changes need a new recording, since rewriting the hashes would keep
+what they break: a change to the sandbox's layers, to a command's type that its lines no longer
+read as, or to what its commands name, the grid scene's types and the field the Inspector sets,
+whose reload and set would then be refused at their ticks. Make one with a windowed run and
+`--record` that uses the panels, File > Reload the grid and the Inspector, undoing and redoing an
+edit, and closes; not File > Save, since the attach reads the grid's scene.
 
 CI ([ci.yml](.github/workflows/ci.yml)) runs the four gates on every push, on Windows, Linux
 and macOS, x86-64 and ARM64, and the layering check. Its Linux jobs run the GPU tests and the
-sandbox headless on lavapipe, with and without Tracy, and check that the run logged
-`engine.perf`; Windows' and macOS's runners have no GPU, so there `GG_SKIP_GPU_TESTS` skips the
-GPU tests.
+sandbox headless on lavapipe, with and without Tracy, check that the run logged `engine.perf`,
+and record a run and replay it; Windows' and macOS's runners have no GPU, so there
+`GG_SKIP_GPU_TESTS` skips the GPU tests.
 
 ## Rust
 

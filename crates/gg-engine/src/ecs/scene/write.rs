@@ -306,7 +306,13 @@ fn pad(out: &mut String, indent: usize) {
 /// Writes a float as Rust's `Display` does, the shortest text that reads back to the same bits and
 /// never an exponent, with `.0` if it has no point; `inf` and `-inf`; and `NaN` and `-NaN`, which
 /// keep a NaN's sign but not its payload.
-fn float(out: &mut String, x: impl fmt::Display, nan: bool, negative: bool, finite: bool) {
+pub(crate) fn float(
+    out: &mut String,
+    x: impl fmt::Display,
+    nan: bool,
+    negative: bool,
+    finite: bool,
+) {
     if nan {
         out.push_str(if negative { "-NaN" } else { "NaN" });
         return;
@@ -334,7 +340,7 @@ fn floats(out: &mut String, xs: &[f32]) {
 /// `\n`, `\r` and `\t`; `\u{..}` for the other control characters, and for those that would
 /// reorder or hide text, bidirectional controls and invisible separators; and everything else as
 /// it is.
-fn quote(out: &mut String, text: &str) {
+pub(crate) fn quote(out: &mut String, text: &str) {
     out.push('"');
     for c in text.chars() {
         match c {

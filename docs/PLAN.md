@@ -167,15 +167,26 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   hashes its reference holds, which CI checks on all six platforms; unit tests check that every
   field reflection reads reaches the content and nothing opaque does, that where the world holds
   its entities reaches only the layout, and that undoing a log gives back the content.
+- **Recordings and replays** (2026-10-24): each layer queues its commands, which the engine reads
+  at each tick as reflection's values through `Layer::commands`; `--record` writes a run's seed,
+  each layer's commands just before its tick applies them, with entities by their IDs, and the
+  world's hash after each tick, a line at a time; `--replay` runs the ticks again without a window
+  or a GPU, each layer's with its recorded commands, and names the first hash that goes another
+  way, its tick, the part of it and both builds; `World::difference` names the entity, component
+  and field where two worlds part, and `--dump` writes a world a field a line, for two machines'
+  to diff. The Inspector's edits, seals, undos and redos are its commands, and the sandbox's swarm
+  is in the world, its drifters found by their index. The sandbox's live recording, of a windowed
+  run that used its panels, File menu and Inspector, replays to its hashes in debug and release;
+  a copy with a grid color changed names its tick, the first square of that color and
+  `Sprite.color.x`; CI records a headless run and replays it; unit tests check values' text bit
+  for bit, a recorded run against command and hash changes and a cut-off copy, the difference and
+  the dump, the Inspector's commands, and a restored world simulating the swarm as before.
 
-## Now: recordings and replays
+## Now: input actions
 
-Phase 3's tenth milestone: recordings of runs, and replays of them, checked by the world's hash at
-every tick. *Done when* a recording of a live run, its seed and the commands after its attach,
-replays without a GPU to the same hashes on all three OSes and both architectures, with a forced
-divergence reported as its first tick, entity and field. Its plan is made when it starts, and
-decides one queue that every layer's commands go through to be recorded, and how the state layers
-keep for the simulation, such as the sandbox's swarm's handles, moves into the world.
+Phase 3's eleventh milestone: input actions, which name what a game does and the keys, buttons and
+axes that do it, for its layers to queue as commands. Its plan is made when it starts, and says
+when it's done.
 
 ## Next
 
@@ -247,7 +258,7 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | No console window for shipping builds on Windows (`windows_subsystem = "windows"` on the player); the JSON log still records the run | Phase 7, with the shipping profile |
 | Checking the sandbox by hand on Linux, and on macOS with KosmicKrisp (Vulkan SDK 1.4.363.0 or later, the first conformant build) | Phase 4, once the sandbox draws a glTF mesh |
 | Deleting old JSON logs; every run's log is kept | Logs pile up enough to matter |
-| A clean shutdown on Ctrl+C, which now ends the process at once; the JSON log keeps every line written until then | A headless run that goes on until it's stopped, such as a dedicated server |
+| A clean shutdown on Ctrl+C, which now ends the process at once; the JSON log keeps every line written until then, and a recording every whole line but its `end` | A headless run that goes on until it's stopped, such as a dedicated server |
 | GPU tests in Windows and macOS CI, which skip them because hosted runners there have no GPU | A self-hosted runner with a GPU, or a Vulkan driver that runs on those runners without one |
 | A gate that compiles the shipping configuration: `cargo clippy -p player --all-targets -- -D warnings` | When `gg-engine` gets its `dev` feature |
 | egui, the dock and the Inspector behind `dev`: the player links them and runs an empty UI pass every frame; `Ui`, which `Layer::ui` takes, is the type to turn into a no-op | When `gg-engine` gets its `dev` feature |
@@ -335,9 +346,9 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Comments in scene files, which a save drops | People annotate scenes |
 | Reading and writing scene files in the engine, atomically; the engine takes and gives text, and the sandbox writes its own | Phase 4, with assets |
 | The log in `Context`, every layer's and the tool API's clients each undoing their own, and an undo logged as an operation; the Inspector keeps a log of its own | Phase 5, the tool API |
-| Replaying a log into another world, which maps values' handles to IDs; `set_field` and operations store a dead handle without complaint | Phase 5, the tool API |
+| Replaying a log into another world, which maps values' handles to IDs, as a recording's commands are; `set_field` and operations store a dead handle without complaint | Phase 5, the tool API |
 | A delete saying what refers to its entities from outside, or refusing; those references dangle until it's undone, and the world doesn't save in between | An agent deletes through the tool API |
-| Layers holding handles that an operation deletes or a restore takes back, as the sandbox's swarm does, changing them only at its ticks, whose `expect` panics then; nothing tells a layer, or the Inspector, whose log and pick outlive it, that `Context`'s world was restored, so the sandbox doesn't snapshot | The Inspector or the tool API deletes, or something restores the running world, such as rollback or Phase 5's restart |
+| Layers holding what a restore takes back: the sandbox's swarm is in the world, but the Inspector's log and pick outlive a restore, and nothing tells a layer that `Context`'s world was restored, so the sandbox doesn't snapshot | The Inspector or the tool API deletes, or something restores the running world, such as rollback or Phase 5's restart |
 | Creating, deleting, adding, removing and reparenting from the Inspector, which sets fields | The editor, or a game's tools |
 | A bound on the log, which keeps a session's entries, a delete's components and slots among them, until it's cleared | A session's memory shows it |
 | A log that outlives a run or a restore: inverses that keep components typed can't be saved, and a restored world refuses every inverse from before, the slots kept when the snapshot was taken staying unused; a snapshot could keep the log's place, which a restore would rewind it to | Phase 5's restart from a snapshot |
@@ -348,9 +359,13 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Headless runs in real time, as a dedicated server's: a headless run takes a tick each frame, as fast as its frames go | The first dedicated server |
 | Ticks as a part of their own in the Performance panel and in `engine.perf`'s times: a frame's update includes its ticks, so that a windowed run's update times mix frames of no tick and of several | Phase 4's extraction, or frames often running several ticks |
 | The Inspector showing an undo or a redo before its tick makes it, as it shows a set: above 64 frames a second, a field shows its value from before for a frame or so, and a refusal and the Edit menu's names come at the tick | It shows, or Phase 5's editor in another process |
-| Hashing a world for less: incrementally as its components change, on several threads, or with a cheaper step for each word and one mix for each term. `World::hash` reads every component, mixing each word with SplitMix64's mix: 5.5 ms for the swarm's 100,450 entities in release, three times their tick | Hashing every tick shows in a profile, as recordings will |
+| Hashing a world for less: incrementally as its components change, on several threads, or with a cheaper step for each word and one mix for each term. `World::hash` reads every component, mixing each word with SplitMix64's mix: 5.5 ms for the swarm's 100,450 entities in release, three times their tick; a recorded run hashes every tick, which takes the release swarm's headless frames from a p50 of 8.7 ms to 16.3 ms, its updates from 14.0 ms to 22.6 ms on average | Recorded runs of large worlds need the time |
 | The sign of a zero that f32's `min`, `max` and `clamp` give, which std leaves to the platform, and its `algebraic_*` methods, which clippy doesn't refuse; the simulation calls none of them | The simulation first calls one |
 | The ban on std's float methods for games in their own repositories, which the workspace's clippy.toml doesn't reach, though glam's features do, since Cargo merges them | The first game outside the workspace |
+| Locating a divergence of the layout alone, to the table, row, children or stream of IDs where two worlds part; `World::difference` compares their content, and a replay names the part of the hash | A replay's layout goes another way first |
+| Replaying from a snapshot and the commands after it, and a SyncTest, which runs each tick again from a snapshot and checks its hash, as rollback needs | Rollback |
+| Recordings that keep what their attach read, such as the sandbox's grid scene, and the commit they were built from; a file changed since shows as a divergence at the attach, and a recording names its engine's version and build alone | Recordings replayed far from where they were made, such as bug reports from people's runs |
+| Recording every run, as a flight recorder; a run records only with `--record` | Bug reports from people's runs |
 
 ## Open questions
 

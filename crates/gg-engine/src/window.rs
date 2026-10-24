@@ -212,6 +212,9 @@ impl Handler<'_> {
             }
             Err(error) => self.fail(event_loop, error),
         }
+        if let Err(error) = self.app.stack.recorded() {
+            self.fail(event_loop, error);
+        }
         if close {
             self.close(event_loop);
         }
@@ -361,6 +364,10 @@ impl ApplicationHandler for Handler<'_> {
         self.dock.save();
         if let Some(renderer) = self.renderer.take() {
             self.app.stack.detach(&mut self.cx);
+            // The recording's end, which detaching writes.
+            if let Err(error) = self.app.stack.recorded() {
+                self.error.get_or_insert(error);
+            }
             let perf = mem::take(&mut self.cx.perf);
             self.ran = Some(Ran::finish(
                 renderer,

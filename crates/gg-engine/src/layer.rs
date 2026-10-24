@@ -1,5 +1,6 @@
 //! The layer stack: how an app's code, and the engine's tools, plug into the main loop.
 
+use std::any::type_name;
 use std::ops::ControlFlow;
 use std::path::Path;
 use std::sync::Arc;
@@ -16,6 +17,8 @@ use gg_renderer::{
 use crate::draw::{self, Scratch};
 use crate::image::{self, Image};
 use crate::perf::Perf;
+use crate::recording::Recorder;
+use crate::reflect::{Reflect, Value};
 use crate::{Event, Input, MeshDraw, Transform, Ui, World};
 
 /// A part of an app that the main loop drives. Every method has a default that does nothing,
@@ -23,7 +26,8 @@ use crate::{Event, Input, MeshDraw, Transform, Ui, World};
 ///
 /// The world changes only as the layers attach and detach, and at their ticks: the rest of a
 /// layer reads it, and queues commands, data of its own, for its next tick to apply, so that the
-/// simulation goes on at its own rate whatever the frame rate.
+/// simulation goes on at its own rate whatever the frame rate. A tick changes the world only
+/// through its commands and its systems, so that a recording of the commands replays the run.
 pub trait Layer {
     /// Called once as the app starts, before the first tick and update: it builds the world the
     /// simulation starts from.
@@ -38,6 +42,16 @@ pub trait Layer {
     /// world alone, so that a tick goes by the world, the tick, its commands and what the layer set
     /// up as it attached, never by the frame's time, input or drawing.
     fn tick(&mut self, _world: &mut World, _tick: Tick) {}
+
+    /// The commands the layer queued since its last tick, which its tick applies: what a recording
+    /// of the run keeps of the layer, which the engine reads just before each tick, and what a
+    /// replay gives it again, in place of what it queued itself. `None`, the default, for a layer
+    /// that queues none. A layer whose tick goes by anything but the world, the tick, its commands
+    /// and what it set up as it attached, such as a frame's time or input, or what its UI keeps,
+    /// replays another way.
+    fn commands(&mut self) -> Option<&mut dyn Commands> {
+        None
+    }
 
     /// Called every frame, after the frame's ticks, with the time since the last frame: zero for
     /// the first, and for the first after the window is restored from being minimized, so that
@@ -54,6 +68,49 @@ pub trait Layer {
     /// Called every frame, after the updates, to draw UI: dockable panels, and anything else
     /// egui draws.
     fn ui(&mut self, _cx: &mut Context, _ui: &mut Ui<'_>) {}
+}
+
+/// A layer's queue of commands, without their type, as [`Layer::commands`] gives it to the engine,
+/// which reads it at each tick to record it, and fills it to replay it: each command as a
+/// reflection [`Value`]. A `Vec` of a type that's [`Reflect`], such as an enum that derives it, is
+/// one.
+pub trait Commands {
+    /// How many are queued.
+    fn len(&self) -> usize;
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Command `i`, the first queued first, as a value.
+    fn value(&self, i: usize) -> Value;
+
+    /// Queues the command `value` makes, after those queued.
+    ///
+    /// Fails as [`Reflect::from_value`] does if it makes none.
+    fn push(&mut self, value: &Value) -> Result<()>;
+
+    /// Empties the queue.
+    fn clear(&mut self);
+}
+
+impl<C: Reflect> Commands for Vec<C> {
+    fn len(&self) -> usize {
+        Vec::len(self)
+    }
+
+    fn value(&self, i: usize) -> Value {
+        self[i].to_value()
+    }
+
+    fn push(&mut self, value: &Value) -> Result<()> {
+        Vec::push(self, C::from_value(value)?);
+        Ok(())
+    }
+
+    fn clear(&mut self) {
+        Vec::clear(self);
+    }
 }
 
 /// A step of the simulation, which runs 64 of them a second whatever the frame rate: what a
@@ -334,6 +391,13 @@ fn add_sheet(
     })
 }
 
+/// The name of type `L`, without its path or its generics: such as `Inspector`.
+fn short_name<L>() -> &'static str {
+    let name = type_name::<L>();
+    let name = name.split('<').next().unwrap_or(name);
+    name.rsplit("::").next().unwrap_or(name)
+}
+
 /// The app's window, as layers see it.
 pub struct Window {
     raw: Arc<winit::window::Window>,
@@ -360,45 +424,107 @@ impl Window {
 #[derive(Default)]
 pub(crate) struct Stack {
     layers: Vec<Box<dyn Layer>>,
+    /// The name of each layer's type, in the same order, which a recording names it by.
+    names: Vec<&'static str>,
     /// Where the overlays start.
     overlays: usize,
+    /// What records the run, if it's recorded.
+    recorder: Option<Recorder>,
 }
 
 impl Stack {
     /// Adds a layer on top of the other layers, under the overlays.
-    pub(crate) fn push_layer(&mut self, layer: Box<dyn Layer>) {
-        self.layers.insert(self.overlays, layer);
+    pub(crate) fn push_layer<L: Layer + 'static>(&mut self, layer: L) {
+        self.layers.insert(self.overlays, Box::new(layer));
+        self.names.insert(self.overlays, short_name::<L>());
         self.overlays += 1;
     }
 
     /// Adds an overlay on top of everything.
-    pub(crate) fn push_overlay(&mut self, overlay: Box<dyn Layer>) {
-        self.layers.push(overlay);
+    pub(crate) fn push_overlay<L: Layer + 'static>(&mut self, overlay: L) {
+        self.layers.push(Box::new(overlay));
+        self.names.push(short_name::<L>());
     }
 
+    /// The names of the layers' types, from the bottom up.
+    pub(crate) fn names(&self) -> &[&'static str] {
+        &self.names
+    }
+
+    /// Has `recorder` record the run, from the layers' attach.
+    pub(crate) fn record(&mut self, recorder: Recorder) {
+        self.recorder = Some(recorder);
+    }
+
+    /// Fails with `record.file` once a write to the run's recording has failed.
+    pub(crate) fn recorded(&self) -> Result<()> {
+        self.recorder.as_ref().map_or(Ok(()), Recorder::check)
+    }
+
+    /// Attaches the layers, from the bottom up, in `cx`, whose world nothing has drawn an ID from:
+    /// its seed is what a recording starts from.
     pub(crate) fn attach(&mut self, cx: &mut Context) {
         let _zone = gg_core::zone!();
+        if let Some(recorder) = &mut self.recorder {
+            recorder.start(&self.names, cx.world.stream_state());
+        }
         for layer in &mut self.layers {
             layer.attach(cx);
         }
         cx.attached = true;
+        if let Some(recorder) = &mut self.recorder {
+            recorder.attached(&cx.world);
+        }
     }
 
-    /// Detaches from the top down, the reverse of attaching.
+    /// Detaches from the top down, the reverse of attaching, once a recording has its end.
     pub(crate) fn detach(&mut self, cx: &mut Context) {
         let _zone = gg_core::zone!();
+        if let Some(recorder) = &mut self.recorder {
+            recorder.end();
+        }
         cx.attached = false;
         for layer in self.layers.iter_mut().rev() {
             layer.detach(cx);
         }
     }
 
-    /// Runs a tick of the simulation: each layer's, from the bottom up.
+    /// Runs a tick of the simulation: each layer's, from the bottom up. A recording gets each
+    /// layer's commands just before its tick applies them, so that a tick that panics leaves them,
+    /// and the world's hash after the last.
     pub(crate) fn tick(&mut self, cx: &mut Context, tick: Tick) {
         let _zone = gg_core::zone!();
-        for layer in &mut self.layers {
+        let Self {
+            layers, recorder, ..
+        } = self;
+        for (index, layer) in layers.iter_mut().enumerate() {
+            if let Some(recorder) = recorder.as_mut()
+                && let Some(commands) = layer.commands()
+            {
+                recorder.queued(index, commands, &cx.world);
+            }
             layer.tick(&mut cx.world, tick);
         }
+        if let Some(recorder) = recorder {
+            recorder.ticked(tick, &cx.world);
+        }
+    }
+
+    /// Runs a tick as a replay does: as [`tick`](Self::tick) does, with each layer's queue emptied
+    /// and filled again by `fill`, which gets the layer's index, its queue, if it has one, and the
+    /// world as its tick finds it.
+    pub(crate) fn replay_tick(
+        &mut self,
+        cx: &mut Context,
+        tick: Tick,
+        mut fill: impl FnMut(usize, Option<&mut dyn Commands>, &World) -> Result<()>,
+    ) -> Result<()> {
+        let _zone = gg_core::zone!();
+        for (index, layer) in self.layers.iter_mut().enumerate() {
+            fill(index, layer.commands(), &cx.world)?;
+            layer.tick(&mut cx.world, tick);
+        }
+        Ok(())
     }
 
     pub(crate) fn update(&mut self, cx: &mut Context, dt: Duration) {
@@ -510,12 +636,10 @@ mod tests {
     /// `b_handles`), and returns the stack, bottom to top `a b o`, with its call record.
     fn probes(b_handles: bool) -> (Stack, Rc<RefCell<Vec<String>>>) {
         let calls = Rc::new(RefCell::new(Vec::new()));
-        let probe = |name, handles| {
-            Box::new(Probe {
-                name,
-                handles,
-                calls: calls.clone(),
-            })
+        let probe = |name, handles| Probe {
+            name,
+            handles,
+            calls: calls.clone(),
         };
         let mut stack = Stack::default();
         stack.push_overlay(probe("o", false));
@@ -539,12 +663,14 @@ mod tests {
                 "update b", "update o", "detach o", "detach b", "detach a"
             ]
         );
+        assert_eq!(stack.names(), ["Probe"; 3]);
+        assert_eq!(short_name::<Vec<crate::inspector::Inspector>>(), "Vec");
     }
 
     #[test]
     fn layers_change_the_world_as_they_attach_and_detach_and_at_their_ticks() {
         let mut stack = Stack::default();
-        stack.push_layer(Box::new(Spawner { rogue: false }));
+        stack.push_layer(Spawner { rogue: false });
         let mut cx = Context::new(None);
         stack.attach(&mut cx);
         stack.tick(&mut cx, Tick { number: 0 });
@@ -557,7 +683,7 @@ mod tests {
     #[should_panic(expected = "only as it attaches or detaches")]
     fn a_layer_changing_the_world_as_it_updates_is_a_bug() {
         let mut stack = Stack::default();
-        stack.push_layer(Box::new(Spawner { rogue: true }));
+        stack.push_layer(Spawner { rogue: true });
         let mut cx = Context::new(None);
         stack.attach(&mut cx);
         stack.update(&mut cx, Duration::ZERO);
@@ -585,7 +711,7 @@ mod tests {
     fn the_input_state_takes_each_event_before_the_layers() {
         let held = Rc::new(RefCell::new(Vec::new()));
         let mut stack = Stack::default();
-        stack.push_layer(Box::new(Poll(held.clone())));
+        stack.push_layer(Poll(held.clone()));
         let mut cx = Context::new(None);
         for pressed in [true, false] {
             let key = Event::Key {

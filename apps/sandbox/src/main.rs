@@ -12,16 +12,22 @@ use gg_engine::egui::{self, ViewportCommand, ViewportId};
 use gg_engine::math::{self, EulerRot, Quat, Vec2, Vec3, Vec4};
 use gg_engine::reflect::Error;
 use gg_engine::{
-    Blend, Camera, Component, Context, Entity, Event, Key, Layer, MeshDraw,
-    OrthographicCameraController, Projection, Sampler, Sprite, SpriteSheet, Tick, Transform, Ui,
-    World,
+    App, Blend, Camera, Commands, Component, Context, Entity, Event, Key, Layer, MeshDraw,
+    OrthographicCameraController, Projection, Reflect, Sampler, Sprite, SpriteSheet, Tick,
+    Transform, Ui, World,
 };
 use tracing::{error, info};
 
 fn main() -> ExitCode {
-    let app = gg_engine::App::new("Sandbox").custom_title_bar();
+    gg_engine::run(app())
+}
+
+/// The sandbox, with the engine's Performance, Entities and Inspector panels: what `main` runs,
+/// and what its recordings replay.
+fn app() -> App {
+    let app = App::new("Sandbox").custom_title_bar();
     let app = app.layer(Sandbox::new()).overlay(gg_engine::PerfPanel);
-    gg_engine::run(app.overlay(gg_engine::Inspector::default()))
+    app.overlay(gg_engine::Inspector::default())
 }
 
 /// A corner of a mesh in the colors of its corners, which `shaders/vertex_color.slang` reads: its
@@ -147,17 +153,17 @@ fn overlooking(center: Vec2, height: f32) -> Camera {
     }
 }
 
-/// What the sandbox spawned as it attached, which its ticks go by as its panels say.
+/// What the sandbox set up as it attached, which its ticks go by: the swarm's sprites, one for each
+/// cell of a sheet of 4 by 4 shapes with transparent margins, row by row.
 struct Scene {
-    /// The swarm's sprites, one for each cell of a sheet of 4 by 4 shapes with transparent
-    /// margins, row by row.
     shapes: [Sprite; 16],
-    checkerboard: Entity,
 }
 
 /// One of the swarm's sprites: how it moves, picked once from its index.
 #[derive(Clone, Copy, Component)]
 struct Drifter {
+    /// Which of the swarm it is, from 0: the swarm shrinks from its last.
+    index: u32,
     /// Where it is when the swarm starts, from the field's bottom left.
     start: Vec2,
     /// In units a second.
@@ -178,6 +184,7 @@ impl Drifter {
         let pick = |salt| pick(index, salt);
         let direction = Vec2::from_angle(pick(0) * TAU);
         let drifter = Self {
+            index,
             start: Vec2::new(pick(2), pick(3)) * FIELD,
             velocity: direction * (0.05 + 0.25 * pick(4)),
             turn: pick(5) * TAU,
@@ -210,6 +217,10 @@ impl Drifter {
 #[derive(Clone, Copy, Component)]
 struct MapTile;
 
+/// The checkerboard's sprite, which its panel's filtering, tiling and tint apply to.
+#[derive(Clone, Copy, Component)]
+struct Checkerboard;
+
 /// One of the grid's squares, which its sprite's color follows.
 #[derive(Clone, Copy, Component)]
 struct GridCell {
@@ -231,6 +242,7 @@ fn register(world: &mut World) {
     for registered in [
         world.register::<Drifter>(),
         world.register::<MapTile>(),
+        world.register::<Checkerboard>(),
         world.register::<GridCell>(),
         world.register::<Spin>(),
     ] {
@@ -401,8 +413,10 @@ fn pick(index: u32, salt: u32) -> f32 {
 /// one of them carrying a moonlet of its own, then a logo sprite whose alpha shows them through it.
 /// Below the swarm, out of its way, a map of tiles from a tile set's cells packed edge to edge,
 /// which tests that none shows any of the cells beside it. They're entities, spawned as the sandbox
-/// attaches, the grid loaded from a scene and the moons placed from a prefab, under a pivot that
-/// the triangle carries, which the engine draws back to front by their z's in the world. At each
+/// attaches but for the swarm, at its first tick, the grid loaded from a scene and the moons placed
+/// from a prefab, under a pivot that the triangle carries, which the engine draws back to front by
+/// their z's in the world; the world holds all of the simulation, so that a snapshot of it restores
+/// it, and a recording of the commands replays it. At each
 /// tick, 64 a second whatever the frame rate, the sandbox's systems move the swarm by its drifters
 /// and turn the triangle, its moons and the moonlet by their spins, after the commands its panels
 /// and File menu queued since the last: they resize the swarm, color the grid by its cells, filter
@@ -431,8 +445,6 @@ struct Sandbox {
     grid_colors: [[f32; 3]; 2],
     settings: Settings,
     camera: OrthographicCameraController,
-    /// The swarm's entities, the first spawned first.
-    drifters: Vec<Entity>,
     /// How many sprites the swarm has, as its panel says.
     swarm: u32,
     /// Spawned once the sandbox attaches.
@@ -442,7 +454,7 @@ struct Sandbox {
 }
 
 /// How the map and the checkerboard are drawn, as their panels say.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Reflect)]
 struct Settings {
     /// Whether the map is filtered linearly rather than sampled at the nearest texel, as pixel art
     /// is.
@@ -457,7 +469,8 @@ struct Settings {
 }
 
 /// What the sandbox's panels and File menu change of its world, queued as they change it and
-/// applied at its next tick, before its systems.
+/// applied at its next tick, before its systems: its commands, which a recording keeps.
+#[derive(Reflect)]
 enum Command {
     /// Spawns or despawns drifters until the swarm has this many.
     Swarm(u32),
@@ -488,7 +501,6 @@ impl Sandbox {
                 tint: [1.0, 0.8, 0.8, 1.0],
             },
             camera,
-            drifters: Vec::new(),
             swarm: SWARM_START,
             scene: None,
             commands: Vec::new(),
@@ -503,22 +515,29 @@ impl Sandbox {
 
     /// Spawns drifters until the swarm has `swarm`, or despawns them until it has, from its end,
     /// so that those left are the first `swarm`, each moving as its index has it, from where it is
-    /// `t` seconds after the swarm starts.
-    fn resize_swarm(&mut self, world: &mut World, swarm: u32, t: f64) {
+    /// `t` seconds after the swarm starts. It finds them in the world, which holds the swarm
+    /// whole, as a snapshot of it restores it.
+    fn resize_swarm(&self, world: &mut World, swarm: u32, t: f64) {
         let _zone = gg_engine::zone!();
         let Some(scene) = &self.scene else {
             return;
         };
-        let kept = (swarm as usize).min(self.drifters.len());
-        for entity in self.drifters.drain(kept..).rev() {
+        let drifters = world.query::<(Entity, &Drifter)>();
+        let mut gone: Vec<(u32, Entity)> = drifters
+            .filter(|(_, drifter)| drifter.index >= swarm)
+            .map(|(entity, drifter)| (drifter.index, entity))
+            .collect();
+        // The last first.
+        gone.sort_unstable_by(|a, b| b.cmp(a));
+        for (_, entity) in gone {
             world
                 .despawn(entity)
                 .expect("the swarm's drifters are alive");
         }
-        for index in self.drifters.len() as u32..swarm {
+        let kept = world.query::<&Drifter>().count() as u32;
+        for index in kept..swarm {
             let (drifter, shape) = Drifter::new(index);
-            let entity = world.spawn((drifter.transform(t), scene.shapes[shape], drifter));
-            self.drifters.push(entity);
+            world.spawn((drifter.transform(t), scene.shapes[shape], drifter));
         }
     }
 
@@ -533,10 +552,7 @@ impl Sandbox {
         for (_, sprite) in world.query_mut::<(&MapTile, &mut Sprite)>() {
             sprite.sampler = sampler;
         }
-        let Some(scene) = &self.scene else {
-            return;
-        };
-        if let Some(checkerboard) = world.get_mut::<Sprite>(scene.checkerboard) {
+        for (_, checkerboard) in world.query_mut::<(&Checkerboard, &mut Sprite)>() {
             checkerboard.color = Vec4::from(settings.tint);
             checkerboard.rect = [Vec2::ZERO, Vec2::splat(settings.tiles)];
             checkerboard.sampler = if settings.smooth {
@@ -585,7 +601,7 @@ impl Layer for Sandbox {
             scale: middle,
             ..Transform::IDENTITY
         };
-        let checkerboard = world.spawn((at, checkerboard));
+        world.spawn((at, checkerboard, Checkerboard));
         let at = Transform {
             translation: Vec3::Z * TRIANGLE_Z,
             ..Transform::IDENTITY
@@ -607,11 +623,12 @@ impl Layer for Sandbox {
         world.spawn((at, logo));
         self.scene = Some(Scene {
             shapes: std::array::from_fn(|i| shapes.sprite([i as u32 % 4, i as u32 / 4], [1, 1])),
-            checkerboard,
         });
         self.apply_settings(world, self.settings);
         color_grid(world, self.grid_colors);
-        self.resize_swarm(world, self.swarm, 0.0);
+        // At the first tick, so that a recording holds the swarm's size, which a build's own
+        // differs from another's.
+        self.commands.push(Command::Swarm(self.swarm));
     }
 
     fn tick(&mut self, world: &mut World, tick: Tick) {
@@ -635,6 +652,10 @@ impl Layer for Sandbox {
         }
         drift(world, t);
         spin(world, Tick::DT);
+    }
+
+    fn commands(&mut self) -> Option<&mut dyn Commands> {
+        Some(&mut self.commands)
     }
 
     fn update(&mut self, cx: &mut Context, dt: Duration) {
@@ -826,11 +847,10 @@ mod tests {
     fn commands_change_the_world_at_the_next_tick_in_order() {
         let mut world = world();
         world.load_scene(&read_scene("grid.ron").0).expect("loaded");
-        let checkerboard = world.spawn((Transform::IDENTITY, Sprite::default()));
+        world.spawn((Transform::IDENTITY, Sprite::default(), Checkerboard));
         let mut sandbox = Sandbox::new();
         sandbox.scene = Some(Scene {
             shapes: std::array::from_fn(|_| Sprite::default()),
-            checkerboard,
         });
         let colors = [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]];
         let commands = [
@@ -865,12 +885,148 @@ mod tests {
         sandbox.tick(&mut world, Tick { number: 2 });
         assert_eq!(colored(&world), 99);
         // The swarm's size dragged away and back between two ticks leaves its drifters be.
-        let drifters = sandbox.drifters.clone();
+        let swarm = |world: &World| {
+            let drifters = world.query::<(Entity, &Drifter)>();
+            let mut drifters: Vec<(u32, Entity)> = drifters.map(|(e, d)| (d.index, e)).collect();
+            drifters.sort_unstable();
+            drifters
+        };
+        let before = swarm(&world);
+        assert_eq!(
+            before.iter().map(|&(i, _)| i).collect::<Vec<_>>(),
+            [0, 1, 2]
+        );
         sandbox
             .commands
             .extend([Command::Swarm(1), Command::Swarm(3)]);
         sandbox.tick(&mut world, Tick { number: 3 });
-        assert_eq!(sandbox.drifters, drifters);
+        assert_eq!(swarm(&world), before);
+        // Shrunk, it keeps its first.
+        sandbox.commands.push(Command::Swarm(2));
+        sandbox.tick(&mut world, Tick { number: 4 });
+        assert_eq!(swarm(&world), before[..2]);
+    }
+
+    /// The live recording, `tests/references/live.recording`, of a windowed run whose panels and
+    /// Inspector were used, replays without a GPU to the hashes it recorded, as the deterministic
+    /// mode needs, in a debug build as in a release one and on every platform.
+    /// `GG_UPDATE_REFERENCES=1` writes its hashes again, after a change meant to change the
+    /// simulation or what the hash reads; a change to a command's type that its lines no longer
+    /// read as needs a new recording.
+    #[test]
+    fn the_live_recording_replays_to_its_hashes() {
+        let path = live_recording();
+        let text = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("can't read {}: {error}", path.display()));
+        if std::env::var_os("GG_UPDATE_REFERENCES").is_some_and(|value| value == "1") {
+            let rewritten = gg_engine::Replay::rewrite(app(), &text);
+            fs::write(&path, rewritten.unwrap_or_else(|error| panic!("{error:#}")))
+                .expect("written");
+            println!("wrote {}", path.display());
+            return;
+        }
+        assert!(text.ends_with("\nend\n"), "the recording has its end");
+        let mut replay = gg_engine::Replay::new(app(), &text);
+        let replay = replay.as_mut().unwrap_or_else(|error| panic!("{error:#}"));
+        let mut ticks = 0;
+        while let Some(tick) = replay.step().unwrap_or_else(|error| panic!("{error:#}")) {
+            ticks = tick.number + 1;
+        }
+        let hashes = text
+            .lines()
+            .filter(|line| line.starts_with(|c: char| c.is_ascii_digit()));
+        assert_eq!(ticks, hashes.count() as u64);
+    }
+
+    fn live_recording() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/references/live.recording")
+    }
+
+    /// A copy of the live recording whose first command that colors the grid colors one of its
+    /// squares' colors otherwise goes another way at that command's tick, and the first difference
+    /// between the two worlds there is the red of the first square of that color, by its ID.
+    #[test]
+    fn a_forced_divergence_names_its_tick_entity_and_field() {
+        // Its hashes are being written again, by the test above.
+        if std::env::var_os("GG_UPDATE_REFERENCES").is_some_and(|value| value == "1") {
+            return;
+        }
+        let text = fs::read_to_string(live_recording()).expect("the live recording");
+        let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+        let at = lines
+            .iter()
+            .position(|line| line.starts_with("> 0 Variant(\"GridColors\""));
+        let at = at.expect("the recording colors the grid");
+        // The first color's red.
+        let red = lines[at].find("F32(").expect("a color") + "F32(".len();
+        let end = red + lines[at][red..].find(')').expect("a float");
+        let old: f32 = lines[at][red..end].parse().expect("a float");
+        let new = if old > 0.5 { old - 0.25 } else { old + 0.25 };
+        lines[at].replace_range(red..end, &format!("{new:?}"));
+        let tick = lines[at..]
+            .iter()
+            .find_map(|line| line.split_once(' ')?.0.parse::<u64>().ok());
+        let tick = tick.expect("the command's tick");
+        let changed: String = lines.iter().map(|line| format!("{line}\n")).collect();
+        let mut original = gg_engine::Replay::new(app(), &text).expect("attached");
+        let mut copy = gg_engine::Replay::new(app(), &changed).expect("attached");
+        let diverged = loop {
+            let ran = original.step().expect("the recording replays");
+            let ran = ran.expect("the copy goes another way before the end");
+            if let Err(error) = copy.step() {
+                break (ran, error);
+            }
+        };
+        let (ran, error) = diverged;
+        assert_eq!(error.code(), "replay.diverged", "{error}");
+        assert_eq!(ran.number, tick, "{error}");
+        assert!(
+            error.to_string().contains(&format!("after tick {tick}")),
+            "{error}"
+        );
+        let world = original.world();
+        let squares = world
+            .query::<(Entity, &GridCell)>()
+            .filter(|(_, cell)| cell.color == 0);
+        let first = squares.map(|(square, _)| world.id(square)).min().flatten();
+        let difference = world.difference(copy.world()).expect("a difference");
+        assert_eq!(Some(difference.entity), first);
+        assert_eq!(difference.component.as_deref(), Some("Sprite"));
+        assert_eq!(difference.path, "color.x");
+        assert_eq!(difference.theirs, Some(gg_engine::reflect::Value::F32(new)));
+    }
+
+    /// A world restored from a snapshot simulates the swarm as it did from there, through a resize:
+    /// the sandbox keeps none of the swarm, which the world holds.
+    #[test]
+    fn a_restored_world_simulates_the_swarm_as_before() {
+        let mut cx = Context::seeded(0x5eed);
+        let mut sandbox = Sandbox {
+            swarm: 1_000,
+            ..Sandbox::new()
+        };
+        sandbox.attach(&mut cx);
+        let world = cx.world_mut();
+        for number in 0..64 {
+            sandbox.tick(world, Tick { number });
+        }
+        let snapshot = world.clone();
+        let run = |sandbox: &mut Sandbox, world: &mut World| {
+            let hashes = (64..128).map(|number| {
+                if number == 96 {
+                    sandbox.commands.push(Command::Swarm(250));
+                }
+                sandbox.tick(world, Tick { number });
+                world.hash()
+            });
+            hashes.collect::<Vec<_>>()
+        };
+        let first = run(&mut sandbox, world);
+        assert_eq!(world.query::<&Drifter>().count(), 250);
+        world.clone_from(&snapshot);
+        let again = run(&mut sandbox, world);
+        let parted = first.iter().zip(&again).position(|(a, b)| a != b);
+        assert_eq!(parted.map(|tick| 64 + tick), None, "the first tick to part");
     }
 
     /// The sandbox's simulation, run without a GPU from a seed through the commands of a script,
@@ -931,9 +1087,9 @@ mod tests {
                 // An infinite spin, which turns the drifter by a NaN that an invalid operation
                 // makes, whose sign each CPU gives it, and the hash takes as one.
                 112 => {
-                    let first = sandbox.drifters[0];
-                    let drifter = world.get_mut::<Drifter>(first);
-                    drifter.expect("a drifter").spin = f32::INFINITY;
+                    let mut drifters = world.query_mut::<&mut Drifter>();
+                    let first = drifters.find(|drifter| drifter.index == 0);
+                    first.expect("a drifter").spin = f32::INFINITY;
                 }
                 128 => sandbox.commands.push(Command::Settings(Settings {
                     smooth_map: true,

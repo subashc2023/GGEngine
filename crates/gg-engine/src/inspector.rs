@@ -2,7 +2,7 @@
 //! which shows the picked entity's components and edits their fields. It reaches the world only
 //! through its by-name calls, its IDs and its hierarchy, as the tool API will, so that an editor
 //! can show it for a game in another process, and names entities by their IDs. Its edits are its
-//! commands: the panels queue them, and its next tick makes them.
+//! commands: the panels queue them, its next tick makes them, and a recording keeps them.
 
 use std::f64::consts::PI;
 use std::mem;
@@ -10,11 +10,12 @@ use std::mem;
 use egui::color_picker::Alpha;
 use egui::ecolor::{Hsva, HsvaGamma};
 use egui::{KeyboardShortcut, Modifiers};
+use gg_core::Result;
 use gg_core::math::{self, EulerRot, Quat, Vec2, Vec3, Vec4};
 use tracing::warn;
 
 use crate::reflect::{self, Bound, Field, Meta, Name, Shape, Show, Type, Types, Value};
-use crate::{Context, Entity, EntityId, Layer, Log, Operation, Tick, Ui, World};
+use crate::{Commands, Context, Entity, EntityId, Layer, Log, Operation, Tick, Ui, World};
 
 /// The Entities and Inspector panels, which an app adds as an overlay,
 /// `.overlay(gg_engine::Inspector::default())`. The Entities panel lists the world's entities, all
@@ -43,8 +44,11 @@ pub struct Inspector {
     log: Log,
     /// Why the last undo or redo was refused, until the next edit, undo or redo.
     not_stepped: Option<String>,
-    /// The panels' passes since the last tick, whose edits it makes.
-    queued: Vec<Edits>,
+    /// What the panels did since the last tick, which it makes.
+    queued: Queue,
+    /// Whether a set has been queued since the last seal, undo or redo, which leave no edit going
+    /// on: a seal queued otherwise would end none, so none is.
+    open: bool,
 }
 
 /// Undoes the last edit.
@@ -112,13 +116,82 @@ struct Edit {
     value: Value,
 }
 
-/// What a pass of the panels did, which the next tick makes: the sets of the fields of `entity`,
-/// the entity picked then, what the input said of the edits, and the step the Edit menu chose.
-struct Edits {
-    entity: Option<EntityId>,
-    sets: Vec<Edit>,
-    cues: Cues,
-    chosen: Option<Step>,
+/// What the panels did, which the next tick makes in the order they did it: the Inspector's
+/// commands.
+enum Command {
+    /// Sets a field of the entity with this ID, the one picked as the field was drawn, as part of
+    /// the edit going on.
+    Set(EntityId, Edit),
+    /// Ends the edit going on, so that the next set begins another.
+    Seal,
+    Step(Step),
+}
+
+/// The Inspector's commands, which a recording reads as values: variants `Set`, with the
+/// entity's ID as text, the component and the path, and the value; `Seal`; `Undo`; and `Redo`.
+#[derive(Default)]
+struct Queue(Vec<Command>);
+
+impl Commands for Queue {
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn value(&self, i: usize) -> Value {
+        let text = |text: &str| Value::String(text.to_owned());
+        let (name, fields) = match &self.0[i] {
+            Command::Set(id, edit) => (
+                "Set",
+                vec![
+                    ("entity".into(), Value::String(id.to_string())),
+                    ("component".into(), text(&edit.component)),
+                    ("path".into(), text(&edit.path)),
+                    ("value".into(), edit.value.clone()),
+                ],
+            ),
+            Command::Seal => ("Seal", Vec::new()),
+            Command::Step(Step::Undo) => ("Undo", Vec::new()),
+            Command::Step(Step::Redo) => ("Redo", Vec::new()),
+        };
+        Value::Variant(name.into(), fields)
+    }
+
+    fn push(&mut self, value: &Value) -> Result<()> {
+        let (name, fields) = reflect::variant(value)?;
+        let text = |value: &Value, field: &str| match value {
+            Value::String(text) => Ok(text.clone()),
+            other => Err(reflect::within(reflect::wrong_kind("String", other), field)),
+        };
+        let command = match name {
+            "Set" => {
+                let names = ["entity", "component", "path", "value"];
+                let [entity, component, path, value] = reflect::pick(fields, names)?;
+                let id = text(entity, "entity")?.parse();
+                let id = id.map_err(|error| reflect::within(error, "entity"))?;
+                let edit = Edit {
+                    component: text(component, "component")?,
+                    path: text(path, "path")?,
+                    value: value.clone(),
+                };
+                Command::Set(id, edit)
+            }
+            "Seal" | "Undo" | "Redo" => {
+                reflect::pick(fields, [])?;
+                match name {
+                    "Seal" => Command::Seal,
+                    "Undo" => Command::Step(Step::Undo),
+                    _ => Command::Step(Step::Redo),
+                }
+            }
+            other => return Err(reflect::no_variant(other, &["Set", "Seal", "Undo", "Redo"])),
+        };
+        self.0.push(command);
+        Ok(())
+    }
+
+    fn clear(&mut self) {
+        self.0.clear();
+    }
 }
 
 impl Layer for Inspector {
@@ -127,12 +200,16 @@ impl Layer for Inspector {
     }
 
     fn tick(&mut self, world: &mut World, _: Tick) {
-        let mut queued = mem::take(&mut self.queued);
-        for edits in queued.drain(..) {
-            self.finish(world, edits);
+        let mut queued = mem::take(&mut self.queued.0);
+        for command in queued.drain(..) {
+            self.run(world, command);
         }
         // Kept for its memory.
-        self.queued = queued;
+        self.queued.0 = queued;
+    }
+
+    fn commands(&mut self) -> Option<&mut dyn Commands> {
+        Some(&mut self.queued)
     }
 
     fn ui(&mut self, cx: &mut Context, ui: &mut Ui<'_>) {
@@ -179,47 +256,52 @@ impl Inspector {
         chosen
     }
 
-    /// Queues a pass of the panels' `sets` of the picked entity's fields, with what its input
-    /// said of the edits, `cues`, and the step the Edit menu `chosen`, for the next tick to make.
+    /// Queues a pass of the panels, for the next tick to make: its `sets` of the picked entity's
+    /// fields, as one edit from a press of the pointer to its release, or while a widget has the
+    /// keys, as its input says, in `cues`, so that a drag, or a number typed, is one edit; then
+    /// the step the Edit menu `chosen`, or a key, asks for.
     fn queue(&mut self, sets: Vec<Edit>, cues: Cues, chosen: Option<Step>) {
-        self.queued.push(Edits {
-            entity: self.picked,
-            sets,
-            cues,
-            chosen,
-        });
-    }
-
-    /// Makes, at a tick, what a pass of the panels did: sets the fields its `edits` changed, as
-    /// one edit from a press of the pointer to its release, or while a widget has the keys, as
-    /// their cues say, so that a drag, or a number typed, is one edit; and undoes or redoes as the
-    /// step chosen in the Edit menu, or a key, asks.
-    fn finish(&mut self, world: &mut World, edits: Edits) {
-        let Edits {
-            entity,
-            sets,
-            cues,
-            chosen,
-        } = edits;
         // Before this pass's sets: a press begins another edit, even while a text field keeps
         // the keys.
         if cues.pressed {
-            self.log.seal();
+            self.seal();
         }
-        for edit in sets {
-            self.apply(world, entity, edit);
+        if let Some(id) = self.picked {
+            for edit in sets {
+                self.queued.0.push(Command::Set(id, edit));
+                self.open = true;
+            }
         }
         if cues.released || !cues.held {
-            self.log.seal();
+            self.seal();
         }
-        let Some(step) = chosen.or(cues.step) else {
-            return;
-        };
-        let stepped = match step {
-            Step::Undo => self.log.undo(world),
-            Step::Redo => self.log.redo(world),
-        };
-        self.not_stepped = stepped.err().map(|error| error.to_string());
+        if let Some(step) = chosen.or(cues.step) {
+            self.queued.0.push(Command::Step(step));
+            self.open = false;
+        }
+    }
+
+    /// Queues a seal, unless it would end no edit, so that a pass that does nothing queues
+    /// nothing: only a set the log takes begins one, and seals, undos and redos end it.
+    fn seal(&mut self) {
+        if mem::take(&mut self.open) {
+            self.queued.0.push(Command::Seal);
+        }
+    }
+
+    /// Makes, at a tick, `command`, which the panels queued.
+    fn run(&mut self, world: &mut World, command: Command) {
+        match command {
+            Command::Set(id, edit) => self.apply(world, Some(id), edit),
+            Command::Seal => self.log.seal(),
+            Command::Step(step) => {
+                let stepped = match step {
+                    Step::Undo => self.log.undo(world),
+                    Step::Redo => self.log.redo(world),
+                };
+                self.not_stepped = stepped.err().map(|error| error.to_string());
+            }
+        }
     }
 
     /// The Entities panel: a field that finds an entity by its ID, which component the entities
@@ -316,8 +398,11 @@ impl Inspector {
         };
         let components = world.components_of(entity);
         let components = components.expect("the entity of an ID is alive");
-        let queued = self.queued.iter().filter(|edits| edits.entity == Some(id));
-        let waiting: Vec<&Edit> = queued.flat_map(|edits| &edits.sets).collect();
+        let queued = self.queued.0.iter().filter_map(|command| match command {
+            Command::Set(set, edit) if *set == id => Some(edit),
+            _ => None,
+        });
+        let waiting: Vec<&Edit> = queued.collect();
         ui.label(format!("Entity {id}"));
         if let Some(children) = children(world, entity) {
             ui.label(children);
@@ -1591,6 +1676,117 @@ mod tests {
             run(&mut inspector, &mut world, keys);
             assert_eq!(weight(&world).to_bits(), expected.to_bits());
         }
+    }
+
+    #[test]
+    fn frames_that_change_nothing_queue_nothing() {
+        let mut world = World::default();
+        let entity = world.spawn(everything());
+        let ctx = crate::egui_context();
+        let mut inspector = Inspector::default();
+        inspector.pick(id(&world, entity));
+        let mut time = 0.0;
+        let mut run = |inspector: &mut Inspector, world: &mut World, events, tick| {
+            time += 1.0;
+            frame_ticking(inspector, world, &ctx, time, events, tick)
+        };
+        let mut texts = Vec::new();
+        for _ in 0..3 {
+            texts = run(&mut inspector, &mut world, Vec::new(), true).0;
+        }
+        assert!(inspector.queued.is_empty(), "drawing queues nothing");
+        let at = beside(&texts, find(&texts, "Everything", "weight"));
+        let weight = |world: &World| world.get::<Everything>(entity).expect("everything").weight;
+        for _ in 0..2 {
+            for events in slide(at) {
+                run(&mut inspector, &mut world, events, true);
+            }
+            // Frames between the drags, which wait for a tick, and end no edit.
+            for _ in 0..10 {
+                run(&mut inspector, &mut world, Vec::new(), false);
+            }
+            assert!(inspector.queued.is_empty(), "idle frames queue nothing");
+        }
+        assert_eq!(inspector.log.operations().len(), 2, "two edits");
+        for _ in 0..2 {
+            run(
+                &mut inspector,
+                &mut world,
+                shortcut(egui::Key::Z, false),
+                true,
+            );
+        }
+        assert_eq!(weight(&world).to_bits(), 2.5f64.to_bits());
+    }
+
+    #[test]
+    fn its_commands_are_values_that_queue_them_again() {
+        let mut world = World::default();
+        let entity = world.spawn(everything());
+        let mut inspector = Inspector::default();
+        inspector.pick(id(&world, entity));
+        let set = |path: &str, value| Edit {
+            component: "Everything".to_owned(),
+            path: path.to_owned(),
+            value,
+        };
+        let target = Value::Option(Some(Box::new(Value::Entity(entity))));
+        let sets = vec![set("count", Value::UInt(7)), set("target", target)];
+        let pressed = Cues {
+            pressed: true,
+            held: true,
+            ..Cues::default()
+        };
+        inspector.queue(sets, pressed, None);
+        inspector.queue(Vec::new(), Cues::default(), Some(Step::Undo));
+        inspector.queue(Vec::new(), Cues::default(), Some(Step::Redo));
+        let values = |queue: &Queue| (0..queue.len()).map(|i| queue.value(i)).collect::<Vec<_>>();
+        let queued = values(&inspector.queued);
+        let names: Vec<&str> = queued
+            .iter()
+            .map(|value| reflect::variant(value).expect("a variant").0)
+            .collect();
+        // The press began no edit, since none went on, and the release ended the one it began.
+        assert_eq!(names, ["Set", "Set", "Seal", "Undo", "Redo"]);
+        let mut again = Queue::default();
+        for value in &queued {
+            again
+                .push(value)
+                .unwrap_or_else(|error| panic!("{value:?}: {error}"));
+        }
+        assert_eq!(values(&again), queued);
+        let named = |name: &str, value| (Name::Owned(name.to_owned()), value);
+        let fields = |entity: &str| {
+            vec![
+                named("entity", Value::String(entity.to_owned())),
+                named("component", Value::String("Everything".to_owned())),
+                named("path", Value::String("count".to_owned())),
+                named("value", Value::UInt(1)),
+            ]
+        };
+        for (value, code) in [
+            (
+                Value::Variant("Set".into(), fields("5F3A9C0E12B47D68")),
+                "ecs.bad_id",
+            ),
+            (
+                Value::Variant("Set".into(), fields("")[1..].to_vec()),
+                "reflect.missing_field",
+            ),
+            (
+                Value::Variant("Seal".into(), fields("")),
+                "reflect.no_field",
+            ),
+            (
+                Value::Variant("Cut".into(), Vec::new()),
+                "reflect.no_variant",
+            ),
+            (Value::UInt(1), "reflect.wrong_kind"),
+        ] {
+            let error = again.push(&value).expect_err("refused");
+            assert_eq!(error.code(), code, "{value:?}: {error}");
+        }
+        assert_eq!(again.len(), queued.len());
     }
 
     #[test]

@@ -18,10 +18,11 @@ use super::table::AnyColumn;
 use super::{Entity, Parent, World};
 use crate::reflect::{Meta, Show};
 use read::Loaded;
+pub(crate) use write::{float, quote};
 
 /// The most levels a scene's values nest: a component's value is the first, and each value in a
 /// struct, variant, option, list or array is a level deeper than it.
-const MAX_DEPTH: u32 = 64;
+pub(crate) const MAX_DEPTH: u32 = 64;
 
 /// The hints of a component's value, which has no field's.
 pub(super) static NO_HINTS: Meta = Meta {
