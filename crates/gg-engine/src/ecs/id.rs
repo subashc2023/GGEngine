@@ -31,6 +31,13 @@ impl fmt::Debug for EntityId {
     }
 }
 
+impl EntityId {
+    /// The number it is.
+    pub(super) fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
 /// Exactly as `Display` writes one, so that each ID has one text: 16 lowercase hex digits, not all
 /// zero.
 ///
@@ -72,7 +79,7 @@ pub(super) fn splitmix64(state: &mut u64) -> u64 {
 
 /// SplitMix64's mix, of xorshifts and multiplications by odd constants: a bijection of the 64-bit
 /// numbers, which spreads each bit of `z` over all of them.
-fn mix64(mut z: u64) -> u64 {
+pub(super) fn mix64(mut z: u64) -> u64 {
     z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
     z ^ (z >> 31)
@@ -120,6 +127,11 @@ impl IdStream {
     /// the same state, so that a seeded world stays the same every run.
     pub(super) fn reseed(&mut self) {
         self.0 = mix64(self.0.rotate_left(32) ^ RESEED);
+    }
+
+    /// Where it is on its cycle, which the IDs to come follow from.
+    pub(super) fn state(self) -> u64 {
+        self.0
     }
 }
 

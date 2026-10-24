@@ -4,7 +4,7 @@ use std::f32::consts::FRAC_PI_2;
 use std::ops::ControlFlow;
 use std::time::Duration;
 
-use gg_core::math::{Quat, Vec3};
+use gg_core::math::{self, Quat, Vec3};
 use gg_renderer::{Camera, Projection};
 
 use crate::{Context, Event, Key, Scroll, Window};
@@ -89,7 +89,7 @@ impl OrthographicCameraController {
         // Scrolling up zooms in.
         let Projection::Orthographic { height, .. } = &mut self.camera.projection;
         let [least, most] = self.heights;
-        *height = (*height * ZOOM.powf(-lines)).clamp(least, most);
+        *height = (*height * math::libm::powf(ZOOM, -lines)).clamp(least, most);
         cx.set_camera(self.camera);
         ControlFlow::Break(())
     }

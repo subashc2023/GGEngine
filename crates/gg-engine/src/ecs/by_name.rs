@@ -914,6 +914,10 @@ mod tests {
         fn part_mut(&mut self, index: u32) -> Option<&mut dyn Reflect> {
             self.0.part_mut(index)
         }
+
+        fn digest(&self, to: &mut reflect::Digest<'_>) {
+            self.0.digest(to);
+        }
     }
 
     impl Component for Posing {}

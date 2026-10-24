@@ -102,9 +102,8 @@ impl Shaders {
     ///   matrices: Slang lays out what a pointer points at as `#[repr(C)]` does, without padding.
     ///   glam's `Vec2`, `Vec3`, `Vec4`, `Quat`, `Mat3` and `Mat4` are `float2`, `float3`,
     ///   `float4`, `float4`, `float3x3` and `float4x4`; not `Vec3A` or `Mat3A`, whose columns
-    ///   take 16 bytes to `float3`'s 12. `Vec4`, `Quat` and `Mat4` are 16-byte aligned, so a type
-    ///   with one has padding, which `NoUninit` refuses, unless it starts at a multiple of 16
-    ///   bytes and the type's size is one too.
+    ///   take 16 bytes to `float3`'s 12. The engine builds glam without SIMD, so each of them is
+    ///   4-byte aligned, as Slang's are.
     ///
     /// Fails with `renderer.bad_shader` and slangc's diagnostics if it doesn't compile, and with
     /// `renderer.no_slangc` if slangc can't be run.

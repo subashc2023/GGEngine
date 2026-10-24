@@ -86,7 +86,7 @@ fn clear_reads_back() {
         if c <= 0.04045 {
             c / 12.92
         } else {
-            ((c + 0.055) / 1.055).powf(2.4)
+            gg_core::math::libm::powf((c + 0.055) / 1.055, 2.4)
         }
     };
     for _ in 0..3 {

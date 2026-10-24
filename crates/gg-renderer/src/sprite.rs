@@ -137,8 +137,7 @@ pub(crate) const CORNERS: [Corner; 4] = [
 ];
 pub(crate) const INDICES: [u32; 6] = [0, 1, 2, 2, 3, 0];
 
-/// What `shaders/sprite.slang` takes for each sprite, an instance of its draw. The color is an
-/// array, since a `Vec4` is 16-byte aligned, which would pad the struct from 40 bytes to 48.
+/// What `shaders/sprite.slang` takes for each sprite, an instance of its draw.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 pub(crate) struct Params {

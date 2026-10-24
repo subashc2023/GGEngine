@@ -158,15 +158,24 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   against frames of many lengths, the cap and the stop when slow, lockstep, ticks before the
   updates, the world refused outside ticks, edits made at the next tick on the entity picked as
   they were made, and the sandbox's commands applied in order.
+- **Deterministic math and the world hash** (2026-10-24): the simulation's math gives the same
+  bits on every platform, glam built without SIMD and with libm's functions, and clippy refusing
+  std's float methods whose precision is the platform's; and the world hashes in two parts, its
+  content, each entity's components under its ID, which undoing a log gives back, and its layout,
+  how it holds them, which the order queries find entities in follows from. The sandbox's
+  simulation, run without a GPU from a seed through a script of commands, gives at every tick the
+  hashes its reference holds, which CI checks on all six platforms; unit tests check that every
+  field reflection reads reaches the content and nothing opaque does, that where the world holds
+  its entities reaches only the layout, and that undoing a log gives back the content.
 
-## Now: the deterministic mode
+## Now: recordings and replays
 
-Phase 3's ninth milestone: the deterministic mode, with a world hash per tick, recordings and
-replays, and math that is identical everywhere. *Done when* a recording, a snapshot and the
-commands after it, replays to the same hashes on all three OSes and both architectures, with a
-forced divergence reported as its first tick, entity and field. Its plan is made when it starts,
-and decides one queue that every layer's commands go through to be recorded, and how the state
-layers keep for the simulation, such as the sandbox's swarm's handles, moves into the world.
+Phase 3's tenth milestone: recordings of runs, and replays of them, checked by the world's hash at
+every tick. *Done when* a recording of a live run, its seed and the commands after its attach,
+replays without a GPU to the same hashes on all three OSes and both architectures, with a forced
+divergence reported as its first tick, entity and field. Its plan is made when it starts, and
+decides one queue that every layer's commands go through to be recorded, and how the state layers
+keep for the simulation, such as the sandbox's swarm's handles, moves into the world.
 
 ## Next
 
@@ -177,12 +186,12 @@ Each phase ends in something you can run and check.
    with inverses and their log, and whole-world snapshots and restores. A fixed timestep, with
    commands as the only way into the simulation; the deterministic mode, with a world hash per
    tick, recordings and replays, and math that is identical everywhere (glam's `scalar-math`
-   and `libm` features, or math types of our own); input actions; a job system. All of it runs
-   headless. *Done when* a scene saved, loaded and saved again is byte-identical; undoing a log
-   of operations gives back the original world's hash; a restored snapshot matches the world it
-   was taken from; steady-state ticks don't allocate; and a recording replays to the same
-   hashes on all three OSes and both architectures, with a forced divergence reported as its
-   first tick, entity and field.
+   and `libm` features); input actions; a job system. All of it runs headless. *Done when* a
+   scene saved, loaded and saved again is byte-identical; undoing a log of operations gives back
+   the original world's content hash; a restored snapshot matches the world it was taken from;
+   steady-state ticks don't allocate; and a recording replays to the same hashes on all three
+   OSes and both architectures, with a forced divergence reported as its first tick, entity and
+   field.
 4. **First mesh.** Uploads of whole assets through the transfer queue, or by host image copy
    where a device has no separate transfer queue; depth; Slang reflection; an on-disk pipeline
    cache; shader hot reload. Render extraction, with the render thread a frame behind
@@ -303,20 +312,19 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | A component type's default as a value, to add one without giving every field; `Create` and `Add` take whole values | The Inspector or the tool API adds components |
 | Moving values to a type that changed: matching fields by name and by alias, defaults for fields added, and fields dropped; a scene with a field its type hasn't, or without one it has, is refused | Phase 4, when `Sprite` gains its texture's name, or Phase 5's hot reload |
 | In the Inspector, turning an option on or off, switching to a variant with fields, and adding or removing a list's elements; by path, a value sets them whole | A component needs one edited |
-| `Sprite.texture` and `MeshDraw` are opaque: shown, but not set, saved or carried across a rebuild | Phase 4, which names assets |
+| `Sprite.texture` and `MeshDraw` are opaque: shown, but not set, saved, hashed or carried across a rebuild | Phase 4, which names assets |
 | Flags for fields that saving, the world's hash or replication skip, and fields that are read only; `Parent` is read only as a whole type, which `set_field` refuses | Each with its first user |
 | Generic types deriving `Reflect` or `Component` | A game needs one |
 | Drag speeds as hints; the Inspector picks them from a field's bounds and kind | A field drags too coarsely or too finely |
 | Paths resolved once and kept, for sets made again and again | A profile |
 | Picking an entity for a field, a parent or a child picked by clicking it, the Entities panel as a tree, names in the Inspector, and picking in the view; entities are shown by their IDs, and found by an ID pasted in | Picking in the view, or Phase 9's scene tree |
 | World transforms stored and propagated after the ticks, with change detection; drawing computes each child's from its ancestors, every frame | Physics, or a profile showing the walks up the hierarchy |
-| A world matrix for game code; the engine's drawing computes its own | The camera as a component, or a system that needs a child's place in the world, once the deterministic mode settles its math |
+| A world matrix for game code; the engine's drawing computes its own | The camera as a component, or a system that needs a child's place in the world |
 | Reparenting that keeps where a child is in the world, by decomposing its matrix, which loses any shear; `set_parent` keeps its own transform | The editor's scene tree, or an agent attaching something where it stands |
 | Spawning a child into its table at once from code: `spawn`, then `set_parent`, moves it to another table; a load and a create operation spawn one there | A profile |
 | Children in an order that means something: reordering them, and saving their order; an undo puts a child back last | The editor's scene tree, or UI laid out by the hierarchy |
-| Seeding a world's IDs, and the stream's state in the world hash; a seed for authoring is never fixed, or every session would draw the same IDs | The deterministic mode |
 | Each session's seed and count saved with the world and merged with it, so that an ID maps back to its session and when it was drawn, and a load refuses IDs no session drew | The tool API refusing an ID an agent made up |
-| An `EntityId` query term | The first system that reads IDs as it iterates, such as the world hash or replication |
+| An `EntityId` query term | The first system that reads IDs as it iterates, such as replication |
 | Errors carrying their entity, and a scene's line and column, as fields, not only in their message | The tool API returns errors as data |
 | Drawing rows at one z in ID order for less. Every frame reads them in that order rather than their tables', about 0.9 ms of the swarm's 4.3 ms frame in release; a frame that changes rows or z's, or follows a restore, sorts them by ID again, about 2.5 ms more for 100,000; and 100,000 sprites each at a z of their own, as sorting by y gives them, take about 2 ms more than before, for a group and an item each. Tables kept in ID order would make the reads a sweep, and a radix sort the sort quicker | A game's frames need the time |
 | Linked prefab instances, with overrides, nesting, apply and revert; a placement is a flattened copy, each ID mixed from its instance's and its own, which links will keep | The editor, or a game editing a prefab its scenes hold many copies of |
@@ -334,13 +342,15 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | A bound on the log, which keeps a session's entries, a delete's components and slots among them, until it's cleared | A session's memory shows it |
 | A log that outlives a run or a restore: inverses that keep components typed can't be saved, and a restored world refuses every inverse from before, the slots kept when the snapshot was taken staying unused; a snapshot could keep the log's place, which a restore would rewind it to | Phase 5's restart from a snapshot |
 | A depth limit on values set or created by name, as scenes' 64; a deeper one recurses without one | The tool API takes values from outside |
-| An undo giving back the ID stream's state and the tables' order: an undone create's ID stays drawn, and what an undo puts back goes last in its table, so a world hash of either differs after a log is undone, though its scene comes back byte for byte | The deterministic mode's world hash |
 | Snapshots that copy less, only the tables changed, or on several threads: the swarm's 100,450 entities copy about 20 MB each way, in 0.63 ms taken again or restored, and the frame after a restore sorts the swarm's rows by ID again, about 2.5 ms | A game's rollback frames need the time |
 | An app's own tick rate; the simulation runs 64 ticks a second | A game needs another rate |
 | Budgeting a frame's ticks against all of its time: a frame stops its ticks only once they take longer than the time they simulate, so ticks that take nearly their 15.625 ms keep real time at the frame rate's cost, as the debug sandbox's 100,000 drifters do, about 8 a frame at 8 fps; counting the rest of the frame too would slow down the simulation of any game drawn below 64 fps | A game's frame rate falls so |
 | Headless runs in real time, as a dedicated server's: a headless run takes a tick each frame, as fast as its frames go | The first dedicated server |
 | Ticks as a part of their own in the Performance panel and in `engine.perf`'s times: a frame's update includes its ticks, so that a windowed run's update times mix frames of no tick and of several | Phase 4's extraction, or frames often running several ticks |
 | The Inspector showing an undo or a redo before its tick makes it, as it shows a set: above 64 frames a second, a field shows its value from before for a frame or so, and a refusal and the Edit menu's names come at the tick | It shows, or Phase 5's editor in another process |
+| Hashing a world for less: incrementally as its components change, on several threads, or with a cheaper step for each word and one mix for each term. `World::hash` reads every component, mixing each word with SplitMix64's mix: 5.5 ms for the swarm's 100,450 entities in release, three times their tick | Hashing every tick shows in a profile, as recordings will |
+| The sign of a zero that f32's `min`, `max` and `clamp` give, which std leaves to the platform, and its `algebraic_*` methods, which clippy doesn't refuse; the simulation calls none of them | The simulation first calls one |
+| The ban on std's float methods for games in their own repositories, which the workspace's clippy.toml doesn't reach, though glam's features do, since Cargo merges them | The first game outside the workspace |
 
 ## Open questions
 

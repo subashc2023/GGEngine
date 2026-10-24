@@ -159,6 +159,8 @@ fn opaque(name: &str, doc: &str, hint: Span) -> TokenStream {
         ) -> ::std::option::Option<&mut dyn #r::Reflect> {
             ::std::option::Option::None
         }
+
+        fn digest(&self, _: &mut #r::Digest<'_>) {}
     }
 }
 
@@ -204,6 +206,15 @@ fn structure(
         let member = &field.member;
         quote_spanned!(at_type(field.ty)=> &mut self.#member as &mut dyn #r::Reflect)
     });
+    let digested = read.iter().map(|(_, field)| {
+        let Field { member, ty, .. } = field;
+        quote_spanned!(at_type(ty)=> <#ty as #r::Reflect>::digest(&self.#member, to))
+    });
+    let to = if read.is_empty() {
+        quote!(_)
+    } else {
+        quote!(to)
+    };
     Ok(quote! {
         fn describe(types: &mut #r::Types) -> #r::Result<#r::Type> {
             types.add::<Self>(
@@ -249,6 +260,10 @@ fn structure(
                 _ => ::std::option::Option::None,
             }
         }
+
+        fn digest(&self, #to: &mut #r::Digest<'_>) {
+            #(#digested;)*
+        }
     })
 }
 
@@ -267,7 +282,8 @@ fn enumeration(
     let mut kept = Vec::new();
     let mut names = Vec::new();
     let mut described_fields = Vec::new();
-    for variant in variants {
+    let mut digested = Vec::new();
+    for (index, variant) in (0u32..).zip(variants) {
         no_hints(
             &variant.attrs,
             "a variant takes no hints: they go on its fields",
@@ -289,19 +305,35 @@ fn enumeration(
             }
         });
 
-        let patterns = fields.iter().map(|field| match field.hints.opaque {
-            Some(_) => quote!(_),
-            None => {
-                let binding = &field.binding;
-                quote!(ref #binding)
-            }
-        });
+        let patterns: Vec<_> = fields
+            .iter()
+            .map(|field| match field.hints.opaque {
+                Some(_) => quote!(_),
+                None => {
+                    let binding = &field.binding;
+                    quote!(ref #binding)
+                }
+            })
+            .collect();
         let values = fields.iter().map(|field| field.to_value(&field.binding));
         read.push(quote! {
             Self::#ident { #(#members: #patterns),* } => #r::Value::Variant(
                 ::std::borrow::Cow::Borrowed(#name),
                 ::std::vec![#(#values),*],
             ),
+        });
+
+        // Its index as a `u32` is, so that the derive needs nothing more of `Digest`.
+        let index = Literal::u32_unsuffixed(index);
+        let fields_digested = fields
+            .iter()
+            .filter(|field| field.hints.opaque.is_none())
+            .map(|Field { ty, binding, .. }| quote!(<#ty as #r::Reflect>::digest(#binding, to)));
+        digested.push(quote! {
+            Self::#ident { #(#members: #patterns),* } => {
+                <::core::primitive::u32 as #r::Reflect>::digest(&#index, to);
+                #(#fields_digested;)*
+            }
         });
 
         let making = fields.iter().map(Field::make);
@@ -331,6 +363,11 @@ fn enumeration(
         described_fields.extend(fields);
     }
     let types = types_binding(&described_fields);
+    let to = if digested.is_empty() {
+        quote!(_)
+    } else {
+        quote!(to)
+    };
     let with_value = if kept.is_empty() {
         quote!(<Self as #r::Reflect>::from_value(value))
     } else {
@@ -378,6 +415,12 @@ fn enumeration(
             _: ::core::primitive::u32,
         ) -> ::std::option::Option<&mut dyn #r::Reflect> {
             ::std::option::Option::None
+        }
+
+        fn digest(&self, #to: &mut #r::Digest<'_>) {
+            match *self {
+                #(#digested)*
+            }
         }
     })
 }

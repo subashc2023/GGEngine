@@ -150,6 +150,7 @@ mod tests {
             same_snapshots(&snapshot(world), &snapshot(twin)),
             "{case}: the values"
         );
+        assert_eq!(world.hash(), twin.hash(), "{case}: the hash");
         // What reflection doesn't read.
         for entity in world.entities(None).expect("every entity") {
             let texture = |world: &World| world.get::<Sprite>(entity).map(|sprite| sprite.texture);

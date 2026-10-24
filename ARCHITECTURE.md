@@ -218,15 +218,19 @@ The world lives in our own ECS, built for what the tools, hot reload and multipl
 - **Snapshots:** the whole world can be saved and restored fast enough to take one every
   frame, for rollback and client-side prediction as well as hot reload.
 - **Commands:** nothing outside the simulation changes its state except a command applied at a
-  tick: player input, a network message or an [operation](#project-state). A snapshot and the
-  commands after it make a recording, for replays, rollback and bug reports an agent can rerun;
-  so a command is data, never a closure.
+  tick: player input, a network message or an [operation](#project-state). A run's seed and the
+  commands after its app attaches make a recording, which replays it without a GPU, for bug
+  reports an agent can rerun, as a snapshot and the commands after it replay from there, for
+  rollback; so a command is data, never a closure.
 - **A deterministic mode:** the fixed timestep, a fixed order of systems and of iteration, and
   math that gives identical results on every platform, so lockstep games and rollback netcode
-  stay in sync. That rules out the platform's C math library and any SIMD path whose order of
-  operations differs by CPU. The world is hashed every tick, so two runs or two machines find
-  the first tick where they diverge, and comparing their snapshots through reflection names
-  the entity and field that differ.
+  stay in sync. So glam is built without SIMD, whose SSE2 and NEON paths add in different orders
+  and fuse multiplications with additions only on ARM, and with libm's functions in place of the
+  platform's C math library: for the whole build, drawing too, since Cargo merges features. And
+  clippy refuses std's float methods whose precision is the platform's across the workspace
+  ([clippy.toml](clippy.toml)), for `gg_core::math`'s. A deterministic run hashes the world every
+  tick, so two runs or two machines find the first tick where they diverge, and comparing their
+  snapshots through reflection names the entity and field that differ.
 
 Each game picks its own network model, such as an authoritative server, lockstep or
 peer-to-peer rollback; the engine supplies these pieces.
@@ -254,32 +258,32 @@ Each entity has a persistent ID, an `EntityId`: a nonzero 64-bit number, written
 hex digits, so that IDs sort as their text does and never read as a handle. Each world draws its
 IDs from SplitMix64, whose 2^64 states each mix to a different number, seeded from the OS's
 randomness through std's `RandomState`, so that a run of the cycle never gives an ID twice, and two
-runs, two sessions' or a world's on either side of a reseed, meet only where they overlap; the
-deterministic mode will seed it, and a snapshot copies its state. A scene's entities keep the IDs
-it gives them, and a load refuses one a living entity has. A draw that meets a living entity's ID,
-as a stream that walks into the run of the session that saved a loaded scene does, reseeds the
-stream, the same way for the same state, and draws again. The world keeps each slot's ID in an
-array beside the slots' `Meta` rather than in it, since every lookup of a handle reads `Meta`, and
-IDs are read only where they cross into files, tools and diagnostics, and as drawing sorts the rows
-at one z: written only as an entity is spawned into the slot and removed from it, and read through
-the entity's handle, checked first, so that a stale handle never names the entity now in its slot.
-A map hashed with SipHash, so that IDs from files can't be chosen to collide, finds an entity by
-its ID; it's looked up, never iterated.
+runs, two sessions' or a world's on either side of a reseed, meet only where they overlap; a run
+that must go the same way every time seeds it, as the sandbox's reference run does, and a snapshot
+copies its state. A scene's entities keep the IDs it gives them, and a load refuses one a living
+entity has. A draw that meets a living entity's ID, as a stream that walks into the run of the
+session that saved a loaded scene does, reseeds the stream, the same way for the same state, and
+draws again. The world keeps each slot's ID in an array beside the slots' `Meta` rather than in
+it, since every lookup of a handle reads `Meta`, and IDs are read only where they cross into
+files, tools and diagnostics, and as drawing sorts the rows at one z: written only as an entity is
+spawned into the slot and removed from it, and read through the entity's handle, checked first, so
+that a stale handle never names the entity now in its slot. A map hashed with SipHash, so that IDs
+from files can't be chosen to collide, finds an entity by its ID; it's looked up, never iterated.
 
 Reflection names each component type by its identifier, unless `#[reflect(name = "...")]` gives
 another, and two types of one name are an error rather than a guess. The derive writes the
-description, with hints for bounds, angles, colors and fields kept opaque. The engine's own
-components register as it starts, so that their names are taken first, and a game's the first time
-an entity has one; each struct or enum among their fields is described once, so a type can hold
-itself. Values cross as a closed `Value`: integers of fixed sizes only, so that a value means the
-same on every machine; `f32` apart from `f64`, so that bits come back as they went; an entity
-as its handle, as components hold one, `Parent` among them, which scenes write as IDs, and the tool
-API and replication will map to them; and `Opaque` for what reflection keeps but doesn't read,
-such as a texture's handle, which no value may make. The world reads and sets a field by its
-component's name and a path, such as `rect[1].y`: a set checks the whole value against the
-description before anything changes, refuses a number outside its field's bounds, and returns
-the old value, which sets it back unless code stored one that a set refuses. The Inspector edits
-components through these calls alone, as operations it queues for its next tick and its log
+description, with hints for bounds, angles, colors and fields kept opaque, and how a value is
+hashed. The engine's own components register as it starts, so that their names are taken first,
+and a game's the first time an entity has one; each struct or enum among their fields is described
+once, so a type can hold itself. Values cross as a closed `Value`: integers of fixed sizes only, so
+that a value means the same on every machine; `f32` apart from `f64`, so that bits come back as
+they went; an entity as its handle, as components hold one, `Parent` among them, which scenes
+write as IDs, and the tool API and replication will map to them; and `Opaque` for what reflection
+keeps but doesn't read, such as a texture's handle, which no value may make. The world reads and
+sets a field by its component's name and a path, such as `rect[1].y`: a set checks the whole value
+against the description before anything changes, refuses a number outside its field's bounds, and
+returns the old value, which sets it back unless code stored one that a set refuses. The Inspector
+edits components through these calls alone, as operations it queues for its next tick and its log
 undoes, which the tool API will serve.
 
 Entities form a hierarchy, as scenes, prefabs and the camera as a component need: a child has its
@@ -317,6 +321,19 @@ the snapshot was taken stay vacant for good, since freeing them would change the
 A snapshot taken again, or restored, is copied into memory already held, so that one taken every
 frame allocates nothing while the tables, the component types and the world's size stay, for
 components whose `Clone` allocates nothing.
+
+A world's hash has two parts. Its content is what it holds: a term for each component of each
+entity, from the entity's ID, the type's name and the words the type's derive writes, its fields in
+order, an entity it holds by its ID, or 0 if it's dead, and a float by its bits, but every NaN as
+one, since arithmetic leaves a NaN's sign to the CPU; summed, so that where the world holds them
+doesn't count, and leaving out what's opaque. Its layout is how the world holds them, which the
+order queries find entities in follows from: its tables in the order they were made, with their
+types and their rows' IDs in order, each parent's children in their order, and the state of its
+stream of IDs. Neither reads slots, handles or the order types registered in, so that a scene
+loaded into another world has the content it had. Undoing a log gives back the content, though not
+always the layout, since what an undo puts back goes last in its table, and the IDs a create drew
+stay drawn: rewinding the stream would hand an ID out twice. Hashing reads every component, without
+allocating.
 
 The simulation steps in ticks, 64 a second whatever the frame rate, each 15.625 ms, exact in
 `f32`, `f64` and nanoseconds. A frame runs the ticks the time since the last one owes before the
@@ -548,7 +565,7 @@ works on up to two frames at once.
 | Window and input | `winit`, with `ash-window` for surfaces and `gilrs` for gamepads |
 | UI | egui, drawn by `gg-renderer`, with a dock of our own |
 | Project state | RON in a canonical form; see [Project state](#project-state) |
-| Math | `glam` |
+| Math | `glam`, with its `scalar-math` and `libm` features; `libm` |
 | ECS | Our own; see [ECS](#ecs) |
 | Logs and profiling | `tracing` for logs; Tracy, through `tracy-client`, for CPU zones and GPU timestamps |
 | Agent access | MCP and a command-line tool, both clients of the [tool API](#agents-and-tools) |

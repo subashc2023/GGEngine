@@ -50,7 +50,7 @@ use dock::Dock;
 pub use dock::Ui;
 pub use ecs::{
     Bundle, Component, Entities, Entity, EntityId, Log, Operation, Parent, Query, QueryIter,
-    QueryIterMut, ReadOnlyQuery, World, Writable,
+    QueryIterMut, ReadOnlyQuery, World, WorldHash, Writable,
 };
 /// The UI library layers draw with, in [`Layer::ui`]; apps use it from here, so that they
 /// share the engine's version.

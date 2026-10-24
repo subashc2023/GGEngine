@@ -2,9 +2,11 @@
 //! kept in archetype tables, a table for each set of component types, and found by queries, or by
 //! name; entities' persistent IDs; the hierarchy, in which entities' parents carry their children
 //! along; scenes, the world's entities as text; operations, the authoring changes made to it, each
-//! with its inverse, and their log; and snapshots, the world copied whole, which restore it.
+//! with its inverse, and their log; snapshots, the world copied whole, which restore it; and the
+//! world's hash, of what it holds and how, which two runs compare at each tick.
 
 mod by_name;
+mod hash;
 mod hierarchy;
 mod id;
 mod log;
@@ -26,6 +28,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use gg_core::{Error, Result};
 
 pub use by_name::Entities;
+pub use hash::{Digest, WorldHash};
 use hierarchy::Links;
 pub use hierarchy::Parent;
 pub use id::EntityId;
@@ -216,7 +219,7 @@ const MOST: usize = 8;
 
 impl World {
     /// An empty world, as [`World::default`] makes one, whose entities' IDs are drawn from `seed`.
-    fn seeded(seed: u64) -> Self {
+    pub(crate) fn seeded(seed: u64) -> Self {
         let mut components = Components::default();
         components
             .register::<Parent>()
@@ -834,7 +837,8 @@ mod tests {
     /// Saves `world`'s every root, as the model has them, and loads the scene into a world of its
     /// own, whose types registered in another order and whose slots were freed; and checks it
     /// against the model, each entity by ID, with its components and parent, and its children in
-    /// the order of their IDs; and that it saves again as it was.
+    /// the order of their IDs; that it has `world`'s content hash; and that it saves again as it
+    /// was.
     fn scene_matches_the_model(world: &World, live: &[(Entity, Has)], step: usize) {
         let roots = live.iter().filter(|(_, has)| has.parent.is_none());
         let roots: Vec<Entity> = roots.map(|&(entity, _)| entity).collect();
@@ -860,6 +864,8 @@ mod tests {
             .unwrap_or_else(|error| panic!("step {step}: {error}"));
         check_ids(&other);
         check_links(&other);
+        let content = |world: &World| world.hash().content;
+        assert_eq!(content(&other), content(world), "step {step}: the content");
         assert_eq!(
             other.save_scene(&loaded).expect("saved"),
             text,

@@ -14,7 +14,7 @@ use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
 use bytemuck::NoUninit;
-use gg_core::math::{Mat4, Quat, Vec2, Vec3, Vec4};
+use gg_core::math::{self, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{
     Blend, Camera, DrawCounts, Draws, MeshDraw, Meshes, Projection, RenderData, Renderer, Sampler,
     Settings, Shaders, Sprite, SpriteSheet, Texture, Textures, Ui, Viewport,
@@ -182,7 +182,7 @@ fn meshes_match_their_reference() {
     let transform = |scale, turn: f32, [x, y]: [f32; 2]| {
         Mat4::from_scale_rotation_translation(
             Vec3::splat(scale),
-            Quat::from_rotation_z(turn.to_radians()),
+            Quat::from_rotation_z(math::to_radians(turn)),
             Vec3::new(x, y, 0.0),
         )
     };
@@ -518,7 +518,7 @@ fn batches_match_their_reference() {
         };
         let transform = Mat4::from_scale_rotation_translation(
             size,
-            Quat::from_rotation_z((place as f32 * 25.0).to_radians()),
+            Quat::from_rotation_z(math::to_radians(place as f32 * 25.0)),
             Vec3::new(place as f32 - 2.5, y, 0.0),
         );
         let sprite = Sprite {
@@ -799,7 +799,7 @@ fn views_match_their_reference() {
     let transform = |scale, turn: f32, [x, y]: [f32; 2]| {
         Mat4::from_scale_rotation_translation(
             Vec3::splat(scale),
-            Quat::from_rotation_z(turn.to_radians()),
+            Quat::from_rotation_z(math::to_radians(turn)),
             Vec3::new(x, y, 0.0),
         )
     };

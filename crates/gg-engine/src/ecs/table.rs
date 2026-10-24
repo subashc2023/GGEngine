@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use gg_core::{Error, Result};
 
-use super::{Component, Entity};
+use super::{Component, Entity, World, hash};
 use crate::reflect::{Name, Reflect, Type, TypeIndex, Types, Value};
 
 /// A component type's index among those a world has seen, in the order it first saw them: the
@@ -34,6 +34,8 @@ pub struct Components {
 struct Info {
     /// Its name in its description.
     name: Name,
+    /// What the world's hash takes it as, from its name.
+    key: u64,
     index: TypeIndex,
     /// Makes an empty column of the type, for a new table.
     new_column: fn() -> Box<dyn AnyColumn>,
@@ -76,6 +78,7 @@ impl Components {
             ));
         }
         self.infos.push(Info {
+            key: hash::type_key(&name),
             name: name.clone(),
             index,
             new_column: || Box::new(Vec::<T>::new()),
@@ -108,6 +111,11 @@ impl Components {
     /// Its name in its description.
     pub fn name(&self, id: ComponentId) -> &str {
         &self.infos[id.0 as usize].name
+    }
+
+    /// What the world's hash takes it as: from its name, so that it's the same in every world.
+    pub(super) fn key(&self, id: ComponentId) -> u64 {
+        self.infos[id.0 as usize].key
     }
 
     /// Every component type's name, in the order they registered.
@@ -262,6 +270,10 @@ pub trait AnyColumn: Any + Send + Sync {
 
     /// Makes `to`, a column of the same type, a copy of this one, in the memory it holds.
     fn copy_to(&self, to: &mut dyn AnyColumn);
+
+    /// The sum of its values' terms of the world's hash, its type's being `key`, and the entity
+    /// each is `rows`'s at its row.
+    fn digest(&self, rows: &[Entity], key: u64, world: &World) -> u64;
 }
 
 impl<T: Component> AnyColumn for Vec<T> {
@@ -297,6 +309,10 @@ impl<T: Component> AnyColumn for Vec<T> {
 
     fn copy_to(&self, to: &mut dyn AnyColumn) {
         to.vec_mut::<T>().clone_from(self);
+    }
+
+    fn digest(&self, rows: &[Entity], key: u64, world: &World) -> u64 {
+        hash::terms(self, rows, key, world)
     }
 }
 

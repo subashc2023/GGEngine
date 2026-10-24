@@ -10,7 +10,7 @@ use std::mem;
 use egui::color_picker::Alpha;
 use egui::ecolor::{Hsva, HsvaGamma};
 use egui::{KeyboardShortcut, Modifiers};
-use gg_core::math::{EulerRot, Quat, Vec2, Vec3, Vec4};
+use gg_core::math::{self, EulerRot, Quat, Vec2, Vec3, Vec4};
 use tracing::warn;
 
 use crate::reflect::{self, Bound, Field, Meta, Name, Shape, Show, Type, Types, Value};
@@ -656,7 +656,7 @@ impl Fields<'_> {
             Some((kept, angles)) if same_rotation(kept, q) => angles,
             _ => {
                 let (z, y, x) = q.to_euler(EulerRot::ZYX);
-                let angles = [x, y, z].map(f32::to_degrees);
+                let angles = [x, y, z].map(math::to_degrees);
                 // Shown as text, as NaN is: a drag over NaN would change it every frame. A
                 // rotation that isn't finite has NaN angles.
                 if !angles.iter().all(|angle| angle.is_finite()) {
@@ -678,7 +678,7 @@ impl Fields<'_> {
         if !changed {
             return None;
         }
-        let [x, y, z] = angles.map(f32::to_radians);
+        let [x, y, z] = angles.map(math::to_radians);
         let q = Quat::from_euler(EulerRot::ZYX, z, y, x).normalize();
         ui.data_mut(|data| data.insert_temp(id, (q, angles)));
         Some(Value::Quat(q))
@@ -1388,7 +1388,7 @@ mod tests {
 
     #[test]
     fn angles_typed_stay_while_a_system_renormalizes_the_rotation() {
-        let typed = Quat::from_rotation_z(200f32.to_radians());
+        let typed = Quat::from_rotation_z(math::to_radians(200.0));
         let mut world = World::default();
         let turned = Transform {
             rotation: typed,
@@ -1414,7 +1414,7 @@ mod tests {
         world
             .get_mut::<Transform>(entity)
             .expect("a transform")
-            .rotation = Quat::from_rotation_z(10f32.to_radians());
+            .rotation = Quat::from_rotation_z(math::to_radians(10.0));
         let texts = frames(&mut inspector, &mut world, &ctx);
         assert!(texts.iter().any(|text| text == "10.0"), "{texts:?}");
         // 200° typed again, and set at a tick that hasn't come yet: the frames before it draw the

@@ -632,19 +632,20 @@ pub(super) mod tests {
     }
 
     /// Applies random operations through the log, now and then undoing and redoing some of them,
-    /// and then undoes them all: as it goes back, the world's scene is as it was before each, byte
-    /// for byte, and in the end as it was at the start, and so is every entity, by its handle, with
-    /// what's opaque.
+    /// and then undoes them all: as it goes back, the world's scene and its content hash are as
+    /// they were before each, the scene byte for byte, and in the end as they were at the start,
+    /// and so is every entity, by its handle, with what's opaque.
     #[test]
-    fn undoing_a_log_of_random_operations_gives_back_the_scene() {
+    fn undoing_a_log_of_random_operations_gives_back_the_scene_and_its_content_hash() {
         let mut x = fixture();
         let start = saved(&x.world).expect("the start saves");
         let start_sorted = sorted(&x.world);
+        let start_content = x.world.hash().content;
         let world = &mut x.world;
         let mut log = Log::default();
         let mut rng = Rng(11);
-        // The scene before each entry done, where it saved.
-        let mut before: Vec<Option<String>> = Vec::new();
+        // The scene, where it saved, and the content hash, before each entry done.
+        let mut before: Vec<(Option<String>, u64)> = Vec::new();
         let mut applied = 0;
         for step in 0..1000 {
             if rng.below(8) == 0 && !before.is_empty() {
@@ -653,23 +654,25 @@ pub(super) mod tests {
                 for _ in 0..1 + rng.below(before.len().min(6)) {
                     let stepped = log.undo(world);
                     assert!(stepped.unwrap_or_else(|error| panic!("step {step}: {error}")));
-                    let text = before.pop().expect("an entry");
+                    let (text, content) = before.pop().expect("an entry");
                     assert_eq!(saved(world), text, "step {step}");
-                    undone.push(text);
+                    assert_eq!(world.hash().content, content, "step {step}: the content");
+                    undone.push((text, content));
                 }
-                while let Some(text) = undone.pop() {
+                while let Some(entry) = undone.pop() {
                     let stepped = log.redo(world);
                     assert!(stepped.unwrap_or_else(|error| panic!("step {step}: {error}")));
-                    before.push(text);
+                    before.push(entry);
                 }
                 assert_eq!(saved(world), now, "step {step}");
             } else {
                 let operation = random(world, &mut rng, step);
                 let said = operation.to_string();
                 let (text, version) = (saved(world), world.version());
+                let content = world.hash().content;
                 match log.apply(world, operation) {
                     Ok(()) => {
-                        before.push(text);
+                        before.push((text, content));
                         applied += 1;
                     }
                     Err(error) => {
@@ -687,12 +690,14 @@ pub(super) mod tests {
         // So that most steps change the world, rather than being refused.
         assert!(applied > 500, "{applied} applied");
         let last = saved(world);
-        while let Some(text) = before.pop() {
+        while let Some((text, content)) = before.pop() {
             assert!(log.undo(world).expect("undone"));
             assert_eq!(saved(world), text);
+            assert_eq!(world.hash().content, content);
         }
         assert!(!log.undo(world).expect("nothing to undo"));
         assert_eq!(saved(world).as_deref(), Some(start.as_str()));
+        assert_eq!(world.hash().content, start_content);
         assert!(same_snapshots(&sorted(world), &start_sorted));
         let sprite = world.get::<Sprite>(x.a).expect("a sprite");
         assert_eq!(sprite.texture, x.texture);

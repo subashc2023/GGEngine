@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 glam.workspace = true
+libm.workspace = true
 nu-ansi-term.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

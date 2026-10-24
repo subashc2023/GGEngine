@@ -72,7 +72,11 @@ The tests include GPU tests, which need a Vulkan 1.4 driver and the Khronos vali
 Without a GPU, lavapipe serves: on Debian or Ubuntu, `mesa-vulkan-drivers` (Mesa 25.0 or later)
 and `vulkan-validationlayers`. When a test's image differs from its reference, the test says
 where it wrote its own; after an intended change, `GG_UPDATE_REFERENCES=1` rewrites the
-references, which you look at before committing them.
+references, which you look at before committing them. The sandbox's world hashes, at each tick of
+a seeded run, are a reference too, which CI checks on every platform: a change to its simulation,
+to what the hash reads, or to glam or libm changes them, and `GG_UPDATE_REFERENCES=1 cargo test -p
+sandbox` rewrites them alone. A difference on some platforms only is a bug, not a reference to
+rewrite.
 
 CI ([ci.yml](.github/workflows/ci.yml)) runs the four gates on every push, on Windows, Linux
 and macOS, x86-64 and ARM64, and the layering check. Its Linux jobs run the GPU tests and the

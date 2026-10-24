@@ -98,9 +98,21 @@ pub struct Context {
 
 impl Context {
     pub(crate) fn new(window: Option<Window>) -> Self {
+        Self::with_world(window, World::default())
+    }
+
+    /// A context without a window, a renderer or a stack, whose world draws its entities' IDs from
+    /// `seed`: for calling a layer's [`attach`](Layer::attach) and its [`tick`](Layer::tick)s
+    /// directly, as a test does, so that its simulation goes the same way every run, on every
+    /// machine.
+    #[doc(hidden)]
+    pub fn seeded(seed: u64) -> Self {
+        Self::with_world(None, World::seeded(seed))
+    }
+
+    fn with_world(window: Option<Window>, mut world: World) -> Self {
         // The engine's names first, so that a game's types can't take them, listed before any
         // entity has one.
-        let mut world = World::default();
         let registered = world.register::<Transform>().and_then(|()| {
             world.register::<Sprite>()?;
             world.register::<MeshDraw>()

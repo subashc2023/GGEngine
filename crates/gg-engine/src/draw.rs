@@ -7,7 +7,7 @@ use gg_core::Error;
 use gg_core::math::{Mat4, Vec2};
 use gg_renderer::{Draws, MeshDraw, Sampler, Sprite};
 
-use crate::reflect::{self, Field, Meta, Reflect, Result, Shape, Show, Type, Types, Value};
+use crate::reflect::{self, Digest, Field, Meta, Reflect, Result, Shape, Show, Type, Types, Value};
 use crate::{Component, EntityId, Parent, Transform, World, Writable};
 
 /// Built on the default sprite, so that a scene's sprite, which leaves its texture out, shows the
@@ -144,6 +144,18 @@ impl Reflect for Sprite {
             _ => None,
         }
     }
+
+    fn digest(&self, to: &mut Digest<'_>) {
+        let Sprite {
+            color,
+            texture: _,
+            rect,
+            sampler,
+        } = self;
+        color.digest(to);
+        rect.digest(to);
+        sampler.digest(to);
+    }
 }
 
 /// A sprite's fields, in the order its description gives them.
@@ -214,6 +226,11 @@ impl Reflect for Sampler {
     fn part_mut(&mut self, _: u32) -> Option<&mut dyn Reflect> {
         None
     }
+
+    /// By its index, which is its variant's in its description.
+    fn digest(&self, to: &mut Digest<'_>) {
+        self.index().digest(to);
+    }
 }
 
 impl Component for MeshDraw {}
@@ -250,6 +267,8 @@ impl Reflect for MeshDraw {
     fn part_mut(&mut self, _: u32) -> Option<&mut dyn Reflect> {
         None
     }
+
+    fn digest(&self, _: &mut Digest<'_>) {}
 }
 
 /// What drawing the world sorts and computes, kept from frame to frame so that it allocates nothing

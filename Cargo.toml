@@ -21,8 +21,15 @@ cc = "1.9.0"
 egui = { version = "0.37.0", features = ["default_fonts"] }
 egui-winit = "0.37.0"
 epaint = { version = "0.37.0", features = ["bytemuck"] }
-# bytemuck, so that glam's types can be the fields of vertices and shader parameters.
-glam = { version = "0.34.1", features = ["bytemuck"] }
+# bytemuck, so that glam's types can be the fields of vertices and shader parameters. scalar-math
+# and libm, so that its math gives the same bits on every platform, as the simulation needs:
+# without SIMD, whose SSE2 and NEON paths add in different orders and fuse multiplications with
+# additions only on ARM, and with libm's functions rather than the platform's C library's. Cargo
+# merges features across a build, so drawing's math is scalar too.
+glam = { version = "0.34.1", features = ["bytemuck", "scalar-math", "libm"] }
+# The float functions std leaves to the platform, in Rust and so the same everywhere: musl's,
+# ported. Its default `arch` feature puts only what IEEE makes exact, such as sqrt, on hardware.
+libm = "0.2.16"
 nu-ansi-term = "0.50.3"
 png = "0.18.1"
 proc-macro2 = "1.0.107"

@@ -9,7 +9,7 @@ use std::{fs, io, mem};
 
 use bytemuck::NoUninit;
 use gg_engine::egui::{self, ViewportCommand, ViewportId};
-use gg_engine::math::{EulerRot, Quat, Vec2, Vec3, Vec4};
+use gg_engine::math::{self, EulerRot, Quat, Vec2, Vec3, Vec4};
 use gg_engine::reflect::Error;
 use gg_engine::{
     Blend, Camera, Component, Context, Entity, Event, Key, Layer, MeshDraw,
@@ -25,8 +25,7 @@ fn main() -> ExitCode {
 }
 
 /// A corner of a mesh in the colors of its corners, which `shaders/vertex_color.slang` reads: its
-/// position in the mesh's own space, and its color in linear RGBA. The color is an array, since a
-/// `Vec4` is 16-byte aligned, which would leave padding after the position.
+/// position in the mesh's own space, and its color in linear RGBA.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 struct Colored {
@@ -643,7 +642,7 @@ impl Layer for Sandbox {
         if self.drift && !cx.input().key_down(Key::Space) {
             self.time += dt;
             let t = self.time.as_secs_f32() * 0.4;
-            let wave = |phase: f32| 0.02 + 0.06 * (0.5 + 0.5 * (t + phase).sin());
+            let wave = |phase: f32| 0.02 + 0.06 * (0.5 + 0.5 * math::libm::sinf(t + phase));
             self.color = [wave(0.0), wave(2.1), wave(4.2)];
         }
     }
@@ -692,7 +691,7 @@ impl Layer for Sandbox {
             let Projection::Orthographic { height, .. } = camera.projection;
             ui.label(format!(
                 "Camera at {x:.2}, {y:.2}, turned {:.0}°, {height:.2} units high",
-                turn.to_degrees().rem_euclid(360.0)
+                math::to_degrees(turn).rem_euclid(360.0)
             ));
             ui.label(match cx.input().cursor() {
                 Some([x, y]) => format!("Cursor at {x:.0}, {y:.0}"),
@@ -872,5 +871,136 @@ mod tests {
             .extend([Command::Swarm(1), Command::Swarm(3)]);
         sandbox.tick(&mut world, Tick { number: 3 });
         assert_eq!(sandbox.drifters, drifters);
+    }
+
+    /// The sandbox's simulation, run without a GPU from a seed through the commands of a script,
+    /// hashes at its attach and at each tick as its reference says: the same in one run as in the
+    /// next, in a debug build as in a release one, and on every platform, as the deterministic mode
+    /// needs. `GG_UPDATE_REFERENCES=1` writes the reference again, after a change meant to change
+    /// the simulation or what the hash reads.
+    #[test]
+    fn the_simulation_gives_its_reference_hashes() {
+        let run = simulate();
+        let again = "; the simulation goes another way each run, so no reference holds";
+        first_difference(&run, &simulate(), "a second run in this process", again);
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/references/hashes.txt");
+        if std::env::var_os("GG_UPDATE_REFERENCES").is_some_and(|value| value == "1") {
+            fs::create_dir_all(path.parent().expect("a folder")).expect("made");
+            fs::write(&path, run.join("\n") + "\n").expect("written");
+            println!("wrote {}", path.display());
+            return;
+        }
+        let reference = fs::read_to_string(&path).unwrap_or_else(|error| {
+            panic!(
+                "can't read {}: {error}; GG_UPDATE_REFERENCES=1 writes it",
+                path.display()
+            )
+        });
+        let reference: Vec<String> = reference.lines().map(str::to_owned).collect();
+        let after = "; after a change meant to change the simulation or what the hash reads, \
+                     `GG_UPDATE_REFERENCES=1 cargo test -p sandbox` writes it again, but a \
+                     difference on some platforms alone is their simulations going apart";
+        first_difference(&run, &reference, &path.display().to_string(), after);
+    }
+
+    /// The sandbox's simulation from a seed, as lines of the world's hash, its content then its
+    /// layout: one after it attaches, and one at each of 256 ticks, between which the script queues
+    /// what the panels would, and sets what the Inspector would.
+    fn simulate() -> Vec<String> {
+        let mut cx = Context::seeded(0x5eed);
+        // One swarm for debug and release builds, whose own differ.
+        let mut sandbox = Sandbox {
+            swarm: 1_000,
+            ..Sandbox::new()
+        };
+        sandbox.attach(&mut cx);
+        let hashed = |at: &dyn std::fmt::Display, world: &World| {
+            let hash = world.hash();
+            format!("{at} {:016x} {:016x}", hash.content, hash.layout)
+        };
+        let mut lines = vec![hashed(&"attach", cx.world())];
+        for number in 0..256 {
+            let world = cx.world_mut();
+            match number {
+                32 => sandbox.commands.push(Command::Swarm(1_500)),
+                64 => {
+                    let colors = [[0.9, 0.6, 0.1], [0.1, 0.6, 0.9]];
+                    sandbox.commands.push(Command::GridColors(colors));
+                }
+                96 => sandbox.commands.push(Command::Swarm(250)),
+                // An infinite spin, which turns the drifter by a NaN that an invalid operation
+                // makes, whose sign each CPU gives it, and the hash takes as one.
+                112 => {
+                    let first = sandbox.drifters[0];
+                    let drifter = world.get_mut::<Drifter>(first);
+                    drifter.expect("a drifter").spin = f32::INFINITY;
+                }
+                128 => sandbox.commands.push(Command::Settings(Settings {
+                    smooth_map: true,
+                    smooth: true,
+                    tiles: 3.0,
+                    tint: [0.5, 1.0, 0.5, 1.0],
+                })),
+                // A zero whose sign the hash keeps.
+                144 => {
+                    let mut triangle = world.query_mut::<(&MeshDraw, &mut Transform)>();
+                    let (_, at) = triangle.next().expect("the triangle");
+                    at.translation.x = -0.0;
+                }
+                160 => {
+                    let (text, _) = read_scene("grid.ron");
+                    let colors = sandbox.grid_colors;
+                    sandbox.commands.push(Command::ReloadGrid { text, colors });
+                }
+                192 => sandbox.commands.push(Command::Swarm(1_000)),
+                _ => {}
+            }
+            sandbox.tick(world, Tick { number });
+            lines.push(hashed(&number, world));
+        }
+        lines
+    }
+
+    /// Panics at the first of `run`'s lines that isn't `expected`'s, which `what` holds, saying
+    /// which part of the hash differs there and how many lines differ, then `after`; or, if one
+    /// of them ends first, at the first line the other has past its end.
+    fn first_difference(run: &[String], expected: &[String], what: &str, after: &str) {
+        let differ = |(line, other): &(&String, &String)| line != other;
+        let lines = || run.iter().zip(expected);
+        if let Some((line, other)) = lines().find(differ) {
+            let parts = |line: &str| {
+                line.split(' ')
+                    .skip(1)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            };
+            let (ours, theirs) = (parts(line), parts(other));
+            let which: Vec<_> = ["content", "layout"]
+                .into_iter()
+                .zip(ours.iter().zip(&theirs))
+                .filter(|(_, (a, b))| a != b)
+                .map(|(part, _)| part)
+                .collect();
+            let verb = if which.len() == 1 {
+                "differs"
+            } else {
+                "differ"
+            };
+            panic!(
+                "the world's {} {verb} from {what}'s, first at its line `{other}`, which this run \
+                 has as `{line}`; {} of {} lines differ{after}",
+                which.join(" and "),
+                lines().filter(differ).count(),
+                run.len()
+            );
+        }
+        if let Some(past) = expected.get(run.len()).or(run.get(expected.len())) {
+            panic!(
+                "{what} has {} lines and this run {}, the first past the other's end being \
+                 `{past}`{after}",
+                expected.len(),
+                run.len()
+            );
+        }
     }
 }

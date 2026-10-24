@@ -19,6 +19,7 @@ pub use gg_core::{Error, Result};
 pub use gg_macros::Reflect;
 
 use crate::Entity;
+pub use crate::ecs::Digest;
 
 /// A type's, a field's or a variant's name: borrowed for Rust's types, and owned for those that
 /// scripts and files will declare.
@@ -387,7 +388,8 @@ impl Types {
 /// Implemented by hand, `describe` calls [`Types::add`] for its own type, a struct or an enum,
 /// never another's, and the rest
 /// keep to its description: `with_value` checks the value's kinds, fields and variants, and makes
-/// what it's given whole before anything changes, keeping what's opaque.
+/// what it's given whole before anything changes, keeping what's opaque; and `digest` writes what
+/// `to_value` reads.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` isn't reflected",
     note = "a type of fields describes itself with `#[derive(gg_engine::Reflect)]`, and a \
@@ -434,6 +436,15 @@ pub trait Reflect: std::any::Any + Send + Sync {
     fn part(&self, index: u32) -> Option<&dyn Reflect>;
 
     fn part_mut(&mut self, index: u32) -> Option<&mut dyn Reflect>;
+
+    /// Writes it into `to`, for the world's hash: what [`to_value`](Self::to_value) reads, in the
+    /// order it reads it, but for what's opaque, which it leaves out. A float goes by its bits,
+    /// every NaN as one; an entity by its ID, or 0 if it isn't alive; a variant by its index,
+    /// then its fields; and an option, a list and a string with what tells where they end, so that
+    /// values moved from one field to the next give another hash. Implemented by hand, it writes
+    /// its parts' own, as `to_value` reads them, and a variant's index as a `u32` does:
+    /// `<u32 as Reflect>::digest(&index, to)`.
+    fn digest(&self, to: &mut Digest<'_>);
 }
 
 /// Types whose fields `#[reflect(min = ..)]` and `#[reflect(max = ..)]` bound: numbers, vectors,

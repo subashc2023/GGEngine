@@ -5,7 +5,9 @@
 
 use gg_core::math::{Quat, Vec2, Vec3, Vec4};
 
-use super::{Angle, Color, Error, Ranged, Reflect, Result, Type, Types, Value, within, wrong_kind};
+use super::{
+    Angle, Color, Digest, Error, Ranged, Reflect, Result, Type, Types, Value, within, wrong_kind,
+};
 use crate::Entity;
 
 /// `set_value` as all of them have it, and no parts.
@@ -27,7 +29,7 @@ macro_rules! whole {
 }
 
 macro_rules! integers {
-    ($($T:ident $signed:literal $Variant:ident,)*) => {$(
+    ($($T:ident $signed:literal $Variant:ident $digest:ident,)*) => {$(
         impl Reflect for $T {
             fn describe(_: &mut Types) -> Result<Type> {
                 Ok(Type::Int { bits: $T::BITS as u8, signed: $signed })
@@ -60,6 +62,10 @@ macro_rules! integers {
                 Self::from_value(value)
             }
 
+            fn digest(&self, to: &mut Digest<'_>) {
+                to.$digest((*self).into());
+            }
+
             whole!();
         }
 
@@ -68,14 +74,14 @@ macro_rules! integers {
 }
 
 integers! {
-    i8 true Int, i16 true Int, i32 true Int, i64 true Int,
-    u8 false UInt, u16 false UInt, u32 false UInt, u64 false UInt,
+    i8 true Int int, i16 true Int int, i32 true Int int, i64 true Int int,
+    u8 false UInt word, u16 false UInt word, u32 false UInt word, u64 false UInt word,
 }
 
 /// Types whose values are one variant of [`Value`], taken as they are: such as `bool`, by
 /// `Value::Bool`, which reflection describes as `Type::Bool`.
 macro_rules! plain {
-    ($($T:ty => $Variant:ident,)*) => {$(
+    ($($T:ty => $Variant:ident $digest:ident,)*) => {$(
         impl Reflect for $T {
             fn describe(_: &mut Types) -> Result<Type> {
                 Ok(Type::$Variant)
@@ -96,16 +102,20 @@ macro_rules! plain {
                 Self::from_value(value)
             }
 
+            fn digest(&self, to: &mut Digest<'_>) {
+                to.$digest(*self);
+            }
+
             whole!();
         }
     )*};
 }
 
 plain! {
-    bool => Bool,
-    f32 => F32,
-    f64 => F64,
-    Entity => Entity,
+    bool => Bool bool,
+    f32 => F32 f32,
+    f64 => F64 f64,
+    Entity => Entity entity,
 }
 
 impl Reflect for String {
@@ -126,6 +136,10 @@ impl Reflect for String {
 
     fn with_value(&self, value: &Value) -> Result<Self> {
         Self::from_value(value)
+    }
+
+    fn digest(&self, to: &mut Digest<'_>) {
+        to.bytes(self.as_bytes());
     }
 
     whole!();
@@ -172,6 +186,13 @@ macro_rules! vectors {
                 let components: &mut [f32] = self.as_mut();
                 Some(components.get_mut(index as usize)?)
             }
+
+            fn digest(&self, to: &mut Digest<'_>) {
+                let components: &[f32] = self.as_ref();
+                for &component in components {
+                    to.f32(component);
+                }
+            }
         }
 
         impl Ranged for $T {}
@@ -215,6 +236,13 @@ impl Reflect for Quat {
         Self::from_value(value)
     }
 
+    /// x, y, z, then w.
+    fn digest(&self, to: &mut Digest<'_>) {
+        for component in self.to_array() {
+            to.f32(component);
+        }
+    }
+
     whole!();
 }
 
@@ -240,6 +268,16 @@ impl<T: Reflect> Reflect for Option<T> {
         match (self, value) {
             (Some(current), Value::Option(Some(value))) => current.with_value(value).map(Some),
             _ => Self::from_value(value),
+        }
+    }
+
+    fn digest(&self, to: &mut Digest<'_>) {
+        match self {
+            None => to.word(0),
+            Some(value) => {
+                to.word(1);
+                value.digest(to);
+            }
         }
     }
 
@@ -302,6 +340,13 @@ impl<T: Reflect> Reflect for Vec<T> {
     fn part_mut(&mut self, index: u32) -> Option<&mut dyn Reflect> {
         Some(self.get_mut(index as usize)?)
     }
+
+    fn digest(&self, to: &mut Digest<'_>) {
+        to.word(self.len() as u64);
+        for item in self {
+            item.digest(to);
+        }
+    }
 }
 
 impl<T: Ranged> Ranged for Vec<T> {}
@@ -349,6 +394,13 @@ impl<T: Reflect, const N: usize> Reflect for [T; N] {
 
     fn part_mut(&mut self, index: u32) -> Option<&mut dyn Reflect> {
         Some(self.get_mut(index as usize)?)
+    }
+
+    /// Its elements, without their number, which its type says.
+    fn digest(&self, to: &mut Digest<'_>) {
+        for item in self {
+            item.digest(to);
+        }
     }
 }
 
