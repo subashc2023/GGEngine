@@ -5,7 +5,7 @@ use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
-use std::{fs, io};
+use std::{fs, io, mem};
 
 use bytemuck::NoUninit;
 use gg_engine::egui::{self, ViewportCommand, ViewportId};
@@ -13,7 +13,8 @@ use gg_engine::math::{EulerRot, Quat, Vec2, Vec3, Vec4};
 use gg_engine::reflect::Error;
 use gg_engine::{
     Blend, Camera, Component, Context, Entity, Event, Key, Layer, MeshDraw,
-    OrthographicCameraController, Projection, Sampler, Sprite, SpriteSheet, Transform, Ui, World,
+    OrthographicCameraController, Projection, Sampler, Sprite, SpriteSheet, Tick, Transform, Ui,
+    World,
 };
 use tracing::{error, info};
 
@@ -147,7 +148,7 @@ fn overlooking(center: Vec2, height: f32) -> Camera {
     }
 }
 
-/// What the sandbox spawned as it attached, which it changes as its panels say.
+/// What the sandbox spawned as it attached, which its ticks go by as its panels say.
 struct Scene {
     /// The swarm's sprites, one for each cell of a sheet of 4 by 4 shapes with transparent
     /// margins, row by row.
@@ -276,21 +277,29 @@ fn save_grid(world: &World) -> Result<(), Error> {
     fs::rename(&temporary, &path).map_err(error)
 }
 
-/// Loads the grid from `scenes/grid.ron` in place of the one there is. If the file is refused,
-/// logs where and why, and the grid stays as it was.
-fn reload_grid(world: &mut World) {
+/// The grid scene's text, from `scenes/grid.ron`; or, if it can't be read, logs why.
+fn read_grid() -> Option<String> {
     let path = scene("grid.ron");
-    let text = match fs::read_to_string(&path) {
-        Ok(text) => text,
+    match fs::read_to_string(&path) {
+        Ok(text) => Some(text),
         Err(e) => {
             let path = path.display();
             error!(code = "sandbox.grid_file", %path, "Can't read the grid from {path}: {e}");
-            return;
+            None
         }
-    };
-    if let Err(refused) = replace_grid(world, &text) {
-        let path = path.display();
-        error!(code = refused.code(), %path, "{path}:{refused}; the grid stays as it was");
+    }
+}
+
+/// Loads the grid from `text`, read from `scenes/grid.ron`, in place of the one there is, and
+/// colors it in `colors`. If it's refused, logs where and why, and the grid stays as it was.
+fn reload_grid(world: &mut World, text: &str, colors: [[f32; 3]; 2]) {
+    match replace_grid(world, text) {
+        Ok(()) => color_grid(world, colors),
+        Err(refused) => {
+            let path = scene("grid.ron");
+            let path = path.display();
+            error!(code = refused.code(), %path, "{path}:{refused}; the grid stays as it was");
+        }
     }
 }
 
@@ -394,25 +403,26 @@ fn pick(index: u32, salt: u32) -> f32 {
 /// Below the swarm, out of its way, a map of tiles from a tile set's cells packed edge to edge,
 /// which tests that none shows any of the cells beside it. They're entities, spawned as the sandbox
 /// attaches, the grid loaded from a scene and the moons placed from a prefab, under a pivot that
-/// the triangle carries, which the engine draws back to front by their z's in the world; the
-/// sandbox's systems move the swarm by its drifters, color the grid by its cells and turn the
-/// triangle, its moons and the moonlet by their spins, every frame, and filter the map and set the
-/// checkerboard's sprite when the panels change them, so that what the Inspector sets stays until
-/// then. The triangle is a mesh with a vertex type and shader of the sandbox's own, and the rest the
-/// engine's sprites, so the map, the swarm, the grid and the checkerboard are one instanced draw,
-/// the triangle another, and the moons, the moonlet and the logo a third. They're drawn over a
-/// color that drifts slowly, so that a running sandbox visibly animates. The engine's camera
-/// controller steers the camera: W, A, S and D move it along its own axes, Q and E turn it left and
-/// right, at the same speed whatever the frame rate, and the mouse wheel zooms it. Shows six
-/// panels to dock, beside the engine's Performance panel, which counts the draws, and its Entities
-/// and Inspector panels, which list the entities and edit the picked one's components: the camera;
-/// how many sprites the swarm has; the map's filtering, smooth or sharp, and buttons that look at
-/// the map or back at the swarm; the grid's colors, which can be picked; the checkerboard's
-/// filtering, how many times it repeats, and its tint; and the clear color, which can be held or
-/// picked. Logs the key and mouse presses that reach it, which those on the panels don't. It polls
-/// input too: holding Space pauses the drift, and a panel shows where the cursor is. The title
-/// bar's File menu saves the grid to its scene, loads it again from the scene, which a refusal of
-/// leaves it as it was, and quits.
+/// the triangle carries, which the engine draws back to front by their z's in the world. At each
+/// tick, 64 a second whatever the frame rate, the sandbox's systems move the swarm by its drifters
+/// and turn the triangle, its moons and the moonlet by their spins, after the commands its panels
+/// and File menu queued since the last: they resize the swarm, color the grid by its cells, filter
+/// the map and set the checkerboard's sprite, so that what the Inspector sets stays until a panel
+/// changes it, and load the grid again. The triangle is a mesh with a vertex type and shader of the
+/// sandbox's own, and the rest the engine's sprites, so the map, the swarm, the grid and the
+/// checkerboard are one instanced draw, the triangle another, and the moons, the moonlet and the
+/// logo a third. They're drawn over a color that drifts slowly, so that a running sandbox visibly
+/// animates. The engine's camera controller steers the camera: W, A, S and D move it along its own
+/// axes, Q and E turn it left and right, at the same speed whatever the frame rate, and the mouse
+/// wheel zooms it. Shows six panels to dock, beside the engine's Performance panel, which counts
+/// the draws, and its Entities and Inspector panels, which list the entities and edit the picked
+/// one's components: the camera; how many sprites the swarm has; the map's filtering, smooth or
+/// sharp, and buttons that look at the map or back at the swarm; the grid's colors, which can be
+/// picked; the checkerboard's filtering, how many times it repeats, and its tint; and the clear
+/// color, which can be held or picked. Logs the key and mouse presses that reach it, which those on
+/// the panels don't. It polls input too: holding Space pauses the drift, and a panel shows where
+/// the cursor is. The title bar's File menu saves the grid to its scene, loads it again from the
+/// scene, which a refusal of leaves it as it was, and quits.
 struct Sandbox {
     time: Duration,
     drift: bool,
@@ -420,6 +430,24 @@ struct Sandbox {
     color: [f32; 3],
     /// The grid's two colors, in linear RGB.
     grid_colors: [[f32; 3]; 2],
+    settings: Settings,
+    camera: OrthographicCameraController,
+    /// The swarm's entities, the first spawned first.
+    drifters: Vec<Entity>,
+    /// How many sprites the swarm has, as its panel says.
+    swarm: u32,
+    /// Spawned once the sandbox attaches.
+    scene: Option<Scene>,
+    /// What the panels and the File menu changed since the last tick.
+    commands: Vec<Command>,
+}
+
+/// How the map and the checkerboard are drawn, as their panels say.
+#[derive(Clone, Copy)]
+struct Settings {
+    /// Whether the map is filtered linearly rather than sampled at the nearest texel, as pixel art
+    /// is.
+    smooth_map: bool,
     /// Whether the checkerboard is filtered linearly, which blurs its texels together, rather than
     /// sampled at the nearest, which keeps them sharp.
     smooth: bool,
@@ -427,17 +455,20 @@ struct Sandbox {
     tiles: f32,
     /// What the checkerboard's colors are multiplied by, in linear RGBA, alpha not multiplied in.
     tint: [f32; 4],
-    /// Whether the map is filtered linearly rather than sampled at the nearest texel, as pixel art
-    /// is.
-    smooth_map: bool,
-    camera: OrthographicCameraController,
-    /// The swarm's entities, the first spawned first, which it keeps `swarm` of.
-    drifters: Vec<Entity>,
-    swarm: u32,
-    /// How long the swarm has moved: its own clock, which the drift's pauses don't stop.
-    swarm_time: Duration,
-    /// Spawned once the sandbox attaches.
-    scene: Option<Scene>,
+}
+
+/// What the sandbox's panels and File menu change of its world, queued as they change it and
+/// applied at its next tick, before its systems.
+enum Command {
+    /// Spawns or despawns drifters until the swarm has this many.
+    Swarm(u32),
+    /// Colors the grid's squares in these, in linear RGB.
+    GridColors([[f32; 3]; 2]),
+    /// Draws the map and the checkerboard so.
+    Settings(Settings),
+    /// Loads the grid in place of the one there is from `text`, read from its scene as the menu
+    /// was clicked, and colors it in `colors`, as the panel had them then.
+    ReloadGrid { text: String, colors: [[f32; 3]; 2] },
 }
 
 impl Sandbox {
@@ -450,16 +481,18 @@ impl Sandbox {
             color: [0.0; 3],
             // Blue and red.
             grid_colors: [[0.2, 0.3, 0.8], [0.8, 0.2, 0.3]],
-            smooth: false,
-            tiles: 2.0,
-            // Pink.
-            tint: [1.0, 0.8, 0.8, 1.0],
-            smooth_map: false,
+            settings: Settings {
+                smooth_map: false,
+                smooth: false,
+                tiles: 2.0,
+                // Pink.
+                tint: [1.0, 0.8, 0.8, 1.0],
+            },
             camera,
             drifters: Vec::new(),
             swarm: SWARM_START,
-            swarm_time: Duration::ZERO,
             scene: None,
+            commands: Vec::new(),
         }
     }
 
@@ -470,30 +503,30 @@ impl Sandbox {
     }
 
     /// Spawns drifters until the swarm has `swarm`, or despawns them until it has, from its end,
-    /// so that those left are the first `swarm`, each moving as its index has it.
-    fn resize_swarm(&mut self, world: &mut World) {
+    /// so that those left are the first `swarm`, each moving as its index has it, from where it is
+    /// `t` seconds after the swarm starts.
+    fn resize_swarm(&mut self, world: &mut World, swarm: u32, t: f64) {
         let _zone = gg_engine::zone!();
         let Some(scene) = &self.scene else {
             return;
         };
-        let swarm = self.swarm as usize;
-        for entity in self.drifters.drain(swarm.min(self.drifters.len())..).rev() {
+        let kept = (swarm as usize).min(self.drifters.len());
+        for entity in self.drifters.drain(kept..).rev() {
             world
                 .despawn(entity)
                 .expect("the swarm's drifters are alive");
         }
-        let t = self.swarm_time.as_secs_f64();
-        for index in self.drifters.len() as u32..self.swarm {
+        for index in self.drifters.len() as u32..swarm {
             let (drifter, shape) = Drifter::new(index);
             let entity = world.spawn((drifter.transform(t), scene.shapes[shape], drifter));
             self.drifters.push(entity);
         }
     }
 
-    /// Has the map's sprites and the checkerboard's as the panels say, as the sandbox attaches and
-    /// when the panels change: between, the Inspector may set them otherwise.
-    fn apply_settings(&self, world: &mut World) {
-        let sampler = if self.smooth_map {
+    /// Has the map's sprites and the checkerboard's as `settings` say, as the sandbox attaches and
+    /// at the tick after the panels change them: between, the Inspector may set them otherwise.
+    fn apply_settings(&self, world: &mut World, settings: Settings) {
+        let sampler = if settings.smooth_map {
             Sampler::LinearClamp
         } else {
             Sampler::NearestClamp
@@ -505,9 +538,9 @@ impl Sandbox {
             return;
         };
         if let Some(checkerboard) = world.get_mut::<Sprite>(scene.checkerboard) {
-            checkerboard.color = Vec4::from(self.tint);
-            checkerboard.rect = [Vec2::ZERO, Vec2::splat(self.tiles)];
-            checkerboard.sampler = if self.smooth {
+            checkerboard.color = Vec4::from(settings.tint);
+            checkerboard.rect = [Vec2::ZERO, Vec2::splat(settings.tiles)];
+            checkerboard.sampler = if settings.smooth {
                 Sampler::LinearRepeat
             } else {
                 Sampler::NearestRepeat
@@ -577,21 +610,36 @@ impl Layer for Sandbox {
             shapes: std::array::from_fn(|i| shapes.sprite([i as u32 % 4, i as u32 / 4], [1, 1])),
             checkerboard,
         });
-        self.apply_settings(world);
-        self.resize_swarm(world);
+        self.apply_settings(world, self.settings);
+        color_grid(world, self.grid_colors);
+        self.resize_swarm(world, self.swarm, 0.0);
+    }
+
+    fn tick(&mut self, world: &mut World, tick: Tick) {
+        let _zone = gg_engine::zone!();
+        let t = tick.time().as_secs_f64();
+        let mut commands = mem::take(&mut self.commands);
+        // The swarm's last size, once: its slider dragged between two ticks queues several.
+        let mut swarm = None;
+        for command in commands.drain(..) {
+            match command {
+                Command::Swarm(count) => swarm = Some(count),
+                Command::GridColors(colors) => color_grid(world, colors),
+                Command::Settings(settings) => self.apply_settings(world, settings),
+                Command::ReloadGrid { text, colors } => reload_grid(world, &text, colors),
+            }
+        }
+        // Kept for its memory.
+        self.commands = commands;
+        if let Some(swarm) = swarm {
+            self.resize_swarm(world, swarm, t);
+        }
+        drift(world, t);
+        spin(world, Tick::DT);
     }
 
     fn update(&mut self, cx: &mut Context, dt: Duration) {
-        let _zone = gg_engine::zone!();
         self.camera.update(cx, dt);
-        self.swarm_time += dt;
-
-        let world = cx.world_mut();
-        self.resize_swarm(world);
-        drift(world, self.swarm_time.as_secs_f64());
-        color_grid(world, self.grid_colors);
-        spin(world, dt);
-
         if self.drift && !cx.input().key_down(Key::Space) {
             self.time += dt;
             let t = self.time.as_secs_f32() * 0.4;
@@ -631,8 +679,11 @@ impl Layer for Sandbox {
         if save && let Err(error) = save_grid(cx.world()) {
             error!(code = error.code(), "{error:#}");
         }
-        if reload {
-            reload_grid(cx.world_mut());
+        // Read now, so that the tick goes by its commands alone; and colored as the panel says,
+        // rather than as it was saved.
+        if reload && let Some(text) = read_grid() {
+            let colors = self.grid_colors;
+            self.commands.push(Command::ReloadGrid { text, colors });
         }
         ui.panel("Stats", |ui| {
             let camera = self.camera.camera;
@@ -650,12 +701,14 @@ impl Layer for Sandbox {
         });
         ui.panel("Sprites", |ui| {
             let swarm = egui::Slider::new(&mut self.swarm, 0..=SWARM_MAX).logarithmic(true);
-            ui.add(swarm.text("In the swarm"));
+            if ui.add(swarm.text("In the swarm")).changed() {
+                self.commands.push(Command::Swarm(self.swarm));
+            }
         });
         let mut changed = false;
         ui.panel("Map", |ui| {
             changed |= ui
-                .checkbox(&mut self.smooth_map, "Smooth the map")
+                .checkbox(&mut self.settings.smooth_map, "Smooth the map")
                 .changed();
             ui.horizontal(|ui| {
                 // 5 units high, so that the map, 6 across and 3.5 down, fits a view of most shapes.
@@ -667,6 +720,10 @@ impl Layer for Sandbox {
                 }
             });
         });
+        // By the colors rather than the buttons' changes: egui gives back the colors its picker
+        // makes of them, as it first draws them too, which the world takes, as the grid's scene
+        // saves them.
+        let colors = self.grid_colors;
         ui.panel("Grid", |ui| {
             ui.horizontal(|ui| {
                 ui.label("Colors");
@@ -675,21 +732,25 @@ impl Layer for Sandbox {
                 }
             });
         });
+        if self.grid_colors != colors {
+            self.commands.push(Command::GridColors(self.grid_colors));
+        }
         ui.panel("Textures", |ui| {
+            let settings = &mut self.settings;
             changed |= ui
-                .checkbox(&mut self.smooth, "Smooth the checkerboard")
+                .checkbox(&mut settings.smooth, "Smooth the checkerboard")
                 .changed();
-            let tiles = egui::Slider::new(&mut self.tiles, 1.0..=10.0).text("Tiles");
+            let tiles = egui::Slider::new(&mut settings.tiles, 1.0..=10.0).text("Tiles");
             changed |= ui.add(tiles).changed();
             ui.horizontal(|ui| {
                 ui.label("Tint");
                 changed |= ui
-                    .color_edit_button_rgba_unmultiplied(&mut self.tint)
+                    .color_edit_button_rgba_unmultiplied(&mut settings.tint)
                     .changed();
             });
         });
         if changed {
-            self.apply_settings(cx.world_mut());
+            self.commands.push(Command::Settings(self.settings));
         }
         ui.panel("Clear color", |ui| {
             ui.checkbox(&mut self.drift, "Drift");
@@ -758,5 +819,58 @@ mod tests {
         let refused = replace_grid(&mut world, "(entities: {").expect_err("refused");
         assert_eq!(refused.code(), "scene.syntax");
         assert_eq!(world.save_scene(&grid(&world)).expect("saved"), nested);
+    }
+
+    /// The panels' commands change nothing until the next tick, which applies them in the order
+    /// they came; and what the Inspector sets stays until a panel changes it again.
+    #[test]
+    fn commands_change_the_world_at_the_next_tick_in_order() {
+        let mut world = world();
+        world.load_scene(&read_scene("grid.ron").0).expect("loaded");
+        let checkerboard = world.spawn((Transform::IDENTITY, Sprite::default()));
+        let mut sandbox = Sandbox::new();
+        sandbox.scene = Some(Scene {
+            shapes: std::array::from_fn(|_| Sprite::default()),
+            checkerboard,
+        });
+        let colors = [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]];
+        let commands = [
+            Command::Swarm(5),
+            Command::Swarm(3),
+            Command::GridColors(colors),
+        ];
+        sandbox.commands.extend(commands);
+        let drifters = |world: &World| world.query::<&Drifter>().count();
+        let colored = |world: &World| {
+            let cells = world.query::<(&GridCell, &Sprite)>();
+            let color = |cell: &GridCell| Vec3::from(colors[cell.color as usize]).extend(1.0);
+            cells
+                .filter(|(cell, sprite)| sprite.color == color(cell))
+                .count()
+        };
+        assert_eq!((drifters(&world), colored(&world)), (0, 0));
+        sandbox.tick(&mut world, Tick { number: 0 });
+        assert_eq!((drifters(&world), colored(&world)), (3, 100));
+        // A square colored otherwise, as the Inspector colors it, stays so at the next tick.
+        let square = world
+            .query::<(Entity, &GridCell)>()
+            .next()
+            .map(|(square, _)| square);
+        let sprite = world.get_mut::<Sprite>(square.expect("a square"));
+        sprite.expect("a sprite").color = Vec4::ONE;
+        sandbox.tick(&mut world, Tick { number: 1 });
+        assert_eq!(colored(&world), 99);
+        // And stays so through a reload that's refused, which leaves the grid as it was.
+        let text = "(entities: {".to_owned();
+        sandbox.commands.push(Command::ReloadGrid { text, colors });
+        sandbox.tick(&mut world, Tick { number: 2 });
+        assert_eq!(colored(&world), 99);
+        // The swarm's size dragged away and back between two ticks leaves its drifters be.
+        let drifters = sandbox.drifters.clone();
+        sandbox
+            .commands
+            .extend([Command::Swarm(1), Command::Swarm(3)]);
+        sandbox.tick(&mut world, Tick { number: 3 });
+        assert_eq!(sandbox.drifters, drifters);
     }
 }

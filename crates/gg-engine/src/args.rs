@@ -19,7 +19,7 @@ pub(crate) fn usage(program: &str) -> String {
         "Usage: {program} [options]
 
 Options:
-  --headless        Run without a window, rendering offscreen
+  --headless        Run without a window, rendering offscreen, a tick of the simulation a frame
   --frames <N>      Exit after N frames
   --gpu <NAME>      Use the GPU whose name contains NAME, such as `--gpu amd`
   --validation      Run under Vulkan validation (the default in debug builds)

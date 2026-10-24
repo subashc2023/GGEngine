@@ -156,7 +156,9 @@ in the editor is out of an agent's reach.
 - **Headless runs.** Every app runs without a window (`--headless`) and can run a set number
   of frames, then exit with a status (`--frames N`): 0 for a clean run, 1 after an error or any
   validation message, and 2 for bad arguments. Dedicated servers, CI and agents checking their
-  work run this way; rendering checks render offscreen, and simulation-only runs need no GPU.
+  work run this way; rendering checks render offscreen, and simulation-only runs need no GPU. A
+  headless run takes a tick of the simulation each frame, so that a run of a set number of frames
+  runs as many ticks on any machine.
 
 ## Project state
 
@@ -201,9 +203,9 @@ A project's state is text that people and agents edit, diff and merge with ordin
   its handle, and every reference to it is whole again. The log keeps the operations applied, in
   order, with their inverses: it undoes and redoes them, merges a gesture's sets of one field,
   such as a drag's, into one edit, and drops an entry whose undo the world refuses, since the
-  world has moved on from it. A running game applies operations in the order they arrive, so
-  several clients can edit it at once, and their log gives undo, review and replay. Editing a
-  scene file while the game runs is an edit too: the engine applies the difference as
+  world has moved on from it. A running game applies operations at its ticks, in the order they
+  arrive, so several clients can edit it at once, and their log gives undo, review and replay.
+  Editing a scene file while the game runs is an edit too: the engine applies the difference as
   operations.
 
 ## ECS
@@ -217,8 +219,9 @@ The world lives in our own ECS, built for what the tools, hot reload and multipl
   frame, for rollback and client-side prediction as well as hot reload.
 - **Commands:** nothing outside the simulation changes its state except a command applied at a
   tick: player input, a network message or an [operation](#project-state). A snapshot and the
-  commands after it make a recording, for replays, rollback and bug reports an agent can rerun.
-- **A deterministic mode:** a fixed timestep, a fixed order of systems and of iteration, and
+  commands after it make a recording, for replays, rollback and bug reports an agent can rerun;
+  so a command is data, never a closure.
+- **A deterministic mode:** the fixed timestep, a fixed order of systems and of iteration, and
   math that gives identical results on every platform, so lockstep games and rollback netcode
   stay in sync. That rules out the platform's C math library and any SIMD path whose order of
   operations differs by CPU. The world is hashed every tick, so two runs or two machines find
@@ -239,13 +242,13 @@ system. Components live in archetype tables, one for each set of component types
 its entities and whose columns are each type's own `Vec`, which the world reaches through a trait
 object, downcast once a table, rather than through raw pointers. Queries borrow the world, shared
 to read it and exclusively to change it, so that the borrow checker keeps them apart, and walk
-each table's columns as slices. Systems are plain functions over the world, run in a fixed order.
-The order queries find entities in follows only from the changes made: tables are kept in the
-order they were made, despawning an entity or changing its components moves its table's last row
-into its place, the last freed slot is the first taken, and no hash map is iterated. So it's the
-same in every run, as the deterministic mode needs, but means nothing a game may rely on:
-anything ordered, such as what's drawn over what, orders by its components' values, or by its
-entities' IDs.
+each table's columns as slices. Systems are plain functions over the world, run at its ticks in a
+fixed order. The order queries find entities in follows only from the changes made: tables are
+kept in the order they were made, despawning an entity or changing its components moves its
+table's last row into its place, the last freed slot is the first taken, and no hash map is
+iterated. So it's the same in every run, as the deterministic mode needs, but means nothing a
+game may rely on: anything ordered, such as what's drawn over what, orders by its components'
+values, or by its entities' IDs.
 
 Each entity has a persistent ID, an `EntityId`: a nonzero 64-bit number, written as 16 lowercase
 hex digits, so that IDs sort as their text does and never read as a handle. Each world draws its
@@ -276,8 +279,8 @@ such as a texture's handle, which no value may make. The world reads and sets a 
 component's name and a path, such as `rect[1].y`: a set checks the whole value against the
 description before anything changes, refuses a number outside its field's bounds, and returns
 the old value, which sets it back unless code stored one that a set refuses. The Inspector edits
-components through these calls alone, as operations its log undoes, which the tool API will
-serve.
+components through these calls alone, as operations it queues for its next tick and its log
+undoes, which the tool API will serve.
 
 Entities form a hierarchy, as scenes, prefabs and the camera as a component need: a child has its
 parent as its `Parent` component, and its `Transform` is relative to its parent's, so that a
@@ -315,6 +318,22 @@ A snapshot taken again, or restored, is copied into memory already held, so that
 frame allocates nothing while the tables, the component types and the world's size stay, for
 components whose `Clone` allocates nothing.
 
+The simulation steps in ticks, 64 a second whatever the frame rate, each 15.625 ms, exact in
+`f32`, `f64` and nanoseconds. A frame runs the ticks the time since the last one owes before the
+layers' updates, so that it draws and shows the world they leave: at most 8, and no more once its
+ticks have taken longer than the time they simulate, so that a simulation slower than real time
+slows down rather than spending every frame catching up. The whole ticks a frame doesn't run are
+dropped, and counted in `engine.perf`, and the fraction of one left over carries to the next. A
+frame without time runs none, as the first does and the first after the window is restored, and
+a headless run takes exactly one each frame. Each layer's tick applies the commands it queued
+since its last, data of its own, in the order it queued them, then runs its systems, the layers
+from the bottom up. Once they've attached, the world changes only there: `Context::world_mut`
+panics outside attaching and detaching, and a tick is given the world but not the `Context`, so
+that it goes by the world, its commands and what its layer set up, never by the frame's time,
+input or drawing. Operations are the commands of authoring: the Inspector's edits, undos and
+redos wait for its next tick, its panel drawing a field set as the set will make it until then,
+and a refusal and the Edit menu's names show from the tick.
+
 ## Diagnostics
 
 Diagnostics are data, so agents and tools can act on them as reliably as people read them.
@@ -334,12 +353,12 @@ Diagnostics are data, so agents and tools can act on them as reliably as people 
 - **Profiling.** Code marks its work with zones (`gg_core::zone!`), which Tracy lays out on a
   timeline of frames, with plots such as each frame's draws; without the `tracy` feature they
   compile to nothing. The engine also measures every frame itself, always: its time, and how much
-  of it went to the layers' updates and drawing the world, the UI, rendering and waiting for the
-  GPU and the display. The Performance panel, an overlay apps add, shows them, and a run that
-  doesn't end in an error logs `engine.perf` as it ends: the frame times' percentiles, means and
-  maxima, how long the run took to start, its first frame and its shutdown, with the GPU and the
-  build, so that an agent can compare two builds by their runs. GPU timestamps for each pass come
-  with the render graph.
+  of it went to the simulation's ticks, the layers' updates and drawing the world, together, the
+  UI, rendering and waiting for the GPU and the display. The Performance panel, an overlay apps
+  add, shows them, and a run that doesn't end in an error logs `engine.perf` as it ends: the frame
+  times' percentiles, means and maxima, how long the run took to start, its first frame and its
+  shutdown, the ticks it ran and dropped, with the GPU and the build, so that an agent can compare
+  two builds by their runs. GPU timestamps for each pass come with the render graph.
 
 ## Events and layers
 
@@ -348,12 +367,13 @@ minimize), keyboard and mouse. winit stays inside `gg-engine`, so apps and games
 types.
 
 An app is a stack of layers, which its `main` describes on `App`: layers, then overlays above
-them. Each layer attaches when the app starts and detaches when it ends, updates every frame
-with the time since the last, handles events and draws UI. Frames pause while the main window
-is minimized, and the first update after it's restored is given no time, rather than the length
-of the pause. An event goes down the stack from the top overlay until a layer handles it;
-updates and UI go up from the bottom. Headless runs have no window events, but their layers
-update and draw UI all the same.
+them. Each layer attaches when the app starts and detaches when it ends, ticks with the
+simulation, as [ECS](#ecs) describes, updates every frame with the time since the last, for what's
+presented, handles events and draws UI. Frames pause while the main window is minimized, and the
+first update after it's restored is given no time, rather than the length of the pause. An event
+goes down the stack from the top overlay until a layer handles it; ticks, updates and UI go up
+from the bottom. Headless runs have no window events, but their layers tick, update and draw UI
+all the same.
 
 egui, the engine's immediate-mode UI, is the top overlay: it sees every event first and keeps
 those it wants, such as a click on one of its panels, and `gg-renderer` draws its meshes over
@@ -398,7 +418,8 @@ come while the window is out of focus, and a key already down as it regains focu
 its next press.
 
 Layers run on the main thread with the event loop. Input that reaches a game's layer enters the
-simulation as commands, as [ECS](#ecs) describes.
+simulation as its commands, which its next tick applies, as [ECS](#ecs) describes: a tick polls no
+input, so that a press between two ticks isn't lost.
 
 ## World space
 
@@ -418,14 +439,14 @@ depth, HDR and tonemapping, post-processing and the tool API's captures read the
 games' pipelines are made for that image's format, 8-bit sRGB, whatever the window presents.
 Layers add shaders, meshes and textures, draw them and set the camera through their `Context`,
 and the renderer's `Shaders`, `Meshes` and `Textures` hand out their handles at once. After the
-layers' updates, the engine draws the world's entities that have a `Transform` and a sprite or a
-`MeshDraw`, a mesh with its shader and parameters held without their types, over what the layers
-drew, back to front by their z's in the world, children where their ancestors carry them; those
-at one z draw sprites under meshes, each in the order of their IDs, which overlapping entities
-keep as others come and go. That sorts the rows at each z, which drawing keeps until a row or a z
-changes, and draws them out of their tables' order; so meshes of different meshes or shaders at
-one z interleave, each change between them another draw, and meshes meant to batch take a z of
-their own.
+frame's ticks and the layers' updates, the engine draws the world's entities that have a
+`Transform` and a sprite or a `MeshDraw`, a mesh with its shader and parameters held without
+their types, over what the layers drew, back to front by their z's in the world, children where
+their ancestors carry them; those at one z draw sprites under meshes, each in the order of their
+IDs, which overlapping entities keep as others come and go. That sorts the rows at each z, which
+drawing keeps until a row or a z changes, and draws them out of their tables' order; so meshes of
+different meshes or shaders at one z interleave, each change between them another draw, and
+meshes meant to batch take a z of their own.
 
 A game's shader is a Slang file that the engine compiles with slangc as a layer adds it, so one
 that doesn't compile fails there, with slangc's diagnostics naming the file and line; the renderer

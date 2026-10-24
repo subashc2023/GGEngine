@@ -24,7 +24,8 @@ use crate::viewports::{self, Viewports, WindowInput};
 #[cfg(target_os = "windows")]
 use crate::windows_frame::Frame;
 use crate::{
-    App, Clock, Context, Event, Ran, egui_context, event, render_frame, run_frame, settings,
+    App, Clock, Context, Event, Ran, Stepper, egui_context, event, render_frame, run_frame,
+    settings,
 };
 
 pub(crate) fn run(app: &mut App, args: &Args) -> Result<Ran> {
@@ -53,6 +54,7 @@ pub(crate) fn run(app: &mut App, args: &Args) -> Result<Ran> {
         viewports: None,
         cx: Context::new(None),
         clock: Clock::default(),
+        stepper: Stepper::default(),
         frames: 0,
         minimized: false,
         error: None,
@@ -91,6 +93,8 @@ struct Handler<'a> {
     dock: Dock,
     cx: Context,
     clock: Clock,
+    /// Steps the simulation in real time.
+    stepper: Stepper,
     frames: u64,
     /// Set while the window has no area to render into.
     minimized: bool,
@@ -157,6 +161,7 @@ impl Handler<'_> {
                 &mut self.app.stack,
                 &mut self.cx,
                 &mut self.clock,
+                &mut self.stepper,
                 &self.egui,
                 &mut self.dock,
                 input,
@@ -361,6 +366,7 @@ impl ApplicationHandler for Handler<'_> {
                 renderer,
                 self.frames,
                 &self.clock,
+                &self.stepper,
                 perf,
                 stopping,
             ));

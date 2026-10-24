@@ -146,13 +146,27 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   snapshots, field by field and through the same steps after, restores across worlds of other
   types and tables, and memory kept; in release, a snapshot of the swarm's 100,450 entities takes
   2.2 ms cold, and 0.63 ms taken again or restored, allocating nothing.
+- **A fixed timestep, with commands** (2026-10-23): the simulation steps 64 ticks a second
+  whatever the frame rate, each frame running the ticks its time owes before the layers' updates,
+  at most 8, and no more once they run slower than real time, the rest dropped and counted, and
+  headless runs one a frame; a layer's tick applies the commands it queued since its last, plain
+  data, then runs its systems, and once the layers have attached the world changes only there;
+  the Inspector's edits, undos and redos are its commands, made through its log at its next tick,
+  its panel drawing the sets waiting as they'll be.
+  The sandbox moves its swarm and turns its triangle and moons at ticks, its panels and File menu
+  queue commands, and `engine.perf` counts the ticks run and dropped; unit tests check ticks
+  against frames of many lengths, the cap and the stop when slow, lockstep, ticks before the
+  updates, the world refused outside ticks, edits made at the next tick on the entity picked as
+  they were made, and the sandbox's commands applied in order.
 
-## Now: a fixed timestep, with commands
+## Now: the deterministic mode
 
-Phase 3's eighth milestone: a fixed timestep, with commands as the only way into the simulation.
-*Done when* the sandbox's simulation steps at a fixed rate whatever its frame rate, and its world
-changes only through systems run at a tick and commands applied at one. Its plan is made when it
-starts, and decides what a command is beside an operation.
+Phase 3's ninth milestone: the deterministic mode, with a world hash per tick, recordings and
+replays, and math that is identical everywhere. *Done when* a recording, a snapshot and the
+commands after it, replays to the same hashes on all three OSes and both architectures, with a
+forced divergence reported as its first tick, entity and field. Its plan is made when it starts,
+and decides one queue that every layer's commands go through to be recorded, and how the state
+layers keep for the simulation, such as the sandbox's swarm's handles, moves into the world.
 
 ## Next
 
@@ -282,7 +296,7 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Queries that keep the tables they match, and tables that keep where adding or removing each component leads; a query looks over every table, and a change of components finds its table by its types | Tables number in the hundreds, or changes of components show in a profile |
 | Sparse storage for components added and removed often, which move their entity's row between tables | A profile shows those moves |
 | A layer reading the world and drawing in one loop: `Context` lends one at a time | A layer draws from the world itself, such as debug shapes |
-| Spawning many entities at once, faster than one by one: 100,000 sprites take about 16 ms in release, 5.5 ms of it their IDs, and the swarm spawns its 100,000 in one frame. A load spawns its entities one by one too, building each component from a value into a column of its own: 100,000 sprites, 45 MB of text, load in about 650 ms in release, and save in about 170 ms | A spawn hitch matters, or a scene's load time |
+| Spawning many entities at once, faster than one by one: 100,000 sprites take about 16 ms in release, 5.5 ms of it their IDs, and the swarm spawns its 100,000 in one tick, longer than a tick is. A load spawns its entities one by one too, building each component from a value into a column of its own: 100,000 sprites, 45 MB of text, load in about 650 ms in release, and save in about 170 ms | A spawn hitch matters, or a scene's load time |
 | `MeshDraw` parameters of more than 64 bytes, which draw through `Context::draw` | Phase 6, with materials |
 | Micro-benchmarks, with criterion | A CPU hot path gets a target of its own; batching's is a frame time, which `engine.perf` measures |
 | Gates on time in CI: hosted runners' times vary too much to gate on | A self-hosted runner, as for the GPU tests |
@@ -295,7 +309,7 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Drag speeds as hints; the Inspector picks them from a field's bounds and kind | A field drags too coarsely or too finely |
 | Paths resolved once and kept, for sets made again and again | A profile |
 | Picking an entity for a field, a parent or a child picked by clicking it, the Entities panel as a tree, names in the Inspector, and picking in the view; entities are shown by their IDs, and found by an ID pasted in | Picking in the view, or Phase 9's scene tree |
-| World transforms stored and propagated after the updates, with change detection; drawing computes each child's from its ancestors, every frame | Physics, or a profile showing the walks up the hierarchy |
+| World transforms stored and propagated after the ticks, with change detection; drawing computes each child's from its ancestors, every frame | Physics, or a profile showing the walks up the hierarchy |
 | A world matrix for game code; the engine's drawing computes its own | The camera as a component, or a system that needs a child's place in the world, once the deterministic mode settles its math |
 | Reparenting that keeps where a child is in the world, by decomposing its matrix, which loses any shear; `set_parent` keeps its own transform | The editor's scene tree, or an agent attaching something where it stands |
 | Spawning a child into its table at once from code: `spawn`, then `set_parent`, moves it to another table; a load and a create operation spawn one there | A profile |
@@ -315,13 +329,18 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | The log in `Context`, every layer's and the tool API's clients each undoing their own, and an undo logged as an operation; the Inspector keeps a log of its own | Phase 5, the tool API |
 | Replaying a log into another world, which maps values' handles to IDs; `set_field` and operations store a dead handle without complaint | Phase 5, the tool API |
 | A delete saying what refers to its entities from outside, or refusing; those references dangle until it's undone, and the world doesn't save in between | An agent deletes through the tool API |
-| Layers holding handles that an operation deletes or a restore takes back, as the sandbox's swarm does, whose `expect` panics then; nothing tells a layer, or the Inspector, whose log and pick outlive it, that `Context`'s world was restored, so the sandbox doesn't snapshot | The Inspector or the tool API deletes, or something restores the running world, such as rollback or Phase 5's restart |
+| Layers holding handles that an operation deletes or a restore takes back, as the sandbox's swarm does, changing them only at its ticks, whose `expect` panics then; nothing tells a layer, or the Inspector, whose log and pick outlive it, that `Context`'s world was restored, so the sandbox doesn't snapshot | The Inspector or the tool API deletes, or something restores the running world, such as rollback or Phase 5's restart |
 | Creating, deleting, adding, removing and reparenting from the Inspector, which sets fields | The editor, or a game's tools |
 | A bound on the log, which keeps a session's entries, a delete's components and slots among them, until it's cleared | A session's memory shows it |
 | A log that outlives a run or a restore: inverses that keep components typed can't be saved, and a restored world refuses every inverse from before, the slots kept when the snapshot was taken staying unused; a snapshot could keep the log's place, which a restore would rewind it to | Phase 5's restart from a snapshot |
 | A depth limit on values set or created by name, as scenes' 64; a deeper one recurses without one | The tool API takes values from outside |
 | An undo giving back the ID stream's state and the tables' order: an undone create's ID stays drawn, and what an undo puts back goes last in its table, so a world hash of either differs after a log is undone, though its scene comes back byte for byte | The deterministic mode's world hash |
 | Snapshots that copy less, only the tables changed, or on several threads: the swarm's 100,450 entities copy about 20 MB each way, in 0.63 ms taken again or restored, and the frame after a restore sorts the swarm's rows by ID again, about 2.5 ms | A game's rollback frames need the time |
+| An app's own tick rate; the simulation runs 64 ticks a second | A game needs another rate |
+| Budgeting a frame's ticks against all of its time: a frame stops its ticks only once they take longer than the time they simulate, so ticks that take nearly their 15.625 ms keep real time at the frame rate's cost, as the debug sandbox's 100,000 drifters do, about 8 a frame at 8 fps; counting the rest of the frame too would slow down the simulation of any game drawn below 64 fps | A game's frame rate falls so |
+| Headless runs in real time, as a dedicated server's: a headless run takes a tick each frame, as fast as its frames go | The first dedicated server |
+| Ticks as a part of their own in the Performance panel and in `engine.perf`'s times: a frame's update includes its ticks, so that a windowed run's update times mix frames of no tick and of several | Phase 4's extraction, or frames often running several ticks |
+| The Inspector showing an undo or a redo before its tick makes it, as it shows a set: above 64 frames a second, a field shows its value from before for a frame or so, and a refusal and the Edit menu's names come at the tick | It shows, or Phase 5's editor in another process |
 
 ## Open questions
 

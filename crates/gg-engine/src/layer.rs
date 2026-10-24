@@ -20,16 +20,29 @@ use crate::{Event, Input, MeshDraw, Transform, Ui, World};
 
 /// A part of an app that the main loop drives. Every method has a default that does nothing,
 /// so a layer implements only what it uses.
+///
+/// The world changes only as the layers attach and detach, and at their ticks: the rest of a
+/// layer reads it, and queues commands, data of its own, for its next tick to apply, so that the
+/// simulation goes on at its own rate whatever the frame rate.
 pub trait Layer {
-    /// Called once as the app starts, before the first update.
+    /// Called once as the app starts, before the first tick and update: it builds the world the
+    /// simulation starts from.
     fn attach(&mut self, _cx: &mut Context) {}
 
-    /// Called once as the app ends.
+    /// Called once as the app ends, after the last tick.
     fn detach(&mut self, _cx: &mut Context) {}
 
-    /// Called every frame, with the time since the last one: zero for the first, and for the
-    /// first after the window is restored from being minimized, so that the pause doesn't count
-    /// as one long frame.
+    /// Called at each tick of the simulation, [64 a second](Tick::DT) whatever the frame rate,
+    /// before the frame's updates: the layer applies the commands it queued since its last tick,
+    /// in the order it queued them, then runs its systems, in the order it calls them. It gets the
+    /// world alone, so that a tick goes by the world, the tick, its commands and what the layer set
+    /// up as it attached, never by the frame's time, input or drawing.
+    fn tick(&mut self, _world: &mut World, _tick: Tick) {}
+
+    /// Called every frame, after the frame's ticks, with the time since the last frame: zero for
+    /// the first, and for the first after the window is restored from being minimized, so that
+    /// the pause doesn't count as one long frame. For what's presented, such as the camera, rather
+    /// than the world, which changes at ticks.
     fn update(&mut self, _cx: &mut Context, _dt: Duration) {}
 
     /// Called for each event that the layers above didn't handle. `Break` handles it, so the
@@ -41,6 +54,24 @@ pub trait Layer {
     /// Called every frame, after the updates, to draw UI: dockable panels, and anything else
     /// egui draws.
     fn ui(&mut self, _cx: &mut Context, _ui: &mut Ui<'_>) {}
+}
+
+/// A step of the simulation, which runs 64 of them a second whatever the frame rate: what a
+/// layer's [`tick`](Layer::tick) gets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tick {
+    /// The ticks before it.
+    pub number: u64,
+}
+
+impl Tick {
+    /// How long a tick simulates: a 64th of a second, exact in `f32`, `f64` and nanoseconds.
+    pub const DT: Duration = Duration::from_nanos(15_625_000);
+
+    /// The simulation's time once this tick has run: `DT` for the first.
+    pub fn time(self) -> Duration {
+        Duration::from_nanos(Self::DT.as_nanos() as u64 * (self.number + 1))
+    }
 }
 
 /// What layers can see and change of the running app.
@@ -57,6 +88,9 @@ pub struct Context {
     world: World,
     /// What drawing the world sorts and computes, kept between frames.
     scratch: Scratch,
+    /// Set from when the layers have attached until they detach: the world then changes only at
+    /// ticks.
+    attached: bool,
     /// How long frames take, which the main loop measures and
     /// [`PerfPanel`](crate::PerfPanel) shows.
     pub(crate) perf: Perf,
@@ -83,6 +117,7 @@ impl Context {
             draws: Draws::default(),
             world,
             scratch: Scratch::default(),
+            attached: false,
             perf: Perf::default(),
         }
     }
@@ -212,16 +247,24 @@ impl Context {
         self.draws.push_sprite(transform, sprite);
     }
 
-    /// The world: its entities and their components. After the layers' updates each frame, the
-    /// engine draws those with a [`Transform`](crate::Transform) and a [`Sprite`] or a
-    /// [`MeshDraw`](crate::MeshDraw), back to front by their z's in the world, and at one z sprites
-    /// under meshes, each in the order of their IDs, children where their parents carry them, over
-    /// what the layers drew themselves.
+    /// The world: its entities and their components, as the frame's ticks left it. After the
+    /// layers' updates each frame, the engine draws those with a [`Transform`](crate::Transform)
+    /// and a [`Sprite`] or a [`MeshDraw`](crate::MeshDraw), back to front by their z's in the
+    /// world, and at one z sprites under meshes, each in the order of their IDs, children where
+    /// their parents carry them, over what the layers drew themselves.
     pub fn world(&self) -> &World {
         &self.world
     }
 
+    /// The world, to change as a layer attaches or detaches. At any other time it changes only at
+    /// ticks, which [`Layer::tick`] is given it for, and this panics: a layer queues a command for
+    /// its next tick instead.
     pub fn world_mut(&mut self) -> &mut World {
+        assert!(
+            !self.attached,
+            "a layer changes the world only as it attaches or detaches, and at its ticks: queue a \
+             command for its next tick"
+        );
         &mut self.world
     }
 
@@ -326,13 +369,23 @@ impl Stack {
         for layer in &mut self.layers {
             layer.attach(cx);
         }
+        cx.attached = true;
     }
 
     /// Detaches from the top down, the reverse of attaching.
     pub(crate) fn detach(&mut self, cx: &mut Context) {
         let _zone = gg_core::zone!();
+        cx.attached = false;
         for layer in self.layers.iter_mut().rev() {
             layer.detach(cx);
+        }
+    }
+
+    /// Runs a tick of the simulation: each layer's, from the bottom up.
+    pub(crate) fn tick(&mut self, cx: &mut Context, tick: Tick) {
+        let _zone = gg_core::zone!();
+        for layer in &mut self.layers {
+            layer.tick(&mut cx.world, tick);
         }
     }
 
@@ -368,7 +421,7 @@ mod tests {
     use std::rc::Rc;
 
     use super::*;
-    use crate::Key;
+    use crate::{Key, Transform};
 
     /// Records each call it gets, by layer name, and handles events if `handles` is set.
     struct Probe {
@@ -388,6 +441,9 @@ mod tests {
                 .borrow_mut()
                 .push(format!("detach {}", self.name));
         }
+        fn tick(&mut self, _: &mut World, _: Tick) {
+            self.calls.borrow_mut().push(format!("tick {}", self.name));
+        }
         fn update(&mut self, _: &mut Context, _: Duration) {
             self.calls
                 .borrow_mut()
@@ -399,6 +455,29 @@ mod tests {
                 ControlFlow::Break(())
             } else {
                 ControlFlow::Continue(())
+            }
+        }
+    }
+
+    /// Spawns an entity as it attaches, at each tick, and as it detaches; and as it updates, if
+    /// `rogue`.
+    struct Spawner {
+        rogue: bool,
+    }
+
+    impl Layer for Spawner {
+        fn attach(&mut self, cx: &mut Context) {
+            cx.world_mut().spawn(Transform::IDENTITY);
+        }
+        fn detach(&mut self, cx: &mut Context) {
+            cx.world_mut().spawn(Transform::IDENTITY);
+        }
+        fn tick(&mut self, world: &mut World, _: Tick) {
+            world.spawn(Transform::IDENTITY);
+        }
+        fn update(&mut self, cx: &mut Context, _: Duration) {
+            if self.rogue {
+                cx.world_mut().spawn(Transform::IDENTITY);
             }
         }
     }
@@ -438,15 +517,38 @@ mod tests {
         let (mut stack, calls) = probes(false);
         let mut cx = Context::new(None);
         stack.attach(&mut cx);
+        stack.tick(&mut cx, Tick { number: 0 });
         stack.update(&mut cx, Duration::ZERO);
         stack.detach(&mut cx);
         assert_eq!(
             *calls.borrow(),
             [
-                "attach a", "attach b", "attach o", "update a", "update b", "update o", "detach o",
-                "detach b", "detach a"
+                "attach a", "attach b", "attach o", "tick a", "tick b", "tick o", "update a",
+                "update b", "update o", "detach o", "detach b", "detach a"
             ]
         );
+    }
+
+    #[test]
+    fn layers_change_the_world_as_they_attach_and_detach_and_at_their_ticks() {
+        let mut stack = Stack::default();
+        stack.push_layer(Box::new(Spawner { rogue: false }));
+        let mut cx = Context::new(None);
+        stack.attach(&mut cx);
+        stack.tick(&mut cx, Tick { number: 0 });
+        stack.update(&mut cx, Duration::ZERO);
+        stack.detach(&mut cx);
+        assert_eq!(cx.world().query::<&Transform>().count(), 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "only as it attaches or detaches")]
+    fn a_layer_changing_the_world_as_it_updates_is_a_bug() {
+        let mut stack = Stack::default();
+        stack.push_layer(Box::new(Spawner { rogue: true }));
+        let mut cx = Context::new(None);
+        stack.attach(&mut cx);
+        stack.update(&mut cx, Duration::ZERO);
     }
 
     #[test]

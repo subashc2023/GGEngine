@@ -99,6 +99,10 @@ jobs:
       - name: Check that the run logged its frame times
         if: matrix.container
         run: grep -q '"code":"engine.perf"' target/debug/logs/sandbox-*.jsonl
+      # A tick of the simulation each frame, so that a headless run runs as many ticks anywhere.
+      - name: Check that the run ticked once a frame
+        if: matrix.container
+        run: grep -q '"ticks":60,' target/debug/logs/sandbox-*.jsonl
       # With Tracy's client, which records into memory with no viewer and exits as usual. Hosted
       # runners are VMs, whose clocks Tracy otherwise refuses on x86.
       - name: Run the sandbox headless with Tracy

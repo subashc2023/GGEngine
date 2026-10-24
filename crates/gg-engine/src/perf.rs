@@ -20,7 +20,7 @@ const GRAPHED: usize = 240;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Sample {
     pub(crate) frame: u64,
-    /// The layers' updates, and drawing the world.
+    /// The simulation's ticks, the layers' updates, and drawing the world.
     pub(crate) update: u64,
     /// The UI: the layers' and egui's, and tessellating it.
     pub(crate) ui: u64,
@@ -77,12 +77,12 @@ impl Perf {
     /// A frame starts, `dt` after the last one did, which is then measured. A zero `dt`, the
     /// first frame's or the first's after a pause, drops the last frame instead, since its time
     /// would count the pause.
-    pub(crate) fn tick(&mut self, dt: Duration) {
+    pub(crate) fn start_frame(&mut self, dt: Duration) {
         self.end(dt);
         self.pending = Some(Sample::default());
     }
 
-    /// The frame's updates and drawing its world took `update`, and its UI `ui`.
+    /// The frame's ticks and updates and drawing its world took `update`, and its UI `ui`.
     pub(crate) fn ran(&mut self, update: Duration, ui: Duration) {
         if let Some(sample) = &mut self.pending {
             sample.update = nanos(update);
@@ -519,7 +519,7 @@ mod tests {
         let mut perf = Perf::default();
         let mut dt = Duration::ZERO;
         for &time in times {
-            perf.tick(dt);
+            perf.start_frame(dt);
             perf.ran(Duration::ZERO, Duration::ZERO);
             let drew = DrawCounts::default();
             perf.rendered(Duration::ZERO, Duration::ZERO, Duration::ZERO, drew, true);
@@ -576,15 +576,15 @@ mod tests {
             };
             perf.rendered(Duration::ZERO, MS, Duration::ZERO, drew, presented);
         };
-        perf.tick(Duration::ZERO);
+        perf.start_frame(Duration::ZERO);
         present(&mut perf, true);
-        perf.tick(10 * MS);
+        perf.start_frame(10 * MS);
         // Then a pause: the window is restored, and the frame before it is dropped.
         present(&mut perf, true);
-        perf.tick(Duration::ZERO);
+        perf.start_frame(Duration::ZERO);
         // A frame that presented nothing.
         present(&mut perf, false);
-        perf.tick(30 * MS);
+        perf.start_frame(30 * MS);
         present(&mut perf, true);
         perf.finish(20 * MS);
         let summary = perf.summary();
@@ -597,16 +597,16 @@ mod tests {
     fn rendering_leaves_out_its_waits_and_the_ui_takes_tessellation() {
         let mut perf = Perf::default();
         let none = DrawCounts::default();
-        perf.tick(Duration::ZERO);
+        perf.start_frame(Duration::ZERO);
         perf.rendered(Duration::ZERO, Duration::ZERO, Duration::ZERO, none, true);
-        perf.tick(MS);
+        perf.start_frame(MS);
         perf.ran(2 * MS, 3 * MS);
         let drew = DrawCounts {
             draws: 7,
             instances: 900,
         };
         perf.rendered(MS, 10 * MS, 4 * MS, drew, true);
-        perf.tick(30 * MS);
+        perf.start_frame(30 * MS);
         // Waits outlasting the render they're in round down to no rendering.
         perf.rendered(Duration::ZERO, MS, 4 * MS, none, true);
         perf.finish(5 * MS);
@@ -686,9 +686,9 @@ mod tests {
             };
             perf.ran(MS, MS);
             perf.rendered(Duration::ZERO, 2 * MS, MS, drew, true);
-            perf.tick(4 * MS);
+            perf.start_frame(4 * MS);
         };
-        perf.tick(Duration::ZERO);
+        perf.start_frame(Duration::ZERO);
         for i in 0..=20 {
             frame(&mut perf, if i == 15 { 42 } else { 1 });
         }

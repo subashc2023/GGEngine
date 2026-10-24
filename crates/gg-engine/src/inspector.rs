@@ -1,9 +1,11 @@
 //! The inspector: the Entities panel, which lists the world's entities, and the Inspector panel,
 //! which shows the picked entity's components and edits their fields. It reaches the world only
 //! through its by-name calls, its IDs and its hierarchy, as the tool API will, so that an editor
-//! can show it for a game in another process, and names entities by their IDs.
+//! can show it for a game in another process, and names entities by their IDs. Its edits are its
+//! commands: the panels queue them, and its next tick makes them.
 
 use std::f64::consts::PI;
+use std::mem;
 
 use egui::color_picker::Alpha;
 use egui::ecolor::{Hsva, HsvaGamma};
@@ -12,7 +14,7 @@ use gg_core::math::{EulerRot, Quat, Vec2, Vec3, Vec4};
 use tracing::warn;
 
 use crate::reflect::{self, Bound, Field, Meta, Name, Shape, Show, Type, Types, Value};
-use crate::{Context, Entity, EntityId, Layer, Log, Operation, Ui, World};
+use crate::{Context, Entity, EntityId, Layer, Log, Operation, Tick, Ui, World};
 
 /// The Entities and Inspector panels, which an app adds as an overlay,
 /// `.overlay(gg_engine::Inspector::default())`. The Entities panel lists the world's entities, all
@@ -22,6 +24,9 @@ use crate::{Context, Entity, EntityId, Layer, Log, Operation, Ui, World};
 /// widget changes it, through a [`Log`] of the edits, as [`World::set_field`] does. That checks the
 /// value: a value refused shows beside its field, and is logged. The Edit menu, Ctrl+Z (Cmd+Z on
 /// macOS) and Ctrl+Shift+Z or Ctrl+Y undo and redo them, a drag, or a number typed, as one edit.
+/// The panels queue each frame's edits, undos and redos, which the Inspector's next tick makes, so
+/// that the world changes only at ticks; until then, a field set is drawn as the set will make it,
+/// and a refusal, and the Edit menu's names, show from the tick.
 #[derive(Default)]
 pub struct Inspector {
     /// By its ID, which outlives it, so that a pick despawned is still named as it was shown.
@@ -38,6 +43,8 @@ pub struct Inspector {
     log: Log,
     /// Why the last undo or redo was refused, until the next edit, undo or redo.
     not_stepped: Option<String>,
+    /// The panels' passes since the last tick, whose edits it makes.
+    queued: Vec<Edits>,
 }
 
 /// Undoes the last edit.
@@ -98,16 +105,34 @@ struct Refusal {
     message: String,
 }
 
-/// A field to set, found as the Inspector panel draws, and set once it has.
+/// A field to set, found as the Inspector panel draws, and set at the next tick.
 struct Edit {
     component: String,
     path: String,
     value: Value,
 }
 
+/// What a pass of the panels did, which the next tick makes: the sets of the fields of `entity`,
+/// the entity picked then, what the input said of the edits, and the step the Edit menu chose.
+struct Edits {
+    entity: Option<EntityId>,
+    sets: Vec<Edit>,
+    cues: Cues,
+    chosen: Option<Step>,
+}
+
 impl Layer for Inspector {
     fn detach(&mut self, cx: &mut Context) {
         self.log.clear(cx.world_mut());
+    }
+
+    fn tick(&mut self, world: &mut World, _: Tick) {
+        let mut queued = mem::take(&mut self.queued);
+        for edits in queued.drain(..) {
+            self.finish(world, edits);
+        }
+        // Kept for its memory.
+        self.queued = queued;
     }
 
     fn ui(&mut self, cx: &mut Context, ui: &mut Ui<'_>) {
@@ -117,15 +142,17 @@ impl Layer for Inspector {
         let world = cx.world();
         let mut cues = Cues::default();
         ui.panel("Entities", |ui| self.entities(world, ui, &mut cues));
-        let mut edits = Vec::new();
+        let mut sets = Vec::new();
         ui.panel("Inspector", |ui| {
             // A new panel floats smaller than its contents.
             let scroll = egui::ScrollArea::vertical();
-            scroll.show(ui, |ui| self.inspect(world, ui, &mut edits, &mut cues));
+            scroll.show(ui, |ui| self.inspect(world, ui, &mut sets, &mut cues));
         });
         // The Edit menu's keys, wherever the panels are.
         cues.read(ui.egui());
-        self.finish(cx.world_mut(), edits, cues, chosen);
+        // Every pass, even one egui discards, which alone had the frame's input; and empty ones
+        // too, whose cues end an edit.
+        self.queue(sets, cues, chosen);
     }
 }
 
@@ -152,18 +179,35 @@ impl Inspector {
         chosen
     }
 
-    /// The end of a frame of the panels: sets the fields `edits` changed, as one edit from a
-    /// press of the pointer to its release, or while a widget has the keys, as `cues` say, so that
-    /// a drag, or a number typed, is one edit; and undoes or redoes as `chosen` in the Edit menu,
-    /// or a key, asks.
-    fn finish(&mut self, world: &mut World, edits: Vec<Edit>, cues: Cues, chosen: Option<Step>) {
-        // Before this frame's sets: a press begins another edit, even while a text field keeps
+    /// Queues a pass of the panels' `sets` of the picked entity's fields, with what its input
+    /// said of the edits, `cues`, and the step the Edit menu `chosen`, for the next tick to make.
+    fn queue(&mut self, sets: Vec<Edit>, cues: Cues, chosen: Option<Step>) {
+        self.queued.push(Edits {
+            entity: self.picked,
+            sets,
+            cues,
+            chosen,
+        });
+    }
+
+    /// Makes, at a tick, what a pass of the panels did: sets the fields its `edits` changed, as
+    /// one edit from a press of the pointer to its release, or while a widget has the keys, as
+    /// their cues say, so that a drag, or a number typed, is one edit; and undoes or redoes as the
+    /// step chosen in the Edit menu, or a key, asks.
+    fn finish(&mut self, world: &mut World, edits: Edits) {
+        let Edits {
+            entity,
+            sets,
+            cues,
+            chosen,
+        } = edits;
+        // Before this pass's sets: a press begins another edit, even while a text field keeps
         // the keys.
         if cues.pressed {
             self.log.seal();
         }
-        for edit in edits {
-            self.apply(world, edit);
+        for edit in sets {
+            self.apply(world, entity, edit);
         }
         if cues.released || !cues.held {
             self.log.seal();
@@ -272,6 +316,8 @@ impl Inspector {
         };
         let components = world.components_of(entity);
         let components = components.expect("the entity of an ID is alive");
+        let queued = self.queued.iter().filter(|edits| edits.entity == Some(id));
+        let waiting: Vec<&Edit> = queued.flat_map(|edits| &edits.sets).collect();
         ui.label(format!("Entity {id}"));
         if let Some(children) = children(world, entity) {
             ui.label(children);
@@ -299,6 +345,7 @@ impl Inspector {
                             component,
                             refusals: &self.refusals,
                             edits: &mut *edits,
+                            waiting: &waiting,
                         };
                         let ty = Type::Named(index);
                         let meta = Meta::default();
@@ -315,10 +362,10 @@ impl Inspector {
         });
     }
 
-    /// Sets the field `edit` changed, as part of the edit going on, and keeps the refusal if it's
-    /// refused.
-    fn apply(&mut self, world: &mut World, edit: Edit) {
-        let Some(id) = self.picked.filter(|&id| world.entity(id).is_some()) else {
+    /// Sets the field `edit` changed of `entity`, the entity picked as it was made, as part of the
+    /// edit going on, and keeps the refusal if it's refused, while that's still the entity picked.
+    fn apply(&mut self, world: &mut World, entity: Option<EntityId>, edit: Edit) {
+        let Some(id) = entity.filter(|&id| world.entity(id).is_some()) else {
             return;
         };
         let Edit {
@@ -326,8 +373,11 @@ impl Inspector {
             path,
             value,
         } = edit;
-        self.refusals
-            .retain(|refusal| refusal.component != component || refusal.path != path);
+        let shown = self.picked == Some(id);
+        if shown {
+            self.refusals
+                .retain(|refusal| refusal.component != component || refusal.path != path);
+        }
         self.not_stepped = None;
         let set = Operation::Set {
             entity: id,
@@ -343,11 +393,13 @@ impl Inspector {
                 path = path.as_str(),
                 "{error}"
             );
-            self.refusals.push(Refusal {
-                component,
-                path,
-                message: error.to_string(),
-            });
+            if shown {
+                self.refusals.push(Refusal {
+                    component,
+                    path,
+                    message: error.to_string(),
+                });
+            }
         }
     }
 }
@@ -359,14 +411,37 @@ struct Fields<'a> {
     component: &'a str,
     refusals: &'a [Refusal],
     edits: &'a mut Vec<Edit>,
+    /// The sets of the entity's fields that wait for a tick, in the order they were made.
+    waiting: &'a [&'a Edit],
 }
 
 impl Fields<'_> {
     /// Draws `value`, of type `ty`, the field at `path` with hints `meta`, and returns its new
     /// value if a widget changed it and it's set `whole`, as the inside of an option or an enum
     /// is; otherwise its parts set themselves, each at its own path. A field is set only when its
-    /// widget says it changed, never by comparing values: drawing it changes nothing.
+    /// widget says it changed, never by comparing values: drawing it changes nothing. A field that
+    /// a set waits for a tick to set is drawn as the last such set will make it, so that its
+    /// widget, which keeps what it shows from frame to frame, goes on from there; a field is set
+    /// at its own path or whole with what's around it, never both, so the sets of one field and of
+    /// what's around it never wait together.
     fn value(
+        &mut self,
+        ui: &mut egui::Ui,
+        ty: &Type,
+        meta: &Meta,
+        value: &Value,
+        path: &str,
+        whole: bool,
+    ) -> Option<Value> {
+        let waiting = self.waiting;
+        let mut sets = waiting.iter().rev();
+        let set = sets.find(|set| set.component == self.component && set.path == path);
+        let value = set.map_or(value, |set| &set.value);
+        self.draw(ui, ty, meta, value, path, whole)
+    }
+
+    /// Draws `value` as [`value`](Self::value) does, as it's given.
+    fn draw(
         &mut self,
         ui: &mut egui::Ui,
         ty: &Type,
@@ -570,7 +645,7 @@ impl Fields<'_> {
     /// A rotation as angles about x, y and z, in degrees, applied z first. The angles are kept
     /// with the rotation they made, so that those typed stay as they are, rather than jump to the
     /// same rotation's other angles, while the rotation stays within float noise of it: a system
-    /// that renormalizes it every frame can change its last bits, which would reset the text being
+    /// that renormalizes it at each tick can change its last bits, which would reset the text being
     /// typed. They're kept under an id of the component's field, not the entity's, so that what's
     /// kept doesn't grow as entities are picked.
     fn rotation(&mut self, ui: &mut egui::Ui, q: Quat, path: &str) -> Option<Value> {
@@ -813,14 +888,39 @@ mod tests {
     /// A text drawn, and where.
     type Text = (String, egui::Rect);
 
+    /// Queues a pass's `sets`, as the panels do, and makes them at a tick, as the next one does.
+    fn make(
+        inspector: &mut Inspector,
+        world: &mut World,
+        sets: Vec<Edit>,
+        cues: Cues,
+        chosen: Option<Step>,
+    ) {
+        inspector.queue(sets, cues, chosen);
+        Layer::tick(inspector, world, Tick { number: 0 });
+    }
+
     /// A frame of the two panels' contents, on a screen big enough for all of them, given
-    /// `events`, whose edits are then set; returns its texts, and how many edits it made.
+    /// `events`, whose edits are then set at a tick; returns its texts, and how many edits it made.
     fn frame(
         inspector: &mut Inspector,
         world: &mut World,
         ctx: &egui::Context,
         time: f64,
         events: Vec<egui::Event>,
+    ) -> (Vec<Text>, usize) {
+        frame_ticking(inspector, world, ctx, time, events, true)
+    }
+
+    /// A frame as [`frame`] draws it, whose edits are set at a tick if `tick`, or else wait for
+    /// one, as at a frame rate above the simulation's.
+    fn frame_ticking(
+        inspector: &mut Inspector,
+        world: &mut World,
+        ctx: &egui::Context,
+        time: f64,
+        events: Vec<egui::Event>,
+        tick: bool,
     ) -> (Vec<Text>, usize) {
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 4000.0));
         let input = egui::RawInput {
@@ -836,7 +936,11 @@ mod tests {
             let mut edits = Vec::new();
             inspector.inspect(world, ui, &mut edits, &mut cues);
             made = edits.len();
-            inspector.finish(world, edits, cues, None);
+            if tick {
+                make(inspector, world, edits, cues, None);
+            } else {
+                inspector.queue(edits, cues, None);
+            }
         });
         output.textures_delta.clear();
         let mut texts = Vec::new();
@@ -1212,13 +1316,17 @@ mod tests {
 
     #[test]
     fn a_gray_keeps_the_hue_picked_for_it() {
-        // White, as a sprite is untinted, and a gray whose value gamma's round trip moves.
+        // White, as a sprite is untinted, and a gray whose value gamma's round trip moves; with a
+        // tick each frame, and with frames that draw the sets waiting for one, as at frame rates
+        // above the simulation's.
         for gray in [Vec4::ONE, Vec4::new(0.9, 0.9, 0.9, 1.0)] {
-            a_gray_keeps_its_hue(gray);
+            for every_frame in [true, false] {
+                a_gray_keeps_its_hue(gray, every_frame);
+            }
         }
     }
 
-    fn a_gray_keeps_its_hue(gray: Vec4) {
+    fn a_gray_keeps_its_hue(gray: Vec4, every_frame: bool) {
         let mut world = World::default();
         let sprite = Sprite {
             color: gray,
@@ -1228,12 +1336,14 @@ mod tests {
         let ctx = crate::egui_context();
         let mut inspector = Inspector::default();
         let mut time = 0.0;
-        // A frame given `events`, then two that settle what they did; the last one's texts.
+        // A frame given `events`, then two that settle what they did, the last with a tick, if not
+        // each; the last one's texts.
         let mut run = |inspector: &mut Inspector, world: &mut World, events| {
             let mut texts = Vec::new();
-            for events in [events, Vec::new(), Vec::new()] {
+            for (i, events) in [events, Vec::new(), Vec::new()].into_iter().enumerate() {
                 time += 1.0;
-                texts = frame(inspector, world, &ctx, time, events).0;
+                let tick = every_frame || i == 2;
+                texts = frame_ticking(inspector, world, &ctx, time, events, tick).0;
             }
             texts
         };
@@ -1291,7 +1401,7 @@ mod tests {
         // As the widget keeps them once 200° is typed: from the rotation alone, it shows -160°.
         let id = egui::Id::unique(("inspector rotation", "Transform", "rotation"));
         ctx.data_mut(|data| data.insert_temp(id, (typed, [0.0f32, 0.0, 200.0])));
-        // A bit off in each component, as renormalizing it every frame leaves it.
+        // A bit off in each component, as renormalizing it at each tick leaves it.
         let nudged = typed.to_array().map(|x| f32::from_bits(x.to_bits() + 1));
         world
             .get_mut::<Transform>(entity)
@@ -1307,6 +1417,47 @@ mod tests {
             .rotation = Quat::from_rotation_z(10f32.to_radians());
         let texts = frames(&mut inspector, &mut world, &ctx);
         assert!(texts.iter().any(|text| text == "10.0"), "{texts:?}");
+        // 200° typed again, and set at a tick that hasn't come yet: the frames before it draw the
+        // rotation as the set will make it, and so keep the angles typed.
+        ctx.data_mut(|data| data.insert_temp(id, (typed, [0.0f32, 0.0, 200.0])));
+        let set = Edit {
+            component: "Transform".to_owned(),
+            path: "rotation".to_owned(),
+            value: Value::Quat(typed),
+        };
+        inspector.queue(vec![set], Cues::default(), None);
+        frame_ticking(&mut inspector, &mut world, &ctx, 3.0, Vec::new(), false);
+        Layer::tick(&mut inspector, &mut world, Tick { number: 0 });
+        let texts = frames(&mut inspector, &mut world, &ctx);
+        assert!(texts.iter().any(|text| text == "200.0"), "{texts:?}");
+    }
+
+    #[test]
+    fn an_edit_applies_at_the_next_tick_to_the_entity_picked_as_it_was_made() {
+        let mut world = World::default();
+        let [a, b] = [(); 2].map(|()| world.spawn(everything()));
+        let mut inspector = Inspector::default();
+        inspector.pick(id(&world, a));
+        let count = |value| Edit {
+            component: "Everything".to_owned(),
+            path: "count".to_owned(),
+            value,
+        };
+        // A set, and then one refused, before another entity is picked.
+        for value in [7, 200] {
+            inspector.queue(vec![count(Value::UInt(value))], Cues::default(), None);
+        }
+        inspector.pick(id(&world, b));
+        let counts = |world: &World| {
+            [a, b].map(|entity| world.get::<Everything>(entity).expect("everything").count)
+        };
+        assert_eq!(counts(&world), [42, 42]);
+        Layer::tick(&mut inspector, &mut world, Tick { number: 0 });
+        assert_eq!(counts(&world), [7, 42]);
+        assert_eq!(inspector.log.operations().len(), 1);
+        // The refusal, of a field of the entity picked before, isn't shown beside the same field
+        // of this one.
+        assert!(inspector.refusals.is_empty());
     }
 
     #[test]
@@ -1321,7 +1472,7 @@ mod tests {
             path: "count".to_owned(),
             value,
         };
-        inspector.apply(&mut world, count(Value::UInt(200)));
+        inspector.apply(&mut world, inspector.picked, count(Value::UInt(200)));
         let refused = format!(
             "can't set `Everything.count` of entity {}: 200 is above the field's max, 100",
             id(&world, entity)
@@ -1332,7 +1483,7 @@ mod tests {
             world.get::<Everything>(entity).expect("everything").count,
             42
         );
-        inspector.apply(&mut world, count(Value::UInt(99)));
+        inspector.apply(&mut world, inspector.picked, count(Value::UInt(99)));
         assert_eq!(
             world.get::<Everything>(entity).expect("everything").count,
             99
@@ -1340,7 +1491,7 @@ mod tests {
         let texts = frames(&mut inspector, &mut world, &ctx);
         assert!(!texts.contains(&refused), "{texts:?}");
         // Another entity picked starts without the last one's.
-        inspector.apply(&mut world, count(Value::UInt(200)));
+        inspector.apply(&mut world, inspector.picked, count(Value::UInt(200)));
         let other = world.spawn(everything());
         inspector.pick(id(&world, other));
         assert!(inspector.refusals.is_empty());
@@ -1444,15 +1595,24 @@ mod tests {
 
     #[test]
     fn a_number_typed_is_one_edit() {
+        // With a tick each frame, and every other one, as at frame rates above the simulation's,
+        // whose frames between draw the sets waiting for one.
+        for every in [1, 2] {
+            a_number_is_typed(every);
+        }
+    }
+
+    fn a_number_is_typed(every: u32) {
         let mut world = World::default();
         let entity = world.spawn(everything());
         let ctx = crate::egui_context();
         let mut inspector = Inspector::default();
         inspector.pick(id(&world, entity));
-        let mut time = 0.0;
+        let mut frames = 0;
         let mut run = |inspector: &mut Inspector, world: &mut World, events| {
-            time += 1.0;
-            frame(inspector, world, &ctx, time, events)
+            frames += 1;
+            let tick = frames % every == 0;
+            frame_ticking(inspector, world, &ctx, f64::from(frames), events, tick)
         };
         let mut texts = Vec::new();
         for _ in 0..3 {
@@ -1468,9 +1628,12 @@ mod tests {
             sets += run(&mut inspector, &mut world, text).1;
         }
         sets += run(&mut inspector, &mut world, enter()).1;
+        // Then a frame with a tick, if that one had none.
+        run(&mut inspector, &mut world, Vec::new());
         assert!(sets > 1 && weight(&world) == 0.75, "{sets} sets");
         assert_eq!(inspector.log.operations().len(), 1, "one edit");
         run(&mut inspector, &mut world, shortcut(egui::Key::Z, false));
+        run(&mut inspector, &mut world, Vec::new());
         assert_eq!(weight(&world).to_bits(), 2.5f64.to_bits());
     }
 
@@ -1555,7 +1718,7 @@ mod tests {
             });
             cues.read(root.ctx());
             made = edits.len();
-            inspector.finish(world, edits, cues, None);
+            make(inspector, world, edits, cues, None);
         });
         output.textures_delta.clear();
         let texts = mem::take(&mut window.borrow_mut().texts);
@@ -1661,7 +1824,7 @@ mod tests {
             let chosen = inspector.edit_menu(ui);
             let mut cues = Cues::default();
             cues.read(ui.ctx());
-            inspector.finish(world, Vec::new(), cues, chosen);
+            make(inspector, world, Vec::new(), cues, chosen);
         });
         output.textures_delta.clear();
         let mut texts = Vec::new();
@@ -1685,7 +1848,7 @@ mod tests {
             path: "count".to_owned(),
             value: Value::UInt(99),
         };
-        inspector.apply(&mut world, edit);
+        inspector.apply(&mut world, inspector.picked, edit);
         let mut time = 0.0;
         let mut run = |inspector: &mut Inspector, world: &mut World, events| {
             time += 1.0;

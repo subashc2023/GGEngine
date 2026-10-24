@@ -1,10 +1,11 @@
-//! What apps build on: the main loop, window and input, layers and their UI, the world of entities
-//! and their components, which it draws, handing each frame's render data to `gg-renderer`;
-//! reflection, which describes the components' types so that tools reach them by name, and the
-//! Inspector, which edits them; scenes and prefabs, the world's entities as canonical text;
-//! operations, the authoring changes made to the world, each with its inverse, and their log, which
-//! undoes and redoes them; and measuring each frame, for the log and the Performance panel. Assets
-//! to come.
+//! What apps build on: the main loop, which steps the simulation at a fixed rate whatever the frame
+//! rate, window and input, and layers, which change the world at its ticks, and their UI; the world
+//! of entities and their components, which it draws, handing each frame's render data to
+//! `gg-renderer`; reflection, which describes the components' types so that tools reach them by
+//! name, and the Inspector, which edits them; scenes and prefabs, the world's entities as canonical
+//! text; operations, the authoring changes made to the world, each with its inverse, and their log,
+//! which undoes and redoes them; and measuring each frame, for the log and the Performance panel.
+//! Assets to come.
 //!
 //! An app's `main` starts the engine; there is no separate entry-point crate.
 
@@ -74,7 +75,7 @@ pub use gg_renderer::{
 pub use input::Input;
 pub use inspector::Inspector;
 use layer::Stack;
-pub use layer::{Context, Layer, Window};
+pub use layer::{Context, Layer, Tick, Window};
 pub use perf::PerfPanel;
 use perf::{Perf, Summary};
 pub use reflect::Reflect;
@@ -193,12 +194,14 @@ pub fn run(mut app: App) -> ExitCode {
     }
 }
 
-/// Renders offscreen, without a window, as fast as the GPU allows.
+/// Renders offscreen, without a window, as fast as the GPU allows, with a tick of the simulation
+/// each frame, so that a run of a set number of frames runs as many ticks on any machine.
 fn run_headless(app: &mut App, args: &Args) -> Result<Ran> {
     let (width, height) = (1280, 720);
     let mut renderer = Renderer::headless(&settings(app, args), width, height)?;
     let mut cx = Context::new(None);
     let mut clock = Clock::default();
+    let mut stepper = Stepper::lockstep();
     let egui = egui_context();
     // Headless runs neither read nor save the layout, so that they're reproducible, and have no
     // window to frame.
@@ -216,7 +219,15 @@ fn run_headless(app: &mut App, args: &Args) -> Result<Ran> {
                 time: Some(clock.elapsed().as_secs_f64()),
                 ..Default::default()
             };
-            let output = run_frame(&mut app.stack, &mut cx, &mut clock, &egui, &mut dock, input);
+            let output = run_frame(
+                &mut app.stack,
+                &mut cx,
+                &mut clock,
+                &mut stepper,
+                &egui,
+                &mut dock,
+                input,
+            );
             render_frame(
                 &egui,
                 &mut cx,
@@ -234,7 +245,9 @@ fn run_headless(app: &mut App, args: &Args) -> Result<Ran> {
     app.stack.detach(&mut cx);
     rendered?;
     let perf = mem::take(&mut cx.perf);
-    Ok(Ran::finish(renderer, frames, &clock, perf, stopping))
+    Ok(Ran::finish(
+        renderer, frames, &clock, &stepper, perf, stopping,
+    ))
 }
 
 /// egui, without its shortcut that closes the window, Ctrl or Cmd+Q: a game may use those keys,
@@ -246,8 +259,9 @@ fn egui_context() -> egui::Context {
 }
 
 /// The first half of a turn of the main loop: starts the frame, for Tracy and the frame's
-/// measure, updates the layers, draws the world, over what they drew, and has the layers draw
-/// their UI, in the dock and with egui.
+/// measure, runs the ticks of the simulation that the time since the last frame owes, as
+/// `stepper` steps it, updates the layers, draws the world, over what they drew, and has the
+/// layers draw their UI, in the dock and with egui.
 /// [`render_frame`] renders what egui made of it.
 ///
 /// egui allocates as it lays out here, and as [`render_frame`] tessellates, so frames that draw
@@ -256,15 +270,17 @@ fn run_frame(
     stack: &mut Stack,
     cx: &mut Context,
     clock: &mut Clock,
+    stepper: &mut Stepper,
     egui: &egui::Context,
     dock: &mut Dock,
     input: egui::RawInput,
 ) -> egui::FullOutput {
-    let dt = clock.tick();
+    let dt = clock.start_frame();
     gg_core::profile::frame_mark();
-    cx.perf.tick(dt);
+    cx.perf.start_frame(dt);
     let _zone = gg_core::zone!();
     let start = Instant::now();
+    stepper.step(dt, |tick| stack.tick(cx, tick), || start.elapsed());
     stack.update(cx, dt);
     cx.draw_world();
     let updated = Instant::now();
@@ -340,7 +356,7 @@ struct Clock {
 impl Clock {
     /// Starts a frame, and returns the time since the last one started; zero for the first, and
     /// for the first after [`Clock::resume`].
-    fn tick(&mut self) -> Duration {
+    fn start_frame(&mut self) -> Duration {
         let now = Instant::now();
         let dt = self.last.map_or(Duration::ZERO, |last| now - last);
         self.first.get_or_insert(now);
@@ -366,6 +382,70 @@ impl Clock {
     }
 }
 
+/// The most ticks a frame runs: 125 ms of the simulation. Past them, the simulation falls behind
+/// real time, rather than taking the frame rate down with it.
+const MOST_TICKS: u64 = 8;
+
+/// Turns frames' time into the simulation's ticks, as many as the time owed holds, so that the
+/// simulation steps at its fixed rate whatever the frame rate.
+#[derive(Default)]
+struct Stepper {
+    /// The time not yet simulated: less than a tick, between frames.
+    owed: Duration,
+    /// The ticks run, which number the next.
+    ticks: u64,
+    /// The whole ticks the time owed held that no frame ran.
+    dropped: u64,
+    /// One tick every frame, whatever its time.
+    lockstep: bool,
+}
+
+impl Stepper {
+    /// A tick every frame, as headless runs step, so that a run of a set number of frames runs as
+    /// many ticks, however fast its frames are.
+    fn lockstep() -> Self {
+        Self {
+            lockstep: true,
+            ..Self::default()
+        }
+    }
+
+    /// Runs, through `tick`, the ticks owed by a frame `dt` after the last, numbered on from the
+    /// last: one for each whole tick the time owed holds, at most [`MOST_TICKS`], and no more once
+    /// `took`, the time the frame's ticks have taken so far, is longer than the time they've
+    /// simulated, so that a simulation slower than real time slows down rather than spending every
+    /// frame catching up. The whole ticks not run are dropped, and the fraction of one left over
+    /// carries to the next frame. In lockstep, exactly one. Returns how many ran.
+    fn step(
+        &mut self,
+        dt: Duration,
+        mut tick: impl FnMut(Tick),
+        took: impl Fn() -> Duration,
+    ) -> u64 {
+        let due = if self.lockstep {
+            1
+        } else {
+            self.owed += dt;
+            let step = Tick::DT.as_nanos();
+            let owed = self.owed.as_nanos();
+            self.owed = Duration::from_nanos((owed % step) as u64);
+            (owed / step) as u64
+        };
+        let mut ran = 0;
+        while ran < due.min(MOST_TICKS) {
+            tick(Tick { number: self.ticks });
+            self.ticks += 1;
+            ran += 1;
+            // Slower than real time: the ticks left would only fall further behind.
+            if took() > Tick::DT * ran as u32 {
+                break;
+            }
+        }
+        self.dropped += due - ran;
+        ran
+    }
+}
+
 fn settings<'a>(app: &'a App, args: &'a Args) -> Settings<'a> {
     Settings {
         app_name: app.name,
@@ -386,11 +466,16 @@ fn log_dir() -> PathBuf {
 /// What a run did, reported when it ends.
 struct Ran {
     frames: u64,
+    /// The simulation's ticks.
+    ticks: u64,
+    /// The whole ticks the frames' time held that they didn't run, which the simulation fell
+    /// behind by.
+    ticks_dropped: u64,
     validation: Validation,
     /// The GPU it rendered on.
     gpu: String,
     /// When its first frame started, if one did.
-    first_tick: Option<Instant>,
+    first_frame_at: Option<Instant>,
     shutdown: Duration,
     perf: Summary,
 }
@@ -398,11 +483,13 @@ struct Ran {
 impl Ran {
     /// Shuts the renderer down first, so that what validation reports on the way, such as
     /// objects left undestroyed, counts too. `stopping` is when the run began to end, after its
-    /// last frame, and `perf` what it measured of its frames.
+    /// last frame, `stepper` what stepped its simulation, and `perf` what it measured of its
+    /// frames.
     fn finish(
         renderer: Renderer,
         frames: u64,
         clock: &Clock,
+        stepper: &Stepper,
         mut perf: Perf,
         stopping: Instant,
     ) -> Self {
@@ -412,9 +499,11 @@ impl Ran {
         drop(renderer);
         Self {
             frames,
+            ticks: stepper.ticks,
+            ticks_dropped: stepper.dropped,
             validation,
             gpu,
-            first_tick: clock.first,
+            first_frame_at: clock.first,
             shutdown: stopping.elapsed(),
             perf: perf.summary(),
         }
@@ -428,10 +517,12 @@ impl Ran {
         info!(
             code = "engine.perf",
             frames = self.frames,
+            ticks = self.ticks,
+            ticks_dropped = self.ticks_dropped,
             measured = perf.measured,
             percentile_frames = perf.percentile_frames,
             startup_ms = self
-                .first_tick
+                .first_frame_at
                 .map(|first| perf::millis(first.saturating_duration_since(started))),
             first_frame_ms = perf.first_frame,
             shutdown_ms = perf::millis(self.shutdown),
@@ -477,7 +568,11 @@ impl Ran {
 
 #[cfg(test)]
 mod tests {
-    use gg_core::math::{Mat4, Vec4};
+    use std::cell::{Cell, RefCell};
+    use std::f32::consts::FRAC_PI_2;
+    use std::rc::Rc;
+
+    use gg_core::math::{Mat4, Quat, Vec4};
     use gg_renderer::Draws;
 
     use super::*;
@@ -502,6 +597,139 @@ mod tests {
         }
     }
 
+    /// Spawns an entity as it attaches, which it turns a quarter turn a second at each tick, and
+    /// notes each tick it gets.
+    struct Turner(Rc<RefCell<Vec<Tick>>>);
+
+    impl Layer for Turner {
+        fn attach(&mut self, cx: &mut Context) {
+            cx.world_mut().spawn(Transform::IDENTITY);
+        }
+
+        fn tick(&mut self, world: &mut World, tick: Tick) {
+            let turn = Quat::from_rotation_z(FRAC_PI_2 * Tick::DT.as_secs_f32());
+            for transform in world.query_mut::<&mut Transform>() {
+                transform.rotation = (turn * transform.rotation).normalize();
+            }
+            self.0.borrow_mut().push(tick);
+        }
+    }
+
+    /// Notes its ticks and its updates, in the order they come.
+    struct Order(Rc<RefCell<Vec<String>>>);
+
+    impl Layer for Order {
+        fn tick(&mut self, _: &mut World, tick: Tick) {
+            self.0.borrow_mut().push(format!("tick {}", tick.number));
+        }
+
+        fn update(&mut self, _: &mut Context, _: Duration) {
+            self.0.borrow_mut().push("update".to_owned());
+        }
+    }
+
+    #[test]
+    fn the_simulation_steps_at_a_fixed_rate_whatever_the_frame_rate() {
+        let ms = Duration::from_millis;
+        // Each a second of frames.
+        let runs = [
+            vec![ms(1); 1000],
+            vec![ms(10); 100],
+            vec![Tick::DT; 64],
+            vec![ms(40); 25],
+            [ms(2), ms(48)].repeat(20),
+        ];
+        let mut first = None;
+        for frames in runs {
+            let ticks = Rc::new(RefCell::new(Vec::new()));
+            let mut stack = Stack::default();
+            stack.push_layer(Box::new(Turner(ticks.clone())));
+            let mut cx = Context::new(None);
+            stack.attach(&mut cx);
+            let mut stepper = Stepper::default();
+            for dt in frames {
+                // A frame without time, as the first is and the first after a pause, runs no tick.
+                for dt in [Duration::ZERO, dt] {
+                    stepper.step(dt, |tick| stack.tick(&mut cx, tick), || Duration::ZERO);
+                }
+            }
+            let ticks = ticks.borrow();
+            let numbers: Vec<_> = ticks.iter().map(|tick| tick.number).collect();
+            assert_eq!(numbers, (0..64).collect::<Vec<_>>());
+            let last = ticks.last().map(|tick| tick.time());
+            assert_eq!(last, Some(Duration::from_secs(1)));
+            let turned = cx.world().query::<&Transform>().next();
+            let turned = turned.map(|transform| transform.rotation.to_array().map(f32::to_bits));
+            assert_eq!(turned, *first.get_or_insert(turned));
+        }
+    }
+
+    #[test]
+    fn a_frame_runs_at_most_8_ticks_keeping_the_fraction() {
+        let mut stepper = Stepper::default();
+        let fast = || Duration::ZERO;
+        // 64.32 ticks' time: 8 run, the other 56 whole ticks are dropped, and 5 ms is left over.
+        assert_eq!(stepper.step(Duration::from_millis(1005), |_| {}, fast), 8);
+        assert_eq!(stepper.dropped, 56);
+        // A whole tick, with the 5 ms.
+        assert_eq!(stepper.step(Duration::from_micros(10_625), |_| {}, fast), 1);
+        assert_eq!(stepper.step(Duration::ZERO, |_| {}, fast), 0);
+        assert_eq!((stepper.ticks, stepper.dropped), (9, 56));
+    }
+
+    #[test]
+    fn ticks_that_run_slow_stop_the_frame() {
+        let mut stepper = Stepper::default();
+        let mut numbers = Vec::new();
+        let ran = Cell::new(0);
+        for _ in 0..2 {
+            ran.set(0);
+            // Each tick takes two ticks' time.
+            let took = || Tick::DT * 2 * ran.get();
+            let owed = Tick::DT * MOST_TICKS as u32;
+            let tick = |tick: Tick| {
+                ran.set(ran.get() + 1);
+                numbers.push(tick.number);
+            };
+            assert_eq!(stepper.step(owed, tick, took), 1);
+        }
+        assert_eq!(numbers, [0, 1]);
+        assert_eq!(stepper.dropped, 2 * (MOST_TICKS - 1));
+    }
+
+    #[test]
+    fn headless_frames_tick_once_before_the_layers_update() {
+        let mut stepper = Stepper::lockstep();
+        for dt in [Duration::ZERO, Duration::from_secs(1)] {
+            assert_eq!(stepper.step(dt, |_| {}, || Duration::from_secs(1)), 1);
+        }
+        assert_eq!((stepper.ticks, stepper.dropped), (2, 0));
+
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let mut stack = Stack::default();
+        stack.push_layer(Box::new(Order(calls.clone())));
+        let mut cx = Context::new(None);
+        stack.attach(&mut cx);
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(640.0, 360.0),
+            )),
+            ..Default::default()
+        };
+        let mut dock = Dock::new(None, Chrome::Os);
+        let mut clock = Clock::default();
+        let mut stepper = Stepper::lockstep();
+        let egui = egui_context();
+        for _ in 0..2 {
+            let (cx, clock, stepper) = (&mut cx, &mut clock, &mut stepper);
+            let mut output = run_frame(&mut stack, cx, clock, stepper, &egui, &mut dock, input());
+            // As the renderer would have.
+            output.textures_delta.clear();
+        }
+        assert_eq!(*calls.borrow(), ["tick 0", "update", "tick 1", "update"]);
+    }
+
     #[test]
     fn the_world_draws_over_the_layers_draws() {
         let mut stack = Stack::default();
@@ -517,8 +745,10 @@ mod tests {
         };
         let mut dock = Dock::new(None, Chrome::Os);
         let mut clock = Clock::default();
+        let mut stepper = Stepper::default();
         let egui = egui_context();
-        let mut output = run_frame(&mut stack, &mut cx, &mut clock, &egui, &mut dock, input);
+        let (cx, clock, stepper) = (&mut cx, &mut clock, &mut stepper);
+        let mut output = run_frame(&mut stack, cx, clock, stepper, &egui, &mut dock, input);
         // As the renderer would have.
         output.textures_delta.clear();
         let mut expected = Draws::default();
@@ -547,11 +777,13 @@ mod tests {
         };
         let mut dock = Dock::new(None, Chrome::Os);
         let mut clock = Clock::default();
+        let mut stepper = Stepper::default();
         let egui = egui_context();
         let mut texts = Vec::new();
         // The dock places a panel in its first frame, and draws it from the next.
         for _ in 0..3 {
-            let mut output = run_frame(&mut stack, &mut cx, &mut clock, &egui, &mut dock, input());
+            let (cx, clock, stepper) = (&mut cx, &mut clock, &mut stepper);
+            let mut output = run_frame(&mut stack, cx, clock, stepper, &egui, &mut dock, input());
             output.textures_delta.clear();
             texts.clear();
             for clipped in output.shapes {
@@ -593,12 +825,12 @@ mod tests {
     #[test]
     fn the_frame_after_a_pause_counts_from_its_own_start() {
         let mut clock = Clock::default();
-        assert_eq!(clock.tick(), Duration::ZERO);
+        assert_eq!(clock.start_frame(), Duration::ZERO);
         std::thread::sleep(Duration::from_millis(1));
-        assert!(clock.tick() > Duration::ZERO);
+        assert!(clock.start_frame() > Duration::ZERO);
         std::thread::sleep(Duration::from_millis(1));
         clock.resume();
-        assert_eq!(clock.tick(), Duration::ZERO);
+        assert_eq!(clock.start_frame(), Duration::ZERO);
         // The run's time still counts the pause.
         assert!(clock.elapsed() >= Duration::from_millis(2));
     }
