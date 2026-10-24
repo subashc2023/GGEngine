@@ -15,7 +15,10 @@ use super::ops::{Inverse, Operation};
 /// their components typed and their slots, so that it gives each back under its handle, as it was,
 /// until the entry is dropped: by an operation applied after an undo, which drops what was undone;
 /// by an undo or a redo the world refuses; or by [`clear`](Self::clear). A log dropped without
-/// `clear` leaves those slots unused for good, so whoever keeps one clears it.
+/// `clear` leaves those slots unused for good, so whoever keeps one clears it. A world restored
+/// from a snapshot refuses the entries from before, as another world's, and the slots kept when
+/// the snapshot was taken stay unused in it for good; so whoever restores a world clears its log
+/// too.
 #[derive(Default)]
 pub struct Log {
     /// Applied and not undone, the first applied first.
@@ -182,7 +185,7 @@ impl Log {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::num::NonZeroU32;
 
     use gg_core::math::{Vec3, Vec4};
@@ -198,7 +201,7 @@ mod tests {
     use crate::{Entity, EntityId, Parent, Reflect, Sprite, Transform};
 
     /// How many of `world`'s slots are vacant, kept for entities a delete took.
-    fn vacated(world: &World) -> usize {
+    pub(in crate::ecs) fn vacated(world: &World) -> usize {
         let mut vacant = 0;
         for (index, meta) in world.meta.iter().enumerate() {
             let free = world.free.contains(&(index as u32));
@@ -506,7 +509,7 @@ mod tests {
     /// A random operation on `world`'s living entities, mostly one that applies. A reference left
     /// dangling by a delete, which keeps the world from saving, is mostly avoided, and set to
     /// `None` soon after, so that the scene shows most steps.
-    fn random(world: &World, rng: &mut Rng, step: usize) -> Operation {
+    pub(in crate::ecs) fn random(world: &World, rng: &mut Rng, step: usize) -> Operation {
         let living: Vec<Entity> = world.entities(None).expect("every entity").collect();
         let id = |entity| world.id(entity).expect("alive");
         let pick = |rng: &mut Rng| living[rng.below(living.len())];

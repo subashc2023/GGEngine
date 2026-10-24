@@ -1,8 +1,8 @@
 //! The engine's ECS: entities, which are handles, and their components, data of any reflected type,
 //! kept in archetype tables, a table for each set of component types, and found by queries, or by
 //! name; entities' persistent IDs; the hierarchy, in which entities' parents carry their children
-//! along; scenes, the world's entities as text; and operations, the authoring changes made to it,
-//! each with its inverse, and their log.
+//! along; scenes, the world's entities as text; operations, the authoring changes made to it, each
+//! with its inverse, and their log; and snapshots, the world copied whole, which restore it.
 
 mod by_name;
 mod hierarchy;
@@ -11,6 +11,7 @@ mod log;
 mod ops;
 mod query;
 mod scene;
+mod snapshot;
 mod table;
 
 use std::any::TypeId;
@@ -38,7 +39,7 @@ use crate::reflect::Reflect;
 
 /// Data an entity can have: a struct or an enum that derives it, with `#[derive(Clone,
 /// Component)]`, which describes it to reflection too, as [`Reflect`] says, so that tools reach it
-/// by name. Clone, so that the world can be copied whole, as snapshots will; and, through
+/// by name. Clone, so that the world can be copied whole, as a snapshot is; and, through
 /// `Reflect`, `Send` and `Sync`, so that it can move to the threads that will run the simulation.
 /// A type registers the first time an entity has one, or with [`World::register`]. The derive makes
 /// it [`Writable`] too, a component that code changes.
@@ -85,7 +86,8 @@ pub use gg_macros::Component;
 pub trait Bundle: seal::Bundle {}
 
 /// An entity: a handle to it, which stays its own as other entities come and go, and never names
-/// another once it's despawned. It's printed as its slot and the slot's generation, such as `7v2`.
+/// another once it's despawned, unless its world is restored from a snapshot taken before it was
+/// spawned. It's printed as its slot and the slot's generation, such as `7v2`.
 /// It's the world's own: files, tools and diagnostics name an entity by its [`EntityId`].
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Entity {
@@ -113,6 +115,34 @@ impl fmt::Debug for Entity {
 /// table's last row into its place. So the order queries find entities in follows from the changes
 /// made, the same every time, but means nothing a game should depend on: anything ordered, such as
 /// what's drawn over what, orders by its components' values, or by its entities' IDs.
+///
+/// A copy of the world is a snapshot of it, which restores it: [`clone`](Clone::clone) takes one,
+/// and [`clone_from`](Clone::clone_from) restores the world from one, or takes one into a copy kept
+/// from before. A copy is all of the world: each slot under its generation, the free ones in the
+/// order they're taken, and those kept for the entities a [`Log`] can put back still kept; each
+/// entity under its handle and its ID, in its table and row, with its parent and children; the
+/// tables in the order they were made, those made since a snapshot cut away as it's restored; the
+/// stream the IDs come from; and the component types. So a world restored goes on as the world the
+/// snapshot was taken from did: given the same changes, it spawns the same handles with the same
+/// IDs, and its queries find the same order, as it gives out again the handles and IDs given out
+/// since the snapshot. But it's another world: drawing sorts its rows again, and it refuses what
+/// undoes an operation applied before, as another world's, so that the slots kept when the snapshot
+/// was taken are never used again. Taken again, or restored, a snapshot is copied into the memory
+/// the world holds, which allocates nothing while the tables, the component types and the world's
+/// size stay as they were, for components whose `Clone` allocates nothing.
+///
+/// ```
+/// use gg_engine::{Transform, World};
+///
+/// let mut world = World::default();
+/// let entity = world.spawn(Transform::IDENTITY);
+/// let id = world.id(entity);
+/// let snapshot = world.clone();
+/// world.despawn(entity)?;
+/// world.clone_from(&snapshot);
+/// assert_eq!(world.id(entity), id);
+/// # Ok::<(), gg_engine::reflect::Error>(())
+/// ```
 pub struct World {
     /// Each slot's generation, and where its entity is if it's alive.
     meta: Vec<Meta>,
@@ -130,8 +160,8 @@ pub struct World {
     /// Where the next entity's ID comes from.
     stream: IdStream,
     /// Which world this is among the process's, so that the order drawing keeps for one world never
-    /// passes for another's, as when a game replaces its world; a world copied, as snapshots will
-    /// copy one, takes another.
+    /// passes for another's, as when a game replaces its world; a world copied takes another, as
+    /// does a world restored from a copy.
     serial: u64,
     /// How many times entities' rows have changed, as entities are spawned, despawned or moved to
     /// other tables: drawing keeps the order it sorted while it and `serial` stay.
@@ -160,6 +190,12 @@ impl Default for World {
 /// How many worlds the process has made, which numbers each.
 static WORLDS: AtomicU64 = AtomicU64::new(0);
 
+/// A serial no other world has had, for a world made, copied or restored.
+fn next_serial() -> u64 {
+    WORLDS.fetch_add(1, Ordering::Relaxed)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Meta {
     generation: NonZeroU32,
     /// `None` while the slot is free; vacant, kept for the entity a delete took, which its inverse
@@ -169,7 +205,7 @@ struct Meta {
     links: Links,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Location {
     table: u32,
     row: u32,
@@ -191,7 +227,7 @@ impl World {
             entity_ids: Vec::new(),
             by_id: HashMap::new(),
             stream: IdStream::new(seed),
-            serial: WORLDS.fetch_add(1, Ordering::Relaxed),
+            serial: next_serial(),
             version: 0,
             tables: Vec::new(),
             by_signature: HashMap::new(),

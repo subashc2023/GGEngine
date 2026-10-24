@@ -135,13 +135,24 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   undone and redone by handle, refusals changing nothing, undos the world has moved past refused
   whole, and 1,000 random steps, of operations and of undos and redos, undone back to the first
   scene, byte for byte.
+- **Whole-world snapshots and restores** (2026-10-23): the world copies whole, as `World` is
+  `Clone`, and `clone_from` restores a world from a snapshot, or takes a snapshot into one kept
+  from before, in the memory it holds; a restored world is the one its snapshot was taken from in
+  every slot, free, vacant or retired, the free ones in their order, in every entity's handle, ID,
+  table, row and links, in the component types and in the stream of IDs to come, so that it goes
+  on as that world did; and it's another world, with a serial of its own, which refuses the
+  inverses from before, the slots a log kept staying vacant, and whose drawing sorts again. Unit
+  tests check worlds restored after random branches against twins that stopped at their
+  snapshots, field by field and through the same steps after, restores across worlds of other
+  types and tables, and memory kept; in release, a snapshot of the swarm's 100,450 entities takes
+  2.2 ms cold, and 0.63 ms taken again or restored, allocating nothing.
 
-## Now: whole-world snapshots and restores
+## Now: a fixed timestep, with commands
 
-Phase 3's seventh milestone: whole-world snapshots and restores. *Done when* a restored snapshot
-matches the world it was taken from. Its plan is made when it starts, and decides what a snapshot
-does with the slots kept for the entities the log can put back, by undoing a delete or redoing a
-create, whose inverses a copy, with another serial, refuses.
+Phase 3's eighth milestone: a fixed timestep, with commands as the only way into the simulation.
+*Done when* the sandbox's simulation steps at a fixed rate whatever its frame rate, and its world
+changes only through systems run at a tick and commands applied at one. Its plan is made when it
+starts, and decides what a command is beside an operation.
 
 ## Next
 
@@ -289,11 +300,11 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Reparenting that keeps where a child is in the world, by decomposing its matrix, which loses any shear; `set_parent` keeps its own transform | The editor's scene tree, or an agent attaching something where it stands |
 | Spawning a child into its table at once from code: `spawn`, then `set_parent`, moves it to another table; a load and a create operation spawn one there | A profile |
 | Children in an order that means something: reordering them, and saving their order; an undo puts a child back last | The editor's scene tree, or UI laid out by the hierarchy |
-| Seeding a world's IDs, and the stream's state in snapshots and the world hash; a seed for authoring is never fixed, or every session would draw the same IDs | The deterministic mode, or snapshots |
+| Seeding a world's IDs, and the stream's state in the world hash; a seed for authoring is never fixed, or every session would draw the same IDs | The deterministic mode |
 | Each session's seed and count saved with the world and merged with it, so that an ID maps back to its session and when it was drawn, and a load refuses IDs no session drew | The tool API refusing an ID an agent made up |
 | An `EntityId` query term | The first system that reads IDs as it iterates, such as the world hash or replication |
 | Errors carrying their entity, and a scene's line and column, as fields, not only in their message | The tool API returns errors as data |
-| Drawing rows at one z in ID order for less. Every frame reads them in that order rather than their tables', about 0.9 ms of the swarm's 4.3 ms frame in release; a frame that changes rows or z's sorts them by ID again, about 2.5 ms more for 100,000; and 100,000 sprites each at a z of their own, as sorting by y gives them, take about 2 ms more than before, for a group and an item each. Tables kept in ID order would make the reads a sweep, and a radix sort the sort quicker | A game's frames need the time |
+| Drawing rows at one z in ID order for less. Every frame reads them in that order rather than their tables', about 0.9 ms of the swarm's 4.3 ms frame in release; a frame that changes rows or z's, or follows a restore, sorts them by ID again, about 2.5 ms more for 100,000; and 100,000 sprites each at a z of their own, as sorting by y gives them, take about 2 ms more than before, for a group and an item each. Tables kept in ID order would make the reads a sweep, and a radix sort the sort quicker | A game's frames need the time |
 | Linked prefab instances, with overrides, nesting, apply and revert; a placement is a flattened copy, each ID mixed from its instance's and its own, which links will keep | The editor, or a game editing a prefab its scenes hold many copies of |
 | A derive hint for `Component::base`, and opaque values in lists and options, which saving refuses, as does a set's undo (`reflect.opaque`) where the old value holds something opaque in a variant, an option or a list; a type with opaque fields implements `Component` by hand to load, as `Sprite` does | A game's component holds something opaque |
 | Names in scenes beyond ASCII identifiers, which saving refuses (`scene.bad_name`) | A game names a type or a field so |
@@ -304,12 +315,13 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | The log in `Context`, every layer's and the tool API's clients each undoing their own, and an undo logged as an operation; the Inspector keeps a log of its own | Phase 5, the tool API |
 | Replaying a log into another world, which maps values' handles to IDs; `set_field` and operations store a dead handle without complaint | Phase 5, the tool API |
 | A delete saying what refers to its entities from outside, or refusing; those references dangle until it's undone, and the world doesn't save in between | An agent deletes through the tool API |
-| Layers holding handles that an operation deletes, as the sandbox's swarm, whose `expect` panics then | The Inspector or the tool API deletes |
+| Layers holding handles that an operation deletes or a restore takes back, as the sandbox's swarm does, whose `expect` panics then; nothing tells a layer, or the Inspector, whose log and pick outlive it, that `Context`'s world was restored, so the sandbox doesn't snapshot | The Inspector or the tool API deletes, or something restores the running world, such as rollback or Phase 5's restart |
 | Creating, deleting, adding, removing and reparenting from the Inspector, which sets fields | The editor, or a game's tools |
 | A bound on the log, which keeps a session's entries, a delete's components and slots among them, until it's cleared | A session's memory shows it |
-| A log that outlives a run: inverses that keep components typed can't be saved | Phase 5's restart from a snapshot |
+| A log that outlives a run or a restore: inverses that keep components typed can't be saved, and a restored world refuses every inverse from before, the slots kept when the snapshot was taken staying unused; a snapshot could keep the log's place, which a restore would rewind it to | Phase 5's restart from a snapshot |
 | A depth limit on values set or created by name, as scenes' 64; a deeper one recurses without one | The tool API takes values from outside |
 | An undo giving back the ID stream's state and the tables' order: an undone create's ID stays drawn, and what an undo puts back goes last in its table, so a world hash of either differs after a log is undone, though its scene comes back byte for byte | The deterministic mode's world hash |
+| Snapshots that copy less, only the tables changed, or on several threads: the swarm's 100,450 entities copy about 20 MB each way, in 0.63 ms taken again or restored, and the frame after a restore sorts the swarm's rows by ID again, about 2.5 ms | A game's rollback frames need the time |
 
 ## Open questions
 

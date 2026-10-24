@@ -230,10 +230,11 @@ peer-to-peer rollback; the engine supplies these pieces.
 
 The world is a `World` of entities and their components, in safe Rust. An entity is a handle,
 its slot and which use of the slot it is, so that a despawned entity's handle never names
-another. A delete operation leaves its entities' slots vacant rather than free, their uses as
-they were, until its inverse puts them back or is dropped, so that an undone delete's entities
-have their handles again. A component is a struct or an enum that derives `Component`, which
-describes it to reflection; it's `Clone`, for snapshots, and `Send` and `Sync`, for the job
+another, unless a restore takes the world back to before it was spawned. A delete operation
+leaves its entities' slots vacant rather than free, their uses as they were, until its inverse
+puts them back or is dropped, so that an undone delete's entities have their handles again.
+A component is a struct or an enum that derives `Component`, which describes it to reflection;
+it's `Clone`, for snapshots, and `Send` and `Sync`, for the job
 system. Components live in archetype tables, one for each set of component types, whose rows are
 its entities and whose columns are each type's own `Vec`, which the world reaches through a trait
 object, downcast once a table, rather than through raw pointers. Queries borrow the world, shared
@@ -251,7 +252,7 @@ hex digits, so that IDs sort as their text does and never read as a handle. Each
 IDs from SplitMix64, whose 2^64 states each mix to a different number, seeded from the OS's
 randomness through std's `RandomState`, so that a run of the cycle never gives an ID twice, and two
 runs, two sessions' or a world's on either side of a reseed, meet only where they overlap; the
-deterministic mode will seed it, and snapshots will copy its state. A scene's entities keep the IDs
+deterministic mode will seed it, and a snapshot copies its state. A scene's entities keep the IDs
 it gives them, and a load refuses one a living entity has. A draw that meets a living entity's ID,
 as a stream that walks into the run of the session that saved a loaded scene does, reseeds the
 stream, the same way for the same state, and draws again. The world keeps each slot's ID in an
@@ -294,10 +295,25 @@ parent's children its own in the order of their IDs, an undone delete puts a sub
 its order, the root the last of its parent's children, and an undone reparent makes the child
 the last of its old parent's. So despawning an entity despawns its descendants, children first,
 and the links allocate nothing, though giving or taking away a `Parent` moves the child to
-another table, as `insert` and `remove` do; snapshots will copy the links with the tables. World
+another table, as `insert` and `remove` do; a snapshot copies them with the slots. World
 transforms aren't stored: drawing computes each child's from its ancestors, every frame, while a
 table of roots draws by its transforms alone, for one check a frame; the links cost each slot 16
 bytes, whether its entity has a parent or not.
+
+A snapshot is the world copied: `World` is `Clone`, and `clone_from` restores a world from a
+snapshot, or takes a snapshot into one kept from before, in the memory it holds. It copies all of
+the world: each slot under its generation, the free ones in the order they're taken and the vacant
+ones vacant; each entity under its handle and ID, in its table and row, with its links; the
+tables in the order they were made, cutting away those made since; the stream the IDs come from;
+and the component types. So a restored world goes on as the world the snapshot was taken from
+did, spawning the same handles with the same IDs and finding entities in the same order, and gives
+out again the handles and IDs given out since the snapshot. A copy is another world, with a serial
+of its own: drawing sorts its rows again, and it refuses what undoes an operation applied before,
+as another world's, so that undo history doesn't outlive a restore, and the slots a log kept when
+the snapshot was taken stay vacant for good, since freeing them would change the handles to come.
+A snapshot taken again, or restored, is copied into memory already held, so that one taken every
+frame allocates nothing while the tables, the component types and the world's size stay, for
+components whose `Clone` allocates nothing.
 
 ## Diagnostics
 

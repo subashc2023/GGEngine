@@ -198,7 +198,7 @@ pub enum Show {
 /// The named types, structs and enums, in the order they were described. Each describes itself
 /// once, under a name no other has; a type of fields is described with the first type that has
 /// one.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Types {
     entries: Vec<Entry>,
     /// Looked up, never iterated, as is `by_type`.
@@ -206,6 +206,7 @@ pub struct Types {
     by_type: HashMap<TypeId, TypeIndex>,
 }
 
+#[derive(Clone)]
 struct Entry {
     info: TypeInfo,
     type_id: TypeId,
@@ -293,6 +294,13 @@ impl Types {
     pub fn iter(&self) -> impl ExactSizeIterator<Item = (TypeIndex, &TypeInfo)> {
         let entries = self.entries.iter().enumerate();
         entries.map(|(i, entry)| (TypeIndex(i as u32), &entry.info))
+    }
+
+    /// Whether `other` has described the same Rust types as these, in the same order, so that
+    /// its indices name the same types.
+    pub(crate) fn same(&self, other: &Self) -> bool {
+        let ours = self.entries.iter().map(|entry| entry.type_id);
+        ours.eq(other.entries.iter().map(|entry| entry.type_id))
     }
 }
 

@@ -110,7 +110,8 @@ impl fmt::Display for Operation {
 }
 
 /// What undoes an operation applied to a world, which [`World::undo`] applies. It's its world's
-/// own, since its values hold the world's handles and its rows its component types; a delete's
+/// own, since its values hold the world's handles and its rows its component types, and a world
+/// restored from a snapshot is another, which may have given those handles out again; a delete's
 /// keeps its entities' slots until it's applied or [released](World::release).
 pub(super) struct Inverse {
     /// Its world's serial.
@@ -161,17 +162,18 @@ impl World {
 
     /// Applies `inverse`, undoing its operation, and leaves in its place what undoes that, which
     /// redoes it. Refused, it changes neither the world nor `inverse`: with `ops.other_world` for
-    /// another world's inverse; as its operation is refused, if it's one; and, as it gives back what
-    /// a remove or a delete took, with `ecs.no_entity` for an entity gone since, or a root's parent
-    /// gone, `reflect.has_component` for a component the entity has since, and `ecs.id_taken` for
-    /// an ID a living entity has since, such as one a scene loaded.
+    /// another world's inverse, as one from before the world was restored is; as its operation is
+    /// refused, if it's one; and, as it gives back what a remove or a delete took, with
+    /// `ecs.no_entity` for an entity gone since, or a root's parent gone, `reflect.has_component`
+    /// for a component the entity has since, and `ecs.id_taken` for an ID a living entity has
+    /// since, such as one a scene loaded.
     pub(super) fn undo(&mut self, inverse: &mut Inverse) -> Result<()> {
         let _zone = gg_core::zone!();
         if inverse.world != self.serial {
             return Err(Error::new(
                 "ops.other_world",
-                "it's another world's: what undoes an operation undoes it in the world it was \
-                 applied to",
+                "it's another world's, or from before the world was restored: what undoes an \
+                 operation undoes it in the world it was applied to",
             ));
         }
         let redo = match &inverse.undo {

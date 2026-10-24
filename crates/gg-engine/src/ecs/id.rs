@@ -98,6 +98,7 @@ pub(super) fn placed(instance: EntityId, local: EntityId) -> Option<EntityId> {
 /// streams, seeded apart, are windows on the one cycle of 2^64 states, which give the same IDs
 /// only where they overlap, as a stream's before and after a reseed do: for n and m IDs, about
 /// (n + m) / 2^64.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct IdStream(u64);
 
 impl IdStream {

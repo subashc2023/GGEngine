@@ -20,7 +20,7 @@ pub struct ComponentId(u32);
 pub type Row = Vec<(ComponentId, Box<dyn AnyColumn>)>;
 
 /// The component types a world has seen, and the descriptions of them and their fields' types.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Components {
     ids: HashMap<TypeId, ComponentId>,
     /// By id.
@@ -30,6 +30,7 @@ pub struct Components {
     types: Types,
 }
 
+#[derive(Clone)]
 struct Info {
     /// Its name in its description.
     name: Name,
@@ -127,6 +128,13 @@ impl Components {
     pub fn types(&self) -> &Types {
         &self.types
     }
+
+    /// Whether `other` has seen the same types as these, in the same order, so that its ids name
+    /// the same types: those described, and the component types among them.
+    pub(super) fn same(&self, other: &Self) -> bool {
+        let indices = self.infos.iter().map(|info| info.index);
+        self.types.same(&other.types) && indices.eq(other.infos.iter().map(|info| info.index))
+    }
 }
 
 /// The entities with one set of component types, a row each: each column holds one type's
@@ -205,6 +213,29 @@ impl Table {
     }
 }
 
+impl Clone for Table {
+    fn clone(&self) -> Self {
+        Self {
+            components: self.components.clone(),
+            columns: self.columns.iter().map(|column| column.cloned()).collect(),
+            entities: self.entities.clone(),
+        }
+    }
+
+    /// Makes the table a copy of `source`, whose ids name the types this one's do, as two copies
+    /// of a world's do: in the memory it holds, if they have the same component types.
+    fn clone_from(&mut self, source: &Self) {
+        if self.components != source.components {
+            *self = source.clone();
+            return;
+        }
+        for (from, to) in source.columns.iter().zip(&mut self.columns) {
+            from.copy_to(&mut **to);
+        }
+        self.entities.clone_from(&source.entities);
+    }
+}
+
 /// A column of a table: one component type's `Vec`, without its type, for the changes that move
 /// rows whatever their types.
 pub trait AnyColumn: Any + Send + Sync {
@@ -225,6 +256,12 @@ pub trait AnyColumn: Any + Send + Sync {
     ///
     /// Fails as [`Reflect::with_value`] and [`Reflect::from_value`] do.
     fn push_value(&mut self, value: &Value) -> Result<()>;
+
+    /// A copy of the column.
+    fn cloned(&self) -> Box<dyn AnyColumn>;
+
+    /// Makes `to`, a column of the same type, a copy of this one, in the memory it holds.
+    fn copy_to(&self, to: &mut dyn AnyColumn);
 }
 
 impl<T: Component> AnyColumn for Vec<T> {
@@ -252,6 +289,14 @@ impl<T: Component> AnyColumn for Vec<T> {
         };
         self.push(made);
         Ok(())
+    }
+
+    fn cloned(&self) -> Box<dyn AnyColumn> {
+        Box::new(self.clone())
+    }
+
+    fn copy_to(&self, to: &mut dyn AnyColumn) {
+        to.vec_mut::<T>().clone_from(self);
     }
 }
 
