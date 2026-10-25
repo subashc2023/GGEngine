@@ -659,7 +659,7 @@ main thread.
 | GPU API | Vulkan through `ash`: one backend, no multi-API abstraction layer |
 | GPU memory | VMA through our own binding in `gg-gpu`, for its budgets, aliasing, pools and defragmentation |
 | Window and input | `winit`, with `ash-window` for surfaces and `gilrs` for gamepads |
-| UI | egui, drawn by `gg-renderer`, with a dock of our own |
+| UI | egui, drawn by `gg-renderer`, with a dock of our own: the engine's overlay and the editor alike |
 | Project state | RON in a canonical form; see [Project state](#project-state) |
 | Math | `glam`, with its `scalar-math` and `libm` features; `libm` |
 | Jobs | `rayon-core`'s thread pool and `join`; not rayon's parallel iterators, whose splits and reductions follow the number of threads |

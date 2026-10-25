@@ -446,8 +446,6 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 - Which game is the flagship? Recommendation: a networked game whose design depends on
   determinism, so the simulation core, the tool API and multiplayer are exercised from the
   start. Decide before Phase 5, v0.1.
-- Editor UI toolkit: egui, which the engine's overlay already uses, or GPUI? Decide before
-  Phase 9.
 - Which license? Recommendation: MIT OR Apache-2.0, the Rust convention, chosen once; until
   then, `publish = false` keeps the crates off crates.io. Decide before anyone outside the
   project contributes.

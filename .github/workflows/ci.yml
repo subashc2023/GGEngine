@@ -31,7 +31,6 @@ jobs:
           - { name: Linux ARM64, runner: ubuntu-24.04-arm, container: "debian:trixie" }
           - { name: Windows x86-64, runner: windows-2025, skip-gpu-tests: "1" }
           - { name: Windows ARM64, runner: windows-11-arm, skip-gpu-tests: "1" }
-          - { name: macOS x86-64, runner: macos-15-intel, skip-gpu-tests: "1" }
           - { name: macOS ARM64, runner: macos-15, skip-gpu-tests: "1" }
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.container }}
@@ -86,6 +85,9 @@ jobs:
         with:
           # Clippy, among the gates below, already denies warnings.
           build-warnings: warn
+          # Only main saves its caches, which branches and pull requests restore: a branch's own
+          # would push main's out of the repository's 10 GB.
+          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
       # AGENTS.md's gates, kept by --locked to the versions Cargo.lock pins.
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
