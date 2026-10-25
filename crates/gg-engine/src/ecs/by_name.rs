@@ -271,7 +271,7 @@ impl ExactSizeIterator for Entities<'_> {}
 #[cfg(test)]
 mod tests {
     use gg_core::math::{Quat, Vec2, Vec3, Vec4};
-    use gg_renderer::Textures;
+    use gg_renderer::{Mipmaps, Textures};
 
     use super::*;
     use crate::reflect::tests::{
@@ -362,7 +362,7 @@ mod tests {
 
     #[test]
     fn a_sprite_set_whole_keeps_its_texture() {
-        let texture = Textures::default().add("first", [1, 1], &[0; 4]);
+        let texture = Textures::default().add("first", [1, 1], &[0; 4], Mipmaps::None);
         let texture = texture.expect("a texture");
         let mut world = World::default();
         let sprite = Sprite {

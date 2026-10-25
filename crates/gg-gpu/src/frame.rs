@@ -17,10 +17,11 @@ use tracing::error;
 
 use crate::bindless::PUSH_CONSTANTS;
 use crate::buffer::Buffer;
+use crate::texture::MAX_LEVELS;
 use crate::vma::Memory;
 use crate::{
-    COLOR_LAYERS, COLOR_RANGE, ColorImage, DEPTH_RANGE, DepthImage, Device, Format, GpuBuffer,
-    Pipeline, Swapchain, Texture, UploadPath, vk_error,
+    COLOR_RANGE, ColorImage, DEPTH_RANGE, DepthImage, Device, Faces, Format, GpuBuffer, Pipeline,
+    Swapchain, Texture, UploadPath, color_layers, vk_error,
 };
 
 /// How many frames the GPU works on at once.
@@ -375,7 +376,8 @@ impl<'a> Frame<'a> {
     ///
     /// # Panics
     ///
-    /// If the region doesn't fit in the texture, or `pixels` doesn't fill it exactly.
+    /// If the texture has mip levels, whose others a write would leave undefined, the region
+    /// doesn't fit in it, or `pixels` doesn't fill the region exactly.
     pub fn write_texture(
         &mut self,
         texture: &mut Texture,
@@ -383,6 +385,11 @@ impl<'a> Frame<'a> {
         size: [u32; 2],
         pixels: &[u8],
     ) -> Result<()> {
+        assert_eq!(
+            texture.level_count(),
+            1,
+            "a texture with mip levels is filled, not written"
+        );
         let [width, height] = texture.size();
         assert!(
             origin[0].checked_add(size[0]).is_some_and(|x| x <= width)
@@ -403,36 +410,39 @@ impl<'a> Frame<'a> {
             return Ok(());
         }
         let staged = self.upload(pixels)?;
-        let staged = (staged.buffer, staged.offset);
-        self.copy_to_texture(texture, staged, origin, size, c"write texture");
+        let region = texture_region(staged.offset, origin, size, 0);
+        self.copy_to_texture(texture, staged.buffer, &[region], c"write texture");
         texture.set_written();
         Ok(())
     }
 
-    /// Fills `texture`, which no frame has written, with `pixels`: all of it, rows of RGBA8 in the
-    /// texture's format, tightly packed, top row first. Shaders see them from this frame's passes
-    /// on, whichever way the device uploads: through a transfer queue, the frame waits for the
-    /// copy. What's staged for a copy is freed once the frame has finished.
+    /// Fills `texture`, which no frame has written, with `pixels`: all of it, each of its mip
+    /// levels, largest first, as rows of RGBA8 in the texture's format, tightly packed, top row
+    /// first, after the level before. Shaders see them from this frame's passes on, whichever way
+    /// the device uploads: through a transfer queue, the frame waits for the copy. What's staged
+    /// for a copy is freed once the frame has finished.
     ///
     /// # Panics
     ///
-    /// If a frame has written the texture, or `pixels` doesn't fill it exactly.
+    /// If a frame has written the texture, or `pixels` doesn't fill its levels exactly.
     pub fn fill_texture(&mut self, texture: &mut Texture, pixels: &[u8]) -> Result<()> {
-        let size @ [width, height] = texture.size();
+        let [width, height] = texture.size();
         assert!(
             !texture.written(),
             "a texture is filled once, before any frame writes it"
         );
         assert_eq!(
             pixels.len() as u64,
-            u64::from(width) * u64::from(height) * 4,
-            "the pixels don't fill a {width}x{height} texture",
+            texture.bytes(),
+            "the pixels don't fill a {width}x{height} texture's {} levels",
+            texture.level_count(),
         );
         match self.frames.device.upload_path() {
             UploadPath::HostImageCopy => texture.copy_from_host(pixels)?,
             UploadPath::GraphicsQueue => {
-                let staged = self.stage(pixels)?;
-                self.copy_to_texture(texture, staged, [0, 0], size, c"fill texture");
+                let (staging, offset) = self.stage(pixels)?;
+                let (regions, count) = level_regions(texture, offset);
+                self.copy_to_texture(texture, staging, &regions[..count], c"fill texture");
             }
             UploadPath::TransferQueue => {
                 let (staging, offset) = self.stage(pixels)?;
@@ -448,17 +458,14 @@ impl<'a> Frame<'a> {
                     .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                     .image(image)
                     .subresource_range(COLOR_RANGE);
-                // The whole texture, which any queue copies whatever its transfer granularity,
-                // AMD's 16 by 16 by 8 among them: Vulkan lets a copy that reaches the image's
-                // edges ignore it (`minImageTransferGranularity`).
-                let region = texture_region(offset, [0, 0], size);
+                let (regions, count) = level_regions(texture, offset);
                 let families = handover_families(&self.frames.device);
                 let [release, acquire] = texture_handover(families, image);
                 self.hand_over(
                     c"fill texture",
-                    // SAFETY: the region fits the texture, and the staged pixels and the texture
-                    // live until the frame has finished, which waits for the copy: staging and the
-                    // texture retire until then.
+                    // SAFETY: the regions fit the texture's levels, and the staged pixels and the
+                    // texture live until the frame has finished, which waits for the copy: staging
+                    // and the texture retire until then.
                     |raw, transfers| unsafe {
                         raw.cmd_pipeline_barrier2(
                             transfers,
@@ -470,7 +477,7 @@ impl<'a> Frame<'a> {
                             staging,
                             image,
                             vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                            &[region],
+                            &regions[..count],
                         );
                     },
                     [
@@ -617,15 +624,14 @@ impl<'a> Frame<'a> {
         Ok(())
     }
 
-    /// Records into the frame's commands, under `label`, a copy of the `size` pixels staged at
-    /// `staged`, a buffer and an offset, into `texture` at `origin`, between barriers that wait
-    /// for what reads the texture and make the copy visible to it.
+    /// Records into the frame's commands, under `label`, a copy of the pixels staged in `buffer`
+    /// into `texture`, by `regions`, between barriers that wait for what reads the texture and make
+    /// the copy visible to it.
     fn copy_to_texture(
         &self,
         texture: &Texture,
-        (buffer, offset): (vk::Buffer, u64),
-        origin: [u32; 2],
-        size: [u32; 2],
+        buffer: vk::Buffer,
+        regions: &[vk::BufferImageCopy],
         label: &CStr,
     ) {
         let device = &self.frames.device;
@@ -644,7 +650,6 @@ impl<'a> Frame<'a> {
             .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
             .image(texture.raw())
             .subresource_range(COLOR_RANGE);
-        let region = texture_region(offset, origin, size);
         let to_read = vk::ImageMemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::COPY)
             .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
@@ -655,7 +660,7 @@ impl<'a> Frame<'a> {
             .image(texture.raw())
             .subresource_range(COLOR_RANGE);
         let raw = device.raw();
-        // SAFETY: the commands are recording outside a pass, the region fits the texture, and
+        // SAFETY: the commands are recording outside a pass, the regions fit the texture, and
         // the staged pixels and the texture live until the frame has finished: the arena is
         // reset only after that, staging and the texture retire until then.
         unsafe {
@@ -669,7 +674,7 @@ impl<'a> Frame<'a> {
                 buffer,
                 texture.raw(),
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                &[region],
+                regions,
             );
             raw.cmd_pipeline_barrier2(
                 commands,
@@ -792,10 +797,12 @@ impl<'a> Frame<'a> {
             max_depth: 1.0,
         };
         let raw = device.raw();
+        let (cull_mode, front_face) = Faces::Both.state();
         // SAFETY: the commands are recording outside a pass, and the images and views live until
         // the frame has finished on the GPU: the swapchain waits for its frames before
         // destroying its images, and an offscreen image, and a depth image, retire until then,
-        // dropped while the frame records.
+        // dropped while the frame records. Every pipeline takes its faces as dynamic state, which
+        // a draw needs set, and binding one doesn't change.
         unsafe {
             device.begin_label(commands, label);
             raw.cmd_pipeline_barrier2(
@@ -805,6 +812,8 @@ impl<'a> Frame<'a> {
             raw.cmd_begin_rendering(commands, &rendering);
             raw.cmd_set_viewport(commands, 0, &[viewport]);
             raw.cmd_set_scissor(commands, 0, &[extent.into()]);
+            raw.cmd_set_cull_mode(commands, cull_mode);
+            raw.cmd_set_front_face(commands, front_face);
         }
         self.frames.images[target] = Some((index, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL));
         Some(Pass {
@@ -1042,11 +1051,17 @@ impl Drop for Frame<'_> {
     }
 }
 
-/// The region of a copy of `size` pixels, at `offset` in a buffer, into a texture at `origin`.
-fn texture_region(offset: u64, origin: [u32; 2], size: [u32; 2]) -> vk::BufferImageCopy {
+/// The region of a copy of `size` pixels, at `offset` in a buffer, into mip level `level` of a
+/// texture at `origin`.
+fn texture_region(
+    offset: u64,
+    origin: [u32; 2],
+    size: [u32; 2],
+    level: u32,
+) -> vk::BufferImageCopy {
     vk::BufferImageCopy::default()
         .buffer_offset(offset)
-        .image_subresource(COLOR_LAYERS)
+        .image_subresource(color_layers(level))
         .image_offset(vk::Offset3D {
             x: origin[0] as i32,
             y: origin[1] as i32,
@@ -1057,6 +1072,20 @@ fn texture_region(offset: u64, origin: [u32; 2], size: [u32; 2]) -> vk::BufferIm
             height: size[1],
             depth: 1,
         })
+}
+
+/// The regions, the first `count` of them, of a copy of every level of `texture` from its pixels
+/// at `offset` in a buffer, packed a level after another, largest first. Each is a whole level,
+/// which any queue copies whatever its transfer granularity, AMD's 16 by 16 by 8 among them:
+/// Vulkan lets a copy that reaches the image's edges ignore it (`minImageTransferGranularity`).
+/// Each level's pixels start a multiple of 4 bytes after the staged ones, which start 16-byte
+/// aligned, as a queue for transfers alone needs (VUID-vkCmdCopyBufferToImage-commandBuffer-07737).
+fn level_regions(texture: &Texture, offset: u64) -> ([vk::BufferImageCopy; MAX_LEVELS], usize) {
+    let mut regions = [vk::BufferImageCopy::default(); MAX_LEVELS];
+    for ((level, (size, at)), region) in texture.levels().enumerate().zip(&mut regions) {
+        *region = texture_region(offset + at, [0, 0], size, level as u32);
+    }
+    (regions, texture.level_count() as usize)
 }
 
 /// The families of the queues a resource is handed over between: the transfer queue's, then the
@@ -1195,6 +1224,19 @@ impl<'a> Pass<'_, 'a> {
                 .cmd_set_viewport(self.commands(), 0, &[viewport]);
         }
         self.set_scissor(origin, size);
+    }
+
+    /// Has the draws that follow draw only the triangles `faces` names: a pass starts drawing
+    /// both.
+    pub fn set_faces(&mut self, faces: Faces) {
+        let (cull_mode, front_face) = faces.state();
+        let raw = self.frame.frames.device.raw();
+        let commands = self.commands();
+        // SAFETY: the commands are recording, and every pipeline takes its faces as dynamic state.
+        unsafe {
+            raw.cmd_set_cull_mode(commands, cull_mode);
+            raw.cmd_set_front_face(commands, front_face);
+        }
     }
 
     /// Limits the draws that follow to the `size` pixels at `origin`, clipped to the target.
@@ -1517,7 +1559,7 @@ mod tests {
             (1, 0),
             image,
             vk::ImageAspectFlags::COLOR,
-            (0, 1, 1),
+            (0, vk::REMAINING_MIP_LEVELS, 1),
         );
         assert_eq!(alike(&release), expected);
         assert_eq!(alike(&acquire), expected);

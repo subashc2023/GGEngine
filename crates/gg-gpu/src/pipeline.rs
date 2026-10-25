@@ -54,8 +54,36 @@ pub enum Blend {
     PremultipliedAlpha,
 }
 
-/// What a graphics pipeline is made from. It draws triangle lists without culling, and its
-/// viewport and scissor are set as it draws. Where its targets have depth, it tests it, drawing
+/// Which of a mesh's triangles draw, by the way their corners wind as they show on screen.
+/// Vulkan tells it in framebuffer coordinates, whose Y points down, and flips the sign of the
+/// area it measures there, so its counterclockwise is as seen; the renderer's cameras show the
+/// world upright.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Faces {
+    /// All of them: what a pass starts drawing.
+    Both,
+    /// Those whose corners wind counterclockwise: the fronts of a mesh whose fronts wind so seen
+    /// from in front, as glTF's do, drawn with a transform that doesn't mirror it.
+    CounterClockwise,
+    /// Those whose corners wind clockwise: such a mesh's fronts drawn with a transform that
+    /// mirrors it.
+    Clockwise,
+}
+
+impl Faces {
+    /// The cull mode and front face that draw them.
+    pub(crate) fn state(self) -> (vk::CullModeFlags, vk::FrontFace) {
+        match self {
+            Self::Both => (vk::CullModeFlags::NONE, vk::FrontFace::COUNTER_CLOCKWISE),
+            Self::CounterClockwise => (vk::CullModeFlags::BACK, vk::FrontFace::COUNTER_CLOCKWISE),
+            Self::Clockwise => (vk::CullModeFlags::BACK, vk::FrontFace::CLOCKWISE),
+        }
+    }
+}
+
+/// What a graphics pipeline is made from. It draws triangle lists, and its viewport, scissor and
+/// which [`Faces`] draw are set as it draws, a pass starting with both. Where its targets have
+/// depth, it tests it, drawing
 /// only where it's as near as what was drawn there before or nearer: depth runs from 1 at the near
 /// plane to 0 far away, as the renderer's cameras project it.
 pub struct GraphicsDesc<'a> {
@@ -161,7 +189,12 @@ impl Pipeline {
             .depth_test_enable(depth)
             .depth_write_enable(desc.depth_write)
             .depth_compare_op(vk::CompareOp::GREATER_OR_EQUAL);
-        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let dynamic_states = [
+            vk::DynamicState::VIEWPORT,
+            vk::DynamicState::SCISSOR,
+            vk::DynamicState::CULL_MODE,
+            vk::DynamicState::FRONT_FACE,
+        ];
         let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
         let formats = [desc.format.color];
         let mut rendering = vk::PipelineRenderingCreateInfo::default()

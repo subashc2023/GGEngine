@@ -15,6 +15,7 @@ use gg_gpu::{
 };
 
 use crate::shader::{self, Shader};
+use crate::texture::{self, Mipmaps};
 use crate::{DrawCounts, Draws, Uploads, sprite};
 
 /// A mesh that [`Meshes::add`] handed out, of vertex type `V`.
@@ -56,6 +57,8 @@ pub struct MeshDraw {
     pub(crate) shader: u32,
     /// Whether its shader writes depth.
     opaque: bool,
+    /// Whether it draws only its mesh's fronts, as a material that isn't double-sided does.
+    pub(crate) culls: bool,
     params: [u8; MeshDraw::MAX_PARAMS],
     /// How many bytes of `params` are the parameters'.
     len: u8,
@@ -82,6 +85,7 @@ impl MeshDraw {
             mesh: mesh.index,
             shader: shader.index,
             opaque: shader.opaque,
+            culls: false,
             params: copy,
             len: bytes.len() as u8,
         }
@@ -283,12 +287,13 @@ impl MeshPass {
             frame.fill_buffer(&mut mesh.indices, indices)?;
             self.meshes.push(mesh);
         }
-        for added in uploads.textures.drain(..) {
+        for mut added in uploads.textures.drain(..) {
             assert_eq!(
                 added.index as usize,
                 self.textures.len(),
                 "a renderer samples the textures of one `Textures`"
             );
+            texture::add_mipmaps(&mut added.pixels, added.size, added.mipmaps);
             // In the slot of its handle's index, which shaders sample it by.
             let [width, height] = added.size;
             let mut texture = GpuTexture::placed(
@@ -297,6 +302,7 @@ impl MeshPass {
                 width,
                 height,
                 TextureFormat::Rgba8Srgb,
+                added.mipmaps != Mipmaps::None,
                 &added.name,
             )?;
             frame.fill_texture(&mut texture, &added.pixels)?;
@@ -323,7 +329,8 @@ impl MeshPass {
     ) -> Result<DrawCounts> {
         let _zone = gg_core::zone!();
         let mut drawn = DrawCounts::default();
-        let mut bound = None;
+        // What's set, which a pipeline's binding leaves as it is.
+        let (mut bound, mut faces) = (None, None);
         for run in &draws.runs {
             let mesh = self
                 .meshes
@@ -349,6 +356,10 @@ impl MeshPass {
                 pass.set_pipeline(&shader.pipeline);
                 bound = Some(run.shader);
             }
+            if faces != Some(run.faces) {
+                pass.set_faces(run.faces);
+                faces = Some(run.faces);
+            }
             // Where the shader reads them during this frame, each array in an upload of its own,
             // so that each starts 16-byte aligned; a shader that takes no parameters gets 0.
             let transforms = pass.upload(bytemuck::cast_slice(transforms))?.address();
@@ -370,6 +381,7 @@ impl MeshPass {
             pass.draw_indexed(&mesh.indices, 0, mesh.count, 0, instances);
             drawn.draws += 1;
             drawn.instances += run.instances.len();
+            drawn.triangles += mesh.count as usize / 3 * run.instances.len();
         }
         Ok(drawn)
     }
@@ -407,7 +419,7 @@ mod tests {
         uploads.take(&mut meshes, &mut shaders, &mut textures);
         // As a frame that presented nothing leaves them, and more are added before the next.
         meshes.add("a", &TRIANGLE, &[0, 1, 2]).unwrap();
-        textures.add("a", [1, 1], &[255; 4]).unwrap();
+        textures.add("a", [1, 1], &[255; 4], Mipmaps::None).unwrap();
         uploads.take(&mut meshes, &mut shaders, &mut textures);
         let meshes_held: Vec<u32> = uploads.meshes.iter().map(|added| added.index).collect();
         let textures_held: Vec<u32> = uploads.textures.iter().map(|added| added.index).collect();

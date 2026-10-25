@@ -46,7 +46,11 @@ rayon-core = "1.13.0"
 ron = "0.12.2"
 scoped-tls = "1.0.1"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.154"
+# float_roundtrip, so that numbers parse to the float nearest them in every build: Cargo turns a
+# crate's features on across a build, and without it here, a build where another crate asked for
+# it would parse a model's transforms, which reach the world hash, to other bits than one where none
+# did.
+serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
 # serde_derive's version, so that the two build once.
 syn = "3.0.9"
 tracing = "0.1.44"
@@ -68,6 +72,8 @@ tracy-client-sys = { version = "=0.30.1", default-features = false }
 # winit's version, so that the two build once.
 windows-sys = "0.52.0"
 winit = "0.30.13"
+# JPEGs, as textures and models' images may be: a decoder in Rust alone, the image crate's.
+zune-jpeg = "0.5.15"
 
 [workspace.lints.rust]
 # A crate opts in to unsafe code with `#![allow(unsafe_code)]` and a stated reason.
@@ -75,3 +81,8 @@ unsafe_code = "deny"
 
 [workspace.lints.clippy]
 undocumented_unsafe_blocks = "warn"
+
+# Debug builds decode a model's JPEGs as a layer adds it, the sandbox's 2,048 by 2,048 one in about
+# 0.75 s unoptimized, at each of its tests' attaches and CI's runs.
+[profile.dev.package.zune-jpeg]
+opt-level = 3

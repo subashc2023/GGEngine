@@ -215,7 +215,8 @@ fn depth_clears_in_every_pass() {
 /// Fills a texture and a buffer in a frame, then writes over a pixel of the texture in each of the
 /// next two, more frames than are in flight, once for each way of uploading that the GPU has:
 /// validation checks the layout each way leaves the texture in against the one the write starts
-/// from, which it doesn't for what the bindless set samples.
+/// from, which it doesn't for what the bindless set samples. The frame fills a texture with mip
+/// levels too, whose copies validation checks against each level's size and the staged bytes.
 fn filled_textures_can_be_written_over_on_every_path() {
     let instance = instance();
     let validation = instance.validation();
@@ -230,8 +231,11 @@ fn filled_textures_can_be_written_over_on_every_path() {
         };
         let mut image = ColorImage::new(&device, 4, 4, "fill test target").expect("an image");
         let format = TextureFormat::Rgba8Srgb;
-        let texture = Texture::new(&device, 8, 2, format, "filled test texture");
+        let texture = Texture::new(&device, 8, 2, format, false, "filled test texture");
         let mut texture = texture.expect("a texture");
+        // 5x3, 2x1 and 1x1.
+        let levels = Texture::new(&device, 5, 3, format, true, "mipmapped test texture");
+        let mut levels = levels.expect("a texture");
         let mut buffer = GpuBuffer::new(&device, 64, "filled test buffer").expect("a buffer");
         let mut frames = Frames::new(&device).expect("frames");
         for i in 0..3 {
@@ -242,6 +246,8 @@ fn filled_textures_can_be_written_over_on_every_path() {
             if i == 0 {
                 let pixels = [255; 8 * 2 * 4];
                 frame.fill_texture(&mut texture, &pixels).expect("a fill");
+                let pixels = [127; (5 * 3 + 2 + 1) * 4];
+                frame.fill_texture(&mut levels, &pixels).expect("a fill");
                 frame.fill_buffer(&mut buffer, &[7; 64]).expect("a fill");
             } else {
                 let write = frame.write_texture(&mut texture, [i, 0], [1, 1], &[0; 4]);
@@ -250,7 +256,7 @@ fn filled_textures_can_be_written_over_on_every_path() {
             drop(frame.begin_pass(0, c"clear", [0.0, 0.0, 0.0, 1.0], None));
             frame.submit().expect("the frame's submission");
         }
-        drop((frames, texture, buffer, image, device));
+        drop((frames, texture, levels, buffer, image, device));
     }
 
     drop(instance);

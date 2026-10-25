@@ -12,6 +12,7 @@ use gg_core::{Error, Result};
 use gg_gpu::Blend;
 use tracing::{debug, warn};
 
+use crate::model::{self, AlphaMode, ModelVertex};
 use crate::sprite::{self, Corner, Params};
 
 /// The slangc that compiled the renderer's own shaders, as the build found it.
@@ -68,6 +69,9 @@ pub struct Shaders {
     pub(crate) added: Vec<Added>,
     /// How many have been added.
     count: u32,
+    /// The handles of the engine's model shaders, for opaque, masked and blended materials, once
+    /// each has been asked for.
+    models: [Option<u32>; 3],
 }
 
 pub(crate) struct Added {
@@ -146,6 +150,24 @@ impl Shaders {
         });
         Shader::new(index, writes_depth(blend))
     }
+
+    /// The engine's model shader for materials that cover what's behind them as `alpha` says,
+    /// which the build compiled, added as a game's are the first time it's asked for: a renderer
+    /// draws models with it, but makes no pipeline for it without them, and games' handles come
+    /// where they would have.
+    pub(crate) fn model(&mut self, alpha: AlphaMode) -> Shader<ModelVertex, model::Params> {
+        let (slot, name, spirv, blend) = match alpha {
+            AlphaMode::Opaque => (0, "model", model::OPAQUE_SPIRV, Blend::Opaque),
+            AlphaMode::Mask { .. } => (1, "model masked", model::MASKED_SPIRV, Blend::Opaque),
+            AlphaMode::Blend => (2, "model blended", model::BLENDED_SPIRV, Blend::Alpha),
+        };
+        if let Some(index) = self.models[slot] {
+            return Shader::new(index, writes_depth(blend));
+        }
+        let shader = self.push(name, spirv.to_vec(), blend);
+        self.models[slot] = Some(shader.index);
+        shader
+    }
 }
 
 impl Default for Shaders {
@@ -153,6 +175,7 @@ impl Default for Shaders {
         let mut shaders = Self {
             added: Vec::new(),
             count: 0,
+            models: [None; 3],
         };
         let shader = shaders.push::<Corner, Params>("sprite", sprite::SPIRV.to_vec(), Blend::Alpha);
         assert_eq!(

@@ -181,17 +181,21 @@ impl Device {
             .synchronization2(true);
         let mut host_image_copy =
             vk::PhysicalDeviceHostImageCopyFeaturesEXT::default().host_image_copy(true);
+        // For models' textures, which recede from the camera.
+        let features = vk::PhysicalDeviceFeatures::default().sampler_anisotropy(true);
         let mut create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
             .enabled_extension_names(&extensions)
+            .enabled_features(&features)
             .push_next(&mut vulkan12)
             .push_next(&mut vulkan13);
         if uploads == UploadPath::HostImageCopy {
             create_info = create_info.push_next(&mut host_image_copy);
         }
         // SAFETY: the physical device came from this instance, every Vulkan 1.4 device has these
-        // features but the bindless ones and host image copy, which `Candidate::new` checked, and
-        // the create info's pointers outlive the call.
+        // features but the bindless ones and host image copy, which `Candidate::new` checked
+        // (Vulkan 1.4 requires sampler anisotropy, in vk.xml's feature requirements), and the
+        // create info's pointers outlive the call.
         let raw = unsafe { instance.raw().create_device(physical, &create_info, None) }
             .map_err(|e| vk_error("vkCreateDevice", e))?;
         // SAFETY: the device was just made from this physical device, with buffer device

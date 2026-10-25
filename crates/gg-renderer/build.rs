@@ -7,7 +7,14 @@ use std::env;
 use std::path::{self, PathBuf};
 use std::process::Command;
 
-const SHADERS: [&str; 3] = ["egui", "sprite", "view"];
+const SHADERS: [&str; 6] = [
+    "egui",
+    "model",
+    "model_masked",
+    "model_opaque",
+    "sprite",
+    "view",
+];
 
 fn main() {
     println!("cargo::rerun-if-env-changed=SLANGC");
@@ -22,6 +29,8 @@ fn main() {
     };
     println!("cargo::rustc-env=GG_SLANGC={name}");
     for shader in SHADERS {
+        // model.slang, which the other model shaders include, is one of them, so a change to it
+        // compiles them again too.
         let source = format!("shaders/{shader}.slang");
         println!("cargo::rerun-if-changed={source}");
         let output = Command::new(&slangc)

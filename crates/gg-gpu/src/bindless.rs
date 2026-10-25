@@ -36,7 +36,7 @@ pub enum Sampler {
 
 impl Sampler {
     /// Every sampler, in the order of their indices.
-    const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 6] = [
         Self::LinearClamp,
         Self::NearestClamp,
         Self::LinearRepeat,
@@ -51,7 +51,7 @@ impl Sampler {
     }
 
     fn info(self) -> vk::SamplerCreateInfo<'static> {
-        use vk::{Filter, SamplerAddressMode as Address, SamplerMipmapMode as Mipmap};
+        use vk::{Filter, SamplerMipmapMode as Mipmap};
         let (filter, mipmap) = match self {
             Self::LinearClamp | Self::LinearRepeat | Self::LinearMirror => {
                 (Filter::LINEAR, Mipmap::LINEAR)
@@ -60,11 +60,12 @@ impl Sampler {
                 (Filter::NEAREST, Mipmap::NEAREST)
             }
         };
-        let address = match self {
-            Self::LinearClamp | Self::NearestClamp => Address::CLAMP_TO_EDGE,
-            Self::LinearRepeat | Self::NearestRepeat => Address::REPEAT,
-            Self::LinearMirror | Self::NearestMirror => Address::MIRRORED_REPEAT,
+        let wrap = match self {
+            Self::LinearClamp | Self::NearestClamp => Wrap::Clamp,
+            Self::LinearRepeat | Self::NearestRepeat => Wrap::Repeat,
+            Self::LinearMirror | Self::NearestMirror => Wrap::Mirror,
         };
+        let address = wrap.address();
         vk::SamplerCreateInfo::default()
             .mag_filter(filter)
             .min_filter(filter)
@@ -75,6 +76,54 @@ impl Sampler {
             .max_lod(vk::LOD_CLAMP_NONE)
     }
 }
+
+/// What a sampler gives past a texture's edges: the edges' texels, the texture repeated, or the
+/// texture mirrored at each edge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Wrap {
+    Clamp,
+    Repeat,
+    Mirror,
+}
+
+impl Wrap {
+    const ALL: [Self; 3] = [Self::Clamp, Self::Repeat, Self::Mirror];
+
+    /// Where shaders find, after every [`Sampler`], the anisotropic sampler that wraps this way: it
+    /// filters linearly within and between a texture's mip levels, with up to 16 samples along the
+    /// way a surface recedes, as models' textures are sampled. Not for sprites, whose texels it
+    /// would read past, since its samples spread around the point a shader asks for.
+    pub fn anisotropic(self) -> u32 {
+        Sampler::ALL.len() as u32 + self as u32
+    }
+
+    fn address(self) -> vk::SamplerAddressMode {
+        match self {
+            Self::Clamp => vk::SamplerAddressMode::CLAMP_TO_EDGE,
+            Self::Repeat => vk::SamplerAddressMode::REPEAT,
+            Self::Mirror => vk::SamplerAddressMode::MIRRORED_REPEAT,
+        }
+    }
+
+    /// What its anisotropic sampler is made from: 16 samples at most, the least
+    /// `maxSamplerAnisotropy` a device with anisotropy may have, and every Vulkan 1.4 device has it.
+    fn anisotropic_info(self) -> vk::SamplerCreateInfo<'static> {
+        let address = self.address();
+        vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::LINEAR)
+            .min_filter(vk::Filter::LINEAR)
+            .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+            .address_mode_u(address)
+            .address_mode_v(address)
+            .address_mode_w(address)
+            .anisotropy_enable(true)
+            .max_anisotropy(16.0)
+            .max_lod(vk::LOD_CLAMP_NONE)
+    }
+}
+
+/// How many samplers the set has: every [`Sampler`], then [`Wrap`]'s anisotropic ones.
+const SAMPLERS: usize = Sampler::ALL.len() + Wrap::ALL.len();
 
 /// The set, its layout and the pipeline layout built on it, and which texture slots are free.
 pub(crate) struct Bindless {
@@ -182,9 +231,11 @@ impl Bindless {
         // SAFETY: the caller guarantees the device; every handle is made from live ones, and
         // the infos outlive the calls.
         unsafe {
-            for sampler in Sampler::ALL {
+            let infos = (Sampler::ALL.map(Sampler::info).into_iter())
+                .chain(Wrap::ALL.map(Wrap::anisotropic_info));
+            for info in infos {
                 let sampler = device
-                    .create_sampler(&sampler.info(), None)
+                    .create_sampler(&info, None)
                     .map_err(|e| vk_error("vkCreateSampler", e))?;
                 self.samplers.push(sampler);
             }
@@ -202,8 +253,8 @@ impl Bindless {
                 vk::DescriptorSetLayoutBinding::default()
                     .binding(1)
                     .descriptor_type(vk::DescriptorType::SAMPLER)
-                    .stage_flags(vk::ShaderStageFlags::ALL)
-                    .immutable_samplers(&self.samplers),
+                    .descriptor_count(SAMPLERS as u32)
+                    .stage_flags(vk::ShaderStageFlags::ALL),
             ];
             let mut flags_info = vk::DescriptorSetLayoutBindingFlagsCreateInfo::default()
                 .binding_flags(&binding_flags);
@@ -222,7 +273,7 @@ impl Bindless {
                 },
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::SAMPLER,
-                    descriptor_count: Sampler::ALL.len() as u32,
+                    descriptor_count: SAMPLERS as u32,
                 },
             ];
             let pool_info = vk::DescriptorPoolCreateInfo::default()
@@ -239,6 +290,19 @@ impl Bindless {
             self.set = device
                 .allocate_descriptor_sets(&allocate_info)
                 .map_err(|e| vk_error("vkAllocateDescriptorSets", e))?[0];
+            // Written into the set once, before any pipeline uses it, rather than made immutable
+            // in its layout: AMD's driver (25.10.30) reads immutable samplers that shaders index
+            // non-uniformly as a sampler of zeros, which filters by the nearest texel and never
+            // leaves a texture's first level.
+            let samplers: Vec<_> = (self.samplers.iter())
+                .map(|&sampler| vk::DescriptorImageInfo::default().sampler(sampler))
+                .collect();
+            let write = vk::WriteDescriptorSet::default()
+                .dst_set(self.set)
+                .dst_binding(1)
+                .descriptor_type(vk::DescriptorType::SAMPLER)
+                .image_info(&samplers);
+            device.update_descriptor_sets(&[write], &[]);
 
             let push_constants = [vk::PushConstantRange {
                 stage_flags: vk::ShaderStageFlags::ALL,
@@ -268,8 +332,12 @@ impl Bindless {
         // SAFETY: the caller guarantees the objects are the device's, and they live as long as
         // the set.
         unsafe {
-            for (&sampler, kind) in self.samplers.iter().zip(Sampler::ALL) {
-                device.set_name(sampler, &format!("{kind:?} sampler"));
+            let names = (Sampler::ALL
+                .map(|kind| format!("{kind:?} sampler"))
+                .into_iter())
+            .chain(Wrap::ALL.map(|wrap| format!("Anisotropic{wrap:?} sampler")));
+            for (&sampler, name) in self.samplers.iter().zip(names) {
+                device.set_name(sampler, &name);
             }
             device.set_name(self.layout, "bindless set layout");
             device.set_name(self.pool, "bindless pool");

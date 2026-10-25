@@ -842,9 +842,11 @@ dependencies = [
  "ron",
  "scoped-tls",
  "serde",
+ "serde_json",
  "tracing",
  "windows-sys 0.52.0",
  "winit",
+ "zune-jpeg",
 ]
 
 [[package]]

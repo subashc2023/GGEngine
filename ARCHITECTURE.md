@@ -520,15 +520,16 @@ frame's ticks and the layers' updates, the engine draws the world's entities tha
 `Transform` and a sprite or a `MeshDraw`, a mesh with its shader and parameters held without
 their types, after what the layers drew, children where their ancestors carry them: first the
 meshes whose shaders are opaque, whose depth hides what's behind them whatever order they draw
-in, by shader, then mesh, so that each mesh with each shader is one instanced draw and their z's
-never sort them; then what blends, back to front by their z's in the world, those at one z drawing
-sprites under meshes; each batch and each z in the order of their IDs, which overlapping entities
-keep as others come and go. World z orders what blends rightly as seen from in front of layers
-parallel to XY, as 2D cameras see them; from behind or the side, what blends draws in the wrong
-order among itself, though rightly against what's opaque. At one depth, an opaque mesh goes under
-what blends; a layer's opaque draws hide the world's behind them, and its draws that blend go
-under the world's opaque ones behind them. Drawing sorts the rows of each batch and each z, which
-it keeps until a row, a z or a batch changes, and draws them out of their tables' order.
+in, by shader, then mesh, so that each mesh with each shader is one instanced draw, split only where
+a culling mesh's draws change between mirrored and not, and their z's never sort them; then what
+blends, back to front by their z's in the world, those at one z drawing sprites under meshes; each
+batch and each z in the order of their IDs, which overlapping entities keep as others come and go.
+World z orders what blends rightly as seen from in front of layers parallel to XY, as 2D cameras see
+them; from behind or the side, what blends draws in the wrong order among itself, though rightly
+against what's opaque. At one depth, an opaque mesh goes under what blends; a layer's opaque draws
+hide the world's behind them, and its draws that blend go under the world's opaque ones behind them.
+Drawing sorts the rows of each batch and each z, which it keeps until a row, a z or a batch changes,
+and draws them out of their tables' order.
 
 Frames draw the world between ticks, so that it moves as smoothly at any frame rate. As each tick
 starts, the engine copies where the world's entities are, outside the world, so that no hash,
@@ -567,16 +568,22 @@ through.
 Vulkan checks nothing about a shader, so its interface, which `Shaders::add` describes, is
 trusted, and validation checks it in debug builds.
 
-A game's texture is a PNG that the engine decodes as a layer adds it, to RGBA8 with colors
-sRGB-encoded and alpha not multiplied into them, as images store them; the next frame that renders
-copies it into GPU memory, where it stays, and shaders sample its colors decoded to linear. Texture
-coordinates run from (0, 0) at an image's top left, as glTF's do, and Vulkan samples rows stored
-top first that way, so images load as they're stored, without the flip OpenGL needs. A texture's
-handle is its index in the bindless set, which a draw's parameters carry as it is and the shader
-samples by. The set keeps most of its slots for textures placed at a given index, so that a
-texture's handle is known before the texture reaches the GPU, and gives out the rest, such as the
-UI's, wherever one is free. Shaders pick one of the engine's samplers by its index: nearest or
-linear, clamped, repeated or mirrored.
+A game's texture is a PNG or a JPEG that the engine decodes as a layer adds it, to RGBA8 with
+colors sRGB-encoded and alpha not multiplied into them, as images store them, whatever color
+profile or gamma the file holds, as glTF requires; the next frame that renders copies it into GPU
+memory, where it stays, and shaders sample its colors decoded to linear. Texture coordinates run
+from (0, 0) at an image's top left, as glTF's do, and Vulkan samples rows stored top first that
+way, so images load as they're stored, without the flip OpenGL needs. A texture's handle is its
+index in the bindless set, which a draw's parameters carry as it is and the shader samples by.
+The set keeps most of its slots for textures placed at a given index, so that a texture's handle
+is known before the texture reaches the GPU, and gives out the rest, such as the UI's, wherever
+one is free. Shaders pick one of the engine's samplers by its index: nearest or linear, clamped,
+repeated or mirrored; and, for models' textures, trilinear with 16x anisotropy, the least Vulkan
+1.4 guarantees, clamped, repeated or mirrored. A model's textures have their full chains of mip
+levels, which the CPU makes as the frame that copies them renders, until Phase 7 cooks them: each
+level averages the one before by area in linear space, as shaders filter, its colors weighted by
+their alpha where a masked or blended material samples it, since its alpha is then how much it
+covers, and levels pass floats to each other, so that rounding doesn't build up.
 
 Meshes and textures reach GPU memory the best way the device has. A queue for transfers alone, or
 for compute, apart from graphics, copies them beside the frames the GPU renders, and hands them
@@ -618,18 +625,34 @@ samples only the texels a sprite's rectangle covers, wholly or in part, never ne
 than their centers, so that neither a linear sampler nor a nearest one shows any of the cells
 beside it, and sheets need no space between their cells. So a tiled sprite's outermost texels
 don't blend with those they'd wrap to either, nor, filtered linearly, sprites side by side with
-each other; games' own shaders sample as they choose. It holds while textures have one level and
-no anisotropy, which will read past those texels.
+each other; games' own shaders sample as they choose. It holds for the textures layers add, which
+have one level and are sampled without anisotropy, either of which reads past those texels.
+
+3D games draw models: `Context::add_model` reads a glTF 2.0 file and adds its meshes and its
+images, as textures, once, and `Model::spawn` places its default scene in a world as entities, as
+often as the game likes, under a root where it's placed: a node each, with its transform in its
+parent's space, and a child for each primitive of a mesh with several, since an entity holds one
+`MeshDraw`. The engine reads glTF itself, over serde_json, rather than through the `gltf` crate,
+whose public calls panic on some malformed files. Reading checks all that the default scene draws
+before anything is added, refusing glTF the engine doesn't draw with `engine.unsupported_model` and
+what isn't glTF with `engine.bad_model`, so that a model adds all of itself or nothing, and it
+parses numbers to the nearest float in every build, since transforms reach the world's hash. Until
+Phase 6 lights them, models draw unlit, their base color alone, as KHR_materials_unlit has it,
+through the engine's model shader in three forms, each added the first time a model needs it:
+opaque, which keeps early depth testing; masked, which discards what's below its cutoff; and
+blended, by straight alpha. A material that isn't double-sided draws its triangles' fronts alone:
+every pipeline draws both faces unless a draw culls, and a culling draw's fronts wind
+counterclockwise on screen, or clockwise where its transform mirrors it, as glTF has them.
 
 Draws are batched, every mesh and not only quads: each run of consecutive draws of one mesh with
-one shader is a single instanced draw, whose instances are the draws, and the frame copies the
-run's transforms and its parameters into its memory, each in an array of its own, which shaders
-read by the instance's index. A change of texture is a change of parameters, which bindless
-textures make free, so 100,000 sprites take a handful of draws; shaders index their textures
-through `NonUniformResourceIndex`, since the instances of a draw can carry different ones.
-Nothing caps a run: the frame's memory grows to hold it, where a renderer with a buffer of fixed
-size would draw what it holds and start another. The renderer counts each frame's draws and
-instances, which the Performance panel shows and `engine.perf` logs the most of.
+one shader, drawing the same faces, is a single instanced draw, whose instances are the draws, and
+the frame copies the run's transforms and its parameters into its memory, each in an array of its
+own, which shaders read by the instance's index. A change of texture is a change of parameters,
+which bindless textures make free, so 100,000 sprites take a handful of draws; shaders index
+their textures through `NonUniformResourceIndex`, since the instances of a draw can carry
+different ones. Nothing caps a run: the frame's memory grows to hold it, where a renderer with a
+buffer of fixed size would draw what it holds and start another. The renderer counts each frame's
+draws, instances and triangles; the Performance panel shows them and `engine.perf` logs their peaks.
 
 An error while rendering ends the renderer, since a failed frame can leave meshes and textures
 half copied to the GPU.
@@ -696,6 +719,6 @@ main thread.
 | Logs and profiling | `tracing` for logs; Tracy, through `tracy-client`, for CPU zones and GPU timestamps |
 | Agent access | MCP and a command-line tool, both clients of the [tool API](#agents-and-tools) |
 | Shaders | Slang, compiled to SPIR-V by the Vulkan SDK's `slangc` rather than linked in: the engine's own as it builds, games' as they're added |
-| Assets | glTF 2.0 in; meshoptimizer for meshes and meshlets; BC-compressed textures in KTX2; until cooking, PNGs that the `png` crate decodes as layers add them |
+| Assets | glTF 2.0 in, read by the engine over `serde_json`; meshoptimizer for meshes and meshlets; BC-compressed textures in KTX2; until cooking, PNGs and JPEGs that `png` and `zune-jpeg` decode as layers add them |
 
 Areas not listed here are undecided.

@@ -8,7 +8,7 @@ use crate::render_thread::Rendered;
 use crate::{Context, Layer, Ui};
 
 /// How many frames the percentiles cover: the last 16,384, 68 s at 240 fps, while means and
-/// maxima cover the whole run. They take 1,152 KiB, from the first frame measured.
+/// maxima cover the whole run. They take 1,280 KiB, from the first frame measured.
 const KEPT: usize = 16_384;
 
 /// How many frames the Performance panel's graph shows at the fewest, given a pixel for each: its
@@ -38,6 +38,8 @@ pub(crate) struct Sample {
     pub(crate) draws: u64,
     /// The meshes they drew.
     pub(crate) instances: u64,
+    /// Those meshes' triangles.
+    pub(crate) triangles: u64,
 }
 
 impl Sample {
@@ -58,6 +60,7 @@ impl Sample {
         self.wait = f(self.wait, other.wait);
         self.draws = f(self.draws, other.draws);
         self.instances = f(self.instances, other.instances);
+        self.triangles = f(self.triangles, other.triangles);
     }
 }
 
@@ -120,6 +123,7 @@ impl Perf {
             sample.wait = nanos(rendered.wait);
             sample.draws = rendered.drawn.draws as u64;
             sample.instances = rendered.drawn.instances as u64;
+            sample.triangles = rendered.drawn.triangles as u64;
         }
     }
 
@@ -193,6 +197,7 @@ impl Perf {
             wait: stats(|s| s.wait),
             draws_max: self.max.draws,
             instances_max: self.max.instances,
+            triangles_max: self.max.triangles,
         }
     }
 }
@@ -215,6 +220,7 @@ pub(crate) struct Summary {
     pub(crate) wait: Stats,
     pub(crate) draws_max: u64,
     pub(crate) instances_max: u64,
+    pub(crate) triangles_max: u64,
 }
 
 /// One part of the frames, in milliseconds.
@@ -503,9 +509,16 @@ impl Bars {
     }
 }
 
-/// A frame's instanced draws and the meshes they drew, as the panel shows them.
+/// A frame's instanced draws, the meshes they drew and those meshes' triangles, as the panel shows
+/// them.
 fn draws_text(sample: &Sample) -> String {
-    format!("{} draws of {} instances", sample.draws, sample.instances)
+    let Sample {
+        draws,
+        instances,
+        triangles,
+        ..
+    } = sample;
+    format!("{draws} draws of {instances} instances, {triangles} triangles")
 }
 
 /// One frame's time, its parts', the render thread's and its draws, for the graph's tooltip.
@@ -624,6 +637,7 @@ mod tests {
             let drew = DrawCounts {
                 draws: 1,
                 instances: 1,
+                triangles: 12,
             };
             let render = rendered(MS, Duration::ZERO, drew, presented);
             perf.rendered(Duration::ZERO, Duration::ZERO, Some(&render));
@@ -660,6 +674,7 @@ mod tests {
         let drew = DrawCounts {
             draws: 7,
             instances: 900,
+            triangles: 1800,
         };
         perf.rendered(MS, 5 * MS, Some(&rendered(10 * MS, 4 * MS, drew, true)));
         perf.start_frame(30 * MS);
@@ -687,13 +702,15 @@ mod tests {
                     wait: ms(4),
                     draws: 7,
                     instances: 900,
+                    triangles: 1800,
                 },
             ]
         );
         // The render thread's parts ran beside the main thread's.
         assert_eq!(newest[1].other(), ms(18));
         let summary = perf.summary();
-        assert_eq!((summary.draws_max, summary.instances_max), (7, 900));
+        let maxima = (summary.draws_max, summary.instances_max);
+        assert_eq!((maxima, summary.triangles_max), ((7, 900), 1800));
     }
 
     #[test]
@@ -736,13 +753,14 @@ mod tests {
 
     #[test]
     fn hovering_over_a_bar_holds_the_graph_and_shows_its_frame() {
-        // Twenty frames measured, the sixth newest with 42 draws of 4,200 instances and the rest
-        // with one of 100.
+        // Twenty frames measured, the sixth newest with 42 draws of 4,200 instances of 2 triangles
+        // and the rest with one of 100.
         let mut perf = Perf::default();
         let frame = |perf: &mut Perf, draws| {
             let drew = DrawCounts {
                 draws,
                 instances: draws * 100,
+                triangles: draws * 200,
             };
             perf.ran(Duration::ZERO, MS, MS);
             let render = rendered(2 * MS, MS, drew, true);
@@ -784,7 +802,7 @@ mod tests {
             }
         }
         assert!(graph.is_some());
-        let drew = "42 draws of 4200 instances";
+        let drew = "42 draws of 4200 instances, 8400 triangles";
         assert!(texts.iter().any(|text| text == drew), "{texts:?}");
     }
 
@@ -808,7 +826,7 @@ mod tests {
             find(&clipped.shape, background, &mut graph, &mut texts);
         }
         // Not the last frame's 12.00 ms, nor the whole run's 2.01.
-        let line = "2.02 ms a frame, 495 fps, 0 draws of 0 instances";
+        let line = "2.02 ms a frame, 495 fps, 0 draws of 0 instances, 0 triangles";
         assert!(texts.iter().any(|text| text == line), "{texts:?}");
     }
 

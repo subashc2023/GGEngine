@@ -16,8 +16,9 @@ use std::path::{Path, PathBuf};
 use bytemuck::NoUninit;
 use gg_core::math::{self, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{
-    Blend, Camera, DrawCounts, Draws, MeshDraw, Meshes, Projection, RenderData, Renderer, Sampler,
-    Settings, Shaders, Sprite, SpriteSheet, Texture, Textures, Ui, UploadPath, Uploads, Viewport,
+    AlphaMode, Blend, Camera, DrawCounts, Draws, Material, MeshDraw, Meshes, Mipmaps, ModelVertex,
+    Projection, RenderData, Renderer, Sampler, Settings, Shaders, Sprite, SpriteSheet, Texture,
+    Textures, Ui, UploadPath, Uploads, Viewport, Wrap,
 };
 
 fn main() {
@@ -51,6 +52,7 @@ fn main() {
     );
     run("views_match_their_reference", views_match_their_reference);
     run("depth_matches_its_reference", depth_matches_its_reference);
+    run("models_match_their_reference", models_match_their_reference);
     // Once for each way of uploading that the GPU has.
     for path in UploadPath::ALL {
         if let Err(error) = Renderer::headless(&settings(Some(path)), 1, 1) {
@@ -70,6 +72,10 @@ fn main() {
         each(
             "a_large_texture_draws_in_the_frame_that_adds_it",
             a_large_texture_draws_in_the_frame_that_adds_it,
+        );
+        each(
+            "mipmaps_match_their_reference",
+            mipmaps_match_their_reference,
         );
     }
 }
@@ -344,7 +350,7 @@ fn textures_match_their_reference(path: UploadPath) {
         })
         .collect();
     let checkerboard = textures
-        .add("checkerboard", [4, 4], &checkerboard)
+        .add("checkerboard", [4, 4], &checkerboard, Mipmaps::None)
         .expect("a texture");
     let mut draws = Draws::default();
     // x from -2 to 0, pixels 40 to 120, each texel 10 pixels across.
@@ -364,7 +370,7 @@ fn textures_match_their_reference(path: UploadPath) {
                 [0, 0, 0, 0],
             ];
             let translucent = textures
-                .add("translucent", [2, 2], pixels.as_flattened())
+                .add("translucent", [2, 2], pixels.as_flattened(), Mipmaps::None)
                 .expect("a texture");
             // x from -1 to 1, over the checkerboard's right half and the clear color, each texel
             // 40 pixels across.
@@ -425,7 +431,8 @@ fn sprites_match_their_reference() {
             [40 + 60 * x, 40 + 60 * y, 120, alpha]
         })
         .collect();
-    let sheet = textures.add("sheet", [4, 4], &sheet).expect("a texture");
+    let sheet = textures.add("sheet", [4, 4], &sheet, Mipmaps::None);
+    let sheet = sheet.expect("a texture");
     // `width` by `height` units, centered at (`x`, `y`). Every sprite's edges fall between pixels.
     let place = |[x, y]: [f32; 2], [width, height]: [f32; 2]| {
         Mat4::from_translation(Vec3::new(x, y, 0.0))
@@ -527,11 +534,12 @@ fn batches_match_their_reference() {
         [40, 80, 220, 255],
     ];
     let quadrants = textures
-        .add("quadrants", [2, 2], quadrants.as_flattened())
+        .add("quadrants", [2, 2], quadrants.as_flattened(), Mipmaps::None)
         .expect("a texture");
     let (light, dark) = ([240, 240, 240, 255], [20, 20, 20, 255]);
+    let checker = [light, dark, dark, light];
     let checker = textures
-        .add("checker", [2, 2], [light, dark, dark, light].as_flattened())
+        .add("checker", [2, 2], checker.as_flattened(), Mipmaps::None)
         .expect("a texture");
     let white = Sprite::default().texture;
     // Orange, the quadrants as they are, the checker in cyan, violet, the quadrants half
@@ -628,6 +636,7 @@ fn batches_match_their_reference() {
     let drew = DrawCounts {
         draws: 3,
         instances: 6 + 1 + BIG,
+        triangles: 2 * (6 + 1 + BIG),
     };
     assert_eq!(renderer.drawn(), drew, "each run is one instanced draw");
     check(renderer, "batches", WIDTH, HEIGHT);
@@ -685,7 +694,7 @@ fn sheets_match_their_reference(path: UploadPath) {
         })
         .collect();
     let sheet = SpriteSheet {
-        texture: textures.add("sheet", [8, 4], &pixels).expect("a texture"),
+        texture: (textures.add("sheet", [8, 4], &pixels, Mipmaps::None)).expect("a texture"),
         size: [8, 4],
         cell: [2, 2],
     };
@@ -701,7 +710,7 @@ fn sheets_match_their_reference(path: UploadPath) {
         })
         .collect();
     let strip = SpriteSheet {
-        texture: textures.add("strip", [46, 2], &strip).expect("a texture"),
+        texture: (textures.add("strip", [46, 2], &strip, Mipmaps::None)).expect("a texture"),
         size: [46, 2],
         cell: [2, 2],
     };
@@ -874,7 +883,7 @@ fn views_match_their_reference() {
         [0, 0, 0, 255],
     ];
     let tile = textures
-        .add("tile", [2, 2], tile.as_flattened())
+        .add("tile", [2, 2], tile.as_flattened(), Mipmaps::None)
         .expect("a texture");
     let mut draws = Draws::default();
     let blue = Vec4::new(0.2, 0.3, 0.8, 1.0);
@@ -941,9 +950,11 @@ fn views_match_their_reference() {
             _ => {}
         }
     }
+    // Two squares, a triangle and a sprite's quad.
     let drawn = DrawCounts {
         draws: 3,
         instances: 4,
+        triangles: 7,
     };
     assert_eq!(renderer.drawn(), drawn);
     assert!(
@@ -1082,7 +1093,7 @@ fn a_large_texture_draws_in_the_frame_that_adds_it(path: UploadPath) {
         .expect("a mesh");
     let pixels = COLOR.repeat((TEXELS * TEXELS) as usize);
     let large = textures
-        .add("large", [TEXELS, TEXELS], &pixels)
+        .add("large", [TEXELS, TEXELS], &pixels, Mipmaps::None)
         .expect("a texture");
     let mut draws = Draws::default();
     let sampling = Sampling {
@@ -1127,6 +1138,248 @@ fn a_large_texture_draws_in_the_frame_that_adds_it(path: UploadPath) {
             .all(|(&got, want)| got.abs_diff(want) <= 1);
         assert!(close, "read back {pixel:?}, expected {COLOR:?}");
     }
+}
+
+/// Draws models' meshes with materials into an offscreen image, as a camera with perspective sees
+/// them, and compares it with its reference image. Along the top, single-sided squares whose
+/// corners wind counterclockwise seen from in front, as glTF's fronts do: one facing the camera,
+/// drawn; one turned away, culled; one mirrored by a negative scale, whose fronts then wind
+/// clockwise, drawn; one mirrored and turned away, culled; and a double-sided one turned away,
+/// drawn. Along the bottom: a masked square, mirrored, drawn after the mirrored ones by another
+/// pipeline, which leaves the faces set as they were, showing only its texture's texels at least
+/// half opaque; a blended square half over an opaque one behind it; and a square whose corners'
+/// colors its material's color multiplies. Each run of one mesh with one shader that draws the
+/// same faces is one draw, which `DrawCounts` counts with its triangles.
+fn models_match_their_reference() {
+    const WIDTH: u32 = 240;
+    const HEIGHT: u32 = 160;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut meshes = Meshes::default();
+    let mut shaders = Shaders::default();
+    let mut textures = Textures::default();
+    let mut uploads = Uploads::default();
+    // 4 in front of the origin, seeing a sixth of a turn from the view's bottom to its top: at z =
+    // 0, about 4.6 units.
+    let camera = Camera {
+        position: Vec3::new(0.0, 0.0, 4.0),
+        projection: Projection::Perspective {
+            fov: PI / 3.0,
+            near: 0.5,
+        },
+        ..Camera::default()
+    };
+    // A unit square, counterclockwise seen from +Z, its texture's top left at its top left, in
+    // `colors` from its bottom left counterclockwise.
+    let mut square = |name, colors: [Vec4; 4]| {
+        let corner = |[x, y]: [f32; 2], uv: [f32; 2], color| ModelVertex {
+            position: Vec3::new(x, y, 0.0),
+            uv: Vec2::from(uv),
+            color,
+        };
+        let corners = [
+            corner([-0.5, -0.5], [0.0, 1.0], colors[0]),
+            corner([0.5, -0.5], [1.0, 1.0], colors[1]),
+            corner([0.5, 0.5], [1.0, 0.0], colors[2]),
+            corner([-0.5, 0.5], [0.0, 0.0], colors[3]),
+        ];
+        meshes
+            .add(name, &corners, &[0, 1, 2, 2, 3, 0])
+            .expect("a mesh")
+    };
+    let plain = square("square", [Vec4::ONE; 4]);
+    let (red_corner, green_corner) = (Vec4::new(1.0, 0.0, 0.0, 1.0), Vec4::new(0.0, 1.0, 0.0, 1.0));
+    let blue_corner = Vec4::new(0.0, 0.0, 1.0, 1.0);
+    let corners = [red_corner, green_corner, blue_corner, Vec4::ONE];
+    let colored = square("colored square", corners);
+    // Red and blue at least half opaque on the left, green and yellow less so on the right.
+    let cutout = [
+        [255, 64, 64, 255],
+        [64, 255, 64, 40],
+        [64, 64, 255, 200],
+        [255, 255, 64, 100],
+    ];
+    let cutout = textures
+        .add("cutout", [2, 2], cutout.as_flattened(), Mipmaps::None)
+        .expect("a texture");
+    let material = |color: [f32; 4], alpha, double_sided| Material {
+        color: Vec4::from(color),
+        alpha,
+        double_sided,
+        ..Material::default()
+    };
+    // 0.9 across at (x, y, z), turned a half turn about Y if `turned`, and mirrored left to right
+    // if `mirrored`.
+    let placed = |[x, y, z]: [f32; 3], turned: bool, mirrored: bool| {
+        let turn = if turned { PI } else { 0.0 };
+        let scale = Vec3::new(if mirrored { -0.9 } else { 0.9 }, 0.9, 0.9);
+        Mat4::from_translation(Vec3::new(x, y, z))
+            * Mat4::from_scale(scale)
+            * Mat4::from_rotation_y(turn)
+    };
+    let opaque = |color, double_sided| material(color, AlphaMode::Opaque, double_sided);
+    let red = opaque([0.8, 0.1, 0.1, 1.0], false);
+    let green = opaque([0.1, 0.7, 0.1, 1.0], false);
+    let blue = opaque([0.1, 0.2, 0.8, 1.0], false);
+    let yellow = opaque([0.8, 0.7, 0.1, 1.0], false);
+    let white = opaque([0.9, 0.9, 0.9, 1.0], true);
+    let cyan = opaque([0.1, 0.7, 0.8, 1.0], false);
+    let masked = Material {
+        texture: cutout,
+        nearest: true,
+        wrap: Wrap::Clamp,
+        ..material([1.0; 4], AlphaMode::Mask { cutoff: 0.5 }, false)
+    };
+    let blended = material([0.9, 0.1, 0.8, 0.5], AlphaMode::Blend, false);
+    let tinted = opaque([1.0, 0.5, 1.0, 1.0], false);
+    let mut draw =
+        |mesh, material: &Material| MeshDraw::with_material(mesh, material, &mut shaders);
+    let scene = [
+        (draw(plain, &red), placed([-2.0, 0.9, 0.0], false, false)),
+        (draw(plain, &green), placed([-1.0, 0.9, 0.0], true, false)),
+        (draw(plain, &blue), placed([0.0, 0.9, 0.0], false, true)),
+        (draw(plain, &yellow), placed([1.0, 0.9, 0.0], true, true)),
+        (draw(plain, &masked), placed([-1.6, -0.9, 0.0], false, true)),
+        (draw(plain, &white), placed([2.0, 0.9, 0.0], true, false)),
+        (draw(plain, &cyan), placed([0.0, -0.9, -0.2], false, false)),
+        (
+            draw(plain, &blended),
+            placed([0.3, -0.7, 0.2], false, false),
+        ),
+        (
+            draw(colored, &tinted),
+            placed([1.6, -0.9, 0.0], false, false),
+        ),
+    ];
+    let mut draws = Draws::default();
+    for (draw, transform) in &scene {
+        draws.push_draw(*transform, draw);
+    }
+    for _ in 0..2 {
+        uploads.take(&mut meshes, &mut shaders, &mut textures);
+        let data = RenderData {
+            clear_color: CLEAR,
+            viewport: Viewport {
+                origin: [0, 0],
+                size: [WIDTH, HEIGHT],
+            },
+            camera,
+            uploads: &mut uploads,
+            draws: &draws,
+        };
+        render_without_ui(&mut renderer, data);
+    }
+    // Red and green facing one way, blue and yellow mirrored, then one each.
+    let drawn = DrawCounts {
+        draws: 7,
+        instances: 9,
+        triangles: 18,
+    };
+    assert_eq!(renderer.drawn(), drawn);
+    check(renderer, "models", WIDTH, HEIGHT);
+}
+
+/// What `level.slang` takes with each draw.
+#[repr(C)]
+#[derive(Clone, Copy, NoUninit)]
+struct Level {
+    texture: Texture,
+    sampler: u32,
+    level: f32,
+}
+
+/// Draws every mip level of two textures, uploaded by `path`, side by side into an offscreen image,
+/// each at its nearest texels over a square of 64 by 64 pixels, and compares it with its reference
+/// image. The first is 64 by 64 texels, alpha-weighted, in quadrants checkered in squares 1, 2, 4
+/// and 8 texels across, so that each of its first five levels, made by averaging the level before,
+/// evens out one more quadrant; one quadrant's squares are green and clear, which its levels blend
+/// to half-transparent green rather than taking in the clear squares' color. The second is 5 by 3
+/// texels, averaged, of odd sides, whose levels take three texels' parts each. Validation can't see
+/// a level left unfilled, which the bindless set samples unchecked, nor one filled from the wrong
+/// bytes, which both show here.
+fn mipmaps_match_their_reference(path: UploadPath) {
+    const WIDTH: u32 = 640;
+    const HEIGHT: u32 = 64;
+    let mut renderer = renderer_uploading(WIDTH, HEIGHT, Some(path));
+    let mut meshes = Meshes::default();
+    let mut shaders = Shaders::default();
+    let mut textures = Textures::default();
+    let mut uploads = Uploads::default();
+    // A unit a pixel, around the origin.
+    let camera = Camera {
+        projection: Projection::Orthographic {
+            height: HEIGHT as f32,
+            near: -1.0,
+            far: 1.0,
+        },
+        ..Camera::default()
+    };
+    let leveled = shaders
+        .add::<[f32; 5], Level>("level", &shader("level.slang"), Blend::Alpha)
+        .expect("a shader");
+    let corners = [
+        [-32.0, -32.0, 0.0, 0.0, 1.0],
+        [32.0, -32.0, 0.0, 1.0, 1.0],
+        [32.0, 32.0, 0.0, 1.0, 0.0],
+        [-32.0, 32.0, 0.0, 0.0, 0.0],
+    ];
+    let square = meshes
+        .add("square", &corners, &[0, 1, 2, 2, 3, 0])
+        .expect("a mesh");
+    // Checkered in squares 1 texel across at the top left, 2 at the top right, 4 at the bottom
+    // left and 8 at the bottom right, each of two colors, sRGB-encoded.
+    let checkers: Vec<u8> = (0..64 * 64)
+        .flat_map(|i| {
+            let (x, y) = (i % 64, i / 64);
+            let (cell, colors) = match (x < 32, y < 32) {
+                (true, true) => (1, [[255, 255, 255, 255], [0, 0, 0, 255]]),
+                (false, true) => (2, [[230, 40, 40, 255], [40, 60, 230, 255]]),
+                (true, false) => (4, [[40, 200, 60, 255], [255, 0, 255, 0]]),
+                (false, false) => (8, [[250, 210, 40, 255], [40, 40, 40, 255]]),
+            };
+            colors[(x / cell + y / cell) % 2]
+        })
+        .collect();
+    let checkers = textures
+        .add("checkers", [64, 64], &checkers, Mipmaps::AlphaWeighted)
+        .expect("a texture");
+    // A color for each texel.
+    let odd: Vec<u8> = (0..15u32)
+        .flat_map(|i| [i * 17, 255 - i * 13, i * 71 % 256, 255].map(|c| c as u8))
+        .collect();
+    let odd = textures
+        .add("odd", [5, 3], &odd, Mipmaps::Averaged)
+        .expect("a texture");
+    let mut draws = Draws::default();
+    let levels = (0..7)
+        .map(|level| (checkers, level))
+        .chain((0..3).map(|level| (odd, level)));
+    for (i, (texture, level)) in levels.enumerate() {
+        let x = i as f32 * 64.0 + 32.0 - WIDTH as f32 / 2.0;
+        let level = Level {
+            texture,
+            sampler: Sampler::NearestClamp.index(),
+            level: level as f32,
+        };
+        draws.push(
+            square,
+            leveled,
+            Mat4::from_translation(Vec3::new(x, 0.0, 0.0)),
+            level,
+        );
+    }
+    uploads.take(&mut meshes, &mut shaders, &mut textures);
+    let data = RenderData {
+        clear_color: CLEAR,
+        viewport: Viewport {
+            origin: [0, 0],
+            size: [WIDTH, HEIGHT],
+        },
+        camera,
+        uploads: &mut uploads,
+        draws: &draws,
+    };
+    render_without_ui(&mut renderer, data);
+    check(renderer, "mipmaps", WIDTH, HEIGHT);
 }
 
 /// Renders a frame of `data`, without UI.

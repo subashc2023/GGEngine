@@ -490,7 +490,7 @@ impl Inverse {
 #[cfg(test)]
 pub(super) mod tests {
     use gg_core::math::Vec3;
-    use gg_renderer::{Texture, Textures};
+    use gg_renderer::{Mipmaps, Texture, Textures};
 
     use super::*;
     use crate::ecs::hierarchy::tests::check_links;
@@ -544,7 +544,7 @@ pub(super) mod tests {
         registered
             .into_iter()
             .for_each(|done| done.expect("registered"));
-        let texture = Textures::default().add("own", [1, 1], &[255, 0, 0, 255]);
+        let texture = Textures::default().add("own", [1, 1], &[255, 0, 0, 255], Mipmaps::None);
         let texture = texture.expect("a texture");
         let at = |x: f32| Transform {
             translation: Vec3::new(x, 0.0, 0.0),

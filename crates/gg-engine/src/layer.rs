@@ -1,6 +1,7 @@
 //! The layer stack: how an app's code, and the engine's tools, plug into the main loop.
 
 use std::any::type_name;
+use std::fs;
 use std::mem;
 use std::ops::ControlFlow;
 use std::path::Path;
@@ -11,18 +12,20 @@ use bytemuck::NoUninit;
 use gg_core::math::{Mat4, Vec2};
 use gg_core::{Error, Result};
 use gg_renderer::{
-    Blend, Camera, Draws, Mesh, Meshes, Shader, Shaders, Sprite, SpriteSheet, Texture, Textures,
-    Viewport,
+    Blend, Camera, Draws, Mesh, Meshes, Mipmaps, Shader, Shaders, Sprite, SpriteSheet, Texture,
+    Textures, Viewport,
 };
+use tracing::info;
 
 use crate::draw::{self, Scratch};
+use crate::gltf;
 use crate::image::{self, Image};
 use crate::interpolation::Past;
 use crate::perf::Perf;
 use crate::recording::Recorder;
 use crate::reflect::{Reflect, Value};
 use crate::render_thread::Extracted;
-use crate::{Event, Input, MeshDraw, Transform, Ui, World};
+use crate::{Event, Input, MeshDraw, Model, Transform, Ui, World};
 
 /// A part of an app that the main loop drives. Every method has a default that does nothing,
 /// so a layer implements only what it uses.
@@ -258,23 +261,26 @@ impl Context {
         self.shaders.add(name, path.as_ref(), blend)
     }
 
-    /// Loads the PNG file at `path` as a texture for sprites and layers' shaders to sample from
-    /// then on, through the handle: a sprite's `texture`, or a field of a shader's parameters as it
-    /// is. Any PNG loads: its colors are taken as sRGB-encoded and its alpha as not multiplied
-    /// into them, and shaders sample its colors decoded to linear, with texture coordinates from
-    /// (0, 0) at its top left to (1, 1) at its bottom right. `name` names the texture in errors
-    /// and GPU captures. The GPU has it from the next frame that renders.
+    /// Loads the PNG or JPEG file at `path` as a texture for sprites and layers' shaders to sample
+    /// from then on, through the handle: a sprite's `texture`, or a field of a shader's parameters
+    /// as it is. Any PNG loads, and any JPEG that's Huffman-coded at 8 bits, sequential or
+    /// progressive, as nearly all are: its colors are taken as sRGB-encoded, whatever color profile
+    /// or gamma it holds, as glTF requires, and its alpha as not multiplied into them, and shaders
+    /// sample its colors decoded to linear, with texture coordinates from (0, 0) at its top left to
+    /// (1, 1) at its bottom right. `name` names the texture in errors and GPU captures. The GPU has
+    /// it from the next frame that renders.
     ///
-    /// Fails with `engine.bad_texture` if the file can't be read or doesn't decode as a PNG, with
-    /// `renderer.bad_texture` if a side is more than 8,192 pixels, the most every Vulkan 1.4
-    /// device takes, and with `renderer.too_many_textures` past the 61,440 a renderer holds, the
-    /// engine's white one among them.
+    /// Fails with `engine.bad_texture` if the file can't be read, doesn't decode as a PNG or a
+    /// JPEG, or has a side of more than 8,192 pixels, the most every Vulkan 1.4 device takes, and
+    /// with `renderer.too_many_textures` past the 61,440 a renderer holds, the engine's white one
+    /// among them.
     pub fn add_texture(&mut self, name: &str, path: impl AsRef<Path>) -> Result<Texture> {
-        let image = image::load_png(name, path.as_ref())?;
-        self.textures.add(name, image.size, &image.pixels)
+        let image = image::load_image(name, path.as_ref())?;
+        self.textures
+            .add(name, image.size, &image.pixels, Mipmaps::None)
     }
 
-    /// Loads the PNG file at `path` as a sprite sheet: a texture, as
+    /// Loads the PNG or JPEG file at `path` as a sprite sheet: a texture, as
     /// [`add_texture`](Self::add_texture) loads one, cut into cells `cell` pixels across and down,
     /// packed edge to edge from its top left, which [`SpriteSheet::sprite`] draws.
     ///
@@ -287,7 +293,7 @@ impl Context {
         cell: [u32; 2],
     ) -> Result<SpriteSheet> {
         let path = path.as_ref();
-        let image = image::load_png(name, path)?;
+        let image = image::load_image(name, path)?;
         add_sheet(&mut self.textures, name, path, image, cell)
     }
 
@@ -305,6 +311,60 @@ impl Context {
         indices: &[u32],
     ) -> Result<Mesh<V>> {
         self.meshes.add(name, vertices, indices)
+    }
+
+    /// Loads the glTF 2.0 model at `path`, a `.gltf` or `.glb` file, and the files it names: what
+    /// its default scene draws, `scene` or else the first, which [`Model::spawn`] places in worlds
+    /// as entities, as many times as layers like. Its meshes and images are added once, as
+    /// [`add_mesh`](Self::add_mesh) and [`add_texture`](Self::add_texture) add them, but each image
+    /// with mip levels, made as a frame copies it to the GPU; the GPU has them from the next frame
+    /// that renders. `name` names the model in errors and GPU captures.
+    ///
+    /// Of each node it takes the transform, a matrix or a translation, rotation and scale; of each
+    /// primitive its mesh draws, the positions, the texture coordinates its base color texture
+    /// names and its vertex colors, COLOR_0, as floats or normalized integers, and its indices, of
+    /// 8, 16 or 32 bits; and of its material, the base color factor and texture, the texture's
+    /// wrapping and whether it magnifies to the nearest texel, the alpha mode and cutoff, and
+    /// whether it's double-sided. Models draw unlit, their base color alone, as KHR_materials_unlit
+    /// has it, and a material that isn't double-sided draws its triangles' fronts alone. Buffers
+    /// are in files named by URIs relative to the model's, in base64 data URIs or in a GLB's BIN
+    /// chunk, and images there or in buffer views: PNGs or JPEGs, as `add_texture` takes them, told
+    /// apart by their bytes rather than by the types the model declares.
+    ///
+    /// It ignores animations, cameras and the extensions the model uses without requiring them,
+    /// and logs which it has at info level, as `engine.model_ignored`: the model draws as it is at
+    /// rest. It ignores without a word normals, tangents, other texture coordinates, the material's
+    /// other parameters and textures, the textures' minification filters, since it samples them
+    /// trilinearly and anisotropically unless they magnify to the nearest texel, morph targets
+    /// while their weights are 0, the other scenes, and whatever the scene doesn't reach, which it
+    /// doesn't read.
+    ///
+    /// Fails, adding nothing, with `engine.unsupported_model` for glTF the engine doesn't draw:
+    /// glTF 1, a model without a scene, primitives that aren't triangle lists, sparse accessors and
+    /// accessors without a buffer view, skinned nodes, morph weights other than 0, a sampler that
+    /// wraps across and down differently, a texture without an image, and any required extension
+    /// but KHR_materials_unlit; with `engine.bad_model` for a file that can't be read or isn't
+    /// glTF, as far as reading it checks, such as an accessor past its buffer view, an index past
+    /// its vertices, a node with two parents, a matrix that isn't a translation, rotation and
+    /// scale, a URI that's neither a data URI nor a relative path, or an image that doesn't decode,
+    /// and, though glTF allows them, integers written as floats, such as `1.0`; and with
+    /// `renderer.too_many_textures` if the renderer hasn't room for its images.
+    pub fn add_model(&mut self, name: &str, path: impl AsRef<Path>) -> Result<Model> {
+        let zone = gg_core::zone!();
+        let path = path.as_ref();
+        zone.text(path.display());
+        let imported = gltf::read(name, path, |file| fs::read(file))?;
+        if !imported.ignored.is_empty() {
+            info!(
+                code = "engine.model_ignored",
+                model = name,
+                path = %path.display(),
+                "Model {name:?} draws without what the engine ignores of it: {}",
+                imported.ignored.join(", ")
+            );
+        }
+        let (meshes, shaders, textures) = (&mut self.meshes, &mut self.shaders, &mut self.textures);
+        Model::add(name, imported, meshes, shaders, textures)
     }
 
     /// Draws `mesh` with `shader` this frame, where `transform` places it in the world, over the
@@ -403,7 +463,7 @@ fn add_sheet(
             ),
         ));
     }
-    let texture = textures.add(name, image.size, &image.pixels)?;
+    let texture = textures.add(name, image.size, &image.pixels, Mipmaps::None)?;
     Ok(SpriteSheet {
         texture,
         size: image.size,
@@ -832,7 +892,21 @@ mod tests {
         assert_eq!((sheet.size, sheet.cell), ([64, 32], [64, 32]));
         // The sheets that didn't load took no texture, so this one's comes first after the
         // engine's white one.
-        let first = Textures::default().add("first", [1, 1], &[0; 4]);
+        let first = Textures::default().add("first", [1, 1], &[0; 4], Mipmaps::None);
         assert_eq!(sheet.texture, first.expect("a texture"));
+    }
+
+    #[test]
+    fn a_model_that_cant_be_read_fails_naming_its_file() {
+        let path = Path::new("no such folder/truck.glb");
+        let error = Context::seeded(0)
+            .add_model("truck", path)
+            .expect_err("no model");
+        assert_eq!(error.code(), "engine.bad_model");
+        let message = error.to_string();
+        assert!(
+            message.contains("\"truck\"") && message.contains(&path.display().to_string()),
+            "{message}"
+        );
     }
 }

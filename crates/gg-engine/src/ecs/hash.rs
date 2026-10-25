@@ -157,7 +157,7 @@ impl World {
 #[cfg(test)]
 mod tests {
     use gg_core::math::{Quat, Vec3};
-    use gg_renderer::Textures;
+    use gg_renderer::{Mipmaps, Textures};
 
     use super::*;
     use crate::ecs::ops::tests::{Fixture, Sealed, fixture};
@@ -366,7 +366,7 @@ mod tests {
         // Neither writes a field, so that only their indices tell them apart.
         let point = changed(&mut world, all, |e: &mut Everything| e.form = Form::Point);
         assert_ne!(point, first, "a variant, by its index");
-        let texture = Textures::default().add("own", [1, 1], &[255, 0, 0, 255]);
+        let texture = Textures::default().add("own", [1, 1], &[255, 0, 0, 255], Mipmaps::None);
         let texture = texture.expect("a texture");
         let textured = changed(&mut world, posed, |sprite: &mut Sprite| {
             sprite.texture = texture;

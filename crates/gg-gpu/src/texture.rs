@@ -1,5 +1,6 @@
 //! Textures: images shaders sample, each in a slot of the bindless set.
 
+use std::iter;
 use std::slice;
 use std::sync::Arc;
 
@@ -8,11 +9,36 @@ use gg_core::Result;
 
 use crate::device::Retired;
 use crate::vma::{Allocation, Memory};
-use crate::{COLOR_LAYERS, COLOR_RANGE, Device, UploadPath, vk_error};
+use crate::{COLOR_RANGE, Device, UploadPath, color_layers, vk_error};
 
 /// The most pixels a side a texture has: what every Vulkan 1.4 device takes, the version the
 /// engine requires.
 pub const MAX_TEXTURE_SIZE: u32 = 8192;
+
+/// The most mip levels a texture has: a full chain of [`MAX_TEXTURE_SIZE`] pixels a side.
+pub(crate) const MAX_LEVELS: usize = MAX_TEXTURE_SIZE.ilog2() as usize + 1;
+
+/// The sizes of the levels of a full mip chain of a `width` by `height` image, largest first: each
+/// half the one before, rounded down but at least a pixel a side, down to a pixel. A texture made
+/// mipmapped has these levels.
+pub fn mip_sizes(width: u32, height: u32) -> impl Iterator<Item = [u32; 2]> {
+    iter::successors(Some([width, height]), |&[width, height]| {
+        (width > 1 || height > 1).then(|| [(width / 2).max(1), (height / 2).max(1)])
+    })
+}
+
+/// The sizes of the first `count` levels of a `width` by `height` image's mip chain, and where each
+/// one's pixels start among all of theirs, a level's after the one before's.
+fn levels(width: u32, height: u32, count: u32) -> impl Iterator<Item = ([u32; 2], u64)> {
+    let mut offset = 0;
+    mip_sizes(width, height)
+        .take(count as usize)
+        .map(move |size @ [width, height]| {
+            let at = offset;
+            offset += u64::from(width) * u64::from(height) * 4;
+            (size, at)
+        })
+}
 
 /// How a texture's 8-bit RGBA channels read in shaders.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,8 +51,9 @@ pub enum TextureFormat {
     Rgba8Srgb,
 }
 
-/// An RGBA image with 8-bit channels, that shaders sample through its index in the bindless
-/// set. Frames fill its pixels, and may write over them, and they're undefined until then.
+/// An RGBA image with 8-bit channels, with one mip level or a full chain of them, that shaders
+/// sample through its index in the bindless set. Frames fill its pixels, and may write over those
+/// of one with one level, and they're undefined until then.
 /// Dropping it retires it until the GPU is done with it.
 pub struct Texture {
     device: Arc<Device>,
@@ -35,6 +62,8 @@ pub struct Texture {
     /// Taken when the texture is dropped.
     allocation: Option<Allocation>,
     extent: vk::Extent2D,
+    /// How many mip levels it has.
+    levels: u32,
     index: u32,
     /// Whether a frame has filled or written it, which leaves it in the shader-read-only layout.
     written: bool,
@@ -46,8 +75,9 @@ impl Texture {
         vk::ImageUsageFlags::SAMPLED.as_raw() | vk::ImageUsageFlags::TRANSFER_DST.as_raw(),
     );
 
-    /// A texture of `width` by `height` pixels, in a free slot of the bindless set past the placed
-    /// ones, with `name` as its debug name.
+    /// A texture of `width` by `height` pixels, with the full chain of mip levels that
+    /// [`mip_sizes`] gives if `mipmapped`, and otherwise one, in a free slot of the bindless set
+    /// past the placed ones, with `name` as its debug name.
     ///
     /// # Panics
     ///
@@ -57,9 +87,10 @@ impl Texture {
         width: u32,
         height: u32,
         format: TextureFormat,
+        mipmapped: bool,
         name: &str,
     ) -> Result<Self> {
-        Self::make(device, None, width, height, format, name)
+        Self::make(device, None, width, height, format, mipmapped, name)
     }
 
     /// A texture like [`Texture::new`]'s, in placed slot `slot`, one of the first
@@ -75,9 +106,10 @@ impl Texture {
         width: u32,
         height: u32,
         format: TextureFormat,
+        mipmapped: bool,
         name: &str,
     ) -> Result<Self> {
-        Self::make(device, Some(slot), width, height, format, name)
+        Self::make(device, Some(slot), width, height, format, mipmapped, name)
     }
 
     fn make(
@@ -86,6 +118,7 @@ impl Texture {
         width: u32,
         height: u32,
         format: TextureFormat,
+        mipmapped: bool,
         name: &str,
     ) -> Result<Self> {
         let sides = 1..=MAX_TEXTURE_SIZE;
@@ -94,6 +127,11 @@ impl Texture {
             "a {width}x{height} texture, but textures are 1 to {MAX_TEXTURE_SIZE} pixels a side"
         );
         let extent = vk::Extent2D { width, height };
+        let levels = if mipmapped {
+            mip_sizes(width, height).count() as u32
+        } else {
+            1
+        };
         let format = match format {
             TextureFormat::Rgba8Unorm => vk::Format::R8G8B8A8_UNORM,
             TextureFormat::Rgba8Srgb => vk::Format::R8G8B8A8_SRGB,
@@ -109,7 +147,7 @@ impl Texture {
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)
             .extent(extent.into())
-            .mip_levels(1)
+            .mip_levels(levels)
             .array_layers(1)
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
@@ -148,6 +186,7 @@ impl Texture {
             view,
             allocation: Some(allocation),
             extent,
+            levels,
             index,
             written: false,
         })
@@ -158,9 +197,28 @@ impl Texture {
         self.index
     }
 
-    /// The width and height in pixels.
+    /// The width and height in pixels, of its first and largest level.
     pub(crate) fn size(&self) -> [u32; 2] {
         [self.extent.width, self.extent.height]
+    }
+
+    /// How many mip levels it has.
+    pub(crate) fn level_count(&self) -> u32 {
+        self.levels
+    }
+
+    /// Its mip levels' sizes, largest first, and where each one's pixels start among all of
+    /// theirs, packed a level after the one before.
+    pub(crate) fn levels(&self) -> impl Iterator<Item = ([u32; 2], u64)> {
+        levels(self.extent.width, self.extent.height, self.levels)
+    }
+
+    /// How many bytes of RGBA8 fill all its levels.
+    pub(crate) fn bytes(&self) -> u64 {
+        let last = self.levels().last();
+        last.map_or(0, |([width, height], at)| {
+            at + u64::from(width) * u64::from(height) * 4
+        })
     }
 
     pub(crate) fn raw(&self) -> vk::Image {
@@ -175,14 +233,15 @@ impl Texture {
         self.written = true;
     }
 
-    /// Writes `pixels`, every one of the texture's, from the CPU straight into its image, and
-    /// leaves it in the shader-read-only layout: host image copy, on a device that uploads that
-    /// way. The device's next submission makes the writes visible to it.
+    /// Writes `pixels`, every one of the texture's, its levels' packed largest first, from the CPU
+    /// straight into its image, and leaves it in the shader-read-only layout: host image copy, on
+    /// a device that uploads that way. The device's next submission makes the writes visible to
+    /// it.
     ///
     /// # Panics
     ///
     /// If the device doesn't upload by host image copy, a frame has written the texture, or
-    /// `pixels` doesn't fill it exactly.
+    /// `pixels` doesn't fill its levels exactly.
     pub(crate) fn copy_from_host(&mut self, pixels: &[u8]) -> Result<()> {
         let functions = self
             .device
@@ -195,8 +254,9 @@ impl Texture {
         let vk::Extent2D { width, height } = self.extent;
         assert_eq!(
             pixels.len() as u64,
-            u64::from(width) * u64::from(height) * 4,
-            "the pixels don't fill a {width}x{height} texture",
+            self.bytes(),
+            "the pixels don't fill a {width}x{height} texture's {} levels",
+            self.levels,
         );
         let transition = vk::HostImageLayoutTransitionInfoEXT::default()
             .image(self.raw)
@@ -208,16 +268,26 @@ impl Texture {
         // has used it, since no frame has written it, and `&mut` keeps the engine off it.
         unsafe { functions.transition_image_layout(slice::from_ref(&transition)) }
             .map_err(|e| vk_error("vkTransitionImageLayoutEXT", e))?;
-        let region = vk::MemoryToImageCopyEXT::default()
-            .host_pointer(pixels.as_ptr().cast())
-            .image_subresource(COLOR_LAYERS)
-            .image_extent(self.extent.into());
+        // A region for each level, each from where its pixels start.
+        let mut regions = [vk::MemoryToImageCopyEXT::default(); MAX_LEVELS];
+        for ((level, ([width, height], at)), region) in self.levels().enumerate().zip(&mut regions)
+        {
+            *region = vk::MemoryToImageCopyEXT::default()
+                .host_pointer(pixels[at as usize..].as_ptr().cast())
+                .image_subresource(color_layers(level as u32))
+                .image_extent(vk::Extent3D {
+                    width,
+                    height,
+                    depth: 1,
+                });
+        }
         let info = vk::CopyMemoryToImageInfoEXT::default()
             .dst_image(self.raw)
             .dst_image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            .regions(slice::from_ref(&region));
-        // SAFETY: as above, in the layout just changed to; the region is the whole image, whose
-        // every texel `pixels`, tightly packed, was just checked to hold.
+            .regions(&regions[..self.levels as usize]);
+        // SAFETY: as above, in the layout just changed to; the regions are the image's levels,
+        // whose every texel `pixels`, tightly packed a level after another, was just checked to
+        // hold.
         unsafe { functions.copy_memory_to_image(&info) }
             .map_err(|e| vk_error("vkCopyMemoryToImageEXT", e))
     }
@@ -230,5 +300,36 @@ impl Drop for Texture {
                 self.raw, self.view, allocation, self.index,
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_full_chain_halves_each_side_down_to_a_pixel() {
+        let sizes: Vec<_> = mip_sizes(211, 5).collect();
+        let expected = [
+            [211, 5],
+            [105, 2],
+            [52, 1],
+            [26, 1],
+            [13, 1],
+            [6, 1],
+            [3, 1],
+            [1, 1],
+        ];
+        assert_eq!(sizes, expected);
+        assert_eq!(mip_sizes(1, 1).collect::<Vec<_>>(), [[1, 1]]);
+        assert_eq!(mip_sizes(1, MAX_TEXTURE_SIZE).count(), MAX_LEVELS);
+    }
+
+    #[test]
+    fn each_levels_pixels_start_after_the_ones_before() {
+        let at: Vec<_> = levels(5, 3, 3).collect();
+        assert_eq!(at, [([5, 3], 0), ([2, 1], 60), ([1, 1], 68)]);
+        // One level of a texture that isn't mipmapped.
+        assert_eq!(levels(5, 3, 1).collect::<Vec<_>>(), [([5, 3], 0)]);
     }
 }

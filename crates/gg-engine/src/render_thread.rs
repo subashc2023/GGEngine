@@ -109,6 +109,7 @@ impl Render for Renderer {
         let drawn = self.drawn();
         gg_core::plot!("draws", drawn.draws as f64);
         gg_core::plot!("instances", drawn.instances as f64);
+        gg_core::plot!("triangles", drawn.triangles as f64);
         Rendered {
             presented,
             render: start.elapsed(),
@@ -332,6 +333,7 @@ mod tests {
                 drawn: DrawCounts {
                     draws: tag,
                     instances: self.setting,
+                    triangles: 0,
                 },
             }
         }

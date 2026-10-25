@@ -8,7 +8,8 @@
 //! entities as canonical text; operations, the authoring changes made to the world, each with its
 //! inverse, and their log, which undoes and redoes them; recordings of runs, the commands their
 //! ticks applied, which replay without a GPU to the same world, naming where one goes another way;
-//! and measuring each frame, for the log and the Performance panel. Assets to come.
+//! and measuring each frame, for the log and the Performance panel; and loading what layers add,
+//! images as textures and glTF models, whose nodes spawn as entities. A library of assets to come.
 //!
 //! An app's `main` starts the engine; there is no separate entry-point crate.
 
@@ -23,12 +24,14 @@ mod dock;
 mod draw;
 mod ecs;
 mod event;
+mod gltf;
 mod image;
 mod input;
 mod inspector;
 mod interpolation;
 mod jobs;
 mod layer;
+mod model;
 mod pads;
 mod perf;
 mod recording;
@@ -93,6 +96,7 @@ pub use inspector::Inspector;
 pub use jobs::{on_threads, start as start_jobs};
 use layer::Stack;
 pub use layer::{Commands, Context, Layer, Tick, Window};
+pub use model::Model;
 pub use perf::PerfPanel;
 use perf::{Perf, Summary};
 use recording::Recorder;
@@ -640,6 +644,7 @@ impl Ran {
             wait_ms_p95 = perf.wait.p95,
             draws_max = perf.draws_max,
             instances_max = perf.instances_max,
+            triangles_max = perf.triangles_max,
             gpu = self.gpu.as_str(),
             build = BUILD,
             headless = args.headless,

@@ -494,12 +494,13 @@ fn pick(index: u32, salt: u32) -> f32 {
 /// red, green and blue turning, with two moons, which it carries around as it turns,
 /// one of them carrying a moonlet of its own, then a logo sprite whose alpha shows them through it.
 /// Above the swarm, two cubes that cut through each other as they turn, and a pane through them
-/// that shows them through it, which only depth sorts out. Below the swarm, out of its way, a map
+/// that shows them through it, which only depth sorts out; beside them, a milk truck, a textured
+/// glTF model, whose nodes are entities under a root. Below the swarm, out of its way, a map
 /// of tiles from a tile set's cells packed edge to edge, which tests that none shows any of the
 /// cells beside it. All but the cubes and the pane are entities, spawned as the sandbox attaches
 /// but for the swarm, at its first tick, the grid loaded from a scene and the moons placed from a
 /// prefab, under a pivot that the triangle carries, which the engine draws back to front by their
-/// z's in the world, but for the triangle, opaque, which it draws first; the world holds all of the
+/// z's in the world, but for the opaque triangle and truck, drawn first; the world holds all of the
 /// simulation, so that a snapshot of it restores it, and a recording of the commands replays it.
 /// At each tick, 64 a second whatever the frame rate, the sandbox's systems move the swarm by its
 /// drifters, turn the triangle, its moons and the moonlet by their spins, and move the triangle
@@ -507,9 +508,10 @@ fn pick(index: u32, salt: u32) -> f32 {
 /// they steer the triangle and reverse its spin, resize the swarm, color the grid by its cells,
 /// filter the map and set the checkerboard's sprite, so that what the Inspector sets stays until a
 /// panel changes it, and load the grid again. The triangle and the cubes are meshes with a vertex
-/// type and an opaque shader of the sandbox's own, and the rest the engine's sprites; the sandbox
-/// draws the cubes and the pane itself, each frame, before the world, so the cubes are one
-/// instanced draw, the pane another, the triangle a third, and every other sprite a fourth.
+/// type and an opaque shader of the sandbox's own, the truck's meshes the engine's model shader's,
+/// and the rest the engine's sprites; the sandbox draws the cubes and the pane itself, each frame,
+/// before the world, so the cubes are one instanced draw, the pane another, the triangle a third,
+/// the truck four more, one of them its two wheels, and every other sprite one more.
 /// They're drawn over a color that drifts slowly, so that a running sandbox visibly animates, as
 /// the cubes turn. The engine's orthographic camera controller steers the camera: W, A, S and D,
 /// or a gamepad's right stick, move it along its own axes, Q and E, or the triggers, turn it left
@@ -777,8 +779,8 @@ impl Sandbox {
 
 impl Layer for Sandbox {
     fn attach(&mut self, cx: &mut Context) {
-        // A shader that doesn't compile, a texture that doesn't load, or a scene that's refused
-        // stops the sandbox, with what went wrong.
+        // A shader that doesn't compile, a texture or a model that doesn't load, or a scene that's
+        // refused stops the sandbox, with what went wrong.
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let assets = root.join("assets");
         let colored = cx.add_shader(
@@ -791,6 +793,7 @@ impl Layer for Sandbox {
         let logo = cx.add_texture("logo", assets.join("logo.png"));
         let shapes = cx.add_sprite_sheet("sheet", assets.join("sheet.png"), [32, 32]);
         let tiles = cx.add_sprite_sheet("tiles", assets.join("tiles.png"), [16, 16]);
+        let truck = cx.add_model("truck", assets.join("CesiumMilkTruck.glb"));
         let shapes = shapes.expect("the shapes load");
         let mesh = triangle.expect("the triangle is a whole triangle, of its own vertices");
         let shader = colored.expect("the vertex color shader compiles");
@@ -838,6 +841,13 @@ impl Layer for Sandbox {
             ..Transform::IDENTITY
         };
         world.spawn((at, logo));
+        // A quarter of its size, standing beside the cubes, turned to show its cab and a side.
+        let at = Transform {
+            translation: CUBES + Vec3::new(1.4, -0.45, 0.0),
+            rotation: Quat::from_rotation_y(-0.7),
+            scale: Vec3::splat(0.25),
+        };
+        truck.expect("the truck loads").spawn(world, at);
         self.scene = Some(Scene {
             shapes: std::array::from_fn(|i| shapes.sprite([i as u32 % 4, i as u32 / 4], [1, 1])),
         });
@@ -1494,7 +1504,7 @@ mod tests {
                 })),
                 // A zero whose sign the hash keeps.
                 144 => {
-                    let mut triangle = world.query_mut::<(&MeshDraw, &mut Transform)>();
+                    let mut triangle = world.query_mut::<(&Steer, &mut Transform)>();
                     let (_, at) = triangle.next().expect("the triangle");
                     at.translation.x = -0.0;
                 }

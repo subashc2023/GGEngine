@@ -1,5 +1,5 @@
 use gg_core::math::{Quat, Vec2, Vec3, Vec4};
-use gg_renderer::Textures;
+use gg_renderer::{Mipmaps, Textures};
 
 use crate::ecs::hierarchy::tests::check_links;
 use crate::ecs::id::tests::check_ids;
@@ -185,7 +185,7 @@ fn a_scene_loads_and_saves_as_its_canonical_text() {
         .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(saved, GOLDEN);
     // A texture that code sets isn't saved; nor are entities that aren't the roots' subtrees.
-    let texture = Textures::default().add("first", [1, 1], &[0; 4]);
+    let texture = Textures::default().add("first", [1, 1], &[0; 4], Mipmaps::None);
     world.get_mut::<Sprite>(cell).expect("a sprite").texture = texture.expect("a texture");
     assert_eq!(world.save_scene(&[cell, mover]).expect("saved"), GOLDEN);
     assert_eq!(

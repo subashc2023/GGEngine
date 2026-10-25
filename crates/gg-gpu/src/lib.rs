@@ -23,38 +23,40 @@ use std::fmt;
 use ash::vk;
 use gg_core::Error;
 
-pub use bindless::{PLACED_TEXTURES, Sampler};
+pub use bindless::{PLACED_TEXTURES, Sampler, Wrap};
 pub use buffer::GpuBuffer;
 pub use device::{Device, UploadPath};
 pub use frame::{Frame, Frames, Indices, Pass, Target, Upload};
 pub use image::{ColorImage, DepthImage};
 pub use instance::{Instance, InstanceDesc, Validation};
-pub use pipeline::{Blend, Format, GraphicsDesc, Pipeline};
+pub use pipeline::{Blend, Faces, Format, GraphicsDesc, Pipeline};
 pub use surface::{Surface, Window};
 pub use swapchain::Swapchain;
-pub use texture::{MAX_TEXTURE_SIZE, Texture, TextureFormat};
+pub use texture::{MAX_TEXTURE_SIZE, Texture, TextureFormat, mip_sizes};
 
 /// The Vulkan version a device must support.
 const REQUIRED_VERSION: u32 = vk::make_api_version(0, 1, 4, 0);
 
-/// The whole of a color image with one mip level and one layer.
+/// The whole of a color image: every mip level, and its one layer.
 const COLOR_RANGE: vk::ImageSubresourceRange = vk::ImageSubresourceRange {
     aspect_mask: vk::ImageAspectFlags::COLOR,
     base_mip_level: 0,
-    level_count: 1,
+    level_count: vk::REMAINING_MIP_LEVELS,
     base_array_layer: 0,
     layer_count: 1,
 };
 
-/// The one mip level and layer of a color image, which copies write.
-const COLOR_LAYERS: vk::ImageSubresourceLayers = vk::ImageSubresourceLayers {
-    aspect_mask: vk::ImageAspectFlags::COLOR,
-    mip_level: 0,
-    base_array_layer: 0,
-    layer_count: 1,
-};
+/// Mip level `level` of a color image, in its one layer: what a copy writes.
+const fn color_layers(level: u32) -> vk::ImageSubresourceLayers {
+    vk::ImageSubresourceLayers {
+        aspect_mask: vk::ImageAspectFlags::COLOR,
+        mip_level: level,
+        base_array_layer: 0,
+        layer_count: 1,
+    }
+}
 
-/// The whole of a depth image with one mip level and one layer.
+/// The whole of a depth image, as [`COLOR_RANGE`] is of a color one.
 const DEPTH_RANGE: vk::ImageSubresourceRange = vk::ImageSubresourceRange {
     aspect_mask: vk::ImageAspectFlags::DEPTH,
     ..COLOR_RANGE

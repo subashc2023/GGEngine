@@ -17,8 +17,10 @@ rayon-core.workspace = true
 ron.workspace = true
 scoped-tls.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 tracing.workspace = true
 winit.workspace = true
+zune-jpeg.workspace = true
 
 [features]
 # The engine's zones for Tracy, through gg-core's profile module.

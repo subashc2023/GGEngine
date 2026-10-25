@@ -1,13 +1,14 @@
 //! Turns the render data the engine hands it each frame into images, built on `gg-gpu`: meshes
 //! and sprites drawn in the game's view, as its camera sees them, with games' shaders and textures
-//! and the engine's own, and the UI over them; and the render graph, materials, lighting and
-//! post-processing to come.
+//! and the engine's own, models' unlit materials among them, and the UI over them; and the render
+//! graph, lighting, PBR materials and post-processing to come.
 //!
 //! It knows nothing about the scene, ECS or gameplay. It receives plain data, so rendering
 //! can run on its own thread, a frame behind simulation.
 
 mod camera;
 mod mesh;
+mod model;
 mod shader;
 mod sprite;
 mod texture;
@@ -20,19 +21,21 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytemuck::NoUninit;
-use gg_core::math::Mat4;
+use gg_core::math::{Mat3, Mat4};
 use gg_core::{Error, Result};
 use gg_gpu::{
-    ColorImage, DepthImage, Device, Frames, Instance, InstanceDesc, Surface, Swapchain, Target,
+    ColorImage, DepthImage, Device, Faces, Frames, Instance, InstanceDesc, Surface, Swapchain,
+    Target,
 };
 use tracing::trace;
 
 pub use camera::{Camera, Projection};
-pub use gg_gpu::{Blend, Sampler, UploadPath, Validation, Window};
+pub use gg_gpu::{Blend, MAX_TEXTURE_SIZE, Sampler, UploadPath, Validation, Window, Wrap};
 pub use mesh::{Mesh, MeshDraw, Meshes};
+pub use model::{AlphaMode, Material, ModelVertex};
 pub use shader::{Shader, Shaders};
 pub use sprite::{Sprite, SpriteSheet};
-pub use texture::{Texture, Textures};
+pub use texture::{Mipmaps, Texture, Textures};
 pub use ui::Ui;
 
 use mesh::MeshPass;
@@ -49,9 +52,10 @@ pub struct Viewport {
 /// What a frame draws besides UI, in order, each over those before it, but where an opaque one
 /// before it is nearer: meshes, each with a shader for its vertex type, the parameters that shader
 /// takes, and where it is in the world. Each run of consecutive draws of one mesh with one shader
-/// renders as one instanced draw, whatever their transforms and parameters, a texture among them.
-/// Clearing it keeps its memory, so that a frame that draws no more than the last allocates
-/// nothing.
+/// that draw the same [`Faces`] renders as one instanced draw, whatever their transforms and
+/// parameters, a texture among them: every draw draws both faces of its mesh's triangles but a
+/// material's that isn't double-sided. Clearing it keeps its memory, so that a frame that draws no
+/// more than the last allocates nothing.
 #[derive(Debug, Default, PartialEq)]
 pub struct Draws {
     /// The runs, in order.
@@ -62,11 +66,13 @@ pub struct Draws {
     params: Vec<u8>,
 }
 
-/// Consecutive draws of one mesh with one shader: the instances of one instanced draw.
+/// Consecutive draws of one mesh with one shader that draw the same faces: the instances of one
+/// instanced draw.
 #[derive(Debug, PartialEq)]
 struct Run {
     mesh: u32,
     shader: u32,
+    faces: Faces,
     /// Where its draws' transforms are in `Draws::transforms`.
     instances: Range<usize>,
     /// Where their parameters are in `Draws::params`.
@@ -87,16 +93,25 @@ impl Draws {
         let (instance, start) = (self.transforms.len(), self.params.len());
         self.transforms.push(transform);
         self.params.extend_from_slice(bytemuck::bytes_of(&params));
-        self.extend_run(mesh.index, shader.index, instance, start);
+        self.extend_run(mesh.index, shader.index, Faces::Both, instance, start);
     }
 
     /// Draws `draw` over the meshes drawn before it but where an opaque one is nearer, as
-    /// [`push`](Self::push) draws its mesh with its shader and parameters.
+    /// [`push`](Self::push) draws its mesh with its shader and parameters. A material's draw that
+    /// isn't double-sided draws its mesh's fronts: the triangles whose corners wind counterclockwise,
+    /// as glTF's fronts do, or clockwise where `transform` mirrors them, as glTF has it.
     pub fn push_draw(&mut self, transform: Mat4, draw: &MeshDraw) {
         let (instance, start) = (self.transforms.len(), self.params.len());
         self.transforms.push(transform);
         self.params.extend_from_slice(draw.params());
-        self.extend_run(draw.mesh, draw.shader, instance, start);
+        let faces = if !draw.culls {
+            Faces::Both
+        } else if Mat3::from_mat4(transform).determinant() < 0.0 {
+            Faces::Clockwise
+        } else {
+            Faces::CounterClockwise
+        };
+        self.extend_run(draw.mesh, draw.shader, faces, instance, start);
     }
 
     /// Draws `sprite` over the meshes drawn before it but where an opaque one is nearer, as
@@ -119,21 +134,23 @@ impl Draws {
             transform
         }));
         if self.transforms.len() > instance {
-            self.extend_run(sprite::QUAD.index, sprite::SHADER.index, instance, start);
+            let (quad, shader) = (sprite::QUAD.index, sprite::SHADER.index);
+            self.extend_run(quad, shader, Faces::Both, instance, start);
         }
     }
 
     /// Adds the draws from `instance` on, whose parameters start at `start`, of `mesh` with
-    /// `shader`, to the last run if it's of them too, or as a run of their own.
-    fn extend_run(&mut self, mesh: u32, shader: u32, instance: usize, start: usize) {
+    /// `shader`, drawing `faces`, to the last run if it's of them too, or as a run of their own.
+    fn extend_run(&mut self, mesh: u32, shader: u32, faces: Faces, instance: usize, start: usize) {
         match self.runs.last_mut() {
-            Some(run) if (run.mesh, run.shader) == (mesh, shader) => {
+            Some(run) if (run.mesh, run.shader, run.faces) == (mesh, shader, faces) => {
                 run.instances.end = self.transforms.len();
                 run.params.end = self.params.len();
             }
             _ => self.runs.push(Run {
                 mesh,
                 shader,
+                faces,
                 instances: instance..self.transforms.len(),
                 params: start..self.params.len(),
             }),
@@ -156,10 +173,13 @@ impl Draws {
 /// What a frame drew in the game's view, which [`Renderer::drawn`] tells.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DrawCounts {
-    /// Instanced draws: one for each run of consecutive draws of one mesh with one shader.
+    /// Instanced draws: one for each run of consecutive draws of one mesh with one shader that draw
+    /// the same faces.
     pub draws: usize,
     /// The meshes they drew, one for each draw pushed to [`Draws`].
     pub instances: usize,
+    /// The triangles of those meshes, culled ones among them: the GPU's work in drawing them.
+    pub triangles: usize,
 }
 
 /// What's been added to a [`Meshes`], [`Shaders`] and [`Textures`] since it was last taken from
@@ -622,5 +642,52 @@ mod tests {
         draws.push(square, flat, at(0.0), red);
         assert_eq!(runs(&draws), [(1, 1, 0..1)]);
         assert_eq!(draws.params.len(), size_of::<Vec4>());
+    }
+
+    #[test]
+    fn draws_that_cull_run_apart_where_their_transforms_mirror_them() {
+        let mut meshes = Meshes::default();
+        let mut shaders = Shaders::default();
+        let corner = ModelVertex {
+            position: Vec3::ZERO,
+            uv: gg_core::math::Vec2::ZERO,
+            color: Vec4::ONE,
+        };
+        let mesh = meshes.add("a", &[corner; 3], &[0, 1, 2]).unwrap();
+        let mut draw = |double_sided| {
+            let material = Material {
+                double_sided,
+                ..Material::default()
+            };
+            MeshDraw::with_material(mesh, &material, &mut shaders)
+        };
+        let (single, double) = (draw(false), draw(true));
+        let at = Mat4::from_translation(Vec3::X);
+        let mirrored = Mat4::from_scale(Vec3::new(-1.0, 2.0, 1.0));
+        let faces = |draws: &Draws| draws.runs.iter().map(|run| run.faces).collect::<Vec<_>>();
+        let mut draws = Draws::default();
+        for transform in [at, mirrored, at] {
+            draws.push_draw(transform, &single);
+        }
+        let expected = [
+            Faces::CounterClockwise,
+            Faces::Clockwise,
+            Faces::CounterClockwise,
+        ];
+        assert_eq!(faces(&draws), expected);
+        // Mirroring twice turns it back.
+        draws.clear();
+        draws.push_draw(mirrored * mirrored, &single);
+        assert_eq!(faces(&draws), [Faces::CounterClockwise]);
+        // Draws that draw both faces, and sprites, never split for it.
+        draws.clear();
+        for transform in [at, mirrored, at] {
+            draws.push_draw(transform, &double);
+        }
+        for transform in [at, mirrored, at] {
+            draws.push_sprite(transform, Sprite::default());
+        }
+        assert_eq!(faces(&draws), [Faces::Both, Faces::Both]);
+        assert_eq!(runs(&draws), [(1, 1, 0..3), (0, 0, 3..6)]);
     }
 }

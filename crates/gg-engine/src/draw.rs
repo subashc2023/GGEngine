@@ -365,11 +365,12 @@ struct Group {
 /// Draws into `draws` every entity of `world` with a [`Transform`] and a [`Sprite`] or a
 /// [`MeshDraw`]: first the meshes whose shaders are opaque, whose depth hides what's behind them
 /// whatever order they draw in, by their [`MeshDraw::batch`], so that each mesh with each shader is
-/// one instanced draw; then the rest, which blend, back to front by z in the world, as the latest
-/// tick left them, at one z sprites under meshes; each batch and each z in the order of their
-/// entities' IDs, so that entities that overlap at one depth keep how they stack as others come and
-/// go. Each draws `alpha` of the way from what `past` has it
-/// draw from to where the tick left it, while it draws between ticks; at 1, where the tick left it.
+/// one instanced draw, split only where a culling mesh's draws change between mirrored and not;
+/// then the rest, which blend, back to front by z in the world, as the latest tick left them, at
+/// one z sprites under meshes; each batch and each z in the order of their entities' IDs, so that
+/// entities that overlap at one depth keep how they stack as others come and go. Each draws `alpha`
+/// of the way from what `past` has it draw from to where the tick left it, while it draws between
+/// ticks; at 1, where the tick left it.
 /// A child draws where its ancestors carry it, by its world matrix, its transform's and each of
 /// theirs drawn so, which it computes into `scratch` for each child once a frame; roots, in tables
 /// without a [`Parent`], draw by their transforms alone, which those that draw between ticks blend

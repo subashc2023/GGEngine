@@ -253,10 +253,22 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   sheets references on each way the GPU has, the first two reading back the frame that adds an
   asset, draw a 64 MiB texture in the frame that adds it, and write over a filled texture, whose
   layout validation checks; unit tests check the choice of family and of way, and the handover.
+- **Textured glTF models** (2026-10-25): layers add glTF 2.0 models, read by the engine's own
+  reader, which refuses what the engine doesn't draw and what isn't glTF before adding anything,
+  and spawn them into worlds as entities, a node each and a child for each primitive of a mesh with
+  several. Their images, PNGs or JPEGs, as layers' textures may now be too, get mip levels that the
+  CPU makes in linear space as a frame uploads them, weighted by alpha where it's coverage, sampled
+  trilinearly with 16x anisotropy; their materials draw unlit, opaque, masked or blended, and cull
+  by `doubleSided`, a mirrored instance's fronts winding the other way; and the renderer counts
+  triangles. The sandbox draws Cesium's milk truck beside its cubes. GPU tests check models,
+  culling and the alpha modes against a reference, and every mip level on each way of uploading, on
+  the RTX 4090 and the AMD iGPU, where every test now passes, its samplers written into the
+  bindless set rather than immutable; unit tests check the reader's refusals, files cut short or
+  changed byte by byte, the levels' weights and rounding, models spawned, and runs split by faces.
 
-## Now: Phase 4's fifth milestone
+## Now: Phase 4's sixth milestone
 
-[Phase 4](#next)'s fifth milestone is picked from what the phase has left as it starts, and its
+[Phase 4](#next)'s sixth milestone is picked from what the phase has left as it starts, and its
 plan says when it's done.
 
 ## Next
@@ -310,11 +322,11 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Skipped | Add when |
 |---|---|
 | The engine as a dynamic library in development builds, to shorten relinks | Rebuilding a game gets slow |
-| Optimized dependencies in dev builds (`[profile.dev.package."*"] opt-level = 3`) | A heavy dependency (image decoding, physics) makes debug builds slow |
+| Optimized dependencies in dev builds (`[profile.dev.package."*"] opt-level = 3`); zune-jpeg alone is, as it took about 0.75 s to decode the sandbox's truck unoptimized | Another heavy dependency, such as physics, makes debug builds slow |
 | Shipping profile (LTO, `codegen-units = 1`) | Phase 7, with the player |
 | Compiling trace and debug events out of shipping builds, through `tracing`'s `release_max_level_*` features | Phase 7, with the shipping profile |
 | No console window for shipping builds on Windows (`windows_subsystem = "windows"` on the player); the JSON log still records the run | Phase 7, with the shipping profile |
-| Checking the sandbox by hand on Linux, and on macOS with KosmicKrisp (Vulkan SDK 1.4.363.0 or later, the first conformant build), its gamepads too, and the render thread there: acquiring, presenting and rebuilding swapchains as windows resize off the main thread under KosmicKrisp, and on Wayland a frame in flight presenting at its old size after a maximize | Phase 4, once the sandbox draws a glTF mesh |
+| Checking the sandbox by hand on Linux, and on macOS with KosmicKrisp (Vulkan SDK 1.4.363.0 or later, the first conformant build), its gamepads too, and the render thread there: acquiring, presenting and rebuilding swapchains as windows resize off the main thread under KosmicKrisp, and on Wayland a frame in flight presenting at its old size after a maximize | A Linux machine and an Apple Silicon Mac are at hand |
 | Deleting old JSON logs; every run's log is kept | Logs pile up enough to matter |
 | A clean shutdown on Ctrl+C, which now ends the process at once; the JSON log keeps every line written until then, and a recording every whole line but its `end` | A headless run that goes on until it's stopped, such as a dedicated server |
 | GPU tests in Windows and macOS CI, which skip them because hosted runners there have no GPU | A self-hosted runner with a GPU, or a Vulkan driver that runs on those runners without one |
@@ -329,25 +341,27 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Removing meshes, shaders and textures; each lasts until the app ends | Something adds and removes them as it runs, such as asset hot reload in Phase 4 |
 | Per-frame data in a buffer: shaders get the camera's view and projection as one matrix, and see the world through each draw's transform, but not the camera's position, the time or the lights | Phase 6, with lighting |
 | Materials: parameters kept on the GPU and written when they change, rather than copied every frame with each instance | Phase 6, with materials |
-| Counts of vertices, indices or triangles, which follow from the instances; the renderer counts draws and instances | Phase 4, with glTF meshes |
 | Textures of data rather than color, such as normal maps, which shaders read as stored rather than decoded from sRGB | Phase 6, with PBR's maps |
 | Premultiplied alpha for games' textures: with straight alpha, as PNGs store it, a linear filter at an edge mixes in the color of the transparent pixels beside it | A game's art shows dark or colored fringes |
 | Sorting what blends back to front by its depth in the view, rather than by its z in the world, which orders it rightly only as seen from in front of layers parallel to XY: from behind or the side, what blends draws in the wrong order among itself, though opaque meshes, drawn first, hide it rightly; and what layers draw themselves goes in the order given. Sorting coplanar sprites each by its own depth would sort the swarm's 100,000 every frame the camera turns, and swap overlapping ones as it does | A game blends in 3D, such as particles or glass |
-| Back-face culling: pipelines draw both faces, as sprites mirrored by a negative scale need | glTF meshes, by their `doubleSided` |
+| Back-face culling for games' own meshes: `MeshDraw::new` and `Context::draw` draw both faces, as sprites mirrored by a negative scale need; models' materials alone cull | A game draws closed meshes of its own |
+| Mirrored and unmirrored instances of one culling mesh, interleaved in the order of their IDs, draw a run each, since a run culls one way; sorting a run's instances by how they wind would keep it to two | A model instanced many times, some mirrored |
 | Depth other than what a shader's blend implies: draws that ignore it, as gizmos and overlays do, a skybox that tests it without writing it, decals, and sprites cut out by their alpha that write it | Each with its first user |
 | Depth bias, whose sign flips with depth reversed | Phase 6, with shadow maps |
 | A far plane for perspective, as glTF's `zfar` gives; it sees out to infinity | A glTF camera with one, or Phase 8's culling |
 | Keeping the view's depth past its pass, to sample: each frame clears it and doesn't store it | Post-processing, picking, or the tool API's captures |
 | A depth format for a device without D32_SFLOAT depth, which the engine refuses (`gpu.no_device`) | A target device lacks it |
 | Raw mouse motion and a grabbed cursor, for looking about past the window's edges: the fly camera controller looks by the cursor's moves while the right button is held | A game looks with the mouse, as first-person games do |
-| Mipmaps, and anisotropic filtering: a texture drawn smaller than it is samples its one level, and shimmers. A sprite sheet's cells, packed edge to edge, will then mix together at the smaller levels and under anisotropy, which reads past the texels the sprite shader keeps to, and need space around each cell or an array layer each | Phase 4, with the textured glTF mesh |
+| Mipmaps and anisotropic filtering for the textures layers add: `add_texture` and `add_sprite_sheet` give them one level, sampled without anisotropy, so one drawn smaller than it is shimmers. A sprite sheet's cells, packed edge to edge, will then mix together at the smaller levels and under anisotropy, which reads past the texels the sprite shader keeps to, and need space around each cell or an array layer each | A game draws its own textures smaller than they are |
+| Keeping a masked texture's coverage as its levels shrink: averaging thins what its alpha cuts out, such as leaves and fences, at a distance, where scaling each level's alpha to keep the share above the cutoff would keep it | A masked model thins out at a distance |
 | Sprite sheets with space between or around their cells, as some tile sets come; `SpriteSheet` takes cells packed edge to edge from the top left | A game's art comes that way |
 | Tiling one cell of a sheet: a repeating sampler repeats the whole texture | A game tiles part of an atlas, such as a background |
 | A sprite that samples past its rectangle, so that a seamless texture tiled across sprites side by side blends across their edges under a linear sampler | A game tiles one texture across sprites |
 | A tile map in the engine, which scenes save; the sandbox's map is code of its own | Phase 4, which names assets |
-| Images other than PNG, such as the JPEGs glTF allows; and PNGs' own color profiles and gamma, which are ignored, every PNG taken as sRGB | Phase 4, with glTF; Phase 7 cooks KTX2 |
-| Decoding images off the main thread; `Context::add_texture` decodes before it returns | Phase 7, with the streaming loader |
-| Layers making textures from their own pixels; `Textures::add` takes pixels, but `Context` adds only PNGs | A game makes its own textures |
+| glTF that `Context::add_model` refuses or ignores, as it lists: lighting and the material's other textures, skins and animations, morph targets, cameras, models without a scene and scenes other than the default, sparse accessors and accessors without a buffer view, primitives other than triangle lists, samplers that wrap across and down differently, minification filters, texture transforms, quantized or compressed meshes and textures (KHR_mesh_quantization, Draco, meshopt, Basis Universal), and integers written as floats, such as `1.0`, which glTF allows | Each with the first model that needs it; lighting and the other textures in Phase 6, compression with Phase 7's cooker |
+| Decoding images off the main thread; `Context::add_texture` and `add_model` decode before they return | Phase 7, with the streaming loader |
+| Mip levels made on the CPU, on the render thread, as the frame that uploads a model's texture renders: a 2,048 by 2,048 texture's take about 0.3 s of that frame in a debug build | Phase 7, which cooks them; or blits on the GPU, if a hitch shows first |
+| Layers making textures from their own pixels; `Textures::add` takes pixels, but `Context` adds only PNGs and JPEGs | A game makes its own textures |
 | Instances' transforms and parameters, and the UI's vertices, indices and texture changes, reach the GPU through the frame's arena, which merges the buffers it grew into, holding two to three times the largest frame for each frame in flight, in memory the CPU writes: by its growth rule, about 20 MB each for 100,000 sprites, which use 10.4 MB a frame | Phase 7, with the GPU's memory budget |
 | A frame's copies through a transfer queue start only once it's submitted, after its passes are recorded, and the frame waits for them | A profile shows a frame waiting for its uploads |
 | Host image copy where a transfer queue exists, or where the driver says it costs the GPU in reading the image, as KosmicKrisp's does, turning off Apple's lossless compression, so that macOS uploads through the graphics queue; and meshes written straight into GPU memory the CPU reaches, as ReBAR and unified memory allow, rather than copied | A measurement shows either is faster |
@@ -375,8 +389,8 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Codes for dependencies' own warnings, which reach the log as they give them: as a pad connects on Windows.Gaming.Input, gilrs warns, without a code, that it has no mapping for it, since that backend gives every pad a nil UUID, and goes on with its default mapping, the right one there | Phase 5, as the tool API serves diagnostics |
 | Checking a game's shader against the contract on `Shaders::add` through Slang reflection: its push constants, its resources, and the sizes of its vertex and parameter structs against their types'; until then it's trusted, and validation checks it in debug builds | Phase 4, with Slang reflection |
 | Games' shaders compile with slangc as they're added, so running a game needs the Vulkan SDK | Phase 7, which cooks shaders |
-| A library of assets: shaders and textures load from the paths the game gives, the sandbox giving its source's, and nothing finds one by path or name, so a file added twice loads twice; scenes and the tool API will name them | Phase 4, with assets |
-| `Layer::attach` can't fail, so a layer whose shader doesn't compile, or whose texture doesn't load, panics, as the sandbox does | A game loads assets as it starts |
+| A library of assets: shaders, textures and models load from the paths the game gives, the sandbox giving its source's, and nothing finds one by path or name, so a file added twice loads twice; scenes and the tool API will name them | Phase 4, with assets |
+| `Layer::attach` can't fail, so a layer whose shader doesn't compile, or whose texture or model doesn't load, panics, as the sandbox does | A game loads assets as it starts |
 | 8- and 16-bit vertex fields, whose features Vulkan 1.4 guarantees but the device doesn't enable | A mesh packs its vertices, as Phase 7's cooker will |
 | A swapchain without an sRGB format falls back to the first one offered, where colors come out too dark | A device offers no sRGB swapchain format |
 | Splits in a torn-off window, which holds one tab group | A tool wants panels side by side outside the main window |

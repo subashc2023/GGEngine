@@ -100,6 +100,8 @@ impl UiPass {
                         // egui's colors are sRGB-encoded, and the shader decodes them after
                         // multiplying, as egui expects.
                         TextureFormat::Rgba8Unorm,
+                        // Drawn at its size, and written in patches, which levels can't be.
+                        false,
                         &name,
                     )?;
                     self.textures.insert(id, (texture, sampler));
