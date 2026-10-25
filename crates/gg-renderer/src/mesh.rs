@@ -14,9 +14,8 @@ use gg_gpu::{
     TextureFormat,
 };
 
-use crate::shader::{Shader, Shaders};
-use crate::texture::Textures;
-use crate::{DrawCounts, Draws, sprite};
+use crate::shader::Shader;
+use crate::{DrawCounts, Draws, Uploads, sprite};
 
 /// A mesh that [`Meshes::add`] handed out, of vertex type `V`.
 pub struct Mesh<V> {
@@ -92,16 +91,17 @@ impl MeshDraw {
 }
 
 /// The meshes a renderer draws, the first of them the engine's quad, which sprites are drawn on.
-/// It hands out each one's handle at once, and keeps its vertices and indices until the next frame
-/// that renders copies them to the GPU. A renderer draws the meshes of one `Meshes` only.
+/// It hands out each one's handle at once, and keeps its vertices and indices until
+/// [`Uploads::take`] takes them, for a frame to copy to the GPU. A renderer draws the meshes of one
+/// `Meshes` only.
 pub struct Meshes {
-    /// Those added since a frame last took them, in order.
-    added: Vec<Added>,
+    /// Those added since they were last taken, in order.
+    pub(crate) added: Vec<Added>,
     /// How many have been added.
     count: u32,
 }
 
-struct Added {
+pub(crate) struct Added {
     index: u32,
     name: String,
     vertices: Vec<u8>,
@@ -112,7 +112,7 @@ struct Added {
 impl Meshes {
     /// Adds a mesh of triangles, three of `indices` each, which index `vertices`. `name` names it
     /// in errors and GPU captures. It draws with shaders for `V`, which read its vertices as
-    /// [`Shaders::add`] says.
+    /// [`Shaders::add`](crate::Shaders::add) says.
     ///
     /// Fails with `renderer.bad_mesh` if it has no triangles, indices left over from whole
     /// triangles, or an index past its vertices.
@@ -207,14 +207,14 @@ impl MeshPass {
         }
     }
 
-    /// Makes the pipelines of the shaders added to `shaders` since the pass last took them.
+    /// Makes the pipelines of the shaders in `uploads`, taking them.
     ///
     /// # Panics
     ///
-    /// If `shaders` isn't the one the pass has been taking shaders from.
-    pub(crate) fn add_shaders(&mut self, shaders: &mut Shaders) -> Result<()> {
+    /// If they were taken from another `Shaders` than the pass's shaders before them.
+    pub(crate) fn add_shaders(&mut self, uploads: &mut Uploads) -> Result<()> {
         let _zone = gg_core::zone!();
-        for added in shaders.added.drain(..) {
+        for added in uploads.shaders.drain(..) {
             assert_eq!(
                 added.index as usize,
                 self.shaders.len(),
@@ -240,20 +240,16 @@ impl MeshPass {
         Ok(())
     }
 
-    /// Copies the meshes and textures added to `meshes` and `textures` since a frame last took them
-    /// to the GPU, which must happen before the frame's passes.
+    /// Copies the meshes and textures in `uploads` to the GPU, taking them, which must happen
+    /// before the frame's passes.
     ///
     /// # Panics
     ///
-    /// If `meshes` or `textures` isn't the one the pass has been taking them from.
-    pub(crate) fn upload(
-        &mut self,
-        frame: &mut Frame<'_>,
-        meshes: &mut Meshes,
-        textures: &mut Textures,
-    ) -> Result<()> {
+    /// If they were taken from another `Meshes` or `Textures` than the pass's meshes and textures
+    /// before them.
+    pub(crate) fn upload(&mut self, frame: &mut Frame<'_>, uploads: &mut Uploads) -> Result<()> {
         let _zone = gg_core::zone!();
-        for added in meshes.added.drain(..) {
+        for added in uploads.meshes.drain(..) {
             assert_eq!(
                 added.index as usize,
                 self.meshes.len(),
@@ -274,7 +270,7 @@ impl MeshPass {
             frame.write_buffer(&mut mesh.indices, 0, indices)?;
             self.meshes.push(mesh);
         }
-        for added in textures.added.drain(..) {
+        for added in uploads.textures.drain(..) {
             assert_eq!(
                 added.index as usize,
                 self.textures.len(),
@@ -387,5 +383,22 @@ mod tests {
         // After the engine's quad.
         assert_eq!(add(&[0, 1, 2]).ok(), Some(1));
         assert_eq!(add(&[2, 1, 0]).ok(), Some(2));
+    }
+
+    #[test]
+    fn uploads_keep_what_a_frame_left_ahead_of_what_they_take_next() {
+        let mut meshes = Meshes::default();
+        let mut shaders = crate::Shaders::default();
+        let mut textures = crate::Textures::default();
+        let mut uploads = Uploads::default();
+        uploads.take(&mut meshes, &mut shaders, &mut textures);
+        // As a frame that presented nothing leaves them, and more are added before the next.
+        meshes.add("a", &TRIANGLE, &[0, 1, 2]).unwrap();
+        textures.add("a", [1, 1], &[255; 4]).unwrap();
+        uploads.take(&mut meshes, &mut shaders, &mut textures);
+        let meshes_held: Vec<u32> = uploads.meshes.iter().map(|added| added.index).collect();
+        let textures_held: Vec<u32> = uploads.textures.iter().map(|added| added.index).collect();
+        assert_eq!((meshes_held, textures_held), (vec![0, 1], vec![0, 1]));
+        assert!(meshes.added.is_empty() && textures.added.is_empty());
     }
 }

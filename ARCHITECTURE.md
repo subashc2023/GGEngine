@@ -48,8 +48,9 @@ are in [AGENTS.md](AGENTS.md).
   buffers, images, descriptors, pipelines, swapchain, synchronization and submission.
 - **`gg-renderer`:** the render graph, passes, materials, lighting and post-processing. It owns
   the GPU resources and hands out handles to them.
-- **`gg-engine`:** the main loop, window and input, the job system, scene and assets, plus hot
-  reload and the tool API in development builds: what apps and games build on.
+- **`gg-engine`:** the main loop, window and input, the job system and the render thread, scene
+  and assets, plus hot reload and the tool API in development builds: what apps and games build
+  on.
 - **`gg-macros`:** the derives `gg-engine` re-exports beside its traits of the same names,
   `Reflect` and `Component`. Rust builds a derive as a crate of its own; only `gg-engine`
   depends on it, and games derive through `gg-engine`.
@@ -71,8 +72,9 @@ settings by executable name, and a generic name can match one.
    device layer keeps the unsafe surface small and reviewable, and lets rendering techniques
    change quickly on safe types.
 4. **`gg-renderer` never sees the scene.** Each frame the engine extracts plain render data
-   (cameras, instances, lights, settings) and hands it over. That lets rendering run on its own
-   thread a frame behind simulation, and renderer tests run without the engine.
+   (cameras, instances, lights, settings) and hands it over. So rendering runs on its own thread,
+   a frame behind simulation, as [Threads](#threads) says, and renderer tests run without the
+   engine.
 5. **The engine reaches the GPU only through `gg-renderer`.**
 6. **`main` is thin.** An app's or a game's `main` describes it and hands control to
    `gg-engine`, so there is no entry-point crate. Android will be the exception: its
@@ -388,13 +390,15 @@ Diagnostics are data, so agents and tools can act on them as reliably as people 
   involved, and a panic is logged with its location before the process ends.
 - **Profiling.** Code marks its work with zones (`gg_core::zone!`), which Tracy lays out on a
   timeline of frames, with plots such as each frame's draws; without the `tracy` feature they
-  compile to nothing. The engine also measures every frame itself, always: its time, and how much
-  of it went to the simulation's ticks, the layers' updates and drawing the world, together, the
-  UI, rendering and waiting for the GPU and the display. The Performance panel, an overlay apps
-  add, shows them, and a run that doesn't end in an error logs `engine.perf` as it ends: the frame
-  times' percentiles, means and maxima, how long the run took to start, its first frame and its
-  shutdown, the ticks it ran and dropped, with the GPU and the build, so that an agent can compare
-  two builds by their runs. GPU timestamps for each pass come with the render graph.
+  compile to nothing. The engine also measures every frame itself, always: its time on the main
+  thread, and how much of it went to the simulation's ticks, the layers' updates and drawing the
+  world, the UI, and waiting for the render thread; and how long the render thread took on the
+  frame before, rendering and waiting for the GPU and the display. The Performance panel, an
+  overlay apps add, shows them, and a run that doesn't end in an error logs `engine.perf` as it
+  ends: the frame times' percentiles, means and maxima, how long the run took to start, its first
+  frame and its shutdown, the ticks it ran and dropped, with the GPU and the build, so that an
+  agent can compare two builds by their runs. GPU timestamps for each pass come with the render
+  graph.
 
 ## Events and layers
 
@@ -432,9 +436,10 @@ layout is saved as RON in the OS's directory for per-user state, never
 beside the executable; headless runs neither read nor write it.
 
 The torn-off windows are egui's immediate viewports: egui runs each one's pass inside the main
-window's, and the main window's frame renders them all. Only the main window paces frames;
-another with no image free skips the frame. Their events go to egui, never to the layers. On
-Wayland, where windows can't be placed, groups float over the main window instead.
+window's, and the main window's frame renders them all. Only the main window's swapchain paces
+the render thread, and the frames with it; another with no image free skips the frame. Their
+events go to egui, never to the layers. On Wayland, where windows can't be placed, groups float
+over the main window instead.
 
 Layers add menus through `Ui` too. The OS draws the windows' frames, and the menus get a bar of
 their own below its title bar, unless the app calls `App::custom_title_bar`, as tools do for the
@@ -492,16 +497,18 @@ and scenes, physics and the editor share these axes.
 
 ## Rendering
 
-Each frame the engine hands `gg-renderer` that frame's render data, as plain data: the color the
-view clears to, the game's view, the camera it sees the world from, and what to draw in it, in
-order: meshes, each with a shader for its vertex type, the parameters that shader takes, and a
-transform that places it in the world. The view is the main window's central area, which the
+Each frame the engine extracts that frame's render data, as plain data, which the render thread
+hands `gg-renderer`: the color the view clears to, the game's view, the camera it sees the world
+from, and what to draw in it, in order: meshes, each with a shader for its vertex type, the
+parameters that shader takes, and a transform that places it in the world. The view is the main
+window's central area, which the
 dock leaves the game. It renders into an image of its own, the central area's size in pixels,
 made again as that size changes, which the frame then shows there, with the UI over it, so that
 depth, HDR and tonemapping, post-processing and the tool API's captures read the view whole; and
 games' pipelines are made for that image's format, 8-bit sRGB, whatever the window presents.
 Layers add shaders, meshes and textures, draw them and set the camera through their `Context`,
-and the renderer's `Shaders`, `Meshes` and `Textures` hand out their handles at once. After the
+and the renderer's `Shaders`, `Meshes` and `Textures` hand out their handles at once, on the main
+thread; each frame's render data carries what's been added to them since, in order. After the
 frame's ticks and the layers' updates, the engine draws the world's entities that have a
 `Transform` and a sprite or a `MeshDraw`, a mesh with its shader and parameters held without
 their types, over what the layers drew, back to front by their z's in the world, children where
@@ -583,14 +590,30 @@ half copied to the GPU.
 ## Threads
 
 The main thread runs the OS event loop, which macOS requires, and the layers and their ticks.
-Simulation runs on a job system: rayon-core's pool of `--threads` threads, one per CPU by default,
-the main thread among them, which a tick's systems hand their rows to through its `join` and wait
-for, so that the world changes only within a system's call. A job changes only its own rows, work
+Simulation runs on a job system: rayon-core's pool of `--threads` threads, by default one per CPU
+but the one the render thread has, the main thread among them, which a tick's systems hand their
+rows to through its `join` and wait for, so that the world changes only within a system's call. A
+job changes only its own rows, work
 splits at a fixed number of rows, and no thread changes its floating-point environment, so that
 results don't depend on how many threads there are or which takes what; outside the pool, as in
 tests and with `--threads 1`, jobs run one after another on the thread that calls. Steady-state
-ticks allocate nothing on any thread. The render thread records and submits frame N while
-simulation computes frame N+1, and the GPU works on up to two frames at once.
+ticks allocate nothing on any thread.
+
+Rendering runs on a thread of its own, `gg-render`, a frame behind. Once a frame's UI is drawn
+and tessellated, the main thread takes the renderer back from the render thread, waiting for it to
+finish the frame before, and hands it over again with the frame's render data, owned: so the main
+thread is at most a frame ahead, and the GPU works on up to two frames behind that. While the
+renderer is back, the main thread tells it the windows' sizes, opens and closes windows'
+swapchains, and at the end drops it: Windows and macOS give out a window's handle only on its own
+thread, and macOS closes a window there, so the render thread never makes a surface or holds the
+last reference to a window. One thread at a time calls the renderer. The frame's draws swap
+between two buffers that keep their memory, and what layers added since the last frame goes with
+it. The render thread rebuilds a swapchain whose window changed size as it acquires the next
+image. On Windows the main thread answers what's sent to its windows while it waits, since a
+swapchain's acquire, present and rebuild may send the window's thread a message and wait for the
+answer.
+An error while rendering comes back with the renderer and ends the run, and a panic resumes on the
+main thread.
 
 ## Platforms
 

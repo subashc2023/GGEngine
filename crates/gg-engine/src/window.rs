@@ -1,8 +1,11 @@
 //! Windowed runs: the winit event loop, which hands the main window's events to the layers and
-//! renders a frame whenever the window can show one.
+//! runs a frame whenever the window can show one, which renders on the render thread while the
+//! next runs.
 
+use std::any::Any;
 use std::mem;
 use std::ops::ControlFlow;
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -11,7 +14,7 @@ use gg_core::{Error, Result};
 use gg_renderer::Renderer;
 use tracing::{debug, info, trace};
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalPosition};
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
@@ -22,12 +25,13 @@ use crate::chrome::{self, Chrome};
 use crate::dock::{self, Dock};
 use crate::layer::Stack;
 use crate::pads::Gamepads;
+use crate::render_thread::RenderThread;
 use crate::viewports::{self, Viewports, WindowInput};
 #[cfg(target_os = "windows")]
 use crate::windows_frame::Frame;
 use crate::{
-    App, Clock, Context, Event, Ran, Stepper, egui_context, event, render_frame, run_frame,
-    settings,
+    App, Clock, Context, Event, Ran, Stepper, egui_context, event, hand_off, run_frame, settings,
+    take_back, tessellate,
 };
 
 pub(crate) fn run(app: &mut App, args: &Args) -> Result<Ran> {
@@ -50,7 +54,8 @@ pub(crate) fn run(app: &mut App, args: &Args) -> Result<Ran> {
         window: None,
         #[cfg(target_os = "windows")]
         frame: None,
-        renderer: None,
+        render: None,
+        resized: None,
         egui: egui_context(),
         egui_winit: None,
         viewports: None,
@@ -62,8 +67,13 @@ pub(crate) fn run(app: &mut App, args: &Args) -> Result<Ran> {
         minimized: false,
         error: None,
         ran: None,
+        panic: None,
     };
-    event_loop.run_app(&mut handler).map_err(|error| {
+    let ran = event_loop.run_app(&mut handler);
+    if let Some(panic) = handler.panic.take() {
+        panic::resume_unwind(panic);
+    }
+    ran.map_err(|error| {
         Error::new("engine.window", "the window system's event loop failed").with_source(error)
     })?;
     match (handler.error, handler.ran) {
@@ -76,8 +86,8 @@ pub(crate) fn run(app: &mut App, args: &Args) -> Result<Ran> {
     }
 }
 
-/// The event loop's state: the window and renderer once the loop starts, and how the run went.
-/// The layers are attached while the renderer exists.
+/// The event loop's state: the window and the render thread once the loop starts, and how the run
+/// went. The layers are attached while the renderer exists.
 struct Handler<'a> {
     app: &'a mut App,
     args: &'a Args,
@@ -87,7 +97,13 @@ struct Handler<'a> {
     /// Windows' own frame around the main window, when the UI draws its title bar.
     #[cfg(target_os = "windows")]
     frame: Option<Frame>,
-    renderer: Option<Renderer>,
+    /// Renders the frames, each while the next runs. Before `viewports` and `cx`, which hold the
+    /// windows too, so that on a way out that leaves it running, it takes the renderer back as it
+    /// drops, and the renderer drops here, before the windows it presents to.
+    render: Option<RenderThread>,
+    /// The main window's size since the renderer was last told it, which it's told once it's back
+    /// from rendering.
+    resized: Option<PhysicalSize<u32>>,
     egui: egui::Context,
     /// egui's view of the window, which turns its events into egui's input.
     egui_winit: Option<WindowInput>,
@@ -105,6 +121,9 @@ struct Handler<'a> {
     minimized: bool,
     error: Option<Error>,
     ran: Option<Ran>,
+    /// A panic rendering the frame that renders as the loop ends, which resumes once it has:
+    /// winit on Windows drops a panic that leaves `exiting`.
+    panic: Option<Box<dyn Any + Send>>,
 }
 
 impl Handler<'_> {
@@ -131,7 +150,7 @@ impl Handler<'_> {
         );
         let settings = settings(self.app, self.args);
         let renderer = Renderer::windowed(&settings, window.clone(), size.width, size.height)?;
-        self.renderer = Some(renderer);
+        self.render = Some(RenderThread::start(renderer)?);
         self.egui_winit = Some(WindowInput::new(&self.egui, ViewportId::ROOT, &window));
         self.viewports = Some(Viewports::new(
             &self.egui,
@@ -155,9 +174,9 @@ impl Handler<'_> {
         gamepads.poll(|event| {
             let _ = dispatch(&mut app.stack, cx, &event);
         });
-        let (Some(window), Some(renderer), Some(egui_winit), Some(viewports)) = (
+        let (Some(window), Some(render), Some(egui_winit), Some(viewports)) = (
             &self.window,
-            &mut self.renderer,
+            &mut self.render,
             &mut self.egui_winit,
             &self.viewports,
         ) else {
@@ -180,8 +199,40 @@ impl Handler<'_> {
                 input,
             )
         });
+        let (ui, tessellated) = tessellate(&self.egui, &mut output);
+        // The frame before, which rendered meanwhile.
+        let (mut minimized, mut failed) = (false, None);
+        match take_back(render, &mut self.cx, tessellated) {
+            Ok(Some(true)) => {
+                self.frames += 1;
+                if self.args.frames.is_some_and(|limit| self.frames >= limit) {
+                    event_loop.exit();
+                }
+            }
+            // Nothing was presented. Without a window area, rendering waits for a resize;
+            // otherwise the swapchain is rebuilt in time for the next frame.
+            Ok(Some(false)) => {
+                let size = window.inner_size();
+                minimized = size.width == 0 || size.height == 0;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                failed = Some(error);
+                event_loop.exit();
+            }
+        }
+        // A run that's ending hands over no more frames: one past `--frames` would present.
         let outputs = mem::take(&mut output.viewport_output);
-        let (mut windows, close) = viewports.end_frame(&self.egui, egui_winit, outputs, renderer);
+        let mut close = false;
+        if !event_loop.exiting() {
+            let renderer = render.renderer();
+            if let Some(size) = self.resized.take() {
+                renderer.resize(size.width, size.height);
+            }
+            let windows;
+            (windows, close) = viewports.end_frame(&self.egui, egui_winit, outputs, renderer);
+            hand_off(render, &mut self.cx, self.dock.central(), ui, windows);
+        }
         let ppp = egui_winit::pixels_per_point(&self.egui, window);
         if let Some(pos) = self.dock.take_window_menu() {
             window.show_window_menu(PhysicalPosition::new(pos.x * ppp, pos.y * ppp));
@@ -193,37 +244,14 @@ impl Handler<'_> {
                 window.show_window_menu(pos);
             }
         }
-        let view = self.dock.central();
-        let rendered = render_frame(
-            &self.egui,
-            &mut self.cx,
-            view,
-            output,
-            &mut windows,
-            renderer,
-        );
-        let rendered = rendered.map(|(presented, platform_output)| {
-            egui_winit
-                .state
-                .handle_platform_output(window, platform_output);
-            presented
-        });
-        match rendered {
-            Ok(true) => {
-                self.frames += 1;
-                if self.args.frames.is_some_and(|limit| self.frames >= limit) {
-                    event_loop.exit();
-                }
-            }
-            // Nothing was presented. Without a window area, rendering waits for a resize;
-            // otherwise the swapchain is rebuilt in time for the next frame.
-            Ok(false) => {
-                let size = window.inner_size();
-                if size.width == 0 || size.height == 0 {
-                    self.set_minimized(true);
-                }
-            }
-            Err(error) => self.fail(event_loop, error),
+        // egui's requests of the main window, such as the cursor to show, which don't wait for
+        // the frame to render.
+        (egui_winit.state).handle_platform_output(window, output.platform_output);
+        if minimized {
+            self.set_minimized(true);
+        }
+        if let Some(error) = failed {
+            self.fail(event_loop, error);
         }
         if let Err(error) = self.app.stack.recorded() {
             self.fail(event_loop, error);
@@ -309,11 +337,10 @@ impl ApplicationHandler for Handler<'_> {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
-        if let (Some(window), Some(viewports), Some(renderer)) =
-            (&self.window, &self.viewports, &mut self.renderer)
+        if let (Some(window), Some(viewports)) = (&self.window, &self.viewports)
             && window.id() != id
         {
-            viewports.window_event(id, &event, renderer);
+            viewports.window_event(id, &event);
             return;
         }
         // egui, the top overlay, sees each event first, and keeps the input it wants: a click
@@ -347,9 +374,7 @@ impl ApplicationHandler for Handler<'_> {
         );
         match event {
             WindowEvent::Resized(size) => {
-                if let Some(renderer) = &mut self.renderer {
-                    renderer.resize(size.width, size.height);
-                }
+                self.resized = Some(size);
                 if size.width == 0 || size.height == 0 {
                     self.set_minimized(true);
                     return;
@@ -364,7 +389,12 @@ impl ApplicationHandler for Handler<'_> {
                 self.request_frame(event_loop);
             }
             WindowEvent::RedrawRequested => {
-                self.frame(event_loop);
+                // No frame runs while the window has no area, or it would count the pause: a
+                // redraw asked for before the window was minimized still comes, and as Windows
+                // restores it, a redraw comes before the resize that ends the pause.
+                if !self.minimized {
+                    self.frame(event_loop);
+                }
                 // Windows doesn't call `about_to_wait` while it moves or resizes one of the app's
                 // windows, in a loop of its own, so each frame asks for the next. winit calls
                 // `about_to_wait` between two frames otherwise, and the two requests make one.
@@ -390,16 +420,35 @@ impl ApplicationHandler for Handler<'_> {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // Frames render back to back, paced by presentation: mailbox's to the GPU, FIFO's
-        // (`--vsync`) to the display.
+        // Frames run back to back, paced by the render thread, which presentation paces: mailbox's
+        // to the GPU, FIFO's (`--vsync`) to the display.
         self.request_frame(event_loop);
     }
 
     fn exiting(&mut self, _: &ActiveEventLoop) {
+        // The last frame ends here, and the frame handed over last renders, and counts, before
+        // the run's end is timed.
+        (self.cx.perf).finish(self.clock.since_last(Instant::now()));
+        let stopped = self.render.take().and_then(|render| {
+            match panic::catch_unwind(AssertUnwindSafe(|| render.stop())) {
+                Ok(stopped) => Some(stopped),
+                Err(panic) => {
+                    self.panic = Some(panic);
+                    None
+                }
+            }
+        });
         let stopping = Instant::now();
         let _zone = gg_core::zone!("shutdown");
         self.dock.save();
-        if let Some(renderer) = self.renderer.take() {
+        if let Some((renderer, last)) = stopped {
+            match last.map(|last| last.presented) {
+                Some(Ok(true)) => self.frames += 1,
+                Some(Err(error)) => {
+                    self.error.get_or_insert(error);
+                }
+                _ => {}
+            }
             self.app.stack.detach(&mut self.cx);
             // The recording's end, which detaching writes.
             if let Err(error) = self.app.stack.recorded() {

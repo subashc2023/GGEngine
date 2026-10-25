@@ -17,7 +17,7 @@ use bytemuck::NoUninit;
 use gg_core::math::{self, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{
     Blend, Camera, DrawCounts, Draws, MeshDraw, Meshes, Projection, RenderData, Renderer, Sampler,
-    Settings, Shaders, Sprite, SpriteSheet, Texture, Textures, Ui, Viewport,
+    Settings, Shaders, Sprite, SpriteSheet, Texture, Textures, Ui, Uploads, Viewport,
 };
 
 fn main() {
@@ -97,6 +97,7 @@ fn ui_matches_its_reference() {
     let mut meshes = Meshes::default();
     let mut shaders = Shaders::default();
     let mut textures = Textures::default();
+    let mut uploads = Uploads::default();
     let draws = Draws::default();
 
     let egui = egui::Context::default();
@@ -129,6 +130,7 @@ fn ui_matches_its_reference() {
             textures: &mut output.textures_delta,
             pixels_per_point: output.pixels_per_point,
         };
+        uploads.take(&mut meshes, &mut shaders, &mut textures);
         let data = RenderData {
             clear_color: CLEAR,
             viewport: Viewport {
@@ -136,9 +138,7 @@ fn ui_matches_its_reference() {
                 size: [WIDTH, HEIGHT],
             },
             camera: Camera::default(),
-            meshes: &mut meshes,
-            shaders: &mut shaders,
-            textures: &mut textures,
+            uploads: &mut uploads,
             draws: &draws,
         };
         assert!(
@@ -168,6 +168,7 @@ fn meshes_match_their_reference() {
     let mut meshes = Meshes::default();
     let mut shaders = Shaders::default();
     let mut textures = Textures::default();
+    let mut uploads = Uploads::default();
     // 4 units from the view's bottom to its top, which is 160 pixels, so 40 pixels a unit both
     // ways; the view's center is (1, 0.5).
     let camera = Camera {
@@ -223,6 +224,7 @@ fn meshes_match_their_reference() {
                 .expect("a mesh");
             draws.push(triangle, colored, transform(2.0, 0.0, [1.0, 0.5]), ());
         }
+        uploads.take(&mut meshes, &mut shaders, &mut textures);
         let data = RenderData {
             clear_color: CLEAR,
             // Off the image's corner, so that the image shows where the view is.
@@ -231,9 +233,7 @@ fn meshes_match_their_reference() {
                 size: [240, 160],
             },
             camera,
-            meshes: &mut meshes,
-            shaders: &mut shaders,
-            textures: &mut textures,
+            uploads: &mut uploads,
             draws: &draws,
         };
         render_without_ui(&mut renderer, data);
@@ -266,6 +266,7 @@ fn textures_match_their_reference() {
     let mut meshes = Meshes::default();
     let mut shaders = Shaders::default();
     let mut textures = Textures::default();
+    let mut uploads = Uploads::default();
     // 4 units from the view's bottom to its top, 40 pixels a unit, and 6 across, around the origin.
     let camera = Camera {
         projection: Projection::Orthographic {
@@ -337,6 +338,7 @@ fn textures_match_their_reference() {
             };
             draws.push(plain, textured, place(0.0), sampling);
         }
+        uploads.take(&mut meshes, &mut shaders, &mut textures);
         let data = RenderData {
             clear_color: CLEAR,
             viewport: Viewport {
@@ -344,9 +346,7 @@ fn textures_match_their_reference() {
                 size: [WIDTH, HEIGHT],
             },
             camera,
-            meshes: &mut meshes,
-            shaders: &mut shaders,
-            textures: &mut textures,
+            uploads: &mut uploads,
             draws: &draws,
         };
         render_without_ui(&mut renderer, data);
@@ -370,6 +370,7 @@ fn sprites_match_their_reference() {
     let mut meshes = Meshes::default();
     let mut shaders = Shaders::default();
     let mut textures = Textures::default();
+    let mut uploads = Uploads::default();
     // 4 units from the view's bottom to its top, 40 pixels a unit, and 6 across, around the origin.
     let camera = Camera {
         projection: Projection::Orthographic {
@@ -433,6 +434,7 @@ fn sprites_match_their_reference() {
     draws.push_sprite(place([1.5, -1.0], [1.5, 1.5]), tinted);
     // More frames than are in flight.
     for _ in 0..3 {
+        uploads.take(&mut meshes, &mut shaders, &mut textures);
         let data = RenderData {
             clear_color: CLEAR,
             viewport: Viewport {
@@ -440,9 +442,7 @@ fn sprites_match_their_reference() {
                 size: [WIDTH, HEIGHT],
             },
             camera,
-            meshes: &mut meshes,
-            shaders: &mut shaders,
-            textures: &mut textures,
+            uploads: &mut uploads,
             draws: &draws,
         };
         render_without_ui(&mut renderer, data);
@@ -472,6 +472,7 @@ fn batches_match_their_reference() {
     let mut meshes = Meshes::default();
     let mut shaders = Shaders::default();
     let mut textures = Textures::default();
+    let mut uploads = Uploads::default();
     // 4 units from the view's bottom to its top, 40 pixels a unit, and 6 across, around the origin.
     let camera = Camera {
         projection: Projection::Orthographic {
@@ -575,6 +576,7 @@ fn batches_match_their_reference() {
                 draws.push_sprite(transform, sprite);
             }
         }
+        uploads.take(&mut meshes, &mut shaders, &mut textures);
         let data = RenderData {
             clear_color: CLEAR,
             viewport: Viewport {
@@ -582,9 +584,7 @@ fn batches_match_their_reference() {
                 size: [WIDTH, HEIGHT],
             },
             camera,
-            meshes: &mut meshes,
-            shaders: &mut shaders,
-            textures: &mut textures,
+            uploads: &mut uploads,
             draws: &draws,
         };
         render_without_ui(&mut renderer, data);
@@ -617,6 +617,7 @@ fn sheets_match_their_reference() {
     let mut meshes = Meshes::default();
     let mut shaders = Shaders::default();
     let mut textures = Textures::default();
+    let mut uploads = Uploads::default();
     // 5 units from the view's bottom to its top, 40 pixels a unit, and 6 across, around the origin.
     let camera = Camera {
         projection: Projection::Orthographic {
@@ -748,6 +749,7 @@ fn sheets_match_their_reference() {
     draws.push_sprite(place([0.8, -1.8], [0.4, 0.8], 0.0), line);
     // More frames than are in flight.
     for _ in 0..3 {
+        uploads.take(&mut meshes, &mut shaders, &mut textures);
         let data = RenderData {
             clear_color: CLEAR,
             viewport: Viewport {
@@ -755,9 +757,7 @@ fn sheets_match_their_reference() {
                 size: [WIDTH, HEIGHT],
             },
             camera,
-            meshes: &mut meshes,
-            shaders: &mut shaders,
-            textures: &mut textures,
+            uploads: &mut uploads,
             draws: &draws,
         };
         render_without_ui(&mut renderer, data);
@@ -786,6 +786,7 @@ fn views_match_their_reference() {
     let mut meshes = Meshes::default();
     let mut shaders = Shaders::default();
     let mut textures = Textures::default();
+    let mut uploads = Uploads::default();
     // 4 units from the view's bottom to its top; the view's center is (1, 0.5).
     let camera = Camera {
         position: Vec3::new(1.0, 0.5, 0.0),
@@ -875,13 +876,12 @@ fn views_match_their_reference() {
     };
     let mut shown = None;
     for (frame, viewport) in views.into_iter().enumerate() {
+        uploads.take(&mut meshes, &mut shaders, &mut textures);
         let data = RenderData {
             clear_color: CLEAR,
             viewport,
             camera,
-            meshes: &mut meshes,
-            shaders: &mut shaders,
-            textures: &mut textures,
+            uploads: &mut uploads,
             draws: &draws,
         };
         render_without_ui(&mut renderer, data);

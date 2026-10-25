@@ -1,9 +1,10 @@
 //! What apps build on: the main loop, which steps the simulation at a fixed rate whatever the frame
 //! rate, window and input, and the actions that name what a game does with it, and layers, which
 //! change the world at its ticks, and their UI; the world of entities and their components, which
-//! it draws, handing each frame's render data to `gg-renderer`, and the job system, which a tick's
-//! systems split a query's rows across; reflection, which describes the components' types so that
-//! tools reach them by name, and the Inspector, which edits them; scenes and prefabs, the world's
+//! it draws, handing each frame's render data to `gg-renderer` on a thread of its own, a frame
+//! behind, and the job system, which a tick's systems split a query's rows across; reflection,
+//! which describes the components' types so that tools reach them by name, and the Inspector,
+//! which edits them; scenes and prefabs, the world's
 //! entities as canonical text; operations, the authoring changes made to the world, each with its
 //! inverse, and their log, which undoes and redoes them; recordings of runs, the commands their
 //! ticks applied, which replay without a GPU to the same world, naming where one goes another way;
@@ -31,6 +32,7 @@ mod pads;
 mod perf;
 mod recording;
 pub mod reflect;
+mod render_thread;
 mod transform;
 mod viewports;
 mod window;
@@ -39,6 +41,11 @@ mod window;
 #[cfg(target_os = "windows")]
 #[allow(unsafe_code)]
 mod windows_frame;
+// The main thread's wait for the render thread answers what's sent to its windows meanwhile, which
+// only unsafe code does: this module alone may use it.
+#[cfg(target_os = "windows")]
+#[allow(unsafe_code)]
+mod windows_wait;
 
 use std::mem;
 use std::path::{Path, PathBuf};
@@ -91,6 +98,7 @@ use recording::Recorder;
 #[doc(hidden)]
 pub use recording::Replay;
 pub use reflect::Reflect;
+use render_thread::{RenderThread, TextureChanges};
 pub use transform::Transform;
 use viewports::Drawn;
 
@@ -231,10 +239,12 @@ pub fn run(mut app: App) -> ExitCode {
 }
 
 /// Renders offscreen, without a window, as fast as the GPU allows, with a tick of the simulation
-/// each frame, so that a run of a set number of frames runs as many ticks on any machine.
+/// each frame, so that a run of a set number of frames runs as many ticks on any machine. Frames
+/// render on the render thread, as a windowed run's do, the last as the run ends.
 fn run_headless(app: &mut App, args: &Args) -> Result<Ran> {
     let (width, height) = (1280, 720);
-    let mut renderer = Renderer::headless(&settings(app, args), width, height)?;
+    let renderer = Renderer::headless(&settings(app, args), width, height)?;
+    let mut render = RenderThread::start(renderer)?;
     let mut cx = Context::new(None);
     let mut clock = Clock::default();
     let mut stepper = Stepper::lockstep();
@@ -242,10 +252,11 @@ fn run_headless(app: &mut App, args: &Args) -> Result<Ran> {
     // Headless runs neither read nor save the layout, so that they're reproducible, and have no
     // window to frame.
     let mut dock = Dock::new(None, Chrome::Os);
-    let mut frames = 0;
+    // The frames handed over to render, and those rendered.
+    let (mut handed, mut frames) = (0, 0);
     app.stack.attach(&mut cx);
     let rendered = (|| -> Result<()> {
-        while args.frames.is_none_or(|limit| frames < limit) {
+        while args.frames.is_none_or(|limit| handed < limit) {
             // One point is one pixel, as on a display without scaling.
             let input = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
@@ -255,7 +266,7 @@ fn run_headless(app: &mut App, args: &Args) -> Result<Ran> {
                 time: Some(clock.elapsed().as_secs_f64()),
                 ..Default::default()
             };
-            let output = run_frame(
+            let mut output = run_frame(
                 &mut app.stack,
                 &mut cx,
                 &mut clock,
@@ -264,19 +275,27 @@ fn run_headless(app: &mut App, args: &Args) -> Result<Ran> {
                 &mut dock,
                 input,
             );
-            render_frame(
-                &egui,
-                &mut cx,
-                dock.central(),
-                output,
-                &mut [],
-                &mut renderer,
-            )?;
+            let (ui, tessellated) = tessellate(&egui, &mut output);
+            if take_back(&mut render, &mut cx, tessellated)?.is_some() {
+                frames += 1;
+            }
+            hand_off(&mut render, &mut cx, dock.central(), ui, Vec::new());
+            handed += 1;
             app.stack.recorded()?;
-            frames += 1;
         }
         Ok(())
     })();
+    // The last frame ends here, and the frame handed over last renders before the run's end is
+    // timed.
+    cx.perf.finish(clock.since_last(Instant::now()));
+    let (renderer, last) = render.stop();
+    let rendered = rendered.and_then(|()| {
+        if let Some(last) = last {
+            last.presented?;
+            frames += 1;
+        }
+        Ok(())
+    });
     let stopping = Instant::now();
     let _zone = gg_core::zone!("shutdown");
     app.stack.detach(&mut cx);
@@ -299,11 +318,11 @@ fn egui_context() -> egui::Context {
 /// The first half of a turn of the main loop: starts the frame, for Tracy and the frame's
 /// measure, runs the ticks of the simulation that the time since the last frame owes, as
 /// `stepper` steps it, updates the layers, draws the world, over what they drew, and has the
-/// layers draw their UI, in the dock and with egui.
-/// [`render_frame`] renders what egui made of it.
+/// layers draw their UI, in the dock and with egui. [`tessellate`] starts the second half, which
+/// hands what egui made of it to the render thread.
 ///
-/// egui allocates as it lays out here, and as [`render_frame`] tessellates, so frames that draw
-/// UI allocate; the UI is a development overlay.
+/// egui allocates as it lays out here, and as [`tessellate`] tessellates, so frames that draw UI
+/// allocate; the UI is a development overlay.
 fn run_frame(
     stack: &mut Stack,
     cx: &mut Context,
@@ -319,6 +338,7 @@ fn run_frame(
     let _zone = gg_core::zone!();
     let start = Instant::now();
     stepper.step(dt, |tick| stack.tick(cx, tick), || start.elapsed());
+    let ticked = Instant::now();
     stack.update(cx, dt);
     cx.draw_world();
     let updated = Instant::now();
@@ -330,46 +350,66 @@ fn run_frame(
             dock.end(root);
         })
     };
-    cx.perf.ran(updated - start, updated.elapsed());
+    cx.perf
+        .ran(ticked - start, updated - ticked, updated.elapsed());
     output
 }
 
-/// The second half: renders the frame, with what the layers drew in the game's view, the main
-/// window's central area `view` in points, and the UI in `output` over it; and into the windows
-/// of their own what their passes drew, in `windows`. Returns whether the frame was
-/// presented, and egui's requests of the main window, such as the cursor to show.
-fn render_frame(
-    egui: &egui::Context,
-    cx: &mut Context,
-    view: egui::Rect,
-    mut output: egui::FullOutput,
-    windows: &mut [Drawn],
-    renderer: &mut Renderer,
-) -> Result<(bool, egui::PlatformOutput)> {
-    let _zone = gg_core::zone!();
+/// What the main window's pass drew in a frame, tessellated, for the render thread.
+struct MainUi {
+    primitives: Vec<egui::ClippedPrimitive>,
+    textures: TextureChanges,
+    pixels_per_point: f32,
+}
+
+/// The second half of a turn of the main loop starts here, while the frame before renders:
+/// tessellates the UI the main window's pass drew, taking it and its texture changes from `output`,
+/// and returns it, and how long that took.
+fn tessellate(egui: &egui::Context, output: &mut egui::FullOutput) -> (MainUi, Duration) {
+    let _zone = gg_core::zone!("tessellate UI");
     let start = Instant::now();
-    let primitives = {
-        let _zone = gg_core::zone!("tessellate UI");
-        egui.tessellate(output.shapes, output.pixels_per_point)
-    };
-    let tessellated = start.elapsed();
-    let ui = gg_renderer::Ui {
-        primitives: &primitives,
-        textures: &mut output.textures_delta,
+    let textures = TextureChanges(mem::take(&mut output.textures_delta));
+    let primitives = egui.tessellate(mem::take(&mut output.shapes), output.pixels_per_point);
+    let ui = MainUi {
+        primitives,
+        textures,
         pixels_per_point: output.pixels_per_point,
     };
-    let mut windows: Vec<_> = windows.iter_mut().map(Drawn::ui).collect();
-    let data = cx.render_data(viewport(view, output.pixels_per_point));
-    let presented = renderer.render(data, ui, &mut windows);
-    let render = start.elapsed() - tessellated;
-    let rendered = matches!(presented, Ok(true));
-    let drew = renderer.drawn();
-    gg_core::plot!("draws", drew.draws as f64);
-    gg_core::plot!("instances", drew.instances as f64);
+    (ui, start.elapsed())
+}
+
+/// Takes the renderer back from rendering the frame before, which this frame, having tessellated
+/// its own UI in `tessellated`, is measured with, and returns whether that frame presented: `None`
+/// if no frame was rendering.
+fn take_back(
+    render: &mut RenderThread,
+    cx: &mut Context,
+    tessellated: Duration,
+) -> Result<Option<bool>> {
+    let start = Instant::now();
+    let rendered = render.take();
     cx.perf
-        .rendered(tessellated, render, renderer.waited(), drew, rendered);
-    cx.clear_draws();
-    Ok((presented?, output.platform_output))
+        .rendered(tessellated, start.elapsed(), rendered.as_ref());
+    rendered.map(|rendered| rendered.presented).transpose()
+}
+
+/// Hands the frame over to the render thread: what the layers drew in the game's view, the main
+/// window's central area `view` in points, the UI in `ui` over it, and what the windows of their
+/// own drew, in `windows`.
+fn hand_off(
+    render: &mut RenderThread,
+    cx: &mut Context,
+    view: egui::Rect,
+    ui: MainUi,
+    windows: Vec<Drawn>,
+) {
+    render.hand(|frame| {
+        cx.extract(frame, viewport(view, ui.pixels_per_point));
+        frame.primitives = ui.primitives;
+        frame.textures = ui.textures;
+        frame.pixels_per_point = ui.pixels_per_point;
+        frame.windows = windows;
+    });
 }
 
 /// The pixels of `rect`, in points of `ppp` pixels each, rounded as egui rounds its clip
@@ -521,17 +561,16 @@ struct Ran {
 impl Ran {
     /// Shuts the renderer down first, so that what validation reports on the way, such as
     /// objects left undestroyed, counts too. `stopping` is when the run began to end, after its
-    /// last frame, `stepper` what stepped its simulation, and `perf` what it measured of its
-    /// frames.
+    /// last frame rendered, `stepper` what stepped its simulation, and `perf` what it measured of
+    /// its frames, the last of them finished.
     fn finish(
         renderer: Renderer,
         frames: u64,
         clock: &Clock,
         stepper: &Stepper,
-        mut perf: Perf,
+        perf: Perf,
         stopping: Instant,
     ) -> Self {
-        perf.finish(clock.since_last(stopping));
         let validation = renderer.validation();
         let gpu = renderer.gpu_name().to_owned();
         drop(renderer);
@@ -569,10 +608,14 @@ impl Ran {
             frame_ms_p99 = perf.frame.p99,
             frame_ms_mean = perf.frame.mean,
             frame_ms_max = perf.frame.max,
+            ticks_ms_mean = perf.ticks.mean,
+            ticks_ms_p95 = perf.ticks.p95,
             update_ms_mean = perf.update.mean,
             update_ms_p95 = perf.update.p95,
             ui_ms_mean = perf.ui.mean,
             ui_ms_p95 = perf.ui.p95,
+            handoff_ms_mean = perf.handoff.mean,
+            handoff_ms_p95 = perf.handoff.p95,
             render_ms_mean = perf.render.mean,
             render_ms_p95 = perf.render.p95,
             wait_ms_mean = perf.wait.mean,
@@ -1247,7 +1290,17 @@ mod tests {
             origin: [0, 0],
             size: [640, 360],
         };
-        assert_eq!(*cx.render_data(viewport).draws, expected);
+        let mut frame = render_thread::Extracted::default();
+        cx.extract(&mut frame, viewport);
+        assert_eq!(frame.draws, expected);
+        // The context's buffer and the one the frame's draws come back in both start empty.
+        for _ in 0..2 {
+            cx.extract(&mut frame, viewport);
+            assert!(
+                frame.draws.is_empty(),
+                "the context keeps none of a frame's draws for the next"
+            );
+        }
     }
 
     #[test]

@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use egui::epaint::ClippedShape;
 use egui::{
-    ClippedPrimitive, ImmediateViewport, OrderedViewportIdMap, Pos2, RawInput, Rect, TexturesDelta,
+    ClippedPrimitive, ImmediateViewport, OrderedViewportIdMap, Pos2, RawInput, Rect,
     ViewportBuilder, ViewportClass, ViewportCommand, ViewportEvent, ViewportId, ViewportIdMap,
     ViewportIdPair, ViewportInfo, ViewportOutput, pos2,
 };
@@ -18,12 +18,14 @@ use egui_winit::EventResponse;
 use gg_core::{Error, Result};
 use gg_renderer::Renderer;
 use tracing::{debug, warn};
+use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
 use winit::window::{Window, WindowAttributes, WindowId};
 
 use crate::chrome::Chrome;
+use crate::render_thread::TextureChanges;
 
 scoped_tls::scoped_thread_local! {
     /// The event loop while a frame runs, which egui's callback opens windows with.
@@ -64,20 +66,23 @@ struct Child {
     builder: ViewportBuilder,
     /// Whether the renderer presents to it yet.
     presented: bool,
+    /// The size it last took, while the renderer was away rendering, which it's told of once
+    /// it's back.
+    resized: Option<PhysicalSize<u32>>,
 }
 
 struct Pass {
     viewport: ViewportId,
     shapes: Vec<ClippedShape>,
     pixels_per_point: f32,
-    textures: TexturesDelta,
+    textures: TextureChanges,
 }
 
 /// What a window's pass drew, for the renderer.
 pub(crate) struct Drawn {
     key: u64,
     primitives: Vec<ClippedPrimitive>,
-    textures: TexturesDelta,
+    textures: TextureChanges,
     pixels_per_point: f32,
 }
 
@@ -86,7 +91,7 @@ impl Drawn {
     pub(crate) fn ui(&mut self) -> (u64, gg_renderer::Ui<'_>) {
         let ui = gg_renderer::Ui {
             primitives: &self.primitives,
-            textures: &mut self.textures,
+            textures: &mut self.textures.0,
             pixels_per_point: self.pixels_per_point,
         };
         (self.key, ui)
@@ -140,9 +145,10 @@ impl Viewports {
         input
     }
 
-    /// After the main window's pass: makes the changes egui asks of the windows, closes those it
-    /// no longer shows, and has the renderer present to the new ones. `main` is the main
-    /// window's input. Returns what the windows' passes drew, in the order they ran, and whether
+    /// After the main window's pass, with the renderer back from rendering: makes the changes egui
+    /// asks of the windows, closes those it no longer shows, tells the renderer the sizes the
+    /// others took meanwhile, and has it present to the new ones. `main` is the main window's
+    /// input. Returns what the windows' passes drew, in the order they ran, and whether
     /// egui asked to close the main window, which, as with the OS's close button, is the
     /// layers' to allow.
     pub(crate) fn end_frame(
@@ -194,6 +200,8 @@ impl Viewports {
                 &child.window,
                 commands,
             );
+            // A window that opens now has the size it took already.
+            let resized = child.resized.take();
             if !child.presented {
                 let size = child.window.inner_size();
                 let window = child.window.clone();
@@ -204,6 +212,8 @@ impl Viewports {
                     return false;
                 }
                 child.presented = true;
+            } else if let Some(size) = resized {
+                renderer.resize_window(key(child.id), size.width, size.height);
             }
             true
         });
@@ -221,8 +231,9 @@ impl Viewports {
     }
 
     /// Hands an event of one of the windows of their own to egui. Their events never reach the
-    /// layers.
-    pub(crate) fn window_event(&self, id: WindowId, event: &WindowEvent, renderer: &mut Renderer) {
+    /// layers. A new size waits for [`Viewports::end_frame`] to reach the renderer, which is away
+    /// rendering between frames.
+    pub(crate) fn window_event(&self, id: WindowId, event: &WindowEvent) {
         let mut shared = self.shared.borrow_mut();
         let Some(child) = shared
             .children
@@ -234,9 +245,7 @@ impl Viewports {
         match event {
             // They render with the main window's frames.
             WindowEvent::RedrawRequested => return,
-            WindowEvent::Resized(size) => {
-                renderer.resize_window(key(child.id), size.width, size.height);
-            }
+            WindowEvent::Resized(size) => child.resized = Some(*size),
             // The dock floats the window's group over the main window instead.
             WindowEvent::CloseRequested => child.info.events.push(ViewportEvent::Close),
             _ => {}
@@ -317,13 +326,13 @@ fn run(shared: &RefCell<Shared>, egui: &egui::Context, viewport: ImmediateViewpo
         Some(pass) => {
             pass.shapes = output.shapes;
             pass.pixels_per_point = output.pixels_per_point;
-            pass.textures.append(output.textures_delta);
+            pass.textures.0.append(output.textures_delta);
         }
         None => shared.passes.push(Pass {
             viewport: ids.this,
             shapes: output.shapes,
             pixels_per_point: output.pixels_per_point,
-            textures: output.textures_delta,
+            textures: TextureChanges(output.textures_delta),
         }),
     }
 }
@@ -369,6 +378,7 @@ impl Child {
             info,
             builder: builder.clone(),
             presented: false,
+            resized: None,
         })
     }
 }

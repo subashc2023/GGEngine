@@ -1,6 +1,7 @@
 //! The layer stack: how an app's code, and the engine's tools, plug into the main loop.
 
 use std::any::type_name;
+use std::mem;
 use std::ops::ControlFlow;
 use std::path::Path;
 use std::sync::Arc;
@@ -10,8 +11,8 @@ use bytemuck::NoUninit;
 use gg_core::math::{Mat4, Vec2};
 use gg_core::{Error, Result};
 use gg_renderer::{
-    Blend, Camera, Draws, Mesh, Meshes, RenderData, Shader, Shaders, Sprite, SpriteSheet, Texture,
-    Textures, Viewport,
+    Blend, Camera, Draws, Mesh, Meshes, Shader, Shaders, Sprite, SpriteSheet, Texture, Textures,
+    Viewport,
 };
 
 use crate::draw::{self, Scratch};
@@ -19,6 +20,7 @@ use crate::image::{self, Image};
 use crate::perf::Perf;
 use crate::recording::Recorder;
 use crate::reflect::{Reflect, Value};
+use crate::render_thread::Extracted;
 use crate::{Event, Input, MeshDraw, Transform, Ui, World};
 
 /// A part of an app that the main loop drives. Every method has a default that does nothing,
@@ -345,22 +347,16 @@ impl Context {
         draw::draw_world(&self.world, &mut self.draws, &mut self.scratch);
     }
 
-    /// The frame's render data, with the game's view at `viewport`.
-    pub(crate) fn render_data(&mut self, viewport: Viewport) -> RenderData<'_> {
-        RenderData {
-            clear_color: self.clear_color,
-            viewport,
-            camera: self.camera,
-            meshes: &mut self.meshes,
-            shaders: &mut self.shaders,
-            textures: &mut self.textures,
-            draws: &self.draws,
-        }
-    }
-
-    /// Forgets the frame's draws, once the renderer has had them.
-    pub(crate) fn clear_draws(&mut self) {
+    /// Fills in `frame` with this frame's render data, with the game's view at `viewport`: its
+    /// draws, for the last frame's, which it forgets, keeping their memory for the next; and what's
+    /// been added since a frame last took it, after what `frame` still holds.
+    pub(crate) fn extract(&mut self, frame: &mut Extracted, viewport: Viewport) {
+        frame.clear_color = self.clear_color;
+        frame.viewport = viewport;
+        frame.camera = self.camera;
+        mem::swap(&mut frame.draws, &mut self.draws);
         self.draws.clear();
+        (frame.uploads).take(&mut self.meshes, &mut self.shaders, &mut self.textures);
     }
 }
 

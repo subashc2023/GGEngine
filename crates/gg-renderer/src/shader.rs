@@ -50,10 +50,10 @@ impl<V, P> fmt::Debug for Shader<V, P> {
 
 /// The shaders a renderer draws meshes with, the first of them the engine's sprite shader, which
 /// the build compiled. It compiles each one added as it's added and hands out its handle, and
-/// keeps its SPIR-V until a renderer makes its pipeline, the next time it renders. A renderer draws
-/// with the shaders of one `Shaders` only.
+/// keeps its SPIR-V until [`Uploads::take`](crate::Uploads::take) takes it, for a renderer to make
+/// its pipeline the next time it renders. A renderer draws with the shaders of one `Shaders` only.
 pub struct Shaders {
-    /// Those added since a renderer last took them, in order.
+    /// Those added since they were last taken, in order.
     pub(crate) added: Vec<Added>,
     /// How many have been added.
     count: u32,

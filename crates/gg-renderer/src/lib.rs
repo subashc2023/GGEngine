@@ -158,6 +158,28 @@ pub struct DrawCounts {
     pub instances: usize,
 }
 
+/// What's been added to a [`Meshes`], [`Shaders`] and [`Textures`] since it was last taken from
+/// them, in order: the shaders a frame makes pipelines for, and the meshes and textures it copies
+/// to the GPU, before it draws. Taking moves them out of the registries, which go on handing out
+/// handles where they are, so that a renderer on another thread renders what they handed out
+/// before. It keeps its memory, so that a frame that adds nothing allocates nothing.
+#[derive(Default)]
+pub struct Uploads {
+    pub(crate) meshes: Vec<mesh::Added>,
+    pub(crate) shaders: Vec<shader::Added>,
+    pub(crate) textures: Vec<texture::Added>,
+}
+
+impl Uploads {
+    /// Takes what's been added to `meshes`, `shaders` and `textures` since they were last taken
+    /// from, after what it holds already.
+    pub fn take(&mut self, meshes: &mut Meshes, shaders: &mut Shaders, textures: &mut Textures) {
+        self.meshes.append(&mut meshes.added);
+        self.shaders.append(&mut shaders.added);
+        self.textures.append(&mut textures.added);
+    }
+}
+
 /// What a frame draws besides UI: plain data, which the engine extracts every frame.
 pub struct RenderData<'a> {
     /// The color the game's view clears to before the meshes are drawn, and the frame around it,
@@ -168,13 +190,9 @@ pub struct RenderData<'a> {
     pub viewport: Viewport,
     /// What the view sees the world from.
     pub camera: Camera,
-    /// The meshes; those added since a frame last rendered reach the GPU first.
-    pub meshes: &'a mut Meshes,
-    /// The shaders; those added since the renderer last rendered get their pipelines first.
-    pub shaders: &'a mut Shaders,
-    /// The textures the shaders sample; those added since a frame last rendered reach the GPU
-    /// first.
-    pub textures: &'a mut Textures,
+    /// The meshes, shaders and textures added since a frame last took them, which it takes first:
+    /// the shaders get their pipelines, and the meshes and textures reach the GPU.
+    pub uploads: &'a mut Uploads,
     /// What to draw.
     pub draws: &'a Draws,
 }
@@ -220,6 +238,13 @@ enum Output {
     Window(Swapchain),
     Offscreen(ColorImage),
 }
+
+// The engine renders on a thread of its own, which the renderer and its uploads move to.
+const _: () = {
+    const fn send<T: Send>() {}
+    send::<Renderer>();
+    send::<Uploads>();
+};
 
 impl Renderer {
     /// A renderer that presents to `window`, whose drawable area is `width` by `height` pixels.
@@ -347,8 +372,8 @@ impl Renderer {
     /// was.
     ///
     /// Returns `false` when there was nothing to render into, as when the window is minimized;
-    /// the meshes and textures added and the UIs' texture changes wait for the next frame that
-    /// renders.
+    /// the meshes and textures stay in `data.uploads`, and the UIs' texture changes wait, for the
+    /// next frame that renders.
     ///
     /// An error ends the renderer, which can then only be dropped: a frame that failed can leave
     /// the GPU's copies of meshes and textures unfinished, so every later call fails with
@@ -356,9 +381,9 @@ impl Renderer {
     ///
     /// # Panics
     ///
-    /// If `data` holds meshes, shaders or textures of another [`Meshes`], [`Shaders`] or
-    /// [`Textures`] than the ones it held before, which could draw a mesh with a shader for
-    /// another vertex type or parameters of another type; or if its camera's projection can't
+    /// If `data.uploads` holds meshes, shaders or textures taken from another [`Meshes`],
+    /// [`Shaders`] or [`Textures`] than those it held before, which could draw a mesh with a shader
+    /// for another vertex type or parameters of another type; or if its camera's projection can't
     /// project, as [`Projection`] says.
     pub fn render(
         &mut self,
@@ -393,7 +418,7 @@ impl Renderer {
         }
         self.ui.queue(ui.textures);
         // Before the frame begins, which a failure would then present unrendered.
-        self.meshes.add_shaders(data.shaders)?;
+        self.meshes.add_shaders(data.uploads)?;
         // Every frame, whether it renders or draws anything, so that a camera that can't project
         // always panics. A view without an area draws nothing, so its aspect ratio doesn't matter.
         let [width, height] = data.viewport.size;
@@ -427,7 +452,7 @@ impl Renderer {
         let Some(mut frame) = self.frames.begin(targets)? else {
             return Ok(false);
         };
-        self.meshes.upload(&mut frame, data.meshes, data.textures)?;
+        self.meshes.upload(&mut frame, data.uploads)?;
         self.ui.write_textures(&mut frame)?;
         let (counts, view) = if has_view {
             let mut pass = frame

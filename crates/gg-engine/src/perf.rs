@@ -4,29 +4,35 @@
 
 use std::time::Duration;
 
-use gg_renderer::DrawCounts;
-
+use crate::render_thread::Rendered;
 use crate::{Context, Layer, Ui};
 
 /// How many frames the percentiles cover: the last 16,384, 68 s at 240 fps, while means and
-/// maxima cover the whole run. They take 896 KiB, from the first frame measured.
+/// maxima cover the whole run. They take 1,152 KiB, from the first frame measured.
 const KEPT: usize = 16_384;
 
 /// How many frames the Performance panel's graph shows at the fewest, given a pixel for each: its
 /// bars are as many whole pixels wide as leave room for that many, and more frames fill the rest.
 const GRAPHED: usize = 240;
 
-/// One frame, in nanoseconds: its time, from its start to the next frame's, and the parts of it.
+/// One frame, in nanoseconds: its time on the main thread, from its start to the next frame's, and
+/// the parts of it; and the render it took back, the frame before's, which ran beside it on the
+/// render thread.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Sample {
     pub(crate) frame: u64,
-    /// The simulation's ticks, the layers' updates, and drawing the world.
+    /// The simulation's ticks.
+    pub(crate) ticks: u64,
+    /// The layers' updates, and drawing the world.
     pub(crate) update: u64,
     /// The UI: the layers' and egui's, and tessellating it.
     pub(crate) ui: u64,
-    /// Rendering, with its submission and present, but not its waits.
+    /// Waiting for the render thread to finish the frame before.
+    pub(crate) handoff: u64,
+    /// Rendering the frame before, with its submission and present, but not its waits.
     pub(crate) render: u64,
-    /// Waiting for the GPU to finish an earlier frame, and for the display to let go of an image.
+    /// Its waits: for the GPU to finish an earlier frame, and for the display to let go of an
+    /// image.
     pub(crate) wait: u64,
     /// Instanced draws in the game's view.
     pub(crate) draws: u64,
@@ -38,15 +44,16 @@ impl Sample {
     /// The rest of the frame: what happens between frames, such as the windows of their own
     /// opening and drawing their UI, and the OS's events.
     pub(crate) fn other(&self) -> u64 {
-        self.frame
-            .saturating_sub(self.update + self.ui + self.render + self.wait)
+        (self.frame).saturating_sub(self.ticks + self.update + self.ui + self.handoff)
     }
 
     /// Sets each field to `f` of it and `other`'s.
     fn merge(&mut self, other: &Sample, f: impl Fn(u64, u64) -> u64) {
         self.frame = f(self.frame, other.frame);
+        self.ticks = f(self.ticks, other.ticks);
         self.update = f(self.update, other.update);
         self.ui = f(self.ui, other.ui);
+        self.handoff = f(self.handoff, other.handoff);
         self.render = f(self.render, other.render);
         self.wait = f(self.wait, other.wait);
         self.draws = f(self.draws, other.draws);
@@ -55,9 +62,10 @@ impl Sample {
 }
 
 /// The frames of a run so far. The main loop tells it when each frame starts and how its parts
-/// went; a frame is measured once the next one starts, or the run ends. The first frame isn't
-/// measured with the rest, since it makes the pipelines and copies the first meshes and textures
-/// to the GPU.
+/// went; a frame is measured once the next one starts, or the run ends, with the render it took
+/// back. A frame that took none back, as the first doesn't, isn't measured; and the first that did
+/// isn't measured with the rest, since that render made the pipelines and copied the first meshes
+/// and textures to the GPU, which it waited for.
 #[derive(Default)]
 pub(crate) struct Perf {
     /// The frames measured, the oldest overwritten once there are `KEPT`.
@@ -82,33 +90,36 @@ impl Perf {
         self.pending = Some(Sample::default());
     }
 
-    /// The frame's ticks and updates and drawing its world took `update`, and its UI `ui`.
-    pub(crate) fn ran(&mut self, update: Duration, ui: Duration) {
+    /// The frame's ticks took `ticks`, its updates and drawing its world `update`, and its UI `ui`.
+    pub(crate) fn ran(&mut self, ticks: Duration, update: Duration, ui: Duration) {
         if let Some(sample) = &mut self.pending {
+            sample.ticks = nanos(ticks);
             sample.update = nanos(update);
             sample.ui = nanos(ui);
         }
     }
 
-    /// The frame tessellated its UI in `tessellate`, and rendered what it `drew` in `render`, of
-    /// which it waited `wait`. A frame that `presented` nothing, or failed, isn't measured.
+    /// The frame tessellated its UI in `tessellate`, then waited `handoff` for the render thread to
+    /// finish the frame before, which went as `rendered` says. A frame that took no render back,
+    /// or whose render presented nothing or failed, isn't measured.
     pub(crate) fn rendered(
         &mut self,
         tessellate: Duration,
-        render: Duration,
-        wait: Duration,
-        drew: DrawCounts,
-        presented: bool,
+        handoff: Duration,
+        rendered: Option<&Rendered>,
     ) {
-        if !presented {
+        let Some(rendered) = rendered.filter(|rendered| matches!(rendered.presented, Ok(true)))
+        else {
             self.pending = None;
-        }
+            return;
+        };
         if let Some(sample) = &mut self.pending {
             sample.ui += nanos(tessellate);
-            sample.render = nanos(render.saturating_sub(wait));
-            sample.wait = nanos(wait);
-            sample.draws = drew.draws as u64;
-            sample.instances = drew.instances as u64;
+            sample.handoff = nanos(handoff);
+            sample.render = nanos(rendered.render.saturating_sub(rendered.wait));
+            sample.wait = nanos(rendered.wait);
+            sample.draws = rendered.drawn.draws as u64;
+            sample.instances = rendered.drawn.instances as u64;
         }
     }
 
@@ -174,8 +185,10 @@ impl Perf {
             percentile_frames: self.kept.len(),
             first_frame: self.first.map(|first| ms(first as f64)),
             frame: stats(|s| s.frame),
+            ticks: stats(|s| s.ticks),
             update: stats(|s| s.update),
             ui: stats(|s| s.ui),
+            handoff: stats(|s| s.handoff),
             render: stats(|s| s.render),
             wait: stats(|s| s.wait),
             draws_max: self.max.draws,
@@ -194,8 +207,10 @@ pub(crate) struct Summary {
     pub(crate) percentile_frames: usize,
     pub(crate) first_frame: Option<f64>,
     pub(crate) frame: Stats,
+    pub(crate) ticks: Stats,
     pub(crate) update: Stats,
     pub(crate) ui: Stats,
+    pub(crate) handoff: Stats,
     pub(crate) render: Stats,
     pub(crate) wait: Stats,
     pub(crate) draws_max: u64,
@@ -241,11 +256,14 @@ impl Layer for PerfPanel {
     }
 }
 
+/// How a part of a frame's time is read from its sample.
+type Time = fn(&Sample) -> u64;
+
 /// A part of a frame the panel shows: its name, how it's read from a sample, and its color in the
 /// graph, on a light background and on a dark one.
 struct Part {
     name: &'static str,
-    time: fn(&Sample) -> u64,
+    time: Time,
     light: egui::Color32,
     dark: egui::Color32,
 }
@@ -260,16 +278,17 @@ impl Part {
     }
 }
 
-/// The parts of a frame, as the graph stacks them from the bottom: the work, then the waits, in
-/// gray, while the CPU idles. Each color stays apart from its neighbors' for the common color
-/// blindnesses, protanopia and deuteranopia, on egui's light and dark backgrounds: a new one needs
-/// checking for that again.
+/// The parts of a frame on the main thread, as the graph stacks them from the bottom: the work,
+/// then the wait, in gray, while the main thread idles. Each color stays apart from its neighbors'
+/// for the common color blindnesses, protanopia and deuteranopia, on egui's light and dark
+/// backgrounds, which puts the UI between the ticks and the updates: UI's orange beside Other's
+/// amber isn't. A new one needs checking for that again.
 const PARTS: [Part; 5] = [
     Part {
-        name: "Update",
-        time: |s| s.update,
-        light: egui::Color32::from_rgb(0x2a, 0x78, 0xd6),
-        dark: egui::Color32::from_rgb(0x39, 0x87, 0xe5),
+        name: "Ticks",
+        time: |s| s.ticks,
+        light: egui::Color32::from_rgb(0x1b, 0xaf, 0x7a),
+        dark: egui::Color32::from_rgb(0x19, 0x9e, 0x70),
     },
     Part {
         name: "UI",
@@ -278,10 +297,10 @@ const PARTS: [Part; 5] = [
         dark: egui::Color32::from_rgb(0xd9, 0x59, 0x26),
     },
     Part {
-        name: "Render",
-        time: |s| s.render,
-        light: egui::Color32::from_rgb(0x1b, 0xaf, 0x7a),
-        dark: egui::Color32::from_rgb(0x19, 0x9e, 0x70),
+        name: "Update",
+        time: |s| s.update,
+        light: egui::Color32::from_rgb(0x2a, 0x78, 0xd6),
+        dark: egui::Color32::from_rgb(0x39, 0x87, 0xe5),
     },
     Part {
         name: "Other",
@@ -290,11 +309,18 @@ const PARTS: [Part; 5] = [
         dark: egui::Color32::from_rgb(0xc9, 0x85, 0x00),
     },
     Part {
-        name: "Waiting",
-        time: |s| s.wait,
+        name: "Waiting for rendering",
+        time: |s| s.handoff,
         light: egui::Color32::from_rgb(0xc3, 0xc2, 0xb7),
         dark: egui::Color32::from_rgb(0x38, 0x38, 0x35),
     },
+];
+
+/// What the render thread spent on the frame before each frame, beside it: the panel lists it, but
+/// the graph doesn't stack it on the main thread's parts, which it overlaps.
+const RENDERING: [(&str, Time); 2] = [
+    ("Render thread: rendering", |s| s.render),
+    ("Render thread: waiting for the GPU and display", |s| s.wait),
 ];
 
 /// The sum and the maximum of some times.
@@ -321,6 +347,7 @@ fn show(perf: &Perf, ui: &mut egui::Ui) {
     let mut frames = 0;
     let mut frame = Total::default();
     let mut parts = [Total::default(); PARTS.len()];
+    let mut rendering = [Total::default(); RENDERING.len()];
     for sample in perf.recent() {
         if frame.sum >= 1_000_000_000 {
             break;
@@ -329,6 +356,9 @@ fn show(perf: &Perf, ui: &mut egui::Ui) {
         frame.add(sample.frame);
         for (total, part) in parts.iter_mut().zip(&PARTS) {
             total.add((part.time)(sample));
+        }
+        for (total, (_, time)) in rendering.iter_mut().zip(&RENDERING) {
+            total.add(time(sample));
         }
     }
     let mean_ms = frame.sum as f64 / frames as f64 / 1e6;
@@ -346,15 +376,19 @@ fn show(perf: &Perf, ui: &mut egui::Ui) {
             ui.label("Mean");
             ui.label("Max");
             ui.end_row();
-            let row = |ui: &mut egui::Ui, part: Option<&Part>, total: Total| {
-                part_name(ui, part);
+            let row = |ui: &mut egui::Ui, color, name: &str, total: Total| {
+                row_name(ui, color, name);
                 ui.label(millis_text(total.sum as f64 / frames as f64));
                 ui.label(millis_text(total.max as f64));
                 ui.end_row();
             };
-            row(ui, None, frame);
+            row(ui, None, "Frame", frame);
             for (part, total) in PARTS.iter().zip(parts) {
-                row(ui, Some(part), total);
+                let color = part.color(ui.visuals());
+                row(ui, Some(color), part.name, total);
+            }
+            for ((name, _), total) in RENDERING.iter().zip(rendering) {
+                row(ui, None, name, total);
             }
         });
 }
@@ -474,33 +508,36 @@ fn draws_text(sample: &Sample) -> String {
     format!("{} draws of {} instances", sample.draws, sample.instances)
 }
 
-/// One frame's time, its parts' and its draws, for the graph's tooltip.
+/// One frame's time, its parts', the render thread's and its draws, for the graph's tooltip.
 fn frame_tooltip(ui: &mut egui::Ui, sample: &Sample) {
     egui::Grid::new("performance frame").show(ui, |ui| {
-        part_name(ui, None);
-        ui.label(millis_text(sample.frame as f64));
-        ui.end_row();
-        for part in &PARTS {
-            part_name(ui, Some(part));
-            ui.label(millis_text((part.time)(sample) as f64));
+        let row = |ui: &mut egui::Ui, color, name: &str, time: u64| {
+            row_name(ui, color, name);
+            ui.label(millis_text(time as f64));
             ui.end_row();
+        };
+        row(ui, None, "Frame", sample.frame);
+        for part in &PARTS {
+            let color = part.color(ui.visuals());
+            row(ui, Some(color), part.name, (part.time)(sample));
+        }
+        for (name, time) in &RENDERING {
+            row(ui, None, name, time(sample));
         }
     });
     ui.label(draws_text(sample));
 }
 
-/// A row's first two cells: a square of its part's color in the graph, and its name; the frame's
-/// row, the parts summed up, has no square.
-fn part_name(ui: &mut egui::Ui, part: Option<&Part>) {
-    let Some(part) = part else {
+/// A row's first two cells: a square of `color`, its part's in the graph, and its name; a row the
+/// graph doesn't stack, such as the frame's, the parts summed up, has no square.
+fn row_name(ui: &mut egui::Ui, color: Option<egui::Color32>, name: &str) {
+    if let Some(color) = color {
+        let (square, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+        ui.painter().rect_filled(square, 2.0, color);
+    } else {
         ui.label("");
-        ui.label("Frame");
-        return;
-    };
-    let color = part.color(ui.visuals());
-    let (square, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-    ui.painter().rect_filled(square, 2.0, color);
-    ui.label(part.name);
+    }
+    ui.label(name);
 }
 
 /// `nanos` in milliseconds, to the microsecond, as the panel shows it.
@@ -510,19 +547,33 @@ fn millis_text(nanos: f64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use gg_renderer::DrawCounts;
+
     use super::*;
 
     const MS: Duration = Duration::from_millis(1);
 
-    /// Runs frames of `times` milliseconds each, with nothing in them, then ends the run.
+    /// A render of the frame before, which took `render`, `wait` of it waiting, drew `drawn`, and
+    /// `presented` or not.
+    fn rendered(render: Duration, wait: Duration, drawn: DrawCounts, presented: bool) -> Rendered {
+        Rendered {
+            presented: Ok(presented),
+            render,
+            wait,
+            drawn,
+        }
+    }
+
+    /// Runs frames of `times` milliseconds each, with nothing in them, each taking back a render
+    /// that presented, then ends the run.
     fn run(times: &[u64]) -> Perf {
         let mut perf = Perf::default();
         let mut dt = Duration::ZERO;
+        let presented = rendered(Duration::ZERO, Duration::ZERO, DrawCounts::default(), true);
         for &time in times {
             perf.start_frame(dt);
-            perf.ran(Duration::ZERO, Duration::ZERO);
-            let drew = DrawCounts::default();
-            perf.rendered(Duration::ZERO, Duration::ZERO, Duration::ZERO, drew, true);
+            perf.ran(Duration::ZERO, Duration::ZERO, Duration::ZERO);
+            perf.rendered(Duration::ZERO, Duration::ZERO, Some(&presented));
             dt = Duration::from_millis(time);
         }
         perf.finish(dt);
@@ -567,22 +618,26 @@ mod tests {
     }
 
     #[test]
-    fn pauses_and_frames_that_presented_nothing_go_unmeasured() {
+    fn pauses_and_frames_without_a_render_that_presented_go_unmeasured() {
         let mut perf = Perf::default();
         let present = |perf: &mut Perf, presented| {
             let drew = DrawCounts {
                 draws: 1,
                 instances: 1,
             };
-            perf.rendered(Duration::ZERO, MS, Duration::ZERO, drew, presented);
+            let render = rendered(MS, Duration::ZERO, drew, presented);
+            perf.rendered(Duration::ZERO, Duration::ZERO, Some(&render));
         };
+        // The first frame takes no render back, so the next is the first measured.
         perf.start_frame(Duration::ZERO);
+        perf.rendered(Duration::ZERO, Duration::ZERO, None);
+        perf.start_frame(5 * MS);
         present(&mut perf, true);
         perf.start_frame(10 * MS);
         // Then a pause: the window is restored, and the frame before it is dropped.
         present(&mut perf, true);
         perf.start_frame(Duration::ZERO);
-        // A frame that presented nothing.
+        // A frame whose render presented nothing.
         present(&mut perf, false);
         perf.start_frame(30 * MS);
         present(&mut perf, true);
@@ -597,18 +652,20 @@ mod tests {
     fn rendering_leaves_out_its_waits_and_the_ui_takes_tessellation() {
         let mut perf = Perf::default();
         let none = DrawCounts::default();
+        let nothing = rendered(Duration::ZERO, Duration::ZERO, none, true);
         perf.start_frame(Duration::ZERO);
-        perf.rendered(Duration::ZERO, Duration::ZERO, Duration::ZERO, none, true);
+        perf.rendered(Duration::ZERO, Duration::ZERO, Some(&nothing));
         perf.start_frame(MS);
-        perf.ran(2 * MS, 3 * MS);
+        perf.ran(MS, 2 * MS, 3 * MS);
         let drew = DrawCounts {
             draws: 7,
             instances: 900,
         };
-        perf.rendered(MS, 10 * MS, 4 * MS, drew, true);
+        perf.rendered(MS, 5 * MS, Some(&rendered(10 * MS, 4 * MS, drew, true)));
         perf.start_frame(30 * MS);
         // Waits outlasting the render they're in round down to no rendering.
-        perf.rendered(Duration::ZERO, MS, 4 * MS, none, true);
+        let waits = rendered(MS, 4 * MS, none, true);
+        perf.rendered(Duration::ZERO, Duration::ZERO, Some(&waits));
         perf.finish(5 * MS);
         let newest: Vec<Sample> = perf.recent().copied().collect();
         let ms = |ms: u64| ms * 1_000_000;
@@ -622,8 +679,10 @@ mod tests {
                 },
                 Sample {
                     frame: ms(30),
+                    ticks: ms(1),
                     update: ms(2),
                     ui: ms(4),
+                    handoff: ms(5),
                     render: ms(6),
                     wait: ms(4),
                     draws: 7,
@@ -631,7 +690,8 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(newest[1].other(), ms(14));
+        // The render thread's parts ran beside the main thread's.
+        assert_eq!(newest[1].other(), ms(18));
         let summary = perf.summary();
         assert_eq!((summary.draws_max, summary.instances_max), (7, 900));
     }
@@ -684,8 +744,9 @@ mod tests {
                 draws,
                 instances: draws * 100,
             };
-            perf.ran(MS, MS);
-            perf.rendered(Duration::ZERO, 2 * MS, MS, drew, true);
+            perf.ran(Duration::ZERO, MS, MS);
+            let render = rendered(2 * MS, MS, drew, true);
+            perf.rendered(Duration::ZERO, Duration::ZERO, Some(&render));
             perf.start_frame(4 * MS);
         };
         perf.start_frame(Duration::ZERO);

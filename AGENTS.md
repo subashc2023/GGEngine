@@ -62,7 +62,8 @@ way, they're the same.
 The `tracy` feature sends the engine's zones to Tracy: run the Tracy viewer of the release the
 root Cargo.toml names, and connect it to the running app. To capture a headless run instead,
 start `tracy-capture -o run.tracy` first and give the run `TRACY_NO_EXIT=1`; then
-`tracy-csvexport run.tracy` lists its zones' times.
+`tracy-csvexport run.tracy` lists its zones' times, and with `-u` each time a zone ran, when, and
+on which thread, such as the render thread's `render_frame` beside the main thread's ticks.
 
 Build and check shipping configurations with `-p player` alone, since a wider build merges the
 sandbox's features into the player ([Builds](ARCHITECTURE.md#builds)).
@@ -95,9 +96,10 @@ grid's scene.
 
 CI ([ci.yml](.github/workflows/ci.yml)) runs the four gates on every push, on Windows, Linux
 and macOS, x86-64 and ARM64, and the layering check. Its Linux jobs run the GPU tests and the
-sandbox headless on lavapipe, with and without Tracy, check that the run logged `engine.perf`,
-and record a run and replay it, on every thread and on one; Windows' and macOS's runners have no
-GPU, so there `GG_SKIP_GPU_TESTS` skips the GPU tests.
+sandbox headless on lavapipe, with and without Tracy, check that the run logged `engine.perf` and
+ticked and rendered once a frame, and record a run on four threads and replay it, on the default
+and on one; Windows' and macOS's runners have no GPU, so there `GG_SKIP_GPU_TESTS` skips the GPU
+tests.
 
 ## Rust
 

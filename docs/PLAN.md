@@ -216,11 +216,21 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   taken from; steady-state ticks allocate nothing on any thread; the live recording replays to its
   hashes, and the reference simulation hashes as its reference says; and a forced divergence names
   its tick, and its entity and field.
+- **The render thread** (2026-10-25): frames render on a thread of their own, `gg-render`, a frame
+  behind: the renderer goes there with each frame's render data, owned, and back once the next
+  frame's UI is drawn, so that windows' swapchains open, resize and close, and the renderer drops,
+  on the main thread, which on Windows answers what's sent to its windows while it waits; what
+  layers add goes with the frame. Ticks are a part of the frame times of their own, the render
+  thread's sit beside the main thread's, and job threads default to one fewer than the CPUs. Unit
+  tests with a stand-in renderer check frames rendering in order, a frame behind and beside the
+  next, the renderer back between them, errors and panics coming back, the last frame rendering as
+  a run ends, and no texture change dropped unapplied; a Tracy capture of the release sandbox shows
+  rendering beside the ticks.
 
-## Now: Phase 4's first milestone
+## Now: Phase 4's second milestone
 
-[Phase 4](#next) starts. Its first milestone is chosen as it starts, and its plan says when it's
-done.
+Rendering interpolated between fixed steps, [Phase 4](#next)'s second milestone, is planned as it
+starts, and its plan says when it's done.
 
 ## Next
 
@@ -279,13 +289,14 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Shipping profile (LTO, `codegen-units = 1`) | Phase 7, with the player |
 | Compiling trace and debug events out of shipping builds, through `tracing`'s `release_max_level_*` features | Phase 7, with the shipping profile |
 | No console window for shipping builds on Windows (`windows_subsystem = "windows"` on the player); the JSON log still records the run | Phase 7, with the shipping profile |
-| Checking the sandbox by hand on Linux, and on macOS with KosmicKrisp (Vulkan SDK 1.4.363.0 or later, the first conformant build), its gamepads too | Phase 4, once the sandbox draws a glTF mesh |
+| Checking the sandbox by hand on Linux, and on macOS with KosmicKrisp (Vulkan SDK 1.4.363.0 or later, the first conformant build), its gamepads too, and the render thread there: acquiring, presenting and rebuilding swapchains as windows resize off the main thread under KosmicKrisp, and on Wayland a frame in flight presenting at its old size after a maximize | Phase 4, once the sandbox draws a glTF mesh |
 | Deleting old JSON logs; every run's log is kept | Logs pile up enough to matter |
 | A clean shutdown on Ctrl+C, which now ends the process at once; the JSON log keeps every line written until then, and a recording every whole line but its `end` | A headless run that goes on until it's stopped, such as a dedicated server |
 | GPU tests in Windows and macOS CI, which skip them because hosted runners there have no GPU | A self-hosted runner with a GPU, or a Vulkan driver that runs on those runners without one |
 | A gate that compiles the shipping configuration: `cargo clippy -p player --all-targets -- -D warnings` | When `gg-engine` gets its `dev` feature |
 | egui, the dock and the Inspector behind `dev`: the player links them and runs an empty UI pass every frame; `Ui`, which `Layer::ui` takes, is the type to turn into a no-op | When `gg-engine` gets its `dev` feature |
-| Waiting for the swapchain image before a frame reads input and the time, not after the layers update, which would cut latency by the wait: up to a refresh under `--vsync`. Events come before the frame that reads them, so a wait moved to the frame's start would freshen only its time and the gamepads, which it polls as it starts: the next image has to be acquired after the last frame's present, and held across the event loop | Phase 4, with the render thread |
+| The main thread takes the renderer back once a frame's UI is drawn, so a frame's input is read about a frame before it renders: a refresh under `--vsync`. Starting each frame once the render thread has acquired the image it renders into would win that back | A game's input latency needs it |
+| Answering at once what a driver sends the main thread's windows from the render thread: the main thread's wait answers each time a millisecond's wait times out, which Windows' timer tick stretches to about 16 ms, so a sent message can hold a frame that long. A Win32 event the render thread sets, waited on with `MsgWaitForMultipleObjectsEx`, would wake for both | A driver's sent messages show as stalls, such as while a window resizes |
 | Pushing and popping layers while the app runs; `App` fixes the stack before it starts | A tool or game needs a layer for only part of a run |
 | Composed text from an input method (winit's `Ime` events), for languages typed through one | A game takes text input, such as chat |
 | Steady-state frames that draw UI allocate: in egui's layout and tessellation, in the dock's own bookkeeping, which copies each frame's panel and menu names and torn-off windows' titles, and makes its arrangement and its list of groups left to draw anew, and in the Inspector, which reads its rows' names, the picked entity's components as values and its children's IDs anew | Phase 4, with the allocation check; the overlay is for development |
@@ -399,12 +410,10 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | An app's own tick rate; the simulation runs 64 ticks a second | A game needs another rate |
 | Budgeting a frame's ticks against all of its time: a frame stops its ticks only once they take longer than the time they simulate, so ticks that take nearly their 15.625 ms keep real time at the frame rate's cost, as the debug sandbox's 100,000 drifters do, about 8 a frame at 8 fps; counting the rest of the frame too would slow down the simulation of any game drawn below 64 fps | A game's frame rate falls so |
 | Headless runs in real time, as a dedicated server's: a headless run takes a tick each frame, as fast as its frames go | The first dedicated server |
-| Ticks as a part of their own in the Performance panel and in `engine.perf`'s times: a frame's update includes its ticks, so that a windowed run's update times mix frames of no tick and of several | Phase 4's extraction, or frames often running several ticks |
 | The Inspector showing an undo or a redo before its tick makes it, as it shows a set: above 64 frames a second, a field shows its value from before for a frame or so, and a refusal and the Edit menu's names come at the tick | It shows, or Phase 5's editor in another process |
 | Hashing a world for less: incrementally as its components change, on several threads, or with a cheaper step for each word and one mix for each term. `World::hash` reads every component, mixing each word with SplitMix64's mix: 5.5 ms for the swarm's 100,450 entities in release, three times their tick; a recorded run hashes every tick, which takes the release swarm's headless frames from a p50 of 8.7 ms to 16.3 ms, its updates from 14.0 ms to 22.6 ms on average | Recorded runs of large worlds need the time |
 | The job system in gg-core, where the renderer can reach it; it's gg-engine's | gg-renderer needs jobs |
-| Naming the job system's threads for Tracy on macOS, whose client reads no thread's name from the OS there, so they show as numbers: a call into gg-core, which keeps Tracy's client, from rayon-core's start handler. On Windows and Linux they show as `gg-job-N` | Someone profiles on macOS |
-| Fewer job threads than CPUs by default, leaving one to the render thread | Phase 4, with the render thread |
+| Naming the job system's threads and the render thread for Tracy on macOS, whose client reads no thread's name from the OS there, so they show as numbers: a call into gg-core, which keeps Tracy's client, from rayon-core's start handler and the render thread's start. On Windows and Linux they show as `gg-job-N` and `gg-render` | Someone profiles on macOS |
 | Checking that every job thread's floating-point environment, its rounding and flush-to-zero, is the main thread's, which a driver could change on the main thread alone | A replay goes another way on one machine on more threads than one |
 | The sign of a zero that f32's `min`, `max` and `clamp` give, which std leaves to the platform, and its `algebraic_*` methods, which clippy doesn't refuse; the simulation calls none of them | The simulation first calls one |
 | The ban on std's float methods for games in their own repositories, which the workspace's clippy.toml doesn't reach, though glam's features do, since Cargo merges them | The first game outside the workspace |

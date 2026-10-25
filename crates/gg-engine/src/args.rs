@@ -53,7 +53,8 @@ Options:
   --validation      Run under Vulkan validation (the default in debug builds)
   --no-validation   Run without Vulkan validation (the default in release builds)
   --vsync           Present at the display's refresh rate, rather than uncapped
-  --threads <N>     Run the simulation's jobs on N threads, the main one among them (one per CPU)
+  --threads <N>     Run the simulation's jobs on N threads, the main one among them (one per CPU
+                    but the one the render thread has)
   --record <PATH>   Record the run to PATH: its seed, its layers' commands and its hash each tick
   --replay <PATH>   Replay the recording at PATH without a window or a GPU, checking each hash
   --dump <TICK>     With --replay, stop after tick TICK, or at `attach`, and print the world
@@ -77,7 +78,10 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
         gpu: None,
         validation: cfg!(debug_assertions),
         vsync: false,
-        threads: std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN),
+        threads: std::thread::available_parallelism()
+            .ok()
+            .and_then(|cpus| NonZeroUsize::new(cpus.get() - 1))
+            .unwrap_or(NonZeroUsize::MIN),
         record: None,
         replay: None,
         dump: None,
@@ -194,9 +198,11 @@ mod tests {
             parse_strs(&["--frames=60"]).unwrap().unwrap().frames,
             Some(60)
         );
+        // A CPU for each but the render thread's.
+        let cpus = std::thread::available_parallelism().unwrap().get();
         assert_eq!(
-            parse_strs(&[]).unwrap().unwrap().threads,
-            std::thread::available_parallelism().unwrap()
+            parse_strs(&[]).unwrap().unwrap().threads.get(),
+            cpus.saturating_sub(1).max(1)
         );
         for args in [&["--threads", "3"][..], &["--threads=3"]] {
             assert_eq!(parse_strs(args).unwrap().unwrap().threads.get(), 3);

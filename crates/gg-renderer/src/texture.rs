@@ -20,10 +20,11 @@ impl Texture {
 }
 
 /// The textures a renderer's shaders sample, the first of them the engine's white texture. It
-/// hands out each one's handle at once, and keeps its pixels until the next frame that renders
-/// copies them to the GPU. A renderer samples the textures of one `Textures` only.
+/// hands out each one's handle at once, and keeps its pixels until
+/// [`Uploads::take`](crate::Uploads::take) takes them, for a frame to copy to the GPU. A renderer
+/// samples the textures of one `Textures` only.
 pub struct Textures {
-    /// Those added since a frame last took them, in order.
+    /// Those added since they were last taken, in order.
     pub(crate) added: Vec<Added>,
     /// How many have been added.
     count: u32,
