@@ -279,10 +279,11 @@ entity has. A draw that meets a living entity's ID, as a stream that walks into 
 session that saved a loaded scene does, reseeds the stream, the same way for the same state, and
 draws again. The world keeps each slot's ID in an array beside the slots' `Meta` rather than in
 it, since every lookup of a handle reads `Meta`, and IDs are read only where they cross into
-files, tools and diagnostics, and as drawing sorts the rows at one z: written only as an entity is
-spawned into the slot and removed from it, and read through the entity's handle, checked first, so
-that a stale handle never names the entity now in its slot. A map hashed with SipHash, so that IDs
-from files can't be chosen to collide, finds an entity by its ID; it's looked up, never iterated.
+files, tools and diagnostics, and as drawing sorts the rows of each batch and each z: written only
+as an entity is spawned into the slot and removed from it, and read through the entity's handle,
+checked first, so that a stale handle never names the entity now in its slot. A map hashed with
+SipHash, so that IDs from files can't be chosen to collide, finds an entity by its ID; it's looked
+up, never iterated.
 
 Reflection names each component type by its identifier, unless `#[reflect(name = "...")]` gives
 another, and two types of one name are an error rather than a guess. The derive writes the
@@ -505,19 +506,29 @@ parameters that shader takes, and a transform that places it in the world. The v
 window's central area, which the
 dock leaves the game. It renders into an image of its own, the central area's size in pixels,
 made again as that size changes, which the frame then shows there, with the UI over it, so that
-depth, HDR and tonemapping, post-processing and the tool API's captures read the view whole; and
-games' pipelines are made for that image's format, 8-bit sRGB, whatever the window presents.
+HDR and tonemapping, post-processing and the tool API's captures read the view whole; and games'
+pipelines are made for that image's format, 8-bit sRGB, whatever the window presents, and for the
+depth image beside it, of 32-bit floats, which every draw into the view tests. Depth runs
+reversed, from 1 at the near plane to 0 far away, which keeps a float's precision where it's
+needed and lets perspective see infinitely far; each frame clears it to 0, and a draw shows where
+it's as near as what's drawn there or nearer, so that at one depth the later goes over, as 2D
+draws at one z stack.
 Layers add shaders, meshes and textures, draw them and set the camera through their `Context`,
 and the renderer's `Shaders`, `Meshes` and `Textures` hand out their handles at once, on the main
 thread; each frame's render data carries what's been added to them since, in order. After the
 frame's ticks and the layers' updates, the engine draws the world's entities that have a
 `Transform` and a sprite or a `MeshDraw`, a mesh with its shader and parameters held without
-their types, over what the layers drew, back to front by their z's in the world, children where
-their ancestors carry them; those at one z draw sprites under meshes, each in the order of their
-IDs, which overlapping entities keep as others come and go. That sorts the rows at each z, which
-drawing keeps until a row or a z changes, and draws them out of their tables' order; so meshes of
-different meshes or shaders at one z interleave, each change between them another draw, and
-meshes meant to batch take a z of their own.
+their types, after what the layers drew, children where their ancestors carry them: first the
+meshes whose shaders are opaque, whose depth hides what's behind them whatever order they draw
+in, by shader, then mesh, so that each mesh with each shader is one instanced draw and their z's
+never sort them; then what blends, back to front by their z's in the world, those at one z drawing
+sprites under meshes; each batch and each z in the order of their IDs, which overlapping entities
+keep as others come and go. World z orders what blends rightly as seen from in front of layers
+parallel to XY, as 2D cameras see them; from behind or the side, what blends draws in the wrong
+order among itself, though rightly against what's opaque. At one depth, an opaque mesh goes under
+what blends; a layer's opaque draws hide the world's behind them, and its draws that blend go
+under the world's opaque ones behind them. Drawing sorts the rows of each batch and each z, which
+it keeps until a row, a z or a batch changes, and draws them out of their tables' order.
 
 Frames draw the world between ticks, so that it moves as smoothly at any frame rate. As each tick
 starts, the engine copies where the world's entities are, outside the world, so that no hash,
@@ -526,7 +537,7 @@ last tick found it to where the tick left it as the frame is past the tick, its 
 scale blended and its rotation the shorter way round. So drawing runs up to a tick behind the
 simulation, besides the frame the render thread runs behind. A child blends its own transform and
 each ancestor's, then composes them, so that it keeps to its orbit; and the order everything draws
-in, by its z, is the tick's, so that blending never sorts again. An entity's own transform draws
+in is the tick's, so that blending never sorts again. An entity's own transform draws
 where the tick left it, with nothing on the way, though its ancestors still carry it on theirs,
 where there's nothing to draw on from or the way would mislead: spawned in the tick, given its
 transform there, or put back by an undone delete; in a slot another entity had before; under
@@ -550,7 +561,9 @@ color, which each draw gives it: a mesh draws only with a shader for its own ver
 with parameters of that shader's type. Each frame copies the draws' transforms and parameters into
 the frame's own memory, where the shader reads them through their addresses too, so parameters can
 be as large as a shader needs. A shader is added with how it blends too, since Vulkan bakes
-blending into its pipeline: opaque, or by the alpha it returns, not multiplied into its color.
+blending into its pipeline: opaque, which writes its depth as well as testing it, or by the alpha
+it returns, not multiplied into its color, which only tests it, so that what's behind it shows
+through.
 Vulkan checks nothing about a shader, so its interface, which `Shaders::add` describes, is
 trusted, and validation checks it in debug builds.
 
@@ -565,15 +578,19 @@ texture's handle is known before the texture reaches the GPU, and gives out the 
 UI's, wherever one is free. Shaders pick one of the engine's samplers by its index: nearest or
 linear, clamped, repeated or mirrored.
 
-A camera is a position, a rotation and a projection. An orthographic camera, as 2D games use,
-sees as much of the world from bottom to top as the game sets, and as much across as the view's
-aspect ratio makes, so nothing stretches as the dock resizes the view; perspective comes with
-depth. Each frame the renderer pushes the camera's view and projection, column-major as glam's
-matrices are, with the addresses of the vertices and of the draws' transforms and parameters: a
-shader places each vertex by its draw's transform, into the world, then by the camera's. Layers
-can also steer the camera with the engine's orthographic camera controller, which a layer keeps
-and calls from its own update and event, not adding it to the stack, so that the game can still
-place its camera itself or stop steering it.
+A camera is a position, a rotation and a projection: orthographic, as 2D games use, seeing as
+much of the world from bottom to top as the game sets, and as much across as the view's aspect
+ratio makes, so nothing stretches as the dock resizes the view; or perspective, seeing an angle
+from bottom to top, as glTF's cameras do, from a near plane out to infinity. Each frame the
+renderer pushes the camera's view and projection, column-major as glam's matrices are, with the
+addresses of the vertices and of the draws' transforms and parameters: a shader places each
+vertex by its draw's transform, into the world, then by the camera's. Layers can also steer the
+camera with the engine's camera controllers: the orthographic one, which moves, turns and zooms a
+2D camera, and the fly one, which moves a camera where it looks and looks about, from the keys, a
+gamepad's sticks or the mouse dragged with its right button, keeping it level. A layer keeps one
+and calls it from its own update and event, not adding it to the stack, so that the game can
+still place its camera itself or stop steering it. The camera isn't in the world: it moves every
+frame, by input, where the world changes only at ticks, so no hash, scene or recording holds it.
 
 2D games draw sprites, which are draws like any other rather than a renderer of their own:
 `Context::draw_sprite` draws the engine's quad mesh with its sprite shader, whose parameters are a
@@ -638,8 +655,10 @@ main thread.
 
 ## Platforms
 
-- **Vulkan 1.4, bleeding edge.** The engine requires a Vulkan 1.4 device and takes up newer
-  features as drivers ship them, with a fallback wherever a target lacks one.
+- **Vulkan 1.4, bleeding edge.** The engine requires a Vulkan 1.4 device, with the descriptor
+  indexing bindless textures need and depth in 32-bit floats, which Vulkan doesn't require but
+  every target has, and takes up newer features as drivers ship them, with a fallback wherever a
+  target lacks one.
 - **Windows and Linux:** native Vulkan drivers.
 - **macOS: KosmicKrisp,** LunarG's Vulkan 1.4 driver on Metal. It needs Apple Silicon and
   macOS 26 or later. Not MoltenVK, which Khronos deprecated in October 2026. KosmicKrisp has no

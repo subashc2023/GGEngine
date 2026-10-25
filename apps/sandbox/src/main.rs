@@ -1,6 +1,6 @@
 //! Development playground: test scenes and debug tooling for engine work.
 
-use std::f32::consts::{FRAC_PI_2, TAU};
+use std::f32::consts::{FRAC_PI_2, FRAC_PI_3, TAU};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -10,12 +10,13 @@ use std::{fs, io, mem};
 
 use bytemuck::NoUninit;
 use gg_engine::egui::{self, ViewportCommand, ViewportId};
-use gg_engine::math::{self, EulerRot, Quat, Vec2, Vec3, Vec4};
+use gg_engine::math::{self, EulerRot, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_engine::reflect::Error;
 use gg_engine::{
-    Actions, App, Binding, Blend, Camera, Change, Commands, Component, Context, Entity, Event, Key,
-    Layer, MeshDraw, OrthographicCameraController, PadButton, Projection, Reflect, Sampler, Source,
-    Sprite, SpriteSheet, Stick, Tick, Transform, Ui, World,
+    Actions, App, Binding, Blend, Camera, Change, Commands, Component, Context, Entity, Event,
+    FlyAction, FlyCameraController, Key, Layer, Mesh, MeshDraw, OrthographicCameraController,
+    PadButton, Projection, Reflect, Sampler, Shader, Source, Sprite, SpriteSheet, Stick, Tick,
+    Transform, Ui, World,
 };
 use tracing::{error, info};
 
@@ -56,6 +57,36 @@ const TRIANGLE: [Colored; 3] = [
     },
 ];
 
+/// A cube a unit across around its origin, each face in a color of its own, in linear RGBA, from
+/// four corners of its own: its vertices, and its indices, two triangles a face.
+fn cube() -> ([Colored; 24], [u32; 36]) {
+    // Each face's outward axis, two axes along it, and its color.
+    let faces = [
+        (Vec3::X, Vec3::Y, Vec3::Z, [0.8, 0.1, 0.1, 1.0]),
+        (Vec3::NEG_X, Vec3::Y, Vec3::Z, [0.1, 0.7, 0.7, 1.0]),
+        (Vec3::Y, Vec3::Z, Vec3::X, [0.1, 0.7, 0.1, 1.0]),
+        (Vec3::NEG_Y, Vec3::Z, Vec3::X, [0.7, 0.1, 0.7, 1.0]),
+        (Vec3::Z, Vec3::X, Vec3::Y, [0.1, 0.1, 0.8, 1.0]),
+        (Vec3::NEG_Z, Vec3::X, Vec3::Y, [0.7, 0.7, 0.1, 1.0]),
+    ];
+    let mut vertices = [Colored {
+        position: Vec3::ZERO,
+        color: [0.0; 4],
+    }; 24];
+    let mut indices = [0; 36];
+    for (face, (out, across, up, color)) in faces.into_iter().enumerate() {
+        let corners = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)];
+        for (corner, (a, b)) in corners.into_iter().enumerate() {
+            let position = (out + across * a + up * b) * 0.5;
+            vertices[face * 4 + corner] = Colored { position, color };
+        }
+        let first = face as u32 * 4;
+        let triangles = [0, 1, 2, 0, 2, 3].map(|corner| first + corner);
+        indices[face * 6..face * 6 + 6].copy_from_slice(&triangles);
+    }
+    (vertices, indices)
+}
+
 /// How fast the triangle turns, in radians a second: a quarter turn.
 const TURN_SPEED: f32 = FRAC_PI_2;
 
@@ -63,10 +94,10 @@ const TURN_SPEED: f32 = FRAC_PI_2;
 const STEER_SPEED: f32 = 1.0;
 
 // How far forward each part of the scene is, which the engine draws back to front by its z in the
-// world: the map's ground, what stands on it, the swarm, the grid, at 0.2 in its scene, the
-// checkerboard, the triangle, its moons, each 0.01 in front of its parent in theirs, so that
-// they're between the triangle and the logo, and the logo. The camera sees from 1 behind it to 1
-// in front.
+// world, but for the triangle, which is opaque and draws first, its depth hiding what's behind it:
+// the map's ground, what stands on it, the swarm, the grid, at 0.2 in its scene, the checkerboard,
+// the triangle, its moons, each 0.01 in front of its parent in theirs, so that they're between the
+// triangle and the logo, and the logo. The orthographic camera sees from 1 behind it to 1 in front.
 const GROUND_Z: f32 = 0.0;
 const STANDING_Z: f32 = 0.01;
 const SWARM_Z: f32 = 0.1;
@@ -123,6 +154,10 @@ const TILE: f32 = 0.25;
 
 /// Where the map's center is: below the swarm's field, whose sprites would hide it.
 const MAP_CENTER: Vec2 = Vec2::new(0.0, -5.0);
+
+/// Where the cubes are: above the swarm's field, out of its way, and less than 1 from z = 0, where
+/// the orthographic camera sees them too.
+const CUBES: Vec3 = Vec3::new(0.0, 5.0, 0.0);
 
 /// The cells of `assets/tiles.png` that the map's `letter` draws: its ground's, and what stands on
 /// it, with how many cells tall that is.
@@ -458,36 +493,43 @@ fn pick(index: u32, salt: u32) -> f32 {
 /// alternate; over the grid's middle, a checkerboard sprite, tiled and tinted, then a triangle in
 /// red, green and blue turning, with two moons, which it carries around as it turns,
 /// one of them carrying a moonlet of its own, then a logo sprite whose alpha shows them through it.
-/// Below the swarm, out of its way, a map of tiles from a tile set's cells packed edge to edge,
-/// which tests that none shows any of the cells beside it. They're entities, spawned as the sandbox
-/// attaches but for the swarm, at its first tick, the grid loaded from a scene and the moons placed
-/// from a prefab, under a pivot that the triangle carries, which the engine draws back to front by
-/// their z's in the world; the world holds all of the simulation, so that a snapshot of it restores
-/// it, and a recording of the commands replays it. At each tick, 64 a second whatever the frame
-/// rate, the sandbox's systems move the swarm by its drifters, turn the triangle, its moons and the
-/// moonlet by their spins, and move the triangle along its heading, after the commands its panels,
-/// File menu and actions queued since the last: they steer the triangle and reverse its spin,
-/// resize the swarm, color the grid by its cells, filter the map and set the checkerboard's
-/// sprite, so that what the Inspector sets stays until a panel changes it, and load the grid
-/// again. The triangle is a mesh with a vertex type and shader of the sandbox's own, and the rest
-/// the engine's sprites, so the map, the swarm, the grid and the checkerboard are one instanced
-/// draw, the triangle another, and the moons, the moonlet and the logo a third. They're drawn over
-/// a color that drifts slowly, so that a running sandbox visibly animates. The engine's camera
-/// controller steers the camera: W, A, S and D, or a gamepad's right stick, move it along its own
-/// axes, Q and E, or the triggers, turn it left and right, at the same speed whatever the frame
-/// rate, and the mouse wheel zooms it. The arrows, the left stick and the D-pad steer the triangle,
-/// a unit a second at most, and R or the pad's South button, A on an Xbox pad, reverses its spin:
-/// the sandbox's actions, whose changes it queues as commands as they come, so that its ticks move
-/// the triangle for as long as an arrow is held, and reverse it once for each press, however short.
-/// Shows six panels to dock, beside the engine's Performance panel, which counts the draws, and its
-/// Entities and Inspector panels, which list the entities and edit the picked one's components: the
-/// camera; how many sprites the swarm has; the map's filtering, smooth or sharp, and buttons that
-/// look at the map or back at the swarm; the grid's colors, which can be picked; the checkerboard's
-/// filtering, how many times it repeats, and its tint; and the clear color, which can be held or
-/// picked. Logs the key, mouse and gamepad presses that reach it, which those on the panels don't.
-/// It polls input too: holding Space pauses the drift, and a panel shows where the cursor is. The
-/// title bar's File menu saves the grid to its scene, loads it again from the scene, which a
-/// refusal of leaves it as it was, and quits.
+/// Above the swarm, two cubes that cut through each other as they turn, and a pane through them
+/// that shows them through it, which only depth sorts out. Below the swarm, out of its way, a map
+/// of tiles from a tile set's cells packed edge to edge, which tests that none shows any of the
+/// cells beside it. All but the cubes and the pane are entities, spawned as the sandbox attaches
+/// but for the swarm, at its first tick, the grid loaded from a scene and the moons placed from a
+/// prefab, under a pivot that the triangle carries, which the engine draws back to front by their
+/// z's in the world, but for the triangle, opaque, which it draws first; the world holds all of the
+/// simulation, so that a snapshot of it restores it, and a recording of the commands replays it.
+/// At each tick, 64 a second whatever the frame rate, the sandbox's systems move the swarm by its
+/// drifters, turn the triangle, its moons and the moonlet by their spins, and move the triangle
+/// along its heading, after the commands its panels, File menu and actions queued since the last:
+/// they steer the triangle and reverse its spin, resize the swarm, color the grid by its cells,
+/// filter the map and set the checkerboard's sprite, so that what the Inspector sets stays until a
+/// panel changes it, and load the grid again. The triangle and the cubes are meshes with a vertex
+/// type and an opaque shader of the sandbox's own, and the rest the engine's sprites; the sandbox
+/// draws the cubes and the pane itself, each frame, before the world, so the cubes are one
+/// instanced draw, the pane another, the triangle a third, and every other sprite a fourth.
+/// They're drawn over a color that drifts slowly, so that a running sandbox visibly animates, as
+/// the cubes turn. The engine's orthographic camera controller steers the camera: W, A, S and D,
+/// or a gamepad's right stick, move it along its own axes, Q and E, or the triggers, turn it left
+/// and right, at the same speed whatever the frame rate, and the mouse wheel zooms it. Looking at
+/// the cubes, the engine's fly camera controller steers it instead, with perspective: W, A, S and
+/// D move it where it looks, E and Q, or the triggers, raise and lower it, and the right stick, or
+/// the mouse moved with its right button held, looks about. The arrows, the left stick and the
+/// D-pad steer the triangle, a unit a second at most, and R or the pad's South button, A on an Xbox
+/// pad, reverses its spin: the sandbox's actions, whose changes it queues as commands as they come,
+/// so that its ticks move the triangle for as long as an arrow is held, and reverse it once for
+/// each press, however short. Shows six panels to dock, beside the engine's Performance panel,
+/// which counts the draws, and its Entities and Inspector panels, which list the entities and edit
+/// the picked one's components: the camera; how many sprites the swarm has; the map's filtering,
+/// smooth or sharp, and buttons that look at the map, back at the swarm, or at the cubes; the
+/// grid's colors, which can be picked; the checkerboard's filtering, how many times it repeats, and
+/// its tint; and the clear color, which can be held or picked. Logs the key, mouse and gamepad
+/// presses that reach it, which those on the panels don't. It polls input too: holding Space
+/// pauses the drift and the cubes, and a panel shows where the cursor is. The title bar's File menu
+/// saves the grid to its scene, loads it again from the scene, which a refusal of leaves it as it
+/// was, and quits.
 struct Sandbox {
     time: Duration,
     drift: bool,
@@ -497,6 +539,11 @@ struct Sandbox {
     grid_colors: [[f32; 3]; 2],
     settings: Settings,
     camera: OrthographicCameraController,
+    /// Steers the camera while `flying`, rather than `camera`.
+    fly: FlyCameraController,
+    flying: bool,
+    /// The cubes' mesh and shader, once the sandbox attaches.
+    cubes: Option<(Mesh<Colored>, Shader<Colored>)>,
     actions: Actions<Act>,
     /// How many sprites the swarm has, as its panel says.
     swarm: u32,
@@ -555,6 +602,15 @@ impl Sandbox {
     fn new() -> Self {
         let mut camera = OrthographicCameraController::new(Self::start());
         camera.rotation = true;
+        let mut fly = FlyCameraController::new(Self::looking_at_the_cubes());
+        // W, A, S and D alone, since the left stick steers the triangle.
+        fly.actions.unbind(FlyAction::Move);
+        let wasd = Binding::Axis2 {
+            x: [Key::KeyA, Key::KeyD].map(Source::Key),
+            y: [Key::KeyS, Key::KeyW].map(Source::Key),
+        };
+        let bound = fly.actions.bind(FlyAction::Move, wasd);
+        bound.expect("W, A, S and D are free once moving is unbound");
         let mut actions = Actions::default();
         let arrows = Binding::Axis2 {
             x: [Key::ArrowLeft, Key::ArrowRight].map(Source::Key),
@@ -591,6 +647,9 @@ impl Sandbox {
                 tint: [1.0, 0.8, 0.8, 1.0],
             },
             camera,
+            fly,
+            flying: false,
+            cubes: None,
             actions,
             swarm: SWARM_START,
             scene: None,
@@ -603,6 +662,66 @@ impl Sandbox {
     /// the grid's 2.
     fn start() -> Camera {
         overlooking(Vec2::ZERO, 3.0)
+    }
+
+    /// A camera with perspective, 2.5 in front of the cubes, looking at them, a sixth of a turn
+    /// from the view's bottom to its top.
+    fn looking_at_the_cubes() -> Camera {
+        Camera {
+            position: CUBES + Vec3::Z * 2.5,
+            rotation: Quat::IDENTITY,
+            projection: Projection::Perspective {
+                fov: FRAC_PI_3,
+                near: 0.1,
+            },
+        }
+    }
+
+    /// Has `camera` be the game's view's, steered by the controller for its projection: the fly
+    /// camera controller for one with perspective. The controller it leaves lets go of what it
+    /// held, since it's sent no more events.
+    fn look_at(&mut self, cx: &mut Context, camera: Camera) {
+        let flying = matches!(camera.projection, Projection::Perspective { .. });
+        if flying != self.flying {
+            let left = Event::Focused(false);
+            let _ = if self.flying {
+                self.fly.event(cx, &left)
+            } else {
+                self.camera.event(cx, &left)
+            };
+        }
+        self.flying = flying;
+        if flying {
+            self.fly.camera = camera;
+        } else {
+            self.camera.camera = camera;
+        }
+    }
+
+    /// Draws two cubes half a unit across, which cut through each other as they turn opposite ways
+    /// about tilted axes, then a pane through their middles that's half transparent: what's nearer
+    /// than it hides it, and it tints what's behind it, which only depth sorts out.
+    fn draw_cubes(&self, cx: &mut Context) {
+        let Some((mesh, shader)) = self.cubes else {
+            return;
+        };
+        let turned = self.time.as_secs_f32();
+        for way in [-1.0, 1.0] {
+            let axis = Vec3::new(1.0, way, 0.5).normalize();
+            let at = Mat4::from_scale_rotation_translation(
+                Vec3::splat(0.5),
+                Quat::from_axis_angle(axis, way * turned),
+                CUBES + Vec3::X * 0.2 * way,
+            );
+            cx.draw(mesh, shader, at, ());
+        }
+        let pane = Sprite {
+            color: Vec4::new(1.0, 1.0, 1.0, 0.5),
+            ..Sprite::default()
+        };
+        let at =
+            Mat4::from_scale_rotation_translation(Vec3::new(1.2, 0.8, 1.0), Quat::IDENTITY, CUBES);
+        cx.draw_sprite(at, pane);
     }
 
     /// Spawns drifters until the swarm has `swarm`, or despawns them until it has, from its end,
@@ -675,6 +794,9 @@ impl Layer for Sandbox {
         let shapes = shapes.expect("the shapes load");
         let mesh = triangle.expect("the triangle is a whole triangle, of its own vertices");
         let shader = colored.expect("the vertex color shader compiles");
+        let (vertices, indices) = cube();
+        let cube = cx.add_mesh("cube", &vertices, &indices);
+        self.cubes = Some((cube.expect("the cube is whole triangles"), shader));
 
         let world = cx.world_mut();
         register(world);
@@ -766,17 +888,26 @@ impl Layer for Sandbox {
     }
 
     fn update(&mut self, cx: &mut Context, dt: Duration) {
-        self.camera.update(cx, dt);
+        if self.flying {
+            self.fly.update(cx, dt);
+        } else {
+            self.camera.update(cx, dt);
+        }
         if self.drift && !cx.input().key_down(Key::Space) {
             self.time += dt;
             let t = self.time.as_secs_f32() * 0.4;
             let wave = |phase: f32| 0.02 + 0.06 * (0.5 + 0.5 * math::libm::sinf(t + phase));
             self.color = [wave(0.0), wave(2.1), wave(4.2)];
         }
+        self.draw_cubes(cx);
     }
 
     fn event(&mut self, cx: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
-        self.camera.event(cx, event)?;
+        if self.flying {
+            self.fly.event(cx, event)?;
+        } else {
+            self.camera.event(cx, event)?;
+        }
         // Queued now, rather than at the next update, so that the next tick applies them.
         let Self {
             actions, commands, ..
@@ -827,14 +958,31 @@ impl Layer for Sandbox {
             self.commands.push(Command::ReloadGrid { text, colors });
         }
         ui.panel("Stats", |ui| {
-            let camera = self.camera.camera;
-            let [x, y, _] = camera.position.to_array();
-            let (turn, _, _) = camera.rotation.to_euler(EulerRot::ZYX);
-            let Projection::Orthographic { height, .. } = camera.projection;
-            ui.label(format!(
-                "Camera at {x:.2}, {y:.2}, turned {:.0}°, {height:.2} units high",
-                math::to_degrees(turn).rem_euclid(360.0)
-            ));
+            let camera = if self.flying {
+                self.fly.camera
+            } else {
+                self.camera.camera
+            };
+            let [x, y, z] = camera.position.to_array();
+            let degrees = |radians| math::to_degrees(radians).rem_euclid(360.0);
+            let facing = match camera.projection {
+                Projection::Orthographic { height, .. } => {
+                    let (turn, _, _) = camera.rotation.to_euler(EulerRot::ZYX);
+                    format!("turned {:.0}°, {height:.2} units high", degrees(turn))
+                }
+                // The fly camera turns about the world's up, then looks up or down, unrolled.
+                Projection::Perspective { fov, .. } => {
+                    let (turn, up, _) = camera.rotation.to_euler(EulerRot::YXZ);
+                    // Plus 0, so that looking just below level shows as 0°, not -0°.
+                    let up = math::to_degrees(up).round() + 0.0;
+                    format!(
+                        "turned {:.0}°, looking {up:.0}° up, {:.0}° from bottom to top",
+                        degrees(turn),
+                        math::to_degrees(fov)
+                    )
+                }
+            };
+            ui.label(format!("Camera at {x:.2}, {y:.2}, {z:.2}, {facing}"));
             ui.label(match cx.input().cursor() {
                 Some([x, y]) => format!("Cursor at {x:.0}, {y:.0}"),
                 None => "Cursor outside the window".to_owned(),
@@ -847,6 +995,7 @@ impl Layer for Sandbox {
             }
         });
         let mut changed = false;
+        let mut look = None;
         ui.panel("Map", |ui| {
             changed |= ui
                 .checkbox(&mut self.settings.smooth_map, "Smooth the map")
@@ -854,13 +1003,19 @@ impl Layer for Sandbox {
             ui.horizontal(|ui| {
                 // 5 units high, so that the map, 6 across and 3.5 down, fits a view of most shapes.
                 if ui.button("Look at the map").clicked() {
-                    self.camera.camera = overlooking(MAP_CENTER, 5.0);
+                    look = Some(overlooking(MAP_CENTER, 5.0));
                 }
                 if ui.button("Look at the swarm").clicked() {
-                    self.camera.camera = Self::start();
+                    look = Some(Self::start());
+                }
+                if ui.button("Look at the cubes").clicked() {
+                    look = Some(Self::looking_at_the_cubes());
                 }
             });
         });
+        if let Some(camera) = look {
+            self.look_at(cx, camera);
+        }
         // By the colors rather than the buttons' changes: egui gives back the colors its picker
         // makes of them, as it first draws them too, which the world takes, as the grid's scene
         // saves them.

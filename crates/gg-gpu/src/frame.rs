@@ -16,7 +16,8 @@ use crate::bindless::PUSH_CONSTANTS;
 use crate::buffer::Buffer;
 use crate::vma::Memory;
 use crate::{
-    COLOR_RANGE, ColorImage, Device, Format, GpuBuffer, Pipeline, Swapchain, Texture, vk_error,
+    COLOR_RANGE, ColorImage, DEPTH_RANGE, DepthImage, Device, Format, GpuBuffer, Pipeline,
+    Swapchain, Texture, vk_error,
 };
 
 /// How many frames the GPU works on at once.
@@ -469,18 +470,20 @@ impl<'a> Frame<'a> {
     }
 
     /// Starts rendering into the `target`th of the targets the frame began with, cleared to
-    /// `color`, in linear RGBA. `label` names the pass in captures. Rendering ends when the pass
-    /// is dropped. Returns `None` for a swapchain that had no image ready this frame; the first
-    /// target always has one.
+    /// `color`, in linear RGBA, and with `depth`, if given, which its draws test and write as
+    /// their pipelines say, cleared to 0, as far away as depth goes. `label` names the pass in
+    /// captures. Rendering ends when the pass is dropped. Returns `None` for a swapchain that had
+    /// no image ready this frame; the first target always has one.
     ///
     /// # Panics
     ///
-    /// If the frame has no `target`th target.
+    /// If the frame has no `target`th target, or `depth` isn't the target's size.
     pub fn begin_pass(
         &mut self,
         target: usize,
         label: &std::ffi::CStr,
         color: [f32; 4],
+        depth: Option<&DepthImage>,
     ) -> Option<Pass<'_, 'a>> {
         let (index, _) = self.frames.images[target]?;
         let device = &self.frames.device;
@@ -488,6 +491,16 @@ impl<'a> Frame<'a> {
         let ((image, view, extent), format) = match &self.targets[target] {
             Target::Swapchain(swapchain) => (swapchain.image(index), swapchain.format()),
             Target::Image(image) => (image.parts(), ColorImage::FORMAT),
+        };
+        let depth = depth.map(|depth| {
+            let (image, view, size) = depth.parts();
+            assert_eq!(size, extent, "a pass's depth image is its target's size");
+            (image, view)
+        });
+        let format = if depth.is_some() {
+            format.with_depth()
+        } else {
+            format
         };
         // The old contents are discarded. A swapchain image is ready once its acquire semaphore
         // is signaled, which the submission waits for at the color-attachment stage; an
@@ -511,6 +524,26 @@ impl<'a> Frame<'a> {
             .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
             .image(image)
             .subresource_range(COLOR_RANGE);
+        // The depth's old contents are discarded too, once the last pass that had it is done with
+        // it: its clear wrote it at the early fragment tests, and its store at the late ones.
+        let tests = vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
+            | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS;
+        let depth_barrier = depth.map(|(image, _)| {
+            vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(tests)
+                .src_access_mask(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                .dst_stage_mask(tests)
+                .dst_access_mask(
+                    vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ
+                        | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                )
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                .image(image)
+                .subresource_range(DEPTH_RANGE)
+        });
+        let barriers = [barrier, depth_barrier.unwrap_or_default()];
+        let barriers = &barriers[..1 + usize::from(depth_barrier.is_some())];
         let attachment = vk::RenderingAttachmentInfo::default()
             .image_view(view)
             .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
@@ -519,10 +552,27 @@ impl<'a> Frame<'a> {
             .clear_value(vk::ClearValue {
                 color: vk::ClearColorValue { float32: color },
             });
-        let rendering = vk::RenderingInfo::default()
+        // Nothing reads depth after the pass.
+        let depth_attachment = depth.map(|(_, view)| {
+            vk::RenderingAttachmentInfo::default()
+                .image_view(view)
+                .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .clear_value(vk::ClearValue {
+                    depth_stencil: vk::ClearDepthStencilValue {
+                        depth: 0.0,
+                        stencil: 0,
+                    },
+                })
+        });
+        let mut rendering = vk::RenderingInfo::default()
             .render_area(extent.into())
             .layer_count(1)
             .color_attachments(slice::from_ref(&attachment));
+        if let Some(depth) = &depth_attachment {
+            rendering = rendering.depth_attachment(depth);
+        }
         let viewport = vk::Viewport {
             x: 0.0,
             y: 0.0,
@@ -532,14 +582,15 @@ impl<'a> Frame<'a> {
             max_depth: 1.0,
         };
         let raw = device.raw();
-        // SAFETY: the commands are recording outside a pass, and the image and view live until
+        // SAFETY: the commands are recording outside a pass, and the images and views live until
         // the frame has finished on the GPU: the swapchain waits for its frames before
-        // destroying its images, and an offscreen image retires until then.
+        // destroying its images, and an offscreen image, and a depth image, retire until then,
+        // dropped while the frame records.
         unsafe {
             device.begin_label(commands, label);
             raw.cmd_pipeline_barrier2(
                 commands,
-                &vk::DependencyInfo::default().image_memory_barriers(slice::from_ref(&barrier)),
+                &vk::DependencyInfo::default().image_memory_barriers(barriers),
             );
             raw.cmd_begin_rendering(commands, &rendering);
             raw.cmd_set_viewport(commands, 0, &[viewport]);
@@ -755,7 +806,8 @@ impl<'a> Pass<'_, 'a> {
         [self.extent.width, self.extent.height]
     }
 
-    /// The target's format, which the pipelines it draws with must be made for.
+    /// The formats of its target and its depth image, if it has one, which the pipelines it draws
+    /// with must be made for.
     pub fn format(&self) -> Format {
         self.format
     }
@@ -769,16 +821,17 @@ impl<'a> Pass<'_, 'a> {
     ///
     /// # Panics
     ///
-    /// If the pipeline isn't made for the target's format.
+    /// If the pipeline isn't made for the pass's formats.
     pub fn set_pipeline(&mut self, pipeline: &Pipeline) {
         assert_eq!(
             pipeline.format(),
             self.format,
-            "a pipeline is made for the format of the target it draws into"
+            "a pipeline is made for the formats of the pass it draws in: its target's and its depth \
+             image's"
         );
         self.pipeline_set = true;
-        // SAFETY: the commands are recording inside a pass whose target has the pipeline's
-        // format, and the pipeline retires until the frame has finished.
+        // SAFETY: the commands are recording inside a pass whose formats, its target's and its
+        // depth image's, are the pipeline's, and the pipeline retires until the frame has finished.
         unsafe {
             self.frame.frames.device.raw().cmd_bind_pipeline(
                 self.commands(),

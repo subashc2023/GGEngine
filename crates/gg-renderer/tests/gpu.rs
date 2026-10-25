@@ -56,6 +56,7 @@ fn main() {
     );
     run("sheets_match_their_reference", sheets_match_their_reference);
     run("views_match_their_reference", views_match_their_reference);
+    run("depth_matches_its_reference", depth_matches_its_reference);
 }
 
 fn run(name: &str, test: impl FnOnce()) {
@@ -914,6 +915,105 @@ fn views_match_their_reference() {
         "the view showed otherwise once it was 160 by 160 again and kept that size"
     );
     check(renderer, "views", WIDTH, HEIGHT);
+}
+
+/// Draws squares and sprites into an offscreen image, as a camera with perspective sees them, and
+/// compares it with its reference image: two opaque squares that cross, each hiding the half of
+/// the other behind it; a nearer opaque square drawn before a farther one, which it hides; two
+/// opaque squares in one plane facing the camera, the later over the earlier, as draws at one z
+/// stack in 2D; a translucent sprite drawn after an opaque square in front of it, which hides the
+/// middle of it; and two translucent sprites, the nearer drawn first, which the farther goes over,
+/// since what blends tests depth without writing it. In the first frame alone, an opaque square
+/// nearer than the rest covers most of them, which the later frames, their depth cleared, don't
+/// remember. Against the reference, opaque squares that don't write depth make 2,957 pixels
+/// differ, sprites that write it 1,118, and sprites that don't test it 1,444.
+fn depth_matches_its_reference() {
+    const WIDTH: u32 = 240;
+    const HEIGHT: u32 = 160;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut meshes = Meshes::default();
+    let mut shaders = Shaders::default();
+    let mut textures = Textures::default();
+    let mut uploads = Uploads::default();
+    // 4 in front of the origin, seeing a sixth of a turn from the view's bottom to its top: at z =
+    // 0, about 4.6 units.
+    let camera = Camera {
+        position: Vec3::new(0.0, 0.0, 4.0),
+        projection: Projection::Perspective {
+            fov: PI / 3.0,
+            near: 0.5,
+        },
+        ..Camera::default()
+    };
+    let flat = shaders
+        .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+        .expect("a shader");
+    let corners = [
+        [-0.5, -0.5, 0.0],
+        [0.5, -0.5, 0.0],
+        [0.5, 0.5, 0.0],
+        [-0.5, 0.5, 0.0],
+    ];
+    let square = meshes
+        .add("square", &corners, &[0, 1, 2, 2, 3, 0])
+        .expect("a mesh");
+    // `size` across at `at`, turned `turn` degrees about Y.
+    let placed = |size: f32, turn: f32, at: [f32; 3]| {
+        Mat4::from_scale_rotation_translation(
+            Vec3::splat(size),
+            Quat::from_rotation_y(math::to_radians(turn)),
+            Vec3::from(at),
+        )
+    };
+    let color = |r, g, b| Vec4::new(r, g, b, 1.0);
+    let translucent = |color: [f32; 4]| Sprite {
+        color: Vec4::from(color),
+        ..Sprite::default()
+    };
+    let scene = |occluded: bool| {
+        let mut draws = Draws::default();
+        if occluded {
+            let gray = color(0.5, 0.5, 0.5);
+            draws.push(square, flat, placed(3.0, 0.0, [0.0, 0.0, 2.0]), gray);
+        }
+        let crossing = [(0.0, color(0.8, 0.1, 0.1)), (60.0, color(0.1, 0.7, 0.1))];
+        for (turn, color) in crossing {
+            draws.push(square, flat, placed(1.4, turn, [-1.8, 0.8, 0.0]), color);
+        }
+        let blue = color(0.1, 0.2, 0.8);
+        draws.push(square, flat, placed(1.0, 0.0, [1.4, 0.9, 1.0]), blue);
+        let yellow = color(0.8, 0.7, 0.1);
+        draws.push(square, flat, placed(1.6, 0.0, [1.9, 0.6, -1.0]), yellow);
+        let white = color(0.9, 0.9, 0.9);
+        draws.push(square, flat, placed(0.8, 0.0, [-0.3, 1.6, 0.0]), white);
+        let purple = color(0.4, 0.1, 0.6);
+        draws.push(square, flat, placed(0.8, 0.0, [0.1, 1.4, 0.0]), purple);
+        let magenta = color(0.8, 0.1, 0.6);
+        draws.push(square, flat, placed(1.0, 0.0, [-1.5, -1.2, 0.3]), magenta);
+        let behind = translucent([1.0, 1.0, 1.0, 0.6]);
+        draws.push_sprite(placed(2.0, 0.0, [-1.95, -1.55, -0.8]), behind);
+        let nearer = translucent([0.1, 0.9, 0.9, 0.5]);
+        draws.push_sprite(placed(1.2, 0.0, [1.2, -1.1, 0.5]), nearer);
+        let farther = translucent([0.9, 0.5, 0.1, 0.5]);
+        draws.push_sprite(placed(1.4, 0.0, [1.6, -0.8, -0.5]), farther);
+        draws
+    };
+    for frame in 0..3 {
+        let draws = scene(frame == 0);
+        uploads.take(&mut meshes, &mut shaders, &mut textures);
+        let data = RenderData {
+            clear_color: CLEAR,
+            viewport: Viewport {
+                origin: [0, 0],
+                size: [WIDTH, HEIGHT],
+            },
+            camera,
+            uploads: &mut uploads,
+            draws: &draws,
+        };
+        render_without_ui(&mut renderer, data);
+    }
+    check(renderer, "depth", WIDTH, HEIGHT);
 }
 
 /// Renders a frame of `data`, without UI.

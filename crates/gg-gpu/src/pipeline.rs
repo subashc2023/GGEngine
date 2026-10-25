@@ -8,11 +8,39 @@ use ash::vk;
 use gg_core::{Error, Result};
 
 use crate::device::Retired;
-use crate::{Device, vk_error};
+use crate::{DepthImage, Device, vk_error};
 
-/// The pixel format of what a frame renders into, which pipelines are made for.
+/// The pixel formats of what a pass renders into, which pipelines are made for: its target's, and
+/// its depth image's, if it has one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Format(pub(crate) vk::Format);
+pub struct Format {
+    pub(crate) color: vk::Format,
+    /// `UNDEFINED` for a pass without depth.
+    pub(crate) depth: vk::Format,
+}
+
+impl Format {
+    /// A target's format, `color`, without depth.
+    pub(crate) const fn new(color: vk::Format) -> Self {
+        Self {
+            color,
+            depth: vk::Format::UNDEFINED,
+        }
+    }
+
+    /// This format with a [`DepthImage`]'s: what a pass into a target of this format with a depth
+    /// image renders into.
+    pub const fn with_depth(self) -> Self {
+        Self {
+            depth: DepthImage::FORMAT,
+            ..self
+        }
+    }
+
+    fn has_depth(self) -> bool {
+        self.depth != vk::Format::UNDEFINED
+    }
+}
 
 /// How a pipeline's output combines with what's already in the target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,8 +54,10 @@ pub enum Blend {
     PremultipliedAlpha,
 }
 
-/// What a graphics pipeline is made from. It draws triangle lists without culling or depth, and
-/// its viewport and scissor are set as it draws.
+/// What a graphics pipeline is made from. It draws triangle lists without culling, and its
+/// viewport and scissor are set as it draws. Where its targets have depth, it tests it, drawing
+/// only where it's as near as what was drawn there before or nearer: depth runs from 1 at the near
+/// plane to 0 far away, as the renderer's cameras project it.
 pub struct GraphicsDesc<'a> {
     /// The debug name.
     pub name: &'a str,
@@ -38,9 +68,12 @@ pub struct GraphicsDesc<'a> {
     pub spirv: &'a [u8],
     pub vertex: &'a CStr,
     pub fragment: &'a CStr,
-    /// The format of the targets it draws into.
+    /// The formats of the targets it draws into.
     pub format: Format,
     pub blend: Blend,
+    /// Whether it writes its depth where it draws, for later draws to test against. Only a
+    /// pipeline whose targets have depth can.
+    pub depth_write: bool,
 }
 
 /// A graphics pipeline. Dropping it retires it until the GPU is done with it.
@@ -51,7 +84,15 @@ pub struct Pipeline {
 }
 
 impl Pipeline {
+    /// # Panics
+    ///
+    /// If it writes depth into targets without it.
     pub fn graphics(device: &Arc<Device>, desc: &GraphicsDesc<'_>) -> Result<Self> {
+        let depth = desc.format.has_depth();
+        assert!(
+            depth || !desc.depth_write,
+            "a pipeline writes depth only into targets that have it"
+        );
         let code = ash::util::read_spv(&mut Cursor::new(desc.spirv)).map_err(|error| {
             Error::new(
                 "gpu.bad_shader",
@@ -114,11 +155,18 @@ impl Pipeline {
         let attachments = [attachment];
         let color_blend =
             vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachments);
+        // Or equal, so that what draws later at one depth goes over what drew there before, as 2D
+        // games stack what they draw at one z.
+        let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
+            .depth_test_enable(depth)
+            .depth_write_enable(desc.depth_write)
+            .depth_compare_op(vk::CompareOp::GREATER_OR_EQUAL);
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
-        let formats = [desc.format.0];
-        let mut rendering =
-            vk::PipelineRenderingCreateInfo::default().color_attachment_formats(&formats);
+        let formats = [desc.format.color];
+        let mut rendering = vk::PipelineRenderingCreateInfo::default()
+            .color_attachment_formats(&formats)
+            .depth_attachment_format(desc.format.depth);
         let info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&stages)
             .vertex_input_state(&vertex_input)
@@ -126,6 +174,7 @@ impl Pipeline {
             .viewport_state(&viewport)
             .rasterization_state(&rasterization)
             .multisample_state(&multisample)
+            .depth_stencil_state(&depth_stencil)
             .color_blend_state(&color_blend)
             .dynamic_state(&dynamic)
             .layout(device.bindless().pipeline_layout())
@@ -153,7 +202,7 @@ impl Pipeline {
         self.raw
     }
 
-    /// The format of the targets it draws into.
+    /// The formats of the targets it draws into.
     pub(crate) fn format(&self) -> Format {
         self.format
     }

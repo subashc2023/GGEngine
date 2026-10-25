@@ -11,7 +11,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use ash::vk;
-use gg_gpu::{ColorImage, Device, Frames, Instance, InstanceDesc, Target};
+use gg_gpu::{ColorImage, DepthImage, Device, Frames, Instance, InstanceDesc, Target};
 
 fn main() {
     if gg_core::profile::ENABLED {
@@ -43,6 +43,7 @@ fn main() {
         "dropped_images_free_their_slots",
         dropped_images_free_their_slots,
     );
+    run("depth_clears_in_every_pass", depth_clears_in_every_pass);
     run("validation_errors_reach_the_json_log", || {
         validation_errors_reach_the_json_log(&log);
     });
@@ -99,7 +100,7 @@ fn clear_reads_back() {
         for (target, srgb) in srgb.iter().enumerate() {
             let color = [linear(srgb[0]), linear(srgb[1]), linear(srgb[2]), 1.0];
             // A pass that draws nothing clears its target.
-            drop(frame.begin_pass(target, c"clear", color));
+            drop(frame.begin_pass(target, c"clear", color, None));
         }
         frame.submit().expect("the frame's submission");
     }
@@ -138,7 +139,7 @@ fn sampled_images_keep_their_layout() {
             .begin([Target::Image(&mut image)])
             .expect("a frame")
             .expect("an offscreen image can always be rendered into");
-        drop(frame.begin_pass(0, c"clear", [1.0, 0.0, 0.0, 1.0]));
+        drop(frame.begin_pass(0, c"clear", [1.0, 0.0, 0.0, 1.0], None));
         frame.begin_sampling(0);
         frame.submit().expect("the frame's submission");
     }
@@ -167,6 +168,36 @@ fn dropped_images_free_their_slots() {
     }
 
     drop((device, instance));
+    assert_eq!(
+        validation.messages(),
+        0,
+        "validation reported problems; the log above says what"
+    );
+}
+
+/// Clears an image and a depth image in two passes each frame, over more frames than are in
+/// flight, so that every pass but the first follows another's use of the depth image, in its own
+/// submission or the last: synchronization validation reports a pass whose barrier doesn't wait
+/// for that use, and core validation one that leaves the depth image in the wrong layout.
+fn depth_clears_in_every_pass() {
+    let instance = instance();
+    let validation = instance.validation();
+    let device = Device::new(&instance, None, None).expect("a GPU that supports Vulkan 1.4");
+    let mut image = ColorImage::new(&device, 16, 16, "depth test target").expect("an image");
+    let depth = DepthImage::new(&device, 16, 16, "depth test depth").expect("a depth image");
+    let mut frames = Frames::new(&device).expect("frames");
+    for _ in 0..3 {
+        let mut frame = frames
+            .begin([Target::Image(&mut image)])
+            .expect("a frame")
+            .expect("an offscreen image can always be rendered into");
+        for _ in 0..2 {
+            drop(frame.begin_pass(0, c"clear", [0.0, 0.0, 0.0, 1.0], Some(&depth)));
+        }
+        frame.submit().expect("the frame's submission");
+    }
+
+    drop((frames, image, depth, device, instance));
     assert_eq!(
         validation.messages(),
         0,

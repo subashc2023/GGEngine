@@ -274,11 +274,11 @@ impl Reflect for MeshDraw {
 }
 
 /// What drawing the world sorts and computes, kept from frame to frame so that it allocates nothing
-/// once it's grown, and so that a frame that changes no entity's row and no z draws in the order
-/// the last one sorted its rows by ID, without sorting them by ID again.
+/// once it's grown, and so that a frame that changes no entity's row, no z and no batch draws in
+/// the order the last one sorted its rows by ID, without sorting them by ID again.
 #[derive(Default)]
 pub(crate) struct Scratch {
-    /// This frame's runs of rows at one z, back to front.
+    /// This frame's runs of rows of one batch, then those at one z, back to front.
     segments: Vec<Segment>,
     /// The segments `items` were sorted from, which each frame's are compared with.
     last: Vec<Segment>,
@@ -295,17 +295,20 @@ pub(crate) struct Scratch {
     blends: Vec<Option<usize>>,
     /// Each row drawn, in the order they draw.
     items: Vec<Item>,
-    /// The rows of each z and kind, back to front.
+    /// The rows of each batch, then of each z and kind, back to front.
     groups: Vec<Group>,
     /// The world and its version when `items` were sorted, if they are.
     sorted: Option<(u64, u64)>,
 }
 
-/// A run of one table's rows at one z, of one kind, whose rows `sort` puts among the others of
-/// their z and kind.
+/// A run of one table's rows at one z, of one kind, or of one batch, for opaque meshes, whose rows
+/// `sort` puts among the others of their z and kind, or of their batch.
 #[derive(Clone)]
 struct Segment {
+    /// Its rows' z, or 0 for opaque meshes, which draw in any order.
     z: f32,
+    /// Its rows' [`MeshDraw::batch`], for opaque meshes, or 0.
+    batch: u64,
     /// Which segment it was found as: tables in the order they were made, then a table's sprites
     /// before its meshes, then its rows in order.
     order: u32,
@@ -322,6 +325,7 @@ struct Segment {
 impl PartialEq for Segment {
     fn eq(&self, other: &Self) -> bool {
         self.z.to_bits() == other.z.to_bits()
+            && self.batch == other.batch
             && self.order == other.order
             && self.kind == other.kind
             && self.table == other.table
@@ -333,14 +337,17 @@ impl PartialEq for Segment {
 /// A [`Segment`] of roots.
 const ROOTS: u32 = u32::MAX;
 
-/// What a row draws: at one z, sprites draw under meshes.
+/// What a row draws: opaque meshes first, whatever their z, then, at one z, sprites under the meshes
+/// that blend.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Kind {
+    Opaque,
     Sprite,
     Mesh,
 }
 
-/// A row drawn: its entity's ID, which orders it among the rows of its z and kind, and where it is.
+/// A row drawn: its entity's ID, which orders it among the rows of its batch, or of its z and kind,
+/// and where it is.
 struct Item {
     id: EntityId,
     /// Its segment, among the scratch's.
@@ -349,31 +356,34 @@ struct Item {
     row: u32,
 }
 
-/// The rows of one z and one kind, a range of the scratch's items.
+/// The rows of one batch, or of one z and one kind, a range of the scratch's items.
 struct Group {
     kind: Kind,
     items: Range<u32>,
 }
 
 /// Draws into `draws` every entity of `world` with a [`Transform`] and a [`Sprite`] or a
-/// [`MeshDraw`], back to front by its z in the world, as the latest tick left it; at one z, sprites
-/// under meshes, each in the order of their entities' IDs, so that entities that overlap at one z
-/// keep how they stack as others come and go. Each draws `alpha` of the way from what `past` has it
+/// [`MeshDraw`]: first the meshes whose shaders are opaque, whose depth hides what's behind them
+/// whatever order they draw in, by their [`MeshDraw::batch`], so that each mesh with each shader is
+/// one instanced draw; then the rest, which blend, back to front by z in the world, as the latest
+/// tick left them, at one z sprites under meshes; each batch and each z in the order of their
+/// entities' IDs, so that entities that overlap at one depth keep how they stack as others come and
+/// go. Each draws `alpha` of the way from what `past` has it
 /// draw from to where the tick left it, while it draws between ticks; at 1, where the tick left it.
 /// A child draws where its ancestors carry it, by its world matrix, its transform's and each of
 /// theirs drawn so, which it computes into `scratch` for each child once a frame; roots, in tables
 /// without a [`Parent`], draw by their transforms alone, which those that draw between ticks blend
 /// first, in their tables' order, in runs of rows that the job system's threads take.
 ///
-/// It sorts runs of consecutive rows at one z every frame, so it's quick while each table's rows at
-/// one z stay together. Spawning entities of a table at mixed z's, or despawning, which moves a
-/// table's last row into the gap, splits those runs; at worst, as when sprites each have their own
-/// z, as sorting by y gives them, it sorts every sprite every frame, until the renderer sorts by
-/// depth, with Phase 4. The rows of each z are sorted by ID, and kept sorted in `scratch` while no
-/// entity's row and no z changes. A frame that changes them sorts every row at a shared z again,
-/// O(n log n), as the swarm's 100,000 at one z are; and every frame draws them in that order,
-/// reading their tables' rows out of order rather than in a sweep. A radix sort, or tables kept in
-/// ID order, waits for a game whose frames need the time.
+/// It sorts runs of consecutive rows of one batch or at one z every frame, so it's quick while each
+/// table's rows at one z stay together, as opaque meshes do whatever their z's. Spawning entities
+/// of a table at mixed z's, or despawning, which moves a table's last row into the gap, splits those
+/// runs; at worst, as when sprites each have their own z, as sorting by y gives them, it sorts
+/// every sprite every frame. The rows of each batch and each z are sorted by ID, and kept sorted in
+/// `scratch` while no entity's row, no z and no batch changes. A frame that changes them sorts every
+/// row of a shared batch or z again, O(n log n), as the swarm's 100,000 at one z are; and every
+/// frame draws them in that order, reading their tables' rows out of order rather than in a sweep.
+/// A radix sort, or tables kept in ID order, waits for a game whose frames need the time.
 pub(crate) fn draw_world(
     world: &World,
     past: &Past,
@@ -445,11 +455,19 @@ pub(crate) fn draw_world(
         }
         let table = index as u32;
         let len = transforms.len();
+        // A row's batch, if it's a mesh whose shader is opaque, which draws by it rather than by
+        // its z.
+        let meshes = mesh.and_then(|id| rows.column::<MeshDraw>(id));
+        let batch = |kind: Kind, row: usize| match (kind, meshes) {
+            (Kind::Mesh, Some(meshes)) => meshes[row].batch(),
+            _ => None,
+        };
         match parent.and_then(|id| rows.column::<Parent>(id)) {
             None => {
                 let z = |row: usize| transforms[row].translation.z;
                 for (kind, _) in drawn.into_iter().filter(|&(_, drawn)| drawn) {
-                    cut(segments, len, z, kind, table, ROOTS);
+                    let batch = |row| batch(kind, row);
+                    cut(segments, len, z, batch, kind, table, ROOTS);
                 }
                 if let Some(from) = drawn_from(index) {
                     let end = blending + len;
@@ -474,13 +492,17 @@ pub(crate) fn draw_world(
                 let z = |row: usize| depths[row];
                 let start = u32::try_from(start).expect("fewer than 2^32 children drawn");
                 for (kind, _) in drawn.into_iter().filter(|&(_, drawn)| drawn) {
-                    cut(segments, len, z, kind, table, start);
+                    let batch = |row| batch(kind, row);
+                    cut(segments, len, z, batch, kind, table, start);
                 }
             }
         }
     }
+    // Opaque meshes first, by batch; then the rest back to front. An opaque segment's z is 0, and
+    // another's batch.
     segments.sort_unstable_by(|a, b| {
-        let z = a.z.total_cmp(&b.z);
+        let opaque = (a.kind != Kind::Opaque).cmp(&(b.kind != Kind::Opaque));
+        let z = opaque.then(a.batch.cmp(&b.batch)).then(a.z.total_cmp(&b.z));
         z.then(a.kind.cmp(&b.kind)).then(a.order.cmp(&b.order))
     });
     if *sorted != Some(world.version()) || segments != last {
@@ -524,7 +546,7 @@ pub(crate) fn draw_world(
                     (matrix(transforms, drawn, row), sprites[row])
                 }));
             }
-            Kind::Mesh => {
+            Kind::Opaque | Kind::Mesh => {
                 let mesh = mesh.expect("a table has meshes");
                 let columns = |index: u32| {
                     let (table, transforms, drawn) = placed(index);
@@ -567,20 +589,32 @@ fn blend(out: &mut [Mat4], from: &[Transform], to: &[Transform], alpha: f32) {
 }
 
 /// Adds to `segments` the runs of rows at one z, which `z` gives, among table `table`'s `len` rows,
-/// of `kind`, whose world matrices start at `matrices` among the scratch's.
+/// of `kind`, but for meshes whose `batch` is one, which are opaque, the runs of rows of one batch;
+/// their world matrices start at `matrices` among the scratch's.
 fn cut(
     segments: &mut Vec<Segment>,
     len: usize,
     z: impl Fn(usize) -> f32,
+    batch: impl Fn(usize) -> Option<u64>,
     kind: Kind,
     table: u32,
     matrices: u32,
 ) {
+    // A row's kind, batch and z: an opaque mesh's z is 0, and another's batch.
+    let key = |row: usize| match batch(row) {
+        Some(batch) => (Kind::Opaque, batch, 0.0),
+        None => (kind, 0, z(row)),
+    };
+    let same = |(a, a_batch, a_z): (Kind, u64, f32), (b, b_batch, b_z): (Kind, u64, f32)| {
+        (a, a_batch) == (b, b_batch) && a_z.total_cmp(&b_z).is_eq()
+    };
     let mut start = 0;
     for row in 1..=len {
-        if row == len || z(row).total_cmp(&z(start)).is_ne() {
+        if row == len || !same(key(start), key(row)) {
+            let (kind, batch, z) = key(start);
             segments.push(Segment {
-                z: z(start),
+                z,
+                batch,
                 order: segments.len() as u32,
                 kind,
                 table,
@@ -592,14 +626,17 @@ fn cut(
     }
 }
 
-/// Puts each row of `segments`, sorted back to front, into `items`, a group of them for each z and
-/// kind, each group's in the order of its entities' IDs.
+/// Puts each row of `segments`, sorted, into `items`, a group of them for each batch, and for each z
+/// and kind, each group's in the order of its entities' IDs.
 fn sort(world: &World, segments: &[Segment], items: &mut Vec<Item>, groups: &mut Vec<Group>) {
     items.clear();
     groups.clear();
     let tables = world.tables();
     let mut first = 0;
-    for group in segments.chunk_by(|a, b| a.z.total_cmp(&b.z).is_eq() && a.kind == b.kind) {
+    let same = |a: &Segment, b: &Segment| {
+        (a.kind, a.batch) == (b.kind, b.batch) && a.z.total_cmp(&b.z).is_eq()
+    };
+    for group in segments.chunk_by(same) {
         let start = items.len();
         for (index, segment) in (first..).zip(group) {
             let entities = tables[segment.table as usize].entities();
@@ -686,16 +723,26 @@ mod tests {
         ]
     }
 
-    /// A triangle, and a shader for it whose parameter is its color.
-    fn flat_triangle() -> (Mesh<[f32; 3]>, Shader<[f32; 3], Vec4>) {
-        let mut shaders = Shaders::default();
+    /// A shader for triangles whose parameter is their color, which blends as `blend` says, added
+    /// to `shaders`.
+    fn flat_color(shaders: &mut Shaders, blend: Blend) -> Shader<[f32; 3], Vec4> {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/shaders/flat_color.slang");
-        let flat = shaders
-            .add::<[f32; 3], Vec4>("flat color", &fixture, Blend::Opaque)
-            .expect("the shader compiles");
+        let flat = shaders.add::<[f32; 3], Vec4>("flat color", &fixture, blend);
+        flat.expect("the shader compiles")
+    }
+
+    /// A triangle, added to `meshes`.
+    fn add_triangle(meshes: &mut Meshes) -> Mesh<[f32; 3]> {
         let corners = [[-0.5, -0.5, 0.0], [0.5, -0.5, 0.0], [0.0, 0.5, 0.0]];
-        let triangle = Meshes::default().add("triangle", &corners, &[0, 1, 2]);
-        (triangle.expect("a mesh"), flat)
+        let triangle = meshes.add("triangle", &corners, &[0, 1, 2]);
+        triangle.expect("a mesh")
+    }
+
+    /// A triangle, and a shader for it that blends, whose parameter is its color: a mesh that
+    /// draws back to front by its z, as sprites do.
+    fn flat_triangle() -> (Mesh<[f32; 3]>, Shader<[f32; 3], Vec4>) {
+        let flat = flat_color(&mut Shaders::default(), Blend::Alpha);
+        (add_triangle(&mut Meshes::default()), flat)
     }
 
     enum Expected {
@@ -867,9 +914,10 @@ mod tests {
     /// kept from frame to frame and by a fresh one, which draw the same each time: after nothing,
     /// which takes no more memory; after the world is replaced by another spawned the same way,
     /// which has the same tables, rows and z's and as many changes, but other IDs; after entities
-    /// despawned and others spawned in their tables,
-    /// which keep their lengths, so that only which entity is in a row shows; after two entities
-    /// trade tables; after a z is set, which moves no row; and after a spawn and a despawn alone.
+    /// despawned and others spawned in their tables, which keep their lengths, so that only which
+    /// entity is in a row shows; after two entities trade tables; after a z is set, which moves no
+    /// row; after two meshes are made opaque, one is set to another mesh, its z is set, and it's set
+    /// to blend again; and after a spawn and a despawn alone.
     #[test]
     fn a_kept_scratch_draws_as_a_fresh_one_does() {
         let (triangle, flat) = flat_triangle();
@@ -944,6 +992,7 @@ mod tests {
             found.expect("one of each")
         };
         let (plain, marked, lowered) = (of(false, false), of(false, true), of(true, true));
+        let other = of(true, false);
         world.insert(plain, Marked).expect("alive");
         world.remove::<Marked>(marked).expect("alive");
         step(&world, &mut kept, "two entities trading tables");
@@ -955,10 +1004,138 @@ mod tests {
         step(&world, &mut kept, "a z set");
         z(&mut world, 0.5);
         step(&world, &mut kept, "the z set back");
+        // Two meshes made opaque, which draw first, by their meshes; one set to another mesh, which
+        // swaps them without moving a row or changing a z; its z set, which changes nothing; and
+        // set to blend again.
+        let opaque = flat_color(&mut Shaders::default(), Blend::Opaque);
+        let mut meshes = Meshes::default();
+        let others: [_; 3] = std::array::from_fn(|_| add_triangle(&mut meshes));
+        let set = |world: &mut World, entity, draw| {
+            *world.get_mut::<MeshDraw>(entity).expect("meshed") = draw;
+        };
+        set(
+            &mut world,
+            lowered,
+            MeshDraw::new(others[0], opaque, Vec4::ONE),
+        );
+        set(
+            &mut world,
+            other,
+            MeshDraw::new(others[1], opaque, Vec4::ONE),
+        );
+        step(&world, &mut kept, "two meshes made opaque");
+        set(
+            &mut world,
+            lowered,
+            MeshDraw::new(others[2], opaque, Vec4::ONE),
+        );
+        step(&world, &mut kept, "an opaque mesh set to another mesh");
+        z(&mut world, 0.25);
+        step(&world, &mut kept, "an opaque mesh's z set");
+        set(
+            &mut world,
+            lowered,
+            MeshDraw::new(triangle, flat, Vec4::ONE),
+        );
+        step(&world, &mut kept, "an opaque mesh set to blend");
         entities.push(spawn(&mut world, true, false));
         step(&world, &mut kept, "a spawn");
         world.despawn(entities.swap_remove(1)).expect("alive");
         step(&world, &mut kept, "a despawn");
+    }
+
+    /// Two opaque meshes of one batch, each in a table of its own, the later table's with the
+    /// smaller ID, which draw as one group of the batch, by ID; then that one set to another mesh,
+    /// which splits them into two batches without moving their segments: a scratch kept from frame
+    /// to frame draws them as a fresh one does each time.
+    #[test]
+    fn a_kept_scratch_sees_a_batch_split() {
+        let opaque = flat_color(&mut Shaders::default(), Blend::Opaque);
+        let mut meshes = Meshes::default();
+        let [first, second] = [(); 2].map(|()| add_triangle(&mut meshes));
+        let draw = |mesh| MeshDraw::new(mesh, opaque, Vec4::ONE);
+        let mut world = World::default();
+        let pair = [0.0, 1.0].map(|x| world.spawn((at_x(x, 0.5), draw(first))));
+        let smaller = pair.iter().min_by_key(|&&entity| world.id(entity));
+        let smaller = *smaller.expect("two");
+        world.insert(smaller, Marked).expect("alive");
+        let drawn = |world: &World, scratch: &mut Scratch| {
+            let mut draws = Draws::default();
+            draw_world(world, &Past::default(), 1.0, &mut draws, scratch);
+            draws
+        };
+        let mut kept = Scratch::default();
+        for what in ["one batch", "the batch split"] {
+            if what == "the batch split" {
+                *world.get_mut::<MeshDraw>(smaller).expect("meshed") = draw(second);
+            }
+            let fresh = drawn(&world, &mut Scratch::default());
+            assert_eq!(drawn(&world, &mut kept), fresh, "after {what}");
+        }
+    }
+
+    /// Draws the world's opaque meshes first, whatever their z's, by shader, then mesh, then ID,
+    /// across tables and under a parent, so that each mesh with each shader is a run of its own;
+    /// then the meshes that blend, and the sprites, back to front.
+    #[test]
+    fn opaque_meshes_draw_first_by_shader_and_mesh_then_id() {
+        let (mut shaders, mut meshes) = (Shaders::default(), Meshes::default());
+        let opaque = [Blend::Opaque; 2].map(|blend| flat_color(&mut shaders, blend));
+        let blended = flat_color(&mut shaders, Blend::Alpha);
+        let triangles = [(); 2].map(|()| add_triangle(&mut meshes));
+        let mut world = World::default();
+        // Each told apart by its x and its color: its shader's and its mesh's place among the
+        // fixture's, its entity, where it draws and what.
+        let mut want = Vec::new();
+        for i in 0..16 {
+            let (shader, mesh) = (i % 2, i / 2 % 2);
+            let at = at_x(i as f32, [0.3, 0.1, 0.5, 0.0][i / 4]);
+            let draw = MeshDraw::new(triangles[mesh], opaque[shader], Vec4::splat(i as f32));
+            let entity = if i % 3 == 0 {
+                world.spawn((at, draw, Marked))
+            } else {
+                world.spawn((at, draw))
+            };
+            want.push((shader, mesh, entity, at.matrix(), draw));
+        }
+        let pivot_at = Transform {
+            rotation: Quat::from_rotation_z(0.5),
+            ..at_x(-1.0, 0.2)
+        };
+        let pivot = world.spawn(pivot_at);
+        let child_at = at_x(0.5, 0.05);
+        let draw = MeshDraw::new(triangles[1], opaque[1], Vec4::splat(16.0));
+        let child = world.spawn((child_at, draw));
+        world.set_parent(child, Some(pivot)).expect("no cycle");
+        want.push((1, 1, child, pivot_at.matrix() * child_at.matrix(), draw));
+        let sprite = |n: f32| Sprite {
+            color: Vec4::splat(n),
+            ..Sprite::default()
+        };
+        let (near, far) = (at_x(17.0, 0.1), at_x(18.0, 0.0));
+        world.spawn((near, sprite(17.0)));
+        world.spawn((far, sprite(18.0)));
+        let blending_at = at_x(19.0, 0.15);
+        let blending = MeshDraw::new(triangles[0], blended, Vec4::splat(19.0));
+        world.spawn((blending_at, blending));
+
+        want.sort_by_key(|&(shader, mesh, entity, ..)| (shader, mesh, world.id(entity)));
+        let mut expected = Draws::default();
+        for (.., at, draw) in &want {
+            expected.push_draw(*at, draw);
+        }
+        expected.push_sprite(far.matrix(), sprite(18.0));
+        expected.push_sprite(near.matrix(), sprite(17.0));
+        expected.push_draw(blending_at.matrix(), &blending);
+        let mut draws = Draws::default();
+        draw_world(
+            &world,
+            &Past::default(),
+            1.0,
+            &mut draws,
+            &mut Scratch::default(),
+        );
+        assert_eq!(draws, expected);
     }
 
     /// A transform at `x` and `z`.

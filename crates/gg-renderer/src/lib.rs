@@ -22,7 +22,9 @@ use std::time::Duration;
 use bytemuck::NoUninit;
 use gg_core::math::Mat4;
 use gg_core::{Error, Result};
-use gg_gpu::{ColorImage, Device, Frames, Instance, InstanceDesc, Surface, Swapchain, Target};
+use gg_gpu::{
+    ColorImage, DepthImage, Device, Frames, Instance, InstanceDesc, Surface, Swapchain, Target,
+};
 use tracing::trace;
 
 pub use camera::{Camera, Projection};
@@ -44,11 +46,12 @@ pub struct Viewport {
     pub size: [u32; 2],
 }
 
-/// What a frame draws besides UI, in order, each over those before it: meshes, each with a shader
-/// for its vertex type, the parameters that shader takes, and where it is in the world. Each run of
-/// consecutive draws of one mesh with one shader renders as one instanced draw, whatever their
-/// transforms and parameters, a texture among them. Clearing it keeps its memory, so that a frame
-/// that draws no more than the last allocates nothing.
+/// What a frame draws besides UI, in order, each over those before it, but where an opaque one
+/// before it is nearer: meshes, each with a shader for its vertex type, the parameters that shader
+/// takes, and where it is in the world. Each run of consecutive draws of one mesh with one shader
+/// renders as one instanced draw, whatever their transforms and parameters, a texture among them.
+/// Clearing it keeps its memory, so that a frame that draws no more than the last allocates
+/// nothing.
 #[derive(Debug, Default, PartialEq)]
 pub struct Draws {
     /// The runs, in order.
@@ -72,8 +75,8 @@ struct Run {
 
 impl Draws {
     /// Draws `mesh` with `shader`, which reads its vertex type and takes `params`, over the
-    /// meshes drawn before it. `transform` takes the mesh's own space, which its vertices'
-    /// positions are in, to the world's.
+    /// meshes drawn before it but where an opaque one is nearer. `transform` takes the mesh's own
+    /// space, which its vertices' positions are in, to the world's.
     pub fn push<V, P: NoUninit>(
         &mut self,
         mesh: Mesh<V>,
@@ -87,8 +90,8 @@ impl Draws {
         self.extend_run(mesh.index, shader.index, instance, start);
     }
 
-    /// Draws `draw` over the meshes drawn before it, as [`push`](Self::push) draws its mesh with
-    /// its shader and parameters.
+    /// Draws `draw` over the meshes drawn before it but where an opaque one is nearer, as
+    /// [`push`](Self::push) draws its mesh with its shader and parameters.
     pub fn push_draw(&mut self, transform: Mat4, draw: &MeshDraw) {
         let (instance, start) = (self.transforms.len(), self.params.len());
         self.transforms.push(transform);
@@ -96,8 +99,9 @@ impl Draws {
         self.extend_run(draw.mesh, draw.shader, instance, start);
     }
 
-    /// Draws `sprite` over the meshes drawn before it, as [`Sprite`] describes. `transform` takes
-    /// the sprite's own space, where it's a unit square around the origin, to the world's.
+    /// Draws `sprite` over the meshes drawn before it but where an opaque one is nearer, as
+    /// [`Sprite`] describes. `transform` takes the sprite's own space, where it's a unit square
+    /// around the origin, to the world's.
     pub fn push_sprite(&mut self, transform: Mat4, sprite: Sprite) {
         self.push(sprite::QUAD, sprite::SHADER, transform, sprite.params());
     }
@@ -219,8 +223,9 @@ pub struct Renderer {
     windows: Vec<Swapchain>,
     meshes: MeshPass,
     view: ViewPass,
-    /// What the game's view renders into, the size it last had, which has an area.
-    view_image: Option<ColorImage>,
+    /// What the game's view renders into, and the depth image its draws test, the size it last
+    /// had, which has an area.
+    view_image: Option<(ColorImage, DepthImage)>,
     ui: UiPass,
     instance: Arc<Instance>,
     device: Arc<Device>,
@@ -430,9 +435,12 @@ impl Renderer {
         // renders nothing, and keeps the image it had.
         let has_view = width > 0 && height > 0;
         if has_view
-            && (self.view_image.as_ref()).is_none_or(|image| image.size() != data.viewport.size)
+            && (self.view_image.as_ref())
+                .is_none_or(|(image, _)| image.size() != data.viewport.size)
         {
-            self.view_image = Some(ColorImage::new(&self.device, width, height, "view")?);
+            let image = ColorImage::new(&self.device, width, height, "view")?;
+            let depth = DepthImage::new(&self.device, width, height, "view depth")?;
+            self.view_image = Some((image, depth));
             trace!(width, height, "View image made");
         }
         let target = match &mut self.output {
@@ -445,9 +453,10 @@ impl Renderer {
             .map(|(_, swapchain)| Target::Swapchain(swapchain));
         // After the output and the other windows, which keep their places.
         let view_target = 1 + self.window_keys.iter().filter(|key| has_ui(key)).count();
-        let view = (self.view_image.as_mut())
-            .filter(|_| has_view)
-            .map(Target::Image);
+        let (view, depth) = match &mut self.view_image {
+            Some((image, depth)) if has_view => (Some(Target::Image(image)), Some(&*depth)),
+            _ => (None, None),
+        };
         let targets = iter::once(target).chain(others).chain(view);
         let Some(mut frame) = self.frames.begin(targets)? else {
             return Ok(false);
@@ -456,7 +465,7 @@ impl Renderer {
         self.ui.write_textures(&mut frame)?;
         let (counts, view) = if has_view {
             let mut pass = frame
-                .begin_pass(view_target, c"view", data.clear_color)
+                .begin_pass(view_target, c"view", data.clear_color, depth)
                 .expect("an offscreen image is always there");
             let counts = self.meshes.draw(&mut pass, view_projection, data.draws)?;
             drop(pass);
@@ -465,7 +474,7 @@ impl Renderer {
             (DrawCounts::default(), None)
         };
         let mut pass = frame
-            .begin_pass(0, c"frame", data.clear_color)
+            .begin_pass(0, c"frame", data.clear_color, None)
             .expect("a frame's first target has an image");
         if let Some(image) = view {
             self.view.draw(&mut pass, data.viewport, image);
@@ -478,7 +487,8 @@ impl Renderer {
             .iter()
             .filter_map(|key| windows.iter().find(|(drawn, _)| drawn == key));
         for (target, (_, ui)) in (1..).zip(drawn) {
-            if let Some(mut pass) = frame.begin_pass(target, c"window", [0.0, 0.0, 0.0, 1.0]) {
+            let black = [0.0, 0.0, 0.0, 1.0];
+            if let Some(mut pass) = frame.begin_pass(target, c"window", black, None) {
                 self.ui
                     .draw(&mut pass, ui.primitives, ui.pixels_per_point)?;
             }
@@ -539,8 +549,8 @@ mod tests {
     fn consecutive_draws_of_one_mesh_with_one_shader_are_one_run() {
         let square = Mesh::<[f32; 3]>::new(1);
         let triangle = Mesh::<[f32; 3]>::new(2);
-        let flat = Shader::<[f32; 3], Vec4>::new(1);
-        let other = Shader::<[f32; 3], Vec4>::new(2);
+        let flat = Shader::<[f32; 3], Vec4>::new(1, true);
+        let other = Shader::<[f32; 3], Vec4>::new(2, true);
         let at = |x: f32| Mat4::from_translation(Vec3::new(x, 0.0, 0.0));
         let (red, green, blue) = (Vec4::X, Vec4::Y, Vec4::Z);
         let mut draws = Draws::default();

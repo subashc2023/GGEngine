@@ -237,10 +237,18 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   and a half, through the main loop and check exactly where each draws, each way a tick breaks an
   entity's way, children on their orbits, the tick's order kept, and no memory taken again;
   headless frames draw their tick.
+- **Depth and a perspective camera** (2026-10-25): the game's view renders with a depth image of
+  32-bit floats, reversed, from 1 at the near plane to 0 far away, which every draw tests and
+  opaque shaders write; cameras project orthographically or with perspective, out to infinity; the
+  world's opaque meshes draw first, by shader and mesh, then what blends back to front by z; and
+  the engine's fly camera controller moves a camera where it looks and looks about, as the
+  sandbox's cubes, which cut through each other, show. A GPU test checks depth against a reference
+  from a camera with perspective, and another the depth barrier under synchronization validation;
+  unit tests check both projections, the order and the controller.
 
-## Now: Phase 4's third milestone
+## Now: Phase 4's fourth milestone
 
-[Phase 4](#next)'s third milestone is picked from what the phase has left as it starts, and its
+[Phase 4](#next)'s fourth milestone is picked from what the phase has left as it starts, and its
 plan says when it's done.
 
 ## Next
@@ -248,7 +256,7 @@ plan says when it's done.
 Each phase ends in something you can run and check.
 
 4. **First mesh.** Uploads of whole assets through the transfer queue, or by host image copy
-   where a device has no separate transfer queue; depth; Slang reflection; an on-disk pipeline
+   where a device has no separate transfer queue; Slang reflection; an on-disk pipeline
    cache; shader hot reload. Render extraction, with the render thread a frame behind
    simulation and rendering interpolated between fixed steps. *Done when* the sandbox draws a
    textured, depth-tested glTF mesh and thousands of moving entities, Tracy shows simulation
@@ -313,13 +321,19 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Steady-state frames that draw UI allocate: in egui's layout and tessellation, in the dock's own bookkeeping, which copies each frame's panel and menu names and torn-off windows' titles, and makes its arrangement and its list of groups left to draw anew, and in the Inspector, which reads its rows' names, the picked entity's components as values and its children's IDs anew | Phase 4, with the allocation check; the overlay is for development |
 | Keeping within the GPU's memory budget (`VK_EXT_memory_budget` through VMA) | Phase 7, with streaming |
 | Removing meshes, shaders and textures; each lasts until the app ends | Something adds and removes them as it runs, such as asset hot reload in Phase 4 |
-| Perspective cameras, and a controller for them; a camera is orthographic, and so is the engine's controller | Phase 4, with depth |
 | Per-frame data in a buffer: shaders get the camera's view and projection as one matrix, and see the world through each draw's transform, but not the camera's position, the time or the lights | Phase 6, with lighting |
 | Materials: parameters kept on the GPU and written when they change, rather than copied every frame with each instance | Phase 6, with materials |
 | Counts of vertices, indices or triangles, which follow from the instances; the renderer counts draws and instances | Phase 4, with glTF meshes |
 | Textures of data rather than color, such as normal maps, which shaders read as stored rather than decoded from sRGB | Phase 6, with PBR's maps |
 | Premultiplied alpha for games' textures: with straight alpha, as PNGs store it, a linear filter at an edge mixes in the color of the transparent pixels beside it | A game's art shows dark or colored fringes |
-| Sorting what blends back to front by depth, and what doesn't by its mesh and shader, so that it batches; the world's entities draw back to front by their z's in the world as the latest tick left them, at one z sprites under meshes, each by ID, so that meshes of different meshes or shaders at one z don't batch, and what layers draw themselves in the order given | Phase 4, with depth |
+| Sorting what blends back to front by its depth in the view, rather than by its z in the world, which orders it rightly only as seen from in front of layers parallel to XY: from behind or the side, what blends draws in the wrong order among itself, though opaque meshes, drawn first, hide it rightly; and what layers draw themselves goes in the order given. Sorting coplanar sprites each by its own depth would sort the swarm's 100,000 every frame the camera turns, and swap overlapping ones as it does | A game blends in 3D, such as particles or glass |
+| Back-face culling: pipelines draw both faces, as sprites mirrored by a negative scale need | glTF meshes, by their `doubleSided` |
+| Depth other than what a shader's blend implies: draws that ignore it, as gizmos and overlays do, a skybox that tests it without writing it, decals, and sprites cut out by their alpha that write it | Each with its first user |
+| Depth bias, whose sign flips with depth reversed | Phase 6, with shadow maps |
+| A far plane for perspective, as glTF's `zfar` gives; it sees out to infinity | A glTF camera with one, or Phase 8's culling |
+| Keeping the view's depth past its pass, to sample: each frame clears it and doesn't store it | Post-processing, picking, or the tool API's captures |
+| A depth format for a device without D32_SFLOAT depth, which the engine refuses (`gpu.no_device`) | A target device lacks it |
+| Raw mouse motion and a grabbed cursor, for looking about past the window's edges: the fly camera controller looks by the cursor's moves while the right button is held | A game looks with the mouse, as first-person games do |
 | Mipmaps, and anisotropic filtering: a texture drawn smaller than it is samples its one level, and shimmers. A sprite sheet's cells, packed edge to edge, will then mix together at the smaller levels and under anisotropy, which reads past the texels the sprite shader keeps to, and need space around each cell or an array layer each | Phase 4, with the textured glTF mesh |
 | Sprite sheets with space between or around their cells, as some tile sets come; `SpriteSheet` takes cells packed edge to edge from the top left | A game's art comes that way |
 | Tiling one cell of a sheet: a repeating sampler repeats the whole texture | A game tiles part of an atlas, such as a background |
@@ -330,10 +344,10 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Layers making textures from their own pixels; `Textures::add` takes pixels, but `Context` adds only PNGs | A game makes its own textures |
 | Pixels, vertices and instances' transforms and parameters reach the GPU through the frame's arena, which merges the buffers it grew into, holding two to three times the largest frame for each frame in flight: by its growth rule, about 20 MB each for 100,000 sprites, which use 10.4 MB a frame; and a frame that adds many textures leaves that much host memory held | Phase 4, with uploads through the transfer queue |
 | More than one camera or view, such as split screen or the editor's scene view | A game or the editor draws several |
-| The camera as a component of an entity, which a scene saves and a parent carries along; layers set the camera through `Context` | Phase 4, with perspective cameras |
+| The camera as a component of an entity, which a scene saves and a parent carries along; layers set the camera through `Context`, and the world doesn't hold it | A scene saves a camera, or a camera follows or rides an entity, with a world matrix for game code |
 | The game's view in a panel that docks and tabs, and keys reaching the layers only while it has focus, as editors' views do; the view is the central area, and keys reach the layers wherever the pointer is unless one of egui's widgets has focus | A tool in the game's process shows the view among its panels |
-| Converting between the view's pixels and the world, to pick what's under the cursor or zoom toward it; the camera controller zooms about the view's center | Something picks with the mouse, or a tool zooms toward the cursor |
-| Zooming from keys or a gamepad, as a rate beside the wheel's lines; the camera controller zooms by the wheel alone, in its own event handling | A game binds zoom elsewhere |
+| Converting between the view's pixels and the world, to pick what's under the cursor or zoom toward it; the orthographic camera controller zooms about the view's center | Something picks with the mouse, or a tool zooms toward the cursor |
+| Zooming from keys or a gamepad, as a rate beside the wheel's lines; the orthographic camera controller zooms by the wheel alone, in its own event handling. And zooming a camera with perspective, by its field of view or by moving it in, or changing the fly camera controller's speed by the wheel, which does nothing to it | A game binds zoom elsewhere, or zooms a camera with perspective |
 | Per-user bindings, kept as RON in the per-user directory beside the dock's layout, and a UI that binds them; a game binds its actions in code | A game ships its settings |
 | Chords, modifiers, holds and double taps, such as Ctrl and a key: there's no modifier state, and Ctrl+Z reaches layers as `ControlLeft` and `KeyZ` | A game binds a combination |
 | Keys' and gamepad buttons' labels, for prompts that show a binding: both are positions, and the engine drops what a keyboard's layout makes of a key, and whether a pad is an Xbox or a PlayStation one | A game shows its bindings |

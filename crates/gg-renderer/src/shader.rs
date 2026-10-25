@@ -21,6 +21,8 @@ const SLANGC: &str = env!("GG_SLANGC");
 /// parameters of type `P` with each draw.
 pub struct Shader<V, P = ()> {
     pub(crate) index: u32,
+    /// Whether it writes depth, as [`writes_depth`] says.
+    pub(crate) opaque: bool,
     types: PhantomData<fn() -> (V, P)>,
 }
 
@@ -34,12 +36,21 @@ impl<V, P> Clone for Shader<V, P> {
 impl<V, P> Copy for Shader<V, P> {}
 
 impl<V, P> Shader<V, P> {
-    pub(crate) const fn new(index: u32) -> Self {
+    pub(crate) const fn new(index: u32, opaque: bool) -> Self {
         Self {
             index,
+            opaque,
             types: PhantomData,
         }
     }
+}
+
+/// Whether a shader that blends as `blend` says writes its depth where it draws, as well as
+/// testing it: an opaque one does, so that what's behind it, drawn after it, doesn't show; one
+/// that blends doesn't, so that what's behind it still shows through it, as through its
+/// transparent margins.
+pub(crate) fn writes_depth(blend: Blend) -> bool {
+    blend == Blend::Opaque
 }
 
 impl<V, P> fmt::Debug for Shader<V, P> {
@@ -74,7 +85,10 @@ impl Shaders {
     /// Compiles the Slang shader at `path`, which draws meshes of vertex type `V` and takes
     /// parameters of type `P` with each draw, such as a color: `()` for none. `blend` says how its
     /// color goes over what's drawn before it: [`Blend::Alpha`] blends by the alpha it returns,
-    /// not multiplied into the color. `name` names it in errors and GPU captures.
+    /// not multiplied into the color. Every shader tests the view's depth, drawing only where it's
+    /// as near as what's drawn there or nearer; one that's [`Blend::Opaque`] writes its depth too,
+    /// so that what's behind it doesn't show over it, while one that blends doesn't, so that what's
+    /// behind it still shows through it. `name` names it in errors and GPU captures.
     ///
     /// Vulkan checks nothing about a shader, so the engine trusts it to keep to this contract,
     /// which validation checks in debug builds:
@@ -130,7 +144,7 @@ impl Shaders {
             params_size: size_of::<P>(),
             blend,
         });
-        Shader::new(index)
+        Shader::new(index, writes_depth(blend))
     }
 }
 

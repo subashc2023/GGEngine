@@ -63,6 +63,7 @@ impl UiPass {
                     fragment: c"fragment_main",
                     format,
                     blend: Blend::PremultipliedAlpha,
+                    depth_write: false,
                 },
             )?;
             self.pipelines.push((format, pipeline));

@@ -12,9 +12,9 @@ pub(crate) static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/sprit
 /// What a sprite shows: a rectangle of a texture, tinted. A sprite is a square a unit across,
 /// centered on its origin in its XY plane and facing +Z, with `rect`'s top left at its top left,
 /// +Y being up; the draw's transform places, sizes and turns it in the world, and it's drawn by
-/// straight alpha over what's drawn before it. `Sprite::default()` shows the whole of the engine's
-/// white texture, untinted, so that a sprite of only a color is `Sprite { color,
-/// ..Sprite::default() }`.
+/// straight alpha over what's drawn before it, but where an opaque mesh is nearer, testing depth
+/// without writing it. `Sprite::default()` shows the whole of the engine's white texture,
+/// untinted, so that a sprite of only a color is `Sprite { color, ..Sprite::default() }`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sprite {
     /// In linear RGBA, alpha not multiplied in, which multiplies the texture's colors and alpha:
@@ -151,7 +151,7 @@ pub(crate) struct Params {
 pub(crate) const QUAD: Mesh<Corner> = Mesh::new(0);
 
 /// The sprite shader, the first shader of every `Shaders`.
-pub(crate) const SHADER: Shader<Corner, Params> = Shader::new(0);
+pub(crate) const SHADER: Shader<Corner, Params> = Shader::new(0, false);
 
 #[cfg(test)]
 mod tests {

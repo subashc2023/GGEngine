@@ -127,7 +127,7 @@ impl Swapchain {
 
     /// The format of the images it presents, which pipelines that draw into them are made for.
     pub fn format(&self) -> crate::Format {
-        crate::Format(self.format.format)
+        crate::Format::new(self.format.format)
     }
 
     /// Tells the swapchain that the window is now `width` by `height`, so that it's rebuilt

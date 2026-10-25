@@ -171,8 +171,8 @@ pub struct World {
     /// The slots free for new entities, the last freed taken first.
     free: Vec<u32>,
     /// Each slot's entity's persistent ID, beside its `Meta` rather than in it, since every lookup
-    /// of a handle reads `Meta`, and only drawing, as it sorts the rows at one z, and diagnostics,
-    /// tools and files read IDs: written as an entity is spawned into the slot and removed from it,
+    /// of a handle reads `Meta`, and only drawing, as it sorts the rows of each batch and each z,
+    /// and diagnostics, tools and files read IDs: written as an entity is spawned into the slot and removed from it,
     /// and read through [`World::id`], which checks the handle first. `None` while the slot is
     /// free, vacant or retired.
     entity_ids: Vec<Option<EntityId>>,

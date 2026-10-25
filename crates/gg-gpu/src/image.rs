@@ -1,5 +1,6 @@
-//! Offscreen color images: what headless runs render into, what tests read back, and what later
-//! passes of a frame sample, such as the game's view.
+//! Offscreen images: color images, which headless runs render into, tests read back, and later
+//! passes of a frame sample, such as the game's view; and depth images, which passes test their
+//! draws against.
 
 use std::sync::Arc;
 
@@ -9,7 +10,7 @@ use gg_core::Result;
 use crate::buffer::Buffer;
 use crate::device::Retired;
 use crate::vma::{Allocation, Memory};
-use crate::{COLOR_RANGE, Device, Format, vk_error};
+use crate::{COLOR_RANGE, DEPTH_RANGE, Device, Format, vk_error};
 
 /// A color image in GPU memory, which frames render into, their later passes sample through its
 /// slot in the bindless set, and the CPU can read back. Dropping it retires it, and its slot,
@@ -31,7 +32,7 @@ impl ColorImage {
     /// The format of every color image: 8-bit sRGB, as windows usually present, so what's read
     /// back matches what a window would show. The game's view is one, so games' pipelines are
     /// made for it.
-    pub const FORMAT: Format = Format(vk::Format::R8G8B8A8_SRGB);
+    pub const FORMAT: Format = Format::new(vk::Format::R8G8B8A8_SRGB);
 
     /// An image of `width` by `height` pixels, in a free slot of the bindless set past the placed
     /// ones, with `name` as its debug name.
@@ -40,38 +41,16 @@ impl ColorImage {
     ///
     /// If a side is 0.
     pub fn new(device: &Arc<Device>, width: u32, height: u32, name: &str) -> Result<Self> {
-        assert!(
-            width > 0 && height > 0,
-            "a {width}x{height} image, but an image has an area"
-        );
-        let extent = vk::Extent2D { width, height };
-        let info = vk::ImageCreateInfo::default()
-            .image_type(vk::ImageType::TYPE_2D)
-            .format(Self::FORMAT.0)
-            .extent(extent.into())
-            .mip_levels(1)
-            .array_layers(1)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(
-                vk::ImageUsageFlags::COLOR_ATTACHMENT
-                    | vk::ImageUsageFlags::SAMPLED
-                    | vk::ImageUsageFlags::TRANSFER_SRC,
-            );
-        let (raw, allocation) = device.allocator().create_image(&info, Memory::Gpu)?;
-        let view_info = vk::ImageViewCreateInfo::default()
-            .image(raw)
-            .view_type(vk::ImageViewType::TYPE_2D)
-            .format(info.format)
-            .subresource_range(COLOR_RANGE);
-        // SAFETY: the image is live and bound to memory.
-        let view = match unsafe { device.raw().create_image_view(&view_info, None) } {
-            Ok(view) => view,
-            Err(error) => {
-                device.retire(Retired::Image(raw, vk::ImageView::null(), allocation));
-                return Err(vk_error("vkCreateImageView", error));
-            }
-        };
+        let usage = vk::ImageUsageFlags::COLOR_ATTACHMENT
+            | vk::ImageUsageFlags::SAMPLED
+            | vk::ImageUsageFlags::TRANSFER_SRC;
+        let (raw, view, allocation, extent) = allocate(
+            device,
+            [width, height],
+            Self::FORMAT.color,
+            usage,
+            COLOR_RANGE,
+        )?;
         // SAFETY: the view is of a live sampled image, which shaders sample only through the index
         // `Frame::begin_sampling` returns, once it has put the image in the shader-read-only
         // layout.
@@ -199,6 +178,110 @@ impl Drop for ColorImage {
             self.device.retire(Retired::Texture(
                 self.raw, self.view, allocation, self.index,
             ));
+        }
+    }
+}
+
+/// A depth image in GPU memory, which a pass tests its draws against and writes their depths
+/// into, cleared as the pass starts and kept for that pass alone. Dropping it retires it until the
+/// GPU is done with it.
+pub struct DepthImage {
+    device: Arc<Device>,
+    raw: vk::Image,
+    view: vk::ImageView,
+    /// Taken when the image is dropped.
+    allocation: Option<Allocation>,
+    extent: vk::Extent2D,
+}
+
+impl DepthImage {
+    /// The format of every depth image: 32-bit floats, which keep their precision far away, as the
+    /// renderer's cameras project depth, from 1 at the near plane to 0 far away. Every device the
+    /// engine opens can render into it.
+    pub(crate) const FORMAT: vk::Format = vk::Format::D32_SFLOAT;
+
+    /// A depth image of `width` by `height` pixels, with `name` as its debug name.
+    ///
+    /// # Panics
+    ///
+    /// If a side is 0.
+    pub fn new(device: &Arc<Device>, width: u32, height: u32, name: &str) -> Result<Self> {
+        let usage = vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT;
+        let (raw, view, allocation, extent) =
+            allocate(device, [width, height], Self::FORMAT, usage, DEPTH_RANGE)?;
+        // SAFETY: the image and view are live.
+        unsafe {
+            device.set_name(raw, name);
+            device.set_name(view, name);
+        }
+        Ok(Self {
+            device: device.clone(),
+            raw,
+            view,
+            allocation: Some(allocation),
+            extent,
+        })
+    }
+
+    /// The width and height in pixels.
+    pub fn size(&self) -> [u32; 2] {
+        [self.extent.width, self.extent.height]
+    }
+
+    /// The image, its view and its size, for recording commands that use it.
+    pub(crate) fn parts(&self) -> (vk::Image, vk::ImageView, vk::Extent2D) {
+        (self.raw, self.view, self.extent)
+    }
+}
+
+impl Drop for DepthImage {
+    fn drop(&mut self) {
+        if let Some(allocation) = self.allocation.take() {
+            let retired = Retired::Image(self.raw, self.view, allocation);
+            self.device.retire(retired);
+        }
+    }
+}
+
+/// An image of `size` pixels in GPU memory, of `format`, for `usage`, and a view of its `range`.
+///
+/// # Panics
+///
+/// If a side is 0.
+fn allocate(
+    device: &Device,
+    size: [u32; 2],
+    format: vk::Format,
+    usage: vk::ImageUsageFlags,
+    range: vk::ImageSubresourceRange,
+) -> Result<(vk::Image, vk::ImageView, Allocation, vk::Extent2D)> {
+    let [width, height] = size;
+    assert!(
+        width > 0 && height > 0,
+        "a {width}x{height} image, but an image has an area"
+    );
+    let extent = vk::Extent2D { width, height };
+    let info = vk::ImageCreateInfo::default()
+        .image_type(vk::ImageType::TYPE_2D)
+        .format(format)
+        .extent(extent.into())
+        .mip_levels(1)
+        .array_layers(1)
+        .samples(vk::SampleCountFlags::TYPE_1)
+        .tiling(vk::ImageTiling::OPTIMAL)
+        .usage(usage);
+    let (raw, allocation) = device.allocator().create_image(&info, Memory::Gpu)?;
+    let view_info = vk::ImageViewCreateInfo::default()
+        .image(raw)
+        .view_type(vk::ImageViewType::TYPE_2D)
+        .format(format)
+        .subresource_range(range);
+    // SAFETY: the image is live and bound to memory.
+    match unsafe { device.raw().create_image_view(&view_info, None) } {
+        Ok(view) => Ok((raw, view, allocation, extent)),
+        Err(error) => {
+            device.retire(Retired::Image(raw, vk::ImageView::null(), allocation));
+            Err(vk_error("vkCreateImageView", error))
         }
     }
 }

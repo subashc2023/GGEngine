@@ -27,7 +27,7 @@ pub use bindless::{PLACED_TEXTURES, Sampler};
 pub use buffer::GpuBuffer;
 pub use device::Device;
 pub use frame::{Frame, Frames, Indices, Pass, Target, Upload};
-pub use image::ColorImage;
+pub use image::{ColorImage, DepthImage};
 pub use instance::{Instance, InstanceDesc, Validation};
 pub use pipeline::{Blend, Format, GraphicsDesc, Pipeline};
 pub use surface::{Surface, Window};
@@ -44,6 +44,12 @@ const COLOR_RANGE: vk::ImageSubresourceRange = vk::ImageSubresourceRange {
     level_count: 1,
     base_array_layer: 0,
     layer_count: 1,
+};
+
+/// The whole of a depth image with one mip level and one layer.
+const DEPTH_RANGE: vk::ImageSubresourceRange = vk::ImageSubresourceRange {
+    aspect_mask: vk::ImageAspectFlags::DEPTH,
+    ..COLOR_RANGE
 };
 
 /// The engine error for a failed Vulkan call, with codes of their own for the failures callers

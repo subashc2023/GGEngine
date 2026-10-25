@@ -14,7 +14,7 @@ use gg_gpu::{
     TextureFormat,
 };
 
-use crate::shader::Shader;
+use crate::shader::{self, Shader};
 use crate::{DrawCounts, Draws, Uploads, sprite};
 
 /// A mesh that [`Meshes::add`] handed out, of vertex type `V`.
@@ -54,6 +54,8 @@ impl<V> fmt::Debug for Mesh<V> {
 pub struct MeshDraw {
     pub(crate) mesh: u32,
     pub(crate) shader: u32,
+    /// Whether its shader writes depth.
+    opaque: bool,
     params: [u8; MeshDraw::MAX_PARAMS],
     /// How many bytes of `params` are the parameters'.
     len: u8,
@@ -79,9 +81,19 @@ impl MeshDraw {
         Self {
             mesh: mesh.index,
             shader: shader.index,
+            opaque: shader.opaque,
             params: copy,
             len: bytes.len() as u8,
         }
+    }
+
+    /// What it batches by, if its shader is opaque: the same for every draw of its mesh with its
+    /// shader, and ordered by shader, then mesh. An opaque shader writes depth, which hides what's
+    /// behind it whatever order they draw in, so opaque draws can go in this one, which makes each
+    /// run of them one instanced draw.
+    pub fn batch(&self) -> Option<u64> {
+        self.opaque
+            .then(|| (u64::from(self.shader) << 32) | u64::from(self.mesh))
     }
 
     /// Its parameters, as bytes.
@@ -169,8 +181,8 @@ impl Default for Meshes {
 }
 
 /// Draws meshes with their shaders into the game's view, an image whose format is
-/// [`ColorImage::FORMAT`], and keeps on the GPU the meshes' vertices and indices and the textures
-/// the shaders sample.
+/// [`ColorImage::FORMAT`], testing its depth image, and keeps on the GPU the meshes' vertices and
+/// indices and the textures the shaders sample.
 pub(crate) struct MeshPass {
     device: Arc<Device>,
     /// Each shader's pipeline, by its handle.
@@ -227,8 +239,9 @@ impl MeshPass {
                     spirv: &added.spirv,
                     vertex: c"vertex_main",
                     fragment: c"fragment_main",
-                    format: ColorImage::FORMAT,
+                    format: ColorImage::FORMAT.with_depth(),
                     blend: added.blend,
+                    depth_write: shader::writes_depth(added.blend),
                 },
             )?;
             self.shaders.push(GpuShader {
@@ -300,8 +313,8 @@ impl MeshPass {
     ///
     /// If a mesh drawn isn't one the pass has uploaded, a shader isn't one it has made a pipeline
     /// of, a mesh's vertices or a draw's parameters aren't the size its shader reads, a run has
-    /// more instances than Vulkan's 32-bit count, or the target's format isn't
-    /// [`ColorImage::FORMAT`].
+    /// more instances than Vulkan's 32-bit count, or the pass isn't into an image of
+    /// [`ColorImage::FORMAT`] with a depth image.
     pub(crate) fn draw(
         &self,
         pass: &mut Pass<'_, '_>,

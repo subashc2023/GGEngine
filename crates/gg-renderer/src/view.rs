@@ -26,6 +26,7 @@ impl ViewPass {
                 fragment: c"fragment_main",
                 format,
                 blend: Blend::Opaque,
+                depth_write: false,
             },
         )?;
         Ok(Self { pipeline })

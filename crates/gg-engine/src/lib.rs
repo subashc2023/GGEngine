@@ -59,7 +59,7 @@ use tracing::{debug, error, info};
 
 pub use actions::{Actions, Binding, Change, Source, Toward};
 use args::Args;
-pub use camera::{CameraAction, OrthographicCameraController};
+pub use camera::{CameraAction, FlyAction, FlyCameraController, OrthographicCameraController};
 use chrome::Chrome;
 use dock::Dock;
 pub use dock::Ui;
@@ -319,7 +319,7 @@ fn egui_context() -> egui::Context {
 /// The first half of a turn of the main loop: starts the frame, `dt` after the last, for Tracy and
 /// the frame's measure, runs the ticks of the simulation that the time owes, as `stepper` steps
 /// it, copying where the world's entities are as each starts, updates the layers, draws the world
-/// over what they drew, as far on from where the last tick found it to where it left it as the
+/// after what they drew, as far on from where the last tick found it to where it left it as the
 /// frame is past the tick, and has the layers draw their UI, in the dock and with egui.
 /// [`tessellate`] starts the second half, which hands what egui made of it to the render thread.
 ///

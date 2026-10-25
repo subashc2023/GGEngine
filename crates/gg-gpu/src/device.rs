@@ -11,7 +11,7 @@ use tracing::{debug, info};
 
 use crate::bindless::Bindless;
 use crate::vma::{Allocation, Allocator};
-use crate::{Instance, REQUIRED_VERSION, Surface, Version, vk_error};
+use crate::{DepthImage, Instance, REQUIRED_VERSION, Surface, Version, vk_error};
 
 /// A resource that was dropped while frames that may use it could still be running on the GPU.
 pub(crate) enum Retired {
@@ -544,6 +544,8 @@ impl Candidate {
             Some("doesn't support VK_KHR_swapchain".to_owned())
         } else if !bindless {
             Some("doesn't support the descriptor indexing that bindless textures need".to_owned())
+        } else if !has_depth(instance, physical) {
+            Some("can't render depth into D32_SFLOAT images".to_owned())
         } else {
             None
         };
@@ -605,6 +607,20 @@ fn has_bindless(features: &vk::PhysicalDeviceVulkan12Features<'_>) -> bool {
     ]
     .iter()
     .all(|&feature| feature == vk::TRUE)
+}
+
+/// Whether a device renders depth into depth images' format, D32_SFLOAT. Vulkan requires that of
+/// it or of X8_D24_UNORM_PACK32, but nearly every device has it, AMD's among them, which have no
+/// 24-bit depth, and Apple's GPUs, whose Metal has 32-bit float depth everywhere.
+fn has_depth(instance: &Instance, physical: vk::PhysicalDevice) -> bool {
+    // SAFETY: the physical device came from this instance.
+    let properties = unsafe {
+        instance
+            .raw()
+            .get_physical_device_format_properties(physical, DepthImage::FORMAT)
+    };
+    let features = properties.optimal_tiling_features;
+    features.contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT)
 }
 
 fn has_swapchain(instance: &Instance, physical: vk::PhysicalDevice) -> bool {
