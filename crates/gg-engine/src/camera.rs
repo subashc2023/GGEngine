@@ -1,4 +1,4 @@
-//! Camera controllers: what steers the game's camera from the keyboard and mouse.
+//! Camera controllers: what steers the game's camera from the keyboard, the mouse and gamepads.
 
 use std::f32::consts::FRAC_PI_2;
 use std::ops::ControlFlow;
@@ -7,7 +7,7 @@ use std::time::Duration;
 use gg_core::math::{self, Quat};
 use gg_renderer::{Camera, Projection};
 
-use crate::{Actions, Binding, Context, Event, Key, Scroll, Source, Window};
+use crate::{Actions, Binding, Context, Event, Key, Scroll, Source, Stick, Trigger, Window};
 
 /// How fast the camera moves, in the view's heights a second.
 const SPEED: f32 = 0.5;
@@ -20,7 +20,7 @@ const ZOOM: f32 = 1.1;
 const POINTS_PER_LINE: f64 = 40.0;
 
 /// What the camera controller does, which its [`actions`](OrthographicCameraController::actions)
-/// bind to keys and buttons.
+/// bind to keys, buttons and gamepads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CameraAction {
     /// A pair of axes: along the camera's own, to its right and up the view.
@@ -29,11 +29,12 @@ pub enum CameraAction {
     Turn,
 }
 
-/// Steers an orthographic camera from the keyboard and mouse wheel, as 2D games and tools do.
-/// W, A, S and D move it along its own axes, half the view's height a second, so that it crosses
-/// the screen as fast however far it's zoomed; Q and E turn it left and right, a quarter turn a
-/// second, if [`rotation`](Self::rotation) is set; and the mouse wheel zooms about the view's
-/// center, 1.1 times a line, between a hundredth and a hundred times the height it started at.
+/// Steers an orthographic camera from the keyboard, the mouse wheel and gamepads, as 2D games and
+/// tools do. W, A, S and D, or a gamepad's right stick, move it along its own axes, half the view's
+/// height a second, so that it crosses the screen as fast however far it's zoomed; Q and E, or the
+/// left and right triggers, turn it left and right, a quarter turn a second, if
+/// [`rotation`](Self::rotation) is set; and the mouse wheel zooms about the view's center, 1.1
+/// times a line, between a hundredth and a hundred times the height it started at.
 /// [`actions`](Self::actions) binds moving and turning to other keys and buttons.
 ///
 /// A layer keeps one, and calls [`update`](Self::update) from its own update and
@@ -44,7 +45,8 @@ pub struct OrthographicCameraController {
     pub camera: Camera,
     /// Whether turning turns the camera; at first it doesn't.
     pub rotation: bool,
-    /// What moves and turns it: at first W, A, S and D, and Q and E.
+    /// What moves and turns it: at first W, A, S and D and the right stick, and Q and E and the
+    /// triggers.
     pub actions: Actions<CameraAction>,
     /// The least and most of the world the view's height zooms between.
     heights: [f32; 2],
@@ -63,9 +65,20 @@ impl OrthographicCameraController {
             negative: key(Key::KeyE),
             positive: key(Key::KeyQ),
         };
-        let bound = actions.bind(CameraAction::Move, move_);
-        let bound = bound.and_then(|()| actions.bind(CameraAction::Turn, turn));
-        bound.expect("the controller's own bindings are each of one kind, of other keys");
+        // The left trigger counterclockwise, as Q.
+        let triggers = Binding::Axis {
+            negative: Source::PadTrigger(Trigger::Right),
+            positive: Source::PadTrigger(Trigger::Left),
+        };
+        let bound = [
+            (CameraAction::Move, move_),
+            (CameraAction::Move, Binding::stick(Stick::Right)),
+            (CameraAction::Turn, turn),
+            (CameraAction::Turn, triggers),
+        ]
+        .into_iter()
+        .try_for_each(|(action, binding)| actions.bind(action, binding));
+        bound.expect("the controller's own bindings are each of one kind, of other sources");
         Self {
             camera,
             rotation: false,
@@ -120,7 +133,7 @@ impl OrthographicCameraController {
 
 #[cfg(test)]
 mod tests {
-    use gg_core::math::Vec3;
+    use gg_core::math::{Vec2, Vec3};
 
     use super::*;
 
@@ -215,6 +228,44 @@ mod tests {
         controller.update(&mut cx, Duration::from_millis(500));
         let moved = controller.camera.position;
         assert!(moved.abs_diff_eq(Vec3::Y, 1e-6), "{moved}");
+    }
+
+    #[test]
+    fn a_gamepads_right_stick_moves_it_and_its_triggers_turn_it() {
+        let mut cx = Context::new(None);
+        let mut controller = OrthographicCameraController::new(camera());
+        let pad = crate::Pad(0);
+        let mut send = |controller: &mut OrthographicCameraController, event| {
+            assert_eq!(controller.event(&mut cx, &event), ControlFlow::Continue(()));
+        };
+        // Half of the way up for a second.
+        let stick = |value| Event::PadStick {
+            pad,
+            stick: Stick::Right,
+            value,
+        };
+        send(&mut controller, stick(Vec2::new(0.0, 0.5)));
+        controller.update(&mut Context::new(None), Duration::from_secs(1));
+        let moved = controller.camera.position;
+        assert!(moved.abs_diff_eq(Vec3::Y, 1e-6), "{moved}");
+        // The left trigger half of the way for a second.
+        send(&mut controller, stick(Vec2::ZERO));
+        controller.rotation = true;
+        let trigger = |trigger, value| Event::PadTrigger {
+            pad,
+            trigger,
+            value,
+        };
+        send(&mut controller, trigger(Trigger::Left, 0.5));
+        controller.update(&mut Context::new(None), Duration::from_secs(1));
+        let eighth = Quat::from_rotation_z(FRAC_PI_2 / 2.0);
+        let turned = controller.camera.rotation;
+        assert!(turned.abs_diff_eq(eighth, 1e-6), "{turned}");
+        // Both triggers as far cancel.
+        send(&mut controller, trigger(Trigger::Right, 0.5));
+        controller.update(&mut Context::new(None), Duration::from_secs(1));
+        let turned = controller.camera.rotation;
+        assert!(turned.abs_diff_eq(eighth, 1e-6), "{turned}");
     }
 
     /// Scrolls, which the controller should handle, and returns the height it zoomed to.

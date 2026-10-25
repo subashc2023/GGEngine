@@ -1,27 +1,51 @@
-//! Input actions: what a game does, named by the game, bound to the keys and mouse buttons that do
-//! it, which a layer feeds the events it's sent and queues the changes of as its commands.
+//! Input actions: what a game does, named by the game, bound to the keys, mouse buttons and
+//! gamepads that do it, which a layer feeds the events it's sent and queues the changes of as its
+//! commands.
 
 use std::fmt::Debug;
 
 use gg_core::math::Vec2;
 use gg_core::{Error, Result};
 
-use crate::{Event, Key, MouseButton};
+use crate::{Event, Key, MouseButton, Pad, PadButton, Stick, Trigger};
 
-/// What a binding reads: a key, by its position, or a mouse button.
+/// What a binding reads: a key, by its position, or a mouse button; or any gamepad's button, how
+/// far one of its sticks goes one way, from 0 to 1, or how far one of its triggers is pulled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
     Key(Key),
     Button(MouseButton),
+    PadButton(PadButton),
+    PadStick(Stick, Toward),
+    PadTrigger(Trigger),
+}
+
+impl Source {
+    /// Whether it can be part of the way, as a stick or a trigger can.
+    fn analog(self) -> bool {
+        matches!(self, Self::PadStick(..) | Self::PadTrigger(_))
+    }
+}
+
+/// A way a stick goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Toward {
+    Left,
+    Right,
+    Down,
+    Up,
 }
 
 /// How an action reads its sources, which makes it a button, an axis or a pair of axes: an action
 /// is of one kind, which all of its bindings are.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Binding {
-    /// Held while its source is.
+    /// Held while its source is. A stick or a trigger's travel can't be one, since it would press
+    /// and release as it wavered about a point: a trigger is [`PadButton::LeftTrigger`] or
+    /// [`PadButton::RightTrigger`] as a button.
     Button(Source),
-    /// 1 while `positive` is held, -1 while `negative` is, and 0 while both or neither are.
+    /// 1 while `positive` is held, -1 while `negative` is, and 0 while both or neither are; or as
+    /// far as a stick or a trigger goes.
     Axis { negative: Source, positive: Source },
     /// An axis across and one up, each its negative source then its positive: the arrows are
     /// `x: [ArrowLeft, ArrowRight], y: [ArrowDown, ArrowUp]`.
@@ -46,6 +70,20 @@ impl Kind {
 }
 
 impl Binding {
+    /// A stick, as a pair of axes of its four ways.
+    pub const fn stick(stick: Stick) -> Self {
+        Self::Axis2 {
+            x: [
+                Source::PadStick(stick, Toward::Left),
+                Source::PadStick(stick, Toward::Right),
+            ],
+            y: [
+                Source::PadStick(stick, Toward::Down),
+                Source::PadStick(stick, Toward::Up),
+            ],
+        }
+    }
+
     fn kind(self) -> Kind {
         match self {
             Self::Button(_) => Kind::Button,
@@ -63,11 +101,13 @@ impl Binding {
         sources.into_iter().take(count)
     }
 
-    /// What it reads while the sources in `held` are, of those pressed since press `since`: a
-    /// button's 1 or 0, or an axis's value, in `x`.
-    fn value(self, held: &[(Source, u32)], since: u32) -> Vec2 {
-        let pressed = |source| held.iter().any(|&(s, at)| s == source && at >= since);
-        let down = |source| f32::from(u8::from(pressed(source)));
+    /// What it reads while the sources in `held` are, of those pressed since press `since`, each as
+    /// far as it goes on every pad together: a button's 1 or 0, or an axis's value, in `x`.
+    fn value(self, held: &[Held], since: u32) -> Vec2 {
+        let down = |source| {
+            let pressed = held.iter().filter(|h| h.source == source && h.at >= since);
+            pressed.map(|h| h.level).sum::<f32>()
+        };
         let axis = |[negative, positive]: [Source; 2]| down(positive) - down(negative);
         match self {
             Self::Button(source) => Vec2::new(down(source), 0.0),
@@ -91,6 +131,18 @@ pub enum Change<A> {
     Axis2(A, Vec2),
 }
 
+/// A source away from rest.
+#[derive(Debug, Clone, Copy)]
+struct Held {
+    source: Source,
+    /// The gamepad it's on, or `None` for the keyboard and mouse.
+    pad: Option<Pad>,
+    /// How far it goes, above 0: 1 for a key or a button.
+    level: f32,
+    /// How many bindings had been made as it left rest, its press.
+    at: u32,
+}
+
 /// A layer's actions, of a type of its own, such as an enum of what its game does, and what does
 /// them. The layer binds them as it starts, feeds [`event`](Self::event) each event its
 /// [`Layer::event`](crate::Layer::event) is sent, and queues the changes it gives as its commands,
@@ -98,23 +150,23 @@ pub enum Change<A> {
 /// camera. Fed by the layer, they follow the events the layer is sent: unlike
 /// [`Input`](crate::Input), they don't see a press that a layer above it handled.
 ///
-/// An action's bindings add up: a button is held while any of its sources is, and axes add, then
-/// stop at 1, so that a key pair's two keys cancel, and a pair of axes goes as far diagonally as
-/// straight. A source is held from a press to its release, so a release without its press, as when
-/// the press went to the UI, changes nothing, and nor do a held key's repeats, so that a key
-/// already down as the window gains focus counts from its next press. Losing focus lets go of
-/// everything, since not every platform reports the releases that come while the window is out of
-/// focus.
+/// An action's bindings add up, and so do every gamepad's: a button is held while any of its
+/// sources is, and axes add, then stop at 1, so that a key pair's two keys cancel, and a pair of
+/// axes goes as far diagonally as straight. A source is held from a press, or a stick or a trigger
+/// leaving rest, to its release, so a release without its press, as when the press went to the UI,
+/// changes nothing, and nor do a held key's repeats, so that a key already down as the window
+/// gains focus counts from its next press. Losing focus lets go of everything, since not every
+/// platform reports the releases that come while the window is out of focus.
 #[derive(Debug)]
 pub struct Actions<A> {
     /// Each action, its kind, and its value as of the last change given.
     actions: Vec<(A, Kind, Vec2)>,
     /// Each binding, and how many were made before it, which it counts presses from.
     bindings: Vec<(A, Binding, u32)>,
-    /// The bound sources held, each with how many bindings had been made as it was pressed: a list
-    /// rather than a set, since few are held at once, with room for all of them, so that feeding an
-    /// event never allocates.
-    held: Vec<(Source, u32)>,
+    /// The bound sources held: a list rather than a set, since few are held at once, with room for
+    /// all of them on one device, so that feeding an event never allocates but as a second gamepad
+    /// first holds more than one does.
+    held: Vec<Held>,
     /// How many bindings have been made.
     made: u32,
 }
@@ -134,8 +186,9 @@ impl<A: Copy + Eq + Debug> Actions<A> {
     /// Binds `action` to `binding`, beside its other bindings. A source held as it's bound, for
     /// another action, counts for this one from its next press.
     ///
-    /// Fails, binding nothing, if the action is bound as another kind, or if an axis's negative
-    /// source is its positive, which would only cancel.
+    /// Fails, binding nothing, if the action is bound as another kind, if it's a button of a stick
+    /// or a trigger's travel, or if an axis's negative source is its positive, which would only
+    /// cancel.
     pub fn bind(&mut self, action: A, binding: Binding) -> Result<()> {
         let kind = binding.kind();
         let bound = self.actions.iter().find(|(a, ..)| *a == action);
@@ -148,6 +201,17 @@ impl<A: Copy + Eq + Debug> Actions<A> {
                     "action {action:?} is {}, so it can't be bound as {}: {binding:?}",
                     bound.name(),
                     kind.name()
+                ),
+            ));
+        }
+        if let Binding::Button(source) = binding
+            && source.analog()
+        {
+            return Err(Error::new(
+                "engine.bad_binding",
+                format!(
+                    "action {action:?} is a button, so it can't read {source:?}, which goes part \
+                     of the way; a trigger's press is PadButton::LeftTrigger or RightTrigger"
                 ),
             ));
         }
@@ -186,7 +250,7 @@ impl<A: Copy + Eq + Debug> Actions<A> {
         self.actions.retain(|(a, ..)| *a != action);
         self.bindings.retain(|(a, ..)| *a != action);
         let mut held = std::mem::take(&mut self.held);
-        held.retain(|&(source, _)| self.binds(source));
+        held.retain(|held| self.binds(held.source));
         self.held = held;
     }
 
@@ -194,32 +258,46 @@ impl<A: Copy + Eq + Debug> Actions<A> {
     /// makes, in the order the actions were bound, one bound again after [`unbind`](Self::unbind)
     /// coming after the others.
     pub fn event(&mut self, event: &Event<'_>, changed: impl FnMut(Change<A>)) {
-        let (source, pressed) = match *event {
+        let level = |pressed| f32::from(u8::from(pressed));
+        let moved = match *event {
             Event::Key {
                 key,
                 pressed,
                 repeat: false,
-            } => (Source::Key(key), pressed),
-            Event::MouseButton { button, pressed } => (Source::Button(button), pressed),
+            } => self.hold(Source::Key(key), None, level(pressed)),
+            Event::MouseButton { button, pressed } => {
+                self.hold(Source::Button(button), None, level(pressed))
+            }
+            Event::PadButton {
+                pad,
+                button,
+                pressed,
+            } => self.hold(Source::PadButton(button), Some(pad), level(pressed)),
+            Event::PadStick { pad, stick, value } => [
+                (Toward::Left, -value.x),
+                (Toward::Right, value.x),
+                (Toward::Down, -value.y),
+                (Toward::Up, value.y),
+            ]
+            .into_iter()
+            .fold(false, |moved, (toward, way)| {
+                let way = if way > 0.0 { way } else { 0.0 };
+                self.hold(Source::PadStick(stick, toward), Some(pad), way) | moved
+            }),
+            Event::PadTrigger {
+                pad,
+                trigger,
+                value,
+            } => self.hold(Source::PadTrigger(trigger), Some(pad), value),
             Event::Focused(false) => {
                 self.held.clear();
-                self.changes(changed);
-                return;
+                true
             }
-            _ => return,
+            _ => false,
         };
-        if !self.binds(source) {
-            return;
+        if moved {
+            self.changes(changed);
         }
-        let at = self.held.iter().position(|&(held, _)| held == source);
-        match (pressed, at) {
-            (true, None) => self.held.push((source, self.made)),
-            (false, Some(at)) => {
-                self.held.swap_remove(at);
-            }
-            _ => return,
-        }
-        self.changes(changed);
     }
 
     /// Whether `action` is away from rest: a button held, or an axis anywhere but 0.
@@ -252,6 +330,32 @@ impl<A: Copy + Eq + Debug> Actions<A> {
 
     fn binds(&self, source: Source) -> bool {
         self.sources().any(|bound| bound == source)
+    }
+
+    /// Holds `source`, on `pad`, as far as `level`, or lets go of it at 0, giving whether that
+    /// changed it. Leaving rest is its press, which bindings made since count it from the next of.
+    fn hold(&mut self, source: Source, pad: Option<Pad>, level: f32) -> bool {
+        if !self.binds(source) {
+            return false;
+        }
+        let at = self
+            .held
+            .iter()
+            .position(|held| held.source == source && held.pad == pad);
+        match (level > 0.0, at) {
+            (true, None) => self.held.push(Held {
+                source,
+                pad,
+                level,
+                at: self.made,
+            }),
+            (true, Some(at)) if self.held[at].level != level => self.held[at].level = level,
+            (false, Some(at)) => {
+                self.held.swap_remove(at);
+            }
+            _ => return false,
+        }
+        true
     }
 
     /// Works out each action's value from the sources held, giving `changed` each that changed.
@@ -457,6 +561,126 @@ mod tests {
         assert_eq!(feed(&mut actions, &[key(Key::Space, true)]), both);
     }
 
+    fn stick(pad: usize, value: Vec2) -> Event<'static> {
+        Event::PadStick {
+            pad: Pad(pad),
+            stick: Stick::Left,
+            value,
+        }
+    }
+
+    fn trigger(trigger: Trigger, value: f32) -> Event<'static> {
+        Event::PadTrigger {
+            pad: Pad(0),
+            trigger,
+            value,
+        }
+    }
+
+    fn south(pad: usize, pressed: bool) -> Event<'static> {
+        Event::PadButton {
+            pad: Pad(pad),
+            button: PadButton::South,
+            pressed,
+        }
+    }
+
+    #[test]
+    fn a_stick_and_a_trigger_go_as_far_as_they_go_adding_up_with_keys_and_every_pad() {
+        let mut actions = Actions::default();
+        let arrows = Binding::Axis2 {
+            x: pair(Key::ArrowLeft, Key::ArrowRight),
+            y: pair(Key::ArrowDown, Key::ArrowUp),
+        };
+        let triggers = Binding::Axis {
+            negative: Source::PadTrigger(Trigger::Left),
+            positive: Source::PadTrigger(Trigger::Right),
+        };
+        for (action, binding) in [
+            (Act::Move, arrows),
+            (Act::Move, Binding::stick(Stick::Left)),
+            (Act::Walk, triggers),
+        ] {
+            actions.bind(action, binding).expect("bound");
+        }
+        let moved = |at| [Change::Axis2(Act::Move, at)];
+        let half = Vec2::new(0.5, 0.0);
+        assert_eq!(feed(&mut actions, &[stick(0, half)]), moved(half));
+        // With an arrow the same way, as far as 1; and the stick of another pad adds up too.
+        assert_eq!(
+            feed(&mut actions, &[key(Key::ArrowRight, true)]),
+            moved(Vec2::X)
+        );
+        let back = [key(Key::ArrowRight, false), stick(1, Vec2::new(0.25, 0.0))];
+        let changes = feed(&mut actions, &back);
+        assert_eq!(changes, [moved(half)[0], moved(Vec2::new(0.75, 0.0))[0]]);
+        let along = Vec2::new(-0.25, 0.5);
+        let rest = [stick(1, Vec2::ZERO), stick(0, along)];
+        assert_eq!(feed(&mut actions, &rest), [moved(half)[0], moved(along)[0]]);
+        assert_eq!(
+            feed(&mut actions, &[stick(0, Vec2::ZERO)]),
+            moved(Vec2::ZERO)
+        );
+        // A trigger, against the other.
+        let walked = [
+            trigger(Trigger::Right, 0.5),
+            trigger(Trigger::Left, 0.5),
+            trigger(Trigger::Right, 0.0),
+        ];
+        let walked_so = [
+            Change::Axis(Act::Walk, 0.5),
+            Change::Axis(Act::Walk, 0.0),
+            Change::Axis(Act::Walk, -0.5),
+        ];
+        assert_eq!(feed(&mut actions, &walked), walked_so);
+    }
+
+    #[test]
+    fn a_button_held_on_two_pads_is_held_until_both_let_go() {
+        let mut actions = Actions::default();
+        let jump = Binding::Button(Source::PadButton(PadButton::South));
+        actions.bind(Act::Jump, jump).expect("bound");
+        assert_eq!(
+            feed(&mut actions, &[south(0, true)]),
+            [Change::Pressed(Act::Jump)]
+        );
+        assert_eq!(feed(&mut actions, &[south(1, true), south(0, false)]), NONE);
+        // A release from a pad that has let go already, or never pressed it, changes nothing.
+        assert_eq!(
+            feed(&mut actions, &[south(0, false), south(2, false)]),
+            NONE
+        );
+        assert_eq!(
+            feed(&mut actions, &[south(1, false)]),
+            [Change::Released(Act::Jump)]
+        );
+    }
+
+    #[test]
+    fn a_stick_away_from_rest_as_it_is_bound_counts_once_it_has_rested() {
+        let mut actions = Actions::default();
+        let right = Binding::Axis {
+            negative: Source::PadStick(Stick::Left, Toward::Left),
+            positive: Source::PadStick(Stick::Left, Toward::Right),
+        };
+        actions.bind(Act::Walk, right).expect("bound");
+        let half = Vec2::new(0.5, 0.0);
+        feed(&mut actions, &[stick(0, half)]);
+        actions
+            .bind(Act::Move, Binding::stick(Stick::Left))
+            .expect("bound");
+        // Move doesn't see the stick as it goes on, until it has been back at rest.
+        let further = feed(&mut actions, &[stick(0, Vec2::new(0.75, 0.0))]);
+        assert_eq!(further, [Change::Axis(Act::Walk, 0.75)]);
+        let changes = feed(&mut actions, &[stick(0, Vec2::ZERO), stick(0, half)]);
+        let both = [
+            Change::Axis(Act::Walk, 0.0),
+            Change::Axis(Act::Walk, 0.5),
+            Change::Axis2(Act::Move, half),
+        ];
+        assert_eq!(changes, both);
+    }
+
     #[test]
     fn a_binding_of_another_kind_or_of_an_axis_to_one_source_is_refused_binding_nothing() {
         let mut actions = Actions::default();
@@ -485,6 +709,15 @@ mod tests {
                     x: [a, d],
                     y: [w, w],
                 },
+            ),
+            // Stick ways and triggers go part of the way.
+            (
+                Act::Walk,
+                Binding::Button(Source::PadStick(Stick::Left, Toward::Up)),
+            ),
+            (
+                Act::Move,
+                Binding::Button(Source::PadTrigger(Trigger::Left)),
             ),
         ] {
             let refused = actions.bind(action, binding).expect_err("refused");

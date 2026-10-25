@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytemuck::NoUninit;
-use gg_core::math::Mat4;
+use gg_core::math::{Mat4, Vec2};
 use gg_core::{Error, Result};
 use gg_renderer::{
     Blend, Camera, Draws, Mesh, Meshes, RenderData, Shader, Shaders, Sprite, SpriteSheet, Texture,
@@ -60,8 +60,10 @@ pub trait Layer {
     fn update(&mut self, _cx: &mut Context, _dt: Duration) {}
 
     /// Called for each event that the layers above didn't handle. `Break` handles it, so the
-    /// layers below don't see it; but a release of a key or a mouse button, and the loss of focus,
-    /// reach every layer, so that none is left holding what it saw pressed.
+    /// layers below don't see it; but a release of a key or a button, a gamepad's stick or trigger
+    /// back at rest, and the loss of focus, reach every layer, so that none is left holding what it
+    /// saw pressed. A stick or a trigger that a layer handles away from rest stays, for the layers
+    /// below, as they last saw it until it rests.
     fn event(&mut self, _cx: &mut Context, _event: &Event<'_>) -> ControlFlow<()> {
         ControlFlow::Continue(())
     }
@@ -544,17 +546,21 @@ impl Stack {
     }
 
     /// Records `event` in the input state that layers poll, then hands it down from the top
-    /// until a layer handles it. `Break` means one did. A release, and the loss of focus, go on to
-    /// the layers below one that handles them, as releases go past the UI, so that none is left
-    /// holding a key or button it saw pressed: a release without its press changes nothing.
+    /// until a layer handles it. `Break` means one did. A release, a gamepad's stick or trigger
+    /// back at rest, and the loss of focus, go on to the layers below one that handles them, as
+    /// releases go past the UI, so that none is left holding what it saw pressed: a release without
+    /// its press changes nothing.
     pub(crate) fn event(&mut self, cx: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
         cx.input.record(event);
-        let lets_go = matches!(
-            event,
-            Event::Key { pressed: false, .. }
-                | Event::MouseButton { pressed: false, .. }
-                | Event::Focused(false)
-        );
+        let lets_go = match *event {
+            Event::Key { pressed, .. }
+            | Event::MouseButton { pressed, .. }
+            | Event::PadButton { pressed, .. } => !pressed,
+            Event::PadStick { value, .. } => value == Vec2::ZERO,
+            Event::PadTrigger { value, .. } => value == 0.0,
+            Event::Focused(focused) => !focused,
+            _ => false,
+        };
         let mut handled = ControlFlow::Continue(());
         for layer in self.layers.iter_mut().rev() {
             if layer.event(cx, event).is_break() {
@@ -714,12 +720,33 @@ mod tests {
         );
         assert_eq!(*calls.borrow(), ["event o", "event b", "event a"]);
 
-        let (mut stack, calls) = probes(true);
-        assert_eq!(
-            stack.event(&mut cx, &Event::CursorEntered),
-            ControlFlow::Break(())
-        );
-        assert_eq!(*calls.borrow(), ["event o", "event b"]);
+        // A press, and a stick or a trigger away from rest, stop at the layer that handles them.
+        let pad = crate::Pad(0);
+        let stick = |value| Event::PadStick {
+            pad,
+            stick: crate::Stick::Left,
+            value,
+        };
+        let trigger = |value| Event::PadTrigger {
+            pad,
+            trigger: crate::Trigger::Left,
+            value,
+        };
+        let south = |pressed| Event::PadButton {
+            pad,
+            button: crate::PadButton::South,
+            pressed,
+        };
+        for handled in [
+            Event::CursorEntered,
+            south(true),
+            stick(Vec2::X),
+            trigger(0.5),
+        ] {
+            let (mut stack, calls) = probes(true);
+            assert_eq!(stack.event(&mut cx, &handled), ControlFlow::Break(()));
+            assert_eq!(*calls.borrow(), ["event o", "event b"], "{handled:?}");
+        }
 
         // So that the layers below let go too.
         for lets_go in [
@@ -733,6 +760,9 @@ mod tests {
                 pressed: false,
             },
             Event::Focused(false),
+            south(false),
+            stick(Vec2::ZERO),
+            trigger(0.0),
         ] {
             let (mut stack, calls) = probes(true);
             assert_eq!(stack.event(&mut cx, &lets_go), ControlFlow::Break(()));

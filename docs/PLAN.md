@@ -193,14 +193,23 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   stopping at 1, focus, repeats and refusals, each change applying at the first tick after its
   event at frame times from 1 to 130 ms, the sandbox's keys queuing as they come, and the camera's
   keys bound again.
+- **Gamepads** (2026-10-24): gamepads, through gilrs in windowed runs, are the engine's own
+  events, their buttons by position, each stick as one value and each trigger's travel, and the
+  sources of actions beside keys, every pad adding up; each frame polls them before its ticks,
+  giving a stick's or a trigger's moves as one event, through a round dead zone scaled from its
+  edge, the same on every backend; nothing a pad does counts out of focus, what's held as focus
+  returns counts once it has rested, and a pad that disconnects lets go. The camera controller
+  moves by the right stick and turns by the triggers, and the sandbox's triangle steers by the left
+  stick and the D-pad and reverses its spin by South; unit tests check sticks and triggers adding
+  up with keys and across pads, a stick held as it's bound, refusals, the dead zone, a poll's
+  order, focus, disconnects and gilrs's names, and pads' releases going past a layer that handles
+  them. Checked by hand with an Xbox pad on Windows.
 
-## Now: gamepads
+## Now: a job system
 
-Phase 3's twelfth milestone: gamepads, through gilrs, as
-[ARCHITECTURE.md](../ARCHITECTURE.md#technology) has it: their buttons and axes as the engine's
-own events and as the sources of actions, dead zones, the focus rule for every pad, and the camera
-controller's pad bindings, checked by hand with a controller on Windows. Its plan is made when it
-starts, and says when it's done.
+Phase 3's thirteenth milestone, and its last: a job system, as
+[ARCHITECTURE.md](../ARCHITECTURE.md#threads) has it, and then Phase 3's done-when. Its plan is
+made when it starts, and says when it's done.
 
 ## Next
 
@@ -270,13 +279,13 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Shipping profile (LTO, `codegen-units = 1`) | Phase 7, with the player |
 | Compiling trace and debug events out of shipping builds, through `tracing`'s `release_max_level_*` features | Phase 7, with the shipping profile |
 | No console window for shipping builds on Windows (`windows_subsystem = "windows"` on the player); the JSON log still records the run | Phase 7, with the shipping profile |
-| Checking the sandbox by hand on Linux, and on macOS with KosmicKrisp (Vulkan SDK 1.4.363.0 or later, the first conformant build) | Phase 4, once the sandbox draws a glTF mesh |
+| Checking the sandbox by hand on Linux, and on macOS with KosmicKrisp (Vulkan SDK 1.4.363.0 or later, the first conformant build), its gamepads too | Phase 4, once the sandbox draws a glTF mesh |
 | Deleting old JSON logs; every run's log is kept | Logs pile up enough to matter |
 | A clean shutdown on Ctrl+C, which now ends the process at once; the JSON log keeps every line written until then, and a recording every whole line but its `end` | A headless run that goes on until it's stopped, such as a dedicated server |
 | GPU tests in Windows and macOS CI, which skip them because hosted runners there have no GPU | A self-hosted runner with a GPU, or a Vulkan driver that runs on those runners without one |
 | A gate that compiles the shipping configuration: `cargo clippy -p player --all-targets -- -D warnings` | When `gg-engine` gets its `dev` feature |
 | egui, the dock and the Inspector behind `dev`: the player links them and runs an empty UI pass every frame; `Ui`, which `Layer::ui` takes, is the type to turn into a no-op | When `gg-engine` gets its `dev` feature |
-| Waiting for the swapchain image before a frame reads input and the time, not after the layers update, which would cut latency by the wait: up to a refresh under `--vsync`. Events come before the frame that reads them, so a wait moved to the frame's start would freshen only its time: the next image has to be acquired after the last frame's present, and held across the event loop | Phase 4, with the render thread |
+| Waiting for the swapchain image before a frame reads input and the time, not after the layers update, which would cut latency by the wait: up to a refresh under `--vsync`. Events come before the frame that reads them, so a wait moved to the frame's start would freshen only its time and the gamepads, which it polls as it starts: the next image has to be acquired after the last frame's present, and held across the event loop | Phase 4, with the render thread |
 | Pushing and popping layers while the app runs; `App` fixes the stack before it starts | A tool or game needs a layer for only part of a run |
 | Composed text from an input method (winit's `Ime` events), for languages typed through one | A game takes text input, such as chat |
 | Steady-state frames that draw UI allocate: in egui's layout and tessellation, in the dock's own bookkeeping, which copies each frame's panel and menu names and torn-off windows' titles, and makes its arrangement and its list of groups left to draw anew, and in the Inspector, which reads its rows' names, the picked entity's components as values and its children's IDs anew | Phase 4, with the allocation check; the overlay is for development |
@@ -302,14 +311,24 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | The camera as a component of an entity, which a scene saves and a parent carries along; layers set the camera through `Context` | Phase 4, with perspective cameras |
 | The game's view in a panel that docks and tabs, and keys reaching the layers only while it has focus, as editors' views do; the view is the central area, and keys reach the layers wherever the pointer is unless one of egui's widgets has focus | A tool in the game's process shows the view among its panels |
 | Converting between the view's pixels and the world, to pick what's under the cursor or zoom toward it; the camera controller zooms about the view's center | Something picks with the mouse, or a tool zooms toward the cursor |
-| The camera controller takes no gamepad | Now: gamepads |
 | Zooming from keys or a gamepad, as a rate beside the wheel's lines; the camera controller zooms by the wheel alone, in its own event handling | A game binds zoom elsewhere |
 | Per-user bindings, kept as RON in the per-user directory beside the dock's layout, and a UI that binds them; a game binds its actions in code | A game ships its settings |
-| Chords, modifiers and triggers, such as Ctrl and a key, a hold or a double tap: there's no modifier state, and Ctrl+Z reaches layers as `ControlLeft` and `KeyZ` | A game binds a combination |
-| Keys' labels, for prompts that show a binding: keys are positions, and the engine drops what a keyboard's layout makes of them | A game shows its bindings |
+| Chords, modifiers, holds and double taps, such as Ctrl and a key: there's no modifier state, and Ctrl+Z reaches layers as `ControlLeft` and `KeyZ` | A game binds a combination |
+| Keys' and gamepad buttons' labels, for prompts that show a binding: both are positions, and the engine drops what a keyboard's layout makes of a key, and whether a pad is an Xbox or a PlayStation one | A game shows its bindings |
 | A hold of an axis shorter than a tick, which moves nothing: its two changes apply at one tick | A game needs one, as a flag that the tick clears |
 | An engine type for what an action holds in the world, such as a button's held flag and its presses this tick; each game writes its own component | A second game writes the same |
 | Pressing and setting actions from code, ahead of the commands, and listing a game's actions by name, for the tool API and agents | Phase 5, the tool API |
+| Gamepads in `Input`, for layers to poll: `Input` holds keys and mouse buttons alone, and actions read the pads | A layer polls a pad |
+| Gamepads connecting and disconnecting as events, and their names, which only the log has | A game prompts as a pad connects |
+| Binding a source to one gamepad, or the keyboard to one player: every pad drives every layer's actions | Local multiplayer |
+| Dead zones a game sets, for a pad, a stick or a binding: every stick and trigger has the engine's, from a tenth to nine tenths of its travel | A game ships its settings, with per-user bindings |
+| A stick's way or a trigger's travel as a button, pressed past a point and released before it, as menus take a stick; `bind` refuses one, and a trigger's press is a button of its own | A game's menus take a stick |
+| Rumble: gilrs's force feedback is off, and with it its thread | A game rumbles |
+| Fewer commands from a moving stick, by quantizing its value or folding a layer's queue: a frame gives one for each stick and trigger that moved, and one more for each of its pad's button events between its moves, up to the pad's report rate, about 125 a second on Windows.Gaming.Input | Recordings grow too large, or input goes over a network |
+| gilrs's allocations: on Windows.Gaming.Input, its polling thread's, which reads every pad every 8 ms, and the string of a pad's ID that each event the frame takes asks Windows for; and the channel's blocks, which the frame that takes their last event frees. The engine's own feeding of pads to actions allocates only as a pad first reports, and as a second pad first holds more than one does | Phase 4's allocation check, which says whose threads and heaps it counts |
+| Letting go, for the layers below one that handles a stick or a trigger away from rest, of the ways it left: they keep what they last saw until it rests, so that a stick rolled from right to up in a menu leaves the game going right | A game's menus take a stick |
+| Controls the engine doesn't name, C, Z and paddles, and triggers a Linux driver reports as Z axes ([gilrs #200](https://gitlab.com/gilrs-project/gilrs/-/issues/200)), which are dropped | A pad that needs them, or the check by hand on Linux |
+| Codes for dependencies' own warnings, which reach the log as they give them: as a pad connects on Windows.Gaming.Input, gilrs warns, without a code, that it has no mapping for it, since that backend gives every pad a nil UUID, and goes on with its default mapping, the right one there | Phase 5, as the tool API serves diagnostics |
 | Checking a game's shader against the contract on `Shaders::add` through Slang reflection: its push constants, its resources, and the sizes of its vertex and parameter structs against their types'; until then it's trusted, and validation checks it in debug builds | Phase 4, with Slang reflection |
 | Games' shaders compile with slangc as they're added, so running a game needs the Vulkan SDK | Phase 7, which cooks shaders |
 | A library of assets: shaders and textures load from the paths the game gives, the sandbox giving its source's, and nothing finds one by path or name, so a file added twice loads twice; scenes and the tool API will name them | Phase 4, with assets |

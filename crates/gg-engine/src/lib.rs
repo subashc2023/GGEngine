@@ -26,6 +26,7 @@ mod image;
 mod input;
 mod inspector;
 mod layer;
+mod pads;
 mod perf;
 mod recording;
 pub mod reflect;
@@ -47,7 +48,7 @@ use gg_core::Result;
 use gg_renderer::{Renderer, Settings, Validation, Viewport};
 use tracing::{debug, error, info};
 
-pub use actions::{Actions, Binding, Change, Source};
+pub use actions::{Actions, Binding, Change, Source, Toward};
 use args::Args;
 pub use camera::{CameraAction, OrthographicCameraController};
 use chrome::Chrome;
@@ -60,7 +61,7 @@ pub use ecs::{
 /// The UI library layers draw with, in [`Layer::ui`]; apps use it from here, so that they
 /// share the engine's version.
 pub use egui;
-pub use event::{Event, Key, MouseButton, Scroll};
+pub use event::{Event, Key, MouseButton, Pad, PadButton, Scroll, Stick, Trigger};
 /// The engine's vectors, matrices and quaternions; apps use them from here, so that they share
 /// the engine's version.
 pub use gg_core::math;

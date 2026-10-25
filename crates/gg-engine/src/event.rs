@@ -1,10 +1,13 @@
-//! The engine's events, converted from winit's so that apps and games never see winit's types.
+//! The engine's events, converted from winit's and gilrs's so that apps and games never see their
+//! types.
 
+use gg_core::math::Vec2;
 use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
 
-/// Something that happened to the window or came from the keyboard or mouse. Positions and
-/// sizes are in physical pixels; [`Window::scale`](crate::Window::scale) converts them.
+/// Something that happened to the window or came from the keyboard, the mouse or a gamepad.
+/// Positions and sizes are in physical pixels; [`Window::scale`](crate::Window::scale) converts
+/// them.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Event<'a> {
     /// The user asked to close the window. Unless a layer handles it, the app exits.
@@ -48,6 +51,92 @@ pub enum Event<'a> {
     },
     /// The mouse wheel or a touchpad scrolled.
     Scroll(Scroll),
+    /// A gamepad's button went down or up. A trigger is a button too, pressed at 0.75 of its travel
+    /// and released at 0.65, before the dead zone that an [`Event::PadTrigger`]'s value goes
+    /// through, which reads them as about 0.81 and 0.69. As with keys, a release can come without
+    /// its press.
+    PadButton {
+        pad: Pad,
+        button: PadButton,
+        pressed: bool,
+    },
+    /// A gamepad's stick moved: right and up are positive, it's no longer than 1, and it's exactly
+    /// zero within its dead zone.
+    PadStick {
+        pad: Pad,
+        stick: Stick,
+        value: Vec2,
+    },
+    /// A gamepad's trigger moved: from 0, at rest and within its dead zone, to 1 all the way.
+    PadTrigger {
+        pad: Pad,
+        trigger: Trigger,
+        value: f32,
+    },
+}
+
+/// A gamepad, by its number for the run. One that disconnects and connects again may come back as
+/// another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Pad(pub usize);
+
+/// A gamepad's button, by its position, as keys are: `South` is A on an Xbox pad and Cross on a
+/// PlayStation one. The shoulders are the bumpers above the triggers, and the thumbs are the sticks
+/// pressed in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PadButton {
+    South,
+    East,
+    North,
+    West,
+    LeftShoulder,
+    RightShoulder,
+    LeftTrigger,
+    RightTrigger,
+    Select,
+    Start,
+    Mode,
+    LeftThumb,
+    RightThumb,
+    DPadUp,
+    DPadDown,
+    DPadLeft,
+    DPadRight,
+}
+
+impl PadButton {
+    /// Every button, in order.
+    pub(crate) const ALL: [Self; 17] = [
+        Self::South,
+        Self::East,
+        Self::North,
+        Self::West,
+        Self::LeftShoulder,
+        Self::RightShoulder,
+        Self::LeftTrigger,
+        Self::RightTrigger,
+        Self::Select,
+        Self::Start,
+        Self::Mode,
+        Self::LeftThumb,
+        Self::RightThumb,
+        Self::DPadUp,
+        Self::DPadDown,
+        Self::DPadLeft,
+        Self::DPadRight,
+    ];
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Stick {
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Trigger {
+    Left,
+    Right,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

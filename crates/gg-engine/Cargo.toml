@@ -8,6 +8,7 @@ publish.workspace = true
 bytemuck.workspace = true
 egui.workspace = true
 egui-winit.workspace = true
+gilrs.workspace = true
 gg-core.workspace = true
 gg-macros.workspace = true
 gg-renderer.workspace = true

@@ -81,9 +81,9 @@ settings by executable name, and a generic name can match one.
 Cargo's cycle check enforces rule 1, and rule 2's ban on `gg-*` dependencies. It can't see a
 skip-level edge such as `gg-engine` → `gg-gpu`, which forms no cycle, so
 [deny.toml](deny.toml) names the only crates that may depend directly on `gg-gpu`,
-`gg-renderer`, `gg-macros`, `ash`, `ash-window`, `winit`, `egui-winit`, `tracy-client` and
-`tracy-client-sys`, and CI checks it with cargo-deny. Rule 4, and what a crate does with the
-dependencies it may have, are left to review.
+`gg-renderer`, `gg-macros`, `ash`, `ash-window`, `winit`, `egui-winit`, `gilrs`, `gilrs-core`,
+`tracy-client` and `tracy-client-sys`, and CI checks it with cargo-deny. Rule 4, and what a crate
+does with the dependencies it may have, are left to review.
 
 ### Builds
 
@@ -398,8 +398,8 @@ Diagnostics are data, so agents and tools can act on them as reliably as people 
 ## Events and layers
 
 The engine turns the window system's events into its own: window (close, resize, focus, scale,
-minimize), keyboard and mouse. winit stays inside `gg-engine`, so apps and games never see its
-types.
+minimize), keyboard and mouse, and gamepads' from gilrs. winit and gilrs stay inside `gg-engine`,
+so apps and games never see their types.
 
 An app is a stack of layers, which its `main` describes on `App`: layers, then overlays above
 them. Each layer attaches when the app starts and detaches when it ends, ticks with the
@@ -407,9 +407,12 @@ simulation, as [ECS](#ecs) describes, updates every frame with the time since th
 presented, handles events and draws UI. Frames pause while the main window is minimized, and the
 first update after it's restored is given no time, rather than the length of the pause. An event
 goes down the stack from the top overlay until a layer handles it, but for a key's or a button's
-release and the loss of focus, which go to every layer, so that none is left holding what it saw
-pressed; ticks, updates and UI go up from the bottom. Headless runs have no window events, but
-their layers tick, update and draw UI all the same.
+release, a gamepad's stick or trigger back at rest and the loss of focus, which go to every layer,
+so that none is left holding what it saw pressed; a stick or a trigger that a layer handles away
+from rest stays, for the layers below, as they last saw it until it rests. Ticks, updates and UI
+go up from the bottom.
+Headless runs have no window or gamepad events, but their layers tick, update and draw UI all the
+same.
 
 egui, the engine's immediate-mode UI, is the top overlay: it sees every event first and keeps
 those it wants, such as a click on one of its panels, and `gg-renderer` draws its meshes over
@@ -453,17 +456,32 @@ and release between two frames never shows as held. Losing focus lets go of ever
 every platform reports the releases that come while the window is out of focus, and a key
 already down as it regains focus counts from its next press, or from its first repeat.
 
-A game names what it does as actions, which a layer binds to keys, by their position, and mouse
-buttons: buttons, axes, such as a key pair, and pairs of axes, which go as far diagonally as
-straight. The layer feeds its actions the events it's sent, so that a layer above that handles a
-press hides it from them, and queues each change of an action's value as a command of its own as
-the event comes, rather than at its update, so that the next tick applies it. Repeats don't count,
-so a key already down as the window regains focus counts from its next press. Layers run on the
-main thread with the event loop, and input enters the simulation only so, as [ECS](#ecs)
-describes: a tick polls no input, and what an action holds, such as which way a player is going,
-is a component that its commands set, so that a tap between two frames applies at one tick, a hold
-at every tick until its release, and snapshots and replays keep it. A recording holds the actions'
-changes, never keys, so binding them to others changes none.
+A game names what it does as actions, which a layer binds to keys, by their position, mouse
+buttons and gamepads' buttons, sticks and triggers: buttons, axes, such as a key pair or a
+trigger, and pairs of axes, such as a stick, which go as far diagonally as straight. Bindings add
+up, and so does every gamepad; a stick or a trigger's travel can't be a button, which would press
+and release as it wavered. The layer feeds its actions the events it's sent, so that a layer above
+that handles a press hides it from them, and queues each change of an action's value as a command
+of its own as the event comes, rather than at its update, so that the next tick applies it.
+Repeats don't count, so a key already down as the window regains focus counts from its next press.
+Layers run on the main thread with the event loop, and input enters the simulation only so, as
+[ECS](#ecs) describes: a tick polls no input, and what an action holds, such as which way a player
+is going, is a component that its commands set, so that a tap between two frames applies at one
+tick, a hold at every tick until its release, and snapshots and replays keep it. A recording holds
+the actions' changes, never keys or buttons, so binding them to others changes none.
+
+Gamepads come through gilrs, in windowed runs alone. Each frame polls them as it starts, before
+its ticks, which apply what they did, and gives a stick's or a trigger's moves as one event, at its
+last reading, at the poll's end and before each of its pad's button events, so that a press sees
+the moves that came before it. Nothing a pad does counts while the main window is out of focus,
+on every platform, since Windows gives pads to the focused window alone and Linux and macOS to
+any, nor for 40 ms after it regains it, while gilrs's threads read the pads again: losing focus
+lets go of what the pads held, and what's away from rest as they count again counts once it has
+rested, as a key counts from its next press.
+Sticks and triggers have a round dead zone of a tenth of their travel, scaled so that they go from
+exactly 0 at its edge to 1 at nine tenths, the same on every backend, with gilrs's own filters
+off. A pad that disconnects lets go of what it held. If gilrs can't start, the run logs
+`engine.gamepads` and goes on without pads.
 
 ## World space
 

@@ -28,8 +28,8 @@ docs/PLAN.md      the roadmap (see Workflow)
 Dependencies point down: apps → `gg-engine` → `gg-renderer` → `gg-gpu` → `gg-core`, and any
 crate may use `gg-core`. Cargo catches only some breaches of the layering rules in
 ARCHITECTURE.md, and `cargo deny check bans` (from [deny.toml](deny.toml)) catches skip-level
-edges and the wrong crate using `ash`, `winit` or Tracy's client: check a change against the rest
-yourself.
+edges and the wrong crate using `ash`, `winit`, `gilrs` or Tracy's client: check a change against
+the rest yourself.
 
 ## Commands
 
@@ -46,7 +46,8 @@ cargo build -p player --release   # shipping: the player alone
 
 Building needs a C++ compiler, for the Vulkan Memory Allocator, and `slangc` for the shaders: the
 Vulkan SDK's, or the one `SLANGC` names. Games' shaders compile with that slangc as they run, so
-it stays where the build found it.
+it stays where the build found it. On Linux, gamepads need pkg-config and libudev's headers too:
+`pkgconf` and `libudev-dev` on Debian or Ubuntu.
 
 Each run writes a JSON log and logs its path as it starts; filter it on `level`, `code` or
 `vuid`. `RUST_LOG` sets what's logged, such as `RUST_LOG=gg_gpu=trace`. A run that doesn't end in

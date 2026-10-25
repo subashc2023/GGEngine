@@ -13,8 +13,8 @@ use gg_engine::math::{self, EulerRot, Quat, Vec2, Vec3, Vec4};
 use gg_engine::reflect::Error;
 use gg_engine::{
     Actions, App, Binding, Blend, Camera, Change, Commands, Component, Context, Entity, Event, Key,
-    Layer, MeshDraw, OrthographicCameraController, Projection, Reflect, Sampler, Source, Sprite,
-    SpriteSheet, Tick, Transform, Ui, World,
+    Layer, MeshDraw, OrthographicCameraController, PadButton, Projection, Reflect, Sampler, Source,
+    Sprite, SpriteSheet, Stick, Tick, Transform, Ui, World,
 };
 use tracing::{error, info};
 
@@ -240,10 +240,11 @@ struct Spin {
     speed: f32,
 }
 
-/// Moves an entity, the triangle, as the arrows steer it.
+/// Moves an entity, the triangle, as the arrows, the left stick and the D-pad steer it.
 #[derive(Clone, Copy, Component)]
 struct Steer {
-    /// Where it's going, no longer than 1: a unit vector for one arrow or two, zero for none.
+    /// Where it's going, no longer than 1: a unit vector for one arrow or two, shorter for a stick
+    /// pushed part of the way, and zero for none.
     heading: Vec2,
 }
 
@@ -448,20 +449,21 @@ fn pick(index: u32, salt: u32) -> f32 {
 /// the engine's sprites, so the map, the swarm, the grid and the checkerboard are one instanced
 /// draw, the triangle another, and the moons, the moonlet and the logo a third. They're drawn over
 /// a color that drifts slowly, so that a running sandbox visibly animates. The engine's camera
-/// controller steers the camera: W, A, S and D move it along its own axes, Q and E turn it left
-/// and right, at the same speed whatever the frame rate, and the mouse wheel zooms it. The arrows
-/// steer the triangle, a unit a second, and R reverses its spin: the sandbox's actions, whose
-/// changes it queues as commands as they come, so that its ticks move the triangle for as long as
-/// an arrow is held, and reverse it once for each press, however short. Shows six panels to dock,
-/// beside the engine's Performance panel, which counts the draws, and its Entities and Inspector
-/// panels, which list the entities and edit the picked one's components: the camera; how many
-/// sprites the swarm has; the map's filtering, smooth or sharp, and buttons that look at the map or
-/// back at the swarm; the grid's colors, which can be picked; the checkerboard's filtering, how
-/// many times it repeats, and its tint; and the clear color, which can be held or picked. Logs the
-/// key and mouse presses that reach it, which those on the panels don't. It polls input too:
-/// holding Space pauses the drift, and a panel shows where the cursor is. The title bar's File menu
-/// saves the grid to its scene, loads it again from the scene, which a refusal of leaves it as it
-/// was, and quits.
+/// controller steers the camera: W, A, S and D, or a gamepad's right stick, move it along its own
+/// axes, Q and E, or the triggers, turn it left and right, at the same speed whatever the frame
+/// rate, and the mouse wheel zooms it. The arrows, the left stick and the D-pad steer the triangle,
+/// a unit a second at most, and R or the pad's South button, A on an Xbox pad, reverses its spin:
+/// the sandbox's actions, whose changes it queues as commands as they come, so that its ticks move
+/// the triangle for as long as an arrow is held, and reverse it once for each press, however short.
+/// Shows six panels to dock, beside the engine's Performance panel, which counts the draws, and its
+/// Entities and Inspector panels, which list the entities and edit the picked one's components: the
+/// camera; how many sprites the swarm has; the map's filtering, smooth or sharp, and buttons that
+/// look at the map or back at the swarm; the grid's colors, which can be picked; the checkerboard's
+/// filtering, how many times it repeats, and its tint; and the clear color, which can be held or
+/// picked. Logs the key, mouse and gamepad presses that reach it, which those on the panels don't.
+/// It polls input too: holding Space pauses the drift, and a panel shows where the cursor is. The
+/// title bar's File menu saves the grid to its scene, loads it again from the scene, which a
+/// refusal of leaves it as it was, and quits.
 struct Sandbox {
     time: Duration,
     drift: bool,
@@ -480,12 +482,12 @@ struct Sandbox {
     commands: Vec<Command>,
 }
 
-/// What the sandbox's keys do, beside the camera controller's.
+/// What the sandbox's keys and gamepads do, beside the camera controller's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Act {
-    /// The arrows: which way the triangle goes.
+    /// The arrows, the left stick and the D-pad: which way the triangle goes.
     Steer,
-    /// R: turns the triangle the other way.
+    /// R and South: turns the triangle the other way.
     Reverse,
 }
 
@@ -532,10 +534,23 @@ impl Sandbox {
             x: [Key::ArrowLeft, Key::ArrowRight].map(Source::Key),
             y: [Key::ArrowDown, Key::ArrowUp].map(Source::Key),
         };
-        let reverse = Binding::Button(Source::Key(Key::KeyR));
-        let bound = actions.bind(Act::Steer, arrows);
-        let bound = bound.and_then(|()| actions.bind(Act::Reverse, reverse));
-        bound.expect("the sandbox's bindings are each of one kind, of other keys");
+        let d_pad = Binding::Axis2 {
+            x: [PadButton::DPadLeft, PadButton::DPadRight].map(Source::PadButton),
+            y: [PadButton::DPadDown, PadButton::DPadUp].map(Source::PadButton),
+        };
+        let bound = [
+            (Act::Steer, arrows),
+            (Act::Steer, Binding::stick(Stick::Left)),
+            (Act::Steer, d_pad),
+            (Act::Reverse, Binding::Button(Source::Key(Key::KeyR))),
+            (
+                Act::Reverse,
+                Binding::Button(Source::PadButton(PadButton::South)),
+            ),
+        ]
+        .into_iter()
+        .try_for_each(|(action, binding)| actions.bind(action, binding));
+        bound.expect("the sandbox's bindings are each of one kind, of other sources");
         Self {
             time: Duration::ZERO,
             drift: true,
@@ -753,6 +768,11 @@ impl Layer for Sandbox {
                 button,
                 pressed: true,
             } => info!(?button, "Mouse button pressed"),
+            Event::PadButton {
+                pad,
+                button,
+                pressed: true,
+            } => info!(pad = pad.0, ?button, "Gamepad button pressed"),
             _ => {}
         }
         ControlFlow::Continue(())
@@ -980,17 +1000,25 @@ mod tests {
         assert_eq!(swarm(&world), before[..2]);
     }
 
-    /// The arrows and R queue their changes as commands as they come, rather than at the next
-    /// update, so that the frame's ticks apply them: the arrows each heading they make, and R a
-    /// reverse for each press, not for its repeats or its release.
+    /// The arrows, the left stick, the D-pad, R and South queue their changes as commands as they
+    /// come, rather than at the next update, so that the frame's ticks apply them: the arrows, the
+    /// stick and the D-pad each heading they make, and R and South a reverse for each press, not
+    /// for its repeats or its release. The right stick is the camera's alone.
     #[test]
-    fn its_keys_queue_commands_as_they_come() {
+    fn its_keys_and_gamepads_queue_commands_as_they_come() {
         let mut cx = Context::seeded(0x5eed);
         let mut sandbox = Sandbox::new();
         let key = |key, pressed, repeat| Event::Key {
             key,
             pressed,
             repeat,
+        };
+        let pad = gg_engine::Pad(0);
+        let stick = |stick, value| Event::PadStick { pad, stick, value };
+        let button = |button, pressed| Event::PadButton {
+            pad,
+            button,
+            pressed,
         };
         for event in [
             key(Key::ArrowRight, true, false),
@@ -999,6 +1027,14 @@ mod tests {
             key(Key::KeyR, true, true),
             key(Key::KeyR, false, false),
             key(Key::ArrowRight, false, false),
+            key(Key::ArrowUp, false, false),
+            stick(Stick::Left, Vec2::new(-0.5, 0.0)),
+            stick(Stick::Right, Vec2::Y),
+            stick(Stick::Left, Vec2::ZERO),
+            button(PadButton::DPadDown, true),
+            button(PadButton::South, true),
+            button(PadButton::South, false),
+            button(PadButton::DPadDown, false),
         ] {
             assert_eq!(sandbox.event(&mut cx, &event), ControlFlow::Continue(()));
         }
@@ -1006,11 +1042,24 @@ mod tests {
         let queued = sandbox.commands.iter().map(|command| match *command {
             Command::Steer(heading) => Some(heading),
             Command::Reverse => None,
-            _ => panic!("the keys queue steers and reverses alone"),
+            _ => panic!("the keys and pads queue steers and reverses alone"),
         });
         let diagonal = Vec2::ONE.clamp_length_max(1.0);
-        let expected = [Some(Vec2::X), Some(diagonal), None, Some(Vec2::Y)];
+        let expected = [
+            Some(Vec2::X),
+            Some(diagonal),
+            None,
+            Some(Vec2::Y),
+            Some(Vec2::ZERO),
+            Some(Vec2::new(-0.5, 0.0)),
+            Some(Vec2::ZERO),
+            Some(Vec2::NEG_Y),
+            None,
+            Some(Vec2::ZERO),
+        ];
         assert_eq!(queued.collect::<Vec<_>>(), expected);
+        let camera = sandbox.camera.actions.axis2(gg_engine::CameraAction::Move);
+        assert_eq!(camera, Vec2::Y);
     }
 
     /// The live recording, `tests/references/live.recording`, of a windowed run whose panels and

@@ -20,6 +20,8 @@ use winit::window::{Window, WindowId};
 use crate::args::Args;
 use crate::chrome::{self, Chrome};
 use crate::dock::{self, Dock};
+use crate::layer::Stack;
+use crate::pads::Gamepads;
 use crate::viewports::{self, Viewports, WindowInput};
 #[cfg(target_os = "windows")]
 use crate::windows_frame::Frame;
@@ -52,6 +54,7 @@ pub(crate) fn run(app: &mut App, args: &Args) -> Result<Ran> {
         egui: egui_context(),
         egui_winit: None,
         viewports: None,
+        gamepads: Gamepads::default(),
         cx: Context::new(None),
         clock: Clock::default(),
         stepper: Stepper::default(),
@@ -90,6 +93,8 @@ struct Handler<'a> {
     egui_winit: Option<WindowInput>,
     /// The windows of their own that panels tear off into.
     viewports: Option<Viewports>,
+    /// Opened with the window, since Windows gives a pad's input only to a focused window.
+    gamepads: Gamepads,
     dock: Dock,
     cx: Context,
     clock: Clock,
@@ -135,6 +140,7 @@ impl Handler<'_> {
             self.chrome,
         ));
         self.cx = Context::new(Some(crate::Window::new(window.clone())));
+        self.gamepads = Gamepads::open(window.has_focus());
         self.window = Some(window);
         self.app.stack.attach(&mut self.cx);
         Ok(())
@@ -142,6 +148,13 @@ impl Handler<'_> {
 
     fn frame(&mut self, event_loop: &ActiveEventLoop) {
         let _zone = gg_core::zone!();
+        // Before the frame's ticks, which apply what the pads did.
+        let Self {
+            gamepads, app, cx, ..
+        } = self;
+        gamepads.poll(|event| {
+            let _ = dispatch(&mut app.stack, cx, &event);
+        });
         let (Some(window), Some(renderer), Some(egui_winit), Some(viewports)) = (
             &self.window,
             &mut self.renderer,
@@ -244,13 +257,18 @@ impl Handler<'_> {
             let _ = self.dispatch(&Event::Minimized);
         } else {
             debug!("Window restored; rendering resumes");
+            let Self {
+                gamepads, app, cx, ..
+            } = self;
+            gamepads.restored(|event| {
+                let _ = dispatch(&mut app.stack, cx, &event);
+            });
             let _ = self.dispatch(&Event::Restored);
         }
     }
 
     fn dispatch(&mut self, event: &Event<'_>) -> ControlFlow<()> {
-        trace!(?event, "Event");
-        self.app.stack.event(&mut self.cx, event)
+        dispatch(&mut self.app.stack, &mut self.cx, event)
     }
 
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: Error) {
@@ -267,6 +285,11 @@ impl Handler<'_> {
             window.request_redraw();
         }
     }
+}
+
+fn dispatch(stack: &mut Stack, cx: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
+    trace!(?event, "Event");
+    stack.event(cx, event)
 }
 
 impl ApplicationHandler for Handler<'_> {
@@ -347,6 +370,15 @@ impl ApplicationHandler for Handler<'_> {
             _ if consumed => trace!(?event, "Event kept by the UI"),
             WindowEvent::CloseRequested => self.close(event_loop),
             other => event::convert(&other, |event| {
+                // The pads let go first, as the window loses focus.
+                if let Event::Focused(focused) = event {
+                    let Self {
+                        gamepads, app, cx, ..
+                    } = &mut *self;
+                    gamepads.focus(focused, |event| {
+                        let _ = dispatch(&mut app.stack, cx, &event);
+                    });
+                }
                 let _ = self.dispatch(&event);
             }),
         }
@@ -379,6 +411,7 @@ impl ApplicationHandler for Handler<'_> {
             ));
         }
         self.viewports = None;
+        self.gamepads = Gamepads::default();
         self.cx = Context::new(None);
         self.egui_winit = None;
         self.window = None;

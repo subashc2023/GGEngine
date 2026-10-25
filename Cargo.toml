@@ -21,6 +21,10 @@ cc = "1.9.0"
 egui = { version = "0.37.0", features = ["default_fonts"] }
 egui-winit = "0.37.0"
 epaint = { version = "0.37.0", features = ["bytemuck"] }
+# Gamepads. On Windows its default backend, Windows.Gaming.Input, delivers input only to a
+# focused window of the process; on Linux it builds against libudev through pkg-config, so a
+# build needs pkg-config and libudev's headers, and a run libudev1.
+gilrs = "0.11.2"
 # bytemuck, so that glam's types can be the fields of vertices and shader parameters. scalar-math
 # and libm, so that its math gives the same bits on every platform, as the simulation needs:
 # without SIMD, whose SSE2 and NEON paths add in different orders and fuse multiplications with
