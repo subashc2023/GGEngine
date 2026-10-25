@@ -192,7 +192,7 @@ impl Handler<'_> {
             run_frame(
                 &mut self.app.stack,
                 &mut self.cx,
-                &mut self.clock,
+                self.clock.start_frame(),
                 &mut self.stepper,
                 &self.egui,
                 &mut self.dock,

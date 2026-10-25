@@ -10,7 +10,10 @@ use crate::Component;
 /// translation. A parent carries its children along: a child is placed in the world by its own
 /// transform, then by each of its ancestors' in turn. The engine draws the world's entities back to
 /// front by their z's in the world; those at one z draw sprites under meshes, each in the order of
-/// their entities' IDs, which overlapping entities keep as others come and go.
+/// their entities' IDs, which overlapping entities keep as others come and go. Frames draw each on
+/// its way from where a tick found it to where the tick left it: a tick that moves one so that it
+/// jumps, as a teleport does, calls
+/// [`World::reset_interpolation`](crate::World::reset_interpolation) for it.
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
 pub struct Transform {
     pub translation: Vec3,

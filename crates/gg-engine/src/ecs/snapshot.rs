@@ -13,6 +13,8 @@ impl Clone for World {
             meta,
             free,
             entity_ids,
+            resets,
+            reset_count,
             by_id,
             stream,
             serial: _,
@@ -26,6 +28,8 @@ impl Clone for World {
             meta: meta.clone(),
             free: free.clone(),
             entity_ids: entity_ids.clone(),
+            resets: resets.clone(),
+            reset_count: *reset_count,
             by_id: by_id.clone(),
             stream: *stream,
             serial: next_serial(),
@@ -46,6 +50,8 @@ impl Clone for World {
             meta,
             free,
             entity_ids,
+            resets,
+            reset_count,
             by_id,
             stream,
             serial: _,
@@ -74,6 +80,8 @@ impl Clone for World {
         self.meta.clone_from(meta);
         self.free.clone_from(free);
         self.entity_ids.clone_from(entity_ids);
+        self.resets.clone_from(resets);
+        self.reset_count = *reset_count;
         self.by_id.clone_from(by_id);
         self.stream = *stream;
         self.version = *version;
@@ -105,8 +113,8 @@ mod tests {
 
     /// Panics unless `world` is `twin`, but for its serial and its scratch: the same slots, the
     /// free ones in the same order, the same entities in the same tables and rows, with the same
-    /// IDs, values, what's opaque in them, parents and children, the same stream of IDs to come,
-    /// and the same component types.
+    /// IDs, values, what's opaque in them, parents and children, resets of interpolation, the same
+    /// stream of IDs to come, and the same component types.
     fn assert_same(world: &World, twin: &World, case: &str) {
         for world in [world, twin] {
             check_ids(world);
@@ -115,6 +123,11 @@ mod tests {
         assert_eq!(world.meta, twin.meta, "{case}: the slots");
         assert_eq!(world.free, twin.free, "{case}: the free slots");
         assert_eq!(world.entity_ids, twin.entity_ids, "{case}: the IDs");
+        assert_eq!(world.resets, twin.resets, "{case}: the resets");
+        assert_eq!(
+            world.reset_count, twin.reset_count,
+            "{case}: the resets' count"
+        );
         for &id in world.entity_ids.iter().flatten() {
             assert_eq!(world.entity(id), twin.entity(id), "{case}: {id}");
         }
@@ -262,6 +275,13 @@ mod tests {
             worlds.step(&mut rng, step);
         }
         worlds.both(|world| world.register::<Marked>().expect("registered"));
+        // Resets of interpolation, so that the snapshots' copies of them show.
+        worlds.both(|world| {
+            let some: Vec<Entity> = world.query::<Entity>().step_by(3).collect();
+            for entity in some {
+                world.reset_interpolation(entity).expect("alive");
+            }
+        });
         assert_same(&worlds.x, &worlds.twin, "in step");
         let mut snap = worlds.x.clone();
         // The slots the snapshots kept, and the entries of the restored world's logs it refused,
@@ -466,6 +486,7 @@ mod tests {
                 world.entity_ids.as_ptr().addr(),
                 world.entity_ids.capacity(),
             ),
+            (world.resets.as_ptr().addr(), world.resets.capacity()),
             (0, world.by_id.capacity()),
         ];
         let transform = world.component::<Transform>().expect("registered");

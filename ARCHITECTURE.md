@@ -350,11 +350,12 @@ stay drawn: rewinding the stream would hand an ID out twice. Hashing reads every
 allocating.
 
 The simulation steps in ticks, 64 a second whatever the frame rate, each 15.625 ms, exact in
-`f32`, `f64` and nanoseconds. A frame runs the ticks the time since the last one owes before the
-layers' updates, so that it draws and shows the world they leave: at most 8, and no more once its
-ticks have taken longer than the time they simulate, so that a simulation slower than real time
-slows down rather than spending every frame catching up. The whole ticks a frame doesn't run are
-dropped, and counted in `engine.perf`, and the fraction of one left over carries to the next. A
+`f32`, `f64` and nanoseconds. A frame runs the ticks the time since the last one owes, at most 8,
+and no more once its ticks have taken longer than the time they simulate, so that a simulation
+slower than real time slows down rather than spending every frame catching up, before the layers'
+updates, and draws what they leave as [Rendering](#rendering) says. The whole ticks a frame
+doesn't run are dropped, and counted in `engine.perf`, and the fraction of one left over carries
+to the next, as how far the frame draws the world on its way from where the last tick found it. A
 frame without time runs none, as the first does and the first after the window is restored, and
 a headless run takes exactly one each frame. Each layer's tick applies the commands it queued
 since its last, data of its own, in the order it queued them, then runs its systems, the layers
@@ -518,6 +519,25 @@ drawing keeps until a row or a z changes, and draws them out of their tables' or
 different meshes or shaders at one z interleave, each change between them another draw, and
 meshes meant to batch take a z of their own.
 
+Frames draw the world between ticks, so that it moves as smoothly at any frame rate. As each tick
+starts, the engine copies where the world's entities are, outside the world, so that no hash,
+scene, snapshot or recording holds the copy; each frame draws every entity as far on from where its
+last tick found it to where the tick left it as the frame is past the tick, its translation and
+scale blended and its rotation the shorter way round. So drawing runs up to a tick behind the
+simulation, besides the frame the render thread runs behind. A child blends its own transform and
+each ancestor's, then composes them, so that it keeps to its orbit; and the order everything draws
+in, by its z, is the tick's, so that blending never sorts again. An entity's own transform draws
+where the tick left it, with nothing on the way, though its ancestors still carry it on theirs,
+where there's nothing to draw on from or the way would mislead: spawned in the tick, given its
+transform there, or put back by an undone delete; in a slot another entity had before; under
+another parent; in a world restored or replaced in the tick, all of it; from a transform that
+isn't finite, or with a scale whose sign changed, as a sprite mirrored has; and reset by the
+tick, through `World::reset_interpolation`, as a teleport or a wrap is, which the world keeps for
+each slot, copied with snapshots and read by no hash, scene or recording. A row a despawn moved
+still blends. An entity despawned in a tick vanishes up to a tick before it reaches where it
+stopped, and an Inspector set glides there over a tick, as a drag does. Headless frames, a tick
+each, draw their tick as it leaves the world.
+
 A game's shader is a Slang file that the engine compiles with slangc as a layer adds it, so one
 that doesn't compile fails there, with slangc's diagnostics naming the file and line; the renderer
 makes its pipeline the next time it renders. A mesh's vertices are any `#[repr(C)]` type without
@@ -597,7 +617,8 @@ job changes only its own rows, work
 splits at a fixed number of rows, and no thread changes its floating-point environment, so that
 results don't depend on how many threads there are or which takes what; outside the pool, as in
 tests and with `--threads 1`, jobs run one after another on the thread that calls. Steady-state
-ticks allocate nothing on any thread.
+ticks allocate nothing on any thread. Drawing hands the job threads, too, the roots it blends
+between ticks, in runs of rows, after the frame's ticks.
 
 Rendering runs on a thread of its own, `gg-render`, a frame behind. Once a frame's UI is drawn
 and tessellated, the main thread takes the renderer back from the render thread, waiting for it to

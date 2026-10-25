@@ -21,9 +21,9 @@ const GRAPHED: usize = 240;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Sample {
     pub(crate) frame: u64,
-    /// The simulation's ticks.
+    /// The simulation's ticks, each with the copy of the world drawing takes as it starts.
     pub(crate) ticks: u64,
-    /// The layers' updates, and drawing the world.
+    /// The layers' updates, and drawing the world, between its ticks.
     pub(crate) update: u64,
     /// The UI: the layers' and egui's, and tessellating it.
     pub(crate) ui: u64,

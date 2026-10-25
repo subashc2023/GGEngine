@@ -17,6 +17,7 @@ use gg_renderer::{
 
 use crate::draw::{self, Scratch};
 use crate::image::{self, Image};
+use crate::interpolation::Past;
 use crate::perf::Perf;
 use crate::recording::Recorder;
 use crate::reflect::{Reflect, Value};
@@ -150,6 +151,9 @@ pub struct Context {
     world: World,
     /// What drawing the world sorts and computes, kept between frames.
     scratch: Scratch,
+    /// Where the world's entities were as the latest tick started, which drawing draws them on
+    /// from.
+    past: Past,
     /// Set from when the layers have attached until they detach: the world then changes only at
     /// ticks.
     attached: bool,
@@ -191,6 +195,7 @@ impl Context {
             draws: Draws::default(),
             world,
             scratch: Scratch::default(),
+            past: Past::default(),
             attached: false,
             perf: Perf::default(),
         }
@@ -325,7 +330,9 @@ impl Context {
     /// layers' updates each frame, the engine draws those with a [`Transform`](crate::Transform)
     /// and a [`Sprite`] or a [`MeshDraw`](crate::MeshDraw), back to front by their z's in the
     /// world, and at one z sprites under meshes, each in the order of their IDs, children where
-    /// their parents carry them, over what the layers drew themselves.
+    /// their parents carry them, over what the layers drew themselves: each on its way from where
+    /// it was as the latest tick started to where the tick left it, so up to a tick behind the
+    /// world here.
     pub fn world(&self) -> &World {
         &self.world
     }
@@ -342,9 +349,18 @@ impl Context {
         &mut self.world
     }
 
-    /// Draws the world's entities, after what the layers drew this frame.
-    pub(crate) fn draw_world(&mut self) {
-        draw::draw_world(&self.world, &mut self.draws, &mut self.scratch);
+    /// Copies where the world's entities are, as a tick starts, for the frames after it to draw
+    /// them on from.
+    pub(crate) fn capture(&mut self) {
+        self.past.capture(&self.world);
+    }
+
+    /// Draws the world's entities, after what the layers drew this frame, each `alpha` of the way
+    /// from where it was as the latest tick started to where the tick left it.
+    pub(crate) fn draw_world(&mut self, alpha: f32) {
+        self.past.resolve(&self.world);
+        let (world, past) = (&self.world, &self.past);
+        draw::draw_world(world, past, alpha, &mut self.draws, &mut self.scratch);
     }
 
     /// Fills in `frame` with this frame's render data, with the game's view at `viewport`: its

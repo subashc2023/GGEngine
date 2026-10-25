@@ -215,15 +215,19 @@ impl World {
         }
     }
 
-    /// The table and row of `parent`, and of each of its ancestors in turn up to its root, for the
-    /// engine's drawing, which carries each child along with them.
-    pub(crate) fn lineage(&self, parent: Parent) -> impl Iterator<Item = (&Table, usize)> + '_ {
+    /// The table, by its index too, and row of `parent`, and of each of its ancestors in turn up to
+    /// its root, for the engine's drawing, which carries each child along with them.
+    pub(crate) fn lineage(
+        &self,
+        parent: Parent,
+    ) -> impl Iterator<Item = (usize, &Table, usize)> + '_ {
         let up = |&at: &u32| some(self.meta[at as usize].links.parent);
         iter::successors(Some(parent.0.index), up).map(|at| {
             let at = self.meta[at as usize]
                 .location
                 .expect("a linked slot's entity is alive");
-            (&self.tables[at.table as usize], at.row as usize)
+            let table = at.table as usize;
+            (table, &self.tables[table], at.row as usize)
         })
     }
 

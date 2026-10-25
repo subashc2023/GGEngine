@@ -226,11 +226,22 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   next, the renderer back between them, errors and panics coming back, the last frame rendering as
   a run ends, and no texture change dropped unapplied; a Tracy capture of the release sandbox shows
   rendering beside the ticks.
+- **Rendering interpolated between fixed steps** (2026-10-25): each frame draws the world's
+  entities on their way from where its last tick found them to where it left them, as far as the
+  frame is past the tick, from a copy of their transforms taken outside the world as each tick
+  starts, which no hash, scene, snapshot or recording holds; children blend their own transforms
+  and their ancestors', then compose, and the order is the tick's. What jumps draws its own
+  transform where its tick left it: an entity spawned, given its transform or put back, in
+  another's slot, under another parent, in a world restored or replaced, mirrored, or reset, as the
+  sandbox's drifters are as they wrap. Unit tests drive frames a quarter of a tick apart, and two
+  and a half, through the main loop and check exactly where each draws, each way a tick breaks an
+  entity's way, children on their orbits, the tick's order kept, and no memory taken again;
+  headless frames draw their tick.
 
-## Now: Phase 4's second milestone
+## Now: Phase 4's third milestone
 
-Rendering interpolated between fixed steps, [Phase 4](#next)'s second milestone, is planned as it
-starts, and its plan says when it's done.
+[Phase 4](#next)'s third milestone is picked from what the phase has left as it starts, and its
+plan says when it's done.
 
 ## Next
 
@@ -295,7 +306,7 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | GPU tests in Windows and macOS CI, which skip them because hosted runners there have no GPU | A self-hosted runner with a GPU, or a Vulkan driver that runs on those runners without one |
 | A gate that compiles the shipping configuration: `cargo clippy -p player --all-targets -- -D warnings` | When `gg-engine` gets its `dev` feature |
 | egui, the dock and the Inspector behind `dev`: the player links them and runs an empty UI pass every frame; `Ui`, which `Layer::ui` takes, is the type to turn into a no-op | When `gg-engine` gets its `dev` feature |
-| The main thread takes the renderer back once a frame's UI is drawn, so a frame's input is read about a frame before it renders: a refresh under `--vsync`. Starting each frame once the render thread has acquired the image it renders into would win that back | A game's input latency needs it |
+| The main thread takes the renderer back once a frame's UI is drawn, so a frame's input is read about a frame before it renders: a refresh under `--vsync`; and drawing between ticks draws the world up to a tick behind the simulation. Starting each frame once the render thread has acquired the image it renders into would win the first back, and extrapolating from the latest ticks the second | A game's input latency needs it |
 | Answering at once what a driver sends the main thread's windows from the render thread: the main thread's wait answers each time a millisecond's wait times out, which Windows' timer tick stretches to about 16 ms, so a sent message can hold a frame that long. A Win32 event the render thread sets, waited on with `MsgWaitForMultipleObjectsEx`, would wake for both | A driver's sent messages show as stalls, such as while a window resizes |
 | Pushing and popping layers while the app runs; `App` fixes the stack before it starts | A tool or game needs a layer for only part of a run |
 | Composed text from an input method (winit's `Ime` events), for languages typed through one | A game takes text input, such as chat |
@@ -308,7 +319,7 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Counts of vertices, indices or triangles, which follow from the instances; the renderer counts draws and instances | Phase 4, with glTF meshes |
 | Textures of data rather than color, such as normal maps, which shaders read as stored rather than decoded from sRGB | Phase 6, with PBR's maps |
 | Premultiplied alpha for games' textures: with straight alpha, as PNGs store it, a linear filter at an edge mixes in the color of the transparent pixels beside it | A game's art shows dark or colored fringes |
-| Sorting what blends back to front by depth, and what doesn't by its mesh and shader, so that it batches; the world's entities draw back to front by their z's in the world, at one z sprites under meshes, each by ID, so that meshes of different meshes or shaders at one z don't batch, and what layers draw themselves in the order given | Phase 4, with depth |
+| Sorting what blends back to front by depth, and what doesn't by its mesh and shader, so that it batches; the world's entities draw back to front by their z's in the world as the latest tick left them, at one z sprites under meshes, each by ID, so that meshes of different meshes or shaders at one z don't batch, and what layers draw themselves in the order given | Phase 4, with depth |
 | Mipmaps, and anisotropic filtering: a texture drawn smaller than it is samples its one level, and shimmers. A sprite sheet's cells, packed edge to edge, will then mix together at the smaller levels and under anisotropy, which reads past the texels the sprite shader keeps to, and need space around each cell or an array layer each | Phase 4, with the textured glTF mesh |
 | Sprite sheets with space between or around their cells, as some tile sets come; `SpriteSheet` takes cells packed edge to edge from the top left | A game's art comes that way |
 | Tiling one cell of a sheet: a repeating sampler repeats the whole texture | A game tiles part of an atlas, such as a background |
@@ -362,7 +373,7 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | In a frame egui runs twice, the torn-off windows' texture changes apply before all of the main window's, so glyphs added then to a font atlas that grows can go missing | It shows, or egui hands over each pass's changes apart |
 | Present fences (`VK_KHR_swapchain_maintenance1`) before a swapchain's semaphores are destroyed, which closing torn-off windows makes more frequent | Validation reports it, or windows open and close often |
 | egui's own scopes in Tracy, which egui marks for the `profiling` crate: `profiling` 1.0.18 takes tracy-client 0.18, and two Tracy clients don't link together | `profiling` takes tracy-client 0.19; deny.toml's wrappers for tracy-client then add it |
-| Changing the world's tables while a query runs, through a buffer applied after it: Bevy's `Commands`, to be called `Deferred` here, since commands are the simulation's inputs; from `par_for_each`'s jobs too, each run of rows with a buffer of its own, applied in the order of the rows, never as the jobs finish | The first system that spawns or despawns as it iterates |
+| Changing the world's tables, or resetting an entity's interpolation, while a query runs, through a buffer applied after it: Bevy's `Commands`, to be called `Deferred` here, since commands are the simulation's inputs; from `par_for_each`'s jobs too, each run of rows with a buffer of its own, applied in the order of the rows, never as the jobs finish. The sandbox's drift collects the drifters that wrap under a lock, and resets them after | The first system that spawns or despawns as it iterates |
 | Reductions over a query's rows on the job system's threads, such as a sum, each run of rows giving its own, combined in the order of the rows; `par_for_each` on queries that only read; a size of a run of rows for each call; and splitting tables of fewer rows than a run among the threads, which each run on the calling thread, one table after another | Each with its first user |
 | Two systems at once, on components they don't share: a tick's systems run one after another, each splitting its own rows | A profile shows two heavy systems |
 | Query filters: `With`, `Without`, `Option` and `Changed` | Each with its first query |
@@ -382,8 +393,16 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Drag speeds as hints; the Inspector picks them from a field's bounds and kind | A field drags too coarsely or too finely |
 | Paths resolved once and kept, for sets made again and again | A profile |
 | Picking an entity for a field, a parent or a child picked by clicking it, the Entities panel as a tree, names in the Inspector, and picking in the view; entities are shown by their IDs, and found by an ID pasted in | Picking in the view, or Phase 9's scene tree |
-| World transforms stored and propagated after the ticks, with change detection; drawing computes each child's from its ancestors, every frame | Physics, or a profile showing the walks up the hierarchy |
-| A world matrix for game code; the engine's drawing computes its own | The camera as a component, or a system that needs a child's place in the world |
+| World transforms stored and propagated after the ticks, with change detection; drawing computes each child's from its ancestors, every frame, as the latest tick left them, for its z, and blended between ticks, to draw it | Physics, or a profile showing the walks up the hierarchy |
+| A world matrix for game code, and where an entity draws between ticks, for a camera that follows it, which would otherwise judder against it, since layers read the world up to a tick ahead of where it draws; the engine's drawing computes its own | The camera as a component, a camera that follows an entity, or a system that needs a child's place in the world |
+| Turning interpolation off for an entity or a subtree, so that it draws at its ticks; every entity draws between them | A game wants something drawn at its ticks |
+| Rotations of more than half a turn a tick, which draw the shorter way round, the other way; Hermite easing from velocities would draw them, and curves between ticks | Something spins that fast, or a curve between ticks shows |
+| Drawing an entity despawned in a tick on its way there until the next: it vanishes up to a tick before it reaches where it stopped | A game's despawns show it, as bullets vanishing short of what they hit |
+| Copying the world as only the last tick a frame runs starts: a frame that catches up copies it as each of its ticks starts | A profile shows a catching-up frame's copies |
+| Copying the world, and finding what each row draws from, on the job system's threads, or only for the rows that moved: both run on the main thread, for the swarm about 0.19 ms a tick and 0.10 ms a frame that ticked; and blending only the rows that moved, which takes the job threads about 2.6 ms of their time a frame | A profile shows them |
+| Sets that jump: an Inspector set of a moving entity's transform, and its undo, glide there over a tick, as a drag does, rather than reset its interpolation | Phase 5's tool API, whose agents move things by setting them |
+| Headless frames at a fraction of a tick of their own, for captures between ticks and for perf runs that measure blending, which headless frames, drawing their ticks, leave out | Phase 5's headless captures, or a change to blending that needs measuring headless |
+| Interpolation across rollback: a world restored in a tick draws where the tick left it, all of it, so rollback that restores every tick would draw at the tick rate; how rollback restores is decided with it | Rollback |
 | Reparenting that keeps where a child is in the world, by decomposing its matrix, which loses any shear; `set_parent` keeps its own transform | The editor's scene tree, or an agent attaching something where it stands |
 | Spawning a child into its table at once from code: `spawn`, then `set_parent`, moves it to another table; a load and a create operation spawn one there | A profile |
 | Children in an order that means something: reordering them, and saving their order; an undo puts a child back last | The editor's scene tree, or UI laid out by the hierarchy |

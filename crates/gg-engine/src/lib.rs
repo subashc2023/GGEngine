@@ -1,10 +1,10 @@
 //! What apps build on: the main loop, which steps the simulation at a fixed rate whatever the frame
 //! rate, window and input, and the actions that name what a game does with it, and layers, which
 //! change the world at its ticks, and their UI; the world of entities and their components, which
-//! it draws, handing each frame's render data to `gg-renderer` on a thread of its own, a frame
-//! behind, and the job system, which a tick's systems split a query's rows across; reflection,
-//! which describes the components' types so that tools reach them by name, and the Inspector,
-//! which edits them; scenes and prefabs, the world's
+//! it draws between its ticks, handing each frame's render data to `gg-renderer` on a thread of its
+//! own, a frame behind, and the job system, which a tick's systems split a query's rows across;
+//! reflection, which describes the components' types so that tools reach them by name, and the
+//! Inspector, which edits them; scenes and prefabs, the world's
 //! entities as canonical text; operations, the authoring changes made to the world, each with its
 //! inverse, and their log, which undoes and redoes them; recordings of runs, the commands their
 //! ticks applied, which replay without a GPU to the same world, naming where one goes another way;
@@ -26,6 +26,7 @@ mod event;
 mod image;
 mod input;
 mod inspector;
+mod interpolation;
 mod jobs;
 mod layer;
 mod pads;
@@ -269,7 +270,7 @@ fn run_headless(app: &mut App, args: &Args) -> Result<Ran> {
             let mut output = run_frame(
                 &mut app.stack,
                 &mut cx,
-                &mut clock,
+                clock.start_frame(),
                 &mut stepper,
                 &egui,
                 &mut dock,
@@ -315,32 +316,38 @@ fn egui_context() -> egui::Context {
     egui
 }
 
-/// The first half of a turn of the main loop: starts the frame, for Tracy and the frame's
-/// measure, runs the ticks of the simulation that the time since the last frame owes, as
-/// `stepper` steps it, updates the layers, draws the world, over what they drew, and has the
-/// layers draw their UI, in the dock and with egui. [`tessellate`] starts the second half, which
-/// hands what egui made of it to the render thread.
+/// The first half of a turn of the main loop: starts the frame, `dt` after the last, for Tracy and
+/// the frame's measure, runs the ticks of the simulation that the time owes, as `stepper` steps
+/// it, copying where the world's entities are as each starts, updates the layers, draws the world
+/// over what they drew, as far on from where the last tick found it to where it left it as the
+/// frame is past the tick, and has the layers draw their UI, in the dock and with egui.
+/// [`tessellate`] starts the second half, which hands what egui made of it to the render thread.
 ///
 /// egui allocates as it lays out here, and as [`tessellate`] tessellates, so frames that draw UI
 /// allocate; the UI is a development overlay.
 fn run_frame(
     stack: &mut Stack,
     cx: &mut Context,
-    clock: &mut Clock,
+    dt: Duration,
     stepper: &mut Stepper,
     egui: &egui::Context,
     dock: &mut Dock,
     input: egui::RawInput,
 ) -> egui::FullOutput {
-    let dt = clock.start_frame();
     gg_core::profile::frame_mark();
     cx.perf.start_frame(dt);
     let _zone = gg_core::zone!();
     let start = Instant::now();
-    stepper.step(dt, |tick| stack.tick(cx, tick), || start.elapsed());
+    let tick = |tick| {
+        cx.capture();
+        stack.tick(cx, tick);
+    };
+    stepper.step(dt, tick, || start.elapsed());
     let ticked = Instant::now();
     stack.update(cx, dt);
-    cx.draw_world();
+    let alpha = stepper.alpha();
+    gg_core::plot!("alpha", f64::from(alpha));
+    cx.draw_world(alpha);
     let updated = Instant::now();
     let output = {
         let _zone = gg_core::zone!("egui");
@@ -522,6 +529,16 @@ impl Stepper {
         self.dropped += due - ran;
         ran
     }
+
+    /// How far the frame is past its last tick, as a fraction of a tick, from 0 to less than 1,
+    /// which the world draws that far on from where the tick found it to where it left it; 1 in
+    /// lockstep, so that a headless frame draws its tick as it leaves the world.
+    fn alpha(&self) -> f32 {
+        if self.lockstep {
+            return 1.0;
+        }
+        (self.owed.as_nanos() as f64 / Tick::DT.as_nanos() as f64) as f32
+    }
 }
 
 fn settings<'a>(app: &'a App, args: &'a Args) -> Settings<'a> {
@@ -651,10 +668,11 @@ impl Ran {
 mod tests {
     use std::cell::{Cell, RefCell};
     use std::f32::consts::FRAC_PI_2;
+    use std::iter;
     use std::ops::ControlFlow;
     use std::rc::Rc;
 
-    use gg_core::math::{Mat4, Quat, Vec4};
+    use gg_core::math::{Mat4, Quat, Vec3, Vec4};
     use gg_renderer::Draws;
 
     use super::*;
@@ -677,6 +695,93 @@ mod tests {
         fn update(&mut self, cx: &mut Context, _: Duration) {
             cx.draw_sprite(Mat4::IDENTITY, Sprite::default());
         }
+    }
+
+    /// Spawns two sprites as it attaches: the slider, at x 0, which moves 1 in x at each tick, and
+    /// the jumper, at x 10, which jumps 90 at tick 3, resetting its interpolation; and spawns one
+    /// at x 5 at tick 2. Each has a z of its own, so that they draw in that order.
+    #[derive(Default)]
+    struct Slider {
+        slider: Option<Entity>,
+        jumper: Option<Entity>,
+    }
+
+    /// Where [`Slider`]'s sprites are: at `x`, and at their own `z`.
+    fn slid(x: f32, z: f32) -> Transform {
+        Transform {
+            translation: Vec3::new(x, 0.0, z),
+            ..Transform::IDENTITY
+        }
+    }
+
+    impl Layer for Slider {
+        fn attach(&mut self, cx: &mut Context) {
+            let world = cx.world_mut();
+            self.slider = Some(world.spawn((slid(0.0, 0.0), red())));
+            self.jumper = Some(world.spawn((slid(10.0, 0.1), red())));
+        }
+
+        fn tick(&mut self, world: &mut World, tick: Tick) {
+            let [slider, jumper] = [self.slider, self.jumper].map(|it| it.expect("attached"));
+            world
+                .get_mut::<Transform>(slider)
+                .expect("alive")
+                .translation
+                .x += 1.0;
+            match tick.number {
+                2 => {
+                    world.spawn((slid(5.0, 0.2), red()));
+                }
+                3 => {
+                    world
+                        .get_mut::<Transform>(jumper)
+                        .expect("alive")
+                        .translation
+                        .x += 90.0;
+                    world.reset_interpolation(jumper).expect("alive");
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Runs a frame `dt` after the last, of a 640 by 360 view, and returns what it drew.
+    fn drawn(
+        stack: &mut Stack,
+        cx: &mut Context,
+        dt: Duration,
+        stepper: &mut Stepper,
+        (egui, dock): (&egui::Context, &mut Dock),
+    ) -> Draws {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(640.0, 360.0),
+            )),
+            ..Default::default()
+        };
+        let mut output = run_frame(stack, cx, dt, stepper, egui, dock, input);
+        // As the renderer would have.
+        output.textures_delta.clear();
+        let mut frame = render_thread::Extracted::default();
+        let viewport = Viewport {
+            origin: [0, 0],
+            size: [640, 360],
+        };
+        cx.extract(&mut frame, viewport);
+        frame.draws
+    }
+
+    /// What [`Slider`]'s sprites draw as: the slider at `slider`, the jumper at `jumper`, and the
+    /// one spawned at tick 2, once it's spawned.
+    fn slider_draws(slider: f32, jumper: f32, spawned: bool) -> Draws {
+        let mut want = Draws::default();
+        want.push_sprite(slid(slider, 0.0).matrix(), red());
+        want.push_sprite(slid(jumper, 0.1).matrix(), red());
+        if spawned {
+            want.push_sprite(slid(5.0, 0.2).matrix(), red());
+        }
+        want
     }
 
     /// Spawns an entity as it attaches, which it turns a quarter turn a second at each tick, and
@@ -1255,7 +1360,8 @@ mod tests {
         let egui = egui_context();
         for _ in 0..2 {
             let (cx, clock, stepper) = (&mut cx, &mut clock, &mut stepper);
-            let mut output = run_frame(&mut stack, cx, clock, stepper, &egui, &mut dock, input());
+            let dt = clock.start_frame();
+            let mut output = run_frame(&mut stack, cx, dt, stepper, &egui, &mut dock, input());
             // As the renderer would have.
             output.textures_delta.clear();
         }
@@ -1279,8 +1385,8 @@ mod tests {
         let mut clock = Clock::default();
         let mut stepper = Stepper::default();
         let egui = egui_context();
-        let (cx, clock, stepper) = (&mut cx, &mut clock, &mut stepper);
-        let mut output = run_frame(&mut stack, cx, clock, stepper, &egui, &mut dock, input);
+        let (cx, dt, stepper) = (&mut cx, clock.start_frame(), &mut stepper);
+        let mut output = run_frame(&mut stack, cx, dt, stepper, &egui, &mut dock, input);
         // As the renderer would have.
         output.textures_delta.clear();
         let mut expected = Draws::default();
@@ -1301,6 +1407,64 @@ mod tests {
                 "the context keeps none of a frame's draws for the next"
             );
         }
+    }
+
+    /// Frames between ticks draw the world on its way between them, from where the latest tick
+    /// found it to where it left it, as far as they're past the tick: frames a quarter of a tick
+    /// apart, and two and a half, which run two ticks or three, each copying the world as it
+    /// starts. A frame before the first tick draws the world as it attached; an entity reset at a
+    /// tick, and one spawned at one, draw where the tick left them.
+    #[test]
+    fn frames_draw_between_the_ticks_around_them() {
+        let mut stack = Stack::default();
+        stack.push_layer(Slider::default());
+        let mut cx = Context::new(None);
+        stack.attach(&mut cx);
+        let (mut stepper, egui) = (Stepper::default(), egui_context());
+        let mut dock = Dock::new(None, Chrome::Os);
+        let quarters = iter::repeat_n(Tick::DT / 4, 16);
+        let dts = quarters.chain(iter::repeat_n(Tick::DT * 5 / 2, 3));
+        // How far each frame is past its last tick: a quarter more each frame, from the fourth,
+        // whose tick is the first; then half a tick, none and half.
+        let alphas = [0.0; 3]
+            .into_iter()
+            .chain((0..13).map(|frame| (frame % 4) as f32 / 4.0));
+        let alphas = alphas.chain([0.5, 0.0, 0.5]);
+        for (frame, (dt, alpha)) in (1..).zip(dts.zip(alphas)) {
+            let ui = (&egui, &mut dock);
+            let draws = drawn(&mut stack, &mut cx, dt, &mut stepper, ui);
+            // Each tick moves the slider 1. The frames two and a half ticks apart run two ticks or
+            // three, or fewer on a machine that stalls them past their time, as the stepper counts.
+            let slider = match stepper.ticks {
+                0 => 0.0,
+                ticks => (ticks - 1) as f32 + alpha,
+            };
+            // Tick 2 runs in frame 12, and tick 3 in frame 16.
+            let jumper = if frame < 16 { 10.0 } else { 100.0 };
+            let want = slider_draws(slider, jumper, frame >= 12);
+            assert_eq!(draws, want, "frame {frame}, after {} ticks", stepper.ticks);
+        }
+        stack.detach(&mut cx);
+    }
+
+    /// A headless frame, in lockstep, draws the world as its tick left it, bit for bit, as though
+    /// nothing drew between ticks.
+    #[test]
+    fn a_headless_frame_draws_the_tick_it_ran() {
+        let mut stack = Stack::default();
+        stack.push_layer(Slider::default());
+        let mut cx = Context::new(None);
+        stack.attach(&mut cx);
+        let (mut stepper, egui) = (Stepper::lockstep(), egui_context());
+        let mut dock = Dock::new(None, Chrome::Os);
+        for frame in 1..=5 {
+            let ui = (&egui, &mut dock);
+            let draws = drawn(&mut stack, &mut cx, Duration::ZERO, &mut stepper, ui);
+            let jumper = if frame < 4 { 10.0 } else { 100.0 };
+            let want = slider_draws(frame as f32, jumper, frame >= 3);
+            assert_eq!(draws, want, "frame {frame}");
+        }
+        stack.detach(&mut cx);
     }
 
     #[test]
@@ -1324,8 +1488,8 @@ mod tests {
         let mut texts = Vec::new();
         // The dock places a panel in its first frame, and draws it from the next.
         for _ in 0..3 {
-            let (cx, clock, stepper) = (&mut cx, &mut clock, &mut stepper);
-            let mut output = run_frame(&mut stack, cx, clock, stepper, &egui, &mut dock, input());
+            let (cx, dt, stepper) = (&mut cx, clock.start_frame(), &mut stepper);
+            let mut output = run_frame(&mut stack, cx, dt, stepper, &egui, &mut dock, input());
             output.textures_delta.clear();
             texts.clear();
             for clipped in output.shapes {

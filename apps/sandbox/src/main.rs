@@ -4,6 +4,7 @@ use std::f32::consts::{FRAC_PI_2, TAU};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Mutex;
 use std::time::Duration;
 use std::{fs, io, mem};
 
@@ -350,12 +351,34 @@ fn replace_grid(world: &mut World, text: &str) -> Result<(), Error> {
 }
 
 /// Moves each drifter to where it is `t` seconds after the swarm starts, on the job system's
-/// threads.
-fn drift(world: &mut World, t: f64) {
+/// threads; and resets the interpolation of each that wraps from one side of the field to the
+/// other, which it puts in `wrapped`, so that it doesn't draw on its way across.
+fn drift(world: &mut World, t: f64, wrapped: &mut Vec<Entity>) {
     let _zone = gg_engine::zone!();
+    // Kept for its memory. The jobs find them in any order, which drawing alone reads.
+    let found = Mutex::new(mem::take(wrapped));
     world
-        .query_mut::<(&Drifter, &mut Transform)>()
-        .par_for_each(|(drifter, transform)| *transform = drifter.transform(t));
+        .query_mut::<(Entity, &Drifter, &mut Transform)>()
+        .par_for_each(|(entity, drifter, transform)| {
+            let to = drifter.transform(t);
+            if wraps(transform, &to) {
+                let found = found.lock();
+                found.expect("no job panics holding it").push(entity);
+            }
+            *transform = to;
+        });
+    *wrapped = found.into_inner().expect("no job panicked holding it");
+    for &entity in wrapped.iter() {
+        let reset = world.reset_interpolation(entity);
+        reset.expect("a drifter just moved is alive");
+    }
+}
+
+/// Whether a drifter moved from `from` to `to` at a tick has wrapped across the field, or been
+/// moved across it otherwise: a tick moves it far less than half the field's width or height.
+fn wraps(from: &Transform, to: &Transform) -> bool {
+    let moved = (to.translation - from.translation).truncate().abs();
+    moved.cmpgt(FIELD / 2.0).any()
 }
 
 /// Colors the grid's squares in `colors`, in linear RGB.
@@ -481,6 +504,8 @@ struct Sandbox {
     scene: Option<Scene>,
     /// What the panels, the File menu and the actions changed since the last tick.
     commands: Vec<Command>,
+    /// The drifters that wrapped at a tick, kept for its memory: empty between ticks.
+    wrapped: Vec<Entity>,
 }
 
 /// What the sandbox's keys and gamepads do, beside the camera controller's.
@@ -570,6 +595,7 @@ impl Sandbox {
             swarm: SWARM_START,
             scene: None,
             commands: Vec::new(),
+            wrapped: Vec::new(),
         }
     }
 
@@ -729,7 +755,8 @@ impl Layer for Sandbox {
         if let Some(swarm) = swarm {
             self.resize_swarm(world, swarm, t);
         }
-        drift(world, t);
+        drift(world, t, &mut self.wrapped);
+        self.wrapped.clear();
         spin(world, Tick::DT);
         steer(world, Tick::DT);
     }
@@ -915,6 +942,45 @@ mod tests {
         let moons = world.children(pivot).expect("alive").count();
         assert_eq!(moons, 2);
         assert_eq!(world.query::<&Spin>().count(), 3);
+    }
+
+    /// Drift finds, to reset, exactly the drifters that wrap across the field at each tick, as
+    /// their laps across it count, worked out apart from their transforms, so that the swarm
+    /// doesn't streak across the view as it wraps.
+    #[test]
+    fn drift_finds_the_drifters_that_wrap_alone() {
+        let mut world = world();
+        let drifters: Vec<(Entity, Drifter)> = (0..1000)
+            .map(|index| {
+                let (drifter, _) = Drifter::new(index);
+                (world.spawn((drifter.transform(0.0), drifter)), drifter)
+            })
+            .collect();
+        let laps = |drifter: &Drifter, t: f64| {
+            let lap = |start: f32, speed: f32, every: f32| {
+                (f64::from(start) + f64::from(speed) * t).div_euclid(f64::from(every))
+            };
+            let (start, velocity) = (drifter.start, drifter.velocity);
+            [
+                lap(start.x, velocity.x, FIELD.x),
+                lap(start.y, velocity.y, FIELD.y),
+            ]
+        };
+        let (mut wrapped, mut seen) = (Vec::new(), 0);
+        for tick in 1..=256 {
+            let [before, t] = [tick - 1, tick].map(|tick| Tick::DT.as_secs_f64() * f64::from(tick));
+            drift(&mut world, t, &mut wrapped);
+            let lapped = drifters
+                .iter()
+                .filter(|(_, drifter)| laps(drifter, t) != laps(drifter, before));
+            let mut want: Vec<Entity> = lapped.map(|&(entity, _)| entity).collect();
+            want.sort();
+            wrapped.sort();
+            assert_eq!(wrapped, want, "tick {tick}");
+            seen += wrapped.len();
+            wrapped.clear();
+        }
+        assert!(seen > 0, "no drifter wrapped");
     }
 
     /// A reload replaces the grid whole, a square that's another's descendant too, or, if it's

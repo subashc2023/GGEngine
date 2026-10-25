@@ -111,6 +111,11 @@ impl Entity {
         index: u32::MAX,
         generation: NonZeroU32::MIN,
     };
+
+    /// Its slot, which no other living entity has, as an index.
+    pub(crate) fn slot(self) -> usize {
+        self.index as usize
+    }
 }
 
 impl fmt::Display for Entity {
@@ -136,12 +141,13 @@ impl fmt::Debug for Entity {
 /// and [`clone_from`](Clone::clone_from) restores the world from one, or takes one into a copy kept
 /// from before. A copy is all of the world: each slot under its generation, the free ones in the
 /// order they're taken, and those kept for the entities a [`Log`] can put back still kept; each
-/// entity under its handle and its ID, in its table and row, with its parent and children; the
-/// tables in the order they were made, those made since a snapshot cut away as it's restored; the
-/// stream the IDs come from; and the component types. So a world restored goes on as the world the
-/// snapshot was taken from did: given the same changes, it spawns the same handles with the same
-/// IDs, and its queries find the same order, as it gives out again the handles and IDs given out
-/// since the snapshot. But it's another world: drawing sorts its rows again, and it refuses what
+/// entity under its handle and its ID, in its table and row, with its parent and children, and when
+/// its interpolation was last reset; the tables in the order they were made, those made since a
+/// snapshot cut away as it's restored; the stream the IDs come from; and the component types. So a
+/// world restored goes on as the world the snapshot was taken from did: given the same changes, it
+/// spawns the same handles with the same IDs, and its queries find the same order, as it gives out
+/// again the handles and IDs given out since the snapshot. But it's another world: drawing sorts
+/// its rows again, and doesn't interpolate into it from the world before, and it refuses what
 /// undoes an operation applied before, as another world's, so that the slots kept when the snapshot
 /// was taken are never used again. Taken again, or restored, a snapshot is copied into the memory
 /// the world holds, which allocates nothing while the tables, the component types and the world's
@@ -170,14 +176,20 @@ pub struct World {
     /// and read through [`World::id`], which checks the handle first. `None` while the slot is
     /// free, vacant or retired.
     entity_ids: Vec<Option<EntityId>>,
+    /// Each slot's entity's last [`reset_interpolation`](World::reset_interpolation), as the count
+    /// of resets it made; 0 if none. Beside `Meta`, as the IDs are, since only drawing reads it,
+    /// once a frame that ticked: neither it nor the count is hashed, saved or recorded.
+    resets: Vec<u64>,
+    /// How many times entities' interpolation has been reset, which numbers each reset.
+    reset_count: u64,
     /// Each living entity by its ID; looked up, never iterated. Hashed with SipHash, keyed at
     /// random, so that IDs from files can't be chosen to collide.
     by_id: HashMap<EntityId, Entity>,
     /// Where the next entity's ID comes from.
     stream: IdStream,
-    /// Which world this is among the process's, so that the order drawing keeps for one world never
-    /// passes for another's, as when a game replaces its world; a world copied takes another, as
-    /// does a world restored from a copy.
+    /// Which world this is among the process's, so that the order drawing keeps for one world, and
+    /// where it draws the world's entities on from, never pass for another's, as when a game
+    /// replaces its world; a world copied takes another, as does a world restored from a copy.
     serial: u64,
     /// How many times entities' rows have changed, as entities are spawned, despawned or moved to
     /// other tables: drawing keeps the order it sorted while it and `serial` stay.
@@ -241,6 +253,8 @@ impl World {
             meta: Vec::new(),
             free: Vec::new(),
             entity_ids: Vec::new(),
+            resets: Vec::new(),
+            reset_count: 0,
             by_id: HashMap::new(),
             stream: IdStream::new(seed),
             serial: next_serial(),
@@ -462,6 +476,21 @@ impl World {
         self.location(entity).is_some()
     }
 
+    /// Has frames draw `entity`'s own transform where this tick leaves it, rather than on its way
+    /// there from where the tick found it, until its next tick: for a move that jumps, such as a
+    /// teleport or a wrap. Called before or after the move, within the tick; its descendants, which
+    /// it carries, jump with it, and its ancestors still carry it on their way. Only drawing reads
+    /// it, never the simulation: it changes no hash, scene or recording, nor the order drawing
+    /// sorts.
+    ///
+    /// Fails with `ecs.no_entity` if it isn't alive.
+    pub fn reset_interpolation(&mut self, entity: Entity) -> Result<()> {
+        self.locate(entity)?;
+        self.reset_count += 1;
+        self.resets[entity.slot()] = self.reset_count;
+        Ok(())
+    }
+
     /// The entities with every component `Q` reads, table by table, as `Q` takes them: such as
     /// `world.query::<(Entity, &Transform)>()`. It only reads; [`query_mut`](Self::query_mut)
     /// changes components too.
@@ -500,6 +529,17 @@ impl World {
         (self.serial, self.version)
     }
 
+    /// How many times entities' interpolation has been reset, which drawing keeps before a tick.
+    pub(crate) fn resets(&self) -> u64 {
+        self.reset_count
+    }
+
+    /// Whether `entity`, which is alive, has had its interpolation reset since the world had made
+    /// `count` resets.
+    pub(crate) fn reset_since(&self, entity: Entity, count: u64) -> bool {
+        self.resets[entity.slot()] > count
+    }
+
     /// Where `entity` is, if it's alive.
     fn location(&self, entity: Entity) -> Option<Location> {
         let meta = self.meta.get(entity.index as usize)?;
@@ -534,6 +574,8 @@ impl World {
     fn take_slot(&mut self) -> Entity {
         if let Some(index) = self.free.pop() {
             let generation = self.meta[index as usize].generation;
+            // Its last entity's resets aren't the new one's.
+            self.resets[index as usize] = 0;
             return Entity { index, generation };
         }
         // The last index is the hierarchy's for none.
@@ -548,6 +590,7 @@ impl World {
             links: Links::NONE,
         });
         self.entity_ids.push(None);
+        self.resets.push(0);
         Entity { index, generation }
     }
 
@@ -808,6 +851,42 @@ mod tests {
             assert_eq!(error.code(), "ecs.no_entity");
         }
         assert_eq!(world.get::<Index>(next), Some(&Index(1)));
+    }
+
+    /// A reset of an entity's interpolation is its slot's alone, and changes neither the hash nor
+    /// the version, which drawing sorts by; a snapshot keeps it and the count, a world restored
+    /// keeps a reset for each of its slots, and a slot's next entity starts without its last's.
+    #[test]
+    fn a_reset_touches_its_slot_alone() {
+        let mut world = World::seeded(1);
+        let [reset, other] = [0, 1].map(|i| world.spawn(Index(i)));
+        let (hash, version) = (world.hash(), world.version());
+        let before = world.resets();
+        world.reset_interpolation(reset).expect("alive");
+        assert!(world.reset_since(reset, before));
+        assert!(!world.reset_since(other, before));
+        assert!(!world.reset_since(reset, world.resets()), "not since");
+        assert_eq!((world.hash(), world.version()), (hash, version));
+
+        let snapshot = world.clone();
+        assert!(snapshot.reset_since(reset, before), "in the snapshot");
+        assert_eq!(snapshot.resets(), world.resets(), "the snapshot's count");
+        let more = world.spawn(Index(2));
+        world.reset_interpolation(more).expect("alive");
+        // Restored with fewer slots than it had, then given more again.
+        world.clone_from(&snapshot);
+        assert!(world.reset_since(reset, before), "restored");
+        let again = world.spawn(Index(3));
+        assert!(!world.reset_since(again, before), "a slot made again");
+        world.reset_interpolation(again).expect("alive");
+        assert!(world.reset_since(again, snapshot.resets()));
+
+        world.despawn(reset).expect("alive");
+        let error = world.reset_interpolation(reset).expect_err("a dead entity");
+        assert_eq!(error.code(), "ecs.no_entity");
+        let next = world.spawn(Index(4));
+        assert_eq!(next.slot(), reset.slot(), "the slot freed");
+        assert!(!world.reset_since(next, 0), "its last entity's reset");
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Component)]

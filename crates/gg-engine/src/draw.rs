@@ -7,6 +7,8 @@ use gg_core::Error;
 use gg_core::math::{Mat4, Vec2};
 use gg_renderer::{Draws, MeshDraw, Sampler, Sprite};
 
+use crate::interpolation::{self, Past};
+use crate::jobs;
 use crate::reflect::{self, Digest, Field, Meta, Reflect, Result, Shape, Show, Type, Types, Value};
 use crate::{Component, EntityId, Parent, Transform, World, Writable};
 
@@ -282,6 +284,15 @@ pub(crate) struct Scratch {
     last: Vec<Segment>,
     /// The world matrices of the rows of tables of children, which draw by them.
     matrices: Vec<Mat4>,
+    /// The z's in the world of one table of children's rows, as the latest tick left them, which
+    /// order them.
+    depths: Vec<f32>,
+    /// The matrices of the rows of tables of roots that draw between ticks, which draw by them:
+    /// kept at its longest, so that the job system's threads write into it rather than its being
+    /// filled anew each frame.
+    blended: Vec<Mat4>,
+    /// Where each table's rows start in `blended`, by the table's index, if they're there.
+    blends: Vec<Option<usize>>,
     /// Each row drawn, in the order they draw.
     items: Vec<Item>,
     /// The rows of each z and kind, back to front.
@@ -302,7 +313,8 @@ struct Segment {
     table: u32,
     rows: Range<u32>,
     /// Where its table's world matrices start among the scratch's, for a table of children;
-    /// [`ROOTS`] for a table of roots, whose rows draw by their transforms.
+    /// [`ROOTS`] for a table of roots, whose rows draw by their transforms, or by `blended` from
+    /// where `blends` says, while they draw between ticks.
     matrices: u32,
 }
 
@@ -344,11 +356,14 @@ struct Group {
 }
 
 /// Draws into `draws` every entity of `world` with a [`Transform`] and a [`Sprite`] or a
-/// [`MeshDraw`], back to front by its z in the world; at one z, sprites under meshes, each in the
-/// order of their entities' IDs, so that entities that overlap at one z keep how they stack as
-/// others come and go. A child draws where its ancestors carry it, by its world matrix, which it
-/// computes into `scratch` for each child once a frame; roots, in tables without a [`Parent`], draw
-/// by their transforms alone.
+/// [`MeshDraw`], back to front by its z in the world, as the latest tick left it; at one z, sprites
+/// under meshes, each in the order of their entities' IDs, so that entities that overlap at one z
+/// keep how they stack as others come and go. Each draws `alpha` of the way from what `past` has it
+/// draw from to where the tick left it, while it draws between ticks; at 1, where the tick left it.
+/// A child draws where its ancestors carry it, by its world matrix, its transform's and each of
+/// theirs drawn so, which it computes into `scratch` for each child once a frame; roots, in tables
+/// without a [`Parent`], draw by their transforms alone, which those that draw between ticks blend
+/// first, in their tables' order, in runs of rows that the job system's threads take.
 ///
 /// It sorts runs of consecutive rows at one z every frame, so it's quick while each table's rows at
 /// one z stay together. Spawning entities of a table at mixed z's, or despawning, which moves a
@@ -359,41 +374,67 @@ struct Group {
 /// O(n log n), as the swarm's 100,000 at one z are; and every frame draws them in that order,
 /// reading their tables' rows out of order rather than in a sweep. A radix sort, or tables kept in
 /// ID order, waits for a game whose frames need the time.
-pub(crate) fn draw_world(world: &World, draws: &mut Draws, scratch: &mut Scratch) {
+pub(crate) fn draw_world(
+    world: &World,
+    past: &Past,
+    alpha: f32,
+    draws: &mut Draws,
+    scratch: &mut Scratch,
+) {
     let _zone = gg_core::zone!();
     let Scratch {
         segments,
         last,
         matrices,
+        depths,
+        blended,
+        blends,
         items,
         groups,
         sorted,
     } = scratch;
     segments.clear();
     matrices.clear();
+    blends.clear();
+    blends.resize(world.tables().len(), None);
     let Some(transform) = world.component::<Transform>() else {
         return;
     };
     let sprite = world.component::<Sprite>();
     let mesh = world.component::<MeshDraw>();
     let parent = world.component::<Parent>();
-    // A child's matrix from its own space to the world's: its transform's, then each ancestor's in
+    // What table `table`'s rows draw from, from its first row on, while they draw between ticks.
+    let drawn_from = |table: usize| (alpha < 1.0).then(|| past.from(world, table)).flatten();
+    // A child's matrices from its own space to the world's, as the latest tick left it and as it
+    // draws, from its transform, `drawn` as it draws: its transform's, then each ancestor's in
     // turn up to its root, an ancestor without a transform carrying its children as though it
-    // were at the origin, unturned, at its own size. It walks up from each child, every frame, so
+    // were at the origin, unturned, at its own size. The second is `None` while it's the first,
+    // when nothing on the way draws between ticks. It walks up from each child, every frame, so
     // children of one parent each take the steps they share, and a deep hierarchy costs its depth
     // for each of them, until world transforms are stored and propagated, as physics or a profile
     // will need.
-    let carry = |local: &Transform, parent: &Parent| {
+    let carry = |local: &Transform, drawn: Option<Transform>, parent: &Parent| {
+        let start = (local.matrix(), drawn.map(|drawn| drawn.matrix()));
         world
             .lineage(*parent)
-            .fold(local.matrix(), |m, (table, row)| {
-                match table.column::<Transform>(transform) {
-                    Some(transforms) => transforms[row].matrix() * m,
-                    None => m,
-                }
+            .fold(start, |(at, drawn), (index, table, row)| {
+                let Some(transforms) = table.column::<Transform>(transform) else {
+                    return (at, drawn);
+                };
+                let ancestor = transforms[row].matrix();
+                let drawn = match drawn_from(index) {
+                    Some(from) => {
+                        let pose = interpolation::between(&from[row], &transforms[row], alpha);
+                        Some(pose.matrix() * drawn.unwrap_or(at))
+                    }
+                    None => drawn.map(|drawn| ancestor * drawn),
+                };
+                (ancestor * at, drawn)
             })
     };
-    for (table, rows) in world.tables().iter().enumerate() {
+    // How many of `blended`'s matrices the frame's roots take.
+    let mut blending = 0;
+    for (index, rows) in world.tables().iter().enumerate() {
         let Some(transforms) = rows.column::<Transform>(transform) else {
             continue;
         };
@@ -402,7 +443,7 @@ pub(crate) fn draw_world(world: &World, draws: &mut Draws, scratch: &mut Scratch
         if drawn.iter().all(|&(_, drawn)| !drawn) {
             continue;
         }
-        let table = table as u32;
+        let table = index as u32;
         let len = transforms.len();
         match parent.and_then(|id| rows.column::<Parent>(id)) {
             None => {
@@ -410,12 +451,27 @@ pub(crate) fn draw_world(world: &World, draws: &mut Draws, scratch: &mut Scratch
                 for (kind, _) in drawn.into_iter().filter(|&(_, drawn)| drawn) {
                     cut(segments, len, z, kind, table, ROOTS);
                 }
+                if let Some(from) = drawn_from(index) {
+                    let end = blending + len;
+                    if blended.len() < end {
+                        blended.resize(end, Mat4::IDENTITY);
+                    }
+                    blend(&mut blended[blending..end], &from[..len], transforms, alpha);
+                    blends[index] = Some(blending);
+                    blending = end;
+                }
             }
             Some(parents) => {
                 let start = matrices.len();
-                let carried = transforms.iter().zip(parents);
-                matrices.extend(carried.map(|(local, parent)| carry(local, parent)));
-                let z = |row: usize| matrices[start + row].w_axis.z;
+                let from = drawn_from(index);
+                depths.clear();
+                for (row, (local, parent)) in transforms.iter().zip(parents).enumerate() {
+                    let drawn = from.map(|from| interpolation::between(&from[row], local, alpha));
+                    let (at, drawn) = carry(local, drawn, parent);
+                    depths.push(at.w_axis.z);
+                    matrices.push(drawn.unwrap_or(at));
+                }
+                let z = |row: usize| depths[row];
                 let start = u32::try_from(start).expect("fewer than 2^32 children drawn");
                 for (kind, _) in drawn.into_iter().filter(|&(_, drawn)| drawn) {
                     cut(segments, len, z, kind, table, start);
@@ -433,17 +489,21 @@ pub(crate) fn draw_world(world: &World, draws: &mut Draws, scratch: &mut Scratch
         last.clone_from(segments);
     }
     let tables = world.tables();
-    // A segment's table, its transforms, and its rows' world matrices if they're children.
+    // A segment's table, its transforms, and the matrices its rows draw by, if they're children or
+    // roots that draw between ticks.
     let placed = |index: u32| {
         let segment = &segments[index as usize];
         let table = &tables[segment.table as usize];
         let transforms = table.column::<Transform>(transform);
         let transforms = transforms.expect("it has transforms");
-        let carried = (segment.matrices != ROOTS).then(|| &matrices[segment.matrices as usize..]);
-        (table, transforms, carried)
+        let drawn = match segment.matrices {
+            ROOTS => blends[segment.table as usize].map(|start| &blended[start..]),
+            start => Some(&matrices[start as usize..]),
+        };
+        (table, transforms, drawn)
     };
-    let matrix = |transforms: &[Transform], carried: Option<&[Mat4]>, row: usize| {
-        carried.map_or_else(|| transforms[row].matrix(), |carried| carried[row])
+    let matrix = |transforms: &[Transform], drawn: Option<&[Mat4]>, row: usize| {
+        drawn.map_or_else(|| transforms[row].matrix(), |drawn| drawn[row])
     };
     // Kept across groups, whose segments' indices differ.
     let (mut sprites_at, mut meshes_at) = ([None; AT_HAND], [None; AT_HAND]);
@@ -453,33 +513,57 @@ pub(crate) fn draw_world(world: &World, draws: &mut Draws, scratch: &mut Scratch
             Kind::Sprite => {
                 let sprite = sprite.expect("a table has sprites");
                 let columns = |index: u32| {
-                    let (table, transforms, carried) = placed(index);
+                    let (table, transforms, drawn) = placed(index);
                     let sprites = table.column::<Sprite>(sprite).expect("it has sprites");
-                    (transforms, sprites, carried)
+                    (transforms, sprites, drawn)
                 };
                 draws.extend_sprites(items.iter().map(|item| {
                     let found = found(&mut sprites_at, item.segment, columns);
-                    let (transforms, sprites, carried) = found;
+                    let (transforms, sprites, drawn) = found;
                     let row = item.row as usize;
-                    (matrix(transforms, carried, row), sprites[row])
+                    (matrix(transforms, drawn, row), sprites[row])
                 }));
             }
             Kind::Mesh => {
                 let mesh = mesh.expect("a table has meshes");
                 let columns = |index: u32| {
-                    let (table, transforms, carried) = placed(index);
+                    let (table, transforms, drawn) = placed(index);
                     let meshes = table.column::<MeshDraw>(mesh).expect("it has meshes");
-                    (transforms, meshes, carried)
+                    (transforms, meshes, drawn)
                 };
                 for item in items {
                     let found = found(&mut meshes_at, item.segment, columns);
-                    let (transforms, meshes, carried) = found;
+                    let (transforms, meshes, drawn) = found;
                     let row = item.row as usize;
-                    draws.push_draw(matrix(transforms, carried, row), &meshes[row]);
+                    draws.push_draw(matrix(transforms, drawn, row), &meshes[row]);
                 }
             }
         }
     }
+}
+
+/// How many rows a job blends.
+const CHUNK: usize = 1024;
+
+/// Writes into `out` the matrix of each row drawn `alpha` of the way from `from` to `to`, splitting
+/// the rows in two at a multiple of [`CHUNK`], for two jobs, until each run is a chunk or less.
+fn blend(out: &mut [Mat4], from: &[Transform], to: &[Transform], alpha: f32) {
+    let len = out.len();
+    if len <= CHUNK {
+        // A shorter run can take less than the 10 µs or so a zone is for.
+        let _zone = (len == CHUNK).then(|| gg_core::zone!("blend"));
+        for ((out, from), to) in out.iter_mut().zip(from).zip(to) {
+            *out = interpolation::between(from, to, alpha).matrix();
+        }
+        return;
+    }
+    let mid = len.div_ceil(CHUNK) / 2 * CHUNK;
+    let (a, b) = out.split_at_mut(mid);
+    let ((from_a, from_b), (to_a, to_b)) = (from.split_at(mid), to.split_at(mid));
+    jobs::join(
+        || blend(a, from_a, to_a, alpha),
+        || blend(b, from_b, to_b, alpha),
+    );
 }
 
 /// Adds to `segments` the runs of rows at one z, which `z` gives, among table `table`'s `len` rows,
@@ -564,10 +648,11 @@ fn found<T: Copy>(
 
 #[cfg(test)]
 mod tests {
+    use std::f32::consts::FRAC_PI_2;
     use std::path::Path;
 
     use gg_core::math::{Quat, Vec3, Vec4};
-    use gg_renderer::{Blend, Meshes, Shaders};
+    use gg_renderer::{Blend, Mesh, Meshes, Shader, Shaders};
 
     use super::*;
     use crate::Entity;
@@ -577,11 +662,14 @@ mod tests {
 
     /// Where a scratch's buffers are, and how big, which drawing again without taking more memory
     /// leaves as they were.
-    fn held(scratch: &Scratch) -> [(usize, usize); 5] {
+    fn held(scratch: &Scratch) -> [(usize, usize); 8] {
         let Scratch {
             segments,
             last,
             matrices,
+            depths,
+            blended,
+            blends,
             items,
             groups,
             sorted: _,
@@ -590,9 +678,24 @@ mod tests {
             (segments.as_ptr().addr(), segments.capacity()),
             (last.as_ptr().addr(), last.capacity()),
             (matrices.as_ptr().addr(), matrices.capacity()),
+            (depths.as_ptr().addr(), depths.capacity()),
+            (blended.as_ptr().addr(), blended.capacity()),
+            (blends.as_ptr().addr(), blends.capacity()),
             (items.as_ptr().addr(), items.capacity()),
             (groups.as_ptr().addr(), groups.capacity()),
         ]
+    }
+
+    /// A triangle, and a shader for it whose parameter is its color.
+    fn flat_triangle() -> (Mesh<[f32; 3]>, Shader<[f32; 3], Vec4>) {
+        let mut shaders = Shaders::default();
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/shaders/flat_color.slang");
+        let flat = shaders
+            .add::<[f32; 3], Vec4>("flat color", &fixture, Blend::Opaque)
+            .expect("the shader compiles");
+        let corners = [[-0.5, -0.5, 0.0], [0.5, -0.5, 0.0], [0.0, 0.5, 0.0]];
+        let triangle = Meshes::default().add("triangle", &corners, &[0, 1, 2]);
+        (triangle.expect("a mesh"), flat)
     }
 
     enum Expected {
@@ -606,14 +709,7 @@ mod tests {
     /// runs share each, enough for an order by table or by row to show.
     #[test]
     fn the_world_draws_back_to_front_by_z() {
-        let mut shaders = Shaders::default();
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/shaders/flat_color.slang");
-        let flat = shaders
-            .add::<[f32; 3], Vec4>("flat color", &fixture, Blend::Opaque)
-            .expect("the shader compiles");
-        let corners = [[-0.5, -0.5, 0.0], [0.5, -0.5, 0.0], [0.0, 0.5, 0.0]];
-        let triangle = Meshes::default().add("triangle", &corners, &[0, 1, 2]);
-        let triangle = triangle.expect("a mesh");
+        let (triangle, flat) = flat_triangle();
         // Each draw is told apart by its x and its color.
         let mut next = 0.0;
         let mut new = |z: f32| {
@@ -674,7 +770,13 @@ mod tests {
             }
         }
         let mut draws = Draws::default();
-        draw_world(&world, &mut draws, &mut Scratch::default());
+        draw_world(
+            &world,
+            &Past::default(),
+            1.0,
+            &mut draws,
+            &mut Scratch::default(),
+        );
         assert_eq!(draws, want);
     }
 
@@ -687,14 +789,7 @@ mod tests {
     /// scratch takes no more memory.
     #[test]
     fn children_draw_where_their_ancestors_carry_them() {
-        let mut shaders = Shaders::default();
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/shaders/flat_color.slang");
-        let flat = shaders
-            .add::<[f32; 3], Vec4>("flat color", &fixture, Blend::Opaque)
-            .expect("the shader compiles");
-        let corners = [[-0.5, -0.5, 0.0], [0.5, -0.5, 0.0], [0.0, 0.5, 0.0]];
-        let triangle = Meshes::default().add("triangle", &corners, &[0, 1, 2]);
-        let triangle = triangle.expect("a mesh");
+        let (triangle, flat) = flat_triangle();
         let placed = |x: f32, z: f32, turn: f32, scale: [f32; 2]| Transform {
             translation: Vec3::new(x, 0.25 * x, z),
             rotation: Quat::from_rotation_z(turn),
@@ -759,11 +854,11 @@ mod tests {
         want.push_sprite(high.matrix(), sprite(2.0));
         let mut scratch = Scratch::default();
         let mut draws = Draws::default();
-        draw_world(&world, &mut draws, &mut scratch);
+        draw_world(&world, &Past::default(), 1.0, &mut draws, &mut scratch);
         assert_eq!(draws, want);
         let before = held(&scratch);
         let mut again = Draws::default();
-        draw_world(&world, &mut again, &mut scratch);
+        draw_world(&world, &Past::default(), 1.0, &mut again, &mut scratch);
         assert_eq!(again, want);
         assert_eq!(held(&scratch), before, "drawing again takes no more memory");
     }
@@ -777,14 +872,7 @@ mod tests {
     /// trade tables; after a z is set, which moves no row; and after a spawn and a despawn alone.
     #[test]
     fn a_kept_scratch_draws_as_a_fresh_one_does() {
-        let mut shaders = Shaders::default();
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/shaders/flat_color.slang");
-        let flat = shaders
-            .add::<[f32; 3], Vec4>("flat color", &fixture, Blend::Opaque)
-            .expect("the shader compiles");
-        let corners = [[-0.5, -0.5, 0.0], [0.5, -0.5, 0.0], [0.0, 0.5, 0.0]];
-        let triangle = Meshes::default().add("triangle", &corners, &[0, 1, 2]);
-        let triangle = triangle.expect("a mesh");
+        let (triangle, flat) = flat_triangle();
         // Each told apart by its x and its color.
         let mut n = 0.0;
         let mut spawn = |world: &mut World, meshed: bool, marked: bool| {
@@ -815,9 +903,15 @@ mod tests {
         populate(&mut world);
         let step = |world: &World, kept: &mut Scratch, what: &str| {
             let mut draws = Draws::default();
-            draw_world(world, &mut draws, kept);
+            draw_world(world, &Past::default(), 1.0, &mut draws, kept);
             let mut fresh = Draws::default();
-            draw_world(world, &mut fresh, &mut Scratch::default());
+            draw_world(
+                world,
+                &Past::default(),
+                1.0,
+                &mut fresh,
+                &mut Scratch::default(),
+            );
             assert_eq!(draws, fresh, "after {what}");
         };
         let mut kept = Scratch::default();
@@ -865,5 +959,165 @@ mod tests {
         step(&world, &mut kept, "a spawn");
         world.despawn(entities.swap_remove(1)).expect("alive");
         step(&world, &mut kept, "a despawn");
+    }
+
+    /// A transform at `x` and `z`.
+    fn at_x(x: f32, z: f32) -> Transform {
+        Transform {
+            translation: Vec3::new(x, 0.0, z),
+            ..Transform::IDENTITY
+        }
+    }
+
+    /// What `world` draws with `scratch`, `alpha` of the way on from `past`, found for it.
+    fn between_ticks(world: &World, past: &mut Past, alpha: f32, scratch: &mut Scratch) -> Draws {
+        past.resolve(world);
+        let mut draws = Draws::default();
+        draw_world(world, past, alpha, &mut draws, scratch);
+        draws
+    }
+
+    /// Roots blended in runs of rows on the job system's threads draw as each row's own blend has
+    /// them, bit for bit, on a pool of four threads and outside one: 5,000 movers, which isn't a
+    /// whole number of runs.
+    #[test]
+    fn blending_on_threads_draws_each_row_its_own_way() {
+        let mut world = World::default();
+        let mut movers: Vec<(Entity, Transform)> = (0..5000)
+            .map(|i| {
+                let at = at_x(i as f32, 0.0);
+                (world.spawn((at, Sprite::default())), at)
+            })
+            .collect();
+        let mut past = Past::default();
+        past.capture(&world);
+        for (i, &(entity, _)) in movers.iter().enumerate() {
+            let to = world.get_mut::<Transform>(entity).expect("alive");
+            to.translation.x += 1.0 + i as f32 / 1000.0;
+        }
+        movers.sort_by_key(|&(entity, _)| world.id(entity));
+        let mut want = Draws::default();
+        for &(entity, from) in &movers {
+            let to = world.get::<Transform>(entity).expect("alive");
+            let drawn = interpolation::between(&from, to, 0.3).matrix();
+            want.push_sprite(drawn, Sprite::default());
+        }
+        let bits = |draws: &Draws| format!("{draws:?}");
+        let one = between_ticks(&world, &mut past, 0.3, &mut Scratch::default());
+        assert_eq!(bits(&one), bits(&want), "outside a pool");
+        let four = jobs::on_threads(4, || {
+            between_ticks(&world, &mut past, 0.3, &mut Scratch::default())
+        });
+        assert_eq!(bits(&four), bits(&want), "on four threads");
+    }
+
+    /// A child of a pivot that turns a quarter turn a tick and draws nothing draws between ticks
+    /// on its orbit, by the pivot's transform drawn between them, then its own: not on the chord
+    /// between where the two ticks put it, as blending its world matrices would.
+    #[test]
+    fn children_blend_their_locals_then_compose() {
+        let mut world = World::default();
+        let pivot = world.spawn(Transform::IDENTITY);
+        let local = at_x(1.0, 0.0);
+        let child = world.spawn((local, Sprite::default()));
+        world.set_parent(child, Some(pivot)).expect("alive");
+        let mut past = Past::default();
+        past.capture(&world);
+        let turned = Quat::from_rotation_z(FRAC_PI_2);
+        world.get_mut::<Transform>(pivot).expect("alive").rotation = turned;
+        let draws = between_ticks(&world, &mut past, 0.5, &mut Scratch::default());
+        let halfway = Transform {
+            rotation: Quat::IDENTITY.lerp(turned, 0.5),
+            ..Transform::IDENTITY
+        };
+        let mut want = Draws::default();
+        want.push_sprite(halfway.matrix() * local.matrix(), Sprite::default());
+        assert_eq!(draws, want);
+    }
+
+    /// Drawing between ticks keeps the order the latest tick sorted by: a sprite whose z passes
+    /// another's draws over it from the tick that passes it, though it's drawn below it on its way,
+    /// and so does a child, whose own transform blends under its parent's. What didn't move draws
+    /// bit for bit as the tick left it, at a z of -0.0 too, where a lerp of equal ends would round,
+    /// or lose the zero's sign; a mesh blends as a sprite does; and a scratch kept between frames
+    /// draws as a fresh one does.
+    #[test]
+    fn blending_keeps_the_order_the_ticks_sorted() {
+        let (triangle, flat) = flat_triangle();
+        let sprite = |n: f32| Sprite {
+            color: Vec4::splat(n),
+            ..Sprite::default()
+        };
+        // Where glam's lerp of equal ends rounds, at the fractions drawn, and a turn that its
+        // normalizing changes.
+        let still = Transform {
+            translation: Vec3::new(3.7, -1.9, 0.5),
+            rotation: Quat::from_xyzw(0.0, 0.0, 0.006_849_946_5, 0.999_976_5),
+            scale: Vec3::splat(0.123),
+        };
+        let signed = Transform {
+            translation: Vec3::new(-1.9, 3.7, -0.0),
+            rotation: Quat::from_rotation_z(-1.3),
+            scale: Vec3::new(0.123, 0.123, 1.0),
+        };
+        let mut world = World::default();
+        world.spawn((still, sprite(1.0)));
+        world.spawn((signed, sprite(2.0)));
+        let passer = world.spawn((at_x(0.0, 0.375), sprite(3.0)));
+        let mesh = MeshDraw::new(triangle, flat, Vec4::ONE);
+        let meshed = world.spawn((at_x(0.0, 0.9), mesh));
+        // Children of a parent that stays where it is, one passing the other's z.
+        let parent = world.spawn(at_x(10.0, 0.0));
+        let [_, passing] = [(0.75, 30.0), (0.6875, 31.0)].map(|(z, n)| {
+            let child = world.spawn((at_x(0.0, z), sprite(n)));
+            world.set_parent(child, Some(parent)).expect("alive");
+            child
+        });
+        let mut swarm: Vec<(Entity, f32)> = (0..20)
+            .map(|i| {
+                let i = i as f32;
+                (world.spawn((at_x(i, 0.1), sprite(4.0 + i))), i)
+            })
+            .collect();
+        let mut past = Past::default();
+        past.capture(&world);
+        let mut moved = |entity: Entity, to: Transform| {
+            *world.get_mut::<Transform>(entity).expect("alive") = to;
+        };
+        moved(passer, at_x(0.0, 0.625));
+        moved(meshed, at_x(4.0, 0.9));
+        moved(passing, at_x(0.0, 0.8125));
+        for &(entity, i) in &swarm {
+            moved(entity, at_x(i + 4.0, 0.1));
+        }
+        swarm.sort_by_key(|&(entity, _)| world.id(entity));
+        // glam's lerp, as drawing computes it for what moves.
+        let lerp = |from: f32, to: f32, alpha: f32| from * (1.0 - alpha) + to * alpha;
+        // Bit for bit, which `Debug` shows of a zero's sign, and `==` doesn't.
+        let bits = |draws: &Draws| format!("{draws:?}");
+        let mut kept = Scratch::default();
+        for alpha in [0.3, 0.7] {
+            // Back to front by the tick's z: the one at -0.0, the swarm at 0.1 in ID order, the
+            // still one at 0.5, the passer at 0.625, the children at 0.75 and 0.8125, then the
+            // mesh at 0.9.
+            let mut want = Draws::default();
+            want.push_sprite(signed.matrix(), sprite(2.0));
+            for &(_, i) in &swarm {
+                let drifted = at_x(lerp(i, i + 4.0, alpha), 0.1);
+                want.push_sprite(drifted.matrix(), sprite(4.0 + i));
+            }
+            want.push_sprite(still.matrix(), sprite(1.0));
+            let passer = at_x(0.0, lerp(0.375, 0.625, alpha));
+            want.push_sprite(passer.matrix(), sprite(3.0));
+            let parent = at_x(10.0, 0.0).matrix();
+            want.push_sprite(parent * at_x(0.0, 0.75).matrix(), sprite(30.0));
+            let passing = at_x(0.0, lerp(0.6875, 0.8125, alpha));
+            want.push_sprite(parent * passing.matrix(), sprite(31.0));
+            want.push_draw(at_x(lerp(0.0, 4.0, alpha), 0.9).matrix(), &mesh);
+            let draws = between_ticks(&world, &mut past, alpha, &mut kept);
+            assert_eq!(bits(&draws), bits(&want), "at {alpha}, a scratch kept");
+            let draws = between_ticks(&world, &mut past, alpha, &mut Scratch::default());
+            assert_eq!(bits(&draws), bits(&want), "at {alpha}");
+        }
     }
 }

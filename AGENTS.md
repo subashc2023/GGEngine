@@ -52,7 +52,8 @@ it stays where the build found it. On Linux, gamepads need pkg-config and libude
 Each run writes a JSON log and logs its path as it starts; filter it on `level`, `code` or
 `vuid`. `RUST_LOG` sets what's logged, such as `RUST_LOG=gg_gpu=trace`. A run that doesn't end in
 an error logs `engine.perf` as it ends: its frame times and where they went. Compare two builds by
-theirs, from release builds run headless for the same number of frames.
+theirs, from release builds run headless for the same number of frames. Headless frames draw each
+tick as it ends, so theirs leave out blending between ticks, which windowed runs measure.
 
 A replay that goes another way names the tick and the part of the hash; `--replay <path> --dump
 <tick>`, run where it goes another way and where it doesn't, prints each world's content there a
