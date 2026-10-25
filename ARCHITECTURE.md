@@ -578,6 +578,16 @@ texture's handle is known before the texture reaches the GPU, and gives out the 
 UI's, wherever one is free. Shaders pick one of the engine's samplers by its index: nearest or
 linear, clamped, repeated or mirrored.
 
+Meshes and textures reach GPU memory the best way the device has. A queue for transfers alone, or
+for compute, apart from graphics, copies them beside the frames the GPU renders, and hands them
+over to the graphics queue; without one, if the driver says writing an image from the CPU costs
+the GPU nothing in reading it, the CPU writes textures straight into their images (host image
+copy), and the graphics queue copies buffers; otherwise the graphics queue copies them all, at the
+start of the frame. Whichever way, the frame that takes them waits for their copies and draws
+them, and what staged them is freed once that frame has finished, so that adding assets holds no
+memory past their own. The UI's texture changes, small patches it draws at once, and each frame's
+own data go through the frame's memory instead.
+
 A camera is a position, a rotation and a projection: orthographic, as 2D games use, seeing as
 much of the world from bottom to top as the game sets, and as much across as the view's aspect
 ratio makes, so nothing stretches as the dock resizes the view; or perspective, seeing an angle

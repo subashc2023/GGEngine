@@ -547,6 +547,7 @@ fn settings<'a>(app: &'a App, args: &'a Args) -> Settings<'a> {
         validation: args.validation,
         gpu: args.gpu.as_deref(),
         vsync: args.vsync,
+        uploads: None,
     }
 }
 

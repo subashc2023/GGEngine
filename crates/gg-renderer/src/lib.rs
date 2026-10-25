@@ -28,7 +28,7 @@ use gg_gpu::{
 use tracing::trace;
 
 pub use camera::{Camera, Projection};
-pub use gg_gpu::{Blend, Sampler, Validation, Window};
+pub use gg_gpu::{Blend, Sampler, UploadPath, Validation, Window};
 pub use mesh::{Mesh, MeshDraw, Meshes};
 pub use shader::{Shader, Shaders};
 pub use sprite::{Sprite, SpriteSheet};
@@ -211,6 +211,10 @@ pub struct Settings<'a> {
     pub gpu: Option<&'a str>,
     /// Present at the display's refresh rate, rather than as fast as frames are rendered.
     pub vsync: bool,
+    /// Upload meshes and textures this way rather than the GPU's best, for tests and
+    /// measurements of each way. A way the GPU lacks keeps the renderer from starting
+    /// (`gpu.no_upload_path`).
+    pub uploads: Option<UploadPath>,
 }
 
 /// Renders frames into a window or, headless, into an offscreen image, and UI into the app's
@@ -266,7 +270,7 @@ impl Renderer {
             window: Some(&*window),
         })?;
         let surface = Surface::new(&instance, window)?;
-        let device = Device::new(&instance, settings.gpu, Some(&surface))?;
+        let device = Device::new(&instance, settings.gpu, Some(&surface), settings.uploads)?;
         let swapchain = Swapchain::new(&device, surface, width, height, settings.vsync)?;
         Self::new(
             &instance,
@@ -289,7 +293,7 @@ impl Renderer {
             validation: settings.validation,
             window: None,
         })?;
-        let device = Device::new(&instance, settings.gpu, None)?;
+        let device = Device::new(&instance, settings.gpu, None, settings.uploads)?;
         let image = ColorImage::new(&device, width, height, "offscreen color")?;
         Self::new(&instance, &device, Output::Offscreen(image), settings.vsync)
     }
@@ -515,6 +519,11 @@ impl Renderer {
     /// The GPU's name, such as `NVIDIA GeForce RTX 4090`.
     pub fn gpu_name(&self) -> &str {
         self.device.name()
+    }
+
+    /// How the renderer uploads meshes and textures.
+    pub fn upload_path(&self) -> UploadPath {
+        self.device.upload_path()
     }
 
     /// Copies the last frame rendered offscreen to the CPU: rows of RGBA8 pixels, sRGB-encoded

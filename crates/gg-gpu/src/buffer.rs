@@ -121,20 +121,20 @@ impl Drop for Buffer {
     }
 }
 
-/// A buffer in the GPU's own memory, which frames fill ([`Frame::write_buffer`]): vertices and
+/// A buffer in the GPU's own memory, which a frame fills ([`Frame::fill_buffer`]): vertices and
 /// other data that shaders read through its address, and the indices that draws take. Dropping
 /// it retires it until the GPU is done with it.
 ///
-/// [`Frame::write_buffer`]: crate::Frame::write_buffer
+/// [`Frame::fill_buffer`]: crate::Frame::fill_buffer
 pub struct GpuBuffer {
     buffer: Buffer,
-    /// Whether a frame has written it, so that a later write waits for the frames reading it.
+    /// Whether a frame has filled it.
     written: bool,
 }
 
 impl GpuBuffer {
     /// A buffer of `size` bytes, with `name` as its debug name. What it holds is undefined until
-    /// a frame writes it.
+    /// a frame fills it.
     ///
     /// # Panics
     ///

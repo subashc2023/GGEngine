@@ -1,6 +1,7 @@
 //! Choosing a GPU, and the logical device with its queues.
 
 use std::ffi::{CStr, CString};
+use std::fmt;
 use std::mem::ManuallyDrop;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -11,7 +12,9 @@ use tracing::{debug, info};
 
 use crate::bindless::Bindless;
 use crate::vma::{Allocation, Allocator};
-use crate::{DepthImage, Instance, REQUIRED_VERSION, Surface, Version, vk_error};
+use crate::{
+    DepthImage, Instance, MAX_TEXTURE_SIZE, REQUIRED_VERSION, Surface, Texture, Version, vk_error,
+};
 
 /// A resource that was dropped while frames that may use it could still be running on the GPU.
 pub(crate) enum Retired {
@@ -34,7 +37,41 @@ struct Retirement {
     resources: Vec<(u64, Retired)>,
 }
 
-/// A GPU opened for rendering, with its graphics queue and its memory allocator.
+/// How meshes and textures reach the GPU's memory: the GPU's best way, or one a test or a
+/// measurement asks for. Whichever it is, the frame that takes them waits for them and draws them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UploadPath {
+    /// Copied by a queue apart from graphics, beside the frames the GPU renders: the way of GPUs
+    /// with a queue family for transfers, or for compute, apart from graphics.
+    TransferQueue,
+    /// Textures written by the CPU straight into their images (host image copy), and buffers
+    /// copied by the graphics queue: the way of GPUs without such a family whose drivers say that
+    /// costs the GPU nothing in reading the images.
+    HostImageCopy,
+    /// Copied by the graphics queue, at the start of the frame that takes them: the other GPUs'.
+    GraphicsQueue,
+}
+
+impl UploadPath {
+    /// Every way, for tests that try each.
+    pub const ALL: [Self; 3] = [
+        Self::TransferQueue,
+        Self::HostImageCopy,
+        Self::GraphicsQueue,
+    ];
+}
+
+impl fmt::Display for UploadPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::TransferQueue => "transfer queue",
+            Self::HostImageCopy => "host image copy",
+            Self::GraphicsQueue => "graphics queue",
+        })
+    }
+}
+
+/// A GPU opened for rendering, with its queues and its memory allocator.
 pub struct Device {
     /// The instance, which must outlive the device.
     _instance: Arc<Instance>,
@@ -49,6 +86,11 @@ pub struct Device {
     debug_utils: Option<ext::debug_utils::Device>,
     swapchain_fn: Option<khr::swapchain::Device>,
     graphics: Queue,
+    /// The queue uploads are copied on, for a device that uploads through a transfer queue.
+    transfer: Option<Queue>,
+    /// The host image copy functions, for a device that uploads by host image copy.
+    host_image_copy_fn: Option<ext::host_image_copy::Device>,
+    uploads: UploadPath,
 }
 
 /// A device queue. Vulkan lets one thread at a time use a queue, hence the lock.
@@ -67,11 +109,13 @@ impl Queue {
 impl Device {
     /// Opens the best GPU that supports Vulkan 1.4 and, given a surface, can present to it.
     /// Given `gpu`, only GPUs whose names contain it, ignoring case, are considered. Discrete
-    /// GPUs come first, then integrated ones; among equals, the one with the most memory.
+    /// GPUs come first, then integrated ones; among equals, the one with the most memory. It
+    /// uploads by `uploads`, if given, and otherwise by the best way the GPU has.
     pub fn new(
         instance: &Arc<Instance>,
         gpu: Option<&str>,
         surface: Option<&Surface>,
+        uploads: Option<UploadPath>,
     ) -> Result<Arc<Self>> {
         let _zone = gg_core::zone!();
         // SAFETY: the instance is live.
@@ -90,25 +134,43 @@ impl Device {
                 vulkan = %Version(candidate.api),
                 driver = candidate.driver,
                 vram_mib = candidate.vram_mib,
+                transfer = candidate.transfer,
+                host_image_copy = candidate.host_copy.name(),
                 problem = candidate.problem.as_deref(),
                 "GPU found"
             );
         }
         let chosen = pick(&candidates, gpu)?;
+        let uploads = chosen.upload_path(uploads)?;
         let physical = chosen.physical;
         let graphics = chosen
             .graphics
             .expect("a GPU without problems has a graphics queue");
+        let transfer = chosen
+            .transfer
+            .filter(|_| uploads == UploadPath::TransferQueue);
 
         let priorities = [1.0];
-        let queue_infos = [vk::DeviceQueueCreateInfo::default()
-            .queue_family_index(graphics)
-            .queue_priorities(&priorities)];
-        let extensions = if surface.is_some() {
-            vec![vk::KHR_SWAPCHAIN_NAME.as_ptr()]
-        } else {
-            Vec::new()
-        };
+        let mut queue_infos = vec![
+            vk::DeviceQueueCreateInfo::default()
+                .queue_family_index(graphics)
+                .queue_priorities(&priorities),
+        ];
+        // A family for transfers has no graphics, so it's another family.
+        if let Some(transfer) = transfer {
+            queue_infos.push(
+                vk::DeviceQueueCreateInfo::default()
+                    .queue_family_index(transfer)
+                    .queue_priorities(&priorities),
+            );
+        }
+        let mut extensions = Vec::new();
+        if surface.is_some() {
+            extensions.push(vk::KHR_SWAPCHAIN_NAME.as_ptr());
+        }
+        if uploads == UploadPath::HostImageCopy {
+            extensions.push(vk::EXT_HOST_IMAGE_COPY_NAME.as_ptr());
+        }
         // Scalar block layout lets shaders read vertices laid out as `#[repr(C)]` lays them out.
         let mut vulkan12 = bindless_features()
             .timeline_semaphore(true)
@@ -117,14 +179,19 @@ impl Device {
         let mut vulkan13 = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
             .synchronization2(true);
-        let create_info = vk::DeviceCreateInfo::default()
+        let mut host_image_copy =
+            vk::PhysicalDeviceHostImageCopyFeaturesEXT::default().host_image_copy(true);
+        let mut create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
             .enabled_extension_names(&extensions)
             .push_next(&mut vulkan12)
             .push_next(&mut vulkan13);
+        if uploads == UploadPath::HostImageCopy {
+            create_info = create_info.push_next(&mut host_image_copy);
+        }
         // SAFETY: the physical device came from this instance, every Vulkan 1.4 device has these
-        // features but the bindless ones, which `Candidate::new` checked, and the create info's
-        // pointers outlive the call.
+        // features but the bindless ones and host image copy, which `Candidate::new` checked, and
+        // the create info's pointers outlive the call.
         let raw = unsafe { instance.raw().create_device(physical, &create_info, None) }
             .map_err(|e| vk_error("vkCreateDevice", e))?;
         // SAFETY: the device was just made from this physical device, with buffer device
@@ -155,6 +222,14 @@ impl Device {
                 // SAFETY: the device was created with one queue in this family.
                 raw: Mutex::new(unsafe { raw.get_device_queue(graphics, 0) }),
             },
+            transfer: transfer.map(|family| Queue {
+                family,
+                // SAFETY: the device was created with one queue in this family.
+                raw: Mutex::new(unsafe { raw.get_device_queue(family, 0) }),
+            }),
+            host_image_copy_fn: (uploads == UploadPath::HostImageCopy)
+                .then(|| ext::host_image_copy::Device::new(instance.raw(), &raw)),
+            uploads,
             debug_utils: instance
                 .has_debug_utils()
                 .then(|| ext::debug_utils::Device::new(instance.raw(), &raw)),
@@ -167,11 +242,14 @@ impl Device {
             retirement: Mutex::default(),
             raw,
         };
-        // SAFETY: the device, its queue and the bindless set are live, and the set is the
+        // SAFETY: the device, its queues and the bindless set are live, and the set is the
         // device's.
         unsafe {
             device.set_name(device.raw.handle(), &device.name);
             device.set_name(*device.graphics.lock(), "graphics queue");
+            if let Some(transfer) = &device.transfer {
+                device.set_name(*transfer.lock(), "transfer queue");
+            }
             device.bindless.set_names(&device);
         }
         info!(
@@ -180,15 +258,21 @@ impl Device {
             vulkan = %Version(chosen.api),
             driver = chosen.driver,
             vram_mib = chosen.vram_mib,
+            uploads = %uploads,
             "GPU selected"
         );
-        debug!(graphics, "Queue family");
+        debug!(graphics, transfer, "Queue families");
         Ok(Arc::new(device))
     }
 
     /// The GPU's name, such as `NVIDIA GeForce RTX 4090`. The device has it as its debug name.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// How the device uploads meshes and textures.
+    pub fn upload_path(&self) -> UploadPath {
+        self.uploads
     }
 
     /// The ash device, for code that breaks the safe API's rules on purpose, such as tests that
@@ -199,9 +283,11 @@ impl Device {
 
     /// Waits until the GPU has finished all the work submitted to it.
     pub(crate) fn wait_idle(&self) -> Result<()> {
-        // Vulkan requires that nothing uses a queue while the device waits.
-        let _queue = self.graphics.lock();
-        // SAFETY: the device is live, and its one queue's lock is held.
+        // Vulkan requires that nothing uses a queue while the device waits. The locks are always
+        // taken in this order.
+        let _graphics = self.graphics.lock();
+        let _transfer = self.transfer.as_ref().map(Queue::lock);
+        // SAFETY: the device is live, and its queues' locks are held.
         unsafe { self.raw.device_wait_idle() }.map_err(|e| vk_error("vkDeviceWaitIdle", e))
     }
 
@@ -304,6 +390,16 @@ impl Device {
         self.graphics.family
     }
 
+    /// The transfer queue's family, for a device that uploads through one.
+    pub(crate) fn transfer_family(&self) -> Option<u32> {
+        self.transfer.as_ref().map(|queue| queue.family)
+    }
+
+    /// The host image copy functions, which a device that uploads by host image copy has.
+    pub(crate) fn host_image_copy_fn(&self) -> Option<&ext::host_image_copy::Device> {
+        self.host_image_copy_fn.as_ref()
+    }
+
     /// The swapchain functions, which a device opened for a surface has.
     pub(crate) fn swapchain_fn(&self) -> Option<&khr::swapchain::Device> {
         self.swapchain_fn.as_ref()
@@ -316,6 +412,25 @@ impl Device {
     /// The submissions must be valid, and what they use must live until they finish.
     pub(crate) unsafe fn submit(&self, submits: &[vk::SubmitInfo2<'_>]) -> Result<()> {
         let queue = self.graphics.lock();
+        // SAFETY: the caller guarantees the submissions; the lock is held.
+        unsafe { self.raw.queue_submit2(*queue, submits, vk::Fence::null()) }
+            .map_err(|e| vk_error("vkQueueSubmit2", e))
+    }
+
+    /// Submits to the transfer queue.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Device::submit`].
+    ///
+    /// # Panics
+    ///
+    /// If the device doesn't upload through a transfer queue.
+    pub(crate) unsafe fn submit_transfers(&self, submits: &[vk::SubmitInfo2<'_>]) -> Result<()> {
+        let transfer = self.transfer.as_ref();
+        let queue = transfer
+            .expect("only a device that uploads through a transfer queue submits to one")
+            .lock();
         // SAFETY: the caller guarantees the submissions; the lock is held.
         unsafe { self.raw.queue_submit2(*queue, submits, vk::Fence::null()) }
             .map_err(|e| vk_error("vkQueueSubmit2", e))
@@ -463,7 +578,29 @@ struct Candidate {
     vram_mib: u64,
     /// A queue family with graphics that can also present to the surface, if there is one.
     graphics: Option<u32>,
+    /// A queue family for uploads apart from graphics, if there is one.
+    transfer: Option<u32>,
+    host_copy: HostCopy,
     problem: Option<String>,
+}
+
+/// Whether a GPU can write the engine's textures from the CPU (host image copy), and whether its
+/// driver says that costs the GPU anything in reading them, such as compression it turns off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HostCopy {
+    Unsupported,
+    Costly,
+    Free,
+}
+
+impl HostCopy {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Unsupported => "unsupported",
+            Self::Costly => "costly",
+            Self::Free => "free",
+        }
+    }
 }
 
 impl Candidate {
@@ -531,6 +668,14 @@ impl Candidate {
                 family.queue_flags.contains(vk::QueueFlags::GRAPHICS) && presents(index)
             })
             .map(|(_, index)| index);
+        let transfer = transfer_family(&families);
+        let extensions = device_extensions(instance, physical);
+        // Host image copy's queries use Vulkan 1.3's, and a device without 1.4 is refused anyway.
+        let host_copy = if properties.api_version >= REQUIRED_VERSION {
+            host_copy_support(instance, physical, &extensions)
+        } else {
+            HostCopy::Unsupported
+        };
         let problem = if properties.api_version < REQUIRED_VERSION {
             Some(format!(
                 "supports Vulkan {}, not 1.4; a newer driver may add it",
@@ -540,7 +685,7 @@ impl Candidate {
             Some("has no graphics queue that can present to the window".to_owned())
         } else if graphics.is_none() {
             Some("has no graphics queue".to_owned())
-        } else if surface.is_some() && !has_swapchain(instance, physical) {
+        } else if surface.is_some() && !has_extension(&extensions, vk::KHR_SWAPCHAIN_NAME) {
             Some("doesn't support VK_KHR_swapchain".to_owned())
         } else if !bindless {
             Some("doesn't support the descriptor indexing that bindless textures need".to_owned())
@@ -558,6 +703,8 @@ impl Candidate {
             driver,
             vram_mib,
             graphics,
+            transfer,
+            host_copy,
             problem,
         }
     }
@@ -580,6 +727,35 @@ impl Candidate {
             vk::PhysicalDeviceType::VIRTUAL_GPU => 1,
             _ => 0,
         }
+    }
+
+    /// How the GPU uploads: by `wanted`, if given; otherwise through a transfer queue if it has
+    /// one, by host image copy if its driver says that's free, and through the graphics queue if
+    /// neither.
+    fn upload_path(&self, wanted: Option<UploadPath>) -> Result<UploadPath> {
+        let Some(wanted) = wanted else {
+            return Ok(if self.transfer.is_some() {
+                UploadPath::TransferQueue
+            } else if self.host_copy == HostCopy::Free {
+                UploadPath::HostImageCopy
+            } else {
+                UploadPath::GraphicsQueue
+            });
+        };
+        let missing = match wanted {
+            UploadPath::TransferQueue if self.transfer.is_none() => {
+                "has no queue family for transfers apart from graphics"
+            }
+            UploadPath::HostImageCopy if self.host_copy == HostCopy::Unsupported => {
+                "can't write RGBA8 textures from the CPU"
+            }
+            _ => return Ok(wanted),
+        };
+        let message = format!(
+            "uploads by {wanted} were asked for, but {} {missing}",
+            self.name
+        );
+        Err(Error::new("gpu.no_upload_path", message))
     }
 }
 
@@ -623,18 +799,125 @@ fn has_depth(instance: &Instance, physical: vk::PhysicalDevice) -> bool {
     features.contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT)
 }
 
-fn has_swapchain(instance: &Instance, physical: vk::PhysicalDevice) -> bool {
+/// The device's extensions; none, if they can't be listed.
+fn device_extensions(
+    instance: &Instance,
+    physical: vk::PhysicalDevice,
+) -> Vec<vk::ExtensionProperties> {
     // SAFETY: the physical device came from this instance.
     unsafe {
         instance
             .raw()
             .enumerate_device_extension_properties(physical)
     }
-    .is_ok_and(|extensions| {
-        extensions
-            .iter()
-            .any(|extension| extension.extension_name_as_c_str() == Ok(vk::KHR_SWAPCHAIN_NAME))
-    })
+    .unwrap_or_default()
+}
+
+fn has_extension(extensions: &[vk::ExtensionProperties], name: &CStr) -> bool {
+    extensions
+        .iter()
+        .any(|extension| extension.extension_name_as_c_str() == Ok(name))
+}
+
+/// The queue family that uploads go through apart from graphics, if there is one: of those
+/// without graphics that can copy, as compute families can without saying so, the one that does
+/// the fewest other kinds of work, then the first. A family for transfers alone is the GPU's copy
+/// engine. Sparse binding and protected memory are features rather than kinds of work, and don't
+/// count.
+fn transfer_family(families: &[vk::QueueFamilyProperties]) -> Option<u32> {
+    let copies = vk::QueueFlags::TRANSFER | vk::QueueFlags::COMPUTE;
+    let features = vk::QueueFlags::SPARSE_BINDING | vk::QueueFlags::PROTECTED;
+    families
+        .iter()
+        .zip(0u32..)
+        .filter(|(family, _)| {
+            family.queue_count > 0
+                && family.queue_flags.intersects(copies)
+                && !family.queue_flags.contains(vk::QueueFlags::GRAPHICS)
+        })
+        .min_by_key(|&(family, index)| {
+            let mut work = family.queue_flags & !features;
+            if work.contains(vk::QueueFlags::COMPUTE) {
+                work |= vk::QueueFlags::TRANSFER;
+            }
+            (work.as_raw().count_ones(), index)
+        })
+        .map(|(_, index)| index)
+}
+
+/// Whether the device can write the engine's textures from the CPU, and at what cost: host image
+/// copy for both texture formats, at every size a texture has, into the shader-read-only layout
+/// the bindless set declares textures in. Nothing past the extension's name is queried unless
+/// the device lists the extension.
+fn host_copy_support(
+    instance: &Instance,
+    physical: vk::PhysicalDevice,
+    extensions: &[vk::ExtensionProperties],
+) -> HostCopy {
+    if !has_extension(extensions, vk::EXT_HOST_IMAGE_COPY_NAME) {
+        return HostCopy::Unsupported;
+    }
+    let raw = instance.raw();
+    let mut feature = vk::PhysicalDeviceHostImageCopyFeaturesEXT::default();
+    let mut features = vk::PhysicalDeviceFeatures2::default().push_next(&mut feature);
+    // SAFETY: the physical device came from this instance, and lists the extension whose
+    // features these are.
+    unsafe { raw.get_physical_device_features2(physical, &mut features) };
+    if feature.host_image_copy != vk::TRUE {
+        return HostCopy::Unsupported;
+    }
+    let mut counted = vk::PhysicalDeviceHostImageCopyPropertiesEXT::default();
+    let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut counted);
+    // SAFETY: as above; given no arrays, the call counts the layouts.
+    unsafe { raw.get_physical_device_properties2(physical, &mut properties) };
+    let mut layouts = vec![vk::ImageLayout::UNDEFINED; counted.copy_dst_layout_count as usize];
+    let mut listed =
+        vk::PhysicalDeviceHostImageCopyPropertiesEXT::default().copy_dst_layouts(&mut layouts);
+    let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut listed);
+    // SAFETY: as above; the array has room for as many layouts as the device counted.
+    unsafe { raw.get_physical_device_properties2(physical, &mut properties) };
+    if !layouts.contains(&vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL) {
+        return HostCopy::Unsupported;
+    }
+    let mut free = true;
+    // Both texture formats.
+    for format in [vk::Format::R8G8B8A8_UNORM, vk::Format::R8G8B8A8_SRGB] {
+        let mut format_features = vk::FormatProperties3::default();
+        let mut properties = vk::FormatProperties2::default().push_next(&mut format_features);
+        // SAFETY: as above; the third format properties are core in Vulkan 1.3.
+        unsafe { raw.get_physical_device_format_properties2(physical, format, &mut properties) };
+        let host_transfer = vk::FormatFeatureFlags2::HOST_IMAGE_TRANSFER_EXT;
+        if !format_features
+            .optimal_tiling_features
+            .contains(host_transfer)
+        {
+            return HostCopy::Unsupported;
+        }
+        let info = vk::PhysicalDeviceImageFormatInfo2::default()
+            .format(format)
+            .ty(vk::ImageType::TYPE_2D)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(Texture::USAGE | vk::ImageUsageFlags::HOST_TRANSFER_EXT);
+        let mut performance = vk::HostImageCopyDevicePerformanceQueryEXT::default();
+        let mut properties = vk::ImageFormatProperties2::default().push_next(&mut performance);
+        // SAFETY: as above.
+        let supported = unsafe {
+            raw.get_physical_device_image_format_properties2(physical, &info, &mut properties)
+        };
+        let largest = properties.image_format_properties.max_extent;
+        if supported.is_err()
+            || largest.width < MAX_TEXTURE_SIZE
+            || largest.height < MAX_TEXTURE_SIZE
+        {
+            return HostCopy::Unsupported;
+        }
+        free &= performance.optimal_device_access == vk::TRUE;
+    }
+    if free {
+        HostCopy::Free
+    } else {
+        HostCopy::Costly
+    }
 }
 
 /// Picks the GPU to use: of those without a problem whose names contain `gpu`, if given, the
@@ -699,6 +982,8 @@ mod tests {
             driver: String::new(),
             vram_mib,
             graphics: Some(0),
+            transfer: None,
+            host_copy: HostCopy::Unsupported,
             problem: None,
         }
     }
@@ -741,5 +1026,90 @@ mod tests {
                 .contains("no GPU's name contains `nvidia`"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_transfer_queue_is_the_family_apart_from_graphics_with_the_fewest_flags() {
+        use vk::QueueFlags as Q;
+        let families = |flags: &[Q]| {
+            flags
+                .iter()
+                .map(|&queue_flags| vk::QueueFamilyProperties {
+                    queue_flags,
+                    queue_count: 1,
+                    ..Default::default()
+                })
+                .collect::<Vec<_>>()
+        };
+        let all = Q::GRAPHICS | Q::COMPUTE | Q::TRANSFER | Q::SPARSE_BINDING;
+        // An RTX 4090's: transfers alone, then compute, then video and optical flow.
+        let nvidia = families(&[
+            all,
+            Q::TRANSFER | Q::SPARSE_BINDING,
+            Q::COMPUTE | Q::TRANSFER | Q::SPARSE_BINDING,
+            Q::TRANSFER | Q::VIDEO_DECODE_KHR,
+            Q::TRANSFER | Q::VIDEO_ENCODE_KHR,
+            Q::TRANSFER | Q::OPTICAL_FLOW_NV,
+        ]);
+        assert_eq!(transfer_family(&nvidia), Some(1));
+        // An AMD iGPU's: compute before transfers alone, and video that can't copy.
+        let amd = families(&[
+            all,
+            Q::COMPUTE | Q::TRANSFER | Q::SPARSE_BINDING,
+            Q::TRANSFER | Q::SPARSE_BINDING,
+            Q::VIDEO_DECODE_KHR,
+            Q::VIDEO_ENCODE_KHR,
+        ]);
+        assert_eq!(transfer_family(&amd), Some(2));
+        // lavapipe's one family has graphics.
+        assert_eq!(transfer_family(&families(&[all])), None);
+        // A compute family that leaves out the transfer bit it implies, as RADV may: it copies, but
+        // a family for transfers alone after it does less else.
+        let compute = families(&[Q::GRAPHICS | Q::COMPUTE | Q::TRANSFER, Q::COMPUTE]);
+        assert_eq!(transfer_family(&compute), Some(1));
+        let both = families(&[all, Q::COMPUTE, Q::TRANSFER]);
+        assert_eq!(transfer_family(&both), Some(2));
+        // Video before transfers alone.
+        let video = families(&[all, Q::TRANSFER | Q::VIDEO_DECODE_KHR, Q::TRANSFER]);
+        assert_eq!(transfer_family(&video), Some(2));
+    }
+
+    #[test]
+    fn uploads_take_the_best_path_or_the_one_asked_for() {
+        use UploadPath::{GraphicsQueue, HostImageCopy, TransferQueue};
+        let gpu = |transfer, host_copy| Candidate {
+            transfer,
+            host_copy,
+            ..candidate(0, "Some GPU", vk::PhysicalDeviceType::DISCRETE_GPU, 8192)
+        };
+        let path = |gpu: &Candidate, wanted| gpu.upload_path(wanted).expect("a path");
+        let everything = gpu(Some(1), HostCopy::Free);
+        assert_eq!(path(&everything, None), TransferQueue);
+        assert_eq!(path(&everything, Some(TransferQueue)), TransferQueue);
+        assert_eq!(path(&everything, Some(HostImageCopy)), HostImageCopy);
+        assert_eq!(path(&everything, Some(GraphicsQueue)), GraphicsQueue);
+        let free = gpu(None, HostCopy::Free);
+        assert_eq!(path(&free, None), HostImageCopy);
+        // A forced path doesn't need host copies to be free, only to work.
+        let costly = gpu(None, HostCopy::Costly);
+        assert_eq!(path(&costly, None), GraphicsQueue);
+        assert_eq!(path(&costly, Some(HostImageCopy)), HostImageCopy);
+        assert_eq!(path(&gpu(None, HostCopy::Unsupported), None), GraphicsQueue);
+
+        let error = free
+            .upload_path(Some(TransferQueue))
+            .expect_err("no transfer family");
+        assert_eq!(error.code(), "gpu.no_upload_path");
+        assert!(
+            error
+                .to_string()
+                .contains("Some GPU has no queue family for transfers"),
+            "{error}"
+        );
+        let unsupported = gpu(Some(1), HostCopy::Unsupported);
+        let error = unsupported
+            .upload_path(Some(HostImageCopy))
+            .expect_err("no host image copy");
+        assert_eq!(error.code(), "gpu.no_upload_path");
     }
 }

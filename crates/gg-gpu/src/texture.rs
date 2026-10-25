@@ -1,5 +1,6 @@
 //! Textures: images shaders sample, each in a slot of the bindless set.
 
+use std::slice;
 use std::sync::Arc;
 
 use ash::vk;
@@ -7,7 +8,7 @@ use gg_core::Result;
 
 use crate::device::Retired;
 use crate::vma::{Allocation, Memory};
-use crate::{COLOR_RANGE, Device, vk_error};
+use crate::{COLOR_LAYERS, COLOR_RANGE, Device, UploadPath, vk_error};
 
 /// The most pixels a side a texture has: what every Vulkan 1.4 device takes, the version the
 /// engine requires.
@@ -25,8 +26,8 @@ pub enum TextureFormat {
 }
 
 /// An RGBA image with 8-bit channels, that shaders sample through its index in the bindless
-/// set. Frames write its pixels, which are undefined until then. Dropping it retires it until
-/// the GPU is done with it.
+/// set. Frames fill its pixels, and may write over them, and they're undefined until then.
+/// Dropping it retires it until the GPU is done with it.
 pub struct Texture {
     device: Arc<Device>,
     raw: vk::Image,
@@ -35,11 +36,16 @@ pub struct Texture {
     allocation: Option<Allocation>,
     extent: vk::Extent2D,
     index: u32,
-    /// Whether a frame has written it, which leaves it in the shader-read-only layout.
+    /// Whether a frame has filled or written it, which leaves it in the shader-read-only layout.
     written: bool,
 }
 
 impl Texture {
+    /// What every texture is made for: shaders sample it, and copies write it.
+    pub(crate) const USAGE: vk::ImageUsageFlags = vk::ImageUsageFlags::from_raw(
+        vk::ImageUsageFlags::SAMPLED.as_raw() | vk::ImageUsageFlags::TRANSFER_DST.as_raw(),
+    );
+
     /// A texture of `width` by `height` pixels, in a free slot of the bindless set past the placed
     /// ones, with `name` as its debug name.
     ///
@@ -92,6 +98,13 @@ impl Texture {
             TextureFormat::Rgba8Unorm => vk::Format::R8G8B8A8_UNORM,
             TextureFormat::Rgba8Srgb => vk::Format::R8G8B8A8_SRGB,
         };
+        // Host copies need it, and only devices whose drivers say it costs them nothing upload
+        // that way, unless a test asks.
+        let usage = if device.upload_path() == UploadPath::HostImageCopy {
+            Self::USAGE | vk::ImageUsageFlags::HOST_TRANSFER_EXT
+        } else {
+            Self::USAGE
+        };
         let info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)
@@ -100,7 +113,7 @@ impl Texture {
             .array_layers(1)
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST);
+            .usage(usage);
         let (raw, allocation) = device.allocator().create_image(&info, Memory::Gpu)?;
         let view_info = vk::ImageViewCreateInfo::default()
             .image(raw)
@@ -116,7 +129,7 @@ impl Texture {
             }
         };
         // SAFETY: the view is of a live sampled image, which is in the shader-read-only layout
-        // before any shader can sample it: frames write it first.
+        // before any shader can sample it: frames fill or write it first.
         let index = match unsafe { device.bindless().add(device.raw(), view, slot) } {
             Ok(index) => index,
             Err(error) => {
@@ -160,6 +173,53 @@ impl Texture {
 
     pub(crate) fn set_written(&mut self) {
         self.written = true;
+    }
+
+    /// Writes `pixels`, every one of the texture's, from the CPU straight into its image, and
+    /// leaves it in the shader-read-only layout: host image copy, on a device that uploads that
+    /// way. The device's next submission makes the writes visible to it.
+    ///
+    /// # Panics
+    ///
+    /// If the device doesn't upload by host image copy, a frame has written the texture, or
+    /// `pixels` doesn't fill it exactly.
+    pub(crate) fn copy_from_host(&mut self, pixels: &[u8]) -> Result<()> {
+        let functions = self
+            .device
+            .host_image_copy_fn()
+            .expect("only a device that uploads by host image copy copies from the host");
+        assert!(
+            !self.written,
+            "a texture is copied from the host before any frame writes it"
+        );
+        let vk::Extent2D { width, height } = self.extent;
+        assert_eq!(
+            pixels.len() as u64,
+            u64::from(width) * u64::from(height) * 4,
+            "the pixels don't fill a {width}x{height} texture",
+        );
+        let transition = vk::HostImageLayoutTransitionInfoEXT::default()
+            .image(self.raw)
+            .old_layout(vk::ImageLayout::UNDEFINED)
+            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .subresource_range(COLOR_RANGE);
+        // SAFETY: the image is live and made for host transfers, which the device enabled, into
+        // the shader-read-only layout, which it listed as one host copies write; no submission
+        // has used it, since no frame has written it, and `&mut` keeps the engine off it.
+        unsafe { functions.transition_image_layout(slice::from_ref(&transition)) }
+            .map_err(|e| vk_error("vkTransitionImageLayoutEXT", e))?;
+        let region = vk::MemoryToImageCopyEXT::default()
+            .host_pointer(pixels.as_ptr().cast())
+            .image_subresource(COLOR_LAYERS)
+            .image_extent(self.extent.into());
+        let info = vk::CopyMemoryToImageInfoEXT::default()
+            .dst_image(self.raw)
+            .dst_image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .regions(slice::from_ref(&region));
+        // SAFETY: as above, in the layout just changed to; the region is the whole image, whose
+        // every texel `pixels`, tightly packed, was just checked to hold.
+        unsafe { functions.copy_memory_to_image(&info) }
+            .map_err(|e| vk_error("vkCopyMemoryToImageEXT", e))
     }
 }
 

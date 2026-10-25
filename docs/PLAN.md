@@ -245,23 +245,29 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   sandbox's cubes, which cut through each other, show. A GPU test checks depth against a reference
   from a camera with perspective, and another the depth barrier under synchronization validation;
   unit tests check both projections, the order and the controller.
+- **Asset uploads** (2026-10-25): meshes and textures reach the GPU through a queue for transfers
+  alone where the GPU has one, which hands them over to the graphics queue; where it hasn't, by
+  host image copy if its driver says that costs nothing, and through the graphics queue otherwise.
+  The frame that takes them waits for their copies and draws them, and what staged them is freed
+  once it finishes, rather than held in the frame's arena. GPU tests run the meshes, textures and
+  sheets references on each way the GPU has, the first two reading back the frame that adds an
+  asset, draw a 64 MiB texture in the frame that adds it, and write over a filled texture, whose
+  layout validation checks; unit tests check the choice of family and of way, and the handover.
 
-## Now: Phase 4's fourth milestone
+## Now: Phase 4's fifth milestone
 
-[Phase 4](#next)'s fourth milestone is picked from what the phase has left as it starts, and its
+[Phase 4](#next)'s fifth milestone is picked from what the phase has left as it starts, and its
 plan says when it's done.
 
 ## Next
 
 Each phase ends in something you can run and check.
 
-4. **First mesh.** Uploads of whole assets through the transfer queue, or by host image copy
-   where a device has no separate transfer queue; Slang reflection; an on-disk pipeline
-   cache; shader hot reload. Render extraction, with the render thread a frame behind
-   simulation and rendering interpolated between fixed steps. *Done when* the sandbox draws a
-   textured, depth-tested glTF mesh and thousands of moving entities, Tracy shows simulation
-   and rendering overlapping, steady-state frames don't allocate, and a RenderDoc capture shows
-   named resources and labeled passes.
+4. **First mesh.** Slang reflection; an on-disk pipeline cache; shader hot reload. Render
+   extraction, with the render thread a frame behind simulation and rendering interpolated
+   between fixed steps. *Done when* the sandbox draws a textured, depth-tested glTF mesh and
+   thousands of moving entities, Tracy shows simulation and rendering overlapping, steady-state
+   frames don't allocate, and a RenderDoc capture shows named resources and labeled passes.
 5. **Tool API and hot reload: v0.1.** The tool API in development builds, as
    [ARCHITECTURE.md](../ARCHITECTURE.md#agents-and-tools) describes. `tools/gg`, the
    command-line tool: build, run and test with machine-readable results; launch and supervise a
@@ -342,7 +348,9 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Images other than PNG, such as the JPEGs glTF allows; and PNGs' own color profiles and gamma, which are ignored, every PNG taken as sRGB | Phase 4, with glTF; Phase 7 cooks KTX2 |
 | Decoding images off the main thread; `Context::add_texture` decodes before it returns | Phase 7, with the streaming loader |
 | Layers making textures from their own pixels; `Textures::add` takes pixels, but `Context` adds only PNGs | A game makes its own textures |
-| Pixels, vertices and instances' transforms and parameters reach the GPU through the frame's arena, which merges the buffers it grew into, holding two to three times the largest frame for each frame in flight: by its growth rule, about 20 MB each for 100,000 sprites, which use 10.4 MB a frame; and a frame that adds many textures leaves that much host memory held | Phase 4, with uploads through the transfer queue |
+| Instances' transforms and parameters, and the UI's vertices, indices and texture changes, reach the GPU through the frame's arena, which merges the buffers it grew into, holding two to three times the largest frame for each frame in flight, in memory the CPU writes: by its growth rule, about 20 MB each for 100,000 sprites, which use 10.4 MB a frame | Phase 7, with the GPU's memory budget |
+| A frame's copies through a transfer queue start only once it's submitted, after its passes are recorded, and the frame waits for them | A profile shows a frame waiting for its uploads |
+| Host image copy where a transfer queue exists, or where the driver says it costs the GPU in reading the image, as KosmicKrisp's does, turning off Apple's lossless compression, so that macOS uploads through the graphics queue; and meshes written straight into GPU memory the CPU reaches, as ReBAR and unified memory allow, rather than copied | A measurement shows either is faster |
 | More than one camera or view, such as split screen or the editor's scene view | A game or the editor draws several |
 | The camera as a component of an entity, which a scene saves and a parent carries along; layers set the camera through `Context`, and the world doesn't hold it | A scene saves a camera, or a camera follows or rides an entity, with a world matrix for game code |
 | The game's view in a panel that docks and tabs, and keys reaching the layers only while it has focus, as editors' views do; the view is the central area, and keys reach the layers wherever the pointer is unless one of egui's widgets has focus | A tool in the game's process shows the view among its panels |

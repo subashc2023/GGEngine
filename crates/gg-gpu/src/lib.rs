@@ -25,7 +25,7 @@ use gg_core::Error;
 
 pub use bindless::{PLACED_TEXTURES, Sampler};
 pub use buffer::GpuBuffer;
-pub use device::Device;
+pub use device::{Device, UploadPath};
 pub use frame::{Frame, Frames, Indices, Pass, Target, Upload};
 pub use image::{ColorImage, DepthImage};
 pub use instance::{Instance, InstanceDesc, Validation};
@@ -42,6 +42,14 @@ const COLOR_RANGE: vk::ImageSubresourceRange = vk::ImageSubresourceRange {
     aspect_mask: vk::ImageAspectFlags::COLOR,
     base_mip_level: 0,
     level_count: 1,
+    base_array_layer: 0,
+    layer_count: 1,
+};
+
+/// The one mip level and layer of a color image, which copies write.
+const COLOR_LAYERS: vk::ImageSubresourceLayers = vk::ImageSubresourceLayers {
+    aspect_mask: vk::ImageAspectFlags::COLOR,
+    mip_level: 0,
     base_array_layer: 0,
     layer_count: 1,
 };

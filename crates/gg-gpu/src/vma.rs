@@ -88,9 +88,14 @@ mod vulkan {
 pub enum Memory {
     /// Only the GPU: render targets, textures, and buffers the GPU fills.
     Gpu,
-    /// The CPU writes it, in order, and the GPU reads it: per-frame data and uploads. It stays
-    /// mapped, and lives in GPU memory where the CPU can write that directly.
+    /// The CPU writes it, in order, and the GPU reads it: per-frame data. It stays mapped, and
+    /// lives where VMA finds best for what it's used for, such as GPU memory the CPU can write
+    /// directly.
     Upload,
+    /// The CPU writes it once, in order, and the GPU copies from it: staging for uploads. It stays
+    /// mapped, lives in the CPU's memory, and has memory of its own, so that freeing it gives the
+    /// memory back.
+    Staging,
     /// The GPU writes it and the CPU reads it back. It stays mapped.
     Readback,
 }
@@ -269,6 +274,14 @@ fn creation(memory: Memory) -> VmaAllocationCreateInfo {
             VmaMemoryUsage::VMA_MEMORY_USAGE_AUTO,
             VmaAllocationCreateFlagBits::VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
                 | VmaAllocationCreateFlagBits::VMA_ALLOCATION_CREATE_MAPPED_BIT,
+        ),
+        // Dedicated, since VMA keeps an emptied block for later, which would hold on to the
+        // largest upload's memory for good.
+        Memory::Staging => (
+            VmaMemoryUsage::VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+            VmaAllocationCreateFlagBits::VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+                | VmaAllocationCreateFlagBits::VMA_ALLOCATION_CREATE_MAPPED_BIT
+                | VmaAllocationCreateFlagBits::VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT,
         ),
         Memory::Readback => (
             VmaMemoryUsage::VMA_MEMORY_USAGE_AUTO,

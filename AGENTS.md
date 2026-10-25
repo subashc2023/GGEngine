@@ -100,8 +100,10 @@ x86-64 and ARM64, and on macOS, on ARM64 alone, and the layering check. Its Linu
 tests and the sandbox headless on lavapipe, with and without Tracy, check that the run logged
 `engine.perf` and ticked and rendered once a frame, and record a run on four threads and replay it,
 on the default and on one; Windows' and macOS's runners have no GPU, so there `GG_SKIP_GPU_TESTS`
-skips the GPU tests. Its minutes are billed, a macOS minute at ten times a Linux one, so push a
-branch to probe CI only for a change another platform could break.
+skips the GPU tests. lavapipe has no queue for transfers alone, so CI never uploads through one:
+after changing uploads, run the GPU tests on a GPU that has one, as NVIDIA's do. Its minutes are
+billed, a macOS minute at ten times a Linux one, so push a branch to probe CI only for a change
+another platform could break.
 
 ## Rust
 

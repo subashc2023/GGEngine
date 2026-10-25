@@ -279,8 +279,8 @@ impl MeshPass {
                 count: added.indices.len() as u32,
                 vertex_size: added.vertex_size,
             };
-            frame.write_buffer(&mut mesh.vertices, 0, &added.vertices)?;
-            frame.write_buffer(&mut mesh.indices, 0, indices)?;
+            frame.fill_buffer(&mut mesh.vertices, &added.vertices)?;
+            frame.fill_buffer(&mut mesh.indices, indices)?;
             self.meshes.push(mesh);
         }
         for added in uploads.textures.drain(..) {
@@ -299,7 +299,7 @@ impl MeshPass {
                 TextureFormat::Rgba8Srgb,
                 &added.name,
             )?;
-            frame.write_texture(&mut texture, [0, 0], added.size, &added.pixels)?;
+            frame.fill_texture(&mut texture, &added.pixels)?;
             self.textures.push(texture);
         }
         Ok(())

@@ -11,7 +11,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use ash::vk;
-use gg_gpu::{ColorImage, DepthImage, Device, Frames, Instance, InstanceDesc, Target};
+use gg_gpu::{
+    ColorImage, DepthImage, Device, Frames, GpuBuffer, Instance, InstanceDesc, Target, Texture,
+    TextureFormat, UploadPath,
+};
 
 fn main() {
     if gg_core::profile::ENABLED {
@@ -44,6 +47,10 @@ fn main() {
         dropped_images_free_their_slots,
     );
     run("depth_clears_in_every_pass", depth_clears_in_every_pass);
+    run(
+        "filled_textures_can_be_written_over_on_every_path",
+        filled_textures_can_be_written_over_on_every_path,
+    );
     run("validation_errors_reach_the_json_log", || {
         validation_errors_reach_the_json_log(&log);
     });
@@ -73,7 +80,7 @@ fn instance() -> Arc<Instance> {
 fn clear_reads_back() {
     let instance = instance();
     let validation = instance.validation();
-    let device = Device::new(&instance, None, None).expect("a GPU that supports Vulkan 1.4");
+    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
     let mut images = [
         ColorImage::new(&device, 64, 32, "clear test target 0").expect("an image"),
         ColorImage::new(&device, 64, 32, "clear test target 1").expect("an image"),
@@ -131,7 +138,7 @@ fn clear_reads_back() {
 fn sampled_images_keep_their_layout() {
     let instance = instance();
     let validation = instance.validation();
-    let device = Device::new(&instance, None, None).expect("a GPU that supports Vulkan 1.4");
+    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
     let mut image = ColorImage::new(&device, 16, 16, "sampled test target").expect("an image");
     let mut frames = Frames::new(&device).expect("frames");
     for _ in 0..3 {
@@ -161,7 +168,7 @@ fn sampled_images_keep_their_layout() {
 fn dropped_images_free_their_slots() {
     let instance = instance();
     let validation = instance.validation();
-    let device = Device::new(&instance, None, None).expect("a GPU that supports Vulkan 1.4");
+    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
     for i in 0..5_000 {
         let image = ColorImage::new(&device, 4, 4, "dropped test image");
         drop(image.unwrap_or_else(|error| panic!("image {i}: {error:#}")));
@@ -182,7 +189,7 @@ fn dropped_images_free_their_slots() {
 fn depth_clears_in_every_pass() {
     let instance = instance();
     let validation = instance.validation();
-    let device = Device::new(&instance, None, None).expect("a GPU that supports Vulkan 1.4");
+    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
     let mut image = ColorImage::new(&device, 16, 16, "depth test target").expect("an image");
     let depth = DepthImage::new(&device, 16, 16, "depth test depth").expect("a depth image");
     let mut frames = Frames::new(&device).expect("frames");
@@ -205,13 +212,62 @@ fn depth_clears_in_every_pass() {
     );
 }
 
+/// Fills a texture and a buffer in a frame, then writes over a pixel of the texture in each of the
+/// next two, more frames than are in flight, once for each way of uploading that the GPU has:
+/// validation checks the layout each way leaves the texture in against the one the write starts
+/// from, which it doesn't for what the bindless set samples.
+fn filled_textures_can_be_written_over_on_every_path() {
+    let instance = instance();
+    let validation = instance.validation();
+    for path in UploadPath::ALL {
+        let device = match Device::new(&instance, None, None, Some(path)) {
+            Ok(device) => device,
+            Err(error) => {
+                assert_eq!(error.code(), "gpu.no_upload_path", "{error:#}");
+                println!("uploading by {path} skipped: {error}");
+                continue;
+            }
+        };
+        let mut image = ColorImage::new(&device, 4, 4, "fill test target").expect("an image");
+        let format = TextureFormat::Rgba8Srgb;
+        let texture = Texture::new(&device, 8, 2, format, "filled test texture");
+        let mut texture = texture.expect("a texture");
+        let mut buffer = GpuBuffer::new(&device, 64, "filled test buffer").expect("a buffer");
+        let mut frames = Frames::new(&device).expect("frames");
+        for i in 0..3 {
+            let mut frame = frames
+                .begin([Target::Image(&mut image)])
+                .expect("a frame")
+                .expect("an offscreen image can always be rendered into");
+            if i == 0 {
+                let pixels = [255; 8 * 2 * 4];
+                frame.fill_texture(&mut texture, &pixels).expect("a fill");
+                frame.fill_buffer(&mut buffer, &[7; 64]).expect("a fill");
+            } else {
+                let write = frame.write_texture(&mut texture, [i, 0], [1, 1], &[0; 4]);
+                write.expect("a write");
+            }
+            drop(frame.begin_pass(0, c"clear", [0.0, 0.0, 0.0, 1.0], None));
+            frame.submit().expect("the frame's submission");
+        }
+        drop((frames, texture, buffer, image, device));
+    }
+
+    drop(instance);
+    assert_eq!(
+        validation.messages(),
+        0,
+        "validation reported problems; the log above says what"
+    );
+}
+
 /// Breaks a Vulkan rule on purpose, and checks that validation's error reaches the JSON log
 /// with its VUID and the debug name of the object involved.
 fn validation_errors_reach_the_json_log(log: &Path) {
     const NAME: &str = "deliberately misviewed image";
     let instance = instance();
     let validation = instance.validation();
-    let device = Device::new(&instance, None, None).expect("a GPU that supports Vulkan 1.4");
+    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
     let image = ColorImage::new(&device, 4, 4, NAME).expect("an image");
     let info = vk::ImageViewCreateInfo::default()
         .image(image.raw())

@@ -17,7 +17,7 @@ use bytemuck::NoUninit;
 use gg_core::math::{self, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{
     Blend, Camera, DrawCounts, Draws, MeshDraw, Meshes, Projection, RenderData, Renderer, Sampler,
-    Settings, Shaders, Sprite, SpriteSheet, Texture, Textures, Ui, Uploads, Viewport,
+    Settings, Shaders, Sprite, SpriteSheet, Texture, Textures, Ui, UploadPath, Uploads, Viewport,
 };
 
 fn main() {
@@ -41,11 +41,6 @@ fn main() {
     gg_core::log::init("renderer-gpu-tests", &dir);
 
     run("ui_matches_its_reference", ui_matches_its_reference);
-    run("meshes_match_their_reference", meshes_match_their_reference);
-    run(
-        "textures_match_their_reference",
-        textures_match_their_reference,
-    );
     run(
         "sprites_match_their_reference",
         sprites_match_their_reference,
@@ -54,9 +49,29 @@ fn main() {
         "batches_match_their_reference",
         batches_match_their_reference,
     );
-    run("sheets_match_their_reference", sheets_match_their_reference);
     run("views_match_their_reference", views_match_their_reference);
     run("depth_matches_its_reference", depth_matches_its_reference);
+    // Once for each way of uploading that the GPU has.
+    for path in UploadPath::ALL {
+        if let Err(error) = Renderer::headless(&settings(Some(path)), 1, 1) {
+            assert_eq!(error.code(), "gpu.no_upload_path", "{error:#}");
+            println!("tests uploading by {path} skipped: {error}");
+            continue;
+        }
+        let each = |name: &str, test: fn(UploadPath)| {
+            run(&format!("{name} uploading by {path}"), || test(path));
+        };
+        each("meshes_match_their_reference", meshes_match_their_reference);
+        each(
+            "textures_match_their_reference",
+            textures_match_their_reference,
+        );
+        each("sheets_match_their_reference", sheets_match_their_reference);
+        each(
+            "a_large_texture_draws_in_the_frame_that_adds_it",
+            a_large_texture_draws_in_the_frame_that_adds_it,
+        );
+    }
 }
 
 fn run(name: &str, test: impl FnOnce()) {
@@ -67,19 +82,37 @@ fn run(name: &str, test: impl FnOnce()) {
 /// What the tests clear to, in linear RGBA.
 const CLEAR: [f32; 4] = [0.02, 0.03, 0.05, 1.0];
 
-/// A headless renderer of `width` by `height` pixels, under validation.
-fn renderer(width: u32, height: u32) -> Renderer {
-    let settings = Settings {
+/// How the tests' renderers are set up: under validation, uploading by `uploads`, if given, rather
+/// than by the GPU's best way.
+fn settings(uploads: Option<UploadPath>) -> Settings<'static> {
+    Settings {
         app_name: "renderer gpu tests",
         validation: true,
         gpu: None,
         vsync: false,
-    };
-    let renderer = Renderer::headless(&settings, width, height).expect("a renderer");
+        uploads,
+    }
+}
+
+/// A headless renderer of `width` by `height` pixels, under validation.
+fn renderer(width: u32, height: u32) -> Renderer {
+    renderer_uploading(width, height, None)
+}
+
+/// A renderer like [`renderer`]'s, that uploads by `uploads`, if given.
+fn renderer_uploading(width: u32, height: u32, uploads: Option<UploadPath>) -> Renderer {
+    let renderer = Renderer::headless(&settings(uploads), width, height).expect("a renderer");
     assert!(
         renderer.validation().enabled(),
         "GPU tests run under validation; install the Vulkan SDK's validation layer"
     );
+    if let Some(uploads) = uploads {
+        assert_eq!(
+            renderer.upload_path(),
+            uploads,
+            "the renderer uploads as asked"
+        );
+    }
     renderer
 }
 
@@ -158,14 +191,15 @@ fn ui_matches_its_reference() {
 /// order, or the meshes drawn out of order, change thousands of pixels; the second square is
 /// clear of them, so that a draw given another's parameters changes a thousand; it's drawn through
 /// a `MeshDraw`, which holds its mesh, shader and parameters without their types, as an entity's
-/// does, and joins the first square's instanced draw. The triangle is added after the first frame,
-/// and the frames outnumber those in flight, so that later frames draw from what earlier ones
-/// copied to the GPU. The view renders into an image of its own, which the frame shows at the
-/// view's place, so that one shown elsewhere changes thousands of pixels.
-fn meshes_match_their_reference() {
+/// does, and joins the first square's instanced draw. The triangle is added in the last of the
+/// frames, which outnumber those in flight, so that the image shows a mesh drawn in the frame that
+/// adds it beside those that earlier frames copied to the GPU. The view renders into an image of
+/// its own, which the frame shows at the view's place, so that one shown elsewhere changes
+/// thousands of pixels.
+fn meshes_match_their_reference(path: UploadPath) {
     const WIDTH: u32 = 320;
     const HEIGHT: u32 = 200;
-    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut renderer = renderer_uploading(WIDTH, HEIGHT, Some(path));
     let mut meshes = Meshes::default();
     let mut shaders = Shaders::default();
     let mut textures = Textures::default();
@@ -208,7 +242,7 @@ fn meshes_match_their_reference() {
     let second = MeshDraw::new(square, flat, orange);
     draws.push_draw(transform(0.8, 0.0, [3.2, 1.8]), &second);
     for frame in 0..3 {
-        if frame == 1 {
+        if frame == 2 {
             // Positions, then colors; no parameters.
             let colored = shaders
                 .add::<[f32; 7], ()>("vertex color", &shader("vertex_color.slang"), Blend::Opaque)
@@ -256,14 +290,15 @@ struct Sampling {
 /// way, sharp, so that a sampler ignored would clamp it and blur it, and its top left is a third
 /// color, so that an image flipped moves it. The engine's white texture, never drawn here, takes
 /// slot 0, so that textures put in the wrong slots, or sampled through the wrong ones, show it or
-/// each other; the one with alpha is added after the first frame. Its texels are opaque, half, a
+/// each other; the one with alpha is added in the last frame, which the image is read back from,
+/// so that it shows a texture sampled in the frame that adds it. Its texels are opaque, half, a
 /// quarter and wholly transparent, so that a shader blended as opaque, or as though its alpha were
 /// multiplied in, changes thousands of pixels; and the textures are sRGB, so that colors sampled
 /// without decoding come out brighter.
-fn textures_match_their_reference() {
+fn textures_match_their_reference(path: UploadPath) {
     const WIDTH: u32 = 240;
     const HEIGHT: u32 = 160;
-    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut renderer = renderer_uploading(WIDTH, HEIGHT, Some(path));
     let mut meshes = Meshes::default();
     let mut shaders = Shaders::default();
     let mut textures = Textures::default();
@@ -319,7 +354,7 @@ fn textures_match_their_reference() {
     };
     draws.push(tiled, textured, place(-1.0), sampling);
     for frame in 0..3 {
-        if frame == 1 {
+        if frame == 2 {
             // White, opaque and half transparent along the top; red a quarter opaque, then
             // nothing, along the bottom.
             let pixels = [
@@ -610,11 +645,12 @@ fn batches_match_their_reference() {
 /// don't blend with those they'd wrap to, and a rectangle of no width, which shows the texel to its
 /// right. Every edge, and every texel's edge, falls between pixels: whether a nearest sampler takes
 /// a neighbor's texel where an edge lies on a pixel's center depends on how a GPU rounds, so the
-/// linear sprites check the bounds the shader keeps to, which are the same for both.
-fn sheets_match_their_reference() {
+/// linear sprites check the bounds the shader keeps to, which are the same for both. The sheets'
+/// odd sizes, 8 by 4 and 46 by 2, check that each way of uploading copies their rows whole.
+fn sheets_match_their_reference(path: UploadPath) {
     const WIDTH: u32 = 240;
     const HEIGHT: u32 = 200;
-    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut renderer = renderer_uploading(WIDTH, HEIGHT, Some(path));
     let mut meshes = Meshes::default();
     let mut shaders = Shaders::default();
     let mut textures = Textures::default();
@@ -1014,6 +1050,83 @@ fn depth_matches_its_reference() {
         render_without_ui(&mut renderer, data);
     }
     check(renderer, "depth", WIDTH, HEIGHT);
+}
+
+/// Fills the view with a texture of 4,096 by 4,096 texels of one color, 64 MiB, in the frame that
+/// adds it, and checks that every pixel shows that color: staged, it takes more than the least
+/// staging buffer, 16 MiB, so that staging grows to hold it, and every texel the view samples must
+/// have been copied, which a transfer queue takes milliseconds to do.
+fn a_large_texture_draws_in_the_frame_that_adds_it(path: UploadPath) {
+    const SIDE: u32 = 32;
+    const TEXELS: u32 = 4096;
+    // sRGB-encoded.
+    const COLOR: [u8; 4] = [200, 80, 40, 255];
+    let mut renderer = renderer_uploading(SIDE, SIDE, Some(path));
+    let mut meshes = Meshes::default();
+    let mut shaders = Shaders::default();
+    let mut textures = Textures::default();
+    let mut uploads = Uploads::default();
+    // Positions, then texture coordinates.
+    let textured = shaders
+        .add::<[f32; 5], Sampling>("textured", &shader("textured.slang"), Blend::Opaque)
+        .expect("a shader");
+    // The whole view, which is 2 units high and as wide.
+    let corners = [
+        [-1.0, -1.0, 0.0, 0.0, 1.0],
+        [1.0, -1.0, 0.0, 1.0, 1.0],
+        [1.0, 1.0, 0.0, 1.0, 0.0],
+        [-1.0, 1.0, 0.0, 0.0, 0.0],
+    ];
+    let square = meshes
+        .add("square", &corners, &[0, 1, 2, 2, 3, 0])
+        .expect("a mesh");
+    let pixels = COLOR.repeat((TEXELS * TEXELS) as usize);
+    let large = textures
+        .add("large", [TEXELS, TEXELS], &pixels)
+        .expect("a texture");
+    let mut draws = Draws::default();
+    let sampling = Sampling {
+        texture: large,
+        sampler: Sampler::NearestClamp.index(),
+    };
+    draws.push(square, textured, Mat4::IDENTITY, sampling);
+    uploads.take(&mut meshes, &mut shaders, &mut textures);
+    let data = RenderData {
+        clear_color: CLEAR,
+        viewport: Viewport {
+            origin: [0, 0],
+            size: [SIDE, SIDE],
+        },
+        camera: Camera {
+            projection: Projection::Orthographic {
+                height: 2.0,
+                near: -1.0,
+                far: 1.0,
+            },
+            ..Camera::default()
+        },
+        uploads: &mut uploads,
+        draws: &draws,
+    };
+    render_without_ui(&mut renderer, data);
+    let validation = renderer.validation();
+    let pixels = renderer
+        .read_back()
+        .expect("the frame's pixels")
+        .expect("a headless renderer's frame can be read back");
+    drop(renderer);
+    assert_eq!(
+        validation.messages(),
+        0,
+        "validation reported problems; the log above says what"
+    );
+    for pixel in pixels.as_chunks::<4>().0 {
+        let close = pixel
+            .iter()
+            .zip(COLOR)
+            .all(|(&got, want)| got.abs_diff(want) <= 1);
+        assert!(close, "read back {pixel:?}, expected {COLOR:?}");
+    }
 }
 
 /// Renders a frame of `data`, without UI.
