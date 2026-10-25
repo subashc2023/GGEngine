@@ -288,7 +288,10 @@ impl Handler<'_> {
 }
 
 fn dispatch(stack: &mut Stack, cx: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
-    trace!(?event, "Event");
+    // Every event but the cursor's moves, which would drown the rest.
+    if !matches!(event, Event::CursorMoved { .. }) {
+        trace!(?event, "Event");
+    }
     stack.event(cx, event)
 }
 
@@ -367,6 +370,8 @@ impl ApplicationHandler for Handler<'_> {
                 // `about_to_wait` between two frames otherwise, and the two requests make one.
                 self.request_frame(event_loop);
             }
+            // Untraced, as `dispatch` leaves the cursor's moves.
+            WindowEvent::CursorMoved { .. } if consumed => {}
             _ if consumed => trace!(?event, "Event kept by the UI"),
             WindowEvent::CloseRequested => self.close(event_loop),
             other => event::convert(&other, |event| {
