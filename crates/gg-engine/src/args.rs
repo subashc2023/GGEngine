@@ -1,6 +1,7 @@
 //! The command-line flags every app shares.
 
 use std::ffi::OsString;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
 use gg_core::{Error, Result};
@@ -12,6 +13,8 @@ pub(crate) struct Args {
     pub(crate) gpu: Option<String>,
     pub(crate) validation: bool,
     pub(crate) vsync: bool,
+    /// The threads the simulation's jobs run on, the main thread among them.
+    pub(crate) threads: NonZeroUsize,
     /// Where the run is recorded: its seed, its layers' commands and the world's hash at each tick.
     pub(crate) record: Option<PathBuf>,
     /// The recording replayed, without a window or a GPU, in place of a run.
@@ -50,6 +53,7 @@ Options:
   --validation      Run under Vulkan validation (the default in debug builds)
   --no-validation   Run without Vulkan validation (the default in release builds)
   --vsync           Present at the display's refresh rate, rather than uncapped
+  --threads <N>     Run the simulation's jobs on N threads, the main one among them (one per CPU)
   --record <PATH>   Record the run to PATH: its seed, its layers' commands and its hash each tick
   --replay <PATH>   Replay the recording at PATH without a window or a GPU, checking each hash
   --dump <TICK>     With --replay, stop after tick TICK, or at `attach`, and print the world
@@ -73,6 +77,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
         gpu: None,
         validation: cfg!(debug_assertions),
         vsync: false,
+        threads: std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN),
         record: None,
         replay: None,
         dump: None,
@@ -112,6 +117,14 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
                     ))
                 })?;
                 parsed.frames = Some(frames);
+            }
+            "--threads" => {
+                let threads = value_of(flag)?;
+                parsed.threads = threads.parse().map_err(|_| {
+                    bad(format!(
+                        "`--threads` takes a number of threads, 1 or more, not `{threads}`"
+                    ))
+                })?;
             }
             "--gpu" => parsed.gpu = Some(value_of(flag)?),
             "--record" => parsed.record = Some(value_of(flag)?.into()),
@@ -181,6 +194,16 @@ mod tests {
             parse_strs(&["--frames=60"]).unwrap().unwrap().frames,
             Some(60)
         );
+        assert_eq!(
+            parse_strs(&[]).unwrap().unwrap().threads,
+            std::thread::available_parallelism().unwrap()
+        );
+        for args in [&["--threads", "3"][..], &["--threads=3"]] {
+            assert_eq!(parse_strs(args).unwrap().unwrap().threads.get(), 3);
+        }
+        // A replay runs on as many threads as it's given: the ticks go the same way on any.
+        let args = parse_strs(&["--replay", "run.recording", "--threads", "1"]);
+        assert_eq!(args.unwrap().unwrap().threads, NonZeroUsize::MIN);
         let args = parse_strs(&["--record=run.recording", "--headless"])
             .unwrap()
             .unwrap();
@@ -219,6 +242,8 @@ mod tests {
             &["--bogus"][..],
             &["--frames"],
             &["--frames", "sixty"],
+            &["--threads", "0"],
+            &["--threads", "x"],
             &["--headless=yes"],
             &["--dump", "attach"],
             &["--replay", "run.recording", "--dump", "-1"],

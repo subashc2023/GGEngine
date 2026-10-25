@@ -48,8 +48,8 @@ are in [AGENTS.md](AGENTS.md).
   buffers, images, descriptors, pipelines, swapchain, synchronization and submission.
 - **`gg-renderer`:** the render graph, passes, materials, lighting and post-processing. It owns
   the GPU resources and hands out handles to them.
-- **`gg-engine`:** the main loop, window and input, scene and assets, plus hot reload and the
-  tool API in development builds: what apps and games build on.
+- **`gg-engine`:** the main loop, window and input, the job system, scene and assets, plus hot
+  reload and the tool API in development builds: what apps and games build on.
 - **`gg-macros`:** the derives `gg-engine` re-exports beside its traits of the same names,
   `Reflect` and `Component`. Rust builds a derive as a crate of its own; only `gg-engine`
   depends on it, and games derive through `gg-engine`.
@@ -82,8 +82,8 @@ Cargo's cycle check enforces rule 1, and rule 2's ban on `gg-*` dependencies. It
 skip-level edge such as `gg-engine` → `gg-gpu`, which forms no cycle, so
 [deny.toml](deny.toml) names the only crates that may depend directly on `gg-gpu`,
 `gg-renderer`, `gg-macros`, `ash`, `ash-window`, `winit`, `egui-winit`, `gilrs`, `gilrs-core`,
-`tracy-client` and `tracy-client-sys`, and CI checks it with cargo-deny. Rule 4, and what a crate
-does with the dependencies it may have, are left to review.
+`rayon-core`, `tracy-client` and `tracy-client-sys`, and CI checks it with cargo-deny. Rule 4,
+and what a crate does with the dependencies it may have, are left to review.
 
 ### Builds
 
@@ -258,10 +258,11 @@ its entities and whose columns are each type's own `Vec`, which the world reache
 object, downcast once a table, rather than through raw pointers. Queries borrow the world, shared
 to read it and exclusively to change it, so that the borrow checker keeps them apart, and walk
 each table's columns as slices. Systems are plain functions over the world, run at its ticks in a
-fixed order. The order queries find entities in follows only from the changes made: tables are
-kept in the order they were made, despawning an entity or changing its components moves its
-table's last row into its place, the last freed slot is the first taken, and no hash map is
-iterated. So it's the same in every run, as the deterministic mode needs, but means nothing a
+fixed order; one can hand a query's rows to the job system's threads with `par_for_each`, as
+[Threads](#threads) describes. The order queries find entities in follows only from the changes
+made: tables are kept in the order they were made, despawning an entity or changing its components
+moves its table's last row into its place, the last freed slot is the first taken, and no hash map
+is iterated. So it's the same in every run, as the deterministic mode needs, but means nothing a
 game may rely on: anything ordered, such as what's drawn over what, orders by its components'
 values, or by its entities' IDs.
 
@@ -581,9 +582,15 @@ half copied to the GPU.
 
 ## Threads
 
-The main thread runs the OS event loop, which macOS requires. Simulation runs on a job system.
-The render thread records and submits frame N while simulation computes frame N+1, and the GPU
-works on up to two frames at once.
+The main thread runs the OS event loop, which macOS requires, and the layers and their ticks.
+Simulation runs on a job system: rayon-core's pool of `--threads` threads, one per CPU by default,
+the main thread among them, which a tick's systems hand their rows to through its `join` and wait
+for, so that the world changes only within a system's call. A job changes only its own rows, work
+splits at a fixed number of rows, and no thread changes its floating-point environment, so that
+results don't depend on how many threads there are or which takes what; outside the pool, as in
+tests and with `--threads 1`, jobs run one after another on the thread that calls. Steady-state
+ticks allocate nothing on any thread. The render thread records and submits frame N while
+simulation computes frame N+1, and the GPU works on up to two frames at once.
 
 ## Platforms
 
@@ -611,6 +618,7 @@ works on up to two frames at once.
 | UI | egui, drawn by `gg-renderer`, with a dock of our own |
 | Project state | RON in a canonical form; see [Project state](#project-state) |
 | Math | `glam`, with its `scalar-math` and `libm` features; `libm` |
+| Jobs | `rayon-core`'s thread pool and `join`; not rayon's parallel iterators, whose splits and reductions follow the number of threads |
 | ECS | Our own; see [ECS](#ecs) |
 | Logs and profiling | `tracing` for logs; Tracy, through `tracy-client`, for CPU zones and GPU timestamps |
 | Agent access | MCP and a command-line tool, both clients of the [tool API](#agents-and-tools) |

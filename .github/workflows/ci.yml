@@ -105,12 +105,14 @@ jobs:
         if: matrix.container
         run: grep -q '"ticks":60,' target/debug/logs/sandbox-*.jsonl
       # A run recorded as it goes replays without a GPU to the hashes it recorded, exiting 0: the
-      # flags' path, end to end, which the tests take from inside.
+      # flags' path, end to end, which the tests take from inside. Recorded on every thread, it
+      # replays on one too, since a tick goes the same way on any number.
       - name: Record a headless run, and replay it
         if: matrix.container
         run: |
           cargo run -p sandbox --locked -- --headless --frames 60 --record target/run.recording
           cargo run -p sandbox --locked -- --replay target/run.recording
+          cargo run -p sandbox --locked -- --replay target/run.recording --threads 1
       # With Tracy's client, which records into memory with no viewer and exits as usual. Hosted
       # runners are VMs, whose clocks Tracy otherwise refuses on x86.
       - name: Run the sandbox headless with Tracy

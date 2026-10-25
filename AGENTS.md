@@ -28,8 +28,8 @@ docs/PLAN.md      the roadmap (see Workflow)
 Dependencies point down: apps → `gg-engine` → `gg-renderer` → `gg-gpu` → `gg-core`, and any
 crate may use `gg-core`. Cargo catches only some breaches of the layering rules in
 ARCHITECTURE.md, and `cargo deny check bans` (from [deny.toml](deny.toml)) catches skip-level
-edges and the wrong crate using `ash`, `winit`, `gilrs` or Tracy's client: check a change against
-the rest yourself.
+edges and the wrong crate using `ash`, `winit`, `gilrs`, `rayon-core` or Tracy's client: check a
+change against the rest yourself.
 
 ## Commands
 
@@ -96,8 +96,8 @@ grid's scene.
 CI ([ci.yml](.github/workflows/ci.yml)) runs the four gates on every push, on Windows, Linux
 and macOS, x86-64 and ARM64, and the layering check. Its Linux jobs run the GPU tests and the
 sandbox headless on lavapipe, with and without Tracy, check that the run logged `engine.perf`,
-and record a run and replay it; Windows' and macOS's runners have no GPU, so there
-`GG_SKIP_GPU_TESTS` skips the GPU tests.
+and record a run and replay it, on every thread and on one; Windows' and macOS's runners have no
+GPU, so there `GG_SKIP_GPU_TESTS` skips the GPU tests.
 
 ## Rust
 
@@ -130,8 +130,9 @@ and record a run and replay it; Windows' and macOS's runners have no GPU, so the
 - Diagnostics are data: log through `tracing` with fields rather than printing, and give every
   error and warning a stable code and the thing it is about, as
   [ARCHITECTURE.md](ARCHITECTURE.md#diagnostics) describes.
-- Steady-state frames don't allocate: per-frame data lives in frame arenas and ring buffers.
-  Tracy's client allocates as it records, so check allocations without the `tracy` feature.
+- Steady-state frames don't allocate: per-frame data lives in frame arenas and ring buffers, and
+  gg-engine's `ticks` test checks ticks on every thread. Tracy's client allocates as it records,
+  so check allocations without the `tracy` feature.
 
 ## Workflow
 

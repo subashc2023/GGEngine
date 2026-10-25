@@ -1188,14 +1188,17 @@ mod tests {
                     assert_eq!(code, Err("reflect.read_only"), "step {step}");
                 }
                 8 => {
-                    // A query of one term.
+                    // A query of one term, in a `for` loop, through `for_each` or through
+                    // `par_for_each`.
                     let query = world.query_mut::<&mut B>();
-                    if rng.below(2) == 0 {
-                        for b in query {
-                            b.0 += 1;
+                    match rng.below(3) {
+                        0 => {
+                            for b in query {
+                                b.0 += 1;
+                            }
                         }
-                    } else {
-                        query.for_each(|b| b.0 += 1);
+                        1 => query.for_each(|b| b.0 += 1),
+                        _ => query.par_for_each(|b| b.0 += 1),
                     }
                     for (_, has) in &mut live {
                         if let Some(b) = &mut has.b {

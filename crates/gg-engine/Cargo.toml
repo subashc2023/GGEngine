@@ -13,6 +13,7 @@ gg-core.workspace = true
 gg-macros.workspace = true
 gg-renderer.workspace = true
 png.workspace = true
+rayon-core.workspace = true
 ron.workspace = true
 scoped-tls.workspace = true
 serde.workspace = true
@@ -36,6 +37,12 @@ windows-sys = { workspace = true, features = [
 # The window frame's tests make a window of their own, which needs the module's handle.
 [target.'cfg(target_os = "windows")'.dev-dependencies]
 windows-sys = { workspace = true, features = ["Win32_System_LibraryLoader"] }
+
+# The allocation test has a main of its own, so that no other test's threads allocate as it
+# counts, and the job system's threads start once in its process, as in a run.
+[[test]]
+name = "ticks"
+harness = false
 
 [lints]
 workspace = true

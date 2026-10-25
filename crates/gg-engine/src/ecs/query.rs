@@ -6,6 +6,12 @@ use std::slice;
 
 use super::table::{AnyColumn, ComponentId, Components, Table};
 use super::{Component, Entity, Writable};
+use crate::jobs;
+
+/// The rows of a table a job takes: a number of its own, never a share of the threads, so that a
+/// query's rows split the same way on every machine. 1,024 of the sandbox's drifters take about
+/// 17 µs in a release build.
+const CHUNK: usize = 1024;
 
 /// What a query takes of each entity: `&T` reads its `T`, `&mut T` changes it, if it's
 /// [`Writable`], and `Entity` is the entity itself; or a tuple of up to 8 of them, each component
@@ -130,6 +136,55 @@ impl<'w, Q: Query> Iterator for QueryIterMut<'w, Q> {
     }
 }
 
+impl<'w, Q: Query> QueryIterMut<'w, Q> {
+    /// Calls `f` on each entity found, as `for_each` does, with each table's rows in runs of 1,024
+    /// that the job system's threads take, the calling thread among them; outside the pool, on the
+    /// calling thread, in the order `for_each` takes them. The rows [`next`](Iterator::next) left
+    /// of a table come first, and run on the calling thread, as a table of no more rows than a run
+    /// does; each table's rows finish before the next table's start.
+    ///
+    /// `f` gets its own row's terms and no world, so that what each row becomes can't depend on how
+    /// many threads there are or which takes which rows, as the deterministic mode needs; unless `f`
+    /// writes through what it captures, such as a `Mutex` or an atomic, whose writes follow the
+    /// threads' order. In the pool, a thread that waits for rows another took runs other rows
+    /// meanwhile, so `f` mustn't hold a lock that `f` takes, or a `RefCell` it borrows, while it
+    /// calls `par_for_each` or anything else that joins: the thread could run another row's `f`,
+    /// which would wait for the lock the thread holds, or find the `RefCell` borrowed. If `f`
+    /// panics, this panics with its payload, and in the pool other runs of rows may have changed by
+    /// then.
+    pub fn par_for_each(self, f: impl Fn(Q::Item<'w>) + Sync) {
+        if let Some(rows) = self.rows {
+            rows.for_each(&f);
+        }
+        let Some(needs) = self.needs else {
+            return;
+        };
+        for table in self.tables {
+            if Q::matches(needs, table) {
+                let len = table.entities.len();
+                split::<Q, _>(Q::slices_mut(needs, table), len, &f);
+            }
+        }
+    }
+}
+
+/// Calls `f` on each of the `len` rows of `slices`, splitting them in two at a multiple of `CHUNK`,
+/// for two jobs, until each run is a chunk or less.
+fn split<'w, Q: Query, F: Fn(Q::Item<'w>) + Sync>(slices: Q::Slices<'w>, len: usize, f: &F) {
+    if len <= CHUNK {
+        // A shorter run can take less than the 10 µs or so a zone is for.
+        let _zone = (len == CHUNK).then(|| gg_core::zone!("job"));
+        Q::rows(slices).for_each(f);
+        return;
+    }
+    let mid = len.div_ceil(CHUNK) / 2 * CHUNK;
+    let (a, b) = Q::split_at(slices, mid);
+    jobs::join(
+        || split::<Q, F>(a, mid, f),
+        || split::<Q, F>(b, len - mid, f),
+    );
+}
+
 /// The traits that only this module implements, which say how each query fetches.
 mod seal {
     use super::*;
@@ -139,6 +194,8 @@ mod seal {
         type Item<'w>;
         /// A matching table's rows: its terms' slice iterators, zipped.
         type Fetch<'w>: Iterator<Item = Self::Item<'w>>;
+        /// A matching table's rows as its terms' slices, which split for the jobs that take them.
+        type Slices<'w>: Send;
         /// What it needs of a table: the ids of its terms' components.
         type Needs: Copy;
 
@@ -151,8 +208,21 @@ mod seal {
 
         fn matches(needs: Self::Needs, table: &Table) -> bool;
 
+        /// The rows of `table`, which matches, as slices.
+        fn slices_mut<'w>(needs: Self::Needs, table: &'w mut Table) -> Self::Slices<'w>;
+
+        /// The first `mid` rows of `slices`, and the rest.
+        fn split_at<'w>(
+            slices: Self::Slices<'w>,
+            mid: usize,
+        ) -> (Self::Slices<'w>, Self::Slices<'w>);
+
+        fn rows<'w>(slices: Self::Slices<'w>) -> Self::Fetch<'w>;
+
         /// The rows of `table`, which matches.
-        fn fetch_mut<'w>(needs: Self::Needs, table: &'w mut Table) -> Self::Fetch<'w>;
+        fn fetch_mut<'w>(needs: Self::Needs, table: &'w mut Table) -> Self::Fetch<'w> {
+            Self::rows(Self::slices_mut(needs, table))
+        }
     }
 
     pub trait ReadOnlyQuery: Query {
@@ -168,6 +238,8 @@ mod seal {
     pub trait Term {
         type Item<'w>;
         type Fetch<'w>: Iterator<Item = Self::Item<'w>>;
+        /// Its rows of a table: `&[T]`, `&mut [T]` or the table's entities.
+        type Slice<'w>: Send;
         /// What it needs of a table: its component's id, or nothing for `Entity`.
         type Need: Copy;
 
@@ -183,10 +255,14 @@ mod seal {
 
         /// Its rows of a table, from the column it takes, which the table has, and the table's
         /// entities.
-        fn fetch_mut<'w>(
+        fn slice_mut<'w>(
             column: Option<&'w mut Box<dyn AnyColumn>>,
             entities: &'w [Entity],
-        ) -> Self::Fetch<'w>;
+        ) -> Self::Slice<'w>;
+
+        fn split_at<'w>(slice: Self::Slice<'w>, mid: usize) -> (Self::Slice<'w>, Self::Slice<'w>);
+
+        fn rows<'w>(slice: Self::Slice<'w>) -> Self::Fetch<'w>;
     }
 
     #[diagnostic::on_unimplemented(
@@ -203,6 +279,7 @@ use seal::{ReadTerm, Term};
 impl<T: Component> Term for &T {
     type Item<'w> = &'w T;
     type Fetch<'w> = slice::Iter<'w, T>;
+    type Slice<'w> = &'w [T];
     type Need = ComponentId;
 
     fn component() -> Option<(TypeId, &'static str)> {
@@ -221,12 +298,17 @@ impl<T: Component> Term for &T {
         need == id
     }
 
-    fn fetch_mut<'w>(
-        column: Option<&'w mut Box<dyn AnyColumn>>,
-        _: &'w [Entity],
-    ) -> slice::Iter<'w, T> {
+    fn slice_mut<'w>(column: Option<&'w mut Box<dyn AnyColumn>>, _: &'w [Entity]) -> &'w [T] {
         let column: &'w dyn AnyColumn = &**column.expect("a matching table has the column");
-        column.vec().iter()
+        column.vec()
+    }
+
+    fn split_at<'w>(slice: Self::Slice<'w>, mid: usize) -> (Self::Slice<'w>, Self::Slice<'w>) {
+        slice.split_at(mid)
+    }
+
+    fn rows<'w>(slice: Self::Slice<'w>) -> Self::Fetch<'w> {
+        slice.iter()
     }
 }
 
@@ -240,6 +322,7 @@ impl<T: Component> ReadTerm for &T {
 impl<T: Writable> Term for &mut T {
     type Item<'w> = &'w mut T;
     type Fetch<'w> = slice::IterMut<'w, T>;
+    type Slice<'w> = &'w mut [T];
     type Need = ComponentId;
 
     fn component() -> Option<(TypeId, &'static str)> {
@@ -258,18 +341,24 @@ impl<T: Writable> Term for &mut T {
         need == id
     }
 
-    fn fetch_mut<'w>(
-        column: Option<&'w mut Box<dyn AnyColumn>>,
-        _: &'w [Entity],
-    ) -> slice::IterMut<'w, T> {
+    fn slice_mut<'w>(column: Option<&'w mut Box<dyn AnyColumn>>, _: &'w [Entity]) -> &'w mut [T] {
         let column = column.expect("a matching table has the column");
-        column.vec_mut().iter_mut()
+        column.vec_mut()
+    }
+
+    fn split_at<'w>(slice: Self::Slice<'w>, mid: usize) -> (Self::Slice<'w>, Self::Slice<'w>) {
+        slice.split_at_mut(mid)
+    }
+
+    fn rows<'w>(slice: Self::Slice<'w>) -> Self::Fetch<'w> {
+        slice.iter_mut()
     }
 }
 
 impl Term for Entity {
     type Item<'w> = Entity;
     type Fetch<'w> = Copied<slice::Iter<'w, Entity>>;
+    type Slice<'w> = &'w [Entity];
     type Need = ();
 
     fn component() -> Option<(TypeId, &'static str)> {
@@ -288,11 +377,19 @@ impl Term for Entity {
         false
     }
 
-    fn fetch_mut<'w>(
+    fn slice_mut<'w>(
         _: Option<&'w mut Box<dyn AnyColumn>>,
         entities: &'w [Entity],
-    ) -> Copied<slice::Iter<'w, Entity>> {
-        entities.iter().copied()
+    ) -> &'w [Entity] {
+        entities
+    }
+
+    fn split_at<'w>(slice: Self::Slice<'w>, mid: usize) -> (Self::Slice<'w>, Self::Slice<'w>) {
+        slice.split_at(mid)
+    }
+
+    fn rows<'w>(slice: Self::Slice<'w>) -> Self::Fetch<'w> {
+        slice.iter().copied()
     }
 }
 
@@ -308,6 +405,7 @@ macro_rules! term_query {
         impl<$($generics)*> seal::Query for $term {
             type Item<'w> = <$term as Term>::Item<'w>;
             type Fetch<'w> = <$term as Term>::Fetch<'w>;
+            type Slices<'w> = <$term as Term>::Slice<'w>;
             type Needs = <$term as Term>::Need;
 
             fn check() {}
@@ -320,7 +418,7 @@ macro_rules! term_query {
                 <$term as Term>::has(needs, table)
             }
 
-            fn fetch_mut<'w>(needs: Self::Needs, table: &'w mut Table) -> Self::Fetch<'w> {
+            fn slices_mut<'w>(needs: Self::Needs, table: &'w mut Table) -> Self::Slices<'w> {
                 let Table {
                     components,
                     columns,
@@ -331,7 +429,18 @@ macro_rules! term_query {
                     .zip(columns.iter_mut())
                     .find(|&(&id, _)| <$term as Term>::takes(needs, id))
                     .map(|(_, column)| column);
-                <$term as Term>::fetch_mut(column, entities)
+                <$term as Term>::slice_mut(column, entities)
+            }
+
+            fn split_at<'w>(
+                slices: Self::Slices<'w>,
+                mid: usize,
+            ) -> (Self::Slices<'w>, Self::Slices<'w>) {
+                <$term as Term>::split_at(slices, mid)
+            }
+
+            fn rows<'w>(slices: Self::Slices<'w>) -> Self::Fetch<'w> {
+                <$term as Term>::rows(slices)
             }
         }
 
@@ -442,6 +551,7 @@ macro_rules! tuple_query {
         impl<$($T: Term),+> seal::Query for ($($T,)+) {
             type Item<'w> = ($($T::Item<'w>,)+);
             type Fetch<'w> = $Rows<zipped!('w; $($T),+)>;
+            type Slices<'w> = ($($T::Slice<'w>,)+);
             type Needs = ($($T::Need,)+);
 
             fn check() {
@@ -456,7 +566,7 @@ macro_rules! tuple_query {
                 $($T::has(needs.$i, table))&&+
             }
 
-            fn fetch_mut<'w>(needs: Self::Needs, table: &'w mut Table) -> Self::Fetch<'w> {
+            fn slices_mut<'w>(needs: Self::Needs, table: &'w mut Table) -> Self::Slices<'w> {
                 let Table {
                     components,
                     columns,
@@ -474,7 +584,21 @@ macro_rules! tuple_query {
                         }
                     )+
                 }
-                $Rows(zip_fetches!($($T::fetch_mut($t, entities)),+))
+                ($($T::slice_mut($t, entities),)+)
+            }
+
+            fn split_at<'w>(
+                slices: Self::Slices<'w>,
+                mid: usize,
+            ) -> (Self::Slices<'w>, Self::Slices<'w>) {
+                let ($($t,)+) = slices;
+                $(let $t = $T::split_at($t, mid);)+
+                (($($t.0,)+), ($($t.1,)+))
+            }
+
+            fn rows<'w>(slices: Self::Slices<'w>) -> Self::Fetch<'w> {
+                let ($($t,)+) = slices;
+                $Rows(zip_fetches!($($T::rows($t)),+))
             }
         }
 
@@ -503,3 +627,140 @@ tuple_query!(Rows5; A a 0, B b 1, C c 2, D d 3, E e 4);
 tuple_query!(Rows6; A a 0, B b 1, C c 2, D d 3, E e 4, F f 5);
 tuple_query!(Rows7; A a 0, B b 1, C c 2, D d 3, E e 4, F f 5, G g 6);
 tuple_query!(Rows8; A a 0, B b 1, C c 2, D d 3, E e 4, F f 5, G g 6, H h 7);
+
+#[cfg(test)]
+mod tests {
+    use std::panic::{self, AssertUnwindSafe};
+    use std::sync::Mutex;
+
+    use super::*;
+    use crate::World;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Component)]
+    struct Visits(u32);
+
+    /// Where a row's entity is among them all.
+    #[derive(Clone, Copy, Debug, PartialEq, Component)]
+    struct Order(u32);
+
+    #[derive(Clone, Copy, Debug, PartialEq, Component)]
+    struct M1;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Component)]
+    struct M2;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Component)]
+    struct M3;
+
+    /// A world of six tables, of no row, one, a row short of a chunk, a chunk, a row more and five
+    /// chunks and three rows, and its entities in the order of their `Order`s.
+    fn world() -> (World, Vec<Entity>) {
+        let mut world = World::default();
+        let mut entities = Vec::new();
+        let sizes = [0, 1, CHUNK - 1, CHUNK, CHUNK + 1, 5 * CHUNK + 3];
+        // Leaves its table, empty.
+        let gone = world.spawn((Visits(0), Order(u32::MAX)));
+        world.despawn(gone).expect("alive");
+        for (table, size) in sizes.into_iter().enumerate() {
+            for _ in 0..size {
+                let row = (Visits(0), Order(entities.len() as u32));
+                let entity = match table {
+                    0 => world.spawn(row),
+                    1 => world.spawn((row.0, row.1, M1)),
+                    2 => world.spawn((row.0, row.1, M2)),
+                    3 => world.spawn((row.0, row.1, M3)),
+                    4 => world.spawn((row.0, row.1, M1, M2)),
+                    _ => world.spawn((row.0, row.1, M1, M3)),
+                };
+                entities.push(entity);
+            }
+        }
+        (world, entities)
+    }
+
+    /// `par_for_each` gives each row to `f` once, each term of the row its own, whatever the size
+    /// of its table, after the rows `next` took first, on one thread and on four; on one, in the
+    /// order `for_each` takes them.
+    #[test]
+    fn par_for_each_gives_each_row_once() {
+        for threads in [1, 4] {
+            for taken in [0, 1, 7] {
+                let (mut world, entities) = world();
+                let in_order: Vec<_> = world
+                    .query::<&Order>()
+                    .skip(taken)
+                    .map(|order| order.0)
+                    .collect();
+                let ran = Mutex::new(Vec::new());
+                let mut run = || {
+                    let mut query = world.query_mut::<(Entity, &Order, &mut Visits)>();
+                    for (_, _, visits) in query.by_ref().take(taken) {
+                        visits.0 += 1;
+                    }
+                    query.par_for_each(|(entity, order, visits)| {
+                        assert_eq!(entity, entities[order.0 as usize], "{order:?}'s entity");
+                        visits.0 += 1;
+                        ran.lock().unwrap().push(order.0);
+                    });
+                    // A query of one term.
+                    world
+                        .query_mut::<&mut Visits>()
+                        .par_for_each(|visits| visits.0 += 1);
+                };
+                if threads == 1 {
+                    run();
+                    let ran = ran.into_inner().unwrap();
+                    let parted = (0..ran.len().max(in_order.len()))
+                        .find(|&row| ran.get(row) != in_order.get(row));
+                    assert_eq!(
+                        parted, None,
+                        "the first row out of order, {taken} taken first"
+                    );
+                } else {
+                    jobs::on_threads(threads, run);
+                }
+                for (order, visits) in world.query::<(&Order, &Visits)>() {
+                    let at = format!(
+                        "row {} with {threads} threads, {taken} taken first",
+                        order.0
+                    );
+                    assert_eq!(*visits, Visits(2), "{at}");
+                }
+                assert_eq!(world.query::<&Visits>().count(), entities.len());
+            }
+        }
+    }
+
+    /// A row whose `f` panics panics `par_for_each`'s caller, with its payload, on one thread and
+    /// on four, whether the calling thread runs the row or another thread can take it.
+    #[test]
+    fn a_panic_in_par_for_each_reaches_its_caller() {
+        for threads in [1, 4] {
+            // In the first run of the table of a run and a row, which the calling thread runs, and
+            // in the last run of the largest table, which another can take.
+            for row in [3000, 8195] {
+                let (mut world, _) = world();
+                let mut run = || {
+                    panic::catch_unwind(AssertUnwindSafe(|| {
+                        world.query_mut::<&Order>().par_for_each(|order| {
+                            if order.0 == row {
+                                panic!("row {row}");
+                            }
+                        });
+                    }))
+                };
+                let caught = if threads == 1 {
+                    run()
+                } else {
+                    jobs::on_threads(threads, run)
+                };
+                let payload = caught.expect_err("a panic");
+                assert_eq!(
+                    payload.downcast_ref::<String>(),
+                    Some(&format!("row {row}")),
+                    "on {threads} threads"
+                );
+            }
+        }
+    }
+}

@@ -349,12 +349,13 @@ fn replace_grid(world: &mut World, text: &str) -> Result<(), Error> {
     loaded.map(drop)
 }
 
-/// Moves each drifter to where it is `t` seconds after the swarm starts.
+/// Moves each drifter to where it is `t` seconds after the swarm starts, on the job system's
+/// threads.
 fn drift(world: &mut World, t: f64) {
     let _zone = gg_engine::zone!();
     world
         .query_mut::<(&Drifter, &mut Transform)>()
-        .for_each(|(drifter, transform)| *transform = drifter.transform(t));
+        .par_for_each(|(drifter, transform)| *transform = drifter.transform(t));
 }
 
 /// Colors the grid's squares in `colors`, in linear RGB.
@@ -1195,14 +1196,21 @@ mod tests {
 
     /// The sandbox's simulation, run without a GPU from a seed through the commands of a script,
     /// hashes at its attach and at each tick as its reference says: the same in one run as in the
-    /// next, in a debug build as in a release one, and on every platform, as the deterministic mode
-    /// needs. `GG_UPDATE_REFERENCES=1` writes the reference again, after a change meant to change
-    /// the simulation or what the hash reads.
+    /// next, on four threads as on one, in a debug build as in a release one, and on every
+    /// platform, as the deterministic mode needs. `GG_UPDATE_REFERENCES=1` writes the reference
+    /// again, after a change meant to change the simulation or what the hash reads.
     #[test]
     fn the_simulation_gives_its_reference_hashes() {
         let run = simulate();
-        let again = "; the simulation goes another way each run, so no reference holds";
-        first_difference(&run, &simulate(), "a second run in this process", again);
+        let again = "; the simulation goes another way each run, or on more threads than one, so \
+                     no reference holds";
+        let on_four = gg_engine::on_threads(4, simulate);
+        first_difference(
+            &run,
+            &on_four,
+            "a second run in this process, on 4 threads",
+            again,
+        );
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/references/hashes.txt");
         if std::env::var_os("GG_UPDATE_REFERENCES").is_some_and(|value| value == "1") {
             fs::create_dir_all(path.parent().expect("a folder")).expect("made");

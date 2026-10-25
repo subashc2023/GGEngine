@@ -1,13 +1,13 @@
 //! What apps build on: the main loop, which steps the simulation at a fixed rate whatever the frame
 //! rate, window and input, and the actions that name what a game does with it, and layers, which
 //! change the world at its ticks, and their UI; the world of entities and their components, which
-//! it draws, handing each frame's render data to `gg-renderer`; reflection, which describes the
-//! components' types so that tools reach them by name, and the Inspector, which edits them; scenes
-//! and prefabs, the world's entities as canonical text; operations, the authoring changes made to
-//! the world, each with its inverse, and their log, which undoes and redoes them; recordings of
-//! runs, the commands their ticks applied, which replay without a GPU to the same world, naming
-//! where one goes another way; and measuring each frame, for the log and the Performance panel.
-//! Assets to come.
+//! it draws, handing each frame's render data to `gg-renderer`, and the job system, which a tick's
+//! systems split a query's rows across; reflection, which describes the components' types so that
+//! tools reach them by name, and the Inspector, which edits them; scenes and prefabs, the world's
+//! entities as canonical text; operations, the authoring changes made to the world, each with its
+//! inverse, and their log, which undoes and redoes them; recordings of runs, the commands their
+//! ticks applied, which replay without a GPU to the same world, naming where one goes another way;
+//! and measuring each frame, for the log and the Performance panel. Assets to come.
 //!
 //! An app's `main` starts the engine; there is no separate entry-point crate.
 
@@ -25,6 +25,7 @@ mod event;
 mod image;
 mod input;
 mod inspector;
+mod jobs;
 mod layer;
 mod pads;
 mod perf;
@@ -80,6 +81,8 @@ pub use gg_renderer::{
 };
 pub use input::Input;
 pub use inspector::Inspector;
+#[doc(hidden)]
+pub use jobs::{on_threads, start as start_jobs};
 use layer::Stack;
 pub use layer::{Commands, Context, Layer, Tick, Window};
 pub use perf::PerfPanel;
@@ -177,6 +180,7 @@ pub fn run(mut app: App) -> ExitCode {
         os = std::env::consts::OS,
         arch = std::env::consts::ARCH,
         cpus = std::thread::available_parallelism().map_or(0, |cpus| cpus.get()),
+        threads = args.threads,
         pid = std::process::id(),
         "Starting GGEngine"
     );
@@ -193,6 +197,11 @@ pub fn run(mut app: App) -> ExitCode {
         "Options"
     );
 
+    // Before the replay too, which ticks on them as a run does.
+    if let Err(error) = jobs::start(args.threads) {
+        error!(code = error.code(), "{error:#}");
+        return ExitCode::FAILURE;
+    }
     // Before any renderer, which a replay doesn't need, and which a recording that can't be
     // written would keep from starting.
     if let Some(path) = &args.replay {

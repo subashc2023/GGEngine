@@ -22,6 +22,7 @@ deny = [
     { crate = "egui-winit", wrappers = ["gg-engine"], reason = "gg-engine owns the window and input" },
     { crate = "gilrs", wrappers = ["gg-engine"], reason = "gg-engine owns the window and input" },
     { crate = "gilrs-core", wrappers = ["gilrs"], reason = "gg-engine owns the window and input" },
+    { crate = "rayon-core", wrappers = ["gg-engine"], reason = "gg-engine's jobs module is the way into the pool" },
     { crate = "tracy-client", wrappers = ["gg-core"], reason = "gg-core's profile module is the way into Tracy" },
     { crate = "tracy-client-sys", wrappers = ["tracy-client", "gg-core"], reason = "gg-core's profile module is the way into Tracy" },
 ]

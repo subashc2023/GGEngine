@@ -204,28 +204,28 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   up with keys and across pads, a stick held as it's bound, refusals, the dead zone, a poll's
   order, focus, disconnects and gilrs's names, and pads' releases going past a layer that handles
   them. Checked by hand with an Xbox pad on Windows.
+- **A job system** (2026-10-24): a tick's systems hand a query's rows to rayon-core's pool of
+  `--threads` threads, the main thread among them, through `par_for_each`, in runs of 1,024 rows
+  rather than a share of the threads, so that a tick goes the same way on any number of them; the
+  sandbox's drifters move on it. gg-engine's `ticks` test counts every thread's allocations over
+  1,000 ticks, before the pool starts and after, and finds none; the reference simulation hashes
+  as its reference says on four threads, and CI replays a run recorded on every thread on one.
+- **Phase 3, runtime core** (2026-10-24): each item of its done-when has a test that CI runs on
+  all six platforms. A scene saved, loaded and saved again is byte-identical; undoing a log of
+  random operations gives back the content hash; a restored snapshot matches the world it was
+  taken from; steady-state ticks allocate nothing on any thread; the live recording replays to its
+  hashes, and the reference simulation hashes as its reference says; and a forced divergence names
+  its tick, and its entity and field.
 
-## Now: a job system
+## Now: Phase 4's first milestone
 
-Phase 3's thirteenth milestone, and its last: a job system, as
-[ARCHITECTURE.md](../ARCHITECTURE.md#threads) has it, and then Phase 3's done-when. Its plan is
-made when it starts, and says when it's done.
+[Phase 4](#next) starts. Its first milestone is chosen as it starts, and its plan says when it's
+done.
 
 ## Next
 
 Each phase ends in something you can run and check.
 
-3. **Runtime core.** Our own ECS with a transform hierarchy, reflected component types
-   registered at runtime, stable entity IDs, scenes and prefabs in canonical text, operations
-   with inverses and their log, and whole-world snapshots and restores. A fixed timestep, with
-   commands as the only way into the simulation; the deterministic mode, with a world hash per
-   tick, recordings and replays, and math that is identical everywhere (glam's `scalar-math`
-   and `libm` features); input actions and gamepads; a job system. All of it runs headless.
-   *Done when* a scene saved, loaded and saved again is byte-identical; undoing a log of
-   operations gives back the original world's content hash; a restored snapshot matches the world
-   it was taken from; steady-state ticks don't allocate; and a recording replays to the same
-   hashes on all three OSes and both architectures, with a forced divergence reported as its first
-   tick, entity and field.
 4. **First mesh.** Uploads of whole assets through the transfer queue, or by host image copy
    where a device has no separate transfer queue; depth; Slang reflection; an on-disk pipeline
    cache; shader hot reload. Render extraction, with the render thread a frame behind
@@ -325,7 +325,7 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | A stick's way or a trigger's travel as a button, pressed past a point and released before it, as menus take a stick; `bind` refuses one, and a trigger's press is a button of its own | A game's menus take a stick |
 | Rumble: gilrs's force feedback is off, and with it its thread | A game rumbles |
 | Fewer commands from a moving stick, by quantizing its value or folding a layer's queue: a frame gives one for each stick and trigger that moved, and one more for each of its pad's button events between its moves, up to the pad's report rate, about 125 a second on Windows.Gaming.Input | Recordings grow too large, or input goes over a network |
-| gilrs's allocations: on Windows.Gaming.Input, its polling thread's, which reads every pad every 8 ms, and the string of a pad's ID that each event the frame takes asks Windows for; and the channel's blocks, which the frame that takes their last event frees. The engine's own feeding of pads to actions allocates only as a pad first reports, and as a second pad first holds more than one does | Phase 4's allocation check, which says whose threads and heaps it counts |
+| gilrs's allocations: on Windows.Gaming.Input, its polling thread's, which reads every pad every 8 ms, and the string of a pad's ID that each event the frame takes asks Windows for; and the channel's blocks, which the frame that takes their last event frees. The engine's own feeding of pads to actions allocates only as a pad first reports, and as a second pad first holds more than one does | Phase 4's allocation check of frames, which counts every thread, as gg-engine's `ticks` test does ticks |
 | Letting go, for the layers below one that handles a stick or a trigger away from rest, of the ways it left: they keep what they last saw until it rests, so that a stick rolled from right to up in a menu leaves the game going right | A game's menus take a stick |
 | Controls the engine doesn't name, C, Z and paddles, and triggers a Linux driver reports as Z axes ([gilrs #200](https://gitlab.com/gilrs-project/gilrs/-/issues/200)), which are dropped | A pad that needs them, or the check by hand on Linux |
 | Codes for dependencies' own warnings, which reach the log as they give them: as a pad connects on Windows.Gaming.Input, gilrs warns, without a code, that it has no mapping for it, since that backend gives every pad a nil UUID, and goes on with its default mapping, the right one there | Phase 5, as the tool API serves diagnostics |
@@ -351,7 +351,9 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | In a frame egui runs twice, the torn-off windows' texture changes apply before all of the main window's, so glyphs added then to a font atlas that grows can go missing | It shows, or egui hands over each pass's changes apart |
 | Present fences (`VK_KHR_swapchain_maintenance1`) before a swapchain's semaphores are destroyed, which closing torn-off windows makes more frequent | Validation reports it, or windows open and close often |
 | egui's own scopes in Tracy, which egui marks for the `profiling` crate: `profiling` 1.0.18 takes tracy-client 0.18, and two Tracy clients don't link together | `profiling` takes tracy-client 0.19; deny.toml's wrappers for tracy-client then add it |
-| Changing the world's tables while a query runs, through a buffer applied after it: Bevy's `Commands`, to be called `Deferred` here, since commands are the simulation's inputs | The first system that spawns or despawns as it iterates |
+| Changing the world's tables while a query runs, through a buffer applied after it: Bevy's `Commands`, to be called `Deferred` here, since commands are the simulation's inputs; from `par_for_each`'s jobs too, each run of rows with a buffer of its own, applied in the order of the rows, never as the jobs finish | The first system that spawns or despawns as it iterates |
+| Reductions over a query's rows on the job system's threads, such as a sum, each run of rows giving its own, combined in the order of the rows; `par_for_each` on queries that only read; a size of a run of rows for each call; and splitting tables of fewer rows than a run among the threads, which each run on the calling thread, one table after another | Each with its first user |
+| Two systems at once, on components they don't share: a tick's systems run one after another, each splitting its own rows | A profile shows two heavy systems |
 | Query filters: `With`, `Without`, `Option` and `Changed` | Each with its first query |
 | Queries that keep the tables they match, and tables that keep where adding or removing each component leads; a query looks over every table, and a change of components finds its table by its types | Tables number in the hundreds, or changes of components show in a profile |
 | Sparse storage for components added and removed often, which move their entity's row between tables | A profile shows those moves |
@@ -400,6 +402,10 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Ticks as a part of their own in the Performance panel and in `engine.perf`'s times: a frame's update includes its ticks, so that a windowed run's update times mix frames of no tick and of several | Phase 4's extraction, or frames often running several ticks |
 | The Inspector showing an undo or a redo before its tick makes it, as it shows a set: above 64 frames a second, a field shows its value from before for a frame or so, and a refusal and the Edit menu's names come at the tick | It shows, or Phase 5's editor in another process |
 | Hashing a world for less: incrementally as its components change, on several threads, or with a cheaper step for each word and one mix for each term. `World::hash` reads every component, mixing each word with SplitMix64's mix: 5.5 ms for the swarm's 100,450 entities in release, three times their tick; a recorded run hashes every tick, which takes the release swarm's headless frames from a p50 of 8.7 ms to 16.3 ms, its updates from 14.0 ms to 22.6 ms on average | Recorded runs of large worlds need the time |
+| The job system in gg-core, where the renderer can reach it; it's gg-engine's | gg-renderer needs jobs |
+| Naming the job system's threads for Tracy on macOS, whose client reads no thread's name from the OS there, so they show as numbers: a call into gg-core, which keeps Tracy's client, from rayon-core's start handler. On Windows and Linux they show as `gg-job-N` | Someone profiles on macOS |
+| Fewer job threads than CPUs by default, leaving one to the render thread | Phase 4, with the render thread |
+| Checking that every job thread's floating-point environment, its rounding and flush-to-zero, is the main thread's, which a driver could change on the main thread alone | A replay goes another way on one machine on more threads than one |
 | The sign of a zero that f32's `min`, `max` and `clamp` give, which std leaves to the platform, and its `algebraic_*` methods, which clippy doesn't refuse; the simulation calls none of them | The simulation first calls one |
 | The ban on std's float methods for games in their own repositories, which the workspace's clippy.toml doesn't reach, though glam's features do, since Cargo merges them | The first game outside the workspace |
 | Locating a divergence of the layout alone, to the table, row, children or stream of IDs where two worlds part; `World::difference` compares their content, and a replay names the part of the hash | A replay's layout goes another way first |
