@@ -11,6 +11,7 @@
 use std::f32::consts::{FRAC_PI_2, PI};
 use std::fs::{self, File};
 use std::io::BufWriter;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
 use bytemuck::NoUninit;
@@ -59,6 +60,7 @@ fn main() {
         "pipelines_go_through_the_cache",
         pipelines_go_through_the_cache,
     );
+    run("capturing_needs_renderdoc", capturing_needs_renderdoc);
     run("depth_matches_its_reference", depth_matches_its_reference);
     run("models_match_their_reference", models_match_their_reference);
     run(
@@ -110,6 +112,7 @@ fn settings(uploads: Option<UploadPath>) -> Settings<'static> {
         vsync: false,
         uploads,
         pipeline_cache: None,
+        capture: None,
     }
 }
 
@@ -1715,6 +1718,19 @@ fn pipelines_go_through_the_cache() {
             "validation reported problems; the log above says what"
         );
     }
+}
+
+/// A renderer asked to capture a frame doesn't start on a GPU that RenderDoc's layer isn't active
+/// on, as it isn't here: the tests turn implicit layers off, RenderDoc's among them where it's
+/// installed.
+fn capturing_needs_renderdoc() {
+    let settings = Settings {
+        capture: NonZeroU64::new(1),
+        ..settings(None)
+    };
+    let error = (Renderer::headless(&settings, 16, 16).err())
+        .expect("a renderer that can't capture doesn't start");
+    assert_eq!(error.code(), "renderer.no_renderdoc", "{error:#}");
 }
 
 /// Reads back the last frame `renderer` rendered, shuts it down, checks that validation reported

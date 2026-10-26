@@ -1,7 +1,7 @@
 //! The command-line flags every app shares.
 
 use std::ffi::OsString;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 
 use gg_core::{Error, Result};
@@ -10,6 +10,8 @@ use gg_core::{Error, Result};
 pub(crate) struct Args {
     pub(crate) headless: bool,
     pub(crate) frames: Option<u64>,
+    /// The frame captured through RenderDoc, counting from 1.
+    pub(crate) capture: Option<NonZeroU64>,
     pub(crate) gpu: Option<String>,
     pub(crate) validation: bool,
     pub(crate) vsync: bool,
@@ -31,10 +33,11 @@ pub(crate) enum Dump {
 }
 
 /// The flags of a run that a replay, which renders nothing and records nothing, refuses.
-const NOT_REPLAYED: [&str; 7] = [
+const NOT_REPLAYED: [&str; 8] = [
     "--record",
     "--headless",
     "--frames",
+    "--capture",
     "--gpu",
     "--validation",
     "--no-validation",
@@ -49,6 +52,7 @@ pub(crate) fn usage(program: &str) -> String {
 Options:
   --headless        Run without a window, rendering offscreen, a tick of the simulation a frame
   --frames <N>      Exit after N frames
+  --capture <N>     Capture frame N through RenderDoc, in a run under `renderdoccmd capture`
   --gpu <NAME>      Use the GPU whose name contains NAME, such as `--gpu amd`
   --validation      Run under Vulkan validation (the default in debug builds)
   --no-validation   Run without Vulkan validation (the default in release builds)
@@ -75,6 +79,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
     let mut parsed = Args {
         headless: false,
         frames: None,
+        capture: None,
         gpu: None,
         validation: cfg!(debug_assertions),
         vsync: false,
@@ -122,6 +127,14 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
                 })?;
                 parsed.frames = Some(frames);
             }
+            "--capture" => {
+                let frame = value_of(flag)?;
+                parsed.capture = Some(frame.parse().map_err(|_| {
+                    bad(format!(
+                        "`--capture` takes a frame's number, from 1, not `{frame}`"
+                    ))
+                })?);
+            }
             "--threads" => {
                 let threads = value_of(flag)?;
                 parsed.threads = threads.parse().map_err(|_| {
@@ -163,6 +176,14 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
         return Err(bad(
             "`--dump` stops a replay, so it needs `--replay`".to_owned()
         ));
+    }
+    if let (Some(capture), Some(frames)) = (parsed.capture, parsed.frames)
+        && capture.get() > frames
+    {
+        return Err(bad(format!(
+            "`--capture {capture}` names a frame past the last, as the run exits after \
+             `--frames {frames}`"
+        )));
     }
     Ok(Some(parsed))
 }
@@ -207,6 +228,15 @@ mod tests {
         for args in [&["--threads", "3"][..], &["--threads=3"]] {
             assert_eq!(parse_strs(args).unwrap().unwrap().threads.get(), 3);
         }
+        // The last frame of a run of a set number of frames may be captured.
+        for args in [
+            &["--capture", "3"][..],
+            &["--capture=3"],
+            &["--frames=3", "--capture=3"],
+        ] {
+            let capture = parse_strs(args).unwrap().unwrap().capture;
+            assert_eq!(capture, NonZeroU64::new(3), "{args:?}");
+        }
         // A replay runs on as many threads as it's given: the ticks go the same way on any.
         let args = parse_strs(&["--replay", "run.recording", "--threads", "1"]);
         assert_eq!(args.unwrap().unwrap().threads, NonZeroUsize::MIN);
@@ -226,11 +256,8 @@ mod tests {
     fn a_replay_refuses_the_flags_of_a_run() {
         for flag in NOT_REPLAYED {
             let args = ["--replay", "run.recording", flag, "1"];
-            let refused = if flag == "--frames" || flag == "--gpu" || flag == "--record" {
-                &args[..]
-            } else {
-                &args[..3]
-            };
+            let takes_value = ["--frames", "--capture", "--gpu", "--record"].contains(&flag);
+            let refused = if takes_value { &args[..] } else { &args[..3] };
             let error = parse_strs(refused).unwrap_err();
             assert_eq!(error.code(), "engine.args", "{flag}: {error}");
             assert!(error.to_string().contains(&format!("`{flag}`")), "{error}");
@@ -248,6 +275,10 @@ mod tests {
             &["--bogus"][..],
             &["--frames"],
             &["--frames", "sixty"],
+            &["--capture"],
+            &["--capture", "0"],
+            &["--capture", "x"],
+            &["--frames", "2", "--capture", "3"],
             &["--threads", "0"],
             &["--threads", "x"],
             &["--headless=yes"],

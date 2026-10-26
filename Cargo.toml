@@ -31,6 +31,9 @@ gilrs = "0.11.2"
 # additions only on ARM, and with libm's functions rather than the platform's C library's. Cargo
 # merges features across a build, so drawing's math is scalar too.
 glam = { version = "0.34.1", features = ["bytemuck", "scalar-math", "libm"] }
+# Finds RenderDoc's library in the process, for captures. ash's version, so that the two build
+# once.
+libloading = "0.8.9"
 # The float functions std leaves to the platform, in Rust and so the same everywhere: musl's,
 # ported. Its default `arch` feature puts only what IEEE makes exact, such as sqrt, on hardware.
 libm = "0.2.16"

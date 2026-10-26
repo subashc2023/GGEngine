@@ -164,7 +164,8 @@ in the editor is out of an agent's reach.
   validation message, and 2 for bad arguments. Dedicated servers, CI and agents checking their
   work run this way; rendering checks render offscreen, and simulation-only runs need no GPU. A
   headless run takes a tick of the simulation each frame, so that a run of a set number of frames
-  runs as many ticks on any machine.
+  runs as many ticks on any machine. Under RenderDoc, a run can capture a frame
+  ([Captures](#diagnostics)), which `renderdoccmd convert` writes out as XML for agents to read.
 
 ## Project state
 
@@ -406,9 +407,18 @@ Diagnostics are data, so agents and tools can act on them as reliably as people 
   column. What outlives an
   entity, such as a pick or a queued message, keeps its ID, not its handle.
 - **Validation messages** become events with their VUID and the debug names of the objects
-  involved. A run whose validation layer can't validate synchronization, as one without
-  `VK_EXT_layer_settings` can't, warns `gpu.no_sync_validation`. A panic is logged as
-  `log.panic`, with its location, before the process ends, even under `RUST_LOG=off`.
+  involved. A run whose validation layer can't validate synchronization warns
+  `gpu.no_sync_validation`, naming why: the layer takes no settings (`VK_EXT_layer_settings`), or
+  RenderDoc's layer hides them. A panic is logged as `log.panic`, with its location, before the
+  process ends, even under `RUST_LOG=off`.
+- **Captures.** A run that RenderDoc's layer is active on, as one `renderdoccmd capture` starts,
+  captures its Nth frame with `--capture N`, through RenderDoc's in-application API, headless
+  too, and logs the capture's path; asked to without the layer, it doesn't start
+  (`renderer.no_renderdoc`), and one that ends first warns `engine.not_captured`. Frames' command
+  buffers are named again as they're begun while the layer is active, since RenderDoc forgets a
+  command buffer's name as it's begun. RenderDoc reports Vulkan 1.2 for a GPU without
+  `bufferDeviceAddressCaptureReplay`, whose buffer addresses it can't capture, and the engine's
+  refusal of that GPU says so.
 - **Profiling.** Code marks its work with zones (`gg_core::zone!`), which Tracy lays out on a
   timeline of frames, with plots such as each frame's draws; without the `tracy` feature they
   compile to nothing. The engine also measures every frame itself, always: its time on the main
@@ -795,6 +805,7 @@ main thread.
 | Jobs | `rayon-core`'s thread pool and `join`; not rayon's parallel iterators, whose splits and reductions follow the number of threads |
 | ECS | Our own; see [ECS](#ecs) |
 | Logs and profiling | `tracing` for logs; Tracy, through `tracy-client`, for CPU zones and GPU timestamps |
+| Frame captures | RenderDoc, through its in-application API, which `gg-gpu` finds in the process with `libloading` |
 | Agent access | MCP and a command-line tool, both clients of the [tool API](#agents-and-tools) |
 | Shaders | Slang, compiled to SPIR-V by the Vulkan SDK's `slangc` rather than linked in: the engine's own as it builds, games' as they're added and, in development builds, as their files change, their SPIR-V checked against the shader contract |
 | Assets | glTF 2.0 in, read by the engine over `serde_json`; meshoptimizer for meshes and meshlets; BC-compressed textures in KTX2; until cooking, PNGs and JPEGs that `png` and `zune-jpeg` decode as layers add them |

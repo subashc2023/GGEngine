@@ -16,6 +16,7 @@ mod ui;
 mod view;
 
 use std::iter;
+use std::num::NonZeroU64;
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,7 +28,7 @@ use gg_gpu::{
     ColorImage, DepthImage, Device, Faces, Frames, Instance, InstanceDesc, Surface, Swapchain,
     Target,
 };
-use tracing::trace;
+use tracing::{info, trace};
 
 pub use camera::{Camera, Projection};
 pub use gg_gpu::{Blend, MAX_TEXTURE_SIZE, Sampler, UploadPath, Validation, Window, Wrap};
@@ -240,6 +241,10 @@ pub struct Settings<'a> {
     /// made in a fraction of the time. Other data starts it empty, as `Device::load_pipeline_cache`
     /// says. `None` makes them without one.
     pub pipeline_cache: Option<&'a [u8]>,
+    /// Capture this frame through RenderDoc, counting the frames the renderer renders from 1,
+    /// and log the capture's path. RenderDoc's layer must be active on the GPU, as in an app run
+    /// through `renderdoccmd capture`, or the renderer doesn't start (`renderer.no_renderdoc`).
+    pub capture: Option<NonZeroU64>,
 }
 
 /// Renders frames into a window or, headless, into an offscreen image, and UI into the app's
@@ -259,6 +264,8 @@ pub struct Renderer {
     instance: Arc<Instance>,
     device: Arc<Device>,
     vsync: bool,
+    /// The frame to capture, as [`Settings::capture`] says.
+    capture: Option<NonZeroU64>,
     /// Set once rendering fails, which can leave the GPU's copies of meshes and textures
     /// unfinished.
     failed: bool,
@@ -324,6 +331,16 @@ impl Renderer {
         output: Output,
         settings: &Settings<'_>,
     ) -> Result<Self> {
+        if let Some(frame) = settings.capture
+            && !device.can_capture()
+        {
+            let message = format!(
+                "frame {frame} is to be captured, but RenderDoc's layer isn't active on device \
+                 {:?}; run the app through `renderdoccmd capture`",
+                device.name()
+            );
+            return Err(Error::new("renderer.no_renderdoc", message));
+        }
         // Before the passes make their pipelines.
         if let Some(data) = settings.pipeline_cache {
             device.load_pipeline_cache(data)?;
@@ -344,6 +361,7 @@ impl Renderer {
             instance: instance.clone(),
             device: device.clone(),
             vsync: settings.vsync,
+            capture: settings.capture,
             failed: false,
             waited: Duration::ZERO,
             drawn: DrawCounts::default(),
@@ -413,6 +431,12 @@ impl Renderer {
     /// `renderer.failed`. A shader replaced since, whose new pipeline can't be made, is no error:
     /// it warns, and the shader goes on drawing as it did.
     ///
+    /// The frame [`Settings::capture`] names is captured through RenderDoc, which logs `Frame
+    /// captured` with the capture's path; if it has nothing to render into, the next frame that
+    /// renders is captured instead. A capture that fails to start, as while another is under way
+    /// (`gpu.capture_busy`), or that RenderDoc doesn't make (`gpu.capture_failed`), is an error that
+    /// leaves the renderer as it was.
+    ///
     /// # Panics
     ///
     /// If `data.uploads` holds meshes, shaders or textures taken from another [`Meshes`],
@@ -434,9 +458,21 @@ impl Renderer {
                  GPU; the renderer can only be dropped",
             ));
         }
+        // The frame about to begin; one with nothing to render into begins none.
+        let frame = self.frames.submitted() + 1;
+        // Through another handle on the device, so that the capture doesn't borrow the renderer.
+        let device =
+            (self.capture.map(NonZeroU64::get) == Some(frame)).then(|| self.device.clone());
+        let capture = device.as_deref().map(Device::start_capture).transpose()?;
         let rendered = self.render_frame(data, ui, windows);
         self.failed = rendered.is_err();
-        rendered
+        // A frame that fails or renders nothing discards the capture, as it drops.
+        let rendered = rendered?;
+        if rendered && let Some(capture) = capture {
+            let path = capture.end()?;
+            info!(frame, path = %path.display(), "Frame captured");
+        }
+        Ok(rendered)
     }
 
     fn render_frame(

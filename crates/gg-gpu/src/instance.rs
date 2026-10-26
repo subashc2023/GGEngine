@@ -4,15 +4,15 @@
 use std::borrow::Cow;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Once};
 
 use ash::{ext, khr, vk};
 use gg_core::{Error, Result};
 use raw_window_handle::HasDisplayHandle;
 use tracing::{debug, info, trace, warn};
 
-use crate::{Version, vk_error};
+use crate::{Device, Version, capture, vk_error};
 
 const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
 
@@ -35,6 +35,8 @@ pub struct Instance {
     debug_utils: Option<ext::debug_utils::Instance>,
     messenger: vk::DebugUtilsMessengerEXT,
     validation: Validation,
+    /// Done once a device has named the instance, as [`Instance::name_through`] says.
+    named: Once,
 }
 
 /// Counts the validation warnings and errors an instance reports. It outlives the instance, so
@@ -60,7 +62,8 @@ impl Validation {
     }
 
     /// Whether the validation layer validated synchronization too. It didn't when the layer is too
-    /// old to take settings (`VK_EXT_layer_settings`), or validation is off.
+    /// old to take settings (`VK_EXT_layer_settings`), when RenderDoc's layer hides them, or when
+    /// validation is off.
     pub fn synchronization(&self) -> bool {
         self.synchronization
     }
@@ -129,14 +132,6 @@ impl Instance {
                         extension.extension_name_as_c_str() == Ok(vk::EXT_LAYER_SETTINGS_NAME)
                     })
                 });
-        if validating && !layer_settings {
-            warn!(
-                code = "gpu.no_sync_validation",
-                layer = "VK_LAYER_KHRONOS_validation",
-                extension = "VK_EXT_layer_settings",
-                "Validation is on, but its layer takes no settings, so synchronization isn't validated; install a newer Vulkan SDK"
-            );
-        }
 
         // Not VK_KHR_portability_enumeration, though ash's examples enable it on macOS:
         // KosmicKrisp needs no portability extensions, and leaving it off keeps MoltenVK out of
@@ -217,6 +212,21 @@ impl Instance {
             );
             vk_error("vkCreateInstance", subject, e)
         })?;
+        // Once the instance is made, by when RenderDoc's library is in the process if its layer,
+        // whose pre-instance hooks hide the extension, is active.
+        if validating && !layer_settings {
+            let why = if capture::renderdoc().is_some() {
+                "RenderDoc's layer hides the validation layer's settings, so synchronization isn't validated"
+            } else {
+                "its layer takes no settings, so synchronization isn't validated; install a newer Vulkan SDK"
+            };
+            warn!(
+                code = "gpu.no_sync_validation",
+                layer = "VK_LAYER_KHRONOS_validation",
+                extension = "VK_EXT_layer_settings",
+                "Validation is on, but {why}"
+            );
+        }
 
         let mut instance = Self {
             surface_fn: desc
@@ -225,6 +235,7 @@ impl Instance {
             debug_utils: debug_utils.then(|| ext::debug_utils::Instance::new(&entry, &raw)),
             messenger: vk::DebugUtilsMessengerEXT::null(),
             validation,
+            named: Once::new(),
             entry,
             raw,
         };
@@ -275,6 +286,14 @@ impl Instance {
     /// Whether `VK_EXT_debug_utils` is on, for naming objects and labeling commands.
     pub(crate) fn has_debug_utils(&self) -> bool {
         self.debug_utils.is_some()
+    }
+
+    /// Names the instance `instance` through `device`, made from it, unless a device has: naming
+    /// an object must be externally synchronized, and devices may be made on several threads.
+    pub(crate) fn name_through(&self, device: &Device) {
+        // SAFETY: the instance is live, and the device was made from it.
+        self.named
+            .call_once(|| unsafe { device.set_name(self.raw.handle(), "instance") });
     }
 }
 

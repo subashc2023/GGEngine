@@ -66,7 +66,7 @@ use std::time::{Duration, Instant};
 
 use gg_core::Result;
 use gg_renderer::{MAX_TEXTURE_SIZE, Renderer, Settings, Validation, Viewport};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 pub use actions::{Actions, Binding, Change, Source, Toward};
 use args::Args;
@@ -257,6 +257,7 @@ fn run_args(
     debug!(
         headless = args.headless,
         frames = args.frames,
+        capture = args.capture.map(|frame| frame.get()),
         gpu = args.gpu.as_deref(),
         validation = args.validation,
         record = args.record.as_ref().map(|path| path.display().to_string()),
@@ -660,6 +661,7 @@ fn settings<'a>(app: &'a App, args: &'a Args) -> Settings<'a> {
         vsync: args.vsync,
         uploads: None,
         pipeline_cache: None,
+        capture: args.capture,
     }
 }
 
@@ -760,6 +762,18 @@ impl Ran {
             validated = self.validation.enabled(),
             "Frame times"
         );
+        // A frame past `--frames` is refused, but a window closed early ends a run before it.
+        if let Some(frame) = args.capture
+            && self.frames < frame.get()
+        {
+            warn!(
+                code = "engine.not_captured",
+                frame = frame.get(),
+                frames = self.frames,
+                "Frame {frame} wasn't captured: the run ended after {} frames",
+                self.frames
+            );
+        }
         let messages = self.validation.messages();
         if messages > 0 {
             error!(

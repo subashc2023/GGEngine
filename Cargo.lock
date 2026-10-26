@@ -857,6 +857,7 @@ dependencies = [
  "ash-window",
  "cc",
  "gg-core",
+ "libloading",
  "raw-window-handle",
  "serde_json",
  "tracing",

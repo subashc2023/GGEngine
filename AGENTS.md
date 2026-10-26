@@ -67,6 +67,16 @@ start `tracy-capture -o run.tracy` first and give the run `TRACY_NO_EXIT=1`; the
 `tracy-csvexport run.tracy` lists its zones' times, and with `-u` each time a zone ran, when, and
 on which thread, such as the render thread's `render_frame` beside the main thread's ticks.
 
+RenderDoc captures a frame of a run it starts: `renderdoccmd capture -w -d . -c
+target/captures/sandbox target/debug/gg-sandbox --headless --frames 60 --capture 60` captures
+frame 60 and logs `Frame captured` with the file's path. On Windows the executable is
+`target\debug\gg-sandbox.exe`: renderdoccmd launches nothing from a path with forward slashes
+there. renderdoccmd exits 0 whatever the run does, so read the run's log. `renderdoccmd convert -f
+<capture> -c xml -o <capture>.xml` writes the capture as XML, every object's name
+(`vkSetDebugUtilsObjectNameEXT`) and pass's label (`vkCmdBeginDebugUtilsLabelEXT`) among it. Under
+RenderDoc synchronization isn't validated, and a GPU without `bufferDeviceAddressCaptureReplay`
+is refused: RenderDoc reports Vulkan 1.2 for it.
+
 Build and check shipping configurations with `-p player` alone, since a wider build merges the
 sandbox's features into the player ([Builds](ARCHITECTURE.md#builds)).
 

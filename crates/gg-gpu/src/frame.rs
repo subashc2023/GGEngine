@@ -5,7 +5,7 @@
 //! and textures it takes by the device's upload path: through a transfer queue, it records their
 //! copies apart and submits them first, and its commands wait for them.
 
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 use std::marker::PhantomData;
 use std::slice;
 use std::sync::Arc;
@@ -86,6 +86,9 @@ pub struct Frames {
 struct Slot {
     pool: vk::CommandPool,
     commands: vk::CommandBuffer,
+    /// The pool's and the commands' name, kept to name the commands again as they're begun,
+    /// without allocating.
+    commands_name: CString,
     /// For each target, signaled when the swapchain image the frame renders into is ready for
     /// it. There are as many as the most targets a frame has had.
     acquired: Vec<vk::Semaphore>,
@@ -93,6 +96,8 @@ struct Slot {
     /// copies record into; null otherwise.
     transfer_pool: vk::CommandPool,
     transfers: vk::CommandBuffer,
+    /// As `commands_name` is for `commands`.
+    transfers_name: CString,
 }
 
 /// The lists a submission and its present are built in, kept so that frames don't allocate.
@@ -150,7 +155,8 @@ impl Frames {
             let pool_info = vk::CommandPoolCreateInfo::default()
                 .flags(vk::CommandPoolCreateFlags::TRANSIENT)
                 .queue_family_index(device.graphics_family());
-            let commands_name = format!("frame {i} commands");
+            let name = |what| CString::new(format!("frame {i} {what}")).expect("names have no nul");
+            let (commands_name, transfers_name) = (name("commands"), name("transfers"));
             // SAFETY: the device is live, and each object is made from live ones.
             unsafe {
                 let pool = raw.create_command_pool(&pool_info, None).map_err(|e| {
@@ -160,9 +166,11 @@ impl Frames {
                 frames.slots.push(Slot {
                     pool,
                     commands: vk::CommandBuffer::null(),
+                    commands_name,
                     acquired: Vec::new(),
                     transfer_pool: vk::CommandPool::null(),
                     transfers: vk::CommandBuffer::null(),
+                    transfers_name,
                 });
                 let slot = frames.slots.last_mut().expect("a slot was just pushed");
                 let allocate_info = vk::CommandBufferAllocateInfo::default()
@@ -170,26 +178,25 @@ impl Frames {
                     .level(vk::CommandBufferLevel::PRIMARY)
                     .command_buffer_count(1);
                 slot.commands = raw.allocate_command_buffers(&allocate_info).map_err(|e| {
-                    let subject = format_args!("command buffer {commands_name:?}");
+                    let subject = format_args!("command buffer {:?}", slot.commands_name);
                     vk_error("vkAllocateCommandBuffers", subject, e)
                 })?[0];
-                device.set_name(pool, &commands_name);
-                device.set_name(slot.commands, &commands_name);
+                device.set_c_name(pool, &slot.commands_name);
+                device.set_c_name(slot.commands, &slot.commands_name);
                 if let Some(family) = transfer_family {
                     let pool_info = pool_info.queue_family_index(family);
-                    let transfers_name = format!("frame {i} transfers");
                     slot.transfer_pool =
                         raw.create_command_pool(&pool_info, None).map_err(|e| {
-                            let subject = format_args!("command pool {transfers_name:?}");
+                            let subject = format_args!("command pool {:?}", slot.transfers_name);
                             vk_error("vkCreateCommandPool", subject, e)
                         })?;
                     let allocate_info = allocate_info.command_pool(slot.transfer_pool);
                     slot.transfers = raw.allocate_command_buffers(&allocate_info).map_err(|e| {
-                        let subject = format_args!("command buffer {transfers_name:?}");
+                        let subject = format_args!("command buffer {:?}", slot.transfers_name);
                         vk_error("vkAllocateCommandBuffers", subject, e)
                     })?[0];
-                    device.set_name(slot.transfer_pool, &transfers_name);
-                    device.set_name(slot.transfers, &transfers_name);
+                    device.set_c_name(slot.transfer_pool, &slot.transfers_name);
+                    device.set_c_name(slot.transfers, &slot.transfers_name);
                 }
             }
         }
@@ -314,7 +321,12 @@ impl Frames {
         self.device.frame_begun(self.submitted + 1);
         self.arenas[slot].reset(&self.device)?;
         let raw = self.device.raw();
-        let Slot { pool, commands, .. } = self.slots[slot];
+        let Slot {
+            pool,
+            commands,
+            ref commands_name,
+            ..
+        } = self.slots[slot];
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
         let bindless = self.device.bindless();
@@ -331,6 +343,7 @@ impl Frames {
                     let subject = format_args!("command buffer \"frame {slot} commands\"");
                     vk_error("vkBeginCommandBuffer", subject, e)
                 })?;
+            self.device.name_begun(commands, commands_name);
             raw.cmd_bind_descriptor_sets(
                 commands,
                 vk::PipelineBindPoint::GRAPHICS,
@@ -347,6 +360,12 @@ impl Frames {
     /// this one's resources, and for the display to let go of the first target's image.
     pub fn waited(&self) -> Duration {
         self.waited
+    }
+
+    /// How many frames have been submitted: the number of the last, as frames count from 1. A
+    /// [`Frames::begin`] that returns `None` begins none.
+    pub fn submitted(&self) -> u64 {
+        self.submitted
     }
 
     /// Waits until the GPU has finished the `frame`th frame.
@@ -691,7 +710,8 @@ impl<'a> Frame<'a> {
         let slot = &self.frames.slots[self.slot];
         let (pool, transfers) = (slot.transfer_pool, slot.transfers);
         if !self.transferring {
-            let raw = self.frames.device.raw();
+            let device = &self.frames.device;
+            let raw = device.raw();
             let begin_info = vk::CommandBufferBeginInfo::default()
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
             // SAFETY: the slot's last copies have finished, as the GPU has finished the slot's
@@ -710,6 +730,7 @@ impl<'a> Frame<'a> {
                             format_args!("command buffer \"frame {} transfers\"", self.slot);
                         vk_error("vkBeginCommandBuffer", subject, e)
                     })?;
+                device.name_begun(transfers, &slot.transfers_name);
             }
             self.transferring = true;
         }

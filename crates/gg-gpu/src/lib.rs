@@ -1,5 +1,6 @@
 //! The Vulkan layer, built on `ash`: instance and device setup, memory, buffers and images,
-//! bindless descriptors, pipelines, swapchain, synchronization and queue submission.
+//! bindless descriptors, pipelines, swapchain, synchronization and queue submission, and frame
+//! captures through RenderDoc.
 //!
 //! `gg-renderer` is its only client; the engine reaches the GPU through the renderer.
 
@@ -8,6 +9,7 @@
 
 mod bindless;
 mod buffer;
+mod capture;
 mod device;
 mod frame;
 mod image;
@@ -26,6 +28,7 @@ use gg_core::Error;
 
 pub use bindless::{PLACED_TEXTURES, Sampler, Wrap};
 pub use buffer::GpuBuffer;
+pub use capture::Capture;
 pub use device::{Device, SHADER_CAPABILITIES, UploadPath};
 pub use frame::{Frame, Frames, Indices, Pass, Target, Upload};
 pub use image::{ColorImage, DepthImage};

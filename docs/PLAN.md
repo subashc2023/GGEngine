@@ -292,22 +292,33 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   the AMD iGPU, and CI runs it on lavapipe; `ticks` counts none over 20,000 ticks that replace
   parents and their children, which without the room allocate. Frames that draw UI allocate, in
   egui, as the sandbox's do.
+- **RenderDoc captures** (2026-10-26): a run that RenderDoc's layer is active on captures its Nth
+  frame with `--capture N`, headless or windowed, through RenderDoc's in-application API, and logs
+  the capture's path; asked to without the layer, it doesn't start (`renderer.no_renderdoc`), and
+  one that ends first warns (`engine.not_captured`). Frames' command buffers are named again as
+  they're begun while the layer is active, and the instance is named; the warning that
+  synchronization isn't validated, and the refusal of a GPU that RenderDoc reports Vulkan 1.2 for,
+  name RenderDoc as the cause. Captures by hand on the RTX 4090, of the sandbox headless and
+  windowed, debug and release, and of the player, replayed for their resources and actions, name
+  everything the engine makes, but the swapchain images of a torn-off window that the frame doesn't
+  render into, which RenderDoc leaves its own names on, and label every pass; a GPU test checks the
+  refusal, in CI on lavapipe.
+- **Phase 4, first mesh** (2026-10-26): each item of its done-when has a check. The sandbox draws
+  Cesium's milk truck, textured and depth-tested, among its cubes and 100,000 moving sprites, and
+  GPU tests check models, depth and sprites against references, in CI on lavapipe. A Tracy capture
+  of the release sandbox shows rendering on its own thread beside the ticks. The `frames` test
+  counts no allocation in the frames of an app that draws no UI, in CI too. A RenderDoc capture of
+  the sandbox, taken with `--capture`, names what the engine makes and labels its passes.
 
-## Now: Phase 4's eighth milestone
+## Now: Phase 5's first milestone
 
-[Phase 4](#next)'s eighth milestone is picked from what the phase has left as it starts, and its
-plan says when it's done.
+[Phase 5](#next) starts once the flagship game is decided, as [Open questions](#open-questions)
+asks. Its first milestone is chosen as it starts, and its plan says when it's done.
 
 ## Next
 
 Each phase ends in something you can run and check.
 
-4. **First mesh.** Shaders checked against their contract; an on-disk pipeline cache; shader hot
-   reload. Render extraction, with the render thread a frame behind simulation and rendering
-   interpolated between fixed steps. *Done when* the sandbox draws a textured, depth-tested glTF
-   mesh and thousands of moving entities, Tracy shows simulation and rendering overlapping,
-   steady-state frames of an app that draws no UI don't allocate, and a RenderDoc capture shows
-   named resources and labeled passes.
 5. **Tool API and hot reload: v0.1.** The tool API in development builds, as
    [ARCHITECTURE.md](../ARCHITECTURE.md#agents-and-tools) describes. `tools/gg`, the
    command-line tool: build, run and test with machine-readable results; launch and supervise a
@@ -360,6 +371,11 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | A clean shutdown on Ctrl+C, which now ends the process at once; the JSON log keeps every line written until then, and a recording every whole line but its `end` | A headless run that goes on until it's stopped, such as a dedicated server |
 | GPU tests in Windows and macOS CI, which skip them because hosted runners there have no GPU | A self-hosted runner with a GPU, or a Vulkan driver that runs on those runners without one |
 | Checking windowed frames' allocations in CI, under Xvfb on Linux, with lavapipe presenting and input through XTest; they're checked by hand, with `cargo test -p gg-engine --test frames -- --windowed` | A change to the windowed loop allocates where the check by hand didn't look |
+| Checking captures in CI, under RenderDoc on Linux with lavapipe: captures are checked by hand, replayed through qrenderdoc's Python for their names and labels | A name or a label is lost unseen, or the tool API checks captures |
+| Capturing from code or through the tool API, and more than one frame a run: `--capture` names one frame as the run starts | Phase 5, the tool API |
+| Labels inside passes: each run of draws labeled by what it draws, and the frame pass's view and UI apart; a capture shows a label for each pass | Phase 6, with the render graph |
+| Synchronization validation under RenderDoc, whose layer hides the validation layer's settings: through `VK_EXT_validation_features`, or the validation layer's environment | A synchronization bug shows under RenderDoc alone |
+| Captures on macOS, where RenderDoc doesn't run, so `--capture` is refused | Someone needs a capture of a Mac's frames |
 | egui, the dock and the Inspector behind `dev`: the player links them, though it runs egui for its first frame alone, as an app none of whose layers draw UI does; `Ui`, which `Layer::ui` takes, is the type to turn into a no-op | Phase 7, with the shipping profile |
 | The main thread takes the renderer back once a frame's UI is drawn, so a frame's input is read about a frame before it renders: a refresh under `--vsync`; and drawing between ticks draws the world up to a tick behind the simulation. Starting each frame once the render thread has acquired the image it renders into would win the first back, and extrapolating from the latest ticks the second | A game's input latency needs it |
 | Answering at once what a driver sends the main thread's windows from the render thread: the main thread's wait answers each time a millisecond's wait times out, which Windows' timer tick stretches to about 16 ms, so a sent message can hold a frame that long. A Win32 event the render thread sets, waited on with `MsgWaitForMultipleObjectsEx`, would wake for both | A driver's sent messages show as stalls, such as while a window resizes |

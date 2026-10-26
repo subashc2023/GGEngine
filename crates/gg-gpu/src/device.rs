@@ -11,6 +11,7 @@ use gg_core::{Error, Result};
 use tracing::{debug, info, warn};
 
 use crate::bindless::Bindless;
+use crate::capture::{self, Capture, RenderDoc};
 use crate::pipeline_cache::{self, Identity, Refusal};
 use crate::vma::{Allocation, Allocator};
 use crate::{
@@ -98,6 +99,8 @@ pub struct Device {
     /// The host image copy functions, for a device that uploads by host image copy.
     host_image_copy_fn: Option<ext::host_image_copy::Device>,
     uploads: UploadPath,
+    /// RenderDoc, for a device it can capture: one its layer is active on.
+    renderdoc: Option<&'static RenderDoc>,
 }
 
 /// A device queue. Vulkan lets one thread at a time use a queue, hence the lock.
@@ -250,6 +253,7 @@ impl Device {
             }
         };
 
+        let renderdoc = renderdoc_on(instance, physical);
         let device = Self {
             graphics: Queue {
                 family: graphics,
@@ -264,6 +268,7 @@ impl Device {
             host_image_copy_fn: (uploads == UploadPath::HostImageCopy)
                 .then(|| ext::host_image_copy::Device::new(instance.raw(), &raw)),
             uploads,
+            renderdoc,
             debug_utils,
             swapchain_fn: surface.map(|_| khr::swapchain::Device::new(instance.raw(), &raw)),
             instance: instance.clone(),
@@ -287,6 +292,7 @@ impl Device {
             }
             device.bindless.set_names(&device);
         }
+        instance.name_through(&device);
         info!(
             name = chosen.name,
             kind = chosen.kind(),
@@ -308,6 +314,27 @@ impl Device {
     /// How the device uploads meshes and textures.
     pub fn upload_path(&self) -> UploadPath {
         self.uploads
+    }
+
+    /// Whether the device can capture its work through RenderDoc: whether RenderDoc's layer is
+    /// active on its GPU, as in an app run through `renderdoccmd capture`.
+    pub fn can_capture(&self) -> bool {
+        self.renderdoc.is_some()
+    }
+
+    /// Starts capturing the device's work through RenderDoc, until the capture ends, which writes
+    /// it to a file, or drops, which discards it. Fails with `gpu.no_renderdoc` unless the device
+    /// [can capture](Device::can_capture), and with `gpu.capture_busy` while another capture is
+    /// under way, such as one F12 started.
+    pub fn start_capture(&self) -> Result<Capture<'_>> {
+        let Some(renderdoc) = self.renderdoc else {
+            let message = format!(
+                "device {:?} can't capture: RenderDoc's layer isn't active on it",
+                self.name
+            );
+            return Err(Error::new("gpu.no_renderdoc", message));
+        };
+        renderdoc.start(self)
     }
 
     /// Gives the device a pipeline cache, which every pipeline made from then on goes through,
@@ -665,12 +692,13 @@ impl Device {
                     .raw
                     .allocate_command_buffers(&allocate_info)
                     .map_err(|e| vk_error("vkAllocateCommandBuffers", commands_named, e))?[0];
-                self.set_name(commands, name);
                 let begin_info = vk::CommandBufferBeginInfo::default()
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
                 self.raw
                     .begin_command_buffer(commands, &begin_info)
                     .map_err(|e| vk_error("vkBeginCommandBuffer", commands_named, e))?;
+                // Once begun, as RenderDoc forgets a command buffer's name as it's begun.
+                self.set_name(commands, name);
                 record(commands);
                 self.raw
                     .end_command_buffer(commands)
@@ -702,15 +730,42 @@ impl Device {
     ///
     /// `handle` must be a live object of this device or its instance.
     pub(crate) unsafe fn set_name(&self, handle: impl vk::Handle, name: &str) {
-        let (Some(debug_utils), Ok(name)) = (&self.debug_utils, CString::new(name)) else {
+        if self.debug_utils.is_some()
+            && let Ok(name) = CString::new(name)
+        {
+            // SAFETY: the caller guarantees the handle.
+            unsafe { self.set_c_name(handle, &name) };
+        }
+    }
+
+    /// [`Device::set_name`] with a name that's a C string already, which allocates nothing.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Device::set_name`].
+    pub(crate) unsafe fn set_c_name(&self, handle: impl vk::Handle, name: &CStr) {
+        let Some(debug_utils) = &self.debug_utils else {
             return;
         };
         let info = vk::DebugUtilsObjectNameInfoEXT::default()
             .object_handle(handle)
-            .object_name(&name);
+            .object_name(name);
         // SAFETY: the caller guarantees the handle. Names are a debugging aid, so a failure to
         // set one is ignored.
         let _ = unsafe { debug_utils.set_debug_utils_object_name(&info) };
+    }
+
+    /// Names `commands`, just begun, again while the device can capture: RenderDoc forgets a
+    /// command buffer's name as it's begun.
+    ///
+    /// # Safety
+    ///
+    /// `commands` must be a live command buffer of this device.
+    pub(crate) unsafe fn name_begun(&self, commands: vk::CommandBuffer, name: &CStr) {
+        if self.can_capture() {
+            // SAFETY: the caller guarantees it.
+            unsafe { self.set_c_name(commands, name) };
+        }
     }
 
     /// Opens a debug label, which captures and validation messages show around the commands
@@ -816,13 +871,14 @@ impl Candidate {
                 raw.get_physical_device_queue_family_properties(physical),
             )
         };
-        let bindless = properties.api_version >= vk::API_VERSION_1_2 && {
+        let vulkan12 = (properties.api_version >= vk::API_VERSION_1_2).then(|| {
             let mut vulkan12 = vk::PhysicalDeviceVulkan12Features::default();
             let mut features = vk::PhysicalDeviceFeatures2::default().push_next(&mut vulkan12);
             // SAFETY: as above; the 1.2 features are core in Vulkan 1.2.
             unsafe { raw.get_physical_device_features2(physical, &mut features) };
-            has_bindless(&vulkan12)
-        };
+            vulkan12
+        });
+        let bindless = vulkan12.as_ref().is_some_and(has_bindless);
         let name = properties.device_name_as_c_str().map_or_else(
             |_| format!("GPU {index}"),
             |name| name.to_string_lossy().into_owned(),
@@ -874,10 +930,21 @@ impl Candidate {
             HostCopy::Unsupported
         };
         let problem = if properties.api_version < REQUIRED_VERSION {
-            Some(format!(
-                "supports Vulkan {}, not 1.4; a newer driver may add it",
-                Version(properties.api_version)
-            ))
+            let version = Version(properties.api_version);
+            // RenderDoc reports Vulkan 1.2 for a GPU whose buffer addresses it can't capture,
+            // which 1.3 requires.
+            let hidden = vulkan12
+                .is_some_and(|features| features.buffer_device_address_capture_replay != vk::TRUE)
+                && capture::renderdoc().is_some();
+            Some(if hidden {
+                format!(
+                    "reports Vulkan {version} under RenderDoc, which needs \
+                     bufferDeviceAddressCaptureReplay to capture buffer addresses, which this GPU \
+                     lacks"
+                )
+            } else {
+                format!("supports Vulkan {version}, not 1.4; a newer driver may add it")
+            })
         } else if graphics.is_none() && surface.is_some() {
             Some("has no graphics queue that can present to the window".to_owned())
         } else if graphics.is_none() {
@@ -1041,6 +1108,43 @@ fn has_extension(extensions: &[vk::ExtensionProperties], name: &CStr) -> bool {
     extensions
         .iter()
         .any(|extension| extension.extension_name_as_c_str() == Ok(name))
+}
+
+/// RenderDoc, if its layer is active on the GPU, as the tools active on it report, which are
+/// logged at debug: the loader lists RenderDoc's layer whether or not it's active, and its library
+/// can be in the process with the layer off.
+fn renderdoc_on(instance: &Instance, physical: vk::PhysicalDevice) -> Option<&'static RenderDoc> {
+    let raw = instance.raw();
+    // SAFETY: the physical device came from this instance and supports Vulkan 1.4, which has the
+    // query; the list has room for as many tools as it counted.
+    let tools = unsafe {
+        raw.get_physical_device_tool_properties_len(physical)
+            .and_then(|len| {
+                let mut tools = vec![vk::PhysicalDeviceToolProperties::default(); len];
+                raw.get_physical_device_tool_properties(physical, &mut tools)
+                    .map(|()| tools)
+            })
+    }
+    .unwrap_or_default();
+    let mut active = false;
+    for tool in &tools {
+        let [name, version, layer] = [
+            tool.name_as_c_str(),
+            tool.version_as_c_str(),
+            tool.layer_as_c_str(),
+        ]
+        .map(|text| text.map(CStr::to_string_lossy).unwrap_or_default());
+        debug!(
+            name = %name,
+            version = %version,
+            layer = %layer,
+            purposes = ?tool.purposes,
+            "Tool active"
+        );
+        // RenderDoc 1.45 names itself, but not its layer.
+        active |= tool.name_as_c_str() == Ok(c"RenderDoc");
+    }
+    active.then(capture::renderdoc).flatten()
 }
 
 /// The queue family that uploads go through apart from graphics, if there is one: of those
