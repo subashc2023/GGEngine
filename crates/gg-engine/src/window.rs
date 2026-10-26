@@ -481,11 +481,6 @@ impl ApplicationHandler for Handler<'_> {
     }
 
     fn exiting(&mut self, _: &ActiveEventLoop) {
-        // Without waiting for a compile under way, which ends the thread once it ends.
-        #[cfg(feature = "dev")]
-        {
-            self.hot_reload = None;
-        }
         // The last frame ends here, and the frame handed over last renders, and counts, before
         // the run's end is timed.
         (self.cx.perf).finish(self.clock.since_last(Instant::now()));
@@ -500,6 +495,10 @@ impl ApplicationHandler for Handler<'_> {
         });
         let stopping = Instant::now();
         let _zone = gg_core::zone!("shutdown");
+        #[cfg(feature = "dev")]
+        if let Some(hot_reload) = self.hot_reload.take() {
+            hot_reload.stop();
+        }
         self.dock.save();
         if let Some((renderer, last)) = stopped {
             match last.map(|last| last.presented) {

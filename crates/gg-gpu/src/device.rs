@@ -314,7 +314,8 @@ impl Device {
     /// and returns whether it holds `data`: what [`Device::pipeline_cache`] gave on a device of
     /// the same GPU and driver, whole. Other data starts it empty: logged at debug if it's another
     /// GPU's, driver's or engine's, and with a `gpu.pipeline_cache` warning if it's damaged, which
-    /// no driver is given, since drivers needn't survive it.
+    /// no driver is given, since drivers needn't survive it, or if the driver fails to load it, as
+    /// when it runs out of memory.
     ///
     /// # Panics
     ///
@@ -325,7 +326,7 @@ impl Device {
             self.pipeline_cache.get().is_none(),
             "a device loads its pipeline cache once"
         );
-        let payload = match pipeline_cache::open(&self.identity, data) {
+        let mut payload = match pipeline_cache::open(&self.identity, data) {
             Ok(payload) => Some(payload),
             Err(Refusal::Empty) => None,
             Err(Refusal::Foreign(why)) => {
@@ -341,13 +342,32 @@ impl Device {
                 None
             }
         };
-        let info = vk::PipelineCacheCreateInfo::default().initial_data(payload.unwrap_or_default());
-        // SAFETY: the device is live, and the data, if any, is what vkGetPipelineCacheData gave
-        // for this GPU and driver, whole, as its header shows.
-        let cache = unsafe { self.raw.create_pipeline_cache(&info, None) }.map_err(|e| {
-            let cache = format_args!("device {:?}'s pipeline cache", self.name);
-            vk_error("vkCreatePipelineCache", cache, e)
-        })?;
+        let make = |data: &[u8]| {
+            let info = vk::PipelineCacheCreateInfo::default().initial_data(data);
+            // SAFETY: the device is live, and the data, if any, is what vkGetPipelineCacheData
+            // gave for this GPU and driver, whole, as its header shows.
+            unsafe { self.raw.create_pipeline_cache(&info, None) }
+        };
+        let cache = match payload.map(make) {
+            Some(Ok(cache)) => cache,
+            made => {
+                if let Some(Err(e)) = made {
+                    let cache = format_args!("device {:?}'s pipeline cache", self.name);
+                    let error = vk_error("vkCreatePipelineCache", cache, e);
+                    warn!(
+                        code = "gpu.pipeline_cache",
+                        gpu = self.name,
+                        "The saved pipeline cache can't be loaded: {error:#}; pipelines are made \
+                         anew"
+                    );
+                    payload = None;
+                }
+                make(&[]).map_err(|e| {
+                    let cache = format_args!("device {:?}'s pipeline cache", self.name);
+                    vk_error("vkCreatePipelineCache", cache, e)
+                })?
+            }
+        };
         // SAFETY: the cache is live.
         unsafe { self.set_name(cache, "pipeline cache") };
         if self.pipeline_cache.set(cache).is_err() {

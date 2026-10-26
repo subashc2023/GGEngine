@@ -4,10 +4,12 @@
 //! SPIR-V specification lays them out, each a word of its length and opcode, then its operands.
 
 use std::collections::{HashMap, HashSet};
+use std::mem::offset_of;
 
 use gg_gpu::SHADER_CAPABILITIES;
 
 use super::Types;
+use crate::mesh::Push;
 
 /// SPIR-V's magic number, which opens a module.
 const MAGIC: u32 = 0x0723_0203;
@@ -54,6 +56,11 @@ fn is_atomic(opcode: u32) -> bool {
     matches!(opcode, 227 | 229..=242 | 318 | 5614 | 5615 | 6035)
 }
 
+/// The instructions that sample with a depth comparison, as `SampleCmp`, `SampleCmpLevelZero`
+/// and `GatherCmp` do: `OpImageSampleDrefImplicitLod` and `OpImageSampleDrefExplicitLod`, their
+/// projective forms, `OpImageDrefGather`, and the sparse forms of each.
+const COMPARES_DEPTH: [u32; 10] = [89, 90, 93, 94, 97, 307, 308, 311, 312, 315];
+
 // Decorations.
 const ARRAY_STRIDE: u32 = 6;
 const MATRIX_STRIDE: u32 = 7;
@@ -90,27 +97,67 @@ const DRAW_INDEX: u32 = 4426;
 /// An image's dimensionality, for 2D images.
 const DIM_2D: u32 = 1;
 
-/// What the engine pushes before each draw, each at its offset, in order: 88 bytes.
-const PUSHED: [(u32, &str); 4] = [
-    (0, "the matrix from the world to clip space"),
-    (64, "the vertices' address"),
-    (72, "the instances' transforms' address"),
-    (80, "the instances' parameters' address"),
+/// What the engine pushes before each draw, a [`Push`]: each member at its offset, in order.
+const PUSHED: [(u32, &str, Pushed); 4] = [
+    (
+        offset_of!(Push, clip_from_world) as u32,
+        "the matrix from the world to clip space",
+        Pushed::Matrix,
+    ),
+    (
+        offset_of!(Push, vertices) as u32,
+        "the vertices' address",
+        Pushed::Vertices,
+    ),
+    (
+        offset_of!(Push, transforms) as u32,
+        "the instances' transforms' address",
+        Pushed::Transforms,
+    ),
+    (
+        offset_of!(Push, params) as u32,
+        "the instances' parameters' address",
+        Pushed::Params,
+    ),
 ];
+
+/// What a member of a [`Push`] is.
+#[derive(Clone, Copy)]
+enum Pushed {
+    /// A float4x4.
+    Matrix,
+    /// The address of the vertices, a `V` each.
+    Vertices,
+    /// The address of the instances' transforms, a float4x4 each.
+    Transforms,
+    /// The address of the instances' parameters, a `P` each.
+    Params,
+}
 
 /// The capabilities that games' shaders may reach for that need what the engine doesn't enable,
 /// named with what in Slang asks for them; others are named by number.
-const REFUSED_CAPABILITIES: [(u32, &str); 20] = [
+const REFUSED_CAPABILITIES: [(u32, &str); 31] = [
     (9, "Float16, for `half`"),
     (10, "Float64, for `double`"),
     (11, "Int64, for 64-bit integers"),
     (22, "Int16, for 16-bit integers"),
     (39, "Int8, for 8-bit integers"),
+    (4433, "StorageBuffer16BitAccess, for 16-bit data"),
+    (4435, "StoragePushConstant16, for 16-bit data"),
+    (4436, "StorageInputOutput16, for 16-bit varyings"),
+    (4448, "StorageBuffer8BitAccess, for 8-bit data"),
+    (4450, "StoragePushConstant8, for 8-bit data"),
+    (2, "Geometry, for `SV_PrimitiveID`"),
+    (69, "ShaderLayer, for `SV_RenderTargetArrayIndex`"),
+    (70, "ShaderViewportIndex, for `SV_ViewportArrayIndex`"),
+    (4439, "MultiView, for `SV_ViewID`"),
+    (52, "InterpolationFunction, for `EvaluateAttribute*`"),
     (25, "ImageGatherExtended, for gathers at offsets that vary"),
     (32, "ClipDistance, for `SV_ClipDistance`"),
     (33, "CullDistance, for `SV_CullDistance`"),
     (34, "ImageCubeArray, for arrays of cube maps"),
     (35, "SampleRateShading, for `SV_SampleIndex`"),
+    (41, "SparseResidency, for samples' residency status"),
     (42, "MinLod, for samples with a least level of detail"),
     (61, "GroupNonUniform, for wave operations"),
     (62, "GroupNonUniformVote, for wave operations"),
@@ -232,6 +279,8 @@ struct Module {
     value_types: HashMap<u32, u32>,
     /// What stores, copies and atomic operations write through.
     written: Vec<u32>,
+    /// Whether it samples with a depth comparison.
+    compares_depth: bool,
 }
 
 impl Module {
@@ -239,12 +288,9 @@ impl Module {
     fn read(spirv: &[u8]) -> Option<Self> {
         let words = words(spirv)?;
         let mut module = Self::default();
-        let mut at = 5;
-        while at < words.len() {
-            let length = (words[at] >> 16) as usize;
-            let operands = words.get(at + 1..at + length).filter(|_| length > 0)?;
-            module.take(words[at] & 0xffff, operands)?;
-            at += length;
+        for instruction in instructions(&words) {
+            let (_, opcode, operands) = instruction?;
+            module.take(opcode, operands)?;
         }
         Some(module)
     }
@@ -324,6 +370,7 @@ impl Module {
                 &[pointer, ..],
             ) => self.written.push(pointer),
             (opcode, &[_, _, pointer, ..]) if is_atomic(opcode) => self.written.push(pointer),
+            (opcode, _) if COMPARES_DEPTH.contains(&opcode) => self.compares_depth = true,
             (opcode, &[ty, id, ..]) if MAKES_VALUES.contains(&opcode) => {
                 self.value_types.insert(id, ty);
             }
@@ -517,10 +564,11 @@ impl Module {
         for (member, &ty) in (0..).zip(members) {
             let name = self.member_name(block, member);
             let offset = self.member_decoration(block, member, OFFSET);
-            let Some(&(pushed_at, pushed)) = PUSHED.get(member as usize) else {
+            let Some(&(pushed_at, pushed, kind)) = PUSHED.get(member as usize) else {
                 breaches.push(format!(
-                    "it reads {name} from its push constants, past the 88 bytes the engine \
-                     pushes"
+                    "it reads {name} from its push constants, past the {} bytes the engine \
+                     pushes",
+                    size_of::<Push>()
                 ));
                 continue;
             };
@@ -532,8 +580,8 @@ impl Module {
                 ));
                 continue;
             }
-            match member {
-                0 => {
+            match kind {
+                Pushed::Matrix => {
                     let stride = self.member_decoration(block, member, MATRIX_STRIDE);
                     if !self.is_float4x4(ty, stride) {
                         breaches.push(format!(
@@ -542,8 +590,10 @@ impl Module {
                         ));
                     }
                 }
-                1 => self.check_pointee(ty, "vertices", "vertex type", types.vertex(), breaches),
-                2 => {
+                Pushed::Vertices => {
+                    self.check_pointee(ty, "vertices", "vertex type", types.vertex(), breaches);
+                }
+                Pushed::Transforms => {
                     let transforms = self.pointee(ty, PHYSICAL_STORAGE_BUFFER);
                     let stride = self.decoration(ty, ARRAY_STRIDE);
                     let float4x4 = transforms.is_some_and(|ty| self.is_float4x4(ty, None));
@@ -554,10 +604,10 @@ impl Module {
                         ));
                     }
                 }
-                _ if types.params_size == 0 => breaches.push(format!(
+                Pushed::Params if types.params_size == 0 => breaches.push(format!(
                     "it reads parameters through {name}, but it's added without them, `()`"
                 )),
-                _ => self.check_pointee(
+                Pushed::Params => self.check_pointee(
                     ty,
                     "parameters",
                     "type of parameters",
@@ -641,6 +691,13 @@ impl Module {
                 self.resource(variable),
                 self.name(variable.id)
             ));
+        }
+        if self.compares_depth {
+            breaches.push(
+                "it samples with a depth comparison, as `SampleCmp` and `GatherCmp` do, where the \
+                 bindless set's textures hold colors and its samplers compare nothing"
+                    .to_owned(),
+            );
         }
     }
 
@@ -829,6 +886,21 @@ fn words(spirv: &[u8]) -> Option<Vec<u32>> {
     (words.len() >= 5 && words[0] == MAGIC).then_some(words)
 }
 
+/// The instructions of `words`, a module's, after its header, each a word of its length and its
+/// opcode, then its operands: each one's position, opcode and operands, then `None` and no more
+/// where one can't be read, as one of no words, or one that runs past the end.
+fn instructions(words: &[u32]) -> impl Iterator<Item = Option<(usize, u32, &[u32])>> {
+    let mut next = Some(5);
+    std::iter::from_fn(move || {
+        let at = next.filter(|&at| at < words.len())?;
+        let length = (words[at] >> 16) as usize;
+        // None for one of no words too, whose operands would end before they start.
+        let operands = words.get(at + 1..at + length);
+        next = operands.map(|_| at + length);
+        Some(operands.map(|operands| (at, words[at] & 0xffff, operands)))
+    })
+}
+
 /// The string that `words` open with, and how many words it takes: UTF-8, ending in a zero byte,
 /// padded to a whole word.
 fn string(words: &[u32]) -> Option<(String, usize)> {
@@ -856,22 +928,18 @@ pub(super) fn decorate_non_uniform(spirv: Vec<u8>) -> Vec<u8> {
     let mut non_uniform = HashSet::new();
     let mut end = None;
     let mut sampled = Vec::new();
-    let mut at = 5;
-    while at < words.len() {
-        // Each instruction's first word is its length in words, then its opcode.
-        let length = (words[at] >> 16) as usize;
-        let Some(instruction) = words.get(at..at + length).filter(|_| length > 0) else {
+    for instruction in instructions(&words) {
+        let Some((at, opcode, operands)) = instruction else {
             return spirv;
         };
-        match (words[at] & 0xffff, instruction) {
-            (OP_DECORATE, &[_, id, NON_UNIFORM]) => {
+        match (opcode, operands) {
+            (OP_DECORATE, &[id, NON_UNIFORM]) => {
                 non_uniform.insert(id);
-                end.get_or_insert(at + length);
+                end.get_or_insert(at + 1 + operands.len());
             }
-            (OP_SAMPLED_IMAGE, &[_, _, id, image, sampler]) => sampled.push([id, image, sampler]),
+            (OP_SAMPLED_IMAGE, &[_, id, image, sampler]) => sampled.push([id, image, sampler]),
             _ => {}
         }
-        at += length;
     }
     let decorations: Vec<u32> = sampled
         .into_iter()
@@ -891,21 +959,16 @@ pub(super) fn decorate_non_uniform(spirv: Vec<u8>) -> Vec<u8> {
 /// The IDs of the sampled images `spirv` makes, each with whether it's decorated NonUniform.
 #[cfg(test)]
 pub(super) fn sampled_images(spirv: &[u8]) -> Vec<(u32, bool)> {
-    let words: Vec<u32> = (spirv.as_chunks::<4>().0.iter())
-        .map(|&word| u32::from_le_bytes(word))
-        .collect();
+    let words = words(spirv).expect("SPIR-V");
     let (mut non_uniform, mut sampled) = (HashSet::new(), Vec::new());
-    let mut at = 5;
-    while at < words.len() {
-        let length = (words[at] >> 16) as usize;
-        match (words[at] & 0xffff, &words[at..at + length]) {
-            (OP_DECORATE, &[_, id, NON_UNIFORM]) => {
+    for instruction in instructions(&words) {
+        match instruction.expect("an instruction that can be read") {
+            (_, OP_DECORATE, &[id, NON_UNIFORM]) => {
                 non_uniform.insert(id);
             }
-            (OP_SAMPLED_IMAGE, &[_, _, id, ..]) => sampled.push(id),
+            (_, OP_SAMPLED_IMAGE, &[_, id, ..]) => sampled.push(id),
             _ => {}
         }
-        at += length;
     }
     let decorated = |id| (id, non_uniform.contains(&id));
     sampled.into_iter().map(decorated).collect()

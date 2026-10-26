@@ -1,9 +1,10 @@
 //! The OS's directories where an app keeps its files for the user, never beside the executable:
 //! one for what it keeps from run to run, such as the dock's layout, and one for what it can make
-//! again, such as its pipeline cache.
+//! again, such as its pipeline cache; and writing a file there whole.
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::{fs, io};
 
 /// Which of the per-user directories a file goes in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,11 +51,40 @@ pub(crate) fn dir(
     Some(dir.join(app))
 }
 
-#[cfg(test)]
-mod tests {
-    use std::path::Path;
+/// Writes `data` to the file at `path`, making the directories it's in, through a file beside it
+/// named with `.new` after, which then replaces it, so that a crash while writing leaves the last
+/// one whole.
+pub(crate) fn write(path: &Path, data: &[u8]) -> io::Result<()> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let mut temporary = path.as_os_str().to_owned();
+    temporary.push(".new");
+    fs::write(&temporary, data)?;
+    fs::rename(&temporary, path)
+}
 
+#[cfg(test)]
+pub(crate) mod tests {
     use super::*;
+
+    /// A directory of a test's own in the OS's temporary directory, emptied but not made, and
+    /// removed as the test ends, failed or not.
+    pub(crate) struct Scratch(pub(crate) PathBuf);
+
+    impl Scratch {
+        pub(crate) fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("gg-{name}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            Self(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     #[test]
     fn each_kind_of_file_is_in_its_os_directory_for_the_user() {

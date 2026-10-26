@@ -8,8 +8,10 @@
 //! entities as canonical text; operations, the authoring changes made to the world, each with its
 //! inverse, and their log, which undoes and redoes them; recordings of runs, the commands their
 //! ticks applied, which replay without a GPU to the same world, naming where one goes another way;
-//! and measuring each frame, for the log and the Performance panel; and loading what layers add,
-//! images as textures and glTF models, whose nodes spawn as entities. A library of assets to come.
+//! and measuring each frame, for the log and the Performance panel; loading what layers add,
+//! images as textures and glTF models, whose nodes spawn as entities; the pipeline cache's file,
+//! which windowed runs keep; and in development builds, behind `dev`, compiling games' shaders
+//! again as their files change. A library of assets to come.
 //!
 //! An app's `main` starts the engine; there is no separate entry-point crate.
 

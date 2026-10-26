@@ -591,7 +591,8 @@ breaks it, naming each way (`renderer.shader_mismatch`). It checks:
 - each struct the shader reads through an address: its size against its Rust type's, and its
   fields, 32 bits each without padding;
 - that nothing is written through those addresses;
-- the bindless set's textures and samplers, and no other resources;
+- the bindless set's textures and samplers, sampled without a depth comparison, and no other
+  resources;
 - the vertex and instance indices, and no vertex attributes;
 - one float4 out;
 - capabilities, only those the features the device enables give.
@@ -610,16 +611,20 @@ thread hands the renderer draws with it; the old pipeline retires until the GPU 
 A change that doesn't compile, or breaks the contract, warns, and the shader keeps drawing as it
 did. A compile that fails lists none of the files it read, so until one succeeds, a change to any
 file in the directories its files are in compiles it again too, such as an include it couldn't
-find, made, or one it found broken, fixed; one that fails as the last did, from the same files,
-doesn't warn again. The engine's own shaders don't reload.
+find, made, or one it found broken, fixed; a change to its files waits for those directories to
+hold as well, but no more than a second, since something may write beside them all the time; and
+one that fails as the last did, from the same files, doesn't warn again. The run's end waits up to
+a second for a compile under way, so that it removes what slangc wrote. The engine's own shaders
+don't reload.
 
 Every pipeline goes through a pipeline cache, which windowed runs load from the OS's per-user
 directory for caches as the renderer starts, and save as it ends. Pipelines an earlier run made
 are then made again in a fraction of the time, where the driver keeps no cache of its own. The
 driver's data sits behind a header of the engine's: the GPU, the driver and the header's own
 version, and the data's length and hash. Data from another GPU or driver, or damaged, never
-reaches the driver, which needn't survive it. Headless runs, replays and tests use none, as they
-keep no layout, so that their startup times compare.
+reaches the driver, which needn't survive it; data the driver fails to load starts the cache empty
+too. Headless runs, replays and tests use none, as they keep no layout, so that their startup times
+compare.
 
 A game's texture is a PNG or a JPEG that the engine decodes as a layer adds it, to RGBA8 with
 colors sRGB-encoded and alpha not multiplied into them, as images store them, whatever color

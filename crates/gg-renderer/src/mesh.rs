@@ -235,8 +235,15 @@ impl MeshPass {
         let _zone = gg_core::zone!();
         for added in uploads.shaders.drain(..) {
             let index = added.index as usize;
+            // A shader compiled again replaces one the pass has; any other is the next its
+            // `Shaders` added.
+            let follows = if added.replacement {
+                index < self.shaders.len()
+            } else {
+                index == self.shaders.len()
+            };
             assert!(
-                index <= self.shaders.len(),
+                follows,
                 "a renderer draws with the shaders of one `Shaders`"
             );
             // Which the draws' sizes are checked against: its own types, since only the
@@ -392,16 +399,13 @@ impl MeshPass {
             } else {
                 pass.upload(params)?.address()
             };
-            // The shader's `Push`: the matrix from the world to clip space, column-major, then the
-            // addresses of the vertices, the instances' transforms and their parameters. The
-            // matrix goes first, so that every offset is the same under every layout Slang gives
-            // push constants.
-            let mut push = [0u8; 88];
-            push[0..64].copy_from_slice(bytemuck::bytes_of(&view_projection));
-            push[64..72].copy_from_slice(&mesh.vertices.address().to_ne_bytes());
-            push[72..80].copy_from_slice(&transforms.to_ne_bytes());
-            push[80..88].copy_from_slice(&params.to_ne_bytes());
-            pass.push_constants(&push);
+            let push = Push {
+                clip_from_world: view_projection,
+                vertices: mesh.vertices.address(),
+                transforms,
+                params,
+            };
+            pass.push_constants(bytemuck::bytes_of(&push));
             pass.draw_indexed(&mesh.indices, 0, mesh.count, 0, instances);
             drawn.draws += 1;
             drawn.instances += run.instances.len();
@@ -409,6 +413,22 @@ impl MeshPass {
         }
         Ok(drawn)
     }
+}
+
+/// What the mesh pass pushes before each draw, which a mesh shader's push constants read the
+/// start of, as [`Shaders::add`](crate::Shaders::add) describes. The matrix goes first, so that
+/// every offset is the same under every layout Slang gives push constants.
+#[repr(C)]
+#[derive(Clone, Copy, NoUninit)]
+pub(crate) struct Push {
+    /// From the world to clip space, column-major.
+    pub(crate) clip_from_world: Mat4,
+    /// The address of the mesh's vertices.
+    pub(crate) vertices: u64,
+    /// The address of the instances' transforms.
+    pub(crate) transforms: u64,
+    /// The address of the instances' parameters, or 0 for a shader that takes none.
+    pub(crate) params: u64,
 }
 
 #[cfg(test)]

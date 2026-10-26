@@ -35,7 +35,7 @@ fn main() {
         println!("cargo::rerun-if-changed={source}");
         let output = Command::new(&slangc)
             .arg(&source)
-            // As `compile` in src/shader.rs compiles games' shaders, which says why.
+            // As `compile` in src/shader/mod.rs compiles games' shaders, which says why.
             .args(["-target", "spirv", "-fvk-use-entrypoint-name"])
             .arg("-matrix-layout-column-major")
             .args(["-warnings-as-errors", "38006"])

@@ -9,9 +9,9 @@
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use gg_core::{Error, Result};
 use gg_renderer::{Compiled, ShaderSource, Shaders};
@@ -27,9 +27,18 @@ const LOOK: Duration = Duration::from_millis(100);
 /// them to 2 s. A file changed within it compiles the shader again, at worst for nothing.
 const MARGIN: Duration = Duration::from_secs(2);
 
-/// The thread, from the main thread's side. Dropping it ends the thread once a compile under way
-/// ends, without waiting for it: a compile can't be cut short, and a slangc that hangs would hang
-/// the run's end.
+/// How many looks a change to a failing shader's files waits for the directories beside them to
+/// hold too: something may write beside them all the time, such as a log, which would otherwise
+/// keep the change from compiling.
+const SETTLE: u32 = 10;
+
+/// How long the run's end waits for a compile under way, which slangc ends in about a tenth of a
+/// second, so that it removes what slangc wrote; one that hangs holds the end up no longer.
+const STOP: Duration = Duration::from_secs(1);
+
+/// The thread, from the main thread's side, which [`HotReload::stop`] ends. Dropping it ends the
+/// thread too, once a compile under way ends, without waiting for it: a compile can't be cut
+/// short.
 pub(crate) struct HotReload {
     /// How many of the shaders' sources it's been sent.
     sent: usize,
@@ -58,8 +67,8 @@ impl HotReload {
     }
 
     /// Sends the thread the games' shaders added since it last did, and puts each that came back
-    /// compiled in place of the one it was compiled from. Once it's sent them all, it allocates
-    /// nothing unless one came back.
+    /// compiled in place of the one it was compiled from, logging `Shader reloaded`. Once it's
+    /// sent them all, it allocates nothing unless one came back.
     pub(crate) fn update(&mut self, shaders: &mut Shaders) {
         for source in &shaders.sources()[self.sent..] {
             // The thread runs until this side drops, or until it panics, which the log has.
@@ -67,8 +76,23 @@ impl HotReload {
         }
         self.sent = shaders.sources().len();
         while let Ok(compiled) = self.compiled.try_recv() {
+            let source = compiled.source();
+            info!(shader = source.name(), path = %source.path().display(), "Shader reloaded");
             shaders.replace(compiled);
         }
+    }
+
+    /// Ends the thread, which starts no compile once this side lets go, waiting up to [`STOP`]
+    /// for one under way, so that it removes what slangc wrote: slangc outlives a process that
+    /// ends first, and writes it after. What compiles meanwhile isn't put in place.
+    pub(crate) fn stop(self) {
+        let Self {
+            sources, compiled, ..
+        } = self;
+        drop(sources);
+        let until = Instant::now() + STOP;
+        // Until the thread ends, letting go of its side.
+        while (compiled.recv_timeout(until.saturating_duration_since(Instant::now()))).is_ok() {}
     }
 }
 
@@ -79,18 +103,43 @@ fn watch(sources: &Receiver<ShaderSource>, back: &Sender<Compiled>) {
     loop {
         match sources.recv_timeout(LOOK) {
             Ok(source) => {
-                let files = Files::new(source.files(), source.compiled_at(), stamp);
-                watched.push((source, files));
+                watched.push(watching(source));
                 continue;
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
         }
         let _zone = gg_core::zone!("look at shaders' files");
-        for (source, files) in &mut watched {
-            if files.look(stamp) {
-                compile(source, files, back);
+        for at in 0..watched.len() {
+            if !watched[at].1.look(stamp) {
+                continue;
             }
+            // No compile starts once the main thread's side has let go, which waits for the one
+            // under way alone. Shaders sent meanwhile are looked at from the next look.
+            if !take(sources, &mut watched) {
+                return;
+            }
+            let (source, files) = &mut watched[at];
+            compile(source, files, back);
+        }
+    }
+}
+
+/// A shader the thread has been sent, with its files as it was added.
+fn watching(source: ShaderSource) -> (ShaderSource, Files) {
+    let _zone = gg_core::zone!();
+    let files = Files::new(source.files(), source.compiled_at(), stamp);
+    (source, files)
+}
+
+/// Takes the shaders the thread has been sent since it last looked, if any: false once the main
+/// thread's side has let go.
+fn take(sources: &Receiver<ShaderSource>, watched: &mut Vec<(ShaderSource, Files)>) -> bool {
+    loop {
+        match sources.try_recv() {
+            Ok(source) => watched.push(watching(source)),
+            Err(TryRecvError::Empty) => return true,
+            Err(TryRecvError::Disconnected) => return false,
         }
     }
 }
@@ -105,8 +154,7 @@ fn compile(source: &ShaderSource, files: &mut Files, back: &Sender<Compiled>) {
     match source.compile() {
         Ok(compiled) => {
             files.compiled(compiled.files(), stamp);
-            info!(shader = source.name(), path = %path, "Shader reloaded");
-            // Unless the main thread's side has dropped, which ends the thread next.
+            // Unless the main thread's side has let go, which ends the thread next.
             let _ = back.send(compiled);
         }
         Err(error) => {
@@ -182,6 +230,9 @@ struct Files {
     /// from those it compiled from: a change, which compiles once it holds for a look, so that an
     /// editor's partial writes and atomic renames settle first.
     changing: Option<Vec<Stamp>>,
+    /// How many looks in a row its files, changed from those it compiled from, have held while
+    /// its directories haven't.
+    unsettled: u32,
 }
 
 impl Files {
@@ -209,6 +260,7 @@ impl Files {
             dirs: Vec::new(),
             failure: None,
             changing: None,
+            unsettled: 0,
         }
     }
 
@@ -217,21 +269,34 @@ impl Files {
     /// last compiled from, and are as the look before found them. Its stamps are then theirs, as
     /// the compile will find them, so that a change while it compiles, or one it read half done,
     /// compiles again; and a compile that fails waits for the next change. While the shader's own
-    /// file is missing, it waits for it.
+    /// file is missing, it waits for it. A change to its files that holds waits for the directories
+    /// to hold too, but no more than [`SETTLE`] looks.
     fn look(&mut self, stamp: impl Fn(&Path) -> Stamp) -> bool {
         let watched = || self.files.iter().chain(&self.dirs);
         let now: Vec<Stamp> = watched().map(|(path, _)| stamp(path)).collect();
         if watched().zip(&now).all(|((_, then), now)| then == now) {
             self.changing = None;
+            self.unsettled = 0;
             return false;
         }
-        let held = self.changing.as_ref() == Some(&now) && now[0].is_some();
+        let files = self.files.len();
+        let (files_held, dirs_held) = (self.changing.as_ref()).map_or((false, false), |was| {
+            (was[..files] == now[..files], was[files..] == now[files..])
+        });
+        let changed = (self.files.iter().zip(&now)).any(|((_, then), now)| then != now);
+        self.unsettled = if files_held && changed && !dirs_held {
+            self.unsettled + 1
+        } else {
+            0
+        };
+        let held = files_held && now[0].is_some() && (dirs_held || self.unsettled >= SETTLE);
         if held {
             let stamped = self.files.iter_mut().chain(&mut self.dirs);
             for ((_, then), now) in stamped.zip(now) {
                 *then = now;
             }
             self.changing = None;
+            self.unsettled = 0;
         } else {
             self.changing = Some(now);
         }
@@ -283,10 +348,12 @@ impl Files {
 mod tests {
     use std::cell::RefCell;
     use std::collections::HashMap;
+    use std::thread::JoinHandle;
 
     use gg_renderer::Blend;
 
     use super::*;
+    use crate::dirs::tests::Scratch;
     use crate::math::Vec4;
 
     /// Files' stamps as a test sets them, a number for each version of a file.
@@ -457,21 +524,83 @@ mod tests {
     }
 
     #[test]
-    fn edits_before_the_thread_looks_or_after_come_back_compiled() {
-        let dir = std::env::temp_dir().join(format!("gg-watch-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("a directory");
+    fn a_failing_shaders_fix_compiles_while_something_writes_beside_it() {
+        let disk = Disk::default();
+        disk.set("shaders/own.slang", Some(1));
+        disk.set("shaders", Some(1));
+        let listed = [PathBuf::from("shaders/own.slang")];
+        let mut files = Files::new(&listed, SystemTime::UNIX_EPOCH + MARGIN * 2, disk.stamp());
+        // An edit that doesn't compile, so that its directory is watched.
+        disk.set("shaders/own.slang", Some(2));
+        assert!(!files.look(disk.stamp()));
+        assert!(files.look(disk.stamp()));
+        let dirs = files.dirs(disk.stamp());
+        assert!(files.failed(dirs, "a syntax error"));
+        // Something writing beside it at every look, as a log does, which alone compiles nothing.
+        let mut written = 1;
+        let mut write = || {
+            written += 1;
+            disk.set("shaders", Some(written));
+        };
+        for _ in 0..SETTLE * 2 {
+            write();
+            assert!(!files.look(disk.stamp()), "the directory never holds");
+        }
+        // The fix, which waits for the directory to hold, but not for long.
+        disk.set("shaders/own.slang", Some(3));
+        for look in 0..SETTLE {
+            write();
+            assert!(!files.look(disk.stamp()), "waiting, at look {look}");
+        }
+        write();
+        assert!(files.look(disk.stamp()), "waiting no longer");
+    }
+
+    #[test]
+    fn stopping_ends_the_thread_at_once_between_compiles() {
+        let hot_reload = HotReload::start().expect("the thread");
+        let stopping = Instant::now();
+        hot_reload.stop();
+        assert!(stopping.elapsed() < STOP, "{:?}", stopping.elapsed());
+    }
+
+    /// The text of a shader that draws meshes in one color.
+    fn flat_color() -> String {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/shaders/flat_color.slang");
-        let text = fs::read_to_string(fixture).expect("the fixture");
-        // Two shaders, whose files last changed an hour ago, so that each is added from its file
-        // as it is.
+        fs::read_to_string(fixture).expect("the fixture")
+    }
+
+    /// Writes `text` to the shader file at `path`, dated an hour back, so that a shader is added
+    /// from its file as it is.
+    fn written_long_ago(path: &Path, text: &str) {
+        fs::write(path, text).expect("a shader's file");
         let an_hour_ago = SystemTime::now() - Duration::from_secs(60 * 60);
+        let file = fs::File::options().write(true).open(path);
+        (file.and_then(|file| file.set_modified(an_hour_ago))).expect("its time");
+    }
+
+    /// The thread, watching `shaders`' sources: its side, which ends it as it drops; what it sends
+    /// back; and the thread.
+    fn started(shaders: &Shaders) -> (Sender<ShaderSource>, Receiver<Compiled>, JoinHandle<()>) {
+        let (sources, to_watch) = mpsc::channel();
+        let (back, compiled) = mpsc::channel();
+        let thread = thread::spawn(move || watch(&to_watch, &back));
+        for source in shaders.sources() {
+            sources.send(source.clone()).expect("the thread");
+        }
+        (sources, compiled, thread)
+    }
+
+    #[test]
+    fn edits_before_the_thread_looks_or_after_come_back_compiled() {
+        let scratch = Scratch::new("watch");
+        let dir = &scratch.0;
+        fs::create_dir_all(dir).expect("a directory");
+        let text = flat_color();
         let paths = ["a.slang", "b.slang"].map(|file| dir.join(file));
-        let mut shaders = gg_renderer::Shaders::default();
+        let mut shaders = Shaders::default();
         for (name, path) in ["a", "b"].into_iter().zip(&paths) {
-            fs::write(path, &text).expect("a shader's file");
-            let file = fs::File::options().write(true).open(path);
-            (file.and_then(|file| file.set_modified(an_hour_ago))).expect("its time");
+            written_long_ago(path, &text);
             let added = shaders.add::<[f32; 3], Vec4>(name, path, Blend::Opaque);
             added.expect("a shader");
         }
@@ -481,12 +610,7 @@ mod tests {
         // b, edited once it's added but before the thread first looks at its file.
         edit(&paths[1], 1);
 
-        let (sources, to_watch) = mpsc::channel();
-        let (back, compiled) = mpsc::channel();
-        let thread = thread::spawn(move || watch(&to_watch, &back));
-        for source in shaders.sources() {
-            sources.send(source.clone()).expect("the thread");
-        }
+        let (sources, compiled, thread) = started(&shaders);
         let a_while = Duration::from_secs(30);
         let came_back = |what: &str| compiled.recv_timeout(a_while).expect(what);
         let b = came_back("b comes back compiled");
@@ -502,7 +626,6 @@ mod tests {
         shaders.replace(b);
         drop(sources);
         thread.join().expect("the thread ends as its side drops");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The names of the files `compiled` read.
@@ -514,26 +637,17 @@ mod tests {
 
     #[test]
     fn an_include_made_or_fixed_after_a_compile_failed_on_it_comes_back_compiled() {
-        let dir = std::env::temp_dir().join(format!("gg-watch-includes-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("a directory");
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/shaders/flat_color.slang");
-        let text = fs::read_to_string(fixture).expect("the fixture");
-        // Last changed an hour ago, so that it's added from its file as it is.
+        let scratch = Scratch::new("watch-includes");
+        let dir = &scratch.0;
+        fs::create_dir_all(dir).expect("a directory");
+        let text = flat_color();
         let path = dir.join("shader.slang");
-        fs::write(&path, &text).expect("the shader's file");
-        let an_hour_ago = SystemTime::now() - Duration::from_secs(60 * 60);
-        let file = fs::File::options().write(true).open(&path);
-        (file.and_then(|file| file.set_modified(an_hour_ago))).expect("its time");
-        let mut shaders = gg_renderer::Shaders::default();
+        written_long_ago(&path, &text);
+        let mut shaders = Shaders::default();
         let added = shaders.add::<[f32; 3], Vec4>("shader", &path, Blend::Opaque);
         added.expect("a shader");
 
-        let (sources, to_watch) = mpsc::channel();
-        let (back, compiled) = mpsc::channel();
-        let thread = thread::spawn(move || watch(&to_watch, &back));
-        let source = shaders.sources()[0].clone();
-        sources.send(source).expect("the thread");
+        let (sources, compiled, thread) = started(&shaders);
         let a_while = Duration::from_secs(30);
         let came_back = |what: &str| compiled.recv_timeout(a_while).expect(what);
         // Long enough for a compile that fails to have failed, which sends nothing back.
@@ -558,6 +672,5 @@ mod tests {
         shaders.replace(fixed);
         drop(sources);
         thread.join().expect("the thread ends as its side drops");
-        let _ = fs::remove_dir_all(&dir);
     }
 }

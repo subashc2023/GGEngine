@@ -72,7 +72,9 @@ sandbox's features into the player ([Builds](ARCHITECTURE.md#builds)).
 
 A windowed sandbox compiles a game's shader again as its file or one it includes changes, logging
 `Shader reloaded`, and draws with it from the next frame; one that doesn't compile or breaks the
-shader contract warns, and the shader keeps drawing as it did.
+shader contract warns, and the shader keeps drawing as it did. gg-engine's tests of it build only
+with its `dev` feature, which the sandbox turns on: `cargo test --workspace` runs them, and
+`cargo test -p gg-engine` needs `--features dev`.
 
 A change is done when all five pass:
 

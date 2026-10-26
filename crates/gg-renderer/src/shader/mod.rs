@@ -6,6 +6,7 @@ mod spirv;
 use std::any::type_name;
 use std::fmt;
 use std::fs;
+use std::hash::{BuildHasher, RandomState};
 use std::io;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
@@ -85,6 +86,9 @@ pub struct Shaders {
 
 pub(crate) struct Added {
     pub(crate) index: u32,
+    /// Whether it's a shader compiled again, in place of one a renderer has, rather than one
+    /// added, which comes after those a renderer has.
+    pub(crate) replacement: bool,
     pub(crate) name: String,
     pub(crate) spirv: Vec<u8>,
     /// The size of the vertices it reads.
@@ -155,9 +159,10 @@ impl Shaders {
     ///   [`Texture`](crate::Texture) in its parameters, a `uint`, with its
     ///   `[[vk::binding(1, 0)]] SamplerState samplers[]`, by a [`Sampler`](crate::Sampler)'s
     ///   index, a `uint` too, each through `NonUniformResourceIndex`, since the instances of one
-    ///   draw can carry different ones. It uses no other resources, and nothing else that needs a
-    ///   feature the engine doesn't enable, such as `double`, `half`, 64-bit integers or wave
-    ///   operations.
+    ///   draw can carry different ones; not with a depth comparison, as `SampleCmp` makes, since
+    ///   the textures hold colors and the samplers compare nothing. It uses no other resources,
+    ///   and nothing else that needs a feature the engine doesn't enable, such as `double`,
+    ///   `half`, 64-bit integers or wave operations.
     /// - Its structs for `V` and `P` have their fields, in order, of 32-bit scalars, vectors and
     ///   matrices: Slang lays out what a pointer points at as `#[repr(C)]` does, without padding.
     ///   glam's `Vec2`, `Vec3`, `Vec4`, `Quat`, `Mat3` and `Mat4` are `float2`, `float3`,
@@ -171,14 +176,15 @@ impl Shaders {
     /// which way a matrix is laid out, or whether an index that can differ across a draw goes
     /// through `NonUniformResourceIndex`.
     ///
-    /// slangc writes the SPIR-V in the OS's temporary directory, with the list of the files the
-    /// shader read, its own and those it includes, which its [`ShaderSource`] keeps, with when the
-    /// compile began, for hot reload to compile it again as they change.
+    /// slangc writes the SPIR-V in a directory of the compile's own in the OS's temporary
+    /// directory, with the list of the files the shader read, its own and those it includes, which
+    /// its [`ShaderSource`] keeps, with when the compile began, for hot reload to compile it again
+    /// as they change.
     ///
     /// Fails with `renderer.bad_shader` and slangc's diagnostics if it doesn't compile, with
     /// `renderer.shader_mismatch` and each way it breaks the contract if it breaks it, with
-    /// `renderer.shader_files` if what slangc wrote can't be read, and with `renderer.no_slangc`
-    /// if slangc can't be run.
+    /// `renderer.shader_files` if slangc's directory can't be made or what it wrote there can't
+    /// be read, and with `renderer.no_slangc` if slangc can't be run.
     pub fn add<V: NoUninit, P: NoUninit>(
         &mut self,
         name: &str,
@@ -231,6 +237,7 @@ impl Shaders {
         }
         self.added.push(Added {
             index: source.index,
+            replacement: true,
             name: source.name,
             spirv,
             vertex_size: source.types.vertex_size,
@@ -247,6 +254,7 @@ impl Shaders {
         self.count += 1;
         self.added.push(Added {
             index,
+            replacement: false,
             name: name.to_owned(),
             spirv: spirv::decorate_non_uniform(spirv),
             vertex_size: types.vertex_size,
@@ -387,7 +395,18 @@ fn compile(slangc: &Path, name: &str, path: &Path) -> Result<(Vec<u8>, Vec<PathB
     zone.text(path.display());
     let start = Instant::now();
     // slangc lists the files it read only beside SPIR-V it writes to a file.
-    let written = Written::new();
+    let written = Written::new().map_err(|error| {
+        let temporary = std::env::temp_dir();
+        Error::new(
+            "renderer.shader_files",
+            format!(
+                "can't make a directory in {} for slangc to compile shader {name:?} at {} into",
+                temporary.display(),
+                path.display()
+            ),
+        )
+        .with_source(error)
+    })?;
     let mut command = Command::new(slangc);
     command
         .arg(path)
@@ -447,9 +466,12 @@ fn compile(slangc: &Path, name: &str, path: &Path) -> Result<(Vec<u8>, Vec<PathB
         )
         .with_source(error)
     };
-    let depfile = fs::read_to_string(&written.depfile)
-        .map_err(|error| unreadable(&written.depfile, error))?;
-    let files = depfile_files(&depfile);
+    let depfile =
+        fs::read(&written.depfile).map_err(|error| unreadable(&written.depfile, error))?;
+    let Some(files) = depfile_files(&depfile) else {
+        let named = io::Error::other("it names a file whose name isn't UTF-8");
+        return Err(unreadable(&written.depfile, named));
+    };
     if files.is_empty() {
         let listed = io::Error::other("it lists no files");
         return Err(unreadable(&written.depfile, listed));
@@ -464,95 +486,112 @@ fn compile(slangc: &Path, name: &str, path: &Path) -> Result<(Vec<u8>, Vec<PathB
     Ok((spirv, files))
 }
 
-/// Where slangc writes a shader it compiles, and the list of the files it read: in the OS's
-/// temporary directory, named for the process and the compile, and removed as it drops.
+/// Where slangc writes a shader it compiles, and the list of the files it read: a directory of
+/// the compile's own in the OS's temporary directory, removed with them as it drops. That
+/// directory is shared on Unix, so its name is random and only the user can write in it: no one
+/// else can have made it, or put in it anything slangc would write through or this would read.
 struct Written {
+    dir: PathBuf,
     spirv: PathBuf,
     depfile: PathBuf,
 }
 
 impl Written {
-    fn new() -> Self {
+    /// Makes the directory, which fails if anything is at its name.
+    fn new() -> io::Result<Self> {
         static COMPILES: AtomicU64 = AtomicU64::new(0);
         let compile = COMPILES.fetch_add(1, Ordering::Relaxed);
-        let stem = format!("gg-shader-{}-{compile}", std::process::id());
-        let dir = std::env::temp_dir();
-        Self {
-            spirv: dir.join(format!("{stem}.spv")),
-            depfile: dir.join(format!("{stem}.d")),
-        }
+        let random = RandomState::new().hash_one(compile);
+        let name = format!("gg-shader-{}-{compile}-{random:016x}", std::process::id());
+        let dir = std::env::temp_dir().join(name);
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut fs::DirBuilder::new(), 0o700).create(&dir)?;
+        #[cfg(not(unix))]
+        fs::create_dir(&dir)?;
+        Ok(Self {
+            spirv: dir.join("shader.spv"),
+            depfile: dir.join("shader.d"),
+            dir,
+        })
     }
 }
 
 impl Drop for Written {
     fn drop(&mut self) {
-        // What a compile that failed didn't write isn't there to remove.
-        let _ = fs::remove_file(&self.spirv);
-        let _ = fs::remove_file(&self.depfile);
+        let _ = fs::remove_dir_all(&self.dir);
     }
 }
 
 /// The files that `depfile`, which slangc wrote, lists as what its output was made from, each
-/// once, in order. It's a Makefile's rule, `target: prerequisites`, in which a backslash escapes a
-/// colon, a space, a `#` or another backslash, `$$` is a `$`, and a backslash ending a line
-/// carries the rule on to the next.
-fn depfile_files(depfile: &str) -> Vec<PathBuf> {
-    let mut files: Vec<PathBuf> = Vec::new();
-    let mut words = Vec::new();
-    let mut word = String::new();
+/// once, in order; `None` if one's name isn't a path here, as one that isn't UTF-8 isn't outside
+/// Unix. It's a Makefile's rule, `target: prerequisites`, in which a backslash escapes a colon, a
+/// space, a `#` or another backslash, `$$` is a `$`, and a backslash ending a line carries the
+/// rule on to the next. Names are bytes, as Unix's are, which slangc writes as it was given them.
+fn depfile_files(depfile: &[u8]) -> Option<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    let mut word = Vec::new();
     let mut targets_done = false;
-    let mut chars = depfile.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\\' => match chars.peek() {
-                Some(&next @ (':' | ' ' | '#' | '\\')) => {
+    let mut bytes = depfile.iter().copied().peekable();
+    while let Some(byte) = bytes.next() {
+        match byte {
+            b'\\' => match bytes.peek() {
+                Some(&next @ (b':' | b' ' | b'#' | b'\\')) => {
                     word.push(next);
-                    chars.next();
+                    bytes.next();
                 }
-                Some('\r' | '\n') => {
+                Some(b'\r' | b'\n') => {
                     // A line carried on: a space between words.
-                    if chars.next() == Some('\r') && chars.peek() == Some(&'\n') {
-                        chars.next();
+                    if bytes.next() == Some(b'\r') && bytes.peek() == Some(&b'\n') {
+                        bytes.next();
                     }
-                    words.extend((!word.is_empty()).then(|| std::mem::take(&mut word)));
+                    end_word(&mut word, targets_done, &mut files)?;
                 }
-                _ => word.push('\\'),
+                _ => word.push(b'\\'),
             },
-            '$' if chars.peek() == Some(&'$') => {
-                word.push('$');
-                chars.next();
+            b'$' if bytes.peek() == Some(&b'$') => {
+                word.push(b'$');
+                bytes.next();
             }
             // The rule's targets end at the first colon that isn't escaped.
-            ':' if !targets_done => {
+            b':' if !targets_done => {
                 targets_done = true;
                 word.clear();
-                words.clear();
             }
-            '\n' => {
-                words.extend((!word.is_empty()).then(|| std::mem::take(&mut word)));
-                if targets_done {
-                    files.extend(words.drain(..).map(PathBuf::from));
-                }
-                words.clear();
+            b'\n' => {
+                end_word(&mut word, targets_done, &mut files)?;
                 targets_done = false;
             }
-            c if c.is_whitespace() => {
-                words.extend((!word.is_empty()).then(|| std::mem::take(&mut word)));
-            }
-            c => word.push(c),
+            byte if byte.is_ascii_whitespace() => end_word(&mut word, targets_done, &mut files)?,
+            byte => word.push(byte),
         }
     }
-    words.extend((!word.is_empty()).then_some(word));
-    if targets_done {
-        files.extend(words.into_iter().map(PathBuf::from));
+    end_word(&mut word, targets_done, &mut files)?;
+    Some(files)
+}
+
+/// Ends `word`, which `files` takes once the rule's targets are done, unless it has it already.
+fn end_word(word: &mut Vec<u8>, targets_done: bool, files: &mut Vec<PathBuf>) -> Option<()> {
+    let word = std::mem::take(word);
+    if targets_done && !word.is_empty() {
+        let file = path(word)?;
+        if !files.contains(&file) {
+            files.push(file);
+        }
     }
-    let mut seen = Vec::new();
-    files.retain(|file| {
-        let new = !seen.contains(file);
-        seen.push(file.clone());
-        new
-    });
-    files
+    Some(())
+}
+
+/// The path named by `bytes`: any bytes on Unix, and UTF-8 elsewhere, as slangc writes names on
+/// Windows.
+#[cfg(unix)]
+fn path(bytes: Vec<u8>) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    Some(std::ffi::OsString::from_vec(bytes).into())
+}
+
+#[cfg(not(unix))]
+fn path(bytes: Vec<u8>) -> Option<PathBuf> {
+    String::from_utf8(bytes).ok().map(PathBuf::from)
 }
 
 #[cfg(test)]
@@ -725,6 +764,10 @@ mod tests {
             refusal::<Vertex, Color>("doubles.slang"),
             &["Float64, for `double`"],
         );
+        says(
+            refusal::<[f32; 5], [u32; 2]>("compares_depth.slang"),
+            &["it samples with a depth comparison"],
+        );
     }
 
     #[test]
@@ -790,12 +833,20 @@ mod tests {
         assert_eq!(shaders.added.len(), 2, "the sprite shader and the copy");
         assert_eq!(shaders.added[1].index, shader.index);
         assert_ne!(shaders.added[1].spirv, first_spirv);
+        assert!(
+            !shaders.added[1].replacement,
+            "still the shader added, which comes next"
+        );
         shaders.added.clear();
         shaders.replace(source.compile().expect("the shader compiles again"));
         shaders.replace(source.compile().expect("the shader compiles again"));
         assert_eq!(shaders.added.len(), 1);
         assert_eq!(shaders.added[0].index, shader.index);
         assert_eq!(shaders.added[0].blend, Blend::Opaque);
+        assert!(
+            shaders.added[0].replacement,
+            "in place of the one a renderer has"
+        );
 
         // A change that doesn't compile, and one that breaks the contract.
         fs::write(&include, "struct Vertex {").expect("the include broken");
@@ -824,22 +875,35 @@ mod tests {
 
     #[test]
     fn depfiles_list_the_files_their_rules_name() {
+        let files = |depfile: &[u8]| depfile_files(depfile).expect("names that are paths");
         // As slangc writes them on Windows: a drive's colon and every backslash escaped.
-        let windows = r"C\:\\Temp\\out.spv: C\:\\dev\\a\ dir\\main.slang C\:\\dev\\shared.slang";
+        let windows = br"C\:\\Temp\\out.spv: C\:\\dev\\a\ dir\\main.slang C\:\\dev\\shared.slang";
         assert_eq!(
-            depfile_files(windows),
+            files(windows),
             [r"C:\dev\a dir\main.slang", r"C:\dev\shared.slang"].map(PathBuf::from)
         );
-        let unix = "/tmp/out.spv: /src/main.slang \\\n  /src/a\\#b.slang /src/cost$$.slang \\\r\n  /src/main.slang\n";
+        let unix = b"/tmp/out.spv: /src/main.slang \\\n  /src/a\\#b.slang /src/cost$$.slang \\\r\n  /src/main.slang\n";
         assert_eq!(
-            depfile_files(unix),
+            files(unix),
             ["/src/main.slang", "/src/a#b.slang", "/src/cost$.slang"].map(PathBuf::from)
         );
         // A rule per line, and a line without one.
-        let rules = "a.spv: one.slang\nb.spv: two.slang\nstray\n";
-        let files = ["one.slang", "two.slang"].map(PathBuf::from);
-        assert_eq!(depfile_files(rules), files);
-        assert!(depfile_files("").is_empty());
+        let rules = b"a.spv: one.slang\nb.spv: two.slang\nstray\n";
+        assert_eq!(files(rules), ["one.slang", "two.slang"].map(PathBuf::from));
+        assert!(files(b"").is_empty());
+        // Names in UTF-8, as slangc writes them on Windows; and one that isn't, which on Unix is
+        // a name like any other.
+        let japanese = files("out.spv: 日本.slang".as_bytes());
+        assert_eq!(japanese, [PathBuf::from("日本.slang")]);
+        let latin1 = b"out.spv: caf\xe9.slang\n";
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let file = Path::new(std::ffi::OsStr::from_bytes(b"caf\xe9.slang"));
+            assert_eq!(files(latin1), [file.to_owned()]);
+        }
+        #[cfg(not(unix))]
+        assert_eq!(depfile_files(latin1), None);
     }
 
     #[test]
