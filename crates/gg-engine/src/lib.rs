@@ -57,7 +57,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use gg_core::Result;
-use gg_renderer::{Renderer, Settings, Validation, Viewport};
+use gg_renderer::{MAX_TEXTURE_SIZE, Renderer, Settings, Validation, Viewport};
 use tracing::{debug, error, info};
 
 pub use actions::{Actions, Binding, Change, Source, Toward};
@@ -268,6 +268,7 @@ fn run_headless(app: &mut App, args: &Args) -> Result<Ran> {
                     egui::Pos2::ZERO,
                     egui::vec2(width as f32, height as f32),
                 )),
+                max_texture_side: Some(MAX_TEXTURE_SIDE),
                 time: Some(clock.elapsed().as_secs_f64()),
                 ..Default::default()
             };
@@ -311,6 +312,11 @@ fn run_headless(app: &mut App, args: &Args) -> Result<Ran> {
         renderer, frames, &clock, &stepper, perf, stopping,
     ))
 }
+
+/// The most pixels a side of egui's textures may have, the most every device the engine runs on
+/// takes, which each pass's input tells egui: every window's alike, since egui makes its font atlas
+/// again for a pass whose limit isn't the last one's.
+const MAX_TEXTURE_SIDE: usize = MAX_TEXTURE_SIZE as usize;
 
 /// egui, without its shortcut that closes the window, Ctrl or Cmd+Q: a game may use those keys,
 /// and apps quit from their own menus.
@@ -845,6 +851,31 @@ mod tests {
         }
     }
 
+    /// A command of [`Placer`]'s: spawns this sprite, whose texture is opaque, which no value
+    /// makes.
+    #[derive(Reflect)]
+    struct Place(Sprite);
+
+    /// Queues a sprite to place as it attaches, which its next tick spawns.
+    #[derive(Default)]
+    struct Placer(Vec<Place>);
+
+    impl Layer for Placer {
+        fn attach(&mut self, _: &mut Context) {
+            self.0.push(Place(red()));
+        }
+
+        fn tick(&mut self, world: &mut World, _: Tick) {
+            for Place(sprite) in self.0.drain(..) {
+                world.spawn((Transform::IDENTITY, sprite));
+            }
+        }
+
+        fn commands(&mut self) -> Option<&mut dyn Commands> {
+            Some(&mut self.0)
+        }
+    }
+
     /// Notes its ticks and its updates, in the order they come.
     struct Order(Rc<RefCell<Vec<String>>>);
 
@@ -1274,6 +1305,48 @@ mod tests {
         let text = changed(&text, command, bad_value);
         let error = Replay::new(two_layers(), &text).err().expect("refused");
         assert_eq!(column(&error.to_string()), column(&alone) + 4, "{error}");
+    }
+
+    /// A layer's command that its replay would refuse, as one holding something opaque, which no
+    /// value makes, stops the recording before it, which fails, naming the layer, the command and
+    /// where in it what's opaque is; what was written before it replays.
+    #[test]
+    fn a_command_that_wont_replay_stops_the_recording() {
+        let placed = || {
+            App::new("Placed")
+                .layer(Turner(Rc::default()))
+                .layer(Placer::default())
+        };
+        let mut app = placed();
+        let path = std::env::temp_dir().join(format!(
+            "gg-engine-test-{}-{:?}-placed.recording",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        app.stack
+            .record(Recorder::create(&path, app.name).expect("created"));
+        let mut cx = Context::new(None);
+        app.stack.attach(&mut cx);
+        app.stack.tick(&mut cx, Tick { number: 0 });
+        app.stack.detach(&mut cx);
+        let error = app.stack.recorded().expect_err("stopped");
+        let text = std::fs::read_to_string(&path).expect("written");
+        std::fs::remove_file(&path).expect("removed");
+        assert_eq!(error.code(), "record.bad_command", "{error}");
+        let message = error.to_string();
+        for named in [
+            "layer 1, Placer,",
+            "(\"texture\", Opaque)",
+            "at `0.texture`: it's opaque",
+        ] {
+            assert!(message.contains(named), "{named}: {message}");
+        }
+        // Its header and its attach's hash alone: neither the command, nor the tick's hash after
+        // it, nor an end.
+        let last = text.lines().last().unwrap_or_default();
+        assert!(last.starts_with("attach "), "{text}");
+        let replayed = replay_all(placed(), &text).map(|(ticks, _)| ticks);
+        assert_eq!(replayed.map_err(|(_, error)| error.code()), Ok(0), "{text}");
     }
 
     /// `--replay` checks every hash to the end, and stops where `--dump` says, failing where a

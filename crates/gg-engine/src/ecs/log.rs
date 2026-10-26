@@ -12,8 +12,9 @@ use super::ops::{Inverse, Operation};
 /// gesture's sets of one field, as a drag makes, merged into one edit.
 ///
 /// An entry whose undo or redo puts entities back, a delete done or a create undone, keeps them,
-/// their components typed and their slots, so that it gives each back under its handle, as it was,
-/// until the entry is dropped: by an operation applied after an undo, which drops what was undone;
+/// their components typed, their slots and their IDs, which no draw gives out meanwhile, so that it
+/// gives each back under its handle and ID, as it was, until the entry is dropped: by an operation
+/// applied after an undo, which drops what was undone;
 /// by an undo or a redo the world refuses; or by [`clear`](Self::clear). A log dropped without
 /// `clear` leaves those slots unused for good, so whoever keeps one clears it. A world restored
 /// from a snapshot refuses the entries from before, as another world's, and the slots kept when
@@ -96,9 +97,10 @@ impl Log {
 
     /// Undoes the last operation applied and not undone, and returns whether there was one.
     ///
-    /// Refused, as when the entity it changed is gone since, it changes nothing, and its entry is
-    /// dropped, with what it kept, since the world has moved on from it and it would block the
-    /// entries before it: the error says why, and is logged as `ops.dropped`.
+    /// Refused, as when the entity it changed is gone since, or the entity a create made has
+    /// children since, which the create didn't make, it changes nothing, and its entry is dropped,
+    /// with what it kept, since the world has moved on from it and it would block the entries
+    /// before it: the error says why, and is logged as `ops.dropped`.
     pub fn undo(&mut self, world: &mut World) -> Result<bool> {
         self.step(world, Step::Undo)
     }
@@ -186,32 +188,17 @@ impl Log {
 
 #[cfg(test)]
 pub(super) mod tests {
-    use std::num::NonZeroU32;
-
     use gg_core::math::{Vec3, Vec4};
 
     use super::*;
     use crate::ecs::hierarchy::tests::check_links;
-    use crate::ecs::id::splitmix64;
-    use crate::ecs::id::tests::check_ids;
+    use crate::ecs::id::tests::{check_ids, vacated};
+    use crate::ecs::id::{IdStream, splitmix64};
     use crate::ecs::ops::tests::{Sealed, fixture, sorted};
     use crate::ecs::tests::Rng;
     use crate::reflect::tests::{Everything, Handle, everything, same_snapshots};
     use crate::reflect::{Name, Value};
     use crate::{Entity, EntityId, Parent, Reflect, Sprite, Transform};
-
-    /// How many of `world`'s slots are vacant, kept for entities a delete took.
-    pub(in crate::ecs) fn vacated(world: &World) -> usize {
-        let mut vacant = 0;
-        for (index, meta) in world.meta.iter().enumerate() {
-            let free = world.free.contains(&(index as u32));
-            let retired = meta.generation == NonZeroU32::MAX;
-            if meta.location.is_none() && !free && !retired {
-                vacant += 1;
-            }
-        }
-        vacant
-    }
 
     /// A set of `entity`'s `Everything` field at `path`.
     fn set(entity: EntityId, path: &str, value: Value) -> Operation {
@@ -321,6 +308,117 @@ pub(super) mod tests {
         let next = x.world.spawn(());
         assert_eq!(next.index, created.index, "its slot, freed");
         assert!(!x.world.contains(created));
+    }
+
+    /// Undoing a create takes out the entity it made alone: refused, and its entry dropped, if it
+    /// has children since, which the log didn't give it; where redoing a delete takes its subtree
+    /// as it stands, a child given since too.
+    #[test]
+    fn undoing_a_create_takes_only_what_it_made() {
+        let mut x = fixture();
+        let mut log = Log::default();
+        let children = |world: &World, entity| -> Vec<Entity> {
+            world.children(entity).expect("alive").collect()
+        };
+        let create = |parent| Operation::Create {
+            entity: None,
+            parent: Some(parent),
+            components: vec![("Transform".into(), Transform::IDENTITY.to_value())],
+        };
+        // Undone and redone, so that the redo's undo is checked as the first was.
+        let under_b = create(x.id(x.b));
+        log.apply(&mut x.world, under_b).expect("created");
+        let Some(&Operation::Create {
+            entity: Some(made), ..
+        }) = log.undoable()
+        else {
+            panic!("{:?}", log.undoable());
+        };
+        assert!(log.undo(&mut x.world).expect("undone"));
+        assert!(log.redo(&mut x.world).expect("redone"));
+        let handle = x.world.entity(made).expect("alive");
+        // A child the log gives it is undone before it; one the game gives it stays.
+        log.apply(&mut x.world, create(made))
+            .expect("created a child");
+        x.world.set_parent(x.g, Some(handle)).expect("no cycle");
+        assert!(log.undo(&mut x.world).expect("the child's create undone"));
+        let before = sorted(&x.world);
+        let error = log.undo(&mut x.world).expect_err("g is its child");
+        assert_eq!(error.code(), "ecs.has_children", "{error}");
+        let says = format!(
+            "can't undo create {made}: entity {} is its child",
+            x.id(x.g)
+        );
+        assert!(error.to_string().starts_with(&says), "{error}");
+        assert!(same_snapshots(&sorted(&x.world), &before));
+        assert_eq!(children(&x.world, handle), [x.g]);
+        assert_eq!(log.undoable(), None, "dropped");
+        assert!(log.redo(&mut x.world).expect("the child redone"));
+        assert_eq!(children(&x.world, handle).len(), 2);
+        // Redoing a delete takes its subtree as it stands.
+        let delete = Operation::Delete { entity: x.id(x.a) };
+        log.apply(&mut x.world, delete).expect("deleted");
+        assert!(log.undo(&mut x.world).expect("undone"));
+        x.world.set_parent(x.s, Some(x.a)).expect("no cycle");
+        assert!(log.redo(&mut x.world).expect("redone"));
+        assert!(!x.world.contains(x.s), "taken with a");
+        assert!(log.undo(&mut x.world).expect("undone"));
+        assert_eq!(children(&x.world, x.a), [x.b, x.c, x.d, x.s]);
+        assert_eq!(x.world.get::<Parent>(x.g), Some(&Parent(handle)));
+        check_ids(&x.world);
+        check_links(&x.world);
+    }
+
+    /// An ID a delete keeps, for the entity its undo gives back, goes to no entity a draw IDs, as a
+    /// living entity's doesn't: the stream reseeds, the same way every run. It's kept while any
+    /// slot a delete vacated holds it, though a create given the ID took it meanwhile.
+    #[test]
+    fn a_draw_never_gives_an_id_a_delete_keeps() {
+        // A scene saved by a world seeded as this one, whose entity has the ID the second draw
+        // gives.
+        let mut first = World::seeded(21);
+        first.spawn(());
+        let saved = first.spawn(Transform::IDENTITY);
+        let text = first.save_scene(&[saved]).expect("saved");
+        let id = first.id(saved).expect("alive");
+        let mut world = World::seeded(21);
+        let other = world.spawn(Transform::IDENTITY);
+        let loaded = world.load_scene(&text).expect("loaded")[0];
+        let mut log = Log::default();
+        let delete = Operation::Delete { entity: id };
+        log.apply(&mut world, delete).expect("deleted");
+        // Given to another entity by a create, which an undo takes out again: two slots keep it,
+        // and an operation after the undo drops the create, which frees one.
+        let create = Operation::Create {
+            entity: Some(id),
+            parent: None,
+            components: Vec::new(),
+        };
+        log.apply(&mut world, create).expect("created");
+        assert!(log.undo(&mut world).expect("undone"));
+        assert_eq!((log.kept(), vacated(&world)), (2, 2));
+        let set = Operation::Set {
+            entity: world.id(other).expect("alive"),
+            component: "Transform".into(),
+            path: "translation.x".to_owned(),
+            value: Value::F32(1.0),
+        };
+        log.apply(&mut world, set).expect("set");
+        assert_eq!((log.kept(), vacated(&world)), (1, 1));
+        // The stream's next draw is the ID kept, so the draw reseeds instead.
+        let spawned = world.spawn(());
+        let mut stream = IdStream::new(21);
+        stream.draw();
+        assert_eq!(stream.draw(), id);
+        stream.reseed();
+        assert_eq!(world.id(spawned), Some(stream.draw()));
+        // So the undo the log offers isn't refused.
+        assert!(log.undo(&mut world).expect("the set undone"));
+        assert!(log.undo(&mut world).expect("the delete undone"));
+        assert_eq!(world.entity(id), Some(loaded));
+        assert_eq!((log.kept(), vacated(&world)), (0, 0));
+        check_ids(&world);
+        check_links(&world);
     }
 
     #[test]

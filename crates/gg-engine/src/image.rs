@@ -1,8 +1,8 @@
 //! Images that layers load from disk as textures, and models' images: PNGs and JPEGs, decoded to
 //! the RGBA8 that the renderer takes.
 
-use std::fs;
-use std::io::Cursor;
+use std::fs::{self, File};
+use std::io::{self, Cursor, Read};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 
@@ -14,6 +14,10 @@ use zune_jpeg::zune_core::bytestream::ZCursor;
 use zune_jpeg::zune_core::colorspace::ColorSpace;
 use zune_jpeg::zune_core::options::DecoderOptions;
 
+/// The most bytes an image's file may hold: more than a PNG or a JPEG of a texture's size needs, as
+/// 8,192 pixels square of 16-bit RGBA, stored uncompressed, are 512 MiB.
+pub(crate) const MAX_FILE: u64 = 1 << 30;
+
 /// An image's size in pixels, and its rows of RGBA8, tightly packed, top row first, as its file
 /// stores them: colors sRGB-encoded, and alpha not multiplied into them.
 #[derive(Clone, Debug, PartialEq)]
@@ -24,7 +28,8 @@ pub(crate) struct Image {
 
 /// Reads the image file at `path`, which is texture `name`'s: a PNG or a JPEG.
 ///
-/// Fails with `engine.bad_texture` if the file can't be read, or doesn't decode as either.
+/// Fails with `engine.bad_texture` if the file can't be read or isn't a regular file, or doesn't
+/// decode as either.
 pub(crate) fn load_image(name: &str, path: &Path) -> Result<Image> {
     let zone = gg_core::zone!();
     zone.text(path.display());
@@ -34,9 +39,24 @@ pub(crate) fn load_image(name: &str, path: &Path) -> Result<Image> {
             format!("texture {name:?} at {} {problem}", path.display()),
         )
     };
-    let bytes = fs::read(path)
+    // A byte past the most an image's file holds, so that a longer one fails to decode.
+    let bytes = read_file(path, MAX_FILE + 1)
         .map_err(|error| bad(format!("can't be read: {error}")).with_source(error))?;
     decode(&bytes).map_err(|problem| bad(format!("doesn't decode as a PNG or a JPEG: {problem}")))
+}
+
+/// Reads the file at `path`, as far as its first `most` bytes: a regular file alone, so that a FIFO
+/// or a device, such as /dev/zero, can neither hang the read nor fill memory.
+pub(crate) fn read_file(path: &Path, most: u64) -> io::Result<Vec<u8>> {
+    // Before it's opened, since opening a FIFO waits for a writer.
+    let metadata = fs::metadata(path)?;
+    if !metadata.is_file() {
+        let not_regular = "it isn't a regular file";
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, not_regular));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len().min(most).try_into().unwrap_or(0));
+    File::open(path)?.take(most).read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 /// Decodes a PNG or a JPEG, which it tells apart by their first bytes, whatever a file's name or a
@@ -44,15 +64,25 @@ pub(crate) fn load_image(name: &str, path: &Path) -> Result<Image> {
 /// taken as sRGB-encoded. The error says what's wrong with the image.
 ///
 /// Fails before anything is allocated for the pixels if a side is 0 or more than
-/// [`MAX_TEXTURE_SIZE`], since no texture can be.
+/// [`MAX_TEXTURE_SIZE`], since no texture can be, and if there are more than [`MAX_FILE`] bytes.
 pub(crate) fn decode(bytes: &[u8]) -> Result<Image, String> {
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        decode_png(bytes)
-    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
-        decode_jpeg(bytes)
-    } else {
-        Err("it starts with neither a PNG's signature nor a JPEG's".to_owned())
+    if bytes.len() as u64 > MAX_FILE {
+        return Err(format!("it's more than {} MiB", MAX_FILE >> 20));
     }
+    let decode = || {
+        if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+            decode_png(bytes)
+        } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+            decode_jpeg(bytes)
+        } else {
+            Err("it starts with neither a PNG's signature nor a JPEG's".to_owned())
+        }
+    };
+    // zune-jpeg can panic on a malformed file, as its README allows, and png only by a bug: either
+    // way that's the file's doing, not the engine's, so the image fails as one that doesn't decode
+    // does. gg-core's panic hook still logs the panic as it happens.
+    panic::catch_unwind(AssertUnwindSafe(decode))
+        .unwrap_or_else(|_| Err("its decoder panicked on it".to_owned()))
 }
 
 /// Fails unless each side is 1 to [`MAX_TEXTURE_SIZE`] pixels, as every texture's is.
@@ -101,33 +131,47 @@ fn decode_png(bytes: &[u8]) -> Result<Image, String> {
 }
 
 /// Decodes a JPEG that's Huffman-coded at 8 bits, sequential or progressive, to RGBA8: gray to
-/// equal red, green and blue, CMYK and YCCK converted, RGB as it is, and alpha opaque.
+/// equal red, green and blue, YCbCr, CMYK and YCCK converted, CMYK taken as Adobe stores it,
+/// inverted, RGB as it is, and alpha opaque.
 fn decode_jpeg(bytes: &[u8]) -> Result<Image, String> {
-    let options = DecoderOptions::default()
-        .jpeg_set_out_colorspace(ColorSpace::RGBA)
-        // So that it refuses a larger image as it reads the header, before it allocates.
-        .set_max_width(MAX_TEXTURE_SIZE as usize)
-        .set_max_height(MAX_TEXTURE_SIZE as usize);
-    let mut decoder = JpegDecoder::new_with_options(ZCursor::new(bytes), options);
-    let decode = || {
-        decoder.decode_headers()?;
-        // zune-jpeg (0.5.15) makes RGBA from every color space but RGB, as some encoders store
-        // it, which it only copies: those decode as RGB, and get their alpha below.
-        let rgb = decoder.input_colorspace() == Some(ColorSpace::RGB);
-        if rgb {
-            decoder.set_options(options.jpeg_set_out_colorspace(ColorSpace::RGB));
-        }
-        Ok::<_, DecodeErrors>((decoder.decode()?, rgb))
+    let jpeg_error = |error: DecodeErrors| error.to_string();
+    let decoder = |colorspace| {
+        let options = DecoderOptions::default()
+            .jpeg_set_out_colorspace(colorspace)
+            // So that it refuses a larger image as it reads the header, before it allocates.
+            .set_max_width(MAX_TEXTURE_SIZE as usize)
+            .set_max_height(MAX_TEXTURE_SIZE as usize);
+        JpegDecoder::new_with_options(ZCursor::new(bytes), options)
     };
-    // zune-jpeg can panic on a malformed file, as its README allows: that's the file's fault, not
-    // the engine's, so the image fails as one that doesn't decode does. gg-core's panic hook still
-    // logs the panic as it happens.
-    let (decoded, rgb) = panic::catch_unwind(AssertUnwindSafe(decode))
-        .map_err(|_| "the JPEG decoder failed on it".to_owned())?
-        .map_err(|error| error.to_string())?;
-    let info = decoder
-        .info()
-        .expect("a JPEG that decodes has had its header read");
+    let mut jpeg = decoder(ColorSpace::RGBA);
+    jpeg.decode_headers().map_err(jpeg_error)?;
+    // zune-jpeg (0.5.15) makes RGB rightly from every color space it reads, but RGBA from gray and
+    // YCbCr alone, scrambling CMYK's and YCCK's and refusing RGB's; and it picks how it converts as
+    // it reads the headers. So the rest decode afresh, to RGB, which gets its alpha below. Its
+    // 0.5.16 release candidates make RGBA rightly from CMYK and YCCK, though not from RGB.
+    let rgb = !matches!(
+        jpeg.input_colorspace(),
+        Some(ColorSpace::Luma | ColorSpace::YCbCr)
+    );
+    if rgb {
+        jpeg = decoder(ColorSpace::RGB);
+    }
+    let decoded = jpeg.decode().map_err(jpeg_error)?;
+    let (Some(info), Some(colorspace)) = (jpeg.info(), jpeg.input_colorspace()) else {
+        unreachable!("a JPEG that decodes has had its header read");
+    };
+    // zune-jpeg settles some color spaces only as it decodes, such as RGB from an Adobe marker's
+    // CMYK of three components, and decodes components that don't make the one it settles on, such
+    // as two, which it takes as multiband, to scrambled pixels rather than failing.
+    if matches!(colorspace, ColorSpace::MultiBand(_))
+        || colorspace.num_components() != usize::from(info.components)
+    {
+        return Err(format!(
+            "its {} components don't make the gray, YCbCr, RGB, CMYK or YCCK that its markers say \
+             it holds",
+            info.components
+        ));
+    }
     let pixels = if rgb {
         (decoded.as_chunks::<3>().0.iter())
             .flat_map(|&[red, green, blue]| [red, green, blue, 255])
@@ -223,6 +267,21 @@ mod tests {
     }
 
     #[test]
+    fn a_regular_file_is_read_as_far_as_asked_and_a_device_not_at_all() {
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let whole = fs::read(&manifest).expect("the manifest");
+        assert_eq!(read_file(&manifest, 10).expect("its start"), whole[..10]);
+        assert_eq!(read_file(&manifest, u64::MAX).expect("all of it"), whole);
+        // A device, which would read as far as it's asked: zeros, or on Windows nothing.
+        let device = if cfg!(windows) {
+            "models/NUL"
+        } else {
+            "/dev/zero"
+        };
+        read_file(Path::new(device), 1 << 20).expect_err("a device");
+    }
+
+    #[test]
     fn a_texture_that_doesnt_load_names_itself_and_its_file() {
         let missing = Path::new("no such folder/checkerboard.png");
         let not_a_png = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
@@ -259,6 +318,41 @@ mod tests {
 
     const QUADRANTS: [[u8; 3]; 4] = [[200, 40, 40], [40, 160, 60], [50, 70, 190], [230, 210, 80]];
 
+    /// A 16x16 baseline JPEG of CMYK, inverted as Adobe stores it, as libjpeg-turbo writes one
+    /// through Pillow at quality 100, of four 8x8 quadrants: `QUADRANTS`' colors as ink, with black
+    /// ink of 0, 20, 40 and 60%, which make `INKED`.
+    fn cmyk() -> Vec<u8> {
+        let base64 = concat!(
+            "/9j/7gAOQWRvYmUAZAAAAAAA/9sAQwABAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
+            "AQEBAQEBAQEBAQEBAQEBAQEB/8AAFAgAEAAQBEMRAE0RAFkRAEsRAP/EABgAAQEBAQEAAAAAAAAAAAAAAAoLCQcI/8QA",
+            "FBABAAAAAAAAAAAAAAAAAAAAAP/aAA4EQwBNAFkASwAAPwBIAn4n5/CX+eA9QMZ3UBL1BBjOrQKMAR7Gd//Z",
+        );
+        crate::gltf::base64(base64).expect("base64")
+    }
+
+    /// The image `cmyk` holds, as Windows' encoder writes CMYK at quality 100: as YCCK, its cyan,
+    /// magenta and yellow as YCbCr, subsampled, beside its black.
+    fn ycck() -> Vec<u8> {
+        let base64 = concat!(
+            "/9j/7gAOQWRvYmUAZAAAAAAC/9sAQwABAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
+            "AQEBAQEBAQEBAQEBAQEBAQEB/9sAQwEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
+            "AQEBAQEBAQEBAQEBAQEBAQEB/8AAFAgAEAAQBAEiAAIRAQMRAQQiAP/EAB8AAAEFAQEBAQEBAAAAAAAAAAABAgMEBQYH",
+            "CAkKC//EALUQAAIBAwMCBAMFBQQEAAABfQECAwAEEQUSITFBBhNRYQcicRQygZGhCCNCscEVUtHwJDNicoIJChYXGBka",
+            "JSYnKCkqNDU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6g4SFhoeIiYqSk5SVlpeYmZqio6Slpqeo",
+            "qaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2drh4uPk5ebn6Onq8fLz9PX29/j5+v/EAB8BAAMBAQEBAQEBAQEAAAAA",
+            "AAABAgMEBQYHCAkKC//EALURAAIBAgQEAwQHBQQEAAECdwABAgMRBAUhMQYSQVEHYXETIjKBCBRCkaGxwQkjM1LwFWJy",
+            "0QoWJDThJfEXGBkaJicoKSo1Njc4OTpDREVGR0hJSlNUVVZXWFlaY2RlZmdoaWpzdHV2d3h5eoKDhIWGh4iJipKTlJWW",
+            "l5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uLj5OXm5+jp6vLz9PX29/j5+v/aAA4EAQACEQMR",
+            "BAAAPwD9OK+N6/Riv4J6/fPoGeL3/E6X/EVf+Me/4hr/AMQ1/wBRv+Zt/rj/AG1/rj/rh/1LOFf7O/s7/VX/AKj/AK59",
+            "f/5hfqv+0fC/Ra4O/wCKcf8Ar1/wo/8AEZP+Iyf6sf8AMH/xDz/Vz/iHn+sP/UVxz/a/9r/68/8AUr/s/wDsv/mN+u/7",
+            "J/fxX4z1+M9fjPX/2Q==",
+        );
+        crate::gltf::base64(base64).expect("base64")
+    }
+
+    /// `QUADRANTS` darkened by `cmyk`'s black ink.
+    const INKED: [[u8; 3]; 4] = [[200, 40, 40], [32, 128, 48], [30, 42, 114], [92, 84, 32]];
+
     /// The YCbCr that a JPEG holds for `color`, by JFIF's formulas.
     fn ycbcr(color: [u8; 3]) -> [u8; 3] {
         let [r, g, b] = color.map(f32::from);
@@ -271,7 +365,8 @@ mod tests {
     #[test]
     fn a_jpeg_decodes_to_rgba8() {
         // The JPEG, and the JPEG with its components named R, G and B, as some encoders name those
-        // of a JPEG that holds RGB, so that its YCbCr decodes as RGB, as it is.
+        // of a JPEG that holds RGB, so that its YCbCr decodes as RGB, as it is; and the JPEG with
+        // an Adobe marker of transform 0 instead, which says the same of three components.
         let jpeg = jpeg();
         let mut rgb = jpeg.clone();
         let frame = (rgb.windows(2).position(|marker| marker == [0xff, 0xc0]))
@@ -282,9 +377,14 @@ mod tests {
             rgb[frame + 10 + 3 * i] = name;
             rgb[scan + 5 + 2 * i] = name;
         }
+        let adobe = b"\xff\xee\x00\x0eAdobe\x00\x64\x00\x00\x00\x00\x00";
+        let adobe = [&jpeg[..2], adobe, &jpeg[2..]].concat();
         for (kind, file, colors) in [
             ("YCbCr", jpeg, QUADRANTS),
             ("RGB", rgb, QUADRANTS.map(ycbcr)),
+            ("RGB by its Adobe marker", adobe, QUADRANTS.map(ycbcr)),
+            ("CMYK", cmyk(), INKED),
+            ("YCCK", ycck(), INKED),
         ] {
             let image = decode(&file).expect(kind);
             assert_eq!(image.size, [16, 16], "{kind}");
@@ -302,6 +402,23 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_jpeg_whose_components_make_no_color_space_is_refused() {
+        // `cmyk` with its frame and its scan cut to their first two components, which zune-jpeg
+        // decodes as a multiband image, to scrambled pixels.
+        let mut two = cmyk();
+        let frame = (two.windows(2).position(|marker| marker == [0xff, 0xc0]))
+            .expect("a baseline JPEG's frame header");
+        (two[frame + 3], two[frame + 9]) = (8 + 2 * 3, 2);
+        two.drain(frame + 16..frame + 22);
+        let scan =
+            (two.windows(2).position(|marker| marker == [0xff, 0xda])).expect("a scan header");
+        (two[scan + 3], two[scan + 4]) = (6 + 2 * 2, 2);
+        two.drain(scan + 9..scan + 13);
+        let problem = decode(&two).expect_err("two components");
+        assert!(problem.contains("2 components"), "{problem}");
     }
 
     #[test]

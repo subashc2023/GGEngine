@@ -1,6 +1,7 @@
 //! Shaders: Slang files compiled to SPIR-V with slangc, games' as they're added and the engine's
 //! own as it builds, which draw meshes of one vertex type in the game's view.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::marker::PhantomData;
 use std::path::Path;
@@ -94,8 +95,7 @@ impl Shaders {
     /// so that what's behind it doesn't show over it, while one that blends doesn't, so that what's
     /// behind it still shows through it. `name` names it in errors and GPU captures.
     ///
-    /// Vulkan checks nothing about a shader, so the engine trusts it to keep to this contract,
-    /// which validation checks in debug builds:
+    /// Vulkan checks nothing about a shader, so the engine trusts it to keep to this contract:
     ///
     /// - Its entry points are `vertex_main`, a vertex shader, and `fragment_main`, a fragment
     ///   shader that returns one `float4`: the color, in linear RGBA.
@@ -123,6 +123,12 @@ impl Shaders {
     ///   take 16 bytes to `float3`'s 12. The engine builds glam without SIMD, so each of them is
     ///   4-byte aligned, as Slang's are.
     ///
+    /// Validation, in debug builds, checks only what the pipeline shows it: its entry points, the
+    /// features it needs and the resources it binds. It can't see the layouts of what the shader
+    /// reads through addresses, its vertices and parameters, so a struct that doesn't match its
+    /// type draws garbage without a message; nor whether an index that can differ across a draw
+    /// goes through `NonUniformResourceIndex`.
+    ///
     /// Fails with `renderer.bad_shader` and slangc's diagnostics if it doesn't compile, and with
     /// `renderer.no_slangc` if slangc can't be run.
     pub fn add<V: NoUninit, P: NoUninit>(
@@ -136,14 +142,15 @@ impl Shaders {
     }
 
     /// Takes `spirv`, shader `name` compiled, which draws meshes of vertex type `V` and takes
-    /// parameters of type `P`, and hands out its handle.
+    /// parameters of type `P`, with its sampled images decorated as [`decorate_non_uniform`]
+    /// says, and hands out its handle.
     fn push<V, P>(&mut self, name: &str, spirv: Vec<u8>, blend: Blend) -> Shader<V, P> {
         let index = self.count;
         self.count += 1;
         self.added.push(Added {
             index,
             name: name.to_owned(),
-            spirv,
+            spirv: decorate_non_uniform(spirv),
             vertex_size: size_of::<V>(),
             params_size: size_of::<P>(),
             blend,
@@ -245,6 +252,67 @@ fn compile(slangc: &Path, name: &str, path: &Path) -> Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
+/// SPIR-V's magic number, which opens a module, and what [`decorate_non_uniform`] reads and adds:
+/// `OpDecorate`, `OpSampledImage` and the `NonUniform` decoration.
+const MAGIC: u32 = 0x0723_0203;
+const OP_DECORATE: u32 = 71;
+const OP_SAMPLED_IMAGE: u32 = 86;
+const NON_UNIFORM: u32 = 5300;
+
+/// `spirv`, a shader slangc compiled, with each sampled image that it makes of an image or a
+/// sampler decorated `NonUniform` decorated so too. Vulkan requires the decoration on the operand
+/// an instruction reaches a resource through, which for a sample is the sampled image
+/// (VUID-RuntimeSpirv-subgroupSize-10149), but slangc before Slang 2026.11, the Vulkan SDK
+/// 1.4.335's among them, decorates only the loads of the image and the sampler
+/// (shader-slang/slang#10525): a driver that reads the decoration where Vulkan puts it may sample
+/// one instance's texture for every instance of a subgroup. This can go once the engine requires
+/// a slangc that decorates it, Slang 2026.11's or later, such as the Vulkan SDK 1.4.363's. SPIR-V
+/// it can't read stays as it is, for Vulkan to refuse.
+fn decorate_non_uniform(spirv: Vec<u8>) -> Vec<u8> {
+    let (words, []) = spirv.as_chunks::<4>() else {
+        return spirv;
+    };
+    let mut words: Vec<u32> = words.iter().map(|&word| u32::from_le_bytes(word)).collect();
+    if words.len() < 5 || words[0] != MAGIC {
+        return spirv;
+    }
+    // The IDs decorated NonUniform; where the first of those decorations ends, which is where
+    // more go; and each sampled image, with the image and the sampler it's made of.
+    let mut non_uniform = HashSet::new();
+    let mut end = None;
+    let mut sampled = Vec::new();
+    let mut at = 5;
+    while at < words.len() {
+        // Each instruction's first word is its length in words, then its opcode.
+        let length = (words[at] >> 16) as usize;
+        let Some(instruction) = words.get(at..at + length).filter(|_| length > 0) else {
+            return spirv;
+        };
+        match (words[at] & 0xffff, instruction) {
+            (OP_DECORATE, &[_, id, NON_UNIFORM]) => {
+                non_uniform.insert(id);
+                end.get_or_insert(at + length);
+            }
+            (OP_SAMPLED_IMAGE, &[_, _, id, image, sampler]) => sampled.push([id, image, sampler]),
+            _ => {}
+        }
+        at += length;
+    }
+    let decorations: Vec<u32> = sampled
+        .into_iter()
+        .filter(|[id, image, sampler]| {
+            !non_uniform.contains(id)
+                && (non_uniform.contains(image) || non_uniform.contains(sampler))
+        })
+        .flat_map(|[id, ..]| [(3 << 16) | OP_DECORATE, id, NON_UNIFORM])
+        .collect();
+    let Some(end) = end.filter(|_| !decorations.is_empty()) else {
+        return spirv;
+    };
+    words.splice(end..end, decorations);
+    words.iter().flat_map(|word| word.to_le_bytes()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -255,6 +323,28 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/shaders")
             .join(file)
+    }
+
+    /// The IDs of the sampled images `spirv` makes, each with whether it's decorated NonUniform.
+    fn sampled_images(spirv: &[u8]) -> Vec<(u32, bool)> {
+        let words: Vec<u32> = (spirv.as_chunks::<4>().0.iter())
+            .map(|&word| u32::from_le_bytes(word))
+            .collect();
+        let (mut non_uniform, mut sampled) = (HashSet::new(), Vec::new());
+        let mut at = 5;
+        while at < words.len() {
+            let length = (words[at] >> 16) as usize;
+            match (words[at] & 0xffff, &words[at..at + length]) {
+                (OP_DECORATE, &[_, id, NON_UNIFORM]) => {
+                    non_uniform.insert(id);
+                }
+                (OP_SAMPLED_IMAGE, &[_, _, id, ..]) => sampled.push(id),
+                _ => {}
+            }
+            at += length;
+        }
+        let decorated = |id| (id, non_uniform.contains(&id));
+        sampled.into_iter().map(decorated).collect()
     }
 
     #[test]
@@ -278,6 +368,83 @@ mod tests {
         // After the engine's sprite shader.
         assert_eq!(flat().map(|shader| shader.index).ok(), Some(1));
         assert_eq!(flat().map(|shader| shader.index).ok(), Some(2));
+    }
+
+    #[test]
+    fn shaders_sample_through_the_bindless_set_non_uniformly() {
+        let mut shaders = Shaders::default();
+        for alpha in [
+            AlphaMode::Opaque,
+            AlphaMode::Mask { cutoff: 0.5 },
+            AlphaMode::Blend,
+        ] {
+            shaders.model(alpha);
+        }
+        for file in ["textured.slang", "level.slang"] {
+            (shaders.add::<[f32; 5], [u32; 3]>(file, &fixture(file), Blend::Alpha))
+                .expect("a shader");
+        }
+        // The sprite shader, the three model shaders and the two games'.
+        assert_eq!(shaders.added.len(), 6);
+        for added in &shaders.added {
+            let sampled = sampled_images(&added.spirv);
+            assert!(
+                !sampled.is_empty() && sampled.iter().all(|&(_, decorated)| decorated),
+                "{}: {sampled:?}",
+                added.name
+            );
+        }
+    }
+
+    #[test]
+    fn sampled_images_of_non_uniform_images_or_samplers_are_non_uniform() {
+        let module = |instructions: &[[u32; 3]], samples: &[[u32; 5]]| {
+            let header = [MAGIC, 0x0001_0500, 0, 64, 0];
+            let body = instructions
+                .as_flattened()
+                .iter()
+                .chain(samples.as_flattened());
+            let words = header.iter().chain(body);
+            words
+                .flat_map(|word| word.to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        let decorate = |id| [(3 << 16) | OP_DECORATE, id, NON_UNIFORM];
+        let sample = |id, image, sampler| [(5 << 16) | OP_SAMPLED_IMAGE, 1, id, image, sampler];
+        // Image 10 and sampler 21 are non-uniform, image 11 and sampler 20 aren't; sampled image
+        // 33 is decorated already.
+        let samples = [
+            sample(30, 10, 20),
+            sample(31, 11, 21),
+            sample(32, 11, 20),
+            sample(33, 10, 21),
+        ];
+        let spirv = module(&[decorate(10), decorate(21), decorate(33)], &samples);
+        let decorated = decorate_non_uniform(spirv.clone());
+        let sampled = [(30, true), (31, true), (32, false), (33, true)];
+        assert_eq!(sampled_images(&decorated), sampled);
+        // After the first NonUniform decoration, among the others.
+        let expected = [
+            decorate(10),
+            decorate(30),
+            decorate(31),
+            decorate(21),
+            decorate(33),
+        ];
+        assert_eq!(decorated, module(&expected, &samples));
+        // What it can't read stays as it is: an instruction cut short, an instruction of no words,
+        // bytes that aren't whole words, and what isn't SPIR-V.
+        let mut empty = spirv.clone();
+        empty.splice(20..20, [0; 4]);
+        let unreadable = [
+            spirv[..spirv.len() - 4].to_vec(),
+            empty,
+            spirv[..spirv.len() - 1].to_vec(),
+            b"not SPIR-V but words".to_vec(),
+        ];
+        for bytes in unreadable {
+            assert_eq!(decorate_non_uniform(bytes.clone()), bytes);
+        }
     }
 
     #[test]

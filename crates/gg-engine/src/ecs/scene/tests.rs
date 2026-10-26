@@ -8,7 +8,9 @@ use crate::reflect::Value;
 use crate::reflect::tests::{
     Everything, Form, Handle, Inner, Pair, Unit, everything, same, same_snapshots, snapshot,
 };
-use crate::{Component, Entity, EntityId, Parent, Reflect, Sampler, Sprite, Transform, World};
+use crate::{
+    Component, Entity, EntityId, Log, Operation, Parent, Reflect, Sampler, Sprite, Transform, World,
+};
 
 /// A grid's cell.
 #[derive(Clone, Debug, PartialEq, crate::Component)]
@@ -627,7 +629,13 @@ fn floats_and_strings_are_written_as_they_read_back() {
         "\\ \" \n \r \t",
         "\u{0}\u{1f}\u{7f}\u{85}\u{9f}",
         "\u{61c}\u{200e}\u{200f}\u{2028}\u{2029}\u{202a}\u{202e}\u{2066}\u{2069}\u{feff}",
-        "é e\u{301} \u{ad}\u{a0}😀",
+        // A soft hyphen, the grapheme joiner, zero-width characters, the word joiner, an invisible
+        // operator, Mongolian's vowel separator and a Hangul filler, which draw nothing.
+        "\u{ad}\u{34f}\u{200b}\u{200d}\u{2060}\u{2064}\u{180e}\u{3164}",
+        // Variation selectors, an annotation anchor, a number sign, a beam, and tags.
+        "❤\u{fe0f}\u{e0100}\u{fff9}\u{600}\u{1d173}\u{e0001}\u{e007f}",
+        // What draws stays as it is: a combining mark, a no-break space and an emoji among them.
+        "é e\u{301} \u{a0}😀",
     ];
     let numbers = Numbers {
         singles: singles.clone(),
@@ -657,7 +665,9 @@ fn floats_and_strings_are_written_as_they_read_back() {
         r#""\\ \" \n \r \t","#,
         r#""\u{0}\u{1f}\u{7f}\u{85}\u{9f}","#,
         r#""\u{61c}\u{200e}\u{200f}\u{2028}\u{2029}\u{202a}\u{202e}\u{2066}\u{2069}\u{feff}","#,
-        "\"é e\u{301} \u{ad}\u{a0}😀\",",
+        r#""\u{ad}\u{34f}\u{200b}\u{200d}\u{2060}\u{2064}\u{180e}\u{3164}","#,
+        r#""❤\u{fe0f}\u{e0100}\u{fff9}\u{600}\u{1d173}\u{e0001}\u{e007f}","#,
+        "\"é e\u{301} \u{a0}😀\",",
     ] {
         assert!(lines.contains(&written), "{written} in\n{text}");
     }
@@ -957,21 +967,33 @@ fn a_prefab_refused_changes_nothing() {
 }
 
 #[test]
-fn a_copy_that_would_have_a_living_entitys_id_is_another() {
+fn a_copy_that_would_have_a_living_or_kept_entitys_id_is_another() {
     let (text, locals) = prefab();
-    let mut world = golden_world(19);
-    let mut stream = IdStream::new(19);
-    for _ in 0..3 {
-        stream.draw();
+    // The entity that has the ID alive, and taken by a delete that keeps it for its undo.
+    for deleted in [false, true] {
+        let mut world = golden_world(19);
+        let mut stream = IdStream::new(19);
+        for _ in 0..3 {
+            stream.draw();
+        }
+        // The ID the copy's root would take, which a scene loaded before has.
+        let instance = stream.draw();
+        let taken = placed(instance, locals[0]).expect("not zero");
+        let scene = format!("(\n    entities: {{\n        \"{taken}\": (),\n    }},\n)\n");
+        let loaded = world.load_scene(&scene).expect("loaded")[0];
+        let mut log = Log::default();
+        if deleted {
+            let delete = Operation::Delete { entity: taken };
+            log.apply(&mut world, delete).expect("deleted");
+        }
+        let root = world.place_prefab(&text, None).expect("placed");
+        stream.reseed();
+        let instance = stream.draw();
+        assert_eq!(world.id(root), placed(instance, locals[0]), "{deleted}");
+        if deleted {
+            assert!(log.undo(&mut world).expect("undone"));
+            assert_eq!(world.entity(taken), Some(loaded));
+        }
+        check_ids(&world);
     }
-    // The ID the copy's root would take, which a scene loaded before has.
-    let instance = stream.draw();
-    let taken = placed(instance, locals[0]).expect("not zero");
-    let scene = format!("(\n    entities: {{\n        \"{taken}\": (),\n    }},\n)\n");
-    world.load_scene(&scene).expect("loaded");
-    let root = world.place_prefab(&text, None).expect("placed");
-    stream.reseed();
-    let instance = stream.draw();
-    assert_eq!(world.id(root), placed(instance, locals[0]));
-    check_ids(&world);
 }

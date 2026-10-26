@@ -140,18 +140,19 @@ impl fmt::Debug for Entity {
 /// A copy of the world is a snapshot of it, which restores it: [`clone`](Clone::clone) takes one,
 /// and [`clone_from`](Clone::clone_from) restores the world from one, or takes one into a copy kept
 /// from before. A copy is all of the world: each slot under its generation, the free ones in the
-/// order they're taken, and those kept for the entities a [`Log`] can put back still kept; each
-/// entity under its handle and its ID, in its table and row, with its parent and children, and when
-/// its interpolation was last reset; the tables in the order they were made, those made since a
-/// snapshot cut away as it's restored; the stream the IDs come from; and the component types. So a
-/// world restored goes on as the world the snapshot was taken from did: given the same changes, it
-/// spawns the same handles with the same IDs, and its queries find the same order, as it gives out
-/// again the handles and IDs given out since the snapshot. But it's another world: drawing sorts
-/// its rows again, and doesn't interpolate into it from the world before, and it refuses what
-/// undoes an operation applied before, as another world's, so that the slots kept when the snapshot
-/// was taken are never used again. Taken again, or restored, a snapshot is copied into the memory
-/// the world holds, which allocates nothing while the tables, the component types and the world's
-/// size stay as they were, for components whose `Clone` allocates nothing.
+/// order they're taken, and those kept for the entities a [`Log`] can put back still kept, with
+/// their IDs; each entity under its handle and its ID, in its table and row, with its parent and
+/// children, and when its interpolation was last reset; the tables in the order they were made,
+/// those made since a snapshot cut away as it's restored; the stream the IDs come from; and the
+/// component types. So a world restored goes on as the world the snapshot was taken from did:
+/// given the same changes, it spawns the same handles with the same IDs, and its queries find the
+/// same order, as it gives out again the handles and IDs given out since the snapshot. But it's
+/// another world: drawing sorts its rows again, and doesn't interpolate into it from the world
+/// before, and it refuses what undoes an operation applied before, as another world's, so that the
+/// slots kept when the snapshot was taken are never used again. Taken again, or restored, a
+/// snapshot is copied into the memory the world holds, which allocates nothing while the tables,
+/// the component types and the world's size stay as they were, for components whose `Clone`
+/// allocates nothing.
 ///
 /// ```
 /// use gg_engine::{Transform, World};
@@ -185,6 +186,10 @@ pub struct World {
     /// Each living entity by its ID; looked up, never iterated. Hashed with SipHash, keyed at
     /// random, so that IDs from files can't be chosen to collide.
     by_id: HashMap<EntityId, Entity>,
+    /// How many vacant slots keep each ID: the IDs of the entities a delete took, which no draw
+    /// gives to another entity while an undo can give them back, as it gives back their slots.
+    /// Looked up, never iterated, and hashed as `by_id` is.
+    kept: HashMap<EntityId, u32>,
     /// Where the next entity's ID comes from.
     stream: IdStream,
     /// Which world this is among the process's, so that the order drawing keeps for one world, and
@@ -256,6 +261,7 @@ impl World {
             resets: Vec::new(),
             reset_count: 0,
             by_id: HashMap::new(),
+            kept: HashMap::new(),
             stream: IdStream::new(seed),
             serial: next_serial(),
             version: 0,
@@ -301,21 +307,23 @@ impl World {
 
     /// An ID for `entity`, drawn from the stream, by which the world now finds it. A draw that meets
     /// a living entity's ID, as a stream that has walked into the run of the session that saved a
-    /// loaded scene does, reseeds the stream and draws again.
+    /// loaded scene does, or one a delete keeps for its undo, reseeds the stream and draws again.
     fn draw_id(&mut self, entity: Entity) -> EntityId {
         loop {
             let id = self.stream.draw();
-            match self.by_id.entry(id) {
-                Entry::Vacant(vacant) => {
-                    vacant.insert(entity);
-                    return id;
-                }
-                Entry::Occupied(_) => {
-                    tracing::debug!(code = "ecs.reseed", id = %id, "Drew a living entity's ID");
-                    self.stream.reseed();
-                }
+            if self.reserved(id) {
+                tracing::debug!(code = "ecs.reseed", id = %id, "Drew an ID that's taken");
+                self.stream.reseed();
+                continue;
             }
+            self.by_id.insert(id, entity);
+            return id;
         }
+    }
+
+    /// Whether no draw may give `id`: a living entity has it, or a delete keeps it for its undo.
+    fn reserved(&self, id: EntityId) -> bool {
+        self.by_id.contains_key(&id) || self.kept.contains_key(&id)
     }
 
     /// Spawns an entity with ID `id`, which no living entity has, and the components in `row`, a
@@ -624,26 +632,43 @@ impl World {
     /// As [`remove_slot`](Self::remove_slot), but returns the entity's components, a one-row column
     /// each, sorted by their ids, and leaves its slot vacant rather than free: its generation as it
     /// was, and taken by no entity until it's freed, so that the entity can come back into it under
-    /// its handle, as an undone delete does.
+    /// its handle, as an undone delete does; and keeps its ID from draws until then.
     fn vacate(&mut self, index: u32) -> Row {
         let at = self.meta[index as usize].location;
         let at = at.expect("the slot's entity is alive");
         let table = &mut self.tables[at.table as usize];
         let (row, moved) = table.take_row(at.row as usize, &self.components);
-        self.leave(index, at, moved);
+        let id = self.leave(index, at, moved);
+        *self.kept.entry(id).or_insert(0) += 1;
         row
     }
 
     /// The rest of taking slot `index`'s entity, at `at`, out of its table, whose entity `moved`,
-    /// if any, took its row: it goes from the world, and its ID with it.
-    fn leave(&mut self, index: u32, at: Location, moved: Option<Entity>) {
+    /// if any, took its row: it goes from the world, and its ID with it, which is returned.
+    fn leave(&mut self, index: u32, at: Location, moved: Option<Entity>) -> EntityId {
         if let Some(moved) = moved {
             self.meta[moved.index as usize].location = Some(at);
         }
         let id = self.entity_ids[index as usize].take();
-        self.by_id.remove(&id.expect("a living entity has an ID"));
+        let id = id.expect("a living entity has an ID");
+        self.by_id.remove(&id);
         self.version += 1;
         self.meta[index as usize].location = None;
+        id
+    }
+
+    /// Takes `id` out of one vacant slot's keeping: as its entity comes back under it, or as the
+    /// slot is freed. Another slot may keep it still, if a create or a load gave it to another
+    /// entity meanwhile, which a delete took too.
+    fn free_id(&mut self, id: EntityId) {
+        let Entry::Occupied(mut kept) = self.kept.entry(id) else {
+            unreachable!("a vacant slot keeps its entity's ID");
+        };
+        if *kept.get() > 1 {
+            *kept.get_mut() -= 1;
+        } else {
+            kept.remove();
+        }
     }
 
     /// Frees slot `index`, which no entity is in, for the next spawned: under its next generation,

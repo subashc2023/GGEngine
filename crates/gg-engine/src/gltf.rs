@@ -92,19 +92,30 @@ impl Default for Material {
     }
 }
 
-/// Reads model `name`'s file at `path`, and the files it names, through `read_file` (fs::read, or
-/// tests' files from memory), taking, ignoring and refusing what
-/// [`Context::add_model`](crate::Context::add_model) says. Each check it makes fails with the
-/// element it's about, such as "accessor 7 reads past buffer view 2".
+/// The most memory reading a model may take, in bytes, for what it makes of its files: buffers read
+/// from files and data URIs, images decoded, primitives' vertices, indices and names, and parts.
+/// Past what a model that fits a GPU needs, as four textures 8,192 pixels square and ten million
+/// vertices take about 1.5 GiB, so that a small file can't fill memory by naming its data many
+/// times, such as one PNG's bytes as many images.
+pub(crate) const MAX_MEMORY: u64 = 4 << 30;
+
+/// Reads model `name`'s file at `path`, and the files it names, through `read_file`, which reads a
+/// regular file as far as the bytes it's given ([`image::read_file`], or tests' files from memory),
+/// taking no more than `memory` bytes of what [`MAX_MEMORY`] counts, and taking, ignoring and
+/// refusing what [`Context::add_model`](crate::Context::add_model) says. Each check it makes fails
+/// with the element it's about, such as "accessor 7 reads past buffer view 2".
 pub(crate) fn read(
     name: &str,
     path: &Path,
-    read_file: impl Fn(&Path) -> io::Result<Vec<u8>>,
+    read_file: impl Fn(&Path, u64) -> io::Result<Vec<u8>>,
+    memory: u64,
 ) -> Result<Imported> {
     let zone = gg_core::zone!();
     zone.text(path.display());
     let model = Model { name, path };
-    let file = read_file(path).map_err(|error| {
+    // As far as a GLB's header can say it reaches, past which a GLB holds nothing, and a .gltf's
+    // JSON, cut short, doesn't parse.
+    let file = read_file(path, u32::MAX.into()).map_err(|error| {
         model
             .bad(format!("can't be read: {error}"))
             .with_source(error)
@@ -158,6 +169,8 @@ pub(crate) fn read(
             ignored,
             ..Imported::default()
         },
+        held: 0,
+        memory,
     };
     reader.scene()?;
     Ok(reader.imported)
@@ -327,9 +340,25 @@ struct Reader<'a, F> {
     /// Each image read, by its index: where it is in `imported.images`.
     images: BTreeMap<u32, usize>,
     imported: Imported,
+    /// The bytes held of what [`MAX_MEMORY`] counts, and the most that may be.
+    held: u64,
+    memory: u64,
 }
 
-impl<'a, F: Fn(&Path) -> io::Result<Vec<u8>>> Reader<'a, F> {
+impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
+    /// Counts `bytes` more held, failing once they're past the memory reading may take. Counts
+    /// follow what they count, so reading takes at most an image, a primitive or a data URI more.
+    fn hold(&mut self, bytes: usize) -> Result<()> {
+        self.held = self.held.saturating_add(bytes as u64);
+        if self.held > self.memory {
+            return Err(self.model.unsupported(format!(
+                "takes more than {} MiB to read, of its buffers, images, vertices and nodes",
+                self.memory >> 20
+            )));
+        }
+        Ok(())
+    }
+
     /// Reads the default scene into parts, from its roots down, each before its children.
     fn scene(&mut self) -> Result<()> {
         let (model, gltf) = (self.model, self.gltf);
@@ -385,6 +414,7 @@ impl<'a, F: Fn(&Path) -> io::Result<Vec<u8>>> Reader<'a, F> {
                     primitive: Some(primitive),
                 }));
             }
+            self.hold((self.imported.parts.len() - part) * size_of::<Part>())?;
             stack.extend(node.children.iter().rev().map(|&child| (child, Some(part))));
         }
         Ok(())
@@ -563,6 +593,9 @@ impl<'a, F: Fn(&Path) -> io::Result<Vec<u8>>> Reader<'a, F> {
             Some(name) => format!("{name}/{index}"),
             None => format!("{mesh_index}/{index}"),
         };
+        // Its own, as primitives that share accessors or a mesh's name each have a copy.
+        let vertex = size_of::<[f32; 3]>() + size_of::<[f32; 2]>() + size_of::<[f32; 4]>();
+        self.hold(vertices * vertex + size_of_val(indices.as_slice()) + name.len())?;
         Ok(Some(Primitive {
             name,
             positions,
@@ -644,7 +677,11 @@ impl<'a, F: Fn(&Path) -> io::Result<Vec<u8>>> Reader<'a, F> {
         let (model, gltf) = (self.model, self.gltf);
         let image = model.item(&gltf.images, "image", index)?;
         let bytes = match (&image.uri, image.buffer_view) {
-            (Some(uri), None) => Cow::Owned(self.uri(&format!("image {index}"), uri)?),
+            // A byte past the most an image's file holds, so that a longer one fails to decode.
+            (Some(uri), None) => {
+                let most = image::MAX_FILE + 1;
+                Cow::Owned(self.uri(&format!("image {index}"), uri, most)?)
+            }
             (None, Some(view)) => Cow::Borrowed(self.view(view)?.1),
             _ => {
                 return Err(model.bad(format!(
@@ -657,6 +694,8 @@ impl<'a, F: Fn(&Path) -> io::Result<Vec<u8>>> Reader<'a, F> {
                 "image {index} doesn't decode as a PNG or a JPEG: {problem}"
             ))
         })?;
+        // Decoded for each image, as images that share a source each decode it.
+        self.hold(decoded.pixels.len())?;
         let at = self.imported.images.len();
         self.imported.images.push(decoded);
         self.images.insert(index, at);
@@ -841,7 +880,13 @@ impl<'a, F: Fn(&Path) -> io::Result<Vec<u8>>> Reader<'a, F> {
             let (model, gltf) = (self.model, self.gltf);
             let buffer = model.item(&gltf.buffers, "buffer", index)?;
             let bytes = match (&buffer.uri, self.bin) {
-                (Some(uri), _) => Cow::Owned(self.uri(&format!("buffer {index}"), uri)?),
+                // No further into a file than its byteLength, nor than a byte past the memory
+                // reading may still take.
+                (Some(uri), _) => {
+                    let room = self.memory.saturating_sub(self.held).saturating_add(1);
+                    let most = buffer.byte_length.min(room);
+                    Cow::Owned(self.uri(&format!("buffer {index}"), uri, most)?)
+                }
                 (None, Some(bin)) if index == 0 => Cow::Borrowed(bin),
                 (None, _) => {
                     return Err(model.bad(format!(
@@ -849,6 +894,10 @@ impl<'a, F: Fn(&Path) -> io::Result<Vec<u8>>> Reader<'a, F> {
                     )));
                 }
             };
+            // Read for each buffer, as buffers that share a file each read it.
+            if let Cow::Owned(bytes) = &bytes {
+                self.hold(bytes.len())?;
+            }
             let length = (usize::try_from(buffer.byte_length).ok())
                 .filter(|&length| length <= bytes.len())
                 .ok_or_else(|| {
@@ -870,8 +919,9 @@ impl<'a, F: Fn(&Path) -> io::Result<Vec<u8>>> Reader<'a, F> {
         Ok(&self.buffers[&index])
     }
 
-    /// The bytes that `uri`, `what`'s, names: a data URI's, or those of a file beside the model's.
-    fn uri(&self, what: &str, uri: &str) -> Result<Vec<u8>> {
+    /// The bytes that `uri`, `what`'s, names: a data URI's, or those of a file in the model's
+    /// folder, as far as `most` bytes.
+    fn uri(&self, what: &str, uri: &str, most: u64) -> Result<Vec<u8>> {
         let model = self.model;
         if uri
             .get(..5)
@@ -895,8 +945,14 @@ impl<'a, F: Fn(&Path) -> io::Result<Vec<u8>>> Reader<'a, F> {
         if path.starts_with('/') || path.contains(['\\', ':']) {
             return Err(model.bad(format!("{what}'s URI {uri:?} isn't a relative path")));
         }
+        // And none up a folder, so that a model reads its own folder's files alone.
+        if path.split('/').any(|segment| segment == "..") {
+            return Err(model.bad(format!(
+                "{what}'s URI {uri:?} has a `..`, where a model reads files in its folder alone"
+            )));
+        }
         let file = model.path.parent().unwrap_or(Path::new("")).join(path);
-        (self.read_file)(&file).map_err(|error| {
+        (self.read_file)(&file, most).map_err(|error| {
             model
                 .bad(format!(
                     "{what}'s file {} can't be read: {error}",
@@ -1152,6 +1208,8 @@ mod json {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use serde_json::{Value, json};
 
     use super::*;
@@ -1251,17 +1309,21 @@ mod tests {
         file
     }
 
-    /// Reads `file` as model "m" at `path` in folder "models", with `files` beside it there.
+    /// Reads `file` as model "m" at `path` in folder "models", with `files` beside it there, each
+    /// as far as it's asked, as `image::read_file` reads.
     fn read_files(path: &str, file: &[u8], files: &[(&str, &[u8])]) -> Result<Imported> {
         let folder = Path::new("models");
-        read("m", &folder.join(path), |asked| {
-            if asked == folder.join(path) {
-                return Ok(file.to_vec());
-            }
-            (files.iter().find(|(name, _)| folder.join(name) == asked))
-                .map(|(_, bytes)| bytes.to_vec())
-                .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))
-        })
+        let read_file = |asked: &Path, most: u64| {
+            let bytes = if asked == folder.join(path) {
+                file
+            } else {
+                (files.iter().find(|(name, _)| folder.join(name) == asked))
+                    .map(|&(_, bytes)| bytes)
+                    .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?
+            };
+            Ok(bytes[..bytes.len().min(usize::try_from(most).unwrap_or(usize::MAX))].to_vec())
+        };
+        read("m", &folder.join(path), read_file, MAX_MEMORY)
     }
 
     fn read_glb(file: &[u8]) -> Result<Imported> {
@@ -1916,6 +1978,26 @@ mod tests {
             (bad, "isn't a relative path", |g| {
                 g["buffers"][0]["uri"] = json!("C%3A/m.bin")
             }),
+            (bad, "isn't a relative path", |g| {
+                g["buffers"][0]["uri"] = json!("//server/share/m.bin");
+            }),
+            // URIs that go up a folder, as they are or percent-encoded.
+            (bad, "has a `..`", |g| {
+                g["buffers"][0]["uri"] = json!("../m.bin")
+            }),
+            (bad, "has a `..`", |g| {
+                g["buffers"][0]["uri"] = json!("textures/../../m.bin");
+            }),
+            (bad, "has a `..`", |g| g["buffers"][0]["uri"] = json!("..")),
+            (bad, "has a `..`", |g| {
+                g["buffers"][0]["uri"] = json!("%2E%2e/m.bin")
+            }),
+            (bad, "has a `..`", |g| {
+                g["buffers"][0]["uri"] = json!("..%2Fm.bin")
+            }),
+            (bad, "has a `..`", |g| {
+                g["images"][0] = json!({"uri": "../../../../dev/zero"});
+            }),
         ];
         for (code, problem, change) in cases {
             let mut gltf = gltf.clone();
@@ -1924,5 +2006,119 @@ mod tests {
             assert_eq!(error.code(), *code, "{problem}: {error}");
             assert!(error.to_string().contains(problem), "{problem}: {error}");
         }
+    }
+
+    #[test]
+    fn a_buffers_file_is_read_no_further_than_its_byte_length_or_the_memory_left() {
+        // The triangle's buffer in a file of its own, with bytes past its byteLength.
+        let (mut gltf, bin) = triangle();
+        gltf["buffers"][0]["uri"] = json!("m.bin");
+        let model = glb(&gltf.to_string(), &[]);
+        let length = bin.len() as u64;
+        let read_with = |file: &[u8], memory| {
+            let asked = Cell::new(0);
+            let read_file = |path: &Path, most: u64| {
+                if path == Path::new("models/m.glb") {
+                    return Ok(model.clone());
+                }
+                asked.set(most);
+                Ok(file[..file.len().min(most as usize)].to_vec())
+            };
+            let read = read("m", Path::new("models/m.glb"), read_file, memory);
+            (read, asked.get())
+        };
+        let longer = [&bin[..], &[7; 64]].concat();
+        let (read, asked) = read_with(&longer, MAX_MEMORY);
+        read.expect("a triangle");
+        assert_eq!(asked, length);
+        // A file short of its byteLength.
+        let (read, _) = read_with(&bin[..bin.len() - 1], MAX_MEMORY);
+        let error = read.expect_err("a short file");
+        assert_eq!(error.code(), "engine.bad_model");
+        let message = error.to_string();
+        assert!(message.contains("short of its byteLength"), "{message}");
+        // A byteLength past the memory reading may take, which reads a byte past it.
+        let memory = length / 2;
+        let (read, asked) = read_with(&longer, memory);
+        let error = read.expect_err("a buffer past the memory");
+        assert_eq!(error.code(), "engine.unsupported_model");
+        assert_eq!(asked, memory + 1);
+    }
+
+    #[test]
+    fn data_drawn_many_times_counts_each_time_against_the_memory_reading_may_take() {
+        // A mesh of `primitives` that share `vertices`, each holding a copy, drawn by `nodes`, each
+        // a part for each primitive: 30 copies of 3,000 vertices, 120 KB each; and 2,000 nodes of a
+        // mesh of 8 triangles, 648 bytes of parts each.
+        let model = |vertices: usize, primitives: usize, nodes: usize| {
+            let mut bin = Bin::default();
+            let positions = bin.view(&vec![0; vertices * 12], None);
+            let primitive = json!({"attributes": {"POSITION": 0}});
+            let gltf = json!({
+                "asset": {"version": "2.0"},
+                "scenes": [{"nodes": (0..nodes).collect::<Vec<_>>()}],
+                "nodes": vec![json!({"mesh": 0}); nodes],
+                "meshes": [{"primitives": vec![primitive; primitives]}],
+                "accessors": [{
+                    "bufferView": positions,
+                    "componentType": 5126,
+                    "count": vertices,
+                    "type": "VEC3",
+                }],
+                "buffers": [{"byteLength": bin.bytes.len()}],
+                "bufferViews": bin.views,
+            });
+            glb(&gltf.to_string(), &bin.bytes)
+        };
+        for (vertices, primitives, nodes) in [(3000, 30, 1), (3, 8, 2000)] {
+            let model = model(vertices, primitives, nodes);
+            let read_with =
+                |memory| read("m", Path::new("m.glb"), |_, _| Ok(model.clone()), memory);
+            read_with(MAX_MEMORY).expect("a model");
+            let error = read_with(1 << 20).expect_err("a model past 1 MiB");
+            assert_eq!(error.code(), "engine.unsupported_model", "{error}");
+        }
+    }
+
+    #[test]
+    fn images_that_share_a_source_each_count_against_the_memory_reading_may_take() {
+        // Four triangles, each sampling an image of its own, all four the same PNG: 1-bit gray, 256
+        // pixels square, a few hundred bytes that decode to 256 KiB of RGBA each.
+        let mut png = Vec::new();
+        let mut encoder = png::Encoder::new(&mut png, 256, 256);
+        encoder.set_color(png::ColorType::Grayscale);
+        encoder.set_depth(png::BitDepth::One);
+        let mut writer = encoder.write_header().expect("a header");
+        let rows = [0; 256 * 256 / 8];
+        writer.write_image_data(&rows).expect("the pixels");
+        writer.finish().expect("a whole PNG");
+        let mut bin = Bin::default();
+        let positions = bin.view(&floats(&[0., 0., 0., 1., 0., 0., 0., 1., 0.]), None);
+        let uvs = bin.view(&floats(&[0., 0., 1., 0., 0., 1.]), None);
+        let image = bin.view(&png, None);
+        let primitive = |i| json!({"attributes": {"POSITION": 0, "TEXCOORD_0": 1}, "material": i});
+        let material = |i| json!({"pbrMetallicRoughness": {"baseColorTexture": {"index": i}}});
+        let gltf = json!({
+            "asset": {"version": "2.0"},
+            "scenes": [{"nodes": [0]}],
+            "nodes": [{"mesh": 0}],
+            "meshes": [{"primitives": (0..4).map(primitive).collect::<Vec<_>>()}],
+            "accessors": [
+                {"bufferView": positions, "componentType": 5126, "count": 3, "type": "VEC3"},
+                {"bufferView": uvs, "componentType": 5126, "count": 3, "type": "VEC2"},
+            ],
+            "materials": (0..4).map(material).collect::<Vec<_>>(),
+            "textures": (0..4).map(|i| json!({"source": i})).collect::<Vec<_>>(),
+            "images": vec![json!({"bufferView": image}); 4],
+            "buffers": [{"byteLength": bin.bytes.len()}],
+            "bufferViews": bin.views,
+        });
+        let model = glb(&gltf.to_string(), &bin.bytes);
+        let read_with = |memory| read("m", Path::new("m.glb"), |_, _| Ok(model.clone()), memory);
+        let imported = read_with(2 << 20).expect("four images in 2 MiB");
+        assert_eq!(imported.images.len(), 4);
+        let error = read_with(1 << 20).expect_err("four images past 1 MiB");
+        assert_eq!(error.code(), "engine.unsupported_model");
+        assert!(error.to_string().contains("more than 1 MiB"), "{error}");
     }
 }

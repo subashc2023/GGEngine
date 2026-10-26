@@ -50,7 +50,8 @@ it stays where the build found it. On Linux, gamepads need pkg-config and libude
 `pkgconf` and `libudev-dev` on Debian or Ubuntu.
 
 Each run writes a JSON log and logs its path as it starts; filter it on `level`, `code` or
-`vuid`. `RUST_LOG` sets what's logged, such as `RUST_LOG=gg_gpu=trace`. A run that doesn't end in
+`vuid`. `RUST_LOG` sets what's logged: `RUST_LOG=gg_gpu=trace` adds gg-gpu's trace events to the
+default; a level for every target, as `RUST_LOG=info` has, replaces it. A run that doesn't end in
 an error logs `engine.perf` as it ends: its frame times and where they went. Compare two builds by
 theirs, from release builds run headless for the same number of frames. Headless frames draw each
 tick as it ends, so theirs leave out blending between ticks, which windowed runs measure.
@@ -126,7 +127,9 @@ another platform could break.
 ## Engine rules
 
 - Validation errors are test failures: debug builds and tests run under the Khronos validation
-  layer with synchronization validation, and a test fails on any validation message.
+  layer with synchronization validation, and a test fails on any validation message. GPU tests
+  fail without synchronization validation too, which needs a layer that takes
+  `VK_EXT_layer_settings`.
 - GPU tests run headless: they render offscreen and compare against reference images within a
   tolerance, so lavapipe can run them without a GPU.
 - Name and time everything: every Vulkan object gets a debug name, and every render-graph pass

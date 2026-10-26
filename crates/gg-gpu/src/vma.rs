@@ -5,10 +5,11 @@
 //! on how many blocks there can be (4,096 on KosmicKrisp): past three quarters of it, it stops
 //! giving large resources blocks of their own, and it refuses to go beyond it.
 
-use std::ffi::{CStr, c_char, c_int};
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::fmt;
 use std::ptr;
 
-use ash::vk;
+use ash::{ext, vk};
 use gg_core::Result;
 use tracing::error;
 
@@ -103,9 +104,13 @@ pub enum Memory {
 /// VMA's allocator for one device.
 pub(crate) struct Allocator {
     raw: VmaAllocator,
+    /// What [`name_memory`] names the memory VMA allocates through, which it borrows until the
+    /// allocator is destroyed.
+    _debug_utils: Option<Box<ext::debug_utils::Device>>,
 }
 
-// SAFETY: VMA synchronizes the allocator itself, since it isn't made externally synchronized.
+// SAFETY: VMA synchronizes the allocator itself, since it isn't made externally synchronized, and
+// the functions that name its memory are only read.
 unsafe impl Send for Allocator {}
 // SAFETY: as above.
 unsafe impl Sync for Allocator {}
@@ -130,21 +135,38 @@ impl Allocation {
 }
 
 impl Allocator {
+    /// An allocator for the device named `name`, which names each block of memory it allocates
+    /// through `debug_utils`, if given.
+    ///
     /// # Safety
     ///
     /// The instance and device must be live and outlive the allocator, `physical` must be the
-    /// device's, and the device must have buffer device addresses enabled.
+    /// device's, and the device must have buffer device addresses enabled. `debug_utils` must be
+    /// the device's.
     pub(crate) unsafe fn new(
         entry: &ash::Entry,
         instance: &ash::Instance,
         physical: vk::PhysicalDevice,
         device: &ash::Device,
+        debug_utils: Option<&ext::debug_utils::Device>,
+        name: &str,
     ) -> Result<Self> {
         // SAFETY: every field is a nullable pointer, for which zero is null; VMA fetches the
         // functions left null through the two it's given.
         let mut functions: VmaVulkanFunctions = unsafe { std::mem::zeroed() };
         functions.vkGetInstanceProcAddr = Some(entry.static_fn().get_instance_proc_addr);
         functions.vkGetDeviceProcAddr = Some(instance.fp_v1_0().get_device_proc_addr);
+        // Boxed, so that the callback's pointer to it holds as the allocator moves.
+        let debug_utils = debug_utils.cloned().map(Box::new);
+        let callbacks = VmaDeviceMemoryCallbacks {
+            pfnAllocate: Some(name_memory),
+            pfnFree: None,
+            pUserData: debug_utils
+                .as_deref()
+                .map_or(ptr::null_mut(), |debug_utils| {
+                    ptr::from_ref(debug_utils).cast_mut().cast()
+                }),
+        };
         let info = VmaAllocatorCreateInfo {
             flags: VmaAllocatorCreateFlagBits::VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT.0
                 as u32,
@@ -152,7 +174,7 @@ impl Allocator {
             device: device.handle(),
             preferredLargeHeapBlockSize: 0,
             pAllocationCallbacks: ptr::null(),
-            pDeviceMemoryCallbacks: ptr::null(),
+            pDeviceMemoryCallbacks: &callbacks,
             pHeapSizeLimit: ptr::null(),
             pVulkanFunctions: &functions,
             instance: instance.handle(),
@@ -161,17 +183,26 @@ impl Allocator {
             pTypeExternalMemoryHandleTypes: ptr::null(),
         };
         let mut raw = ptr::null_mut();
-        // SAFETY: the caller guarantees the handles; the info and functions outlive the call.
+        // SAFETY: the caller guarantees the handles; the info, functions and callbacks outlive the
+        // call, which copies the callbacks, and their user data lives as long as the allocator.
         let result = unsafe { vmaCreateAllocator(&info, &mut raw) };
-        check("vmaCreateAllocator", result)?;
-        Ok(Self { raw })
+        check(
+            "vmaCreateAllocator",
+            format_args!("device {name:?}"),
+            result,
+        )?;
+        Ok(Self {
+            raw,
+            _debug_utils: debug_utils,
+        })
     }
 
-    /// Makes a buffer and binds memory to it.
+    /// Makes a buffer and binds memory to it, for the buffer named `name`.
     pub(crate) fn create_buffer(
         &self,
         info: &vk::BufferCreateInfo<'_>,
         memory: Memory,
+        name: &str,
     ) -> Result<(vk::Buffer, Allocation)> {
         let mut buffer = vk::Buffer::null();
         let mut raw = ptr::null_mut();
@@ -189,15 +220,21 @@ impl Allocator {
                 &mut allocation_info,
             )
         };
-        check("vmaCreateBuffer", result)?;
+        let size = info.size;
+        check(
+            "vmaCreateBuffer",
+            format_args!("buffer {name:?} of {size} bytes in {memory:?} memory"),
+            result,
+        )?;
         Ok((buffer, allocation(raw, &allocation_info)))
     }
 
-    /// Makes an image and binds memory to it.
+    /// Makes an image and binds memory to it, for the image named `name`.
     pub(crate) fn create_image(
         &self,
         info: &vk::ImageCreateInfo<'_>,
         memory: Memory,
+        name: &str,
     ) -> Result<(vk::Image, Allocation)> {
         let mut image = vk::Image::null();
         let mut raw = ptr::null_mut();
@@ -214,7 +251,16 @@ impl Allocator {
                 &mut allocation_info,
             )
         };
-        check("vmaCreateImage", result)?;
+        let vk::Extent3D { width, height, .. } = info.extent;
+        let (format, levels) = (info.format, info.mip_levels);
+        check(
+            "vmaCreateImage",
+            format_args!(
+                "image {name:?} of {width}x{height} {format:?} pixels in {levels} level(s), in \
+                 {memory:?} memory"
+            ),
+            result,
+        )?;
         Ok((image, allocation(raw, &allocation_info)))
     }
 
@@ -236,22 +282,30 @@ impl Allocator {
         unsafe { vmaDestroyImage(self.raw, image, allocation.raw) };
     }
 
-    /// Makes the CPU's writes to the allocation visible to the GPU. Memory the CPU writes may not
-    /// be coherent, and then this is needed before the GPU reads it.
-    pub(crate) fn flush(&self, allocation: &Allocation) -> Result<()> {
+    /// Makes the CPU's writes to the allocation, of the resource named `name`, visible to the GPU.
+    /// Memory the CPU writes may not be coherent, and then this is needed before the GPU reads it.
+    pub(crate) fn flush(&self, allocation: &Allocation, name: &str) -> Result<()> {
         // SAFETY: the allocator and allocation are live, and the range is the whole allocation:
         // from 0, and to its end for `WHOLE_SIZE`.
         let result = unsafe { vmaFlushAllocation(self.raw, allocation.raw, 0, vk::WHOLE_SIZE) };
-        check("vmaFlushAllocation", result)
+        check(
+            "vmaFlushAllocation",
+            format_args!("{name:?}'s memory"),
+            result,
+        )
     }
 
-    /// Makes the GPU's writes to the allocation visible to the CPU's reads, for memory that
-    /// isn't coherent.
-    pub(crate) fn invalidate(&self, allocation: &Allocation) -> Result<()> {
+    /// Makes the GPU's writes to the allocation, of the resource named `name`, visible to the
+    /// CPU's reads, for memory that isn't coherent.
+    pub(crate) fn invalidate(&self, allocation: &Allocation, name: &str) -> Result<()> {
         // SAFETY: as in `flush`.
         let result =
             unsafe { vmaInvalidateAllocation(self.raw, allocation.raw, 0, vk::WHOLE_SIZE) };
-        check("vmaInvalidateAllocation", result)
+        check(
+            "vmaInvalidateAllocation",
+            format_args!("{name:?}'s memory"),
+            result,
+        )
     }
 }
 
@@ -309,12 +363,43 @@ fn allocation(raw: VmaAllocation, info: &VmaAllocationInfo) -> Allocation {
     }
 }
 
-fn check(call: &str, result: vk::Result) -> Result<()> {
+fn check(call: &str, subject: impl fmt::Display, result: vk::Result) -> Result<()> {
     if result == vk::Result::SUCCESS {
         Ok(())
     } else {
-        Err(vk_error(call, result))
+        Err(vk_error(call, subject, result))
     }
+}
+
+/// Names each block of memory VMA allocates, by its memory type and size, as every Vulkan object
+/// is named, so that captures and validation messages say what it is. VMA calls it after each
+/// `vkAllocateMemory`, with the allocator's user data.
+///
+/// # Safety
+///
+/// `debug_utils` must be null or point to the device's debug utils functions, and `memory` must
+/// have just been allocated from the device.
+unsafe extern "C" fn name_memory(
+    _: VmaAllocator,
+    memory_type: u32,
+    memory: vk::DeviceMemory,
+    size: vk::DeviceSize,
+    debug_utils: *mut c_void,
+) {
+    // SAFETY: the caller guarantees the pointer, which the allocator's `_debug_utils` keeps alive.
+    let Some(debug_utils) = (unsafe { debug_utils.cast::<ext::debug_utils::Device>().as_ref() })
+    else {
+        return;
+    };
+    let Ok(name) = CString::new(format!("VMA memory, type {memory_type}, {size} bytes")) else {
+        return;
+    };
+    let info = vk::DebugUtilsObjectNameInfoEXT::default()
+        .object_handle(memory)
+        .object_name(&name);
+    // SAFETY: the memory was just allocated, so no other thread uses it yet. Names are a debugging
+    // aid, so a failure to set one is ignored.
+    let _ = unsafe { debug_utils.set_debug_utils_object_name(&info) };
 }
 
 /// Where VMA reports a failed assert, as `vma.cpp` arranges.

@@ -197,12 +197,28 @@ impl fmt::Display for Named {
 #[cfg(test)]
 pub(super) mod tests {
     use std::collections::HashSet;
+    use std::num::NonZeroU32;
 
     use super::*;
 
+    /// How many of `world`'s slots are vacant, kept for entities a delete took: neither alive,
+    /// free nor retired.
+    pub(in crate::ecs) fn vacated(world: &World) -> usize {
+        let mut free = vec![false; world.meta.len()];
+        for &index in &world.free {
+            free[index as usize] = true;
+        }
+        let slots = world.meta.iter().zip(free);
+        slots
+            .filter(|(meta, free)| {
+                meta.location.is_none() && !free && meta.generation != NonZeroU32::MAX
+            })
+            .count()
+    }
+
     /// Panics unless the world's IDs agree with its slots: each slot has an ID exactly while its
-    /// entity is alive, by which the world finds that entity, and it finds no more entities by ID
-    /// than are alive.
+    /// entity is alive, by which the world finds that entity, it finds no more entities by ID than
+    /// are alive, and it keeps as many IDs as it has vacant slots.
     pub(in crate::ecs) fn check_ids(world: &World) {
         assert_eq!(
             world.entity_ids.len(),
@@ -222,6 +238,12 @@ pub(super) mod tests {
             }
         }
         assert_eq!(world.by_id.len(), alive, "the entities found by ID");
+        let kept: u32 = world.kept.values().sum();
+        assert_eq!(
+            kept as usize,
+            vacated(world),
+            "the IDs kept for vacant slots"
+        );
     }
 
     /// SplitMix64's numbers from a seed of 0, as Vigna's C gives them, so that every platform draws

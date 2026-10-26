@@ -7,13 +7,15 @@
 // comments.
 #![allow(unsafe_code)]
 
+use std::mem;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 use std::sync::Arc;
 
 use ash::vk;
 use gg_gpu::{
-    ColorImage, DepthImage, Device, Frames, GpuBuffer, Instance, InstanceDesc, Target, Texture,
-    TextureFormat, UploadPath,
+    ColorImage, DepthImage, Device, Frames, GpuBuffer, Instance, InstanceDesc, PLACED_TEXTURES,
+    Target, Texture, TextureFormat, UploadPath,
 };
 
 fn main() {
@@ -51,6 +53,22 @@ fn main() {
         "filled_textures_can_be_written_over_on_every_path",
         filled_textures_can_be_written_over_on_every_path,
     );
+    run(
+        "forgotten_frames_and_passes_are_caught",
+        forgotten_frames_and_passes_are_caught,
+    );
+    run(
+        "another_devices_objects_are_refused",
+        another_devices_objects_are_refused,
+    );
+    run(
+        "refused_texture_slots_leak_nothing",
+        refused_texture_slots_leak_nothing,
+    );
+    run(
+        "passes_refuse_what_the_device_cant_draw",
+        passes_refuse_what_the_device_cant_draw,
+    );
     run("validation_errors_reach_the_json_log", || {
         validation_errors_reach_the_json_log(&log);
     });
@@ -59,6 +77,20 @@ fn main() {
 fn run(name: &str, test: impl FnOnce()) {
     test();
     println!("test {name} ... ok");
+}
+
+/// Runs `broken`, which must panic, and gives its message.
+fn panics(broken: impl FnOnce()) -> String {
+    let payload = panic::catch_unwind(AssertUnwindSafe(broken)).expect_err("a panic");
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| {
+            payload
+                .downcast_ref::<&str>()
+                .map(|message| (*message).to_owned())
+        })
+        .unwrap_or_else(|| "a panic whose payload isn't a string".to_owned())
 }
 
 fn instance() -> Arc<Instance> {
@@ -71,6 +103,11 @@ fn instance() -> Arc<Instance> {
     assert!(
         instance.validation().enabled(),
         "GPU tests run under validation; install the Vulkan SDK's validation layer"
+    );
+    assert!(
+        instance.validation().synchronization(),
+        "GPU tests run under synchronization validation; install a newer Vulkan SDK, whose \
+         validation layer takes VK_EXT_layer_settings"
     );
     instance
 }
@@ -260,6 +297,188 @@ fn filled_textures_can_be_written_over_on_every_path() {
     }
 
     drop(instance);
+    assert_eq!(
+        validation.messages(),
+        0,
+        "validation reported problems; the log above says what"
+    );
+}
+
+/// Forgets a frame, which the next frame catches, and a pass, which the frame's next call catches,
+/// its submission among them, after which no frame begins again. Nothing forgotten reaches the
+/// GPU, so validation has nothing to say.
+fn forgotten_frames_and_passes_are_caught() {
+    let instance = instance();
+    let validation = instance.validation();
+    let black = [0.0, 0.0, 0.0, 1.0];
+    // Each on a device of its own, since a device has one `Frames`, and a caught leak ends it.
+    {
+        let device =
+            Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+        let mut image = ColorImage::new(&device, 4, 4, "forgotten frame target").expect("an image");
+        let mut frames = Frames::new(&device).expect("frames");
+        let frame = frames
+            .begin([Target::Image(&mut image)])
+            .expect("a frame")
+            .expect("an offscreen image can always be rendered into");
+        mem::forget(frame);
+        let message = panics(|| {
+            let _ = frames.begin([Target::Image(&mut image)]);
+        });
+        assert!(message.contains("frame 1 was forgotten"), "{message}");
+        drop((frames, image, device));
+    }
+    {
+        let device =
+            Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+        let mut image = ColorImage::new(&device, 4, 4, "forgotten pass target").expect("an image");
+        let mut frames = Frames::new(&device).expect("frames");
+        let mut frame = frames
+            .begin([Target::Image(&mut image)])
+            .expect("a frame")
+            .expect("an offscreen image can always be rendered into");
+        mem::forget(frame.begin_pass(0, c"forgotten", black, None));
+        let message = panics(|| drop(frame.begin_pass(0, c"next", black, None)));
+        assert!(message.contains("a pass was forgotten"), "{message}");
+        let message = panics(|| {
+            let _ = frame.submit();
+        });
+        assert!(message.contains("a pass was forgotten"), "{message}");
+        // The frame's drop, as the submission unwound, failed it instead of submitting it.
+        let error = frames
+            .begin([Target::Image(&mut image)])
+            .err()
+            .expect("no frame begins after a failed one");
+        assert_eq!(error.code(), "gpu.frame_failed");
+        drop((frames, image, device));
+    }
+
+    drop(instance);
+    assert_eq!(
+        validation.messages(),
+        0,
+        "validation reported problems; the log above says what"
+    );
+}
+
+/// Opens two devices, and gives a frame of the one objects the other made: a target, textures, a
+/// buffer, a depth image and an upload's indices. Each is refused before anything is recorded, so
+/// the frame goes on to submit.
+fn another_devices_objects_are_refused() {
+    let instance = instance();
+    let validation = instance.validation();
+    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let other = Device::new(&instance, None, None, None).expect("a second device");
+    let mut image = ColorImage::new(&device, 4, 4, "identity test target").expect("an image");
+    let mut others_image = ColorImage::new(&other, 4, 4, "the other's image").expect("an image");
+    let others_depth = DepthImage::new(&other, 4, 4, "the other's depth").expect("a depth image");
+    let format = TextureFormat::Rgba8Srgb;
+    let others_texture = Texture::new(&other, 1, 1, format, false, "the other's texture");
+    let mut others_texture = others_texture.expect("a texture");
+    let mut others_buffer = GpuBuffer::new(&other, 12, "the other's buffer").expect("a buffer");
+    let mut frames = Frames::new(&device).expect("frames");
+    let mut others_frames = Frames::new(&other).expect("frames");
+    let refused = |message: String| {
+        assert!(message.contains("made by another device"), "{message}");
+    };
+    let black = [0.0, 0.0, 0.0, 1.0];
+    refused(panics(|| {
+        let targets = [Target::Image(&mut image), Target::Image(&mut others_image)];
+        let _ = frames.begin(targets);
+    }));
+    let mut frame = frames
+        .begin([Target::Image(&mut image)])
+        .expect("a frame")
+        .expect("an offscreen image can always be rendered into");
+    refused(panics(|| {
+        let _ = frame.fill_texture(&mut others_texture, &[255; 4]);
+    }));
+    refused(panics(|| {
+        let _ = frame.write_texture(&mut others_texture, [0, 0], [1, 1], &[255; 4]);
+    }));
+    refused(panics(|| {
+        let _ = frame.fill_buffer(&mut others_buffer, &[7; 12]);
+    }));
+    refused(panics(|| {
+        drop(frame.begin_pass(0, c"depth", black, Some(&others_depth)));
+    }));
+    let mut others_frame = others_frames
+        .begin([Target::Image(&mut others_image)])
+        .expect("a frame")
+        .expect("an offscreen image can always be rendered into");
+    let others_indices = others_frame.upload(&[0; 12]).expect("an upload");
+    let mut pass = frame
+        .begin_pass(0, c"identity", black, None)
+        .expect("an offscreen image is always there");
+    refused(panics(|| pass.draw_indexed(others_indices, 0, 3, 0, 1)));
+    drop(pass);
+    frame.submit().expect("the frame's submission");
+    others_frame.submit().expect("the other frame's submission");
+
+    drop((frames, others_frames, image, others_image, others_depth));
+    drop((others_texture, others_buffer, device, other, instance));
+    assert_eq!(
+        validation.messages(),
+        0,
+        "validation reported problems; the log above says what"
+    );
+}
+
+/// Makes a texture in a placed slot, then asks for its slot again, and for a slot that isn't
+/// placed: both are refused before an image is made, so that dropping the device leaks nothing,
+/// which VMA would abort on.
+fn refused_texture_slots_leak_nothing() {
+    let instance = instance();
+    let validation = instance.validation();
+    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let format = TextureFormat::Rgba8Srgb;
+    let placed = Texture::placed(&device, 7, 1, 1, format, false, "placed test texture");
+    let placed = placed.expect("a texture");
+    let message = panics(|| {
+        let _ = Texture::placed(&device, 7, 1, 1, format, false, "the same slot");
+    });
+    assert!(message.contains("texture slot 7 is in use"), "{message}");
+    let message = panics(|| {
+        let slot = PLACED_TEXTURES;
+        let _ = Texture::placed(&device, slot, 1, 1, format, false, "a slot past the placed");
+    });
+    assert!(message.contains("isn't one of the"), "{message}");
+
+    drop((placed, device, instance));
+    assert_eq!(
+        validation.messages(),
+        0,
+        "validation reported problems; the log above says what"
+    );
+}
+
+/// Asks a pass for viewports no device draws, one wider than its limit and one reaching past its
+/// bounds, and to draw the indices of a buffer no frame has filled: each is refused before it's
+/// recorded, so the pass goes on.
+fn passes_refuse_what_the_device_cant_draw() {
+    let instance = instance();
+    let validation = instance.validation();
+    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let mut image = ColorImage::new(&device, 4, 4, "limits test target").expect("an image");
+    let buffer = GpuBuffer::new(&device, 12, "unfilled test buffer").expect("a buffer");
+    let mut frames = Frames::new(&device).expect("frames");
+    let mut frame = frames
+        .begin([Target::Image(&mut image)])
+        .expect("a frame")
+        .expect("an offscreen image can always be rendered into");
+    let mut pass = frame
+        .begin_pass(0, c"limits", [0.0, 0.0, 0.0, 1.0], None)
+        .expect("an offscreen image is always there");
+    let message = panics(|| pass.set_viewport([0, 0], [u32::MAX, 1]));
+    assert!(message.contains("viewports of up to"), "{message}");
+    let message = panics(|| pass.set_viewport([u32::MAX - 1, 0], [1, 1]));
+    assert!(message.contains("reach at most"), "{message}");
+    let message = panics(|| pass.draw_indexed(&buffer, 0, 3, 0, 1));
+    assert!(message.contains("once a frame has filled it"), "{message}");
+    drop(pass);
+    frame.submit().expect("the frame's submission");
+
+    drop((frames, buffer, image, device, instance));
     assert_eq!(
         validation.messages(),
         0,

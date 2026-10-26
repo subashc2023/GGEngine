@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ash::vk;
-use gg_core::Result;
+use gg_core::{Error, Result};
 use tracing::error;
 
 use crate::bindless::PUSH_CONSTANTS;
@@ -74,6 +74,12 @@ pub struct Frames {
     scratch: Scratch,
     /// How long the last `begin` waited, which [`Frames::waited`] describes.
     waited: Duration,
+    /// Whether a frame begun is still being recorded: cleared as it's submitted or dropped, so
+    /// that one forgotten instead is caught as the next begins.
+    recording: bool,
+    /// Whether a frame failed after acquiring an image, or to submit or present, which can leave
+    /// the semaphores its acquires signaled with no wait pending: no frame begins after that.
+    failed: bool,
 }
 
 /// What one frame in flight records into and synchronizes with.
@@ -112,7 +118,7 @@ impl Frames {
         let info = vk::SemaphoreCreateInfo::default().push_next(&mut timeline_info);
         // SAFETY: the device is live, with timeline semaphores enabled.
         let timeline = unsafe { raw.create_semaphore(&info, None) }
-            .map_err(|e| vk_error("vkCreateSemaphore", e))?;
+            .map_err(|e| vk_error("vkCreateSemaphore", "semaphore \"frame timeline\"", e))?;
         // From here on, dropping `frames` destroys what has been made so far.
         let mut frames = Self {
             device: device.clone(),
@@ -127,6 +133,8 @@ impl Frames {
             spare_targets: Vec::new(),
             scratch: Scratch::default(),
             waited: Duration::ZERO,
+            recording: false,
+            failed: false,
         };
         // SAFETY: the semaphore is live.
         unsafe { device.set_name(timeline, "frame timeline") };
@@ -134,7 +142,7 @@ impl Frames {
         if transfer_family.is_some() {
             // SAFETY: as above.
             frames.transfer_timeline = unsafe { raw.create_semaphore(&info, None) }
-                .map_err(|e| vk_error("vkCreateSemaphore", e))?;
+                .map_err(|e| vk_error("vkCreateSemaphore", "semaphore \"upload timeline\"", e))?;
             // SAFETY: the semaphore is live.
             unsafe { device.set_name(frames.transfer_timeline, "upload timeline") };
         }
@@ -142,11 +150,13 @@ impl Frames {
             let pool_info = vk::CommandPoolCreateInfo::default()
                 .flags(vk::CommandPoolCreateFlags::TRANSIENT)
                 .queue_family_index(device.graphics_family());
+            let commands_name = format!("frame {i} commands");
             // SAFETY: the device is live, and each object is made from live ones.
             unsafe {
-                let pool = raw
-                    .create_command_pool(&pool_info, None)
-                    .map_err(|e| vk_error("vkCreateCommandPool", e))?;
+                let pool = raw.create_command_pool(&pool_info, None).map_err(|e| {
+                    let subject = format_args!("command pool {commands_name:?}");
+                    vk_error("vkCreateCommandPool", subject, e)
+                })?;
                 frames.slots.push(Slot {
                     pool,
                     commands: vk::CommandBuffer::null(),
@@ -159,22 +169,27 @@ impl Frames {
                     .command_pool(pool)
                     .level(vk::CommandBufferLevel::PRIMARY)
                     .command_buffer_count(1);
-                slot.commands = raw
-                    .allocate_command_buffers(&allocate_info)
-                    .map_err(|e| vk_error("vkAllocateCommandBuffers", e))?[0];
-                device.set_name(pool, &format!("frame {i} commands"));
-                device.set_name(slot.commands, &format!("frame {i} commands"));
+                slot.commands = raw.allocate_command_buffers(&allocate_info).map_err(|e| {
+                    let subject = format_args!("command buffer {commands_name:?}");
+                    vk_error("vkAllocateCommandBuffers", subject, e)
+                })?[0];
+                device.set_name(pool, &commands_name);
+                device.set_name(slot.commands, &commands_name);
                 if let Some(family) = transfer_family {
                     let pool_info = pool_info.queue_family_index(family);
-                    slot.transfer_pool = raw
-                        .create_command_pool(&pool_info, None)
-                        .map_err(|e| vk_error("vkCreateCommandPool", e))?;
+                    let transfers_name = format!("frame {i} transfers");
+                    slot.transfer_pool =
+                        raw.create_command_pool(&pool_info, None).map_err(|e| {
+                            let subject = format_args!("command pool {transfers_name:?}");
+                            vk_error("vkCreateCommandPool", subject, e)
+                        })?;
                     let allocate_info = allocate_info.command_pool(slot.transfer_pool);
-                    slot.transfers = raw
-                        .allocate_command_buffers(&allocate_info)
-                        .map_err(|e| vk_error("vkAllocateCommandBuffers", e))?[0];
-                    device.set_name(slot.transfer_pool, &format!("frame {i} transfers"));
-                    device.set_name(slot.transfers, &format!("frame {i} transfers"));
+                    slot.transfers = raw.allocate_command_buffers(&allocate_info).map_err(|e| {
+                        let subject = format_args!("command buffer {transfers_name:?}");
+                        vk_error("vkAllocateCommandBuffers", subject, e)
+                    })?[0];
+                    device.set_name(slot.transfer_pool, &transfers_name);
+                    device.set_name(slot.transfers, &transfers_name);
                 }
             }
         }
@@ -188,13 +203,32 @@ impl Frames {
     /// slow the frame; an offscreen image is always rendered into. Returns `None` if the first
     /// target has nothing to render into this time, as with the swapchain of a minimized window.
     ///
+    /// Fails with `gpu.frame_failed` once a frame has failed after acquiring an image, or to
+    /// submit or present: the semaphores its acquires signaled may have no wait pending, so no
+    /// frame can begin again, and the frames can only be dropped.
+    ///
     /// # Panics
     ///
-    /// If `targets` is empty.
+    /// If `targets` is empty or holds one another device made, or the last frame was forgotten
+    /// rather than submitted or dropped.
     pub fn begin<'a>(
         &'a mut self,
         targets: impl IntoIterator<Item = Target<'a>>,
     ) -> Result<Option<Frame<'a>>> {
+        assert!(
+            !self.recording,
+            "frame {} was forgotten rather than submitted or dropped, so its images were never \
+             presented and the semaphores its acquires signaled can't be used again",
+            self.submitted + 1
+        );
+        if self.failed {
+            return Err(Error::new(
+                "gpu.frame_failed",
+                "a frame failed after acquiring an image, or to submit or present, which can \
+                 leave its semaphores signaled, so no frame begins after it; the frames can only \
+                 be dropped",
+            ));
+        }
         let slot = (self.submitted % FRAMES_IN_FLIGHT) as usize;
         self.waited = Duration::ZERO;
         if let Some(previous) = self.submitted.checked_sub(FRAMES_IN_FLIGHT) {
@@ -206,41 +240,76 @@ impl Frames {
         let mut list: Vec<Target<'a>> = std::mem::take(&mut self.spare_targets);
         list.extend(targets);
         assert!(!list.is_empty(), "a frame renders into at least one target");
+        // Before any image is acquired, which a panic would leave unpresented.
+        for target in &list {
+            match target {
+                Target::Swapchain(swapchain) => self
+                    .device
+                    .check_made("a swapchain among the targets", swapchain.device()),
+                Target::Image(image) => self
+                    .device
+                    .check_made("an offscreen image among the targets", image.device()),
+            }
+        }
         let acquired = &mut self.slots[slot].acquired;
         while acquired.len() < list.len() {
+            let name = format!("frame {slot} target {} image acquired", acquired.len());
             // SAFETY: the device is live.
             let semaphore = unsafe {
                 self.device
                     .raw()
                     .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
             }
-            .map_err(|e| vk_error("vkCreateSemaphore", e))?;
-            let name = format!("frame {slot} target {} image acquired", acquired.len());
+            .map_err(|e| vk_error("vkCreateSemaphore", format_args!("semaphore {name:?}"), e))?;
             // SAFETY: the semaphore is live.
             unsafe { self.device.set_name(semaphore, &name) };
             acquired.push(semaphore);
         }
         self.images.clear();
-        for (i, target) in list.iter_mut().enumerate() {
+        if let Err(error) = self.start(slot, &mut list) {
+            // A swapchain image acquired before the failure goes unpresented, and its semaphore
+            // stays signaled, so no frame may acquire with it again.
+            self.failed |= (list.iter().zip(&self.images))
+                .any(|(target, image)| matches!(target, Target::Swapchain(_)) && image.is_some());
+            self.spare_targets = recycle(list);
+            return Err(error);
+        }
+        if self.images.is_empty() {
+            self.spare_targets = recycle(list);
+            return Ok(None);
+        }
+        self.recording = true;
+        Ok(Some(Frame {
+            frames: self,
+            targets: list,
+            slot,
+            submitted: false,
+            transferring: false,
+            rendering: false,
+        }))
+    }
+
+    /// Acquires `targets`' images into `images`, as [`Frames::begin`] says, and, given one for
+    /// the first, readies slot `slot`'s arena and commands for the frame and begins recording
+    /// them. `images` stays empty if the first target has no image.
+    fn start(&mut self, slot: usize, targets: &mut [Target<'_>]) -> Result<()> {
+        for (i, target) in targets.iter_mut().enumerate() {
             let acquired = self.slots[slot].acquired[i];
             let image = match target {
                 Target::Swapchain(swapchain) => {
                     // SAFETY: the semaphore is new, or the frame that last used this slot waited
                     // on it or left it unsignaled and has finished, so it's unsignaled with no
-                    // wait pending.
+                    // wait pending: a frame forgotten or failed, which could have left it
+                    // signaled, keeps frames from beginning.
                     unsafe { swapchain.acquire(acquired, i == 0, &mut self.waited) }?
                         .map(|image| (image, vk::ImageLayout::UNDEFINED))
                 }
                 Target::Image(image) => Some((0, image.layout())),
             };
             if i == 0 && image.is_none() {
-                break;
+                return Ok(());
             }
             self.images.push(image);
-        }
-        if self.images.is_empty() {
-            self.spare_targets = recycle(list);
-            return Ok(None);
         }
         self.device.frame_begun(self.submitted + 1);
         self.arenas[slot].reset(&self.device)?;
@@ -253,9 +322,15 @@ impl Frames {
         // and recorded again; the set and layout live as long as the device.
         unsafe {
             raw.reset_command_pool(pool, vk::CommandPoolResetFlags::empty())
-                .map_err(|e| vk_error("vkResetCommandPool", e))?;
+                .map_err(|e| {
+                    let subject = format_args!("command pool \"frame {slot} commands\"");
+                    vk_error("vkResetCommandPool", subject, e)
+                })?;
             raw.begin_command_buffer(commands, &begin_info)
-                .map_err(|e| vk_error("vkBeginCommandBuffer", e))?;
+                .map_err(|e| {
+                    let subject = format_args!("command buffer \"frame {slot} commands\"");
+                    vk_error("vkBeginCommandBuffer", subject, e)
+                })?;
             raw.cmd_bind_descriptor_sets(
                 commands,
                 vk::PipelineBindPoint::GRAPHICS,
@@ -265,13 +340,7 @@ impl Frames {
                 &[],
             );
         }
-        Ok(Some(Frame {
-            frames: self,
-            targets: list,
-            slot,
-            submitted: false,
-            transferring: false,
-        }))
+        Ok(())
     }
 
     /// How long the last [`Frames::begin`] waited: for the GPU to finish the frame that last used
@@ -282,12 +351,12 @@ impl Frames {
 
     /// Waits until the GPU has finished the `frame`th frame.
     fn wait(&self, frame: u64) -> Result<()> {
-        wait_on(&self.device, self.timeline, frame)
+        wait_on(&self.device, self.timeline, "frame timeline", frame)
     }
 }
 
-/// Waits until `timeline` reaches `value`.
-fn wait_on(device: &Device, timeline: vk::Semaphore, value: u64) -> Result<()> {
+/// Waits until `timeline`, the semaphore named `name`, reaches `value`.
+fn wait_on(device: &Device, timeline: vk::Semaphore, name: &str, value: u64) -> Result<()> {
     let _zone = gg_core::zone!("wait for the GPU");
     let semaphores = [timeline];
     let values = [value];
@@ -295,8 +364,10 @@ fn wait_on(device: &Device, timeline: vk::Semaphore, value: u64) -> Result<()> {
         .semaphores(&semaphores)
         .values(&values);
     // SAFETY: the timeline semaphore is live.
-    unsafe { device.raw().wait_semaphores(&info, u64::MAX) }
-        .map_err(|e| vk_error("vkWaitSemaphores", e))
+    unsafe { device.raw().wait_semaphores(&info, u64::MAX) }.map_err(|e| {
+        let reached = format_args!("semaphore {name:?} reaching {value}");
+        vk_error("vkWaitSemaphores", reached, e)
+    })
 }
 
 /// Empties `targets` for the next frame's, which borrow for another lifetime. Collecting a
@@ -311,6 +382,13 @@ fn recycle(mut targets: Vec<Target<'_>>) -> Vec<Target<'static>> {
 
 impl Drop for Frames {
     fn drop(&mut self) {
+        if self.recording {
+            error!(
+                code = "gpu.frame_forgotten",
+                frame = self.submitted + 1,
+                "A frame was forgotten rather than submitted or dropped, so its images were never presented"
+            );
+        }
         // A frame's commands wait for its copies, and a frame whose commands fail to submit waits
         // for them itself, but that wait can fail too.
         let waited = self.wait(self.submitted).and_then(|()| {
@@ -318,6 +396,7 @@ impl Drop for Frames {
                 wait_on(
                     &self.device,
                     self.transfer_timeline,
+                    "upload timeline",
                     self.transfers_submitted,
                 )
             } else {
@@ -347,7 +426,8 @@ impl Drop for Frames {
 }
 
 /// A frame being recorded. Submitting it, or dropping it, sends its commands to the GPU and
-/// presents the images of its swapchains.
+/// presents the images of its swapchains; forgetting it instead is caught as the next frame
+/// begins.
 #[must_use = "a frame's commands reach the GPU when it's submitted"]
 pub struct Frame<'a> {
     frames: &'a mut Frames,
@@ -356,6 +436,9 @@ pub struct Frame<'a> {
     submitted: bool,
     /// Whether the frame's copies on the transfer queue have begun recording.
     transferring: bool,
+    /// Whether a pass is open, which only its drop closes: the frame records nothing of its own
+    /// while one is, so a pass forgotten rather than dropped is caught at the frame's next call.
+    rendering: bool,
 }
 
 impl<'a> Frame<'a> {
@@ -376,8 +459,9 @@ impl<'a> Frame<'a> {
     ///
     /// # Panics
     ///
-    /// If the texture has mip levels, whose others a write would leave undefined, the region
-    /// doesn't fit in it, or `pixels` doesn't fill the region exactly.
+    /// If a forgotten pass is still open, another device made the texture, it has mip levels,
+    /// whose others a write would leave undefined, the region doesn't fit in it, or `pixels`
+    /// doesn't fill the region exactly.
     pub fn write_texture(
         &mut self,
         texture: &mut Texture,
@@ -385,6 +469,10 @@ impl<'a> Frame<'a> {
         size: [u32; 2],
         pixels: &[u8],
     ) -> Result<()> {
+        self.outside_pass();
+        self.frames
+            .device
+            .check_made("the texture written", texture.device());
         assert_eq!(
             texture.level_count(),
             1,
@@ -424,8 +512,13 @@ impl<'a> Frame<'a> {
     ///
     /// # Panics
     ///
-    /// If a frame has written the texture, or `pixels` doesn't fill its levels exactly.
+    /// If a forgotten pass is still open, another device made the texture, a frame has written
+    /// it, or `pixels` doesn't fill its levels exactly.
     pub fn fill_texture(&mut self, texture: &mut Texture, pixels: &[u8]) -> Result<()> {
+        self.outside_pass();
+        self.frames
+            .device
+            .check_made("the texture filled", texture.device());
         let [width, height] = texture.size();
         assert!(
             !texture.written(),
@@ -499,8 +592,13 @@ impl<'a> Frame<'a> {
     ///
     /// # Panics
     ///
-    /// If a frame has written the buffer, or `bytes` doesn't fill it exactly.
+    /// If a forgotten pass is still open, another device made the buffer, a frame has written
+    /// it, or `bytes` doesn't fill it exactly.
     pub fn fill_buffer(&mut self, buffer: &mut GpuBuffer, bytes: &[u8]) -> Result<()> {
+        self.outside_pass();
+        self.frames
+            .device
+            .check_made("the buffer filled", buffer.device());
         assert!(
             !buffer.written(),
             "a buffer is filled once, before any frame writes it"
@@ -574,6 +672,20 @@ impl<'a> Frame<'a> {
         Ok((staged.buffer, staged.offset))
     }
 
+    /// Checks that no pass is open: only outside one does the frame record its own commands, or
+    /// end them.
+    ///
+    /// # Panics
+    ///
+    /// If one is: a pass forgotten rather than dropped, whose rendering never ended.
+    fn outside_pass(&self) {
+        assert!(
+            !self.rendering,
+            "a pass was forgotten rather than dropped, so its rendering never ended; the frame can \
+             neither record outside it nor be submitted"
+        );
+    }
+
     /// The commands the frame's copies on the transfer queue record into, begun with the first.
     fn transfer_commands(&mut self) -> Result<vk::CommandBuffer> {
         let slot = &self.frames.slots[self.slot];
@@ -587,9 +699,17 @@ impl<'a> Frame<'a> {
             // for them itself; so the pool's commands can be reset and recorded again.
             unsafe {
                 raw.reset_command_pool(pool, vk::CommandPoolResetFlags::empty())
-                    .map_err(|e| vk_error("vkResetCommandPool", e))?;
+                    .map_err(|e| {
+                        let subject =
+                            format_args!("command pool \"frame {} transfers\"", self.slot);
+                        vk_error("vkResetCommandPool", subject, e)
+                    })?;
                 raw.begin_command_buffer(transfers, &begin_info)
-                    .map_err(|e| vk_error("vkBeginCommandBuffer", e))?;
+                    .map_err(|e| {
+                        let subject =
+                            format_args!("command buffer \"frame {} transfers\"", self.slot);
+                        vk_error("vkBeginCommandBuffer", subject, e)
+                    })?;
             }
             self.transferring = true;
         }
@@ -692,7 +812,9 @@ impl<'a> Frame<'a> {
     ///
     /// # Panics
     ///
-    /// If the frame has no `target`th target, or `depth` isn't the target's size.
+    /// If a forgotten pass is still open, the frame has no `target`th target, `depth` isn't the
+    /// target's size or another device made it, or the target is larger than the device's
+    /// viewports reach, as [`Pass::set_viewport`] says.
     pub fn begin_pass(
         &mut self,
         target: usize,
@@ -700,6 +822,7 @@ impl<'a> Frame<'a> {
         color: [f32; 4],
         depth: Option<&DepthImage>,
     ) -> Option<Pass<'_, 'a>> {
+        self.outside_pass();
         let (index, _) = self.frames.images[target]?;
         let device = &self.frames.device;
         let commands = self.frames.slots[self.slot].commands;
@@ -708,6 +831,7 @@ impl<'a> Frame<'a> {
             Target::Image(image) => (image.parts(), ColorImage::FORMAT),
         };
         let depth = depth.map(|depth| {
+            device.check_made("the pass's depth image", depth.device());
             let (image, view, size) = depth.parts();
             assert_eq!(size, extent, "a pass's depth image is its target's size");
             (image, view)
@@ -718,12 +842,13 @@ impl<'a> Frame<'a> {
             format
         };
         // The old contents are discarded. A swapchain image is ready once its acquire semaphore
-        // is signaled, which the submission waits for at the color-attachment stage; an
-        // offscreen image must wait for whatever used it before.
+        // is signaled, which the submission waits for at the color-attachment stage, and a later
+        // pass into it this frame waits there for the writes of the one before; an offscreen
+        // image must wait for whatever used it before.
         let (src_stage, src_access) = match self.targets[target] {
             Target::Swapchain(_) => (
                 vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
-                vk::AccessFlags2::NONE,
+                vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
             ),
             Target::Image(_) => (
                 vk::PipelineStageFlags2::ALL_COMMANDS,
@@ -788,14 +913,7 @@ impl<'a> Frame<'a> {
         if let Some(depth) = &depth_attachment {
             rendering = rendering.depth_attachment(depth);
         }
-        let viewport = vk::Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: extent.width as f32,
-            height: extent.height as f32,
-            min_depth: 0.0,
-            max_depth: 1.0,
-        };
+        let viewport = viewport(device, [0, 0], [extent.width, extent.height]);
         let raw = device.raw();
         let (cull_mode, front_face) = Faces::Both.state();
         // SAFETY: the commands are recording outside a pass, and the images and views live until
@@ -816,6 +934,7 @@ impl<'a> Frame<'a> {
             raw.cmd_set_front_face(commands, front_face);
         }
         self.frames.images[target] = Some((index, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL));
+        self.rendering = true;
         Some(Pass {
             frame: self,
             extent,
@@ -831,9 +950,11 @@ impl<'a> Frame<'a> {
     ///
     /// # Panics
     ///
-    /// If the frame has no `target`th target, the target is a swapchain's, or it's an offscreen
-    /// image no pass has rendered into since it was made or read back.
+    /// If a forgotten pass is still open, the frame has no `target`th target, the target is a
+    /// swapchain's, or it's an offscreen image no pass has rendered into since it was made or
+    /// read back.
     pub fn begin_sampling(&mut self, target: usize) -> u32 {
+        self.outside_pass();
         let Target::Image(image) = &self.targets[target] else {
             panic!("target {target} is a swapchain's, and only offscreen images are sampled");
         };
@@ -856,8 +977,8 @@ impl<'a> Frame<'a> {
             .subresource_range(COLOR_RANGE);
         let device = &self.frames.device;
         let commands = self.frames.slots[self.slot].commands;
-        // SAFETY: the commands are recording outside a pass, which `Pass` borrowing the frame
-        // ensures, and the image lives until the frame has finished: it retires until then.
+        // SAFETY: the commands are recording outside a pass, as checked, and the image lives until
+        // the frame has finished: it retires until then.
         unsafe {
             device.begin_label(commands, c"begin sampling");
             device.raw().cmd_pipeline_barrier2(
@@ -871,13 +992,38 @@ impl<'a> Frame<'a> {
     }
 
     /// Sends the frame's commands to the GPU and presents the images of its swapchains.
+    ///
+    /// # Panics
+    ///
+    /// If a forgotten pass is still open.
     pub fn submit(mut self) -> Result<()> {
+        self.outside_pass();
         self.finish()
     }
 
+    /// Ends the frame: submits and presents it, unless a forgotten pass is still open, whose
+    /// rendering never ended, so that the frame's commands can't end either and its images go
+    /// unpresented; that's an error rather than a panic, since a drop may already be unwinding.
+    /// After any failure, no frame begins again.
     fn finish(&mut self) -> Result<()> {
         // Set first, so that dropping the frame after a failure doesn't submit it again.
         self.submitted = true;
+        self.frames.recording = false;
+        let finished = if self.rendering {
+            Err(Error::new(
+                "gpu.pass_forgotten",
+                "a pass was forgotten rather than dropped, so its rendering never ended and the \
+                 frame can't be submitted; its images go unpresented",
+            ))
+        } else {
+            self.send()
+        };
+        self.frames.failed |= finished.is_err();
+        finished
+    }
+
+    /// Submits the frame's copies and commands, and presents its swapchains' images.
+    fn send(&mut self) -> Result<()> {
         let Frames {
             device,
             timeline,
@@ -912,8 +1058,10 @@ impl<'a> Frame<'a> {
         );
         if self.transferring {
             // SAFETY: the transfer commands are recording.
-            unsafe { raw.end_command_buffer(slot.transfers) }
-                .map_err(|e| vk_error("vkEndCommandBuffer", e))?;
+            unsafe { raw.end_command_buffer(slot.transfers) }.map_err(|e| {
+                let subject = format_args!("command buffer \"frame {} transfers\"", self.slot);
+                vk_error("vkEndCommandBuffer", subject, e)
+            })?;
             let command_infos =
                 [vk::CommandBufferSubmitInfo::default().command_buffer(slot.transfers)];
             // Without maintenance8, which ash's headers predate, a wait for an ownership
@@ -927,10 +1075,11 @@ impl<'a> Frame<'a> {
                 .signal_semaphore_infos(slice::from_ref(&copied));
             {
                 let _zone = gg_core::zone!("submit uploads");
+                let work = format_args!("frame {frame}'s uploads");
                 // SAFETY: what the copies use lives until they finish, which the frame's own
                 // submission waits for, or the frame itself if that fails: the slot is reused only
                 // after that, and staging and the resources retire until then.
-                unsafe { device.submit_transfers(slice::from_ref(&submit)) }?;
+                unsafe { device.submit_transfers(slice::from_ref(&submit), work) }?;
             }
             *transfers_submitted += 1;
             scratch.waits.push(copied);
@@ -979,19 +1128,27 @@ impl<'a> Frame<'a> {
             .signal_semaphore_infos(&scratch.signals);
         // SAFETY: the commands are recording.
         let sent = unsafe { raw.end_command_buffer(slot.commands) }
-            .map_err(|e| vk_error("vkEndCommandBuffer", e))
+            .map_err(|e| {
+                let subject = format_args!("command buffer \"frame {} commands\"", self.slot);
+                vk_error("vkEndCommandBuffer", subject, e)
+            })
             .and_then(|()| {
                 let _zone = gg_core::zone!("submit");
                 // SAFETY: what the submission uses lives until the timeline reaches `frame`: the
                 // slot and its arena are reused only after waiting for it, and resources retire
                 // until then.
-                unsafe { device.submit(slice::from_ref(&submit)) }
+                unsafe { device.submit(slice::from_ref(&submit), format_args!("frame {frame}")) }
             });
         if let Err(error) = sent {
             // Nothing else waits for the frame's copies now, so it does, before their slot is
             // reused or their staging freed.
             if self.transferring
-                && let Err(waited) = wait_on(device, *transfer_timeline, *transfers_submitted)
+                && let Err(waited) = wait_on(
+                    device,
+                    *transfer_timeline,
+                    "upload timeline",
+                    *transfers_submitted,
+                )
             {
                 error!(code = waited.code(), "{waited:#}");
             }
@@ -1034,7 +1191,11 @@ impl<'a> Frame<'a> {
         match presented {
             // Each swapchain's own result says how its present went.
             Ok(_) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => Ok(()),
-            Err(e) => Err(vk_error("vkQueuePresentKHR", e)),
+            Err(e) => {
+                let swapchains = scratch.swapchains.len();
+                let subject = format_args!("frame {frame}'s presents to {swapchains} swapchain(s)");
+                Err(vk_error("vkQueuePresentKHR", subject, e))
+            }
         }
     }
 }
@@ -1145,8 +1306,9 @@ fn buffer_handover(
     ]
 }
 
-/// Rendering into a frame's target, which ends when the pass is dropped. Draws read their
-/// geometry from [`Upload`]s through push constants, and their textures from the bindless set.
+/// Rendering into a frame's target, which ends when the pass is dropped; a pass forgotten
+/// instead stays open, which the frame's next call catches. Draws read their geometry from
+/// [`Upload`]s through push constants, and their textures from the bindless set.
 pub struct Pass<'p, 'a> {
     frame: &'p mut Frame<'a>,
     extent: vk::Extent2D,
@@ -1176,8 +1338,12 @@ impl<'a> Pass<'_, 'a> {
     ///
     /// # Panics
     ///
-    /// If the pipeline isn't made for the pass's formats.
+    /// If the pipeline isn't made for the pass's formats, or another device made it.
     pub fn set_pipeline(&mut self, pipeline: &Pipeline) {
+        self.frame
+            .frames
+            .device
+            .check_made("the pipeline", pipeline.device());
         assert_eq!(
             pipeline.format(),
             self.format,
@@ -1201,21 +1367,11 @@ impl<'a> Pass<'_, 'a> {
     ///
     /// # Panics
     ///
-    /// If `size` has no area, which a viewport can't have.
+    /// If `size` has no area, which a viewport can't have, or the viewport is larger than the
+    /// device's `maxViewportDimensions` or reaches past its `viewportBoundsRange`.
     pub fn set_viewport(&mut self, origin: [u32; 2], size: [u32; 2]) {
-        assert!(
-            size[0] > 0 && size[1] > 0,
-            "a viewport has an area; got {size:?}"
-        );
-        let viewport = vk::Viewport {
-            x: origin[0] as f32,
-            y: origin[1] as f32,
-            width: size[0] as f32,
-            height: size[1] as f32,
-            min_depth: 0.0,
-            max_depth: 1.0,
-        };
-        // SAFETY: the commands are recording, and the viewport has an area.
+        let viewport = viewport(&self.frame.frames.device, origin, size);
+        // SAFETY: the commands are recording, and the viewport keeps within the device's limits.
         unsafe {
             self.frame
                 .frames
@@ -1313,7 +1469,8 @@ impl<'a> Pass<'_, 'a> {
     ///
     /// # Panics
     ///
-    /// If no pipeline is set, or the indices drawn run past the end of `indices`.
+    /// If no pipeline is set, the indices are a buffer no frame has filled or another device
+    /// made, or the indices drawn run past the end of `indices`.
     pub fn draw_indexed<'i>(
         &mut self,
         indices: impl Into<Indices<'i>>,
@@ -1323,6 +1480,10 @@ impl<'a> Pass<'_, 'a> {
         instances: u32,
     ) {
         let indices = indices.into();
+        self.frame
+            .frames
+            .device
+            .check_made("the indices' buffer", indices.device);
         assert!(self.pipeline_set, "a draw needs a pipeline set first");
         assert!(
             u64::from(first) + u64::from(count) <= indices.count,
@@ -1357,7 +1518,51 @@ impl Drop for Pass<'_, '_> {
             device.raw().cmd_end_rendering(self.commands());
             device.end_label(self.commands());
         }
+        self.frame.rendering = false;
     }
+}
+
+/// The viewport over the `size` pixels at `origin`, which keeps within `device`'s limits.
+///
+/// # Panics
+///
+/// If `size` has no area, which a viewport can't have, or the viewport is larger than the device's
+/// `maxViewportDimensions` or reaches past its `viewportBoundsRange`, which the driver doesn't
+/// check.
+fn viewport(device: &Device, origin: [u32; 2], size: [u32; 2]) -> vk::Viewport {
+    assert!(
+        size[0] > 0 && size[1] > 0,
+        "a viewport has an area; got {size:?}"
+    );
+    let limits = device.limits();
+    let [max_width, max_height] = limits.max_viewport_dimensions;
+    assert!(
+        size[0] <= max_width && size[1] <= max_height,
+        "a {}x{} viewport, but {} draws viewports of up to {max_width}x{max_height}",
+        size[0],
+        size[1],
+        device.name()
+    );
+    let viewport = vk::Viewport {
+        x: origin[0] as f32,
+        y: origin[1] as f32,
+        width: size[0] as f32,
+        height: size[1] as f32,
+        min_depth: 0.0,
+        max_depth: 1.0,
+    };
+    // The origin is never negative, so only the far bound can be crossed.
+    let bound = f64::from(limits.viewport_bounds_range[1]);
+    assert!(
+        f64::from(viewport.x) + f64::from(viewport.width) <= bound
+            && f64::from(viewport.y) + f64::from(viewport.height) <= bound,
+        "a {}x{} viewport at {origin:?}, but {}'s viewports reach at most {bound} pixels from \
+         the origin",
+        size[0],
+        size[1],
+        device.name()
+    );
+    viewport
 }
 
 /// Bytes in a frame's arena, valid for the GPU during that frame, whose [`Frames`] it borrows.
@@ -1367,6 +1572,8 @@ pub struct Upload<'a> {
     offset: u64,
     size: u64,
     address: vk::DeviceAddress,
+    /// The handle of the device whose frames hold the bytes.
+    device: vk::Device,
     frames: PhantomData<&'a ()>,
 }
 
@@ -1377,14 +1584,16 @@ impl Upload<'_> {
     }
 }
 
-/// The 32-bit indices a draw takes: an [`Upload`] of the frame's, or a [`GpuBuffer`] from its
-/// start.
+/// The 32-bit indices a draw takes: an [`Upload`] of the frame's, or a [`GpuBuffer`] a frame has
+/// filled, from its start.
 #[derive(Clone, Copy, Debug)]
 pub struct Indices<'a> {
     buffer: vk::Buffer,
     offset: u64,
     /// How many indices there are.
     count: u64,
+    /// The handle of the device that made the buffer.
+    device: vk::Device,
     /// The indices borrow what holds them, so that it outlives the draw's recording.
     holder: PhantomData<&'a ()>,
 }
@@ -1395,17 +1604,27 @@ impl<'a> From<Upload<'a>> for Indices<'a> {
             buffer: upload.buffer,
             offset: upload.offset,
             count: upload.size / 4,
+            device: upload.device,
             holder: PhantomData,
         }
     }
 }
 
 impl<'a> From<&'a GpuBuffer> for Indices<'a> {
+    /// # Panics
+    ///
+    /// If no frame has filled the buffer: its indices are undefined until then, and a fill after
+    /// the draw in the same frame would race it.
     fn from(buffer: &'a GpuBuffer) -> Self {
+        assert!(
+            buffer.written(),
+            "a buffer is drawn once a frame has filled it; its indices are undefined until then"
+        );
         Self {
             buffer: buffer.raw(),
             offset: 0,
             count: buffer.size() / 4,
+            device: buffer.device(),
             holder: PhantomData,
         }
     }
@@ -1506,6 +1725,7 @@ impl Arena {
             offset,
             size,
             address: buffer.address() + offset,
+            device: device.handle(),
             frames: PhantomData,
         })
     }

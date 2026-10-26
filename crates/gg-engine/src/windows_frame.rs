@@ -75,7 +75,7 @@ impl Frame {
         installed.ok_or_else(|| {
             Error::new(
                 "engine.window_frame",
-                "can't give the window Windows' own frame",
+                format!("can't give window {:?} Windows' own frame", window.title()),
             )
         })
     }

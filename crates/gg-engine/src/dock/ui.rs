@@ -178,7 +178,7 @@ impl Dock {
     pub(crate) fn save(&self) {
         let _zone = gg_core::zone!();
         if let Some(path) = &self.file
-            && let Err(error) = file::save(path, &self.layout)
+            && let Err(error) = file::save(path, &self.layout.saved())
         {
             warn!(code = error.code(), path = %path.display(), "{error:#}");
         }
@@ -213,10 +213,12 @@ impl Dock {
     pub(crate) fn begin(&mut self, root: &mut egui::Ui) {
         self.bar.begin(root);
         if root.ctx().embed_viewports() {
-            // Without windows of their own, floating groups float over the main window.
+            // Without windows of their own, floating groups float over the main window, and the
+            // layout keeps their windows' places for runs with them.
             for floating in &mut self.layout.floating {
                 if let Place::Window { position, size } = floating.place {
                     let min = from_desktop(root.ctx(), position).unwrap_or(pos2(48.0, 48.0));
+                    floating.kept = Some(floating.place);
                     floating.place = Place::Main {
                         min: min.into(),
                         size,
@@ -401,6 +403,9 @@ impl Dock {
                 min: response.response.rect.min.into(),
                 size: (size + response.inner).max(MIN_FLOATING).into(),
             };
+            if response.inner != Vec2::ZERO {
+                floating.kept = None;
+            }
         }
     }
 
@@ -686,6 +691,11 @@ impl Dock {
                 } else {
                     let frame = window_frame(ctx, group);
                     floating.place = place_at(ctx, area, pointer, drag.grab, frame, size);
+                    // Moved, it's saved where the user put it; a press on its bar alone doesn't
+                    // move it.
+                    if moved {
+                        floating.kept = None;
+                    }
                 }
             }
             if let Dragging::Group(group) = drag.what {
@@ -1404,6 +1414,66 @@ mod tests {
             panic!("A floats over the main window: {:?}", run.floating("A"));
         };
         assert!(min[0] >= 0.0, "A is kept on the screen: {min:?}");
+    }
+
+    #[test]
+    fn groups_floated_for_want_of_windows_save_their_windows_places_until_moved_or_resized() {
+        // A and B in windows of their own, over the main window, until a window that can't open
+        // has the dock float every group over the main window instead, as Wayland does from the
+        // start.
+        let mut run = Run::with_windows(Chrome::Os);
+        let window = |min| Place::Window {
+            position: desktop(min),
+            size: NEW_SIZE.into(),
+        };
+        let (a, b) = (window(pos2(40.0, 60.0)), window(pos2(420.0, 300.0)));
+        for (panel, place) in [("A", a), ("B", b)] {
+            let id = run.layout().find(panel).unwrap();
+            run.dock.layout.floating_mut(id).unwrap().place = place;
+        }
+        run.ctx.set_embed_viewports(true);
+        run.frames(2);
+        let saved = |run: &Run, panel: &str| {
+            let layout = run.layout().saved();
+            layout.floating(layout.find(panel).unwrap()).unwrap().place
+        };
+        assert_eq!(
+            run.floating("A"),
+            Place::Main {
+                min: [40.0, 60.0],
+                size: NEW_SIZE.into()
+            }
+        );
+        assert_eq!((saved(&run, "A"), saved(&run, "B")), (a, b));
+
+        // A press on A's bar doesn't move it; dragging the bar does.
+        let held = bar(pos2(40.0, 60.0));
+        run.move_to(held);
+        run.button(true);
+        run.button(false);
+        assert_eq!(saved(&run, "A"), a);
+        run.drag(held, held + vec2(0.0, 100.0));
+        assert!(
+            matches!(
+                saved(&run, "A"),
+                Place::Main {
+                    min: [40.0, 160.0],
+                    ..
+                }
+            ),
+            "{:?}",
+            saved(&run, "A")
+        );
+        assert_eq!(saved(&run, "B"), b);
+
+        // Resizing B by its grip places it too.
+        let grip = pos2(420.0, 300.0) + NEW_SIZE - Vec2::splat(GRIP / 2.0);
+        run.drag(grip, grip - vec2(20.0, 20.0));
+        assert!(
+            matches!(saved(&run, "B"), Place::Main { .. }),
+            "{:?}",
+            saved(&run, "B")
+        );
     }
 
     /// A point in the main window of [`Run::with_windows`] on the desktop, in pixels.

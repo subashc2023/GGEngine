@@ -28,8 +28,8 @@ pub enum Projection {
     /// shows what's from `near` to `far` in front of the camera; either may be negative, to show
     /// what's behind it too, as 2D games' cameras do, and either the nearer.
     ///
-    /// Rendering panics unless `height` is a normal number, and `near` and `far` are finite and
-    /// different: otherwise the view would be blank.
+    /// Rendering panics unless `height` is a positive normal number, and `near` and `far` are
+    /// finite and different: otherwise the view would be blank or upside down.
     Orthographic { height: f32, near: f32, far: f32 },
     /// With perspective, as 3D games draw: the view spans `fov` radians from bottom to top, as
     /// glTF's `yfov` does, and as much across as its aspect ratio makes. It shows what's at least
@@ -67,9 +67,13 @@ impl Camera {
         let projection = match self.projection {
             Projection::Orthographic { height, near, far } => {
                 assert!(
-                    height.is_normal() && near.is_finite() && far.is_finite() && near != far,
-                    "a camera sees a height of the world, between a near and a far that differ; \
-                     got {:?}",
+                    height.is_normal()
+                        && height > 0.0
+                        && near.is_finite()
+                        && far.is_finite()
+                        && near != far,
+                    "a camera sees a positive height of the world, between a near and a far that \
+                     differ; got {:?}",
                     self.projection
                 );
                 let top = height / 2.0;
@@ -185,8 +189,15 @@ mod tests {
 
     #[test]
     fn a_projection_that_cant_project_panics() {
+        let orthographic = |height, near, far| Projection::Orthographic { height, near, far };
         let perspective = |fov, near| Projection::Perspective { fov, near };
         for projection in [
+            // Upside down, flat, of a height that's no number, and seeing no depth.
+            orthographic(-2.0, -1.0, 1.0),
+            orthographic(-f32::MIN_POSITIVE, -1.0, 1.0),
+            orthographic(0.0, -1.0, 1.0),
+            orthographic(f32::NAN, -1.0, 1.0),
+            orthographic(2.0, 1.0, 1.0),
             perspective(0.0, 0.1),
             perspective(PI, 0.1),
             perspective(f32::NAN, 0.1),

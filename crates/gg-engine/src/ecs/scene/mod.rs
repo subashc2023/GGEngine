@@ -93,16 +93,16 @@ impl World {
         // Drawn once the prefab is known to be placed, so that a refusal draws nothing.
         let ids = loop {
             let instance = self.stream.draw();
-            let mixed = entities.iter().map(|entity| {
-                id::placed(instance, entity.id).filter(|id| !self.by_id.contains_key(id))
-            });
+            let mixed = entities
+                .iter()
+                .map(|entity| id::placed(instance, entity.id).filter(|&id| !self.reserved(id)));
             match mixed.collect::<Option<Vec<EntityId>>>() {
                 Some(ids) => break ids,
                 None => {
                     tracing::debug!(
                         code = "ecs.reseed",
                         instance = %instance,
-                        "A prefab's copy would have a living entity's ID"
+                        "A prefab's copy would have an ID that's taken"
                     );
                     self.stream.reseed();
                 }

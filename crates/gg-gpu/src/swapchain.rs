@@ -40,6 +40,10 @@ impl Swapchain {
     /// surface, as it can to the one the device was opened for. With `vsync`, it presents at
     /// the display's refresh rate; otherwise as fast as frames are rendered, where the device
     /// can do that without tearing.
+    ///
+    /// # Panics
+    ///
+    /// If the surface was made by another instance than the device's.
     pub fn new(
         device: &Arc<Device>,
         surface: Surface,
@@ -48,12 +52,16 @@ impl Swapchain {
         vsync: bool,
     ) -> Result<Self> {
         let _zone = gg_core::zone!();
+        surface.check_instance(device.instance());
+        let gpu = device.name();
         if device.swapchain_fn().is_none() {
             return Err(Error::new(
                 "gpu.no_swapchain",
-                "the device was opened without a surface, so it can't present",
+                format!("device {gpu:?} was opened without a surface, so it can't present"),
             ));
         }
+        // The surface, by the debug name it's given below.
+        let surface_named = format_args!("surface \"window surface\" on device {gpu:?}");
         // SAFETY: the physical device and the surface are live, and the family is the device's.
         let presents = unsafe {
             surface.surface_fn().get_physical_device_surface_support(
@@ -62,7 +70,7 @@ impl Swapchain {
                 surface.raw(),
             )
         }
-        .map_err(|e| vk_error("vkGetPhysicalDeviceSurfaceSupportKHR", e))?;
+        .map_err(|e| vk_error("vkGetPhysicalDeviceSurfaceSupportKHR", surface_named, e))?;
         if !presents {
             return Err(Error::new(
                 "gpu.no_present",
@@ -78,7 +86,7 @@ impl Swapchain {
                 .surface_fn()
                 .get_physical_device_surface_formats(device.physical(), surface.raw())
         }
-        .map_err(|e| vk_error("vkGetPhysicalDeviceSurfaceFormatsKHR", e))?;
+        .map_err(|e| vk_error("vkGetPhysicalDeviceSurfaceFormatsKHR", surface_named, e))?;
         let format = choose_format(&formats).ok_or_else(|| {
             Error::new(
                 "gpu.no_surface_format",
@@ -91,7 +99,13 @@ impl Swapchain {
                 .surface_fn()
                 .get_physical_device_surface_present_modes(device.physical(), surface.raw())
         }
-        .map_err(|e| vk_error("vkGetPhysicalDeviceSurfacePresentModesKHR", e))?;
+        .map_err(|e| {
+            vk_error(
+                "vkGetPhysicalDeviceSurfacePresentModesKHR",
+                surface_named,
+                e,
+            )
+        })?;
         debug!(modes = ?present_modes, "Present modes");
         let present_mode = choose_present_mode(&present_modes, vsync);
         // SAFETY: the device is live.
@@ -100,7 +114,7 @@ impl Swapchain {
                 .raw()
                 .create_fence(&vk::FenceCreateInfo::default(), None)
         }
-        .map_err(|e| vk_error("vkCreateFence", e))?;
+        .map_err(|e| vk_error("vkCreateFence", "fence \"swapchain image available\"", e))?;
         // SAFETY: the fence is live, and the surface is of the device's instance.
         unsafe {
             device.set_name(available, "swapchain image available");
@@ -186,7 +200,9 @@ impl Swapchain {
                         raw.wait_for_fences(&fences, true, u64::MAX)
                             .and_then(|()| raw.reset_fences(&fences))
                     }
-                    .map_err(|e| vk_error("vkWaitForFences", e))?;
+                    .map_err(|e| {
+                        vk_error("vkWaitForFences", "fence \"swapchain image available\"", e)
+                    })?;
                 }
                 Some(image)
             }
@@ -196,7 +212,11 @@ impl Swapchain {
                 None
             }
             Err(vk::Result::NOT_READY | vk::Result::TIMEOUT) if !pace => None,
-            Err(e) => return Err(vk_error("vkAcquireNextImageKHR", e)),
+            Err(e) => {
+                let vk::Extent2D { width, height } = self.extent;
+                let subject = format_args!("swapchain \"swapchain\" of {width}x{height} pixels");
+                return Err(vk_error("vkAcquireNextImageKHR", subject, e));
+            }
         };
         if pace {
             *waited += start.elapsed();
@@ -215,12 +235,21 @@ impl Swapchain {
                 self.stale = true;
                 Ok(())
             }
-            e => Err(vk_error("vkQueuePresentKHR", e)),
+            e => {
+                let vk::Extent2D { width, height } = self.extent;
+                let subject = format_args!("swapchain \"swapchain\" of {width}x{height} pixels");
+                Err(vk_error("vkQueuePresentKHR", subject, e))
+            }
         }
     }
 
     pub(crate) fn raw(&self) -> vk::SwapchainKHR {
         self.raw
+    }
+
+    /// The handle of the device that made it.
+    pub(crate) fn device(&self) -> vk::Device {
+        self.device.handle()
     }
 
     /// The `image`th image, its view and the swapchain's size.
@@ -251,7 +280,14 @@ impl Swapchain {
                 .surface_fn()
                 .get_physical_device_surface_capabilities(device.physical(), self.surface.raw())
         }
-        .map_err(|e| vk_error("vkGetPhysicalDeviceSurfaceCapabilitiesKHR", e))?;
+        .map_err(|e| {
+            let subject = format_args!("surface \"window surface\" on device {:?}", device.name());
+            vk_error("vkGetPhysicalDeviceSurfaceCapabilitiesKHR", subject, e)
+        })?;
+        // The window can resize between this query and the swapchain's creation below, which then
+        // makes it at a size the surface just left: a race no query closes, which validation lets
+        // pass, as it checks the size against this query, and which the next acquire or present
+        // reports as out of date, so that the swapchain is rebuilt again.
         // A current width of u32::MAX means the surface takes its size from the swapchain.
         let extent = if capabilities.current_extent.width == u32::MAX {
             let (min, max) = (capabilities.min_image_extent, capabilities.max_image_extent);
@@ -305,17 +341,25 @@ impl Swapchain {
         // its views or its semaphores. Creating the new swapchain retires the old one; the new
         // one's objects are live as they're named.
         unsafe {
-            let raw = swapchain_fn
-                .create_swapchain(&info, None)
-                .map_err(|e| vk_error("vkCreateSwapchainKHR", e))?;
+            let raw = swapchain_fn.create_swapchain(&info, None).map_err(|e| {
+                let subject = format_args!(
+                    "swapchain \"swapchain\" of {}x{} {:?} pixels, presenting by {:?}",
+                    extent.width, extent.height, self.format.format, self.present_mode
+                );
+                vk_error("vkCreateSwapchainKHR", subject, e)
+            })?;
             self.destroy_views_and_semaphores();
             swapchain_fn.destroy_swapchain(self.raw, None);
             self.raw = raw;
             device.set_name(raw, "swapchain");
             self.extent = extent;
-            self.images = swapchain_fn
-                .get_swapchain_images(raw)
-                .map_err(|e| vk_error("vkGetSwapchainImagesKHR", e))?;
+            self.images = swapchain_fn.get_swapchain_images(raw).map_err(|e| {
+                vk_error(
+                    "vkGetSwapchainImagesKHR",
+                    "swapchain \"swapchain\"'s images",
+                    e,
+                )
+            })?;
             for (i, &image) in self.images.iter().enumerate() {
                 let view_info = vk::ImageViewCreateInfo::default()
                     .image(image)
@@ -325,12 +369,18 @@ impl Swapchain {
                 let view = device
                     .raw()
                     .create_image_view(&view_info, None)
-                    .map_err(|e| vk_error("vkCreateImageView", e))?;
+                    .map_err(|e| {
+                        let subject = format_args!("image \"swapchain image {i}\"'s view");
+                        vk_error("vkCreateImageView", subject, e)
+                    })?;
                 self.views.push(view);
                 let rendered = device
                     .raw()
                     .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
-                    .map_err(|e| vk_error("vkCreateSemaphore", e))?;
+                    .map_err(|e| {
+                        let subject = format_args!("semaphore \"swapchain image {i} rendered\"");
+                        vk_error("vkCreateSemaphore", subject, e)
+                    })?;
                 self.rendered.push(rendered);
                 device.set_name(image, &format!("swapchain image {i}"));
                 device.set_name(view, &format!("swapchain image {i}"));

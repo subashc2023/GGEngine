@@ -15,6 +15,7 @@ use std::hint::black_box;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use gg_engine::math::Vec3;
 use gg_engine::{Component, Context, Layer, Tick, Transform, World};
@@ -153,30 +154,34 @@ fn ticks(movers: &mut Movers, cx: &mut Context, number: &mut u64, count: u64) {
 }
 
 /// Checks that what the job system's other threads allocate is counted: that a pass whose rows
-/// allocate once each on those threads counts as many allocations as such rows at least, trying
-/// again until some rows run there.
+/// allocate once each on those threads counts as many allocations as such rows at least. The
+/// ticks' thread holds its rows until one has run on another thread, since rows this quick it could
+/// otherwise finish before a sleeping thread woke to take any, as on one or two cores.
 fn workers_are_counted(world: &mut World) {
-    for _ in 0..100 {
-        let elsewhere = AtomicU64::new(0);
-        let counted = allocations(|| {
-            world.query_mut::<&Velocity>().par_for_each(|_| {
-                if on_a_worker() {
-                    elsewhere.fetch_add(1, Ordering::Relaxed);
-                    black_box(Box::new(0u8));
+    let elsewhere = AtomicU64::new(0);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let counted = allocations(|| {
+        world.query_mut::<&Velocity>().par_for_each(|_| {
+            if on_a_worker() {
+                elsewhere.fetch_add(1, Ordering::Relaxed);
+                black_box(Box::new(0u8));
+            } else {
+                while elsewhere.load(Ordering::Relaxed) == 0 && Instant::now() < deadline {
+                    thread::yield_now();
                 }
-            });
+            }
         });
-        let elsewhere = elsewhere.into_inner();
-        if elsewhere > 0 {
-            assert!(
-                counted >= elsewhere,
-                "counted {counted} allocations of the {elsewhere} rows that allocated on the job \
-                 system's other threads: the counter misses those threads"
-            );
-            return;
-        }
-    }
-    panic!("no row ran on the job system's other threads in 100 passes");
+    });
+    let elsewhere = elsewhere.into_inner();
+    assert!(
+        elsewhere > 0,
+        "no row ran on the job system's other threads in 10 s"
+    );
+    assert!(
+        counted >= elsewhere,
+        "counted {counted} allocations of the {elsewhere} rows that allocated on the job system's \
+         other threads: the counter misses those threads"
+    );
 }
 
 fn main() {

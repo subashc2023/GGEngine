@@ -305,7 +305,7 @@ pub(crate) struct Scratch {
 /// `sort` puts among the others of their z and kind, or of their batch.
 #[derive(Clone)]
 struct Segment {
-    /// Its rows' z, or 0 for opaque meshes, which draw in any order.
+    /// Its rows' z, as [`depth`] gives it, or 0 for opaque meshes, which draw in any order.
     z: f32,
     /// Its rows' [`MeshDraw::batch`], for opaque meshes, or 0.
     batch: u64,
@@ -321,7 +321,8 @@ struct Segment {
     matrices: u32,
 }
 
-/// The same segment, its z bit for bit, so that a z that only changes its sign shows.
+/// The same segment, its z bit for bit, as `total_cmp` tells z's apart, so that a NaN is the same
+/// as itself.
 impl PartialEq for Segment {
     fn eq(&self, other: &Self) -> bool {
         self.z.to_bits() == other.z.to_bits()
@@ -366,11 +367,11 @@ struct Group {
 /// [`MeshDraw`]: first the meshes whose shaders are opaque, whose depth hides what's behind them
 /// whatever order they draw in, by their [`MeshDraw::batch`], so that each mesh with each shader is
 /// one instanced draw, split only where a culling mesh's draws change between mirrored and not;
-/// then the rest, which blend, back to front by z in the world, as the latest tick left them, at
-/// one z sprites under meshes; each batch and each z in the order of their entities' IDs, so that
-/// entities that overlap at one depth keep how they stack as others come and go. Each draws `alpha`
-/// of the way from what `past` has it draw from to where the tick left it, while it draws between
-/// ticks; at 1, where the tick left it.
+/// then the rest, which blend, back to front by z in the world, as the latest tick left them, -0.0
+/// and 0.0 one z, at one z sprites under meshes; each batch and each z in the order of their
+/// entities' IDs, so that entities that overlap at one depth keep how they stack as others come and
+/// go. Each draws `alpha` of the way from what `past` has it draw from to where the tick left it,
+/// while it draws between ticks; at 1, where the tick left it.
 /// A child draws where its ancestors carry it, by its world matrix, its transform's and each of
 /// theirs drawn so, which it computes into `scratch` for each child once a frame; roots, in tables
 /// without a [`Parent`], draw by their transforms alone, which those that draw between ticks blend
@@ -604,7 +605,7 @@ fn cut(
     // A row's kind, batch and z: an opaque mesh's z is 0, and another's batch.
     let key = |row: usize| match batch(row) {
         Some(batch) => (Kind::Opaque, batch, 0.0),
-        None => (kind, 0, z(row)),
+        None => (kind, 0, depth(z(row))),
     };
     let same = |(a, a_batch, a_z): (Kind, u64, f32), (b, b_batch, b_z): (Kind, u64, f32)| {
         (a, a_batch) == (b, b_batch) && a_z.total_cmp(&b_z).is_eq()
@@ -625,6 +626,13 @@ fn cut(
             start = row;
         }
     }
+}
+
+/// `z` as drawing orders by it: -0.0 as 0.0, since they're one depth, and every other z as it is,
+/// bit for bit, which `total_cmp` orders the same way on every machine. Compared rather than added
+/// to 0.0, which would leave a NaN's bits to the platform.
+fn depth(z: f32) -> f32 {
+    if z == 0.0 { 0.0 } else { z }
 }
 
 /// Puts each row of `segments`, sorted, into `items`, a group of them for each batch, and for each z
@@ -826,6 +834,50 @@ mod tests {
             &mut Scratch::default(),
         );
         assert_eq!(draws, want);
+    }
+
+    /// Sprites and meshes that blend, at 0.0 and -0.0 in turn, draw as one z, all the sprites under
+    /// all the meshes, each in the order of their IDs, whichever zero each is at; and a zero that
+    /// changes only its sign changes nothing, for a scratch kept from frame to frame too.
+    #[test]
+    fn both_zeros_are_one_z() {
+        let (triangle, flat) = flat_triangle();
+        let mut world = World::default();
+        let (mut sprites, mut meshes) = (Vec::new(), Vec::new());
+        // Each told apart by its x and its color.
+        for (i, z) in [0.0, -0.0, -0.0, 0.0, -0.0, 0.0].into_iter().enumerate() {
+            let n = i as f32;
+            let at = at_x(n, z);
+            let sprite = Sprite {
+                color: Vec4::splat(n),
+                ..Sprite::default()
+            };
+            sprites.push((world.spawn((at, sprite)), at, sprite));
+            let mesh = MeshDraw::new(triangle, flat, Vec4::splat(n));
+            meshes.push((world.spawn((at, mesh)), at, mesh));
+        }
+        sprites.sort_by_key(|&(entity, ..)| world.id(entity));
+        meshes.sort_by_key(|&(entity, ..)| world.id(entity));
+        let mut want = Draws::default();
+        for &(_, at, sprite) in &sprites {
+            want.push_sprite(at.matrix(), sprite);
+        }
+        for &(_, at, mesh) in &meshes {
+            want.push_draw(at.matrix(), &mesh);
+        }
+        let drawn = |world: &World, scratch: &mut Scratch| {
+            let mut draws = Draws::default();
+            draw_world(world, &Past::default(), 1.0, &mut draws, scratch);
+            draws
+        };
+        let mut kept = Scratch::default();
+        assert_eq!(drawn(&world, &mut kept), want);
+        // `==` takes -0.0 for 0.0, so the matrices drawn match whichever zero they're at.
+        let (flipped, ..) = sprites[0];
+        let at = world.get_mut::<Transform>(flipped).expect("alive");
+        at.translation.z = -at.translation.z;
+        assert_eq!(drawn(&world, &mut kept), want, "a scratch kept");
+        assert_eq!(drawn(&world, &mut Scratch::default()), want);
     }
 
     /// Draws children where their ancestors carry them, back to front by their z's in the world: a

@@ -16,6 +16,7 @@ impl Clone for World {
             resets,
             reset_count,
             by_id,
+            kept,
             stream,
             serial: _,
             version,
@@ -31,6 +32,7 @@ impl Clone for World {
             resets: resets.clone(),
             reset_count: *reset_count,
             by_id: by_id.clone(),
+            kept: kept.clone(),
             stream: *stream,
             serial: next_serial(),
             version: *version,
@@ -53,6 +55,7 @@ impl Clone for World {
             resets,
             reset_count,
             by_id,
+            kept,
             stream,
             serial: _,
             version,
@@ -83,6 +86,7 @@ impl Clone for World {
         self.resets.clone_from(resets);
         self.reset_count = *reset_count;
         self.by_id.clone_from(by_id);
+        self.kept.clone_from(kept);
         self.stream = *stream;
         self.version = *version;
         self.serial = next_serial();
@@ -95,8 +99,8 @@ mod tests {
 
     use super::*;
     use crate::ecs::hierarchy::tests::check_links;
-    use crate::ecs::id::tests::check_ids;
-    use crate::ecs::log::tests::{random, vacated};
+    use crate::ecs::id::tests::{check_ids, vacated};
+    use crate::ecs::log::tests::random;
     use crate::ecs::ops::tests::{Sealed, fixture};
     use crate::ecs::tests::Rng;
     use crate::reflect::tests::{Everything, everything, same_snapshots, snapshot};
@@ -114,7 +118,7 @@ mod tests {
     /// Panics unless `world` is `twin`, but for its serial and its scratch: the same slots, the
     /// free ones in the same order, the same entities in the same tables and rows, with the same
     /// IDs, values, what's opaque in them, parents and children, resets of interpolation, the same
-    /// stream of IDs to come, and the same component types.
+    /// IDs kept for vacant slots, the same stream of IDs to come, and the same component types.
     fn assert_same(world: &World, twin: &World, case: &str) {
         for world in [world, twin] {
             check_ids(world);
@@ -132,6 +136,7 @@ mod tests {
             assert_eq!(world.entity(id), twin.entity(id), "{case}: {id}");
         }
         assert_eq!(world.by_id.len(), twin.by_id.len(), "{case}: the IDs found");
+        assert_eq!(world.kept, twin.kept, "{case}: the IDs kept");
         assert_eq!(world.stream, twin.stream, "{case}: the stream");
         assert_eq!(world.version, twin.version, "{case}: the version");
         assert_eq!(world.tables.len(), twin.tables.len(), "{case}: the tables");
@@ -488,6 +493,7 @@ mod tests {
             ),
             (world.resets.as_ptr().addr(), world.resets.capacity()),
             (0, world.by_id.capacity()),
+            (0, world.kept.capacity()),
         ];
         let transform = world.component::<Transform>().expect("registered");
         for table in &world.tables {

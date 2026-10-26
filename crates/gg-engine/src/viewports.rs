@@ -12,7 +12,7 @@ use egui::epaint::ClippedShape;
 use egui::{
     ClippedPrimitive, ImmediateViewport, OrderedViewportIdMap, Pos2, RawInput, Rect,
     ViewportBuilder, ViewportClass, ViewportCommand, ViewportEvent, ViewportId, ViewportIdMap,
-    ViewportIdPair, ViewportInfo, ViewportOutput, pos2,
+    ViewportIdPair, ViewportIdSet, ViewportInfo, ViewportOutput, pos2,
 };
 use egui_winit::EventResponse;
 use gg_core::{Error, Result};
@@ -51,8 +51,8 @@ struct Shared {
     children: Vec<Child>,
     /// What the windows' passes drew this frame, in the order they ran.
     passes: Vec<Pass>,
-    /// Whether the warning about deferred viewports was logged.
-    warned: bool,
+    /// The deferred viewports warned about, which don't open.
+    warned: ViewportIdSet,
     /// Who draws the windows' frames.
     chrome: Chrome,
 }
@@ -115,7 +115,7 @@ impl Viewports {
             main_info,
             children: Vec::new(),
             passes: Vec::new(),
-            warned: false,
+            warned: ViewportIdSet::default(),
             chrome,
         }));
         let display = event_loop.display_handle().map(|display| display.as_raw());
@@ -161,18 +161,18 @@ impl Viewports {
         let _zone = gg_core::zone!();
         let mut shared = self.shared.borrow_mut();
         let shared = &mut *shared;
-        if !shared.warned
-            && outputs
-                .values()
-                .any(|output| output.class == ViewportClass::Deferred)
-        {
+        for (&id, output) in &outputs {
             // A pass run after the main window's would leave egui's state pointing at the other
             // window.
-            warn!(
-                code = "engine.viewport_deferred",
-                "egui's deferred viewports don't open; show them with `show_viewport_immediate`"
-            );
-            shared.warned = true;
+            if output.class == ViewportClass::Deferred && shared.warned.insert(id) {
+                let title = title(&output.builder);
+                warn!(
+                    code = "engine.viewport_deferred",
+                    window = title,
+                    "egui's deferred viewport {title:?} doesn't open; show it with \
+                     `show_viewport_immediate`"
+                );
+            }
         }
         // What the main window opened with stays as it was: only its commands apply.
         let mut close = false;
@@ -208,7 +208,7 @@ impl Viewports {
                 if let Err(error) =
                     renderer.open_window(key(child.id), window, size.width, size.height)
                 {
-                    embed(egui, &error);
+                    embed(egui, &error, &child.window.title());
                     return false;
                 }
                 child.presented = true;
@@ -282,7 +282,7 @@ fn run(shared: &RefCell<Shared>, egui: &egui::Context, viewport: ImmediateViewpo
             });
             match opened {
                 Ok(child) => shared.children.push(child),
-                Err(error) => embed(egui, &error),
+                Err(error) => embed(egui, &error, title(&builder)),
             }
         }
         let child = shared
@@ -294,6 +294,7 @@ fn run(shared: &RefCell<Shared>, egui: &egui::Context, viewport: ImmediateViewpo
             None => RawInput {
                 viewport_id: ids.this,
                 screen_rect: (builder.inner_size).map(|size| Rect::from_min_size(Pos2::ZERO, size)),
+                max_texture_side: Some(crate::MAX_TEXTURE_SIDE),
                 ..RawInput::default()
             },
         };
@@ -352,7 +353,10 @@ impl Child {
             .map_err(|error| {
                 Error::new(
                     "engine.viewport",
-                    "can't open a window for a group of panels",
+                    format!(
+                        "can't open window {:?} for a group of panels",
+                        title(builder)
+                    ),
                 )
                 .with_source(error)
             })?;
@@ -437,14 +441,20 @@ fn os_frame(_: Chrome, _: &Window) -> Result<()> {
     Ok(())
 }
 
-/// Keeps egui's viewports inside the main window from the next frame, after a window couldn't
-/// open, so that the dock floats their groups over it.
-fn embed(egui: &egui::Context, error: &Error) {
+/// Keeps egui's viewports inside the main window from the next frame, after window `title`
+/// couldn't open, so that the dock floats their groups over it.
+fn embed(egui: &egui::Context, error: &Error, title: &str) {
     warn!(
         code = error.code(),
+        window = title,
         "{error:#}; panels float over the main window instead"
     );
     egui.set_embed_viewports(true);
+}
+
+/// The title of the window `builder` opens: for the dock's, the panel showing in it.
+fn title(builder: &ViewportBuilder) -> &str {
+    builder.title.as_deref().unwrap_or_default()
 }
 
 /// The renderer's key for viewport `id`'s window.
@@ -471,7 +481,7 @@ impl WindowInput {
                 window,
                 scale,
                 window.theme(),
-                None,
+                Some(crate::MAX_TEXTURE_SIDE),
             ),
             viewport,
             cursor: Pos2::ZERO,

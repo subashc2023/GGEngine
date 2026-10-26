@@ -7,8 +7,10 @@ use epaint::textures::{TextureFilter, TextureWrapMode, TexturesDelta};
 use epaint::{ClippedPrimitive, ImageData, ImageDelta, Primitive, TextureId};
 use gg_core::Result;
 use gg_gpu::{
-    Blend, Device, Format, Frame, GraphicsDesc, Pass, Pipeline, Sampler, Texture, TextureFormat,
+    Blend, Device, Format, Frame, GraphicsDesc, MAX_TEXTURE_SIZE, Pass, Pipeline, Sampler, Texture,
+    TextureFormat,
 };
+use tracing::warn;
 
 static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/egui.spv"));
 
@@ -92,6 +94,12 @@ impl UiPass {
                 Some([x, y]) => [x as u32, y as u32],
                 // A whole image replaces the texture, whose size may change with it.
                 None => {
+                    // One that makes none takes its place all the same, so that what samples it
+                    // draws nothing.
+                    if !makes_texture(id, image.size) {
+                        self.textures.remove(&id);
+                        continue;
+                    }
                     let name = format!("egui texture {id:?}");
                     let texture = Texture::new(
                         &self.device,
@@ -185,6 +193,27 @@ impl UiPass {
     }
 }
 
+/// Whether a whole image of `size` pixels across and down makes egui's texture `id`: not if it has
+/// no pixels, which show nothing, nor if a side is past [`MAX_TEXTURE_SIZE`], as no texture's is,
+/// which egui checks only in debug builds, and which this warns of.
+fn makes_texture(id: TextureId, size: [usize; 2]) -> bool {
+    let sides = 1..=MAX_TEXTURE_SIZE as usize;
+    if size.iter().all(|side| sides.contains(side)) {
+        return true;
+    }
+    if !size.contains(&0) {
+        warn!(
+            code = "renderer.bad_texture",
+            texture = ?id,
+            "egui texture {id:?} is {}x{} pixels, but textures are 1 to {MAX_TEXTURE_SIZE} pixels \
+             a side, so it draws nothing",
+            size[0],
+            size[1]
+        );
+    }
+    false
+}
+
 /// The sampler for egui's texture options. The engine's samplers filter alike both ways, so
 /// egui's minification filter, which its presets set to match, goes unused, as does its mipmap
 /// filter: its textures have no mipmaps.
@@ -198,5 +227,32 @@ fn sampler(magnification: TextureFilter, wrap: TextureWrapMode) -> Sampler {
         (Nearest, Repeat) => Sampler::NearestRepeat,
         (Linear, MirroredRepeat) => Sampler::LinearMirror,
         (Nearest, MirroredRepeat) => Sampler::NearestMirror,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An image without pixels, or with a side past the most a texture has, which egui hands on in
+    /// release builds, makes no texture, so that it never reaches `gg-gpu`'s, which would panic the
+    /// render thread; every size between does.
+    #[test]
+    fn an_image_of_no_pixels_or_too_many_makes_no_texture() {
+        let id = TextureId::Managed(1);
+        let most = MAX_TEXTURE_SIZE as usize;
+        for size in [
+            [0, 0],
+            [0, 16],
+            [16, 0],
+            [most + 1, 1],
+            [1, most + 1],
+            [0, most + 1],
+        ] {
+            assert!(!makes_texture(id, size), "{size:?}");
+        }
+        for size in [[1, 1], [3, 1], [most, most]] {
+            assert!(makes_texture(id, size), "{size:?}");
+        }
     }
 }

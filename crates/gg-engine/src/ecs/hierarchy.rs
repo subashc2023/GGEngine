@@ -3,7 +3,8 @@
 //! despawning one takes its descendants with it; both change only through [`World::set_parent`]
 //! and [`World::despawn`]; as a scene's entities are spawned with theirs, by
 //! [`World::load_scene`] and [`World::place_prefab`]; and through operations, as a create spawns
-//! an entity with its parent, and a delete takes a subtree out, which its undo puts back.
+//! an entity with its parent, which its undo takes out again, and a delete takes a subtree out,
+//! which its undo puts back.
 
 use std::iter;
 

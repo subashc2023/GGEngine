@@ -26,6 +26,8 @@ pub struct ColorImage {
     layout: vk::ImageLayout,
     /// Its slot in the bindless set, past the placed ones.
     index: u32,
+    /// Its debug name, which its read-back and their errors are named after.
+    name: String,
 }
 
 impl ColorImage {
@@ -50,11 +52,12 @@ impl ColorImage {
             Self::FORMAT.color,
             usage,
             COLOR_RANGE,
+            name,
         )?;
         // SAFETY: the view is of a live sampled image, which shaders sample only through the index
         // `Frame::begin_sampling` returns, once it has put the image in the shader-read-only
         // layout.
-        let index = match unsafe { device.bindless().add(device.raw(), view, None) } {
+        let index = match unsafe { device.bindless().add(device.raw(), view, None, name) } {
             Ok(index) => index,
             Err(error) => {
                 device.retire(Retired::Image(raw, view, allocation));
@@ -74,6 +77,7 @@ impl ColorImage {
             extent,
             layout: vk::ImageLayout::UNDEFINED,
             index,
+            name: name.to_owned(),
         })
     }
 
@@ -81,12 +85,14 @@ impl ColorImage {
     /// row first. It waits for the GPU to finish everything submitted so far.
     pub fn read_back(&mut self) -> Result<Vec<u8>> {
         let size = u64::from(self.extent.width) * u64::from(self.extent.height) * 4;
+        // The buffer and the commands that copy into it.
+        let name = format!("{} read-back", self.name);
         let buffer = Buffer::new(
             &self.device,
             size,
             vk::BufferUsageFlags::TRANSFER_DST,
             Memory::Readback,
-            "read-back buffer",
+            &name,
         )?;
         let raw = self.device.raw();
         let to_source = vk::ImageMemoryBarrier2::default()
@@ -116,7 +122,7 @@ impl ColorImage {
         // SAFETY: the image and buffer are live, and the barriers make the copy wait for earlier
         // work on the image and the host read wait for the copy.
         unsafe {
-            self.device.run_once(|commands| {
+            self.device.run_once(&name, |commands| {
                 let image_barriers = [to_source];
                 let buffer_barriers = [to_host];
                 raw.cmd_pipeline_barrier2(
@@ -154,6 +160,11 @@ impl ColorImage {
     /// The image, its view and its size, for recording commands that use it.
     pub(crate) fn parts(&self) -> (vk::Image, vk::ImageView, vk::Extent2D) {
         (self.raw, self.view, self.extent)
+    }
+
+    /// The handle of the device that made it.
+    pub(crate) fn device(&self) -> vk::Device {
+        self.device.handle()
     }
 
     pub(crate) fn layout(&self) -> vk::ImageLayout {
@@ -207,8 +218,14 @@ impl DepthImage {
     /// If a side is 0.
     pub fn new(device: &Arc<Device>, width: u32, height: u32, name: &str) -> Result<Self> {
         let usage = vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT;
-        let (raw, view, allocation, extent) =
-            allocate(device, [width, height], Self::FORMAT, usage, DEPTH_RANGE)?;
+        let (raw, view, allocation, extent) = allocate(
+            device,
+            [width, height],
+            Self::FORMAT,
+            usage,
+            DEPTH_RANGE,
+            name,
+        )?;
         // SAFETY: the image and view are live.
         unsafe {
             device.set_name(raw, name);
@@ -232,6 +249,11 @@ impl DepthImage {
     pub(crate) fn parts(&self) -> (vk::Image, vk::ImageView, vk::Extent2D) {
         (self.raw, self.view, self.extent)
     }
+
+    /// The handle of the device that made it.
+    pub(crate) fn device(&self) -> vk::Device {
+        self.device.handle()
+    }
 }
 
 impl Drop for DepthImage {
@@ -243,7 +265,8 @@ impl Drop for DepthImage {
     }
 }
 
-/// An image of `size` pixels in GPU memory, of `format`, for `usage`, and a view of its `range`.
+/// An image of `size` pixels in GPU memory, of `format`, for `usage`, and a view of its `range`,
+/// for the image named `name`.
 ///
 /// # Panics
 ///
@@ -254,6 +277,7 @@ fn allocate(
     format: vk::Format,
     usage: vk::ImageUsageFlags,
     range: vk::ImageSubresourceRange,
+    name: &str,
 ) -> Result<(vk::Image, vk::ImageView, Allocation, vk::Extent2D)> {
     let [width, height] = size;
     assert!(
@@ -270,7 +294,7 @@ fn allocate(
         .samples(vk::SampleCountFlags::TYPE_1)
         .tiling(vk::ImageTiling::OPTIMAL)
         .usage(usage);
-    let (raw, allocation) = device.allocator().create_image(&info, Memory::Gpu)?;
+    let (raw, allocation) = device.allocator().create_image(&info, Memory::Gpu, name)?;
     let view_info = vk::ImageViewCreateInfo::default()
         .image(raw)
         .view_type(vk::ImageViewType::TYPE_2D)
@@ -281,7 +305,8 @@ fn allocate(
         Ok(view) => Ok((raw, view, allocation, extent)),
         Err(error) => {
             device.retire(Retired::Image(raw, vk::ImageView::null(), allocation));
-            Err(vk_error("vkCreateImageView", error))
+            let view = format_args!("image {name:?}'s view");
+            Err(vk_error("vkCreateImageView", view, error))
         }
     }
 }

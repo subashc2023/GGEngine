@@ -67,6 +67,8 @@ pub struct Texture {
     index: u32,
     /// Whether a frame has filled or written it, which leaves it in the shader-read-only layout.
     written: bool,
+    /// Its debug name, which its errors name it by.
+    name: String,
 }
 
 impl Texture {
@@ -152,7 +154,16 @@ impl Texture {
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
             .usage(usage);
-        let (raw, allocation) = device.allocator().create_image(&info, Memory::Gpu)?;
+        // The slot first: a refused one panics, which must leave no image behind.
+        let bindless = device.bindless();
+        let index = bindless.reserve(slot, name)?;
+        let (raw, allocation) = match device.allocator().create_image(&info, Memory::Gpu, name) {
+            Ok(made) => made,
+            Err(error) => {
+                bindless.remove(index);
+                return Err(error);
+            }
+        };
         let view_info = vk::ImageViewCreateInfo::default()
             .image(raw)
             .view_type(vk::ImageViewType::TYPE_2D)
@@ -162,19 +173,19 @@ impl Texture {
         let view = match unsafe { device.raw().create_image_view(&view_info, None) } {
             Ok(view) => view,
             Err(error) => {
-                device.retire(Retired::Image(raw, vk::ImageView::null(), allocation));
-                return Err(vk_error("vkCreateImageView", error));
+                device.retire(Retired::Texture(
+                    raw,
+                    vk::ImageView::null(),
+                    allocation,
+                    index,
+                ));
+                let view = format_args!("texture {name:?}'s view");
+                return Err(vk_error("vkCreateImageView", view, error));
             }
         };
         // SAFETY: the view is of a live sampled image, which is in the shader-read-only layout
         // before any shader can sample it: frames fill or write it first.
-        let index = match unsafe { device.bindless().add(device.raw(), view, slot) } {
-            Ok(index) => index,
-            Err(error) => {
-                device.retire(Retired::Image(raw, view, allocation));
-                return Err(error);
-            }
-        };
+        unsafe { bindless.write(device.raw(), view, index) };
         // SAFETY: the image and view are live.
         unsafe {
             device.set_name(raw, name);
@@ -189,6 +200,7 @@ impl Texture {
             levels,
             index,
             written: false,
+            name: name.to_owned(),
         })
     }
 
@@ -223,6 +235,11 @@ impl Texture {
 
     pub(crate) fn raw(&self) -> vk::Image {
         self.raw
+    }
+
+    /// The handle of the device that made it.
+    pub(crate) fn device(&self) -> vk::Device {
+        self.device.handle()
     }
 
     pub(crate) fn written(&self) -> bool {
@@ -263,11 +280,15 @@ impl Texture {
             .old_layout(vk::ImageLayout::UNDEFINED)
             .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
             .subresource_range(COLOR_RANGE);
+        let texture = format_args!(
+            "texture {:?} of {width}x{height} pixels in {} level(s)",
+            self.name, self.levels
+        );
         // SAFETY: the image is live and made for host transfers, which the device enabled, into
         // the shader-read-only layout, which it listed as one host copies write; no submission
         // has used it, since no frame has written it, and `&mut` keeps the engine off it.
         unsafe { functions.transition_image_layout(slice::from_ref(&transition)) }
-            .map_err(|e| vk_error("vkTransitionImageLayoutEXT", e))?;
+            .map_err(|e| vk_error("vkTransitionImageLayoutEXT", texture, e))?;
         // A region for each level, each from where its pixels start.
         let mut regions = [vk::MemoryToImageCopyEXT::default(); MAX_LEVELS];
         for ((level, ([width, height], at)), region) in self.levels().enumerate().zip(&mut regions)
@@ -289,7 +310,7 @@ impl Texture {
         // whose every texel `pixels`, tightly packed a level after another, was just checked to
         // hold.
         unsafe { functions.copy_memory_to_image(&info) }
-            .map_err(|e| vk_error("vkCopyMemoryToImageEXT", e))
+            .map_err(|e| vk_error("vkCopyMemoryToImageEXT", texture, e))
     }
 }
 

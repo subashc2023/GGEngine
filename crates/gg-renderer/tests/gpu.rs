@@ -53,6 +53,10 @@ fn main() {
     run("views_match_their_reference", views_match_their_reference);
     run("depth_matches_its_reference", depth_matches_its_reference);
     run("models_match_their_reference", models_match_their_reference);
+    run(
+        "mixed_textures_match_their_reference",
+        mixed_textures_match_their_reference,
+    );
     // Once for each way of uploading that the GPU has.
     for path in UploadPath::ALL {
         if let Err(error) = Renderer::headless(&settings(Some(path)), 1, 1) {
@@ -111,6 +115,11 @@ fn renderer_uploading(width: u32, height: u32, uploads: Option<UploadPath>) -> R
     assert!(
         renderer.validation().enabled(),
         "GPU tests run under validation; install the Vulkan SDK's validation layer"
+    );
+    assert!(
+        renderer.validation().synchronization(),
+        "GPU tests run under synchronization validation; install a newer Vulkan SDK, whose \
+         validation layer takes VK_EXT_layer_settings"
     );
     if let Some(uploads) = uploads {
         assert_eq!(
@@ -1276,6 +1285,133 @@ fn models_match_their_reference() {
     };
     assert_eq!(renderer.drawn(), drawn);
     check(renderer, "models", WIDTH, HEIGHT);
+}
+
+/// Draws a run of sprites across the top half of an offscreen image, then a run of models' squares
+/// across the bottom half, each 4 pixels across, abutting in rows, and compares it with its
+/// reference image. Each run is one instanced draw, whose instances alternate in a checkerboard
+/// between two textures, the first sampled at its nearest texels and the second filtered linearly.
+/// An instance is four of the blocks of 2 by 2 pixels that GPUs shade together, half of what a
+/// subgroup of 32 holds, so a run's subgroups mix instances, with both textures and both samplers:
+/// a GPU that sampled one instance's texture or sampler for a whole subgroup, as one may where the
+/// sample isn't decorated as non-uniform, changes thousands of pixels. Against the reference,
+/// shaders that index without `NonUniformResourceIndex` make 3,844 differ on AMD's driver.
+fn mixed_textures_match_their_reference() {
+    const WIDTH: u32 = 128;
+    const HEIGHT: u32 = 64;
+    /// A sprite's and a square's side, in pixels.
+    const SIDE: u32 = 4;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut meshes = Meshes::default();
+    let mut shaders = Shaders::default();
+    let mut textures = Textures::default();
+    let mut uploads = Uploads::default();
+    // A unit a pixel, around the origin.
+    let camera = Camera {
+        projection: Projection::Orthographic {
+            height: HEIGHT as f32,
+            near: -1.0,
+            far: 1.0,
+        },
+        ..Camera::default()
+    };
+    // 2 by 2 texels, sRGB-encoded: red and yellow over green and blue; and a checkerboard of light
+    // and dark, which a linear filter blends between its texels.
+    let quadrants = [
+        [220, 50, 40, 255],
+        [240, 200, 40, 255],
+        [40, 170, 70, 255],
+        [40, 80, 220, 255],
+    ];
+    let quadrants = textures
+        .add("quadrants", [2, 2], quadrants.as_flattened(), Mipmaps::None)
+        .expect("a texture");
+    let (light, dark) = ([240, 240, 240, 255], [20, 20, 20, 255]);
+    let checker = [light, dark, dark, light];
+    let checker = textures
+        .add("checker", [2, 2], checker.as_flattened(), Mipmaps::None)
+        .expect("a texture");
+    let sprites = [
+        Sprite {
+            texture: quadrants,
+            sampler: Sampler::NearestClamp,
+            ..Sprite::default()
+        },
+        Sprite {
+            texture: checker,
+            sampler: Sampler::LinearClamp,
+            ..Sprite::default()
+        },
+    ];
+    // A unit square, counterclockwise seen from +Z, its texture's top left at its top left.
+    let corner = |[x, y]: [f32; 2], uv: [f32; 2]| ModelVertex {
+        position: Vec3::new(x, y, 0.0),
+        uv: Vec2::from(uv),
+        color: Vec4::ONE,
+    };
+    let corners = [
+        corner([-0.5, -0.5], [0.0, 1.0]),
+        corner([0.5, -0.5], [1.0, 1.0]),
+        corner([0.5, 0.5], [1.0, 0.0]),
+        corner([-0.5, 0.5], [0.0, 0.0]),
+    ];
+    let square = meshes
+        .add("square", &corners, &[0, 1, 2, 2, 3, 0])
+        .expect("a mesh");
+    let nearest = Material {
+        texture: quadrants,
+        nearest: true,
+        wrap: Wrap::Clamp,
+        ..Material::default()
+    };
+    let linear = Material {
+        texture: checker,
+        wrap: Wrap::Clamp,
+        ..Material::default()
+    };
+    let squares =
+        [nearest, linear].map(|material| MeshDraw::with_material(square, &material, &mut shaders));
+    let (columns, rows) = (WIDTH / SIDE, HEIGHT / 2 / SIDE);
+    // At `column` and `row` of the half whose top edge is at `top`, from the half's top left.
+    let place = |column: u32, row: u32, top: f32| {
+        let side = SIDE as f32;
+        let x = (column as f32 + 0.5) * side - WIDTH as f32 / 2.0;
+        let y = top - (row as f32 + 0.5) * side;
+        Mat4::from_translation(Vec3::new(x, y, 0.0)) * Mat4::from_scale(Vec3::new(side, side, 1.0))
+    };
+    let mut draws = Draws::default();
+    for row in 0..rows {
+        for column in 0..columns {
+            let sprite = sprites[((column + row) % 2) as usize];
+            draws.push_sprite(place(column, row, HEIGHT as f32 / 2.0), sprite);
+        }
+    }
+    for row in 0..rows {
+        for column in 0..columns {
+            let square = &squares[((column + row) % 2) as usize];
+            draws.push_draw(place(column, row, 0.0), square);
+        }
+    }
+    uploads.take(&mut meshes, &mut shaders, &mut textures);
+    let data = RenderData {
+        clear_color: CLEAR,
+        viewport: Viewport {
+            origin: [0, 0],
+            size: [WIDTH, HEIGHT],
+        },
+        camera,
+        uploads: &mut uploads,
+        draws: &draws,
+    };
+    render_without_ui(&mut renderer, data);
+    let instances = (columns * rows) as usize;
+    let drawn = DrawCounts {
+        draws: 2,
+        instances: 2 * instances,
+        triangles: 4 * instances,
+    };
+    assert_eq!(renderer.drawn(), drawn, "each run is one instanced draw");
+    check(renderer, "mixed_textures", WIDTH, HEIGHT);
 }
 
 /// What `level.slang` takes with each draw.

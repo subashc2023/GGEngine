@@ -53,7 +53,7 @@ pub(crate) enum Zone {
     Side(Side),
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) enum Node {
     /// Two nodes sharing a rect along `axis`, the first taking `ratio` of it.
     Split {
@@ -69,7 +69,7 @@ pub(crate) enum Node {
 }
 
 /// Panels sharing a rect, one showing at a time.
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Tabs {
     #[serde(skip)]
     pub(crate) id: NodeId,
@@ -79,10 +79,15 @@ pub(crate) struct Tabs {
 }
 
 /// A group outside the main window's tree.
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Floating {
     pub(crate) tabs: Tabs,
     pub(crate) place: Place,
+    /// The place in a window of its own that the layout saves for a group that this run floats
+    /// over the main window instead, for want of windows of their own, until the user moves or
+    /// resizes it there.
+    #[serde(skip)]
+    pub(crate) kept: Option<Place>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -95,7 +100,7 @@ pub(crate) enum Place {
 }
 
 /// The whole dock.
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Layout {
     pub(crate) main: Node,
     pub(crate) floating: Vec<Floating>,
@@ -152,6 +157,18 @@ impl Layout {
             floating: Vec::new(),
             next_id: CENTRAL + 1,
         }
+    }
+
+    /// The layout as it's saved: with the places that floating groups keep in windows of their
+    /// own.
+    pub(crate) fn saved(&self) -> Self {
+        let mut saved = self.clone();
+        for floating in &mut saved.floating {
+            if let Some(kept) = floating.kept.take() {
+                floating.place = kept;
+            }
+        }
+        saved
     }
 
     /// Gives every node a new id, as a layout read from a file needs.
@@ -211,6 +228,7 @@ impl Layout {
                 active: 0,
             },
             place,
+            kept: None,
         });
         id
     }

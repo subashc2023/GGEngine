@@ -1,5 +1,6 @@
 //! Surfaces, through which Vulkan presents to a window.
 
+use std::ptr;
 use std::sync::Arc;
 
 use ash::{khr, vk};
@@ -39,7 +40,13 @@ impl Surface {
         let raw = unsafe {
             ash_window::create_surface(instance.entry(), instance.raw(), display, handle, None)
         }
-        .map_err(|e| vk_error("creating the window's surface", e))?;
+        .map_err(|e| {
+            vk_error(
+                "ash_window::create_surface",
+                "surface \"window surface\"",
+                e,
+            )
+        })?;
         Ok(Self {
             instance: instance.clone(),
             raw,
@@ -49,6 +56,20 @@ impl Surface {
 
     pub(crate) fn raw(&self) -> vk::SurfaceKHR {
         self.raw
+    }
+
+    /// Checks that the surface is `instance`'s: Vulkan lets a surface be used only with the
+    /// devices of the instance that made it.
+    ///
+    /// # Panics
+    ///
+    /// If another instance made it.
+    pub(crate) fn check_instance(&self, instance: &Instance) {
+        assert!(
+            ptr::eq(Arc::as_ptr(&self.instance), instance),
+            "the surface was made by another Vulkan instance than the device's; a surface is used \
+             only with the devices of the instance that made it"
+        );
     }
 
     pub(crate) fn surface_fn(&self) -> &khr::surface::Instance {

@@ -74,10 +74,11 @@ impl fmt::Display for UploadPath {
 /// A GPU opened for rendering, with its queues and its memory allocator.
 pub struct Device {
     /// The instance, which must outlive the device.
-    _instance: Arc<Instance>,
+    instance: Arc<Instance>,
     physical: vk::PhysicalDevice,
     raw: ash::Device,
     name: String,
+    limits: vk::PhysicalDeviceLimits,
     /// Dropped by hand, before the device is destroyed.
     allocator: ManuallyDrop<Allocator>,
     /// Destroyed by hand, before the device is.
@@ -111,6 +112,10 @@ impl Device {
     /// Given `gpu`, only GPUs whose names contain it, ignoring case, are considered. Discrete
     /// GPUs come first, then integrated ones; among equals, the one with the most memory. It
     /// uploads by `uploads`, if given, and otherwise by the best way the GPU has.
+    ///
+    /// # Panics
+    ///
+    /// If `surface` was made by another instance.
     pub fn new(
         instance: &Arc<Instance>,
         gpu: Option<&str>,
@@ -118,9 +123,12 @@ impl Device {
         uploads: Option<UploadPath>,
     ) -> Result<Arc<Self>> {
         let _zone = gg_core::zone!();
+        if let Some(surface) = surface {
+            surface.check_instance(instance);
+        }
         // SAFETY: the instance is live.
         let physicals = unsafe { instance.raw().enumerate_physical_devices() }
-            .map_err(|e| vk_error("vkEnumeratePhysicalDevices", e))?;
+            .map_err(|e| vk_error("vkEnumeratePhysicalDevices", "the instance's GPUs", e))?;
         let candidates: Vec<Candidate> = physicals
             .iter()
             .enumerate()
@@ -196,19 +204,35 @@ impl Device {
         // features but the bindless ones and host image copy, which `Candidate::new` checked
         // (Vulkan 1.4 requires sampler anisotropy, in vk.xml's feature requirements), and the
         // create info's pointers outlive the call.
-        let raw = unsafe { instance.raw().create_device(physical, &create_info, None) }
-            .map_err(|e| vk_error("vkCreateDevice", e))?;
+        let raw =
+            unsafe { instance.raw().create_device(physical, &create_info, None) }.map_err(|e| {
+                let device = format_args!("device {:?}, uploading by {uploads}", chosen.name);
+                vk_error("vkCreateDevice", device, e)
+            })?;
+        let debug_utils = instance
+            .has_debug_utils()
+            .then(|| ext::debug_utils::Device::new(instance.raw(), &raw));
         // SAFETY: the device was just made from this physical device, with buffer device
-        // addresses, and `Device` keeps the instance alive and drops the allocator first.
-        let allocator =
-            match unsafe { Allocator::new(instance.entry(), instance.raw(), physical, &raw) } {
-                Ok(allocator) => allocator,
-                Err(error) => {
-                    // SAFETY: nothing has been made from the device yet.
-                    unsafe { raw.destroy_device(None) };
-                    return Err(error);
-                }
-            };
+        // addresses, and `Device` keeps the instance alive and drops the allocator first; the debug
+        // utils are the device's.
+        let allocator = unsafe {
+            Allocator::new(
+                instance.entry(),
+                instance.raw(),
+                physical,
+                &raw,
+                debug_utils.as_ref(),
+                &chosen.name,
+            )
+        };
+        let allocator = match allocator {
+            Ok(allocator) => allocator,
+            Err(error) => {
+                // SAFETY: nothing has been made from the device yet.
+                unsafe { raw.destroy_device(None) };
+                return Err(error);
+            }
+        };
         // SAFETY: the device has the bindless features, and `Device` destroys the set first.
         let bindless = match unsafe { Bindless::new(&raw) } {
             Ok(bindless) => bindless,
@@ -234,13 +258,12 @@ impl Device {
             host_image_copy_fn: (uploads == UploadPath::HostImageCopy)
                 .then(|| ext::host_image_copy::Device::new(instance.raw(), &raw)),
             uploads,
-            debug_utils: instance
-                .has_debug_utils()
-                .then(|| ext::debug_utils::Device::new(instance.raw(), &raw)),
+            debug_utils,
             swapchain_fn: surface.map(|_| khr::swapchain::Device::new(instance.raw(), &raw)),
-            _instance: instance.clone(),
+            instance: instance.clone(),
             physical,
             name: chosen.name.clone(),
+            limits: chosen.limits,
             allocator: ManuallyDrop::new(allocator),
             bindless,
             retirement: Mutex::default(),
@@ -285,6 +308,37 @@ impl Device {
         &self.raw
     }
 
+    /// The device's handle, by which objects tell the device that made them.
+    pub(crate) fn handle(&self) -> vk::Device {
+        self.raw.handle()
+    }
+
+    /// Checks that an object, which `what` names, is this device's: `made_by` is the handle of
+    /// the device that made it. Vulkan lets an object be used only with the device that made it,
+    /// and drivers check nothing.
+    ///
+    /// # Panics
+    ///
+    /// If another device made it.
+    pub(crate) fn check_made(&self, what: &str, made_by: vk::Device) {
+        assert!(
+            made_by == self.raw.handle(),
+            "{what} was made by another device ({made_by:?}) than {} ({:?}), which it's used \
+             with; an object is used only with the device that made it",
+            self.name,
+            self.raw.handle(),
+        );
+    }
+
+    pub(crate) fn instance(&self) -> &Instance {
+        &self.instance
+    }
+
+    /// The GPU's limits, which what's recorded keeps within.
+    pub(crate) fn limits(&self) -> &vk::PhysicalDeviceLimits {
+        &self.limits
+    }
+
     /// Waits until the GPU has finished all the work submitted to it.
     pub(crate) fn wait_idle(&self) -> Result<()> {
         // Vulkan requires that nothing uses a queue while the device waits. The locks are always
@@ -292,7 +346,13 @@ impl Device {
         let _graphics = self.graphics.lock();
         let _transfer = self.transfer.as_ref().map(Queue::lock);
         // SAFETY: the device is live, and its queues' locks are held.
-        unsafe { self.raw.device_wait_idle() }.map_err(|e| vk_error("vkDeviceWaitIdle", e))
+        unsafe { self.raw.device_wait_idle() }.map_err(|e| {
+            vk_error(
+                "vkDeviceWaitIdle",
+                format_args!("device {:?}", self.name),
+                e,
+            )
+        })
     }
 
     pub(crate) fn physical(&self) -> vk::PhysicalDevice {
@@ -409,19 +469,25 @@ impl Device {
         self.swapchain_fn.as_ref()
     }
 
-    /// Submits to the graphics queue.
+    /// Submits `work`, as its errors call it, to the graphics queue.
     ///
     /// # Safety
     ///
     /// The submissions must be valid, and what they use must live until they finish.
-    pub(crate) unsafe fn submit(&self, submits: &[vk::SubmitInfo2<'_>]) -> Result<()> {
+    pub(crate) unsafe fn submit(
+        &self,
+        submits: &[vk::SubmitInfo2<'_>],
+        work: impl fmt::Display,
+    ) -> Result<()> {
         let queue = self.graphics.lock();
         // SAFETY: the caller guarantees the submissions; the lock is held.
-        unsafe { self.raw.queue_submit2(*queue, submits, vk::Fence::null()) }
-            .map_err(|e| vk_error("vkQueueSubmit2", e))
+        unsafe { self.raw.queue_submit2(*queue, submits, vk::Fence::null()) }.map_err(|e| {
+            let submitted = format_args!("{work} on device {:?}'s graphics queue", self.name);
+            vk_error("vkQueueSubmit2", submitted, e)
+        })
     }
 
-    /// Submits to the transfer queue.
+    /// Submits `work`, as its errors call it, to the transfer queue.
     ///
     /// # Safety
     ///
@@ -430,14 +496,20 @@ impl Device {
     /// # Panics
     ///
     /// If the device doesn't upload through a transfer queue.
-    pub(crate) unsafe fn submit_transfers(&self, submits: &[vk::SubmitInfo2<'_>]) -> Result<()> {
+    pub(crate) unsafe fn submit_transfers(
+        &self,
+        submits: &[vk::SubmitInfo2<'_>],
+        work: impl fmt::Display,
+    ) -> Result<()> {
         let transfer = self.transfer.as_ref();
         let queue = transfer
             .expect("only a device that uploads through a transfer queue submits to one")
             .lock();
         // SAFETY: the caller guarantees the submissions; the lock is held.
-        unsafe { self.raw.queue_submit2(*queue, submits, vk::Fence::null()) }
-            .map_err(|e| vk_error("vkQueueSubmit2", e))
+        unsafe { self.raw.queue_submit2(*queue, submits, vk::Fence::null()) }.map_err(|e| {
+            let submitted = format_args!("{work} on device {:?}'s transfer queue", self.name);
+            vk_error("vkQueueSubmit2", submitted, e)
+        })
     }
 
     /// Presents through the graphics queue, which each swapchain checked it can present to.
@@ -456,52 +528,67 @@ impl Device {
     }
 
     /// Records commands with `record`, runs them on the graphics queue and waits for them to
-    /// finish: for rare work outside of frames, such as reading an image back.
+    /// finish: for rare work outside of frames, such as reading an image back. The commands, and
+    /// their errors, are named `name`.
     ///
     /// # Safety
     ///
     /// `record` must record valid commands into the command buffer it's given.
-    pub(crate) unsafe fn run_once(&self, record: impl FnOnce(vk::CommandBuffer)) -> Result<()> {
+    pub(crate) unsafe fn run_once(
+        &self,
+        name: &str,
+        record: impl FnOnce(vk::CommandBuffer),
+    ) -> Result<()> {
         let pool_info = vk::CommandPoolCreateInfo::default()
             .flags(vk::CommandPoolCreateFlags::TRANSIENT)
             .queue_family_index(self.graphics.family);
         // SAFETY: the device is live.
-        let pool = unsafe { self.raw.create_command_pool(&pool_info, None) }
-            .map_err(|e| vk_error("vkCreateCommandPool", e))?;
+        let pool = unsafe { self.raw.create_command_pool(&pool_info, None) }.map_err(|e| {
+            vk_error(
+                "vkCreateCommandPool",
+                format_args!("command pool {name:?}"),
+                e,
+            )
+        })?;
         // SAFETY: the pool is live.
-        unsafe { self.set_name(pool, "one-off commands") };
+        unsafe { self.set_name(pool, name) };
         let ran = (|| {
             let allocate_info = vk::CommandBufferAllocateInfo::default()
                 .command_pool(pool)
                 .level(vk::CommandBufferLevel::PRIMARY)
                 .command_buffer_count(1);
+            let commands_named = format_args!("command buffer {name:?}");
             // SAFETY: the pool is live, and the command buffer is recorded, submitted and waited
             // on in turn; the caller guarantees what's recorded.
             unsafe {
                 let commands = self
                     .raw
                     .allocate_command_buffers(&allocate_info)
-                    .map_err(|e| vk_error("vkAllocateCommandBuffers", e))?[0];
-                self.set_name(commands, "one-off commands");
+                    .map_err(|e| vk_error("vkAllocateCommandBuffers", commands_named, e))?[0];
+                self.set_name(commands, name);
                 let begin_info = vk::CommandBufferBeginInfo::default()
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
                 self.raw
                     .begin_command_buffer(commands, &begin_info)
-                    .map_err(|e| vk_error("vkBeginCommandBuffer", e))?;
+                    .map_err(|e| vk_error("vkBeginCommandBuffer", commands_named, e))?;
                 record(commands);
                 self.raw
                     .end_command_buffer(commands)
-                    .map_err(|e| vk_error("vkEndCommandBuffer", e))?;
+                    .map_err(|e| vk_error("vkEndCommandBuffer", commands_named, e))?;
                 let command_infos =
                     [vk::CommandBufferSubmitInfo::default().command_buffer(commands)];
                 let submit = vk::SubmitInfo2::default().command_buffer_infos(&command_infos);
                 let queue = self.graphics.lock();
+                let submitted = format_args!(
+                    "{commands_named} on device {:?}'s graphics queue",
+                    self.name
+                );
                 self.raw
                     .queue_submit2(*queue, &[submit], vk::Fence::null())
-                    .map_err(|e| vk_error("vkQueueSubmit2", e))?;
+                    .map_err(|e| vk_error("vkQueueSubmit2", submitted, e))?;
                 self.raw
                     .queue_wait_idle(*queue)
-                    .map_err(|e| vk_error("vkQueueWaitIdle", e))
+                    .map_err(|e| vk_error("vkQueueWaitIdle", submitted, e))
             }
         })();
         // SAFETY: the queue is idle, or the work never started, so the pool is unused.
@@ -580,6 +667,7 @@ struct Candidate {
     api: u32,
     driver: String,
     vram_mib: u64,
+    limits: vk::PhysicalDeviceLimits,
     /// A queue family with graphics that can also present to the surface, if there is one.
     graphics: Option<u32>,
     /// A queue family for uploads apart from graphics, if there is one.
@@ -706,6 +794,7 @@ impl Candidate {
             api: properties.api_version,
             driver,
             vram_mib,
+            limits: properties.limits,
             graphics,
             transfer,
             host_copy,
@@ -985,6 +1074,7 @@ mod tests {
             api: REQUIRED_VERSION,
             driver: String::new(),
             vram_mib,
+            limits: vk::PhysicalDeviceLimits::default(),
             graphics: Some(0),
             transfer: None,
             host_copy: HostCopy::Unsupported,

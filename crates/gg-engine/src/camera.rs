@@ -67,9 +67,16 @@ pub struct OrthographicCameraController {
 impl OrthographicCameraController {
     /// # Panics
     ///
-    /// If the camera isn't orthographic.
+    /// If the camera isn't orthographic, or its height isn't a positive normal number, as
+    /// rendering requires.
     pub fn new(mut camera: Camera) -> Self {
         let height = *height(&mut camera.projection);
+        assert!(
+            height.is_normal() && height > 0.0,
+            "the orthographic camera controller zooms a camera that sees a positive height of the \
+             world; got {:?}",
+            camera.projection
+        );
         let key = Source::Key;
         let mut actions = Actions::default();
         let move_ = Binding::Axis2 {
@@ -98,7 +105,12 @@ impl OrthographicCameraController {
             camera,
             rotation: false,
             actions,
-            heights: [height / 100.0, height * 100.0],
+            // Positive normal numbers, as rendering requires, however near the height is to either
+            // end of them.
+            heights: [
+                (height / 100.0).max(f32::MIN_POSITIVE),
+                (height * 100.0).min(f32::MAX),
+            ],
         }
     }
 
@@ -142,7 +154,8 @@ impl OrthographicCameraController {
             }
             _ => return ControlFlow::Continue(()),
         };
-        if lines == 0.0 {
+        // Nor does a scroll of NaN zoom, which would leave a height that can't project.
+        if lines == 0.0 || lines.is_nan() {
             return ControlFlow::Continue(());
         }
         // Scrolling up zooms in.
@@ -301,6 +314,8 @@ impl FlyCameraController {
 
 #[cfg(test)]
 mod tests {
+    use std::panic;
+
     use super::*;
 
     /// At the origin, 4 units high.
@@ -481,6 +496,50 @@ mod tests {
             ..Camera::default()
         };
         OrthographicCameraController::new(perspective);
+    }
+
+    /// A camera whose height can't project, as one upside down, is refused; and the wheel zooms any
+    /// height that projects to one that does, however near either end of the floats it is and
+    /// however far it scrolls, while a scroll of NaN passes by.
+    #[test]
+    fn the_orthographic_controller_zooms_only_heights_that_project() {
+        let seeing = |height| Camera {
+            projection: Projection::Orthographic {
+                height,
+                near: -1.0,
+                far: 1.0,
+            },
+            ..Camera::default()
+        };
+        for height in [
+            -4.0,
+            -f32::MIN_POSITIVE,
+            0.0,
+            f32::MIN_POSITIVE / 2.0,
+            f32::INFINITY,
+            f32::NAN,
+        ] {
+            let made = panic::catch_unwind(|| OrthographicCameraController::new(seeing(height)));
+            assert!(made.is_err(), "a height of {height} was taken");
+        }
+        let mut cx = Context::new(None);
+        for height in [f32::MIN_POSITIVE, f32::MAX] {
+            let mut controller = OrthographicCameraController::new(seeing(height));
+            for y in [1000.0, -1000.0, f32::INFINITY, f32::NEG_INFINITY] {
+                let zoomed = scroll(&mut controller, &mut cx, Scroll::Lines { x: 0.0, y });
+                assert!(
+                    zoomed.is_normal() && zoomed > 0.0,
+                    "{height} zoomed to {zoomed}"
+                );
+            }
+            let before = controller.camera;
+            let nan = Event::Scroll(Scroll::Lines {
+                x: 0.0,
+                y: f32::NAN,
+            });
+            assert_eq!(controller.event(&mut cx, &nan), ControlFlow::Continue(()));
+            assert_eq!(controller.camera, before);
+        }
     }
 
     /// At the origin, unturned, looking down -Z with perspective.

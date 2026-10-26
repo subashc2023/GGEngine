@@ -69,8 +69,9 @@ pub(crate) struct Recorder {
     /// The line being written, kept for its memory, so that a tick without commands allocates
     /// nothing.
     line: String,
-    /// Why the first write that failed failed, after which nothing more is written.
-    failed: Option<io::Error>,
+    /// Why the recording stopped, after which nothing more is written: the first write that failed,
+    /// or the first command that wouldn't replay.
+    failed: Option<Error>,
 }
 
 impl Recorder {
@@ -120,13 +121,32 @@ impl Recorder {
     }
 
     /// Writes the commands `commands` holds, the queue of the layer at `layer` from the bottom of
-    /// the stack, as its tick is about to apply them, with the entities they hold by their IDs in
-    /// `world`.
-    pub(crate) fn queued(&mut self, layer: usize, commands: &dyn Commands, world: &World) {
+    /// the stack, of type `name`, as its tick is about to apply them, with the entities they hold
+    /// by their IDs in `world`; but stops the recording before one that the queue's
+    /// [`check`](Commands::check) says its replay would refuse, as one holding something opaque.
+    pub(crate) fn queued(
+        &mut self,
+        layer: usize,
+        name: &str,
+        commands: &dyn Commands,
+        world: &World,
+    ) {
         for i in 0..commands.len() {
+            let value = commands.value(i);
             self.line.clear();
             write!(self.line, "> {layer} ").expect("a string takes any text");
-            text::write(&mut self.line, &commands.value(i), world);
+            let start = self.line.len();
+            text::write(&mut self.line, &value, world);
+            if self.failed.is_none()
+                && let Err(error) = commands.check(&value)
+            {
+                let command = &self.line[start..];
+                let message = format!(
+                    "layer {layer}, {name}, queued `{command}`, which won't replay: {error}; the \
+                     recording ends before it"
+                );
+                self.failed = Some(Error::new("record.bad_command", message));
+            }
             self.line.push('\n');
             self.flush();
         }
@@ -147,24 +167,27 @@ impl Recorder {
         self.flush();
     }
 
-    /// Writes the line, unless a write has failed before.
+    /// Writes the line, unless the recording has stopped.
     fn flush(&mut self) {
         if self.failed.is_none()
             && let Err(error) = self.file.write_all(self.line.as_bytes())
         {
-            self.failed = Some(error);
+            let path = self.path.display();
+            let message =
+                format!("can't write the recording {path}: {error}; it ends where it failed");
+            self.failed = Some(Error::new("record.file", message));
         }
     }
 
-    /// Fails with `record.file` once a write has failed: the recording ends at the last line
-    /// written whole.
+    /// Fails once the recording has stopped, which ends at the last line written whole: with
+    /// `record.file` once a write has failed, and with `record.bad_command`, naming the layer, the
+    /// command and what its replay would refuse of it, once a layer has queued one that wouldn't
+    /// replay.
     pub(crate) fn check(&self) -> Result<()> {
-        let Some(error) = &self.failed else {
-            return Ok(());
-        };
-        let path = self.path.display();
-        let message = format!("can't write the recording {path}: {error}; it ends where it failed");
-        Err(Error::new("record.file", message))
+        match &self.failed {
+            Some(error) => Err(Error::new(error.code(), error.to_string())),
+            None => Ok(()),
+        }
     }
 }
 

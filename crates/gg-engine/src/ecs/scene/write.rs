@@ -336,10 +336,8 @@ fn floats(out: &mut String, xs: &[f32]) {
     out.push(')');
 }
 
-/// Writes `text` quoted, by the scene's own escapes, which depend on no Unicode tables: `\\`, `\"`,
-/// `\n`, `\r` and `\t`; `\u{..}` for the other control characters, and for those that would
-/// reorder or hide text, bidirectional controls and invisible separators; and everything else as
-/// it is.
+/// Writes `text` quoted, by the scene's own escapes: `\\`, `\"`, `\n`, `\r` and `\t`; `\u{..}` for
+/// the other characters that are [`hidden`]; and everything else as it is.
 pub(crate) fn quote(out: &mut String, text: &str) {
     out.push('"');
     for c in text.chars() {
@@ -349,22 +347,58 @@ pub(crate) fn quote(out: &mut String, text: &str) {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            '\0'..='\u{1f}'
-            | '\u{7f}'..='\u{9f}'
-            | '\u{61c}'
-            | '\u{200e}'
-            | '\u{200f}'
-            | '\u{2028}'
-            | '\u{2029}'
-            | '\u{202a}'..='\u{202e}'
-            | '\u{2066}'..='\u{2069}'
-            | '\u{feff}' => {
+            c if hidden(c) => {
                 write!(out, "\\u{{{:x}}}", u32::from(c)).expect("a string takes any text")
             }
             c => out.push(c),
         }
     }
     out.push('"');
+}
+
+/// Whether `c` draws nothing of its own, or changes how the text around it reads, so that a scene
+/// writes it as an escape, where it shows: a control (Unicode's category Cc); a format character
+/// (Cf), such as a bidirectional control, a joiner or a tag; the line and paragraph separators (Zl
+/// and Zp); or a default-ignorable code point, which renderers may drop, such as a variation
+/// selector, a filler or a reserved code point among them. By Unicode 18.0's tables, kept here
+/// rather than read from a crate's, so that the bytes depend on no library's Unicode: a character
+/// a later Unicode adds to them stays bare until the arms below are updated, which changes the
+/// bytes of the strings that hold it.
+fn hidden(c: char) -> bool {
+    match c {
+        // The C0 and C1 controls, and DEL.
+        '\0'..='\u{1f}' | '\u{7f}'..='\u{9f}' => true,
+        // The soft hyphen and the combining grapheme joiner.
+        '\u{ad}' | '\u{34f}' => true,
+        // Arabic's and Syriac's format characters: number signs, the letter mark, ends of ayah
+        // and the abbreviation mark.
+        '\u{600}'..='\u{605}'
+        | '\u{61c}'
+        | '\u{6dd}'
+        | '\u{70f}'
+        | '\u{890}'..='\u{891}'
+        | '\u{8e2}' => true,
+        // Hangul's fillers.
+        '\u{115f}'..='\u{1160}' | '\u{3164}' | '\u{ffa0}' => true,
+        // Khmer's inherent vowels, and Mongolian's variation selectors and vowel separator.
+        '\u{17b4}'..='\u{17b5}' | '\u{180b}'..='\u{180f}' => true,
+        // The zero-width characters, bidirectional controls, line and paragraph separators, word
+        // joiner, invisible operators and deprecated format characters.
+        '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2060}'..='\u{206f}' => true,
+        // Variation selectors, the byte order mark, and the reserved and interlinear annotation
+        // characters among the specials.
+        '\u{fe00}'..='\u{fe0f}' | '\u{feff}' | '\u{fff0}'..='\u{fffb}' => true,
+        // Kaithi's number signs, and the Egyptian hieroglyph, shorthand and musical format
+        // characters.
+        '\u{110bd}'
+        | '\u{110cd}'
+        | '\u{13430}'..='\u{1343f}'
+        | '\u{1bca0}'..='\u{1bca3}'
+        | '\u{1d173}'..='\u{1d17a}' => true,
+        // Tags, variation selectors 17 to 256, and the reserved code points among them.
+        '\u{e0000}'..='\u{e0fff}' => true,
+        _ => false,
+    }
 }
 
 /// Refuses a name that a scene can't write: one that isn't an ASCII identifier, or is one of RON's

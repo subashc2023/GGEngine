@@ -122,9 +122,9 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   copy; a drawn ID that a loaded entity has reseeds the stream; and the Entities panel finds an
   entity by an ID pasted in. The sandbox loads its grid from a scene and places its moons from a
   prefab, and its File menu saves and reloads the grid; unit tests check the text byte for byte,
-  every kind of value coming back bit for bit, a field set changing only its lines, refusals at
-  their lines and columns changing nothing, and placements' IDs, and the model test saves and
-  loads its world every 100 steps.
+  every kind of value coming back bit for bit but a NaN's payload, a field set changing only its
+  lines, refusals at their lines and columns changing nothing, and placements' IDs, and the model
+  test saves and loads its world every 100 steps.
 - **Operations with inverses and their log** (2026-10-23): creating and deleting an entity, adding
   and removing a component by name, setting a field and reparenting are operations, which name
   entities by their IDs; applied, each checks everything before it changes anything, and gives
@@ -360,10 +360,14 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | A tile map in the engine, which scenes save; the sandbox's map is code of its own | Phase 4, which names assets |
 | glTF that `Context::add_model` refuses or ignores, as it lists: lighting and the material's other textures, skins and animations, morph targets, cameras, models without a scene and scenes other than the default, sparse accessors and accessors without a buffer view, primitives other than triangle lists, samplers that wrap across and down differently, minification filters, texture transforms, quantized or compressed meshes and textures (KHR_mesh_quantization, Draco, meshopt, Basis Universal), and integers written as floats, such as `1.0`, which glTF allows | Each with the first model that needs it; lighting and the other textures in Phase 6, compression with Phase 7's cooker |
 | Decoding images off the main thread; `Context::add_texture` and `add_model` decode before they return | Phase 7, with the streaming loader |
+| Models that take more than 4 GiB to read, of their buffers, decoded images, vertices and nodes, which `add_model` refuses with `engine.unsupported_model` | Phase 7, with streaming and the GPU's memory budget |
+| Keeping a model's reads inside its folder where symlinks there lead out of it: its URIs can't leave the folder, but a link inside it is followed | Games load models from sources they don't trust, such as players' mods |
 | Mip levels made on the CPU, on the render thread, as the frame that uploads a model's texture renders: a 2,048 by 2,048 texture's take about 0.3 s of that frame in a debug build | Phase 7, which cooks them; or blits on the GPU, if a hitch shows first |
 | Layers making textures from their own pixels; `Textures::add` takes pixels, but `Context` adds only PNGs and JPEGs | A game makes its own textures |
 | Instances' transforms and parameters, and the UI's vertices, indices and texture changes, reach the GPU through the frame's arena, which merges the buffers it grew into, holding two to three times the largest frame for each frame in flight, in memory the CPU writes: by its growth rule, about 20 MB each for 100,000 sprites, which use 10.4 MB a frame | Phase 7, with the GPU's memory budget |
 | A frame's copies through a transfer queue start only once it's submitted, after its passes are recorded, and the frame waits for them | A profile shows a frame waiting for its uploads |
+| Staging and the frame's arena kept within the device's `maxMemoryAllocationSize` and `maxBufferSize`, each at least 1 GiB: both grow by doubling, each staging buffer an allocation of its own, so a frame that adds more than that at once fails, which ends the run | A frame adds that much at once, or Phase 7, with the GPU's memory budget |
+| Images' sizes checked against the device's `maxImageDimension2D` and `maxFramebufferWidth` and `Height` as they're made; a pass checks its viewport against the device's limits, which an image past those exceeds only if it's past `maxViewportDimensions` too | A device's limits fall below a window's size |
 | Host image copy where a transfer queue exists, or where the driver says it costs the GPU in reading the image, as KosmicKrisp's does, turning off Apple's lossless compression, so that macOS uploads through the graphics queue; and meshes written straight into GPU memory the CPU reaches, as ReBAR and unified memory allow, rather than copied | A measurement shows either is faster |
 | More than one camera or view, such as split screen or the editor's scene view | A game or the editor draws several |
 | The camera as a component of an entity, which a scene saves and a parent carries along; layers set the camera through `Context`, and the world doesn't hold it | A scene saves a camera, or a camera follows or rides an entity, with a world matrix for game code |
@@ -387,11 +391,13 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Letting go, for the layers below one that handles a stick or a trigger away from rest, of the ways it left: they keep what they last saw until it rests, so that a stick rolled from right to up in a menu leaves the game going right | A game's menus take a stick |
 | Controls the engine doesn't name, C, Z and paddles, and triggers a Linux driver reports as Z axes ([gilrs #200](https://gitlab.com/gilrs-project/gilrs/-/issues/200)), which are dropped | A pad that needs them, or the check by hand on Linux |
 | Codes for dependencies' own warnings, which reach the log as they give them: as a pad connects on Windows.Gaming.Input, gilrs warns, without a code, that it has no mapping for it, since that backend gives every pad a nil UUID, and goes on with its default mapping, the right one there | Phase 5, as the tool API serves diagnostics |
-| Checking a game's shader against the contract on `Shaders::add` through Slang reflection: its push constants, its resources, and the sizes of its vertex and parameter structs against their types'; until then it's trusted, and validation checks it in debug builds | Phase 4, with Slang reflection |
+| Checking a game's shader against the contract on `Shaders::add` through Slang reflection: its push constants, its resources, and the sizes of its vertex and parameter structs against their types'; until then it's trusted, and validation, in debug builds, checks its entry points, features and resources, but not the layouts of what it reads through addresses, where a mismatched struct draws garbage without a message | Phase 4, with Slang reflection |
+| Requiring a slangc that decorates sampled images `NonUniform` itself, Slang 2026.11's or later, such as the Vulkan SDK 1.4.363's, and dropping gg-renderer's `decorate_non_uniform`, which does it for older ones | The engine requires the Vulkan SDK 1.4.363 or later |
 | Games' shaders compile with slangc as they're added, so running a game needs the Vulkan SDK | Phase 7, which cooks shaders |
 | A library of assets: shaders, textures and models load from the paths the game gives, the sandbox giving its source's, and nothing finds one by path or name, so a file added twice loads twice; scenes and the tool API will name them | Phase 4, with assets |
 | `Layer::attach` can't fail, so a layer whose shader doesn't compile, or whose texture or model doesn't load, panics, as the sandbox does | A game loads assets as it starts |
 | 8- and 16-bit vertex fields, whose features Vulkan 1.4 guarantees but the device doesn't enable | A mesh packs its vertices, as Phase 7's cooker will |
+| The instance and VMA asking for Vulkan 1.4, and the validation layer's settings given through ash's `LayerSettingEXT::values`: ash 0.38 has 1.3's headers, so they ask for 1.3 and reach what 1.4 added through the extensions it promoted, and the settings are filled in by hand, since `values` counts bytes ([ash #985](https://github.com/ash-rs/ash/issues/985)) | ash's next release |
 | A swapchain without an sRGB format falls back to the first one offered, where colors come out too dark | A device offers no sRGB swapchain format |
 | Splits in a torn-off window, which holds one tab group | A tool wants panels side by side outside the main window |
 | Closing a panel from its tab; a panel shows while its layer shows it | Panels the user opens and closes, such as the editor's |
@@ -456,6 +462,7 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | The log in `Context`, every layer's and the tool API's clients each undoing their own, and an undo logged as an operation; the Inspector keeps a log of its own | Phase 5, the tool API |
 | Replaying a log into another world, which maps values' handles to IDs, as a recording's commands are; `set_field` and operations store a dead handle without complaint | Phase 5, the tool API |
 | A delete saying what refers to its entities from outside, or refusing; those references dangle until it's undone, and the world doesn't save in between | An agent deletes through the tool API |
+| Undoing a create whose entity has children since that the create didn't make, such as game code gave it, by keeping them where they are; it's refused (`ecs.has_children`), and the log drops it | An agent attaches children to what another's create made, or the editor |
 | Layers holding what a restore takes back: the sandbox's swarm is in the world, but the Inspector's log and pick outlive a restore, and nothing tells a layer that `Context`'s world was restored, so the sandbox doesn't snapshot | The Inspector or the tool API deletes, or something restores the running world, such as rollback or Phase 5's restart |
 | Creating, deleting, adding, removing and reparenting from the Inspector, which sets fields | The editor, or a game's tools |
 | A bound on the log, which keeps a session's entries, a delete's components and slots among them, until it's cleared | A session's memory shows it |

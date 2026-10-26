@@ -125,6 +125,14 @@ impl Wrap {
 /// How many samplers the set has: every [`Sampler`], then [`Wrap`]'s anisotropic ones.
 const SAMPLERS: usize = Sampler::ALL.len() + Wrap::ALL.len();
 
+/// The samplers' debug names, in the order of their indices.
+fn sampler_names() -> impl Iterator<Item = String> {
+    (Sampler::ALL
+        .map(|kind| format!("{kind:?} sampler"))
+        .into_iter())
+    .chain(Wrap::ALL.map(|wrap| format!("Anisotropic{wrap:?} sampler")))
+}
+
 /// The set, its layout and the pipeline layout built on it, and which texture slots are free.
 pub(crate) struct Bindless {
     samplers: Vec<vk::Sampler>,
@@ -156,12 +164,13 @@ impl Slots {
         }
     }
 
-    /// Takes `slot`, a placed one, or with `None` a free slot past them.
+    /// Takes `slot`, a placed one, or with `None` a free slot past them, for the image named
+    /// `name`.
     ///
     /// # Panics
     ///
     /// If `slot` isn't placed, or is in use.
-    fn take(&mut self, slot: Option<u32>) -> Result<u32> {
+    fn take(&mut self, slot: Option<u32>, name: &str) -> Result<u32> {
         if let Some(slot) = slot {
             assert!(
                 slot < PLACED_TEXTURES,
@@ -182,8 +191,8 @@ impl Slots {
             None => Err(Error::new(
                 "gpu.too_many_textures",
                 format!(
-                    "the bindless set gives out {} textures past the placed ones, and all are in \
-                     use",
+                    "image {name:?} has no slot: the bindless set gives out {} textures past the \
+                     placed ones, and all are in use",
                     TEXTURES - PLACED_TEXTURES
                 ),
             )),
@@ -233,10 +242,10 @@ impl Bindless {
         unsafe {
             let infos = (Sampler::ALL.map(Sampler::info).into_iter())
                 .chain(Wrap::ALL.map(Wrap::anisotropic_info));
-            for info in infos {
+            for (info, name) in infos.zip(sampler_names()) {
                 let sampler = device
                     .create_sampler(&info, None)
-                    .map_err(|e| vk_error("vkCreateSampler", e))?;
+                    .map_err(|e| vk_error("vkCreateSampler", format_args!("{name:?}"), e))?;
                 self.samplers.push(sampler);
             }
             // Textures change while frames that use other textures are in flight.
@@ -262,9 +271,13 @@ impl Bindless {
                 .flags(vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL)
                 .bindings(&bindings)
                 .push_next(&mut flags_info);
+            let contents = format_args!("{TEXTURES} textures and {SAMPLERS} samplers");
             self.layout = device
                 .create_descriptor_set_layout(&layout_info, None)
-                .map_err(|e| vk_error("vkCreateDescriptorSetLayout", e))?;
+                .map_err(|e| {
+                    let layout = format_args!("\"bindless set layout\" of {contents}");
+                    vk_error("vkCreateDescriptorSetLayout", layout, e)
+                })?;
 
             let sizes = [
                 vk::DescriptorPoolSize {
@@ -282,14 +295,17 @@ impl Bindless {
                 .pool_sizes(&sizes);
             self.pool = device
                 .create_descriptor_pool(&pool_info, None)
-                .map_err(|e| vk_error("vkCreateDescriptorPool", e))?;
+                .map_err(|e| {
+                    let pool = format_args!("\"bindless pool\" of {contents}");
+                    vk_error("vkCreateDescriptorPool", pool, e)
+                })?;
             let layouts = [self.layout];
             let allocate_info = vk::DescriptorSetAllocateInfo::default()
                 .descriptor_pool(self.pool)
                 .set_layouts(&layouts);
             self.set = device
                 .allocate_descriptor_sets(&allocate_info)
-                .map_err(|e| vk_error("vkAllocateDescriptorSets", e))?[0];
+                .map_err(|e| vk_error("vkAllocateDescriptorSets", "\"bindless set\"", e))?[0];
             // Written into the set once, before any pipeline uses it, rather than made immutable
             // in its layout: AMD's driver (25.10.30) reads immutable samplers that shaders index
             // non-uniformly as a sampler of zeros, which filters by the nearest texel and never
@@ -314,7 +330,12 @@ impl Bindless {
                 .push_constant_ranges(&push_constants);
             self.pipeline_layout = device
                 .create_pipeline_layout(&pipeline_layout_info, None)
-                .map_err(|e| vk_error("vkCreatePipelineLayout", e))?;
+                .map_err(|e| {
+                    let layout = format_args!(
+                        "\"bindless pipeline layout\" with {PUSH_CONSTANTS} bytes of push constants"
+                    );
+                    vk_error("vkCreatePipelineLayout", layout, e)
+                })?;
         }
         Ok(())
     }
@@ -332,11 +353,7 @@ impl Bindless {
         // SAFETY: the caller guarantees the objects are the device's, and they live as long as
         // the set.
         unsafe {
-            let names = (Sampler::ALL
-                .map(|kind| format!("{kind:?} sampler"))
-                .into_iter())
-            .chain(Wrap::ALL.map(|wrap| format!("Anisotropic{wrap:?} sampler")));
-            for (&sampler, name) in self.samplers.iter().zip(names) {
+            for (&sampler, name) in self.samplers.iter().zip(sampler_names()) {
                 device.set_name(sampler, &name);
             }
             device.set_name(self.layout, "bindless set layout");
@@ -351,25 +368,50 @@ impl Bindless {
         self.pipeline_layout
     }
 
-    /// Puts `view` in texture slot `slot`, a placed one, or with `None` a free slot past them, and
-    /// returns the slot's index.
+    /// Puts `view`, of the image named `name`, in texture slot `slot`, a placed one, or with `None`
+    /// a free slot past them, and returns the slot's index: [`Bindless::reserve`], then
+    /// [`Bindless::write`].
     ///
     /// # Safety
     ///
-    /// `device` must be the set's, and `view` a live view of a sampled image of it, in the
-    /// shader-read-only layout whenever a shader samples it.
+    /// As for [`Bindless::write`].
     ///
     /// # Panics
     ///
-    /// If `slot` isn't placed, or is in use.
+    /// As [`Bindless::reserve`] does.
     pub(crate) unsafe fn add(
         &self,
         device: &ash::Device,
         view: vk::ImageView,
         slot: Option<u32>,
+        name: &str,
     ) -> Result<u32> {
-        let mut slots = self.lock();
-        let index = slots.take(slot)?;
+        let index = self.reserve(slot, name)?;
+        // SAFETY: the caller guarantees the device and view.
+        unsafe { self.write(device, view, index) };
+        Ok(index)
+    }
+
+    /// Takes texture slot `slot`, a placed one, or with `None` a free slot past them, for the view
+    /// [`Bindless::write`] puts in it, of the image named `name`, and returns the slot's index. A
+    /// texture reserves its slot before it makes its image, so that a refused slot leaves nothing
+    /// to leak.
+    ///
+    /// # Panics
+    ///
+    /// If `slot` isn't placed, or is in use.
+    pub(crate) fn reserve(&self, slot: Option<u32>, name: &str) -> Result<u32> {
+        self.lock().take(slot, name)
+    }
+
+    /// Puts `view` in texture slot `index`, which [`Bindless::reserve`] gave.
+    ///
+    /// # Safety
+    ///
+    /// `device` must be the set's, and `view` a live view of a sampled image of it, in the
+    /// shader-read-only layout whenever a shader samples it.
+    pub(crate) unsafe fn write(&self, device: &ash::Device, view: vk::ImageView, index: u32) {
+        let _slots = self.lock();
         let image_info = [vk::DescriptorImageInfo::default()
             .image_view(view)
             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
@@ -380,12 +422,12 @@ impl Bindless {
             .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
             .image_info(&image_info);
         // SAFETY: the caller guarantees the device and view; the lock is held, and no frame in
-        // flight uses the slot, which was free.
+        // flight uses the slot, which was free when it was reserved.
         unsafe { device.update_descriptor_sets(&[write], &[]) };
-        Ok(index)
     }
 
-    /// Frees a texture slot, once the GPU is done with the frames that may use it.
+    /// Frees a texture slot: once the GPU is done with the frames that may use it, or at once for
+    /// one reserved and never written.
     pub(crate) fn remove(&self, index: u32) {
         self.lock().release(index);
     }
@@ -419,36 +461,37 @@ mod tests {
     #[test]
     fn placed_slots_come_back_once_released_and_the_rest_are_given_out_past_them() {
         let mut slots = Slots::new();
-        assert_eq!(slots.take(Some(7)).ok(), Some(7));
-        assert_eq!(slots.take(None).ok(), Some(PLACED_TEXTURES));
-        assert_eq!(slots.take(None).ok(), Some(PLACED_TEXTURES + 1));
+        assert_eq!(slots.take(Some(7), "a").ok(), Some(7));
+        assert_eq!(slots.take(None, "b").ok(), Some(PLACED_TEXTURES));
+        assert_eq!(slots.take(None, "c").ok(), Some(PLACED_TEXTURES + 1));
         slots.release(7);
         slots.release(PLACED_TEXTURES);
-        assert_eq!(slots.take(Some(7)).ok(), Some(7));
-        assert_eq!(slots.take(None).ok(), Some(PLACED_TEXTURES));
+        assert_eq!(slots.take(Some(7), "d").ok(), Some(7));
+        assert_eq!(slots.take(None, "e").ok(), Some(PLACED_TEXTURES));
     }
 
     #[test]
     #[should_panic(expected = "texture slot 7 is in use")]
     fn a_placed_slot_in_use_is_refused() {
         let mut slots = Slots::new();
-        let _ = slots.take(Some(7));
-        let _ = slots.take(Some(7));
+        let _ = slots.take(Some(7), "a");
+        let _ = slots.take(Some(7), "b");
     }
 
     #[test]
     #[should_panic(expected = "isn't one of the")]
     fn only_the_placed_slots_can_be_placed() {
-        let _ = Slots::new().take(Some(PLACED_TEXTURES));
+        let _ = Slots::new().take(Some(PLACED_TEXTURES), "a");
     }
 
     #[test]
     fn the_slots_given_out_run_out_at_the_end_of_the_set() {
         let mut slots = Slots::new();
         for _ in PLACED_TEXTURES..TEXTURES {
-            assert!(slots.take(None).is_ok());
+            assert!(slots.take(None, "given out").is_ok());
         }
-        let error = slots.take(None).expect_err("no slot left");
+        let error = slots.take(None, "one too many").expect_err("no slot left");
         assert_eq!(error.code(), "gpu.too_many_textures");
+        assert!(error.to_string().contains("\"one too many\""), "{error}");
     }
 }

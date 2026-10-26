@@ -1,7 +1,6 @@
 //! The layer stack: how an app's code, and the engine's tools, plug into the main loop.
 
 use std::any::type_name;
-use std::fs;
 use std::mem;
 use std::ops::ControlFlow;
 use std::path::Path;
@@ -99,6 +98,17 @@ pub trait Commands {
     /// Fails as [`Reflect::from_value`] does if it makes none.
     fn push(&mut self, value: &Value) -> Result<()>;
 
+    /// Checks that [`push`](Self::push) would queue the command `value` makes, without queuing it:
+    /// a recording checks each command it records, so that it holds none that its replay would
+    /// refuse. The default checks nothing, for a queue whose `push` takes every value its
+    /// [`value`](Self::value) gives, as the Inspector's does, whose sets keep what's opaque.
+    ///
+    /// Fails as `push` would.
+    fn check(&self, value: &Value) -> Result<()> {
+        let _ = value;
+        Ok(())
+    }
+
     /// Empties the queue.
     fn clear(&mut self);
 }
@@ -115,6 +125,12 @@ impl<C: Reflect> Commands for Vec<C> {
     fn push(&mut self, value: &Value) -> Result<()> {
         Vec::push(self, C::from_value(value)?);
         Ok(())
+    }
+
+    /// Makes the command, as `push` does: it fails, saying where, for a command that holds
+    /// something opaque, which no value makes.
+    fn check(&self, value: &Value) -> Result<()> {
+        C::from_value(value).map(drop)
     }
 
     fn clear(&mut self) {
@@ -270,10 +286,10 @@ impl Context {
     /// (1, 1) at its bottom right. `name` names the texture in errors and GPU captures. The GPU has
     /// it from the next frame that renders.
     ///
-    /// Fails with `engine.bad_texture` if the file can't be read, doesn't decode as a PNG or a
-    /// JPEG, or has a side of more than 8,192 pixels, the most every Vulkan 1.4 device takes, and
-    /// with `renderer.too_many_textures` past the 61,440 a renderer holds, the engine's white one
-    /// among them.
+    /// Fails with `engine.bad_texture` if the file can't be read, isn't a regular file, is more
+    /// than 1 GiB, doesn't decode as a PNG or a JPEG, or has a side of more than 8,192 pixels, the
+    /// most every Vulkan 1.4 device takes, and with `renderer.too_many_textures` past the 61,440 a
+    /// renderer holds, the engine's white one among them.
     pub fn add_texture(&mut self, name: &str, path: impl AsRef<Path>) -> Result<Texture> {
         let image = image::load_image(name, path.as_ref())?;
         self.textures
@@ -327,9 +343,10 @@ impl Context {
     /// wrapping and whether it magnifies to the nearest texel, the alpha mode and cutoff, and
     /// whether it's double-sided. Models draw unlit, their base color alone, as KHR_materials_unlit
     /// has it, and a material that isn't double-sided draws its triangles' fronts alone. Buffers
-    /// are in files named by URIs relative to the model's, in base64 data URIs or in a GLB's BIN
-    /// chunk, and images there or in buffer views: PNGs or JPEGs, as `add_texture` takes them, told
-    /// apart by their bytes rather than by the types the model declares.
+    /// are in files in the model's folder, named by URIs relative to the model's, read no further
+    /// than their byteLength, in base64 data URIs or in a GLB's BIN chunk, and images there or in
+    /// buffer views: PNGs or JPEGs, as `add_texture` takes them, told apart by their bytes rather
+    /// than by the types the model declares.
     ///
     /// It ignores animations, cameras and the extensions the model uses without requiring them,
     /// and logs which it has at info level, as `engine.model_ignored`: the model draws as it is at
@@ -342,18 +359,20 @@ impl Context {
     /// Fails, adding nothing, with `engine.unsupported_model` for glTF the engine doesn't draw:
     /// glTF 1, a model without a scene, primitives that aren't triangle lists, sparse accessors and
     /// accessors without a buffer view, skinned nodes, morph weights other than 0, a sampler that
-    /// wraps across and down differently, a texture without an image, and any required extension
-    /// but KHR_materials_unlit; with `engine.bad_model` for a file that can't be read or isn't
-    /// glTF, as far as reading it checks, such as an accessor past its buffer view, an index past
-    /// its vertices, a node with two parents, a matrix that isn't a translation, rotation and
-    /// scale, a URI that's neither a data URI nor a relative path, or an image that doesn't decode,
-    /// and, though glTF allows them, integers written as floats, such as `1.0`; and with
-    /// `renderer.too_many_textures` if the renderer hasn't room for its images.
+    /// wraps across and down differently, a texture without an image, any required extension but
+    /// KHR_materials_unlit, and a model that takes more than 4 GiB to read, of its buffers, decoded
+    /// images, vertices and nodes; with `engine.bad_model` for a file that can't be read, isn't a
+    /// regular file or isn't glTF, as far as reading it checks, such as an accessor past its buffer
+    /// view, an index past its vertices, a node with two parents, a matrix that isn't a
+    /// translation, rotation and scale, a URI that's neither a data URI nor a relative path, or
+    /// that has a `..`, or an image that doesn't decode, and, though glTF allows them, integers
+    /// written as floats, such as `1.0`; and with `renderer.too_many_textures` if the renderer
+    /// hasn't room for its images.
     pub fn add_model(&mut self, name: &str, path: impl AsRef<Path>) -> Result<Model> {
         let zone = gg_core::zone!();
         let path = path.as_ref();
         zone.text(path.display());
-        let imported = gltf::read(name, path, |file| fs::read(file))?;
+        let imported = gltf::read(name, path, image::read_file, gltf::MAX_MEMORY)?;
         if !imported.ignored.is_empty() {
             info!(
                 code = "engine.model_ignored",
@@ -536,7 +555,7 @@ impl Stack {
         self.recorder = Some(recorder);
     }
 
-    /// Fails with `record.file` once a write to the run's recording has failed.
+    /// Fails, once the run's recording has stopped, as [`Recorder::check`] says.
     pub(crate) fn recorded(&self) -> Result<()> {
         self.recorder.as_ref().map_or(Ok(()), Recorder::check)
     }
@@ -575,13 +594,16 @@ impl Stack {
     pub(crate) fn tick(&mut self, cx: &mut Context, tick: Tick) {
         let _zone = gg_core::zone!();
         let Self {
-            layers, recorder, ..
+            layers,
+            names,
+            recorder,
+            ..
         } = self;
         for (index, layer) in layers.iter_mut().enumerate() {
             if let Some(recorder) = recorder.as_mut()
                 && let Some(commands) = layer.commands()
             {
-                recorder.queued(index, commands, &cx.world);
+                recorder.queued(index, names[index], commands, &cx.world);
             }
             layer.tick(&mut cx.world, tick);
         }

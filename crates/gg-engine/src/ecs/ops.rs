@@ -1,8 +1,9 @@
 //! Operations: the authoring changes people and agents make to a world, which name its entities by
 //! their IDs. Each, applied, gives what undoes it, its inverse: another operation, or, for a delete
 //! and a remove, what they took out, typed, so that what's opaque comes back too. A delete's keeps
-//! its entities' slots, so that undoing it gives each back under its handle, and every reference to
-//! it is whole again. Only the [`Log`](super::Log) holds inverses, and it releases what they keep.
+//! its entities' slots and IDs, so that undoing it gives each back under its handle, and every
+//! reference to it is whole again; a create's takes out the entity it made alone, keeping it the
+//! same way. Only the [`Log`](super::Log) holds inverses, and it releases what they keep.
 
 use std::{fmt, mem};
 
@@ -111,8 +112,9 @@ impl fmt::Display for Operation {
 
 /// What undoes an operation applied to a world, which [`World::undo`] applies. It's its world's
 /// own, since its values hold the world's handles and its rows its component types, and a world
-/// restored from a snapshot is another, which may have given those handles out again; a delete's
-/// keeps its entities' slots until it's applied or [released](World::release).
+/// restored from a snapshot is another, which may have given those handles out again; a delete's,
+/// and an undone create's, keeps its entities' slots and IDs until it's applied or
+/// [released](World::release).
 pub(super) struct Inverse {
     /// Its world's serial.
     world: u64,
@@ -127,12 +129,20 @@ enum Undo {
         component: ComponentId,
         column: Box<dyn AnyColumn>,
     },
+    /// Takes out the entity a create made, `entity`, keeping its slot and ID as a delete does, if
+    /// it has no children: those the log gave it have been undone before it, so any it has are the
+    /// game's, which a delete would take with it.
+    Uncreate(EntityId),
     /// Puts back the entities a delete took, in the order it took them: children before their
-    /// parents, each parent's first to last, and the root last.
-    Restore(Vec<Taken>),
+    /// parents, each parent's first to last, and the root last; or, if `created`, the one entity a
+    /// create made, which undoing it took out.
+    Restore {
+        taken: Vec<Taken>,
+        created: bool,
+    },
 }
 
-/// An entity a delete took out of the world.
+/// An entity a delete, or a create undone, took out of the world.
 struct Taken {
     /// Its handle, which it has again as it comes back: its slot is kept for it.
     entity: Entity,
@@ -149,9 +159,7 @@ impl World {
         let _zone = gg_core::zone!();
         let undo = self.applied(operation)?;
         // So that the log holds the ID drawn, which a replay creates the entity with.
-        if let (Operation::Create { entity, .. }, Undo::Apply(Operation::Delete { entity: id })) =
-            (operation, &undo)
-        {
+        if let (Operation::Create { entity, .. }, Undo::Uncreate(id)) = (operation, &undo) {
             *entity = Some(*id);
         }
         Ok(Inverse {
@@ -163,10 +171,12 @@ impl World {
     /// Applies `inverse`, undoing its operation, and leaves in its place what undoes that, which
     /// redoes it. Refused, it changes neither the world nor `inverse`: with `ops.other_world` for
     /// another world's inverse, as one from before the world was restored is; as its operation is
-    /// refused, if it's one; and, as it gives back what a remove or a delete took, with
-    /// `ecs.no_entity` for an entity gone since, or a root's parent gone, `reflect.has_component`
-    /// for a component the entity has since, and `ecs.id_taken` for an ID a living entity has
-    /// since, such as one a scene loaded.
+    /// refused, if it's one; as it takes out what a create made, with `ecs.no_entity` for the
+    /// entity gone since, and `ecs.has_children` for children it has since, which the create didn't
+    /// make; and, as it gives back what a remove or a delete took, with `ecs.no_entity` for an
+    /// entity gone since, or a root's parent gone, `reflect.has_component` for a component the
+    /// entity has since, and `ecs.id_taken` for an ID a living entity has since, such as one a
+    /// scene loaded.
     pub(super) fn undo(&mut self, inverse: &mut Inverse) -> Result<()> {
         let _zone = gg_core::zone!();
         if inverse.world != self.serial {
@@ -188,15 +198,26 @@ impl World {
                     component: name.to_owned().into(),
                 })
             }
-            Undo::Restore(taken) => {
+            Undo::Uncreate(entity) => {
+                let made = self.can_uncreate(*entity)?;
+                Undo::Restore {
+                    taken: self.vacate_subtree(made),
+                    created: true,
+                }
+            }
+            Undo::Restore { taken, created } => {
                 self.can_restore(taken)?;
                 let root = taken.last().expect("a delete takes its entity");
-                Undo::Apply(Operation::Delete { entity: root.id })
+                if *created {
+                    Undo::Uncreate(root.id)
+                } else {
+                    Undo::Apply(Operation::Delete { entity: root.id })
+                }
             }
         };
         // Checked, so that what the inverse kept goes back, which can't fail.
         match mem::replace(&mut inverse.undo, redo) {
-            Undo::Apply(_) => {}
+            Undo::Apply(_) | Undo::Uncreate(_) => {}
             Undo::Put {
                 entity,
                 component,
@@ -206,20 +227,21 @@ impl World {
                 let at = self.location(entity).expect("alive");
                 self.give(entity, at, component, column);
             }
-            Undo::Restore(taken) => self.restore(taken),
+            Undo::Restore { taken, .. } => self.restore(taken),
         }
         Ok(())
     }
 
     /// Drops `inverse`, which won't be applied: if it's this world's, the slots a delete's keeps
-    /// are freed, so that its entities are gone for good.
+    /// are freed, and their IDs let go, so that its entities are gone for good.
     pub(super) fn release(&mut self, inverse: Inverse) {
         if inverse.world != self.serial {
             return;
         }
-        if let Undo::Restore(taken) = inverse.undo {
+        if let Undo::Restore { taken, .. } = inverse.undo {
             for taken in taken {
                 self.free_slot(taken.entity.index);
+                self.free_id(taken.id);
             }
         }
     }
@@ -237,22 +259,14 @@ impl World {
                 components,
             } => {
                 let id = self.create(*entity, *parent, components).map_err(refused)?;
-                Undo::Apply(Operation::Delete { entity: id })
+                Undo::Uncreate(id)
             }
             Operation::Delete { entity } => {
                 let root = self.living(*entity).map_err(refused)?;
-                let mut taken = Vec::new();
-                self.take_apart(root, |world, entity, parent| {
-                    let id = world.id(entity).expect("alive");
-                    let row = world.vacate(entity.index);
-                    taken.push(Taken {
-                        entity,
-                        id,
-                        parent,
-                        row,
-                    });
-                });
-                Undo::Restore(taken)
+                Undo::Restore {
+                    taken: self.vacate_subtree(root),
+                    created: false,
+                }
             }
             Operation::Add {
                 entity,
@@ -369,6 +383,42 @@ impl World {
         Ok(id)
     }
 
+    /// Takes `root`, which is alive, and its descendants out of the world, keeping their slots and
+    /// IDs, in the order [`take_apart`](Self::take_apart) gives them: children before their
+    /// parents, and the root last.
+    fn vacate_subtree(&mut self, root: Entity) -> Vec<Taken> {
+        let mut taken = Vec::new();
+        self.take_apart(root, |world, entity, parent| {
+            let id = world.id(entity).expect("alive");
+            let row = world.vacate(entity.index);
+            taken.push(Taken {
+                entity,
+                id,
+                parent,
+                row,
+            });
+        });
+        taken
+    }
+
+    /// The entity a create made, `entity`, if undoing the create can take it out again: it's alive,
+    /// and has no children, which the create didn't make.
+    fn can_uncreate(&self, entity: EntityId) -> Result<Entity> {
+        let made = self.living(entity)?;
+        let mut children = self.children(made).expect("alive");
+        if let Some(child) = children.next() {
+            let child = self.id(child).expect("alive");
+            return Err(Error::new(
+                "ecs.has_children",
+                format!(
+                    "entity {child} is its child, which the create didn't make: an undo takes only \
+                     what its create made"
+                ),
+            ));
+        }
+        Ok(made)
+    }
+
     /// Whether the component a remove took, `component`, can go back on `entity`.
     fn can_put(&self, entity: EntityId, component: ComponentId) -> Result<()> {
         let name = self.components.name(component);
@@ -397,8 +447,10 @@ impl World {
         for taken in taken {
             let meta = &self.meta[taken.entity.index as usize];
             assert!(
-                meta.location.is_none() && meta.generation == taken.entity.generation,
-                "a slot a delete vacated is freed only with its inverse"
+                meta.location.is_none()
+                    && meta.generation == taken.entity.generation
+                    && self.kept.contains_key(&taken.id),
+                "a slot a delete vacated is freed, and its ID let go, only with its inverse"
             );
             if self.by_id.contains_key(&taken.id) {
                 return Err(refused(Error::new(
@@ -418,7 +470,7 @@ impl World {
         Ok(())
     }
 
-    /// Puts the entities a delete took, `taken`, back, each into its slot under its handle.
+    /// Puts the entities a delete took, `taken`, back, each into its slot under its handle and ID.
     fn restore(&mut self, taken: Vec<Taken>) {
         let mut links = Vec::with_capacity(taken.len());
         for Taken {
@@ -428,6 +480,7 @@ impl World {
             row,
         } in taken
         {
+            self.free_id(id);
             self.by_id.insert(id, entity);
             self.place(entity, id, row);
             if let Some(parent) = parent {
@@ -481,8 +534,8 @@ impl Inverse {
     /// How many slots it keeps.
     pub(super) fn kept(&self) -> usize {
         match &self.undo {
-            Undo::Restore(taken) => taken.len(),
-            Undo::Apply(_) | Undo::Put { .. } => 0,
+            Undo::Restore { taken, .. } => taken.len(),
+            Undo::Apply(_) | Undo::Put { .. } | Undo::Uncreate(_) => 0,
         }
     }
 }
@@ -762,7 +815,7 @@ pub(super) mod tests {
     fn a_refusal_changes_nothing() {
         let x = fixture();
         let [r, a, s, b, e, f] = [x.r, x.a, x.s, x.b, x.e, x.f].map(|entity| x.id(entity));
-        let unknown: EntityId = "0123456789abcdef".parse().expect("an ID");
+        let unknown = fresh();
         let transform = || named("Transform", Transform::IDENTITY.to_value());
         let create = |components| Operation::Create {
             entity: None,
@@ -902,6 +955,11 @@ pub(super) mod tests {
         }
     }
 
+    /// An ID no entity of the fixture's has.
+    fn fresh() -> EntityId {
+        "0123456789abcdef".parse().expect("an ID")
+    }
+
     #[test]
     fn an_undo_the_world_has_moved_past_is_refused_whole() {
         // Each an operation, a change code makes after it, and the code that refuses its undo.
@@ -911,12 +969,25 @@ pub(super) mod tests {
             fn(&mut Fixture),
             &'static str,
         );
-        let cases: [Case; 6] = [
+        let cases: [Case; 7] = [
             (
                 "a set, then a despawn",
                 |x| set(x, "count", Value::UInt(1)),
                 |x| x.world.despawn(x.f).expect("alive"),
                 "ecs.no_entity",
+            ),
+            (
+                "a create, then a child given to what it made",
+                |_| Operation::Create {
+                    entity: Some(fresh()),
+                    parent: None,
+                    components: Vec::new(),
+                },
+                |x| {
+                    let made = x.world.entity(fresh()).expect("created");
+                    x.world.set_parent(x.g, Some(made)).expect("no cycle");
+                },
+                "ecs.has_children",
             ),
             (
                 "a remove, then an insert",

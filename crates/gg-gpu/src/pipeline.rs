@@ -124,7 +124,7 @@ impl Pipeline {
         let code = ash::util::read_spv(&mut Cursor::new(desc.spirv)).map_err(|error| {
             Error::new(
                 "gpu.bad_shader",
-                format!("the shaders of {} aren't SPIR-V", desc.name),
+                format!("the shaders of pipeline {:?} aren't SPIR-V", desc.name),
             )
             .with_source(error)
         })?;
@@ -133,8 +133,11 @@ impl Pipeline {
         // SAFETY: the device is live, and the code is a whole number of words that starts with
         // SPIR-V's magic number, which `read_spv` checked. The module itself is trusted to be
         // valid SPIR-V, as `GraphicsDesc::spirv` says.
-        let module = unsafe { raw_device.create_shader_module(&module_info, None) }
-            .map_err(|e| vk_error("vkCreateShaderModule", e))?;
+        let module =
+            unsafe { raw_device.create_shader_module(&module_info, None) }.map_err(|e| {
+                let shaders = format_args!("the shaders of pipeline {:?}", desc.name);
+                vk_error("vkCreateShaderModule", shaders, e)
+            })?;
         // SAFETY: the module is live.
         unsafe { device.set_name(module, desc.name) };
 
@@ -221,7 +224,13 @@ impl Pipeline {
             raw_device.destroy_shader_module(module, None);
             made
         };
-        let raw = made.map_err(|(_, e)| vk_error("vkCreateGraphicsPipelines", e))?[0];
+        let raw = made.map_err(|(_, e)| {
+            let pipeline = format_args!(
+                "pipeline {:?} for {:?}, blending {:?}",
+                desc.name, desc.format, desc.blend
+            );
+            vk_error("vkCreateGraphicsPipelines", pipeline, e)
+        })?[0];
         // SAFETY: the pipeline is live.
         unsafe { device.set_name(raw, desc.name) };
         Ok(Self {
@@ -233,6 +242,11 @@ impl Pipeline {
 
     pub(crate) fn raw(&self) -> vk::Pipeline {
         self.raw
+    }
+
+    /// The handle of the device that made it.
+    pub(crate) fn device(&self) -> vk::Device {
+        self.device.handle()
     }
 
     /// The formats of the targets it draws into.

@@ -17,5 +17,11 @@ tracy-client-sys = { workspace = true, optional = true }
 # Zones, plots and frame marks for Tracy (src/profile.rs), which compile to nothing without it.
 tracy = ["dep:tracy-client", "dep:tracy-client-sys"]
 
+# The logging test has a main of its own: logging and the panic hook are the process's, so it runs
+# itself again for each filter it tries.
+[[test]]
+name = "logging"
+harness = false
+
 [lints]
 workspace = true

@@ -45,7 +45,10 @@ are in [AGENTS.md](AGENTS.md).
 
 - **`gg-core`:** math, handles, logging, profiling and error types.
 - **`gg-gpu`:** Vulkan through `ash`. It turns ash's unsafe API into safe types: device, memory,
-  buffers, images, descriptors, pipelines, swapchain, synchronization and submission.
+  buffers, images, descriptors, pipelines, swapchain, synchronization and submission. They stay
+  safe whatever safe code does with them: each checks that what it's given was made by its device,
+  or a surface by its instance, and a frame or a pass forgotten rather than dropped is caught at
+  the next call.
 - **`gg-renderer`:** the render graph, passes, materials, lighting and post-processing. It owns
   the GPU resources and hands out handles to them.
 - **`gg-engine`:** the main loop, window and input, the job system and the render thread, scene
@@ -175,11 +178,13 @@ A project's state is text that people and agents edit, diff and merge with ordin
   and no type's name, so that a rename touches only its keys. A struct or a variant with fields
   and a list with elements are blocks, a part to a line; a value of one part, `Some(v)` or a
   one-field tuple's `(v)`, wraps it; and leaves are inline: a float as the shortest text that
-  reads back to its bits, never an exponent, with `.0`, and `inf` and `NaN` keeping their sign;
-  a string by escapes of the scene's own, which leave no control or bidirectional character
-  bare; names ASCII identifiers; at most 64 levels deep. The engine writes the text itself, so
-  that the bytes depend on no library's formatting, line endings or Rust release, and `ron`
-  only reads it, through seeds that reflection's descriptions drive, never its untyped values.
+  reads back to its bits, never an exponent, with `.0`, and `inf` and `NaN` keeping their sign,
+  though not a NaN's payload; a string by escapes of the scene's own for every character that
+  draws nothing or changes how the text around it reads: Unicode's controls, format characters,
+  line and paragraph separators and default-ignorable code points; names ASCII identifiers; at
+  most 64 levels deep. The engine writes the text itself, so that the bytes depend on no
+  library's formatting, line endings or Rust release, and `ron` only reads it, through seeds
+  that reflection's descriptions drive, never its untyped values.
   What's opaque, such as a sprite's texture or a `MeshDraw`, isn't saved: a load builds each
   component on its type's `Component::base`, which gives it that, or from the scene alone. A
   child's `Parent` is saved as its parent's ID, and a root's isn't. A save makes each component
@@ -201,8 +206,10 @@ A project's state is text that people and agents edit, diff and merge with ordin
   operation names entities by their IDs and carries values as reflection's. Applying one checks
   everything before anything changes, and gives what undoes it: another operation, but for a
   delete and a remove, whose inverses keep what they took out, typed, so that what's opaque
-  comes back too. A delete keeps its entities' slots, so that undoing it gives each back under
-  its handle, and every reference to it is whole again. The log keeps the operations applied, in
+  comes back too. A delete keeps its entities' slots and IDs, so that undoing it gives each back
+  under its handle and ID, and every reference to it is whole again. Undoing a create takes out
+  the entity it made alone, kept the same way, and is refused (`ecs.has_children`) if the entity
+  has children since, which the create didn't make. The log keeps the operations applied, in
   order, with their inverses: it undoes and redoes them, merges a gesture's sets of one field,
   such as a drag's, into one edit, and drops an entry whose undo the world refuses, since the
   world has moved on from it. A running game applies operations at its ticks, in the order they
@@ -231,7 +238,9 @@ The world lives in our own ECS, built for what the tools, hot reload and multipl
   place of its own, for bug reports an agent can rerun; it refuses a recording of another format,
   app or stack of layers, and replays one from another build, naming both builds where it goes
   another way. A snapshot and the commands after it will replay from there, for rollback; so a
-  command is data, never a closure.
+  command is data, never a closure. A command its replay couldn't make again, as one holding
+  something opaque, which no value makes, ends the recording before it, and the run with
+  `record.bad_command`.
 - **A deterministic mode:** the fixed timestep, a fixed order of systems and of iteration, and
   math that gives identical results on every platform, so lockstep games and rollback netcode
   stay in sync. So glam is built without SIMD, whose SSE2 and NEON paths add in different orders
@@ -275,15 +284,15 @@ randomness through std's `RandomState`, so that a run of the cycle never gives a
 runs, two sessions' or a world's on either side of a reseed, meet only where they overlap; a run
 that must go the same way every time seeds it, as the sandbox's reference run does, and a snapshot
 copies its state. A scene's entities keep the IDs it gives them, and a load refuses one a living
-entity has. A draw that meets a living entity's ID, as a stream that walks into the run of the
-session that saved a loaded scene does, reseeds the stream, the same way for the same state, and
-draws again. The world keeps each slot's ID in an array beside the slots' `Meta` rather than in
-it, since every lookup of a handle reads `Meta`, and IDs are read only where they cross into
-files, tools and diagnostics, and as drawing sorts the rows of each batch and each z: written only
-as an entity is spawned into the slot and removed from it, and read through the entity's handle,
-checked first, so that a stale handle never names the entity now in its slot. A map hashed with
-SipHash, so that IDs from files can't be chosen to collide, finds an entity by its ID; it's looked
-up, never iterated.
+entity has. A draw that meets a living entity's ID, or one a delete keeps for its undo, as a
+stream that walks into the run of the session that saved a loaded scene does, reseeds the stream,
+the same way for the same state, and draws again. The world keeps each slot's ID in an array
+beside the slots' `Meta` rather than in it, since every lookup of a handle reads `Meta`, and IDs
+are read only where they cross into files, tools and diagnostics, and as drawing sorts the rows of
+each batch and each z: written only as an entity is spawned into the slot and removed from it, and
+read through the entity's handle, checked first, so that a stale handle never names the entity now
+in its slot. A map hashed with SipHash, so that IDs from files can't be chosen to collide, finds an
+entity by its ID, and another counts the IDs deletes keep; both are looked up, never iterated.
 
 Reflection names each component type by its identifier, unless `#[reflect(name = "...")]` gives
 another, and two types of one name are an error rather than a guess. The derive writes the
@@ -325,17 +334,18 @@ bytes, whether its entity has a parent or not.
 A snapshot is the world copied: `World` is `Clone`, and `clone_from` restores a world from a
 snapshot, or takes a snapshot into one kept from before, in the memory it holds. It copies all of
 the world: each slot under its generation, the free ones in the order they're taken and the vacant
-ones vacant; each entity under its handle and ID, in its table and row, with its links; the
-tables in the order they were made, cutting away those made since; the stream the IDs come from;
-and the component types. So a restored world goes on as the world the snapshot was taken from
-did, spawning the same handles with the same IDs and finding entities in the same order, and gives
-out again the handles and IDs given out since the snapshot. A copy is another world, with a serial
-of its own: drawing sorts its rows again, and it refuses what undoes an operation applied before,
-as another world's, so that undo history doesn't outlive a restore, and the slots a log kept when
-the snapshot was taken stay vacant for good, since freeing them would change the handles to come.
-A snapshot taken again, or restored, is copied into memory already held, so that one taken every
-frame allocates nothing while the tables, the component types and the world's size stay, for
-components whose `Clone` allocates nothing.
+ones vacant, with the IDs they keep; each entity under its handle and ID, in its table and row,
+with its links; the tables in the order they were made, cutting away those made since; the stream
+the IDs come from; and the component types. So a restored world goes on as the world the snapshot
+was taken from did, spawning the same handles with the same IDs and finding entities in the same
+order, and gives out again the handles and IDs given out since the snapshot. A copy is another
+world, with a serial of its own: drawing sorts its rows again, and it refuses what undoes an
+operation applied before, as another world's, so that undo history doesn't outlive a restore, and
+the slots a log kept when the snapshot was taken stay vacant for good, with their IDs, since
+freeing them would change the handles and IDs to come. A snapshot taken again, or restored, is
+copied into memory already held, so that one taken every frame allocates nothing while the
+tables, the component types and the world's size stay, for components whose `Clone` allocates
+nothing.
 
 A world's hash has two parts. Its content is what it holds: a term for each component of each
 entity, from the entity's ID, the type's name and the words the type's derive writes, its fields in
@@ -357,7 +367,7 @@ slower than real time slows down rather than spending every frame catching up, b
 updates, and draws what they leave as [Rendering](#rendering) says. The whole ticks a frame
 doesn't run are dropped, and counted in `engine.perf`, and the fraction of one left over carries
 to the next, as how far the frame draws the world on its way from where the last tick found it. A
-frame without time runs none, as the first does and the first after the window is restored, and
+frame without time runs none, as the first does and the first after frames pause, and
 a headless run takes exactly one each frame. Each layer's tick applies the commands it queued
 since its last, data of its own, in the order it queued them, then runs its systems, the layers
 from the bottom up. Once they've attached, the world changes only there: `Context::world_mut`
@@ -378,9 +388,11 @@ would end no edit, so that frames that change nothing queue nothing.
 
 Diagnostics are data, so agents and tools can act on them as reliably as people read them.
 
-- **Logs** go through `tracing` with structured fields, filtered by `RUST_LOG`. Each run prints
-  readable, colored lines to stderr, which keeps stdout for machine-readable output, and writes
-  every event as a JSON line to a file that agents and tools read:
+- **Logs** go through `tracing` with structured fields, filtered by `RUST_LOG`: one that names
+  targets alone, such as `gg_gpu=trace`, sets their levels and keeps the default for the rest,
+  and one with a level for every target, such as `info,gg_gpu=trace`, replaces it. Each run
+  prints readable, colored lines to stderr, which keeps stdout for machine-readable output, and
+  writes every event as a JSON line to a file that agents and tools read:
   `logs/<app>-<UTC time>-<process ID>.jsonl` beside the executable, whose path the run logs as
   it starts.
 - **Errors and warnings name their subject.** Each carries a stable code, a dotted name such as
@@ -389,7 +401,9 @@ Diagnostics are data, so agents and tools can act on them as reliably as people 
   column. What outlives an
   entity, such as a pick or a queued message, keeps its ID, not its handle.
 - **Validation messages** become events with their VUID and the debug names of the objects
-  involved, and a panic is logged with its location before the process ends.
+  involved. A run whose validation layer can't validate synchronization, as one without
+  `VK_EXT_layer_settings` can't, warns `gpu.no_sync_validation`. A panic is logged as
+  `log.panic`, with its location, before the process ends, even under `RUST_LOG=off`.
 - **Profiling.** Code marks its work with zones (`gg_core::zone!`), which Tracy lays out on a
   timeline of frames, with plots such as each frame's draws; without the `tracy` feature they
   compile to nothing. The engine also measures every frame itself, always: its time on the main
@@ -411,8 +425,9 @@ so apps and games never see their types.
 An app is a stack of layers, which its `main` describes on `App`: layers, then overlays above
 them. Each layer attaches when the app starts and detaches when it ends, ticks with the
 simulation, as [ECS](#ecs) describes, updates every frame with the time since the last, for what's
-presented, handles events and draws UI. Frames pause while the main window is minimized, and the
-first update after it's restored is given no time, rather than the length of the pause. An event
+presented, handles events and draws UI. Frames pause while the main window is minimized, and on
+Windows while the window menu that the UI's title bar opens is open, which the OS runs in a loop
+of its own; the first update after either gets no time, rather than the pause's length. An event
 goes down the stack from the top overlay until a layer handles it, but for a key's or a button's
 release, a gamepad's stick or trigger back at rest and the loss of focus, which go to every layer,
 so that none is left holding what it saw pressed; a stick or a trigger that a layer handles away
@@ -440,8 +455,9 @@ beside the executable; headless runs neither read nor write it.
 The torn-off windows are egui's immediate viewports: egui runs each one's pass inside the main
 window's, and the main window's frame renders them all. Only the main window's swapchain paces
 the render thread, and the frames with it; another with no image free skips the frame. Their
-events go to egui, never to the layers. On Wayland, where windows can't be placed, groups float
-over the main window instead.
+events go to egui, never to the layers. On Wayland, where windows can't be placed, and for the
+rest of a run once one can't open, groups float over the main window instead, and the saved
+layout keeps the places of those that had windows until the user moves or resizes them.
 
 Layers add menus through `Ui` too. The OS draws the windows' frames, and the menus get a bar of
 their own below its title bar, unless the app calls `App::custom_title_bar`, as tools do for the
@@ -522,8 +538,9 @@ their types, after what the layers drew, children where their ancestors carry th
 meshes whose shaders are opaque, whose depth hides what's behind them whatever order they draw
 in, by shader, then mesh, so that each mesh with each shader is one instanced draw, split only where
 a culling mesh's draws change between mirrored and not, and their z's never sort them; then what
-blends, back to front by their z's in the world, those at one z drawing sprites under meshes; each
-batch and each z in the order of their IDs, which overlapping entities keep as others come and go.
+blends, back to front by their z's in the world, -0.0 as 0.0, those at one z drawing sprites under
+meshes; each batch and each z in the order of their IDs, which overlapping entities keep as others
+come and go.
 World z orders what blends rightly as seen from in front of layers parallel to XY, as 2D cameras see
 them; from behind or the side, what blends draws in the wrong order among itself, though rightly
 against what's opaque. At one depth, an opaque mesh goes under what blends; a layer's opaque draws
@@ -566,12 +583,16 @@ blending into its pipeline: opaque, which writes its depth as well as testing it
 it returns, not multiplied into its color, which only tests it, so that what's behind it shows
 through.
 Vulkan checks nothing about a shader, so its interface, which `Shaders::add` describes, is
-trusted, and validation checks it in debug builds.
+trusted. Validation, in debug builds, checks its entry points, the features it needs and the
+resources it binds, but can't see the layouts of what it reads through addresses: a vertex or
+parameter struct that doesn't match its type draws garbage without a message.
 
 A game's texture is a PNG or a JPEG that the engine decodes as a layer adds it, to RGBA8 with
 colors sRGB-encoded and alpha not multiplied into them, as images store them, whatever color
 profile or gamma the file holds, as glTF requires; the next frame that renders copies it into GPU
-memory, where it stays, and shaders sample its colors decoded to linear. Texture coordinates run
+memory, where it stays, and shaders sample its colors decoded to linear. Its file is read as a
+regular file alone, 1 GiB at most, so that a FIFO or a device can neither hang the read nor fill
+memory, and a file its decoder panics on fails as one that doesn't decode. Texture coordinates run
 from (0, 0) at an image's top left, as glTF's do, and Vulkan samples rows stored top first that
 way, so images load as they're stored, without the flip OpenGL needs. A texture's handle is its
 index in the bindless set, which a draw's parameters carry as it is and the shader samples by.
@@ -593,7 +614,10 @@ copy), and the graphics queue copies buffers; otherwise the graphics queue copie
 start of the frame. Whichever way, the frame that takes them waits for their copies and draws
 them, and what staged them is freed once that frame has finished, so that adding assets holds no
 memory past their own. The UI's texture changes, small patches it draws at once, and each frame's
-own data go through the frame's memory instead.
+own data go through the frame's memory instead. egui is told that a texture's side is at most 8,192
+pixels, which every Vulkan 1.4 device takes, and an image of no pixels, or one past that, which
+egui hands on in release builds, makes no texture, so that what samples it draws nothing, the
+second with a warning (`renderer.bad_texture`).
 
 A camera is a position, a rotation and a projection: orthographic, as 2D games use, seeing as
 much of the world from bottom to top as the game sets, and as much across as the view's aspect
@@ -636,7 +660,11 @@ parent's space, and a child for each primitive of a mesh with several, since an 
 whose public calls panic on some malformed files. Reading checks all that the default scene draws
 before anything is added, refusing glTF the engine doesn't draw with `engine.unsupported_model` and
 what isn't glTF with `engine.bad_model`, so that a model adds all of itself or nothing, and it
-parses numbers to the nearest float in every build, since transforms reach the world's hash. Until
+parses numbers to the nearest float in every build, since transforms reach the world's hash. It
+reads files in the model's folder alone, refusing a URI that's neither a data URI nor a relative
+path without a `..`, and reads no further into each than it needs; and it counts what it holds
+as it reads, its buffers, decoded images, vertices and nodes, refusing a model past 4 GiB with
+`engine.unsupported_model`, so that a small file naming its data many times can't fill memory. Until
 Phase 6 lights them, models draw unlit, their base color alone, as KHR_materials_unlit has it,
 through the engine's model shader in three forms, each added the first time a model needs it:
 opaque, which keeps early depth testing; masked, which discards what's below its cutoff; and
@@ -650,9 +678,11 @@ the frame copies the run's transforms and its parameters into its memory, each i
 own, which shaders read by the instance's index. A change of texture is a change of parameters,
 which bindless textures make free, so 100,000 sprites take a handful of draws; shaders index
 their textures through `NonUniformResourceIndex`, since the instances of a draw can carry
-different ones. Nothing caps a run: the frame's memory grows to hold it, where a renderer with a
-buffer of fixed size would draw what it holds and start another. The renderer counts each frame's
-draws, instances and triangles; the Performance panel shows them and `engine.perf` logs their peaks.
+different ones, and the engine decorates as non-uniform the sampled images slangc makes of them,
+as Vulkan requires and slangc before Slang 2026.11 doesn't. Nothing caps a run: the frame's memory
+grows to hold it, where a renderer with a buffer of fixed size would draw what it holds and start
+another. The renderer counts each frame's draws, instances and triangles; the Performance panel
+shows them and `engine.perf` logs their peaks.
 
 An error while rendering ends the renderer, since a failed frame can leave meshes and textures
 half copied to the GPU.

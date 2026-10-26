@@ -18,6 +18,8 @@ pub(crate) struct Buffer {
     size: u64,
     /// Where shaders find it, if its usage includes `SHADER_DEVICE_ADDRESS`; 0 otherwise.
     address: vk::DeviceAddress,
+    /// Its debug name, which its errors name it by.
+    name: String,
 }
 
 impl Buffer {
@@ -33,7 +35,7 @@ impl Buffer {
             .size(size)
             .usage(usage)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
-        let (raw, allocation) = device.allocator().create_buffer(&info, memory)?;
+        let (raw, allocation) = device.allocator().create_buffer(&info, memory, name)?;
         let address = if usage.contains(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS) {
             let info = vk::BufferDeviceAddressInfo::default().buffer(raw);
             // SAFETY: the buffer is live, bound to memory, and made for device addresses.
@@ -49,6 +51,7 @@ impl Buffer {
             allocation: Some(allocation),
             size,
             address,
+            name: name.to_owned(),
         })
     }
 
@@ -96,7 +99,7 @@ impl Buffer {
 
     /// Makes the CPU's writes visible to the GPU.
     pub(crate) fn flush(&self) -> Result<()> {
-        self.device.allocator().flush(self.allocation())
+        self.device.allocator().flush(self.allocation(), &self.name)
     }
 
     /// Copies the whole buffer out, once the GPU has finished writing it.
@@ -107,7 +110,9 @@ impl Buffer {
     pub(crate) fn read(&self) -> Result<Vec<u8>> {
         let mapped = self.allocation().mapped();
         assert!(!mapped.is_null(), "only mapped buffers can be read");
-        self.device.allocator().invalidate(self.allocation())?;
+        self.device
+            .allocator()
+            .invalidate(self.allocation(), &self.name)?;
         // SAFETY: the mapping covers the whole buffer, and the GPU's writes are visible.
         Ok(unsafe { std::slice::from_raw_parts(mapped, self.size as usize) }.to_vec())
     }
@@ -162,6 +167,11 @@ impl GpuBuffer {
 
     pub(crate) fn raw(&self) -> vk::Buffer {
         self.buffer.raw()
+    }
+
+    /// The handle of the device that made it.
+    pub(crate) fn device(&self) -> vk::Device {
+        self.buffer.device.handle()
     }
 
     pub(crate) fn written(&self) -> bool {

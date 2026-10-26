@@ -44,6 +44,7 @@ pub struct Instance {
 pub struct Validation {
     messages: Arc<AtomicU32>,
     enabled: bool,
+    synchronization: bool,
 }
 
 impl Validation {
@@ -56,6 +57,12 @@ impl Validation {
     /// asked for but the layer isn't installed.
     pub fn enabled(&self) -> bool {
         self.enabled
+    }
+
+    /// Whether the validation layer validated synchronization too. It didn't when the layer is too
+    /// old to take settings (`VK_EXT_layer_settings`), or validation is off.
+    pub fn synchronization(&self) -> bool {
+        self.synchronization
     }
 }
 
@@ -76,13 +83,20 @@ impl Instance {
             (
                 entry
                     .try_enumerate_instance_version()
-                    .map_err(|e| vk_error("vkEnumerateInstanceVersion", e))?,
-                entry
-                    .enumerate_instance_layer_properties()
-                    .map_err(|e| vk_error("vkEnumerateInstanceLayerProperties", e))?,
+                    .map_err(|e| vk_error("vkEnumerateInstanceVersion", "the Vulkan loader", e))?,
+                entry.enumerate_instance_layer_properties().map_err(|e| {
+                    vk_error(
+                        "vkEnumerateInstanceLayerProperties",
+                        "the loader's layers",
+                        e,
+                    )
+                })?,
                 entry
                     .enumerate_instance_extension_properties(None)
-                    .map_err(|e| vk_error("vkEnumerateInstanceExtensionProperties", e))?,
+                    .map_err(|e| {
+                        let subject = "the loader's extensions";
+                        vk_error("vkEnumerateInstanceExtensionProperties", subject, e)
+                    })?,
             )
         };
         trace!(
@@ -115,6 +129,14 @@ impl Instance {
                         extension.extension_name_as_c_str() == Ok(vk::EXT_LAYER_SETTINGS_NAME)
                     })
                 });
+        if validating && !layer_settings {
+            warn!(
+                code = "gpu.no_sync_validation",
+                layer = "VK_LAYER_KHRONOS_validation",
+                extension = "VK_EXT_layer_settings",
+                "Validation is on, but its layer takes no settings, so synchronization isn't validated; install a newer Vulkan SDK"
+            );
+        }
 
         // Not VK_KHR_portability_enumeration, though ash's examples enable it on macOS:
         // KosmicKrisp needs no portability extensions, and leaving it off keeps MoltenVK out of
@@ -130,8 +152,11 @@ impl Instance {
             let display = window.display_handle().map_err(|error| {
                 Error::new("gpu.window", "can't get the window's display handle").with_source(error)
             })?;
-            let required = ash_window::enumerate_required_extensions(display.as_raw())
-                .map_err(|e| vk_error("listing the window system's Vulkan extensions", e))?;
+            let required =
+                ash_window::enumerate_required_extensions(display.as_raw()).map_err(|e| {
+                    let call = "ash_window::enumerate_required_extensions";
+                    vk_error(call, "the window's display", e)
+                })?;
             // SAFETY: ash-window returns pointers to its static, null-terminated extension names.
             enabled.extend(required.iter().map(|&name| unsafe { CStr::from_ptr(name) }));
         }
@@ -162,6 +187,7 @@ impl Instance {
         let validation = Validation {
             messages: Arc::default(),
             enabled: validating,
+            synchronization: layer_settings,
         };
         // Reports what goes wrong while the instance is created and destroyed.
         let mut startup_messenger = messenger_info(&validation);
@@ -178,8 +204,19 @@ impl Instance {
             }
         }
         // SAFETY: every pointer in the create info refers to locals that outlive the call.
-        let raw = unsafe { entry.create_instance(&create_info, None) }
-            .map_err(|e| vk_error("vkCreateInstance", e))?;
+        let raw = unsafe { entry.create_instance(&create_info, None) }.map_err(|e| {
+            let layers = if validating {
+                "the validation layer"
+            } else {
+                "no layers"
+            };
+            let subject = format_args!(
+                "app {:?}'s instance, with extensions {} and {layers}",
+                desc.app_name,
+                names(enabled.iter().copied())
+            );
+            vk_error("vkCreateInstance", subject, e)
+        })?;
 
         let mut instance = Self {
             surface_fn: desc
@@ -198,7 +235,13 @@ impl Instance {
                 debug_utils
                     .create_debug_utils_messenger(&messenger_info(&instance.validation), None)
             }
-            .map_err(|e| vk_error("vkCreateDebugUtilsMessengerEXT", e))?;
+            .map_err(|e| {
+                vk_error(
+                    "vkCreateDebugUtilsMessengerEXT",
+                    "the validation messenger",
+                    e,
+                )
+            })?;
         }
         info!(
             loader = %Version(loader.unwrap_or(vk::API_VERSION_1_0)),

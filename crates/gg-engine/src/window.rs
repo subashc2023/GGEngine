@@ -14,7 +14,7 @@ use gg_core::{Error, Result};
 use gg_renderer::Renderer;
 use tracing::{debug, info, trace};
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize, Position};
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
@@ -233,16 +233,10 @@ impl Handler<'_> {
             (windows, close) = viewports.end_frame(&self.egui, egui_winit, outputs, renderer);
             hand_off(render, &mut self.cx, self.dock.central(), ui, windows);
         }
-        let ppp = egui_winit::pixels_per_point(&self.egui, window);
-        if let Some(pos) = self.dock.take_window_menu() {
-            window.show_window_menu(PhysicalPosition::new(pos.x * ppp, pos.y * ppp));
-        }
         #[cfg(target_os = "windows")]
         if let Some(frame) = &self.frame {
+            let ppp = egui_winit::pixels_per_point(&self.egui, window);
             frame.set_caption(self.dock.caption(), ppp);
-            if let Some(pos) = frame.take_window_menu() {
-                window.show_window_menu(pos);
-            }
         }
         // egui's requests of the main window, such as the cursor to show, which don't wait for
         // the frame to render.
@@ -258,6 +252,32 @@ impl Handler<'_> {
         }
         if close {
             self.close(event_loop);
+        }
+    }
+
+    /// Opens the OS's window menu where the title bar was right-clicked, if it was since this last
+    /// ran, between frames rather than in one. On Windows the menu runs a loop of its own until it
+    /// closes, which passes on no redraws, so frames pause meanwhile: the clock restarts as the
+    /// menu closes, so that neither the frame before nor the update after counts the pause.
+    /// Wayland's compositor shows the menu while frames go on.
+    fn show_window_menu(&mut self) {
+        let Some(window) = &self.window else {
+            return;
+        };
+        let ppp = egui_winit::pixels_per_point(&self.egui, window);
+        let at = (self.dock.take_window_menu())
+            .map(|pos| Position::from(PhysicalPosition::new(pos.x * ppp, pos.y * ppp)));
+        // In Windows' frame, the title bar's free space is the OS's, whose right-click the frame
+        // keeps.
+        #[cfg(target_os = "windows")]
+        let at = (self.frame.as_ref())
+            .and_then(Frame::take_window_menu)
+            .map(Position::from)
+            .or(at);
+        if let Some(at) = at {
+            window.show_window_menu(at);
+            #[cfg(target_os = "windows")]
+            self.clock.resume();
         }
     }
 
@@ -394,6 +414,7 @@ impl ApplicationHandler for Handler<'_> {
                 // restores it, a redraw comes before the resize that ends the pause.
                 if !self.minimized {
                     self.frame(event_loop);
+                    self.show_window_menu();
                 }
                 // Windows doesn't call `about_to_wait` while it moves or resizes one of the app's
                 // windows, in a loop of its own, so each frame asks for the next. winit calls

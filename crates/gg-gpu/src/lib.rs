@@ -62,9 +62,9 @@ const DEPTH_RANGE: vk::ImageSubresourceRange = vk::ImageSubresourceRange {
     ..COLOR_RANGE
 };
 
-/// The engine error for a failed Vulkan call, with codes of their own for the failures callers
-/// react to.
-fn vk_error(call: &str, result: vk::Result) -> Error {
+/// The engine error for a failed Vulkan call made for `subject`: the object it's about, by its
+/// debug name, and what was asked of it. The failures callers react to have codes of their own.
+fn vk_error(call: &str, subject: impl fmt::Display, result: vk::Result) -> Error {
     let code = match result {
         vk::Result::ERROR_DEVICE_LOST => "gpu.device_lost",
         vk::Result::ERROR_OUT_OF_HOST_MEMORY | vk::Result::ERROR_OUT_OF_DEVICE_MEMORY => {
@@ -73,7 +73,8 @@ fn vk_error(call: &str, result: vk::Result) -> Error {
         vk::Result::ERROR_SURFACE_LOST_KHR => "gpu.surface_lost",
         _ => "gpu.vulkan",
     };
-    Error::new(code, format!("{call} failed with {result:?}")).with_source(result)
+    let message = format!("{call} failed with {result:?} for {subject}");
+    Error::new(code, message).with_source(result)
 }
 
 /// Shows a packed Vulkan version as `1.4.341`.
