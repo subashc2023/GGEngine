@@ -41,7 +41,7 @@ pub(crate) fn load_image(name: &str, path: &Path) -> Result<Image> {
     };
     // A byte past the most an image's file holds, so that a longer one fails to decode.
     let bytes = read_file(path, MAX_FILE + 1)
-        .map_err(|error| bad(format!("can't be read: {error}")).with_source(error))?;
+        .map_err(|error| bad("can't be read".to_owned()).with_source(error))?;
     decode(&bytes).map_err(|problem| bad(format!("doesn't decode as a PNG or a JPEG: {problem}")))
 }
 
@@ -295,6 +295,10 @@ mod tests {
                 "{message}"
             );
         }
+        // Why it can't be read, once: as what caused the error, and not in its message too.
+        let error = load_image("checkerboard", missing).expect_err("no image");
+        let shown = format!("{error:#}");
+        assert_eq!(shown.matches("(os error").count(), 1, "{shown}");
     }
 
     /// A 16x16 baseline JPEG, as Windows' encoder writes one at quality 100, of four 8x8 quadrants

@@ -328,7 +328,7 @@ fn save_grid(world: &World) -> Result<(), Error> {
     let path = scene("grid.ron");
     let text = world.save_scene(&grid(world))?;
     let error = |e: io::Error| {
-        let message = format!("can't save the grid to {}: {e}", path.display());
+        let message = format!("can't save the grid to {}", path.display());
         Error::new("sandbox.grid_file", message).with_source(e)
     };
     let temporary = path.with_extension("ron.new");

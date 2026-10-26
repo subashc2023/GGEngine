@@ -115,19 +115,12 @@ pub(crate) fn read(
     let model = Model { name, path };
     // As far as a GLB's header can say it reaches, past which a GLB holds nothing, and a .gltf's
     // JSON, cut short, doesn't parse.
-    let file = read_file(path, u32::MAX.into()).map_err(|error| {
-        model
-            .bad(format!("can't be read: {error}"))
-            .with_source(error)
-    })?;
+    let file = read_file(path, u32::MAX.into())
+        .map_err(|error| model.bad("can't be read").with_source(error))?;
     let (json, bin) = container(model, &file)?;
     // A byte-order mark, which JSON may start with.
     let json = json.strip_prefix(b"\xef\xbb\xbf").unwrap_or(json);
-    let not_gltf = |error: serde_json::Error| {
-        model
-            .bad(format!("isn't glTF's JSON: {error}"))
-            .with_source(error)
-    };
+    let not_gltf = |error: serde_json::Error| model.bad("isn't glTF's JSON").with_source(error);
     // The version first, since a file of another version may have its other fields of other types.
     let versioned: json::Versioned = serde_json::from_slice(json).map_err(not_gltf)?;
     check_version(model, &versioned.asset)?;
@@ -954,10 +947,7 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
         let file = model.path.parent().unwrap_or(Path::new("")).join(path);
         (self.read_file)(&file, most).map_err(|error| {
             model
-                .bad(format!(
-                    "{what}'s file {} can't be read: {error}",
-                    file.display()
-                ))
+                .bad(format!("{what}'s file {} can't be read", file.display()))
                 .with_source(error)
         })
     }

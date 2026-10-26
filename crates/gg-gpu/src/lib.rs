@@ -74,8 +74,10 @@ fn vk_error(call: &str, subject: impl fmt::Display, result: vk::Result) -> Error
         vk::Result::ERROR_SURFACE_LOST_KHR => "gpu.surface_lost",
         _ => "gpu.vulkan",
     };
+    // The result by its name alone, not as the error's source too: ash 0.38 describes Vulkan 1.0's
+    // results and ERROR_UNKNOWN alone, and names the rest, which would then show twice.
     let message = format!("{call} failed with {result:?} for {subject}");
-    Error::new(code, message).with_source(result)
+    Error::new(code, message)
 }
 
 /// Shows a packed Vulkan version as `1.4.341`.

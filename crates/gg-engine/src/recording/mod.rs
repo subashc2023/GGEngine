@@ -80,7 +80,7 @@ impl Recorder {
     /// Fails with `record.file` if it can't.
     pub(crate) fn create(path: &Path, app: &'static str) -> Result<Self> {
         let file = File::create(path).map_err(|error| {
-            let message = format!("can't create the recording {}: {error}", path.display());
+            let message = format!("can't create the recording {}", path.display());
             Error::new("record.file", message).with_source(error)
         })?;
         Ok(Self {
@@ -595,7 +595,7 @@ impl Replay {
         let mut stdout = io::stdout().lock();
         let written = stdout.write_all(self.world().dump().as_bytes());
         written.and_then(|()| stdout.flush()).map_err(|error| {
-            let message = format!("can't write the world to stdout: {error}");
+            let message = "can't write the world to stdout";
             Error::new("replay.stdout", message).with_source(error)
         })
     }
@@ -620,7 +620,7 @@ pub(crate) fn replay(app: App, path: &Path, dump: Option<Dump>) -> ExitCode {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) => {
-            let message = format!("can't read the recording: {error}");
+            let message = "can't read the recording";
             return failed(Error::new("replay.file", message).with_source(error), "");
         }
     };
@@ -633,7 +633,7 @@ pub(crate) fn replay(app: App, path: &Path, dump: Option<Dump>) -> ExitCode {
     let text = match std::str::from_utf8(&bytes[..whole]) {
         Ok(text) => text,
         Err(error) => {
-            let message = format!("the recording isn't UTF-8 text: {error}");
+            let message = "the recording isn't UTF-8 text";
             return failed(Error::new("replay.file", message).with_source(error), "");
         }
     };

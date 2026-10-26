@@ -19,20 +19,13 @@ pub(crate) fn path(app: &str, os: &str, var: impl Fn(&str) -> Option<OsString>) 
 /// Reads the layout saved at `path`: the empty layout if there's no file, and an
 /// `engine.dock_layout` error if it can't be read or doesn't hold a layout.
 pub(crate) fn load(path: &Path) -> Result<Layout> {
-    let error = |message: String| {
-        Error::new(
-            "engine.dock_layout",
-            format!(
-                "can't read the dock's layout from {}: {message}",
-                path.display()
-            ),
-        )
-    };
+    let message = format!("can't read the dock's layout from {}", path.display());
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Layout::new()),
-        Err(e) => return Err(error(e.to_string()).with_source(e)),
+        Err(e) => return Err(Error::new("engine.dock_layout", message).with_source(e)),
     };
+    let error = |problem: String| Error::new("engine.dock_layout", format!("{message}: {problem}"));
     let mut layout: Layout = ron::from_str(&text).map_err(|e| error(e.to_string()))?;
     layout.check().map_err(error)?;
     layout.prune();
@@ -44,11 +37,8 @@ pub(crate) fn load(path: &Path) -> Result<Layout> {
 /// last layout whole.
 pub(crate) fn save(path: &Path, layout: &Layout) -> Result<()> {
     let error = |e: io::Error| {
-        Error::new(
-            "engine.dock_layout",
-            format!("can't save the dock's layout to {}: {e}", path.display()),
-        )
-        .with_source(e)
+        let message = format!("can't save the dock's layout to {}", path.display());
+        Error::new("engine.dock_layout", message).with_source(e)
     };
     let text = ron::ser::to_string_pretty(layout, ron::ser::PrettyConfig::default())
         .map_err(|e| error(io::Error::other(e)))?;
