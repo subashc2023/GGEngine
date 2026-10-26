@@ -608,7 +608,10 @@ does one changed within 2 s before it, since file systems' times can trail the c
 that holds for a look compiles the shader again, off the main thread, and the next frame the main
 thread hands the renderer draws with it; the old pipeline retires until the GPU is done with it.
 A change that doesn't compile, or breaks the contract, warns, and the shader keeps drawing as it
-did. The engine's own shaders don't reload.
+did. A compile that fails lists none of the files it read, so until one succeeds, a change to any
+file in the directories its files are in compiles it again too, such as an include it couldn't
+find, made, or one it found broken, fixed; one that fails as the last did, from the same files,
+doesn't warn again. The engine's own shaders don't reload.
 
 Every pipeline goes through a pipeline cache, which windowed runs load from the OS's per-user
 directory for caches as the renderer starts, and save as it ends. Pipelines an earlier run made

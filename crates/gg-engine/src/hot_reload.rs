@@ -2,9 +2,12 @@
 //! `gg-watch`, watches the files each shader read, its own and those it includes, and compiles it
 //! again as they change; the main thread puts what compiles in place of the shader, which the
 //! next frame it hands the renderer draws with. A change that doesn't compile, or breaks the
-//! contract that `Shaders::add` describes, warns, and the shader keeps drawing as it did.
+//! contract that `Shaders::add` describes, warns, and the shader keeps drawing as it did; until
+//! one compiles, a change to any file beside its files compiles it again too, such as an include
+//! it couldn't find, since a compile that fails lists none of the files it read.
 
 use std::fs;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
@@ -12,7 +15,7 @@ use std::time::{Duration, SystemTime};
 
 use gg_core::{Error, Result};
 use gg_renderer::{Compiled, ShaderSource, Shaders};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// How long the thread waits between looks at the files. A change compiles on the look after the
 /// one that sees it, in about a tenth of a second more.
@@ -93,9 +96,12 @@ fn watch(sources: &Receiver<ShaderSource>, back: &Sender<Compiled>) {
 }
 
 /// Compiles `source` again from its files, noting in `files` those it lists, and sends it `back`
-/// if it compiles and keeps to the contract; or says why it doesn't.
+/// if it compiles and keeps to the contract; or says why it doesn't, unless it said so last time,
+/// from the same files.
 fn compile(source: &ShaderSource, files: &mut Files, back: &Sender<Compiled>) {
     let path = source.path().display();
+    // As the compile begins, so that a change while it fails compiles it again.
+    let dirs = files.dirs(stamp);
     match source.compile() {
         Ok(compiled) => {
             files.compiled(compiled.files(), stamp);
@@ -103,12 +109,20 @@ fn compile(source: &ShaderSource, files: &mut Files, back: &Sender<Compiled>) {
             // Unless the main thread's side has dropped, which ends the thread next.
             let _ = back.send(compiled);
         }
-        Err(error) => warn!(
-            code = error.code(),
-            shader = source.name(),
-            path = %path,
-            "{error:#}; the shader keeps drawing as it did"
-        ),
+        Err(error) => {
+            let why = format!("{error:#}");
+            if files.failed(dirs, &why) {
+                warn!(
+                    code = error.code(),
+                    shader = source.name(),
+                    path = %path,
+                    "{why}; the shader keeps drawing as it did"
+                );
+            } else {
+                let (code, shader) = (error.code(), source.name());
+                debug!(code, shader, path = %path, "Shader fails as it did");
+            }
+        }
     }
 }
 
@@ -116,20 +130,57 @@ fn compile(source: &ShaderSource, files: &mut Files, back: &Sender<Compiled>) {
 /// can't be read, as while an editor replaces it.
 type Stamp = Option<(SystemTime, u64)>;
 
-/// The file at `path`'s stamp, as the file system has it.
+/// The file at `path`'s stamp, as the file system has it. A directory's is when the latest of its
+/// entries changed, and a digest of their names and stamps for its length, which changes as a
+/// file in it is made, removed or changed, but not as one in a directory within it is changed.
 fn stamp(path: &Path) -> Stamp {
     let metadata = fs::metadata(path).ok()?;
+    if metadata.is_dir() {
+        return entries(path);
+    }
     Some((metadata.modified().ok()?, metadata.len()))
+}
+
+/// The stamp of the directory at `dir`, from its entries, which it reads each time: a ceiling in a
+/// directory of many files, which the OS's notifications of changes would lift.
+fn entries(dir: &Path) -> Stamp {
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(dir).ok()? {
+        // One removed as it's listed is gone.
+        let Ok(entry) = entry else { continue };
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        entries.push((entry.file_name(), modified, metadata.len()));
+    }
+    // Directories list their entries in no particular order.
+    entries.sort_unstable();
+    let mut digest = DefaultHasher::new();
+    entries.hash(&mut digest);
+    let latest = entries.iter().map(|&(_, modified, _)| modified).max();
+    Some((latest.unwrap_or(SystemTime::UNIX_EPOCH), digest.finish()))
 }
 
 /// The files a shader read, each with its stamp as the shader last compiled from it, which the
 /// thread looks at to see them change.
 struct Files {
-    /// Its own first, then those it includes, as its last compile listed them.
+    /// Its own first, then those it includes, as its add or its last compile that succeeded listed
+    /// them.
     files: Vec<(PathBuf, Stamp)>,
-    /// The files' stamps on the last look, where they differed from those it compiled from: a
-    /// change, which compiles once it holds for a look, so that an editor's partial writes and
-    /// atomic renames settle first.
+    /// While its last compile failed, the directories those files are in, with their stamps as it
+    /// began: a compile that fails lists none of the files it read, so a change to any file in
+    /// them compiles the shader again, such as one it includes that it couldn't find, or found
+    /// broken.
+    dirs: Vec<(PathBuf, Stamp)>,
+    /// Why its last compile failed, and its files' stamps as it began, so that one that fails the
+    /// same way from the same files isn't news.
+    failure: Option<(String, Vec<Stamp>)>,
+    /// The stamps on the last look, its files' and then its directories', where they differed
+    /// from those it compiled from: a change, which compiles once it holds for a look, so that an
+    /// editor's partial writes and atomic renames settle first.
     changing: Option<Vec<Stamp>>,
 }
 
@@ -155,24 +206,29 @@ impl Files {
         }
         Self {
             files,
+            dirs: Vec::new(),
+            failure: None,
             changing: None,
         }
     }
 
-    /// Looks at the files, as `stamp` finds them, and returns whether the shader is to compile
-    /// again: once they differ from what it last compiled from, and are as the look before found
-    /// them. Its stamps are then the files', as the compile will find them, so that a change while
-    /// it compiles, or one it read half done, compiles again; and a compile that fails waits for
-    /// the next change. While the shader's own file is missing, it waits for it.
+    /// Looks at the files, and the directories while its last compile failed, as `stamp` finds
+    /// them, and returns whether the shader is to compile again: once they differ from what it
+    /// last compiled from, and are as the look before found them. Its stamps are then theirs, as
+    /// the compile will find them, so that a change while it compiles, or one it read half done,
+    /// compiles again; and a compile that fails waits for the next change. While the shader's own
+    /// file is missing, it waits for it.
     fn look(&mut self, stamp: impl Fn(&Path) -> Stamp) -> bool {
-        let now: Vec<Stamp> = self.files.iter().map(|(path, _)| stamp(path)).collect();
-        if (self.files.iter().zip(&now)).all(|((_, then), now)| then == now) {
+        let watched = || self.files.iter().chain(&self.dirs);
+        let now: Vec<Stamp> = watched().map(|(path, _)| stamp(path)).collect();
+        if watched().zip(&now).all(|((_, then), now)| then == now) {
             self.changing = None;
             return false;
         }
         let held = self.changing.as_ref() == Some(&now) && now[0].is_some();
         if held {
-            for ((_, then), now) in self.files.iter_mut().zip(now) {
+            let stamped = self.files.iter_mut().chain(&mut self.dirs);
+            for ((_, then), now) in stamped.zip(now) {
                 *then = now;
             }
             self.changing = None;
@@ -182,9 +238,10 @@ impl Files {
         held
     }
 
-    /// Takes the files a compile listed, `listed`: those watched already keep their stamps, from
-    /// before the compile, and the rest take `stamp`'s as it ends. One the shader newly includes
-    /// that changes while it compiles waits for the next change.
+    /// Takes the files a compile that succeeded listed, `listed`: those watched already keep their
+    /// stamps, from before the compile, and the rest take `stamp`'s as it ends. One the shader
+    /// newly includes that changes while it compiles waits for the next change. The directories
+    /// are watched no longer.
     fn compiled(&mut self, listed: &[PathBuf], stamp: impl Fn(&Path) -> Stamp) {
         let files = (listed.iter())
             .map(|path| {
@@ -194,6 +251,31 @@ impl Files {
             })
             .collect();
         self.files = files;
+        self.dirs.clear();
+        self.failure = None;
+    }
+
+    /// The directories its files are in, each once, as `stamp` finds them now.
+    fn dirs(&self, stamp: impl Fn(&Path) -> Stamp) -> Vec<(PathBuf, Stamp)> {
+        let mut dirs: Vec<(PathBuf, Stamp)> = Vec::new();
+        for dir in self.files.iter().filter_map(|(file, _)| file.parent()) {
+            if dirs.iter().all(|(seen, _)| seen != dir) {
+                dirs.push((dir.to_owned(), stamp(dir)));
+            }
+        }
+        dirs
+    }
+
+    /// Notes that a compile failed, as `why` says, its files' directories having been `dirs` as
+    /// it began, which it watches until one succeeds. Returns whether that's news: it isn't if
+    /// the last compile failed the same way from the same files, as when a change beside them
+    /// alone set this one off.
+    fn failed(&mut self, dirs: Vec<(PathBuf, Stamp)>, why: &str) -> bool {
+        self.dirs = dirs;
+        let read: Vec<Stamp> = self.files.iter().map(|&(_, stamped)| stamped).collect();
+        let news = (self.failure.as_ref()).is_none_or(|(was, then)| was != why || *then != read);
+        self.failure = Some((why.to_owned(), read));
+        news
     }
 }
 
@@ -328,6 +410,53 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_compile_watches_its_files_directories_until_one_succeeds() {
+        let disk = Disk::default();
+        disk.set("shaders/own.slang", Some(1));
+        disk.set("shaders/shared.slang", Some(1));
+        disk.set("shaders", Some(1));
+        let listed = ["shaders/own.slang", "shaders/shared.slang"].map(PathBuf::from);
+        let mut files = Files::new(&listed, SystemTime::UNIX_EPOCH + MARGIN * 2, disk.stamp());
+        // While it compiles, a change beside its files isn't one.
+        disk.set("shaders", Some(2));
+        assert!(!files.look(disk.stamp()));
+        assert!(!files.look(disk.stamp()));
+
+        // An edit naming an include that isn't there, which fails.
+        disk.set("shaders/own.slang", Some(2));
+        assert!(!files.look(disk.stamp()));
+        assert!(files.look(disk.stamp()));
+        let dirs = files.dirs(disk.stamp());
+        assert!(files.failed(dirs, "no extra.slang"), "the first failure");
+        assert!(!files.look(disk.stamp()), "nothing changed since");
+
+        // The include made beside them, which the directory shows: it compiles again.
+        disk.set("shaders", Some(3));
+        assert!(!files.look(disk.stamp()));
+        assert!(files.look(disk.stamp()));
+        // Failing as it did, from the same files, isn't news; from a file changed since, it is.
+        let dirs = files.dirs(disk.stamp());
+        assert!(!files.failed(dirs, "no extra.slang"), "the same failure");
+        disk.set("shaders/own.slang", Some(3));
+        assert!(!files.look(disk.stamp()));
+        assert!(files.look(disk.stamp()));
+        let dirs = files.dirs(disk.stamp());
+        assert!(files.failed(dirs, "no extra.slang"), "from an edited file");
+
+        // Once one compiles, the directory is watched no longer.
+        disk.set("shaders", Some(4));
+        assert!(!files.look(disk.stamp()));
+        assert!(files.look(disk.stamp()));
+        disk.set("shaders/extra.slang", Some(1));
+        let mut listed = listed.to_vec();
+        listed.push(PathBuf::from("shaders/extra.slang"));
+        files.compiled(&listed, disk.stamp());
+        disk.set("shaders", Some(5));
+        assert!(!files.look(disk.stamp()));
+        assert!(!files.look(disk.stamp()));
+    }
+
+    #[test]
     fn edits_before_the_thread_looks_or_after_come_back_compiled() {
         let dir = std::env::temp_dir().join(format!("gg-watch-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -371,6 +500,62 @@ mod tests {
         assert_eq!(a.files().len(), 1, "{a:?}");
         shaders.replace(a);
         shaders.replace(b);
+        drop(sources);
+        thread.join().expect("the thread ends as its side drops");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The names of the files `compiled` read.
+    fn names(compiled: &Compiled) -> Vec<&str> {
+        (compiled.files().iter())
+            .filter_map(|file| file.file_name()?.to_str())
+            .collect()
+    }
+
+    #[test]
+    fn an_include_made_or_fixed_after_a_compile_failed_on_it_comes_back_compiled() {
+        let dir = std::env::temp_dir().join(format!("gg-watch-includes-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("a directory");
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/shaders/flat_color.slang");
+        let text = fs::read_to_string(fixture).expect("the fixture");
+        // Last changed an hour ago, so that it's added from its file as it is.
+        let path = dir.join("shader.slang");
+        fs::write(&path, &text).expect("the shader's file");
+        let an_hour_ago = SystemTime::now() - Duration::from_secs(60 * 60);
+        let file = fs::File::options().write(true).open(&path);
+        (file.and_then(|file| file.set_modified(an_hour_ago))).expect("its time");
+        let mut shaders = gg_renderer::Shaders::default();
+        let added = shaders.add::<[f32; 3], Vec4>("shader", &path, Blend::Opaque);
+        added.expect("a shader");
+
+        let (sources, to_watch) = mpsc::channel();
+        let (back, compiled) = mpsc::channel();
+        let thread = thread::spawn(move || watch(&to_watch, &back));
+        let source = shaders.sources()[0].clone();
+        sources.send(source).expect("the thread");
+        let a_while = Duration::from_secs(30);
+        let came_back = |what: &str| compiled.recv_timeout(a_while).expect(what);
+        // Long enough for a compile that fails to have failed, which sends nothing back.
+        let fails = || compiled.recv_timeout(LOOK * 15).is_err();
+
+        // An include it names that isn't there yet, made once the compile has failed.
+        fs::write(&path, format!("#include \"extra.slang\"\n{text}")).expect("an edit");
+        assert!(fails(), "it doesn't compile without its include");
+        fs::write(dir.join("extra.slang"), "static const float EXTRA = 1.0;\n").expect("one");
+        let extra = came_back("it compiles with its include made");
+        assert_eq!(names(&extra), ["shader.slang", "extra.slang"]);
+
+        // An include that's there but broken, fixed where it is once the compile has failed.
+        fs::write(dir.join("fix.slang"), "static const float FIX = ;\n").expect("one");
+        fs::write(&path, format!("#include \"fix.slang\"\n{text}")).expect("an edit");
+        assert!(fails(), "it doesn't compile with its include broken");
+        fs::write(dir.join("fix.slang"), "static const float FIX = 1.0;\n").expect("the fix");
+        let fixed = came_back("it compiles with its include fixed");
+        assert_eq!(names(&fixed), ["shader.slang", "fix.slang"]);
+
+        shaders.replace(extra);
+        shaders.replace(fixed);
         drop(sources);
         thread.join().expect("the thread ends as its side drops");
         let _ = fs::remove_dir_all(&dir);
