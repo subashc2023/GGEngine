@@ -272,8 +272,9 @@ impl Context {
     /// breaks the contract, warns, and the shader keeps drawing as it did.
     ///
     /// Fails with `renderer.bad_shader` and slangc's diagnostics if it doesn't compile, with
-    /// `renderer.shader_mismatch` and each way it breaks the contract if it breaks it, and with
-    /// `renderer.no_slangc` if slangc can't be run.
+    /// `renderer.shader_mismatch` and each way it breaks the contract if it breaks it, with
+    /// `renderer.shader_files` if what slangc wrote in the OS's temporary directory can't be read,
+    /// and with `renderer.no_slangc` if slangc can't be run.
     pub fn add_shader<V: NoUninit, P: NoUninit>(
         &mut self,
         name: &str,

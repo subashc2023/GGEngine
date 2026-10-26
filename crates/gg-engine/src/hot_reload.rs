@@ -18,6 +18,12 @@ use tracing::{info, warn};
 /// one that sees it, in about a tenth of a second more.
 const LOOK: Duration = Duration::from_millis(100);
 
+/// How long before the compile that added a shader its files must have last changed for it to
+/// have read them as they are: files' times can trail the clock that compile's start is read
+/// from, as Windows and Linux stamp them from a clock that moves a tick at a time, and FAT keeps
+/// them to 2 s. A file changed within it compiles the shader again, at worst for nothing.
+const MARGIN: Duration = Duration::from_secs(2);
+
 /// The thread, from the main thread's side. Dropping it ends the thread once a compile under way
 /// ends, without waiting for it: a compile can't be cut short, and a slangc that hangs would hang
 /// the run's end.
@@ -70,10 +76,7 @@ fn watch(sources: &Receiver<ShaderSource>, back: &Sender<Compiled>) {
     loop {
         match sources.recv_timeout(LOOK) {
             Ok(source) => {
-                let mut files = Files::new(source.path(), stamp);
-                // To learn the files it includes: the shader drawing is what was added, so this
-                // compile is dropped.
-                compile(&source, &mut files, None);
+                let files = Files::new(source.files(), source.compiled_at(), stamp);
                 watched.push((source, files));
                 continue;
             }
@@ -83,24 +86,22 @@ fn watch(sources: &Receiver<ShaderSource>, back: &Sender<Compiled>) {
         let _zone = gg_core::zone!("look at shaders' files");
         for (source, files) in &mut watched {
             if files.look(stamp) {
-                compile(source, files, Some(back));
+                compile(source, files, back);
             }
         }
     }
 }
 
-/// Compiles `source` again from its files, noting in `files` those it lists, and sends it `back`,
-/// if given, if it compiles and keeps to the contract; or says why it doesn't.
-fn compile(source: &ShaderSource, files: &mut Files, back: Option<&Sender<Compiled>>) {
+/// Compiles `source` again from its files, noting in `files` those it lists, and sends it `back`
+/// if it compiles and keeps to the contract; or says why it doesn't.
+fn compile(source: &ShaderSource, files: &mut Files, back: &Sender<Compiled>) {
     let path = source.path().display();
     match source.compile() {
         Ok(compiled) => {
             files.compiled(compiled.files(), stamp);
-            if let Some(back) = back {
-                info!(shader = source.name(), path = %path, "Shader reloaded");
-                // Unless the main thread's side has dropped, which ends the thread next.
-                let _ = back.send(compiled);
-            }
+            info!(shader = source.name(), path = %path, "Shader reloaded");
+            // Unless the main thread's side has dropped, which ends the thread next.
+            let _ = back.send(compiled);
         }
         Err(error) => warn!(
             code = error.code(),
@@ -133,11 +134,27 @@ struct Files {
 }
 
 impl Files {
-    /// The shader's own file at `path`, as `stamp` finds it now, before the compile that lists
-    /// the rest.
-    fn new(path: &Path, stamp: impl Fn(&Path) -> Stamp) -> Self {
+    /// The files `listed`, its own first, that a shader read as it was added, in a compile begun
+    /// at `compiled_at`, each with its stamp as `stamp` finds it now. That's what the shader
+    /// compiled from if each file last changed more than [`MARGIN`] before; if one changed since,
+    /// or about then, or is missing, the shader may be older than its files, and it starts with no
+    /// stamps, as if it had read no files, so that it compiles again once they hold for a look.
+    fn new(listed: &[PathBuf], compiled_at: SystemTime, stamp: impl Fn(&Path) -> Stamp) -> Self {
+        let mut files: Vec<(PathBuf, Stamp)> = (listed.iter())
+            .map(|path| (path.clone(), stamp(path)))
+            .collect();
+        let as_compiled = files.iter().all(|(_, stamped)| {
+            stamped.is_some_and(|(modified, _)| {
+                (compiled_at.duration_since(modified)).is_ok_and(|age| age > MARGIN)
+            })
+        });
+        if !as_compiled {
+            for (_, stamped) in &mut files {
+                *stamped = None;
+            }
+        }
         Self {
-            files: vec![(path.to_owned(), stamp(path))],
+            files,
             changing: None,
         }
     }
@@ -205,14 +222,13 @@ mod tests {
         }
     }
 
-    /// A shader whose own file, `own.slang`, includes `shared.slang`, both as version 1.
+    /// A shader whose own file, `own.slang`, includes `shared.slang`, both as version 1, which it
+    /// was added from, compiling well after they last changed.
     fn watched(disk: &Disk) -> Files {
         disk.set("own.slang", Some(1));
         disk.set("shared.slang", Some(1));
-        let mut files = Files::new(Path::new("own.slang"), disk.stamp());
         let listed = ["own.slang", "shared.slang"].map(PathBuf::from);
-        files.compiled(&listed, disk.stamp());
-        files
+        Files::new(&listed, SystemTime::UNIX_EPOCH + MARGIN * 2, disk.stamp())
     }
 
     #[test]
@@ -287,37 +303,74 @@ mod tests {
     }
 
     #[test]
-    fn an_edit_to_a_shaders_file_comes_back_compiled() {
+    fn a_shader_whose_files_changed_as_it_was_added_compiles_once_they_hold() {
+        let disk = Disk::default();
+        disk.set("own.slang", Some(1));
+        disk.set("shared.slang", Some(1));
+        let listed = ["own.slang", "shared.slang"].map(PathBuf::from);
+        // They last changed a moment before its compile began, by the file system's clock, which
+        // can trail the one the compile's start was read from: it may have read what was before.
+        let mut files = Files::new(&listed, SystemTime::UNIX_EPOCH + MARGIN / 2, disk.stamp());
+        assert!(!files.look(disk.stamp()), "a look for them to hold");
+        assert!(files.look(disk.stamp()), "held for a look");
+        assert!(!files.look(disk.stamp()), "compiled from as they are");
+
+        // Its own file gone by the time the thread looks, as while an editor replaces it: it waits
+        // for it.
+        disk.set("own.slang", None);
+        let mut files = Files::new(&listed, SystemTime::UNIX_EPOCH + MARGIN * 2, disk.stamp());
+        for _ in 0..3 {
+            assert!(!files.look(disk.stamp()), "its own file is missing");
+        }
+        disk.set("own.slang", Some(2));
+        assert!(!files.look(disk.stamp()));
+        assert!(files.look(disk.stamp()));
+    }
+
+    #[test]
+    fn edits_before_the_thread_looks_or_after_come_back_compiled() {
         let dir = std::env::temp_dir().join(format!("gg-watch-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("a directory");
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/shaders/flat_color.slang");
         let text = fs::read_to_string(fixture).expect("the fixture");
-        let path = dir.join("flat_color.slang");
-        fs::write(&path, &text).expect("the shader's file");
+        // Two shaders, whose files last changed an hour ago, so that each is added from its file
+        // as it is.
+        let an_hour_ago = SystemTime::now() - Duration::from_secs(60 * 60);
+        let paths = ["a.slang", "b.slang"].map(|file| dir.join(file));
         let mut shaders = gg_renderer::Shaders::default();
-        let flat = shaders.add::<[f32; 3], Vec4>("flat", &path, Blend::Opaque);
-        flat.expect("a shader");
+        for (name, path) in ["a", "b"].into_iter().zip(&paths) {
+            fs::write(path, &text).expect("a shader's file");
+            let file = fs::File::options().write(true).open(path);
+            (file.and_then(|file| file.set_modified(an_hour_ago))).expect("its time");
+            let added = shaders.add::<[f32; 3], Vec4>(name, path, Blend::Opaque);
+            added.expect("a shader");
+        }
+        let edit = |path: &Path, edit: u32| {
+            fs::write(path, format!("{text}\n// Edit {edit}.\n")).expect("an edit");
+        };
+        // b, edited once it's added but before the thread first looks at its file.
+        edit(&paths[1], 1);
 
         let (sources, to_watch) = mpsc::channel();
         let (back, compiled) = mpsc::channel();
         let thread = thread::spawn(move || watch(&to_watch, &back));
-        let source = shaders.sources()[0].clone();
-        sources.send(source).expect("the thread");
-        // Edited until an edit comes back, since one before the thread first looks at the file
-        // goes unseen: it's what the shader compiled from.
-        let mut came_back = None;
-        for edit in 0..40 {
-            fs::write(&path, format!("{text}\n// Edit {edit}.\n")).expect("an edit");
-            if let Ok(compiled) = compiled.recv_timeout(Duration::from_millis(500)) {
-                came_back = Some(compiled);
-                break;
-            }
+        for source in shaders.sources() {
+            sources.send(source.clone()).expect("the thread");
         }
-        let came_back = came_back.expect("an edit comes back compiled");
-        assert_eq!(came_back.source(), &shaders.sources()[0]);
-        assert_eq!(came_back.files().len(), 1, "{came_back:?}");
-        shaders.replace(came_back);
+        let a_while = Duration::from_secs(30);
+        let came_back = |what: &str| compiled.recv_timeout(a_while).expect(what);
+        let b = came_back("b comes back compiled");
+        assert_eq!(b.source(), &shaders.sources()[1]);
+        // a, as it was added, compiles only once it's edited.
+        let more = compiled.recv_timeout(LOOK * 5);
+        assert!(more.is_err(), "nothing else comes back");
+        edit(&paths[0], 2);
+        let a = came_back("a comes back compiled");
+        assert_eq!(a.source(), &shaders.sources()[0]);
+        assert_eq!(a.files().len(), 1, "{a:?}");
+        shaders.replace(a);
+        shaders.replace(b);
         drop(sources);
         thread.join().expect("the thread ends as its side drops");
         let _ = fs::remove_dir_all(&dir);

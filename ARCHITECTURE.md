@@ -602,11 +602,13 @@ size in another order, or of another kind, such as an integer read as a float, s
 without a message.
 
 In a development build's windowed run, a thread of its own watches the files each game's shader
-read, its own and those it includes as slangc lists them, by their times and lengths every tenth
-of a second. A change that holds for a look compiles the shader again, off the main thread, and the
-next frame the main thread hands the renderer draws with it; the old pipeline retires until the
-GPU is done with it. A change that doesn't compile, or breaks the contract, warns, and the shader
-keeps drawing as it did. The engine's own shaders don't reload.
+read as it was added, its own and those it includes as slangc lists them, by their times and
+lengths every tenth of a second. A file changed since that compile began counts as a change, as
+does one changed within 2 s before it, since file systems' times can trail the clock. A change
+that holds for a look compiles the shader again, off the main thread, and the next frame the main
+thread hands the renderer draws with it; the old pipeline retires until the GPU is done with it.
+A change that doesn't compile, or breaks the contract, warns, and the shader keeps drawing as it
+did. The engine's own shaders don't reload.
 
 Every pipeline goes through a pipeline cache, which windowed runs load from the OS's per-user
 directory for caches as the renderer starts, and save as it ends. Pipelines an earlier run made

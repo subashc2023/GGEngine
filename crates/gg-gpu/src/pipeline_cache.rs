@@ -2,7 +2,8 @@
 //! own that says which GPU and driver made it, and shows whether it was cut short or changed.
 //! Drivers check only their own header's GPU, if that, and needn't survive damaged data, so the
 //! header is checked before a driver sees anything; the driver's own is never read, since drivers
-//! differ in what they put there (lavapipe's says it's 32 bytes in data of 20). The layout follows
+//! differ in what they put there, and a driver from release to release: lavapipe's says it's 32
+//! bytes, in data of 32 in Mesa 25.0 and of 20 from 26.3 (Mesa's ec071eb2). The layout follows
 //! Arseny Kapoulkine's "Robust pipeline cache serialization" (zeux.io, 2019).
 
 use ash::vk;
@@ -120,7 +121,7 @@ mod tests {
 
     #[test]
     fn sealed_data_opens_to_the_drivers_whole() {
-        // lavapipe's, whose header says it's 32 bytes: the engine reads none of it.
+        // Mesa 26.3's lavapipe's, whose header says it's 32 bytes: the engine reads none of it.
         let payload = [32, 0, 0, 0, 1, 0, 0, 0, 5, 0, 1, 0, 0, 0, 0, 0, 9, 9, 9, 9];
         let data = seal(&GPU, &payload);
         assert_eq!(data.len(), HEADER + payload.len());

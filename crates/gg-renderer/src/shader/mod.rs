@@ -11,7 +11,7 @@ use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use bytemuck::NoUninit;
 use gg_core::{Error, Result};
@@ -171,9 +171,14 @@ impl Shaders {
     /// which way a matrix is laid out, or whether an index that can differ across a draw goes
     /// through `NonUniformResourceIndex`.
     ///
+    /// slangc writes the SPIR-V in the OS's temporary directory, with the list of the files the
+    /// shader read, its own and those it includes, which its [`ShaderSource`] keeps, with when the
+    /// compile began, for hot reload to compile it again as they change.
+    ///
     /// Fails with `renderer.bad_shader` and slangc's diagnostics if it doesn't compile, with
-    /// `renderer.shader_mismatch` and each way it breaks the contract if it breaks it, and with
-    /// `renderer.no_slangc` if slangc can't be run.
+    /// `renderer.shader_mismatch` and each way it breaks the contract if it breaks it, with
+    /// `renderer.shader_files` if what slangc wrote can't be read, and with `renderer.no_slangc`
+    /// if slangc can't be run.
     pub fn add<V: NoUninit, P: NoUninit>(
         &mut self,
         name: &str,
@@ -181,7 +186,8 @@ impl Shaders {
         blend: Blend,
     ) -> Result<Shader<V, P>> {
         let types = Types::of::<V, P>();
-        let spirv = compile(Path::new(SLANGC), name, path, None)?;
+        let compiled_at = SystemTime::now();
+        let (spirv, files) = compile(Path::new(SLANGC), name, path)?;
         check(name, path, &spirv, &types)?;
         let index = self.push(name, spirv, blend, types);
         self.sources.push(ShaderSource {
@@ -190,6 +196,8 @@ impl Shaders {
             path: path.to_owned(),
             blend,
             types,
+            files,
+            compiled_at,
         });
         Ok(Shader::new(index, writes_depth(blend)))
     }
@@ -292,6 +300,8 @@ pub struct ShaderSource {
     path: PathBuf,
     blend: Blend,
     types: Types,
+    files: Vec<PathBuf>,
+    compiled_at: SystemTime,
 }
 
 impl ShaderSource {
@@ -305,16 +315,24 @@ impl ShaderSource {
         &self.path
     }
 
+    /// The files it read as it was added: its own first, then those it includes, as slangc found
+    /// them.
+    pub fn files(&self) -> &[PathBuf] {
+        &self.files
+    }
+
+    /// When the compile that added it began: what its files hold from then on may not be in it.
+    pub fn compiled_at(&self) -> SystemTime {
+        self.compiled_at
+    }
+
     /// Compiles the shader again from its file, and checks it against the contract for the types
     /// it was added for, as [`Shaders::add`] did, on the calling thread: slangc takes about a
-    /// tenth of a second. It also lists the files the shader read, which slangc writes beside the
-    /// SPIR-V in the OS's temporary directory.
+    /// tenth of a second. Its [`Compiled`] lists the files the shader read this time.
     ///
-    /// Fails as `Shaders::add` does, and with `renderer.shader_files` if what slangc wrote there
-    /// can't be read.
+    /// Fails as `Shaders::add` does.
     pub fn compile(&self) -> Result<Compiled> {
-        let mut files = Vec::new();
-        let spirv = compile(Path::new(SLANGC), &self.name, &self.path, Some(&mut files))?;
+        let (spirv, files) = compile(Path::new(SLANGC), &self.name, &self.path)?;
         check(&self.name, &self.path, &spirv, &self.types)?;
         Ok(Compiled {
             source: self.clone(),
@@ -362,19 +380,14 @@ fn check(name: &str, path: &Path, spirv: &[u8], types: &Types) -> Result<()> {
     Err(Error::new("renderer.shader_mismatch", message))
 }
 
-/// Compiles the shader `name` at `path` to SPIR-V with `slangc`. Given `files`, it puts in them
-/// the files the shader read, its own and those it includes.
-fn compile(
-    slangc: &Path,
-    name: &str,
-    path: &Path,
-    files: Option<&mut Vec<PathBuf>>,
-) -> Result<Vec<u8>> {
+/// Compiles the shader `name` at `path` to SPIR-V with `slangc`, and gives it with the files the
+/// shader read, its own first, then those it includes.
+fn compile(slangc: &Path, name: &str, path: &Path) -> Result<(Vec<u8>, Vec<PathBuf>)> {
     let zone = gg_core::zone!();
     zone.text(path.display());
     let start = Instant::now();
     // slangc lists the files it read only beside SPIR-V it writes to a file.
-    let written = files.is_some().then(Written::new);
+    let written = Written::new();
     let mut command = Command::new(slangc);
     command
         .arg(path)
@@ -385,11 +398,11 @@ fn compile(
         // A function marked for one stage but compiled as the other.
         .args(["-warnings-as-errors", "38006"])
         .args(["-entry", "vertex_main", "-stage", "vertex"])
-        .args(["-entry", "fragment_main", "-stage", "fragment"]);
-    if let Some(written) = &written {
-        command.arg("-o").arg(&written.spirv);
-        command.arg("-depfile").arg(&written.depfile);
-    }
+        .args(["-entry", "fragment_main", "-stage", "fragment"])
+        .arg("-o")
+        .arg(&written.spirv)
+        .arg("-depfile")
+        .arg(&written.depfile);
     let output = command.output().map_err(|error| {
         Error::new(
             "renderer.no_slangc",
@@ -423,40 +436,35 @@ fn compile(
             "{diagnostics}"
         );
     }
-    let spirv = match (written, files) {
-        (Some(written), Some(files)) => {
-            let unreadable = |file: &Path, error: io::Error| {
-                Error::new(
-                    "renderer.shader_files",
-                    format!(
-                        "can't read {}, which slangc wrote as it compiled shader {name:?} at {}",
-                        file.display(),
-                        path.display()
-                    ),
-                )
-                .with_source(error)
-            };
-            let depfile = fs::read_to_string(&written.depfile)
-                .map_err(|error| unreadable(&written.depfile, error))?;
-            *files = depfile_files(&depfile);
-            if files.is_empty() {
-                let listed = io::Error::other("it lists no files");
-                return Err(unreadable(&written.depfile, listed));
-            }
-            fs::read(&written.spirv).map_err(|error| unreadable(&written.spirv, error))?
-        }
-        _ => output.stdout,
+    let unreadable = |file: &Path, error: io::Error| {
+        Error::new(
+            "renderer.shader_files",
+            format!(
+                "can't read {}, which slangc wrote as it compiled shader {name:?} at {}",
+                file.display(),
+                path.display()
+            ),
+        )
+        .with_source(error)
     };
+    let depfile = fs::read_to_string(&written.depfile)
+        .map_err(|error| unreadable(&written.depfile, error))?;
+    let files = depfile_files(&depfile);
+    if files.is_empty() {
+        let listed = io::Error::other("it lists no files");
+        return Err(unreadable(&written.depfile, listed));
+    }
+    let spirv = fs::read(&written.spirv).map_err(|error| unreadable(&written.spirv, error))?;
     debug!(
         shader = name,
         path = %path.display(),
         ms = start.elapsed().as_millis() as u64,
         "Shader compiled"
     );
-    Ok(spirv)
+    Ok((spirv, files))
 }
 
-/// Where slangc writes a shader it compiles again, and the list of the files it read: in the OS's
+/// Where slangc writes a shader it compiles, and the list of the files it read: in the OS's
 /// temporary directory, named for the process and the compile, and removed as it drops.
 struct Written {
     spirv: PathBuf,
@@ -555,6 +563,13 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/shaders")
             .join(file)
+    }
+
+    /// The names of `files`, without their directories.
+    fn names(files: &[PathBuf]) -> Vec<Option<&str>> {
+        (files.iter())
+            .map(|file| file.file_name().and_then(|name| name.to_str()))
+            .collect()
     }
 
     /// A directory of the test's own, emptied, and removed as the test ends, failed or not.
@@ -753,6 +768,8 @@ mod tests {
             panic!("one source");
         };
         assert_eq!((source.name(), source.path()), ("copy", path.as_path()));
+        let read = [Some("model_opaque.slang"), Some("model.slang")];
+        assert_eq!(names(source.files()), read, "as it was added");
 
         // A change to the file it includes.
         let include = dir.0.join("model.slang");
@@ -760,10 +777,7 @@ mod tests {
         let dimmer = text.replace("* input.color", "* input.color * 0.5");
         fs::write(&include, dimmer).expect("the include changed");
         let compiled = source.compile().expect("the shader compiles again");
-        let names: Vec<_> = (compiled.files().iter())
-            .map(|file| file.file_name().and_then(|name| name.to_str()))
-            .collect();
-        assert_eq!(names, [Some("model_opaque.slang"), Some("model.slang")]);
+        assert_eq!(names(compiled.files()), read);
         let exist = compiled.files().iter().all(|file| file.exists());
         assert!(exist, "{compiled:?}");
         assert_eq!(compiled.source(), source);
@@ -831,8 +845,7 @@ mod tests {
     #[test]
     fn a_missing_slangc_is_its_own_error() {
         let flat = fixture("flat_color.slang");
-        let error =
-            compile(Path::new("no-such-slangc"), "flat", &flat, None).expect_err("no slangc");
+        let error = compile(Path::new("no-such-slangc"), "flat", &flat).expect_err("no slangc");
         assert_eq!(error.code(), "renderer.no_slangc");
     }
 }
