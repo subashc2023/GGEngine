@@ -92,12 +92,13 @@ and what a crate does with the dependencies it may have, are left to review.
 
 ### Builds
 
-`gg-engine`'s development tooling (hot reload, the tool API, debug UI) will sit
-behind a `dev` feature that development builds turn on and shipping builds never do; shipping
-builds run cooked data only. Cargo merges the features of every package a command selects, so
-`--workspace`, a bare `cargo build` and `--bin gg-player` would all hand the player `dev`.
-Shipping builds therefore select the player alone, with `-p player`, and a game's shipping
-build selects the game alone the same way.
+`gg-engine`'s development tooling sits behind its `dev` feature, which development builds turn
+on, as the sandbox does, and shipping builds never do: hot reload of games' shaders for now, the
+tool API and the debug UI to come. Shipping builds run cooked data only. Cargo merges the features
+of every package a command selects, so `--workspace`, a bare `cargo build` and `--bin gg-player`
+would all hand the player `dev`. Shipping builds therefore select the player alone, with
+`-p player`, and a game's shipping build selects the game alone the same way; the shipping gate,
+`cargo clippy -p player`, checks `gg-engine` as they build it.
 
 Tracy is a feature of its own, `tracy`, off by default and in no shipping build: it compiles
 Tracy's C++ client, which listens on the machine's loopback and keeps what it records in memory
@@ -582,10 +583,38 @@ be as large as a shader needs. A shader is added with how it blends too, since V
 blending into its pipeline: opaque, which writes its depth as well as testing it, or by the alpha
 it returns, not multiplied into its color, which only tests it, so that what's behind it shows
 through.
-Vulkan checks nothing about a shader, so its interface, which `Shaders::add` describes, is
-trusted. Validation, in debug builds, checks its entry points, the features it needs and the
-resources it binds, but can't see the layouts of what it reads through addresses: a vertex or
-parameter struct that doesn't match its type draws garbage without a message.
+Vulkan checks nothing about a shader, so the engine checks the SPIR-V slangc writes against the
+contract `Shaders::add` describes, as the shader's added and as it reloads, and refuses one that
+breaks it, naming each way (`renderer.shader_mismatch`). It checks:
+- the entry points;
+- the push constants, the engine's in order at their offsets, or as many as the shader reads;
+- each struct the shader reads through an address: its size against its Rust type's, and its
+  fields, 32 bits each without padding;
+- that nothing is written through those addresses;
+- the bindless set's textures and samplers, and no other resources;
+- the vertex and instance indices, and no vertex attributes;
+- one float4 out;
+- capabilities, only those the features the device enables give.
+
+It reads the SPIR-V because Slang's reflection names what a pointer points at but none of its
+fields. It sees only how many bytes a struct's fields take, not what they are: fields of the same
+size in another order, or of another kind, such as an integer read as a float, still draw garbage
+without a message.
+
+In a development build's windowed run, a thread of its own watches the files each game's shader
+read, its own and those it includes as slangc lists them, by their times and lengths every tenth
+of a second. A change that holds for a look compiles the shader again, off the main thread, and the
+next frame the main thread hands the renderer draws with it; the old pipeline retires until the
+GPU is done with it. A change that doesn't compile, or breaks the contract, warns, and the shader
+keeps drawing as it did. The engine's own shaders don't reload.
+
+Every pipeline goes through a pipeline cache, which windowed runs load from the OS's per-user
+directory for caches as the renderer starts, and save as it ends. Pipelines an earlier run made
+are then made again in a fraction of the time, where the driver keeps no cache of its own. The
+driver's data sits behind a header of the engine's: the GPU, the driver and the header's own
+version, and the data's length and hash. Data from another GPU or driver, or damaged, never
+reaches the driver, which needn't survive it. Headless runs, replays and tests use none, as they
+keep no layout, so that their startup times compare.
 
 A game's texture is a PNG or a JPEG that the engine decodes as a layer adds it, to RGBA8 with
 colors sRGB-encoded and alpha not multiplied into them, as images store them, whatever color
@@ -685,7 +714,8 @@ another. The renderer counts each frame's draws, instances and triangles; the Pe
 shows them and `engine.perf` logs their peaks.
 
 An error while rendering ends the renderer, since a failed frame can leave meshes and textures
-half copied to the GPU.
+half copied to the GPU. A game's shader compiled again whose new pipeline can't be made doesn't:
+it warns, and the old pipeline goes on drawing.
 
 ## Threads
 
@@ -748,7 +778,7 @@ main thread.
 | ECS | Our own; see [ECS](#ecs) |
 | Logs and profiling | `tracing` for logs; Tracy, through `tracy-client`, for CPU zones and GPU timestamps |
 | Agent access | MCP and a command-line tool, both clients of the [tool API](#agents-and-tools) |
-| Shaders | Slang, compiled to SPIR-V by the Vulkan SDK's `slangc` rather than linked in: the engine's own as it builds, games' as they're added |
+| Shaders | Slang, compiled to SPIR-V by the Vulkan SDK's `slangc` rather than linked in: the engine's own as it builds, games' as they're added and, in development builds, as their files change, their SPIR-V checked against the shader contract |
 | Assets | glTF 2.0 in, read by the engine over `serde_json`; meshoptimizer for meshes and meshlets; BC-compressed textures in KTX2; until cooking, PNGs and JPEGs that `png` and `zune-jpeg` decode as layers add them |
 
 Areas not listed here are undecided.

@@ -20,11 +20,15 @@ mod actions;
 mod args;
 mod camera;
 mod chrome;
+mod dirs;
 mod dock;
 mod draw;
 mod ecs;
 mod event;
 mod gltf;
+// In development builds alone, as `dev` has it.
+#[cfg(feature = "dev")]
+mod hot_reload;
 mod image;
 mod input;
 mod inspector;
@@ -34,6 +38,7 @@ mod layer;
 mod model;
 mod pads;
 mod perf;
+mod pipeline_cache;
 mod recording;
 pub mod reflect;
 mod render_thread;
@@ -558,6 +563,7 @@ fn settings<'a>(app: &'a App, args: &'a Args) -> Settings<'a> {
         gpu: args.gpu.as_deref(),
         vsync: args.vsync,
         uploads: None,
+        pipeline_cache: None,
     }
 }
 

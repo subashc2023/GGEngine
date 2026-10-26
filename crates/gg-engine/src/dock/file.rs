@@ -7,28 +7,13 @@ use std::{fs, io};
 use gg_core::{Error, Result};
 
 use super::tree::Layout;
+use crate::dirs::{self, Kind};
 
-/// The file an app's layout is saved in, in the OS's directory for per-user state, never beside
-/// the executable: `%LOCALAPPDATA%\GGEngine\<app>` on Windows,
-/// `~/Library/Application Support/GGEngine/<app>` on macOS, and elsewhere
-/// `$XDG_STATE_HOME/ggengine/<app>`, by default `~/.local/state/ggengine/<app>`. `os` is
-/// [`std::env::consts::OS`], and `var` reads the environment. `None` without the variables.
+/// The file an app's layout is saved in, in the OS's directory for per-user state, which
+/// [`dirs::dir`] says: `os` is [`std::env::consts::OS`], and `var` reads the environment. `None`
+/// without the variables.
 pub(crate) fn path(app: &str, os: &str, var: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
-    let var = |name| {
-        var(name)
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-    };
-    let dir = match os {
-        "windows" => var("LOCALAPPDATA")?.join("GGEngine"),
-        "macos" => var("HOME")?.join("Library/Application Support/GGEngine"),
-        // The XDG spec says to ignore a relative path.
-        _ => var("XDG_STATE_HOME")
-            .filter(|dir| dir.as_os_str().as_encoded_bytes().starts_with(b"/"))
-            .or_else(|| Some(var("HOME")?.join(".local/state")))?
-            .join("ggengine"),
-    };
-    Some(dir.join(app).join("layout.ron"))
+    Some(dirs::dir(app, Kind::State, os, var)?.join("layout.ron"))
 }
 
 /// Reads the layout saved at `path`: the empty layout if there's no file, and an
@@ -98,40 +83,12 @@ mod tests {
     }
 
     #[test]
-    fn the_file_is_in_each_os_directory_for_per_user_state() {
-        let env = |vars: &'static [(&str, &str)]| {
-            move |name: &str| {
-                let (_, value) = vars.iter().find(|(var, _)| *var == name)?;
-                Some(OsString::from(value))
-            }
-        };
-        let windows = env(&[("LOCALAPPDATA", r"C:\Users\Ada\AppData\Local")]);
+    fn the_file_is_in_the_os_directory_for_per_user_state() {
+        let home = |name: &str| (name == "HOME").then(|| OsString::from("/home/ada"));
         assert_eq!(
-            path("Sandbox", "windows", windows),
-            Some(Path::new(r"C:\Users\Ada\AppData\Local").join("GGEngine/Sandbox/layout.ron"))
+            path("Sandbox", "linux", home),
+            Some(Path::new("/home/ada/.local/state/ggengine/Sandbox/layout.ron").to_owned())
         );
-        let home = Path::new("/home/ada");
-        let macos = env(&[("HOME", "/home/ada")]);
-        assert_eq!(
-            path("Sandbox", "macos", macos),
-            Some(home.join("Library/Application Support/GGEngine/Sandbox/layout.ron"))
-        );
-        let linux = env(&[("HOME", "/home/ada"), ("XDG_STATE_HOME", "/state")]);
-        assert_eq!(
-            path("Sandbox", "linux", linux),
-            Some(Path::new("/state").join("ggengine/Sandbox/layout.ron"))
-        );
-        // Without XDG_STATE_HOME, or with a relative one, it's under the home directory.
-        for linux in [
-            env(&[("HOME", "/home/ada")]),
-            env(&[("HOME", "/home/ada"), ("XDG_STATE_HOME", "state")]),
-        ] {
-            assert_eq!(
-                path("Sandbox", "linux", linux),
-                Some(home.join(".local/state/ggengine/Sandbox/layout.ron"))
-            );
-        }
-        assert_eq!(path("Sandbox", "windows", env(&[])), None);
     }
 
     #[test]

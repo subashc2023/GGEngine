@@ -69,6 +69,10 @@ fn main() {
         "passes_refuse_what_the_device_cant_draw",
         passes_refuse_what_the_device_cant_draw,
     );
+    run(
+        "pipeline_caches_load_what_this_gpu_saved_whole",
+        pipeline_caches_load_what_this_gpu_saved_whole,
+    );
     run("validation_errors_reach_the_json_log", || {
         validation_errors_reach_the_json_log(&log);
     });
@@ -479,6 +483,41 @@ fn passes_refuse_what_the_device_cant_draw() {
     frame.submit().expect("the frame's submission");
 
     drop((frames, buffer, image, device, instance));
+    assert_eq!(
+        validation.messages(),
+        0,
+        "validation reported problems; the log above says what"
+    );
+}
+
+/// Saves a device's pipeline cache, and loads it into other devices of the same GPU: whole, it
+/// loads; changed or cut short, it doesn't, and no driver is given it, so validation has nothing
+/// to say. A device loads one cache. Data of another GPU is refused as the header's unit tests
+/// show; drivers fill caches as pipelines are made, which the renderer's GPU tests check.
+fn pipeline_caches_load_what_this_gpu_saved_whole() {
+    let instance = instance();
+    let validation = instance.validation();
+    let device =
+        || Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let first = device();
+    assert_eq!(first.pipeline_cache().expect("no cache"), None);
+    assert!(!first.load_pipeline_cache(&[]).expect("an empty cache"));
+    let saved = first.pipeline_cache().expect("the cache's data");
+    let saved = saved.expect("a cache");
+    let message = panics(|| {
+        let _ = first.load_pipeline_cache(&saved);
+    });
+    assert!(message.contains("cache once"), "{message}");
+    drop(first);
+
+    let loads = |data: &[u8]| device().load_pipeline_cache(data).expect("a cache");
+    assert!(loads(&saved), "whole");
+    let mut changed = saved.clone();
+    *changed.last_mut().expect("data") ^= 1;
+    assert!(!loads(&changed), "changed");
+    assert!(!loads(&saved[..saved.len() - 1]), "cut short");
+
+    drop(instance);
     assert_eq!(
         validation.messages(),
         0,

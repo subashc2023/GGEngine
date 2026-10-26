@@ -9,7 +9,7 @@
 #![allow(unsafe_code)]
 
 use std::f32::consts::{FRAC_PI_2, PI};
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
@@ -51,6 +51,14 @@ fn main() {
         batches_match_their_reference,
     );
     run("views_match_their_reference", views_match_their_reference);
+    run(
+        "replaced_shaders_draw_from_the_next_frame",
+        replaced_shaders_draw_from_the_next_frame,
+    );
+    run(
+        "pipelines_go_through_the_cache",
+        pipelines_go_through_the_cache,
+    );
     run("depth_matches_its_reference", depth_matches_its_reference);
     run("models_match_their_reference", models_match_their_reference);
     run(
@@ -101,6 +109,7 @@ fn settings(uploads: Option<UploadPath>) -> Settings<'static> {
         gpu: None,
         vsync: false,
         uploads,
+        pipeline_cache: None,
     }
 }
 
@@ -1530,6 +1539,182 @@ fn render_without_ui(renderer: &mut Renderer, data: RenderData<'_>) {
         renderer.render(data, ui, &mut []).expect("a frame"),
         "an offscreen image can always be rendered into"
     );
+}
+
+/// What [`replaced_shaders_draw_from_the_next_frame`] writes as its shader, in the color `COLOR`
+/// stands for.
+const REPLACED: &str = r#"
+struct Vertex {
+    float3 position;
+};
+
+struct Push {
+    float4x4 clip_from_world;
+    Vertex* vertices;
+    float4x4* transforms;
+};
+[[vk::push_constant]] ConstantBuffer<Push> push;
+
+[shader("vertex")]
+float4 vertex_main(uint index: SV_VulkanVertexID, uint instance: SV_VulkanInstanceID)
+    : SV_Position {
+    float4 world = mul(push.transforms[instance], float4(push.vertices[index].position, 1.0));
+    return mul(push.clip_from_world, world);
+}
+
+[shader("fragment")]
+float4 fragment_main() : SV_Target {
+    return COLOR;
+}
+"#;
+
+/// A square that covers a view of `SIZE` pixels a side, with a shader written to a file of the
+/// test's own: red, then, compiled again from the file rewritten, green, which replaces it while
+/// frames before may still draw with the old pipeline, over more frames than are in flight. The
+/// frame after draws green, and validation sees the old pipeline destroyed only once the GPU is
+/// done with it.
+fn replaced_shaders_draw_from_the_next_frame() {
+    const SIZE: u32 = 16;
+    let mut renderer = renderer(SIZE, SIZE);
+    let mut meshes = Meshes::default();
+    let mut shaders = Shaders::default();
+    let mut textures = Textures::default();
+    let mut uploads = Uploads::default();
+    let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join("replaced.slang");
+    let write = |color: &str| fs::write(&path, REPLACED.replace("COLOR", color));
+    write("float4(1.0, 0.0, 0.0, 1.0)").expect("the shader's file");
+    let shader = shaders
+        .add::<[f32; 3], ()>("replaced", &path, Blend::Opaque)
+        .expect("a shader");
+    let corners = [
+        [-1.0, -1.0, 0.0],
+        [1.0, -1.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [-1.0, 1.0, 0.0],
+    ];
+    let square = meshes
+        .add("square", &corners, &[0, 1, 2, 2, 3, 0])
+        .expect("a mesh");
+    let mut draws = Draws::default();
+    draws.push(square, shader, Mat4::IDENTITY, ());
+    let camera = Camera {
+        projection: Projection::Orthographic {
+            height: 2.0,
+            near: -1.0,
+            far: 1.0,
+        },
+        ..Camera::default()
+    };
+    let center = |renderer: &mut Renderer| {
+        let pixels = (renderer.read_back())
+            .expect("the frame's pixels")
+            .expect("a headless renderer's frame can be read back");
+        let at = ((SIZE / 2 * SIZE + SIZE / 2) * 4) as usize;
+        [pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3]]
+    };
+    for frame in 0..6 {
+        if frame == 3 {
+            write("float4(0.0, 1.0, 0.0, 1.0)").expect("the shader's file");
+            let compiled = shaders.sources()[0].compile();
+            shaders.replace(compiled.expect("the shader compiles again"));
+        }
+        uploads.take(&mut meshes, &mut shaders, &mut textures);
+        let data = RenderData {
+            clear_color: CLEAR,
+            viewport: Viewport {
+                origin: [0, 0],
+                size: [SIZE, SIZE],
+            },
+            camera,
+            uploads: &mut uploads,
+            draws: &draws,
+        };
+        render_without_ui(&mut renderer, data);
+        // Reading back waits for the GPU, so not between the first frame and the replacement.
+        match frame {
+            0 => assert_eq!(center(&mut renderer), [255, 0, 0, 255], "red"),
+            3 | 5 => assert_eq!(center(&mut renderer), [0, 255, 0, 255], "green"),
+            _ => {}
+        }
+    }
+    let validation = renderer.validation();
+    drop(renderer);
+    assert_eq!(
+        validation.messages(),
+        0,
+        "validation reported problems; the log above says what"
+    );
+}
+
+/// Renders a frame with a pipeline cache, which the driver fills as the renderer makes the
+/// frame's pipelines, then starts a renderer with what it holds, which renders the frame alike;
+/// validation has nothing to say. lavapipe's cache is a stub that holds nothing (Mesa's
+/// lvp_pipeline_cache.c), so there it isn't seen to fill.
+fn pipelines_go_through_the_cache() {
+    const SIZE: u32 = 16;
+    let cached = |data: &[u8]| {
+        let settings = Settings {
+            pipeline_cache: Some(data),
+            ..settings(None)
+        };
+        Renderer::headless(&settings, SIZE, SIZE).expect("a renderer")
+    };
+    // A triangle in the color its draw gives, which takes a pipeline of its own.
+    let frame = |renderer: &mut Renderer| {
+        let mut meshes = Meshes::default();
+        let mut shaders = Shaders::default();
+        let mut textures = Textures::default();
+        let mut uploads = Uploads::default();
+        let flat = shaders
+            .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+            .expect("a shader");
+        let corners = [[-0.5, -0.5, 0.0], [0.5, -0.5, 0.0], [0.0, 0.5, 0.0]];
+        let triangle = meshes
+            .add("triangle", &corners, &[0, 1, 2])
+            .expect("a mesh");
+        let mut draws = Draws::default();
+        let orange = Vec4::new(0.9, 0.4, 0.1, 1.0);
+        draws.push(triangle, flat, Mat4::IDENTITY, orange);
+        uploads.take(&mut meshes, &mut shaders, &mut textures);
+        let data = RenderData {
+            clear_color: CLEAR,
+            viewport: Viewport {
+                origin: [0, 0],
+                size: [SIZE, SIZE],
+            },
+            camera: Camera::default(),
+            uploads: &mut uploads,
+            draws: &draws,
+        };
+        render_without_ui(renderer, data);
+        (renderer.read_back())
+            .expect("the frame's pixels")
+            .expect("a headless renderer's frame can be read back")
+    };
+    let mut first = cached(&[]);
+    let made = first.pipeline_cache().expect("the cache's data");
+    let made = made.expect("a cache");
+    let pixels = frame(&mut first);
+    let filled = first.pipeline_cache().expect("the cache's data");
+    let filled = filled.expect("a cache");
+    if !first.gpu_name().contains("llvmpipe") {
+        assert!(
+            filled.len() > made.len(),
+            "the cache holds {} bytes once the triangle's pipeline is made, as it did before",
+            filled.len()
+        );
+    }
+    let mut second = cached(&filled);
+    assert_eq!(frame(&mut second), pixels);
+    let validation = [first.validation(), second.validation()];
+    drop((first, second));
+    for validation in validation {
+        assert_eq!(
+            validation.messages(),
+            0,
+            "validation reported problems; the log above says what"
+        );
+    }
 }
 
 /// Reads back the last frame `renderer` rendered, shuts it down, checks that validation reported

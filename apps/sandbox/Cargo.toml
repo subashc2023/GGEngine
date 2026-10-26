@@ -12,7 +12,8 @@ path = "src/main.rs"
 
 [dependencies]
 bytemuck = { workspace = true, features = ["derive"] }
-gg-engine.workspace = true
+# A development build, which reloads its shaders as they change.
+gg-engine = { workspace = true, features = ["dev"] }
 tracing.workspace = true
 
 [features]

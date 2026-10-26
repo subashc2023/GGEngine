@@ -33,7 +33,7 @@ pub use camera::{Camera, Projection};
 pub use gg_gpu::{Blend, MAX_TEXTURE_SIZE, Sampler, UploadPath, Validation, Window, Wrap};
 pub use mesh::{Mesh, MeshDraw, Meshes};
 pub use model::{AlphaMode, Material, ModelVertex};
-pub use shader::{Shader, Shaders};
+pub use shader::{Compiled, Shader, ShaderSource, Shaders};
 pub use sprite::{Sprite, SpriteSheet};
 pub use texture::{Mipmaps, Texture, Textures};
 pub use ui::Ui;
@@ -235,6 +235,11 @@ pub struct Settings<'a> {
     /// measurements of each way. A way the GPU lacks keeps the renderer from starting
     /// (`gpu.no_upload_path`).
     pub uploads: Option<UploadPath>,
+    /// Make every pipeline through a pipeline cache, which holds this if it's what
+    /// [`Renderer::pipeline_cache`] gave on the same GPU and driver: the pipelines it holds are
+    /// made in a fraction of the time. Other data starts it empty, as `Device::load_pipeline_cache`
+    /// says. `None` makes them without one.
+    pub pipeline_cache: Option<&'a [u8]>,
 }
 
 /// Renders frames into a window or, headless, into an offscreen image, and UI into the app's
@@ -292,12 +297,7 @@ impl Renderer {
         let surface = Surface::new(&instance, window)?;
         let device = Device::new(&instance, settings.gpu, Some(&surface), settings.uploads)?;
         let swapchain = Swapchain::new(&device, surface, width, height, settings.vsync)?;
-        Self::new(
-            &instance,
-            &device,
-            Output::Window(swapchain),
-            settings.vsync,
-        )
+        Self::new(&instance, &device, Output::Window(swapchain), settings)
     }
 
     /// A renderer without a window, which renders into an offscreen image of `width` by
@@ -315,15 +315,19 @@ impl Renderer {
         })?;
         let device = Device::new(&instance, settings.gpu, None, settings.uploads)?;
         let image = ColorImage::new(&device, width, height, "offscreen color")?;
-        Self::new(&instance, &device, Output::Offscreen(image), settings.vsync)
+        Self::new(&instance, &device, Output::Offscreen(image), settings)
     }
 
     fn new(
         instance: &Arc<Instance>,
         device: &Arc<Device>,
         output: Output,
-        vsync: bool,
+        settings: &Settings<'_>,
     ) -> Result<Self> {
+        // Before the passes make their pipelines.
+        if let Some(data) = settings.pipeline_cache {
+            device.load_pipeline_cache(data)?;
+        }
         let format = match &output {
             Output::Window(swapchain) => swapchain.format(),
             Output::Offscreen(_) => ColorImage::FORMAT,
@@ -339,7 +343,7 @@ impl Renderer {
             ui: UiPass::new(device, format)?,
             instance: instance.clone(),
             device: device.clone(),
-            vsync,
+            vsync: settings.vsync,
             failed: false,
             waited: Duration::ZERO,
             drawn: DrawCounts::default(),
@@ -406,7 +410,8 @@ impl Renderer {
     ///
     /// An error ends the renderer, which can then only be dropped: a frame that failed can leave
     /// the GPU's copies of meshes and textures unfinished, so every later call fails with
-    /// `renderer.failed`.
+    /// `renderer.failed`. A shader replaced since, whose new pipeline can't be made, is no error:
+    /// it warns, and the shader goes on drawing as it did.
     ///
     /// # Panics
     ///
@@ -544,6 +549,16 @@ impl Renderer {
     /// How the renderer uploads meshes and textures.
     pub fn upload_path(&self) -> UploadPath {
         self.device.upload_path()
+    }
+
+    /// What the GPU's pipeline cache holds, for a later run's [`Settings::pipeline_cache`]: `None`
+    /// for a renderer made without one, and once it has failed, since a device that's lost or out
+    /// of memory may hand back what no driver should be given.
+    pub fn pipeline_cache(&self) -> Result<Option<Vec<u8>>> {
+        if self.failed {
+            return Ok(None);
+        }
+        self.device.pipeline_cache()
     }
 
     /// Copies the last frame rendered offscreen to the CPU: rows of RGBA8 pixels, sRGB-encoded

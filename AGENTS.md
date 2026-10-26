@@ -70,12 +70,17 @@ on which thread, such as the render thread's `render_frame` beside the main thre
 Build and check shipping configurations with `-p player` alone, since a wider build merges the
 sandbox's features into the player ([Builds](ARCHITECTURE.md#builds)).
 
-A change is done when all four pass:
+A windowed sandbox compiles a game's shader again as its file or one it includes changes, logging
+`Shader reloaded`, and draws with it from the next frame; one that doesn't compile or breaks the
+shader contract warns, and the shader keeps drawing as it did.
+
+A change is done when all five pass:
 
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy --workspace --all-targets --features sandbox/tracy -- -D warnings
+cargo clippy -p player --all-targets -- -D warnings
 cargo test --workspace
 ```
 
@@ -96,8 +101,9 @@ whose reload and set would then be refused at their ticks. Make one with a windo
 Inspector, undoing and redoing an edit, and closes; not File > Save, since the attach reads the
 grid's scene.
 
-CI ([ci.yml](.github/workflows/ci.yml)) runs the four gates on every push, on Windows and Linux,
-x86-64 and ARM64, and on macOS, on ARM64 alone, and the layering check. Its Linux jobs run the GPU
+CI ([ci.yml](.github/workflows/ci.yml)) runs the gates on every push, on Windows and Linux, x86-64
+and ARM64, and on macOS, on ARM64 alone, the shipping gate on Linux x86-64 alone, and the layering
+check. Its Linux jobs run the GPU
 tests and the sandbox headless on lavapipe, with and without Tracy, check that the run logged
 `engine.perf` and ticked and rendered once a frame, and record a run on four threads and replay it,
 on the default and on one; Windows' and macOS's runners have no GPU, so there `GG_SKIP_GPU_TESTS`

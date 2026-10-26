@@ -265,21 +265,37 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   the RTX 4090 and the AMD iGPU, where every test now passes, its samplers written into the
   bindless set rather than immutable; unit tests check the reader's refusals, files cut short or
   changed byte by byte, the levels' weights and rounding, models spawned, and runs split by faces.
+- **Shaders checked, hot reloaded and their pipelines cached** (2026-10-25): games' shaders are
+  checked, in the SPIR-V slangc writes, against the contract `Shaders::add` describes, as they're
+  added and as they reload, and one that breaks it is refused, naming each way
+  (`renderer.shader_mismatch`). Behind gg-engine's new `dev` feature, which the sandbox turns on
+  and the player doesn't, a windowed run compiles a game's shader again off the main thread as its
+  files change, its includes among them, and draws with it from the next frame; one that doesn't
+  compile or breaks the contract warns, and the old one keeps drawing. Every pipeline goes through
+  a pipeline cache, which windowed runs load from the per-user cache directory and save as they
+  end, behind a header that keeps another GPU's, driver's or damaged data from the driver; and the
+  shipping gate joins the gates. Unit tests check the engine's shaders and the fixtures, a fixture
+  for each kind of breach, the depfile, shaders compiled again and replaced, the cache's header and
+  each refusal, and the watcher's looks, stepped and on a thread; GPU tests check a shader replaced
+  with frames in flight, and the cache filling, loading whole and refusing damage, on the RTX 4090
+  and the AMD iGPU. In windowed sandboxes there, a second run hits the cache for every pipeline:
+  the AMD iGPU makes the sprite pipeline in 126 µs rather than 20.6 ms.
 
-## Now: Phase 4's sixth milestone
+## Now: Phase 4's seventh milestone
 
-[Phase 4](#next)'s sixth milestone is picked from what the phase has left as it starts, and its
+[Phase 4](#next)'s seventh milestone is picked from what the phase has left as it starts, and its
 plan says when it's done.
 
 ## Next
 
 Each phase ends in something you can run and check.
 
-4. **First mesh.** Slang reflection; an on-disk pipeline cache; shader hot reload. Render
-   extraction, with the render thread a frame behind simulation and rendering interpolated
-   between fixed steps. *Done when* the sandbox draws a textured, depth-tested glTF mesh and
-   thousands of moving entities, Tracy shows simulation and rendering overlapping, steady-state
-   frames don't allocate, and a RenderDoc capture shows named resources and labeled passes.
+4. **First mesh.** Shaders checked against their contract; an on-disk pipeline cache; shader hot
+   reload. Render extraction, with the render thread a frame behind simulation and rendering
+   interpolated between fixed steps. *Done when* the sandbox draws a textured, depth-tested glTF
+   mesh and thousands of moving entities, Tracy shows simulation and rendering overlapping,
+   steady-state frames don't allocate, and a RenderDoc capture shows named resources and labeled
+   passes.
 5. **Tool API and hot reload: v0.1.** The tool API in development builds, as
    [ARCHITECTURE.md](../ARCHITECTURE.md#agents-and-tools) describes. `tools/gg`, the
    command-line tool: build, run and test with machine-readable results; launch and supervise a
@@ -330,15 +346,14 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Deleting old JSON logs; every run's log is kept | Logs pile up enough to matter |
 | A clean shutdown on Ctrl+C, which now ends the process at once; the JSON log keeps every line written until then, and a recording every whole line but its `end` | A headless run that goes on until it's stopped, such as a dedicated server |
 | GPU tests in Windows and macOS CI, which skip them because hosted runners there have no GPU | A self-hosted runner with a GPU, or a Vulkan driver that runs on those runners without one |
-| A gate that compiles the shipping configuration: `cargo clippy -p player --all-targets -- -D warnings` | When `gg-engine` gets its `dev` feature |
-| egui, the dock and the Inspector behind `dev`: the player links them and runs an empty UI pass every frame; `Ui`, which `Layer::ui` takes, is the type to turn into a no-op | When `gg-engine` gets its `dev` feature |
+| egui, the dock and the Inspector behind `dev`: the player links them and runs an empty UI pass every frame; `Ui`, which `Layer::ui` takes, is the type to turn into a no-op | Phase 7, with the shipping profile |
 | The main thread takes the renderer back once a frame's UI is drawn, so a frame's input is read about a frame before it renders: a refresh under `--vsync`; and drawing between ticks draws the world up to a tick behind the simulation. Starting each frame once the render thread has acquired the image it renders into would win the first back, and extrapolating from the latest ticks the second | A game's input latency needs it |
 | Answering at once what a driver sends the main thread's windows from the render thread: the main thread's wait answers each time a millisecond's wait times out, which Windows' timer tick stretches to about 16 ms, so a sent message can hold a frame that long. A Win32 event the render thread sets, waited on with `MsgWaitForMultipleObjectsEx`, would wake for both | A driver's sent messages show as stalls, such as while a window resizes |
 | Pushing and popping layers while the app runs; `App` fixes the stack before it starts | A tool or game needs a layer for only part of a run |
 | Composed text from an input method (winit's `Ime` events), for languages typed through one | A game takes text input, such as chat |
 | Steady-state frames that draw UI allocate: in egui's layout and tessellation, in the dock's own bookkeeping, which copies each frame's panel and menu names and torn-off windows' titles, and makes its arrangement and its list of groups left to draw anew, and in the Inspector, which reads its rows' names, the picked entity's components as values and its children's IDs anew | Phase 4, with the allocation check; the overlay is for development |
 | Keeping within the GPU's memory budget (`VK_EXT_memory_budget` through VMA) | Phase 7, with streaming |
-| Removing meshes, shaders and textures; each lasts until the app ends | Something adds and removes them as it runs, such as asset hot reload in Phase 4 |
+| Removing meshes, shaders and textures, which last until the app ends, and replacing meshes and textures; shaders are replaced as they reload | Phase 7, with asset hot reload |
 | Per-frame data in a buffer: shaders get the camera's view and projection as one matrix, and see the world through each draw's transform, but not the camera's position, the time or the lights | Phase 6, with lighting |
 | Materials: parameters kept on the GPU and written when they change, rather than copied every frame with each instance | Phase 6, with materials |
 | Textures of data rather than color, such as normal maps, which shaders read as stored rather than decoded from sRGB | Phase 6, with PBR's maps |
@@ -391,7 +406,14 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Letting go, for the layers below one that handles a stick or a trigger away from rest, of the ways it left: they keep what they last saw until it rests, so that a stick rolled from right to up in a menu leaves the game going right | A game's menus take a stick |
 | Controls the engine doesn't name, C, Z and paddles, and triggers a Linux driver reports as Z axes ([gilrs #200](https://gitlab.com/gilrs-project/gilrs/-/issues/200)), which are dropped | A pad that needs them, or the check by hand on Linux |
 | Codes for dependencies' own warnings, which reach the log as they give them: as a pad connects on Windows.Gaming.Input, gilrs warns, without a code, that it has no mapping for it, since that backend gives every pad a nil UUID, and goes on with its default mapping, the right one there | Phase 5, as the tool API serves diagnostics |
-| Checking a game's shader against the contract on `Shaders::add` through Slang reflection: its push constants, its resources, and the sizes of its vertex and parameter structs against their types'; until then it's trusted, and validation, in debug builds, checks its entry points, features and resources, but not the layouts of what it reads through addresses, where a mismatched struct draws garbage without a message | Phase 4, with Slang reflection |
+| Checking a game's vertex and parameter structs field by field: the check compares each struct's size with its Rust type's and finds its fields 32-bit, so fields of one size in another order or of another kind, such as an integer read as a float, draw garbage without a message. A derive on vertex and parameter types would give it each field's offset, scalar type and vector width | Agents edit games' shaders, in Phase 5 |
+| Wave operations in games' shaders, and the other SPIR-V capabilities a device's properties decide rather than its features, which the check refuses | A game's shader needs them |
+| Hot reloading the engine's own shaders, which the build compiles in | Work on the engine's shaders wants it |
+| Watching shaders' files through the OS's notifications, rather than by their times and lengths every tenth of a second, which reads every watched file each time | Phase 7, with asset hot reload, or a game with many shaders |
+| The shader watcher allocates as it looks, since Windows reads each file's times through its path, which it converts to UTF-16 | Phase 4's allocation check of frames, if it checks windowed runs |
+| `VK_KHR_pipeline_binary`, which saves and loads pipelines whole; ash 0.38 lacks it | ash's next release, or a driver whose pipeline cache keeps less |
+| Saving the pipeline cache as pipelines are made rather than as the run ends, which a crash skips | Phase 5, which restarts games after a crash |
+| Pruning the pipeline cache, which keeps every pipeline it was given, an edited shader's old ones too | It grows to tens of megabytes |
 | Requiring a slangc that decorates sampled images `NonUniform` itself, Slang 2026.11's or later, such as the Vulkan SDK 1.4.363's, and dropping gg-renderer's `decorate_non_uniform`, which does it for older ones | The engine requires the Vulkan SDK 1.4.363 or later |
 | Games' shaders compile with slangc as they're added, so running a game needs the Vulkan SDK | Phase 7, which cooks shaders |
 | A library of assets: shaders, textures and models load from the paths the game gives, the sandbox giving its source's, and nothing finds one by path or name, so a file added twice loads twice; scenes and the tool API will name them | Phase 4, with assets |

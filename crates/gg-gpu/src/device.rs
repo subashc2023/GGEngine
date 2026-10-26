@@ -3,14 +3,15 @@
 use std::ffi::{CStr, CString};
 use std::fmt;
 use std::mem::ManuallyDrop;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use ash::prelude::VkResult;
 use ash::{ext, khr, vk};
 use gg_core::{Error, Result};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::bindless::Bindless;
+use crate::pipeline_cache::{self, Identity, Refusal};
 use crate::vma::{Allocation, Allocator};
 use crate::{
     DepthImage, Instance, MAX_TEXTURE_SIZE, REQUIRED_VERSION, Surface, Texture, Version, vk_error,
@@ -79,6 +80,11 @@ pub struct Device {
     raw: ash::Device,
     name: String,
     limits: vk::PhysicalDeviceLimits,
+    /// The GPU and driver its pipeline cache's data is for.
+    identity: Identity,
+    /// What pipelines are made through, once [`Device::load_pipeline_cache`] has made it.
+    /// Destroyed by hand, before the device is.
+    pipeline_cache: OnceLock<vk::PipelineCache>,
     /// Dropped by hand, before the device is destroyed.
     allocator: ManuallyDrop<Allocator>,
     /// Destroyed by hand, before the device is.
@@ -264,6 +270,8 @@ impl Device {
             physical,
             name: chosen.name.clone(),
             limits: chosen.limits,
+            identity: chosen.identity,
+            pipeline_cache: OnceLock::new(),
             allocator: ManuallyDrop::new(allocator),
             bindless,
             retirement: Mutex::default(),
@@ -300,6 +308,78 @@ impl Device {
     /// How the device uploads meshes and textures.
     pub fn upload_path(&self) -> UploadPath {
         self.uploads
+    }
+
+    /// Gives the device a pipeline cache, which every pipeline made from then on goes through,
+    /// and returns whether it holds `data`: what [`Device::pipeline_cache`] gave on a device of
+    /// the same GPU and driver, whole. Other data starts it empty: logged at debug if it's another
+    /// GPU's, driver's or engine's, and with a `gpu.pipeline_cache` warning if it's damaged, which
+    /// no driver is given, since drivers needn't survive it.
+    ///
+    /// # Panics
+    ///
+    /// If the device has a pipeline cache already.
+    pub fn load_pipeline_cache(&self, data: &[u8]) -> Result<bool> {
+        let _zone = gg_core::zone!();
+        assert!(
+            self.pipeline_cache.get().is_none(),
+            "a device loads its pipeline cache once"
+        );
+        let payload = match pipeline_cache::open(&self.identity, data) {
+            Ok(payload) => Some(payload),
+            Err(Refusal::Empty) => None,
+            Err(Refusal::Foreign(why)) => {
+                debug!(gpu = self.name, "Pipeline cache not loaded: {why}");
+                None
+            }
+            Err(Refusal::Damaged(why)) => {
+                warn!(
+                    code = "gpu.pipeline_cache",
+                    gpu = self.name,
+                    "The saved pipeline cache is damaged: {why}; pipelines are made anew"
+                );
+                None
+            }
+        };
+        let info = vk::PipelineCacheCreateInfo::default().initial_data(payload.unwrap_or_default());
+        // SAFETY: the device is live, and the data, if any, is what vkGetPipelineCacheData gave
+        // for this GPU and driver, whole, as its header shows.
+        let cache = unsafe { self.raw.create_pipeline_cache(&info, None) }.map_err(|e| {
+            let cache = format_args!("device {:?}'s pipeline cache", self.name);
+            vk_error("vkCreatePipelineCache", cache, e)
+        })?;
+        // SAFETY: the cache is live.
+        unsafe { self.set_name(cache, "pipeline cache") };
+        if self.pipeline_cache.set(cache).is_err() {
+            // SAFETY: the cache was just made, and nothing has used it.
+            unsafe { self.raw.destroy_pipeline_cache(cache, None) };
+            panic!("a device loads its pipeline cache once");
+        }
+        let loaded_bytes = payload.map_or(0, <[u8]>::len);
+        debug!(gpu = self.name, loaded_bytes, "Pipeline cache made");
+        Ok(payload.is_some())
+    }
+
+    /// What the device's pipeline cache holds, for [`Device::load_pipeline_cache`] in a later run;
+    /// `None` if it has none.
+    pub fn pipeline_cache(&self) -> Result<Option<Vec<u8>>> {
+        let _zone = gg_core::zone!();
+        let Some(&cache) = self.pipeline_cache.get() else {
+            return Ok(None);
+        };
+        // SAFETY: the cache is live and the device's; reading its data needs no exclusive access.
+        let payload = unsafe { self.raw.get_pipeline_cache_data(cache) }.map_err(|e| {
+            let cache = format_args!("device {:?}'s pipeline cache", self.name);
+            vk_error("vkGetPipelineCacheData", cache, e)
+        })?;
+        Ok(Some(pipeline_cache::seal(&self.identity, &payload)))
+    }
+
+    /// The pipeline cache pipelines are made through: null until one is loaded. Making pipelines
+    /// through it needs no lock, since the device doesn't enable pipeline cache control, without
+    /// which caches are synchronized internally.
+    pub(crate) fn raw_pipeline_cache(&self) -> vk::PipelineCache {
+        self.pipeline_cache.get().copied().unwrap_or_default()
     }
 
     /// The ash device, for code that breaks the safe API's rules on purpose, such as tests that
@@ -643,13 +723,17 @@ impl Device {
 impl Drop for Device {
     fn drop(&mut self) {
         // SAFETY: everything made from the device holds an Arc to it, so only the device, its
-        // allocator and retired resources are left; waiting first lets the GPU finish, and the
-        // allocator goes before the device it allocates from.
+        // allocator, its pipeline cache and retired resources are left; waiting first lets the
+        // GPU finish, and the allocator goes before the device it allocates from. Pipelines
+        // don't need the cache they were made through.
         unsafe {
             let _ = self.raw.device_wait_idle();
             let retired = std::mem::take(&mut self.lock_retirement().resources);
             for (_, resource) in retired {
                 self.destroy(resource);
+            }
+            if let Some(&cache) = self.pipeline_cache.get() {
+                self.raw.destroy_pipeline_cache(cache, None);
             }
             self.bindless.destroy(&self.raw);
             ManuallyDrop::drop(&mut self.allocator);
@@ -668,6 +752,7 @@ struct Candidate {
     driver: String,
     vram_mib: u64,
     limits: vk::PhysicalDeviceLimits,
+    identity: Identity,
     /// A queue family with graphics that can also present to the surface, if there is one.
     graphics: Option<u32>,
     /// A queue family for uploads apart from graphics, if there is one.
@@ -795,6 +880,7 @@ impl Candidate {
             driver,
             vram_mib,
             limits: properties.limits,
+            identity: Identity::new(&properties),
             graphics,
             transfer,
             host_copy,
@@ -851,6 +937,31 @@ impl Candidate {
         Err(Error::new("gpu.no_upload_path", message))
     }
 }
+
+/// The SPIR-V capabilities a shader may declare on the devices the engine makes: those Vulkan 1.4
+/// gives without a feature, and those of the features [`Device::new`] enables, as the Vulkan SDK
+/// 1.4.335's vk.xml lists them under `spirvcapabilities`; they change with those features. A
+/// shader that declares another needs a feature no device has enabled, which validation reports
+/// in debug builds and a driver may crash on in others.
+pub const SHADER_CAPABILITIES: [u32; 17] = [
+    0,    // Matrix
+    1,    // Shader
+    40,   // InputAttachment
+    43,   // Sampled1D
+    44,   // Image1D
+    46,   // SampledBuffer
+    47,   // ImageBuffer
+    49,   // StorageImageExtendedFormats
+    50,   // ImageQuery
+    51,   // DerivativeControl
+    55,   // StorageImageReadWithoutFormat
+    56,   // StorageImageWriteWithoutFormat
+    4437, // DeviceGroup
+    5301, // ShaderNonUniform
+    5302, // RuntimeDescriptorArray, by runtimeDescriptorArray
+    5307, // SampledImageArrayNonUniformIndexing, by shaderSampledImageArrayNonUniformIndexing
+    5347, // PhysicalStorageBufferAddresses, by bufferDeviceAddress
+];
 
 /// The descriptor indexing features that the bindless set needs, which Vulkan 1.4 doesn't
 /// require but every desktop driver has. A device that has `descriptorIndexing` can hold at
@@ -1075,6 +1186,7 @@ mod tests {
             driver: String::new(),
             vram_mib,
             limits: vk::PhysicalDeviceLimits::default(),
+            identity: Identity::new(&vk::PhysicalDeviceProperties::default()),
             graphics: Some(0),
             transfer: None,
             host_copy: HostCopy::Unsupported,

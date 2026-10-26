@@ -13,6 +13,7 @@ use gg_gpu::{
     ColorImage, Device, Frame, GpuBuffer, GraphicsDesc, Pass, Pipeline, Texture as GpuTexture,
     TextureFormat,
 };
+use tracing::warn;
 
 use crate::shader::{self, Shader};
 use crate::texture::{self, Mipmaps};
@@ -223,7 +224,9 @@ impl MeshPass {
         }
     }
 
-    /// Makes the pipelines of the shaders in `uploads`, taking them.
+    /// Makes the pipelines of the shaders in `uploads`, taking them. A shader that has a pipeline
+    /// already, compiled again, gets a new one in place of the old, which retires until the GPU is
+    /// done with it; one whose new pipeline can't be made warns, and keeps the old.
     ///
     /// # Panics
     ///
@@ -231,12 +234,23 @@ impl MeshPass {
     pub(crate) fn add_shaders(&mut self, uploads: &mut Uploads) -> Result<()> {
         let _zone = gg_core::zone!();
         for added in uploads.shaders.drain(..) {
-            assert_eq!(
-                added.index as usize,
-                self.shaders.len(),
+            let index = added.index as usize;
+            assert!(
+                index <= self.shaders.len(),
                 "a renderer draws with the shaders of one `Shaders`"
             );
-            let pipeline = Pipeline::graphics(
+            // Which the draws' sizes are checked against: its own types, since only the
+            // `Shaders` that added it replaces it.
+            if let Some(old) = self.shaders.get(index) {
+                assert_eq!(
+                    (old.vertex_size, old.params_size),
+                    (added.vertex_size, added.params_size),
+                    "shader {:?} is replaced by one for other types; a renderer draws with the \
+                     shaders of one `Shaders`",
+                    added.name
+                );
+            }
+            let made = Pipeline::graphics(
                 &self.device,
                 &GraphicsDesc {
                     name: &added.name,
@@ -247,12 +261,22 @@ impl MeshPass {
                     blend: added.blend,
                     depth_write: shader::writes_depth(added.blend),
                 },
-            )?;
-            self.shaders.push(GpuShader {
-                pipeline,
-                vertex_size: added.vertex_size,
-                params_size: added.params_size,
-            });
+            );
+            match self.shaders.get_mut(index) {
+                Some(old) => match made {
+                    Ok(pipeline) => old.pipeline = pipeline,
+                    Err(error) => warn!(
+                        code = error.code(),
+                        shader = added.name,
+                        "{error:#}; the shader keeps drawing as it did"
+                    ),
+                },
+                None => self.shaders.push(GpuShader {
+                    pipeline: made?,
+                    vertex_size: added.vertex_size,
+                    params_size: added.params_size,
+                }),
+            }
         }
         Ok(())
     }

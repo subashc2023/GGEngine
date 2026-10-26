@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use ash::vk;
 use gg_core::{Error, Result};
+use tracing::debug;
 
 use crate::device::Retired;
 use crate::{DepthImage, Device, vk_error};
@@ -203,6 +204,10 @@ impl Pipeline {
         let mut rendering = vk::PipelineRenderingCreateInfo::default()
             .color_attachment_formats(&formats)
             .depth_attachment_format(desc.format.depth);
+        // How long the driver took, and whether the device's pipeline cache held the pipeline.
+        let mut feedback = vk::PipelineCreationFeedback::default();
+        let mut feedback_info = vk::PipelineCreationFeedbackCreateInfo::default()
+            .pipeline_creation_feedback(&mut feedback);
         let info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&stages)
             .vertex_input_state(&vertex_input)
@@ -214,13 +219,15 @@ impl Pipeline {
             .color_blend_state(&color_blend)
             .dynamic_state(&dynamic)
             .layout(device.bindless().pipeline_layout())
-            .push_next(&mut rendering);
-        // SAFETY: the module and layout are live, and the infos outlive the call; the module
-        // can go once the pipeline is made. The module is trusted to have both entry points and
-        // to keep to the layout, as `GraphicsDesc::spirv` says.
+            .push_next(&mut rendering)
+            .push_next(&mut feedback_info);
+        // SAFETY: the module, the layout and the pipeline cache, if the device has one, are live,
+        // and the infos outlive the call; the module can go once the pipeline is made. The module
+        // is trusted to have both entry points and to keep to the layout, as `GraphicsDesc::spirv`
+        // says.
         let made = unsafe {
-            let made =
-                raw_device.create_graphics_pipelines(vk::PipelineCache::null(), &[info], None);
+            let cache = device.raw_pipeline_cache();
+            let made = raw_device.create_graphics_pipelines(cache, &[info], None);
             raw_device.destroy_shader_module(module, None);
             made
         };
@@ -233,6 +240,16 @@ impl Pipeline {
         })?[0];
         // SAFETY: the pipeline is live.
         unsafe { device.set_name(raw, desc.name) };
+        let flags = feedback.flags;
+        debug!(
+            pipeline = desc.name,
+            us = flags
+                .contains(vk::PipelineCreationFeedbackFlags::VALID)
+                .then_some(feedback.duration / 1000),
+            cache_hit =
+                flags.contains(vk::PipelineCreationFeedbackFlags::APPLICATION_PIPELINE_CACHE_HIT),
+            "Pipeline made"
+        );
         Ok(Self {
             device: device.clone(),
             raw,

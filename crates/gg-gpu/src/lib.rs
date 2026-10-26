@@ -13,6 +13,7 @@ mod frame;
 mod image;
 mod instance;
 mod pipeline;
+mod pipeline_cache;
 mod surface;
 mod swapchain;
 mod texture;
@@ -25,7 +26,7 @@ use gg_core::Error;
 
 pub use bindless::{PLACED_TEXTURES, Sampler, Wrap};
 pub use buffer::GpuBuffer;
-pub use device::{Device, UploadPath};
+pub use device::{Device, SHADER_CAPABILITIES, UploadPath};
 pub use frame::{Frame, Frames, Indices, Pass, Target, Upload};
 pub use image::{ColorImage, DepthImage};
 pub use instance::{Instance, InstanceDesc, Validation};

@@ -93,6 +93,11 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # With Tracy's C++ client compiled in, as the `tracy` feature builds it.
       - run: cargo clippy --workspace --all-targets --locked --features sandbox/tracy -- -D warnings
+      # The shipping configuration, the player alone, whose gg-engine leaves out `dev`: on one
+      # runner, as what `dev` leaves out is alike on every platform.
+      - name: Check the shipping configuration
+        if: matrix.name == 'Linux x86-64'
+        run: cargo clippy -p player --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       # Whether the engine runs: rendering offscreen on lavapipe, under validation, it exits 0.
       - name: Run the sandbox headless

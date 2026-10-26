@@ -260,13 +260,19 @@ impl Context {
     /// writes its depth too, so that what's behind it, drawn later, doesn't show over it, while one
     /// that blends doesn't, so that what's behind it shows through it. `name` names it in errors
     /// and GPU captures. The shader keeps to the contract that [`gg_renderer::Shaders::add`]
-    /// describes: entry points `vertex_main` and `fragment_main`; instanced draws, each run of
-    /// consecutive draws of one mesh with the shader being one, with push constants that hold the
-    /// matrix from the world to clip space and the addresses of the vertices, which it reads as `V`
-    /// is laid out, of the instances' transforms, and of their parameters, which it reads as `P`
-    /// is; and textures sampled from the bindless set by the handles in its parameters.
+    /// describes, which the engine checks: entry points `vertex_main` and `fragment_main`;
+    /// instanced draws, each run of consecutive draws of one mesh with the shader being one, with
+    /// push constants that hold the matrix from the world to clip space and the addresses of the
+    /// vertices, which it reads as `V` is laid out, of the instances' transforms, and of their
+    /// parameters, which it reads as `P` is; and textures sampled from the bindless set by the
+    /// handles in its parameters.
     ///
-    /// Fails with `renderer.bad_shader` and slangc's diagnostics if it doesn't compile, and with
+    /// In a development build's windowed run, the shader compiles again as its file or a file it
+    /// includes changes, and the next frame draws with it; a change that doesn't compile, or
+    /// breaks the contract, warns, and the shader keeps drawing as it did.
+    ///
+    /// Fails with `renderer.bad_shader` and slangc's diagnostics if it doesn't compile, with
+    /// `renderer.shader_mismatch` and each way it breaks the contract if it breaks it, and with
     /// `renderer.no_slangc` if slangc can't be run.
     pub fn add_shader<V: NoUninit, P: NoUninit>(
         &mut self,
@@ -457,6 +463,12 @@ impl Context {
         mem::swap(&mut frame.draws, &mut self.draws);
         self.draws.clear();
         (frame.uploads).take(&mut self.meshes, &mut self.shaders, &mut self.textures);
+    }
+
+    /// The shaders layers added, for hot reload to put those it compiles again in their place.
+    #[cfg(feature = "dev")]
+    pub(crate) fn shaders(&mut self) -> &mut Shaders {
+        &mut self.shaders
     }
 }
 

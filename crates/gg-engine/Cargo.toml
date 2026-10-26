@@ -25,6 +25,9 @@ zune-jpeg.workspace = true
 [features]
 # The engine's zones for Tracy, through gg-core's profile module.
 tracy = ["gg-core/tracy"]
+# Development tooling, which development builds turn on and shipping builds never do: hot reload of
+# games' shaders, for now.
+dev = []
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { workspace = true, features = [

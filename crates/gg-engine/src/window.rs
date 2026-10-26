@@ -6,12 +6,13 @@ use std::any::Any;
 use std::mem;
 use std::ops::ControlFlow;
 use std::panic::{self, AssertUnwindSafe};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
 use egui::ViewportId;
 use gg_core::{Error, Result};
-use gg_renderer::Renderer;
+use gg_renderer::{Renderer, Settings};
 use tracing::{debug, info, trace};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize, Position};
@@ -23,8 +24,11 @@ use winit::window::{Window, WindowId};
 use crate::args::Args;
 use crate::chrome::{self, Chrome};
 use crate::dock::{self, Dock};
+#[cfg(feature = "dev")]
+use crate::hot_reload::HotReload;
 use crate::layer::Stack;
 use crate::pads::Gamepads;
+use crate::pipeline_cache;
 use crate::render_thread::RenderThread;
 use crate::viewports::{self, Viewports, WindowInput};
 #[cfg(target_os = "windows")]
@@ -45,9 +49,13 @@ pub(crate) fn run(app: &mut App, args: &Args) -> Result<Ran> {
     let layout = dock::path(app.name, std::env::consts::OS, |name| {
         std::env::var_os(name)
     });
+    let pipelines = pipeline_cache::path(app.name, std::env::consts::OS, |name| {
+        std::env::var_os(name)
+    });
     let chrome = Chrome::new(app.custom_title_bar);
     let mut handler = Handler {
         dock: Dock::new(layout, chrome),
+        pipelines,
         app,
         args,
         chrome,
@@ -55,6 +63,8 @@ pub(crate) fn run(app: &mut App, args: &Args) -> Result<Ran> {
         #[cfg(target_os = "windows")]
         frame: None,
         render: None,
+        #[cfg(feature = "dev")]
+        hot_reload: None,
         resized: None,
         egui: egui_context(),
         egui_winit: None,
@@ -101,6 +111,11 @@ struct Handler<'a> {
     /// windows too, so that on a way out that leaves it running, it takes the renderer back as it
     /// drops, and the renderer drops here, before the windows it presents to.
     render: Option<RenderThread>,
+    /// The pipeline cache's file, which the renderer loads as it starts and saves as it ends.
+    pipelines: Option<PathBuf>,
+    /// Watches the files of the shaders the layers add, from when they attach.
+    #[cfg(feature = "dev")]
+    hot_reload: Option<HotReload>,
     /// The main window's size since the renderer was last told it, which it's told once it's back
     /// from rendering.
     resized: Option<PhysicalSize<u32>>,
@@ -148,7 +163,13 @@ impl Handler<'_> {
             scale = window.scale_factor(),
             "Window opened"
         );
-        let settings = settings(self.app, self.args);
+        let pipelines = (self.pipelines.as_deref())
+            .map(pipeline_cache::load)
+            .unwrap_or_default();
+        let settings = Settings {
+            pipeline_cache: Some(&pipelines),
+            ..settings(self.app, self.args)
+        };
         let renderer = Renderer::windowed(&settings, window.clone(), size.width, size.height)?;
         self.render = Some(RenderThread::start(renderer)?);
         self.egui_winit = Some(WindowInput::new(&self.egui, ViewportId::ROOT, &window));
@@ -162,6 +183,14 @@ impl Handler<'_> {
         self.gamepads = Gamepads::open(window.has_focus());
         self.window = Some(window);
         self.app.stack.attach(&mut self.cx);
+        #[cfg(feature = "dev")]
+        {
+            let started = HotReload::start().inspect_err(|error| {
+                let consequence = "shaders don't reload as their files change";
+                tracing::warn!(code = error.code(), "{error:#}; {consequence}");
+            });
+            self.hot_reload = started.ok();
+        }
         Ok(())
     }
 
@@ -200,6 +229,11 @@ impl Handler<'_> {
             )
         });
         let (ui, tessellated) = tessellate(&self.egui, &mut output);
+        // Shaders compiled again since, which the frame handed off below draws with.
+        #[cfg(feature = "dev")]
+        if let Some(hot_reload) = &mut self.hot_reload {
+            hot_reload.update(self.cx.shaders());
+        }
         // The frame before, which rendered meanwhile.
         let (mut minimized, mut failed) = (false, None);
         match take_back(render, &mut self.cx, tessellated) {
@@ -447,6 +481,11 @@ impl ApplicationHandler for Handler<'_> {
     }
 
     fn exiting(&mut self, _: &ActiveEventLoop) {
+        // Without waiting for a compile under way, which ends the thread once it ends.
+        #[cfg(feature = "dev")]
+        {
+            self.hot_reload = None;
+        }
         // The last frame ends here, and the frame handed over last renders, and counts, before
         // the run's end is timed.
         (self.cx.perf).finish(self.clock.since_last(Instant::now()));
@@ -474,6 +513,9 @@ impl ApplicationHandler for Handler<'_> {
             // The recording's end, which detaching writes.
             if let Err(error) = self.app.stack.recorded() {
                 self.error.get_or_insert(error);
+            }
+            if let Some(path) = &self.pipelines {
+                pipeline_cache::save(path, &renderer);
             }
             let perf = mem::take(&mut self.cx.perf);
             self.ran = Some(Ran::finish(
