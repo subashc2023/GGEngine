@@ -58,6 +58,7 @@ mod windows_frame;
 #[allow(unsafe_code)]
 mod windows_wait;
 
+use std::ffi::OsString;
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -126,6 +127,10 @@ pub struct App {
     name: &'static str,
     stack: Stack,
     custom_title_bar: bool,
+    /// What the world's IDs are drawn from, rather than a seed drawn at random.
+    seed: Option<u64>,
+    /// How far apart headless frames are, rather than a tick each.
+    headless_step: Option<Duration>,
 }
 
 impl App {
@@ -135,7 +140,29 @@ impl App {
             name,
             stack: Stack::default(),
             custom_title_bar: false,
+            seed: None,
+            headless_step: None,
         }
+    }
+
+    /// Draws the world's IDs from `seed` rather than from a seed drawn at random, so that a run's
+    /// IDs, and what follows from them, such as the order entities at one z draw in, are the same
+    /// every run: for tests.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn seeded(mut self, seed: u64) -> Self {
+        self.seed = Some(seed);
+        self
+    }
+
+    /// Has headless frames come `dt` apart, which their measures take them as, rather than a tick
+    /// each, stepping the simulation as windowed runs do, so that they draw the world between its
+    /// ticks: for tests. A `dt` less than a tick runs at most one a frame, however long one takes.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn headless_step(mut self, dt: Duration) -> Self {
+        self.headless_step = Some(dt);
+        self
     }
 
     /// Adds a layer above the layers added before it, and below every overlay.
@@ -169,24 +196,44 @@ impl App {
 /// It parses the flags every app shares, which `--help` lists, and starts logging. The status is
 /// 0 on success, 1 on an error, a Vulkan validation message or a replay that goes another way,
 /// and 2 on bad arguments.
-pub fn run(mut app: App) -> ExitCode {
+pub fn run(app: App) -> ExitCode {
     let started = Instant::now();
     let mut argv = std::env::args_os();
     let program = argv
         .next()
         .and_then(|path| Some(Path::new(&path).file_stem()?.to_string_lossy().into_owned()))
         .unwrap_or_else(|| app.name.to_lowercase());
-    let args = match args::parse(argv) {
+    run_args(app, started, &program, argv)
+}
+
+/// Runs `app` as [`run`] does, with `args` in place of the arguments the process was given after
+/// its name: for tests, whose own are their harness's.
+#[doc(hidden)]
+pub fn run_with(app: App, args: impl IntoIterator<Item = impl Into<OsString>>) -> ExitCode {
+    let program = app.name.to_lowercase();
+    let args = args.into_iter().map(Into::into);
+    run_args(app, Instant::now(), &program, args)
+}
+
+/// What [`run`] and [`run_with`] do with `args`, the arguments after the program's name, which
+/// the usage names `program`, once the engine `started`.
+fn run_args(
+    mut app: App,
+    started: Instant,
+    program: &str,
+    args: impl IntoIterator<Item = OsString>,
+) -> ExitCode {
+    let args = match args::parse(args) {
         Ok(Some(args)) => args,
         Ok(None) => {
-            print!("{}", args::usage(&program));
+            print!("{}", args::usage(program));
             return ExitCode::SUCCESS;
         }
         Err(error) => {
             eprintln!(
                 "error[{}]: {error}\n\n{}",
                 error.code(),
-                args::usage(&program)
+                args::usage(program)
             );
             return ExitCode::from(2);
         }
@@ -257,20 +304,24 @@ fn run_headless(app: &mut App, args: &Args) -> Result<Ran> {
     let (width, height) = (1280, 720);
     let renderer = Renderer::headless(&settings(app, args), width, height)?;
     let mut render = RenderThread::start(renderer)?;
-    let mut cx = Context::new(None);
+    let mut cx = Context::of_run(None, app.seed);
     let mut clock = Clock::default();
-    let mut stepper = Stepper::lockstep();
+    let mut stepper = match app.headless_step {
+        Some(_) => Stepper::default(),
+        None => Stepper::lockstep(),
+    };
     let egui = egui_context();
     // Headless runs neither read nor save the layout, so that they're reproducible, and have no
     // window to frame.
     let mut dock = Dock::new(None, Chrome::Os);
+    let mut egui_runs = true;
     // The frames handed over to render, and those rendered.
     let (mut handed, mut frames) = (0, 0);
     app.stack.attach(&mut cx);
     let rendered = (|| -> Result<()> {
         while args.frames.is_none_or(|limit| handed < limit) {
             // One point is one pixel, as on a display without scaling.
-            let input = egui::RawInput {
+            let input = egui_runs.then(|| egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
                     egui::vec2(width as f32, height as f32),
@@ -278,21 +329,34 @@ fn run_headless(app: &mut App, args: &Args) -> Result<Ran> {
                 max_texture_side: Some(MAX_TEXTURE_SIDE),
                 time: Some(clock.elapsed().as_secs_f64()),
                 ..Default::default()
-            };
-            let mut output = run_frame(
+            });
+            let dt = app.headless_step.unwrap_or(clock.start_frame());
+            let pass = run_frame(
                 &mut app.stack,
                 &mut cx,
-                clock.start_frame(),
+                dt,
                 &mut stepper,
-                &egui,
-                &mut dock,
-                input,
+                input.map(|input| (&egui, &mut dock, input)),
             );
-            let (ui, tessellated) = tessellate(&egui, &mut output);
+            let (ui, tessellated, view) = match pass {
+                Some((mut output, layers_draw)) => {
+                    egui_runs = keeps_egui(&app.stack, layers_draw, Chrome::Os);
+                    let (ui, tessellated) = tessellate(&egui, &mut output);
+                    let view = viewport(dock.central(), ui.pixels_per_point);
+                    (ui, tessellated, view)
+                }
+                None => {
+                    let view = Viewport {
+                        origin: [0, 0],
+                        size: [width, height],
+                    };
+                    (MainUi::none(), Duration::ZERO, view)
+                }
+            };
             if take_back(&mut render, &mut cx, tessellated)?.is_some() {
                 frames += 1;
             }
-            hand_off(&mut render, &mut cx, dock.central(), ui, Vec::new());
+            hand_off(&mut render, &mut cx, view, ui, Vec::new());
             handed += 1;
             app.stack.recorded()?;
         }
@@ -337,20 +401,21 @@ fn egui_context() -> egui::Context {
 /// the frame's measure, runs the ticks of the simulation that the time owes, as `stepper` steps
 /// it, copying where the world's entities are as each starts, updates the layers, draws the world
 /// after what they drew, as far on from where the last tick found it to where it left it as the
-/// frame is past the tick, and has the layers draw their UI, in the dock and with egui.
-/// [`tessellate`] starts the second half, which hands what egui made of it to the render thread.
+/// frame is past the tick, and, given egui, the dock and egui's input in `ui`, has the layers draw
+/// their UI, in the dock and with egui. Returns that pass's output, and whether any layer draws
+/// UI, as [`Stack::ui`] says. [`tessellate`] starts the second half, which hands what egui made
+/// of it to the render thread.
 ///
-/// egui allocates as it lays out here, and as [`tessellate`] tessellates, so frames that draw UI
-/// allocate; the UI is a development overlay.
+/// egui allocates as it lays out here, and as [`tessellate`] tessellates, so frames that run its
+/// pass allocate; the UI is a development overlay, and an app that draws none stops running it,
+/// as [`keeps_egui`] says.
 fn run_frame(
     stack: &mut Stack,
     cx: &mut Context,
     dt: Duration,
     stepper: &mut Stepper,
-    egui: &egui::Context,
-    dock: &mut Dock,
-    input: egui::RawInput,
-) -> egui::FullOutput {
+    ui: Option<(&egui::Context, &mut Dock, egui::RawInput)>,
+) -> Option<(egui::FullOutput, bool)> {
     gg_core::profile::frame_mark();
     cx.perf.start_frame(dt);
     let _zone = gg_core::zone!();
@@ -366,17 +431,35 @@ fn run_frame(
     gg_core::plot!("alpha", f64::from(alpha));
     cx.draw_world(alpha);
     let updated = Instant::now();
-    let output = {
+    let pass = ui.map(|(egui, dock, input)| {
         let _zone = gg_core::zone!("egui");
-        egui.run_ui(input, |root| {
+        let mut layers_draw = false;
+        // egui may run the pass again in a frame, as it asks for one.
+        let output = egui.run_ui(input, |root| {
             dock.begin(root);
-            stack.ui(cx, &mut Ui::new(root, dock));
+            layers_draw |= stack.ui(cx, &mut Ui::new(root, dock));
             dock.end(root);
-        })
-    };
+        });
+        (output, layers_draw)
+    });
     cx.perf
         .ran(ticked - start, updated - ticked, updated.elapsed());
-    output
+    pass
+}
+
+/// Whether egui runs from the next frame on, after a pass in which `layers_draw` says whether any
+/// of `stack`'s layers draw UI, in windows framed as `chrome` says. Once none does, and the OS
+/// frames the windows, egui would show nothing, so it stops for the rest of the run: whether a
+/// layer draws UI is its type's, which no later frame changes.
+fn keeps_egui(stack: &Stack, layers_draw: bool, chrome: Chrome) -> bool {
+    let keeps = layers_draw || chrome != Chrome::Os;
+    if !keeps {
+        debug!(
+            layers = ?stack.names(),
+            "No layer draws UI, so frames run without egui from the next"
+        );
+    }
+    keeps
 }
 
 /// What the main window's pass drew in a frame, tessellated, for the render thread.
@@ -384,6 +467,17 @@ struct MainUi {
     primitives: Vec<egui::ClippedPrimitive>,
     textures: TextureChanges,
     pixels_per_point: f32,
+}
+
+impl MainUi {
+    /// Nothing, from a frame that ran no pass.
+    fn none() -> Self {
+        Self {
+            primitives: Vec::new(),
+            textures: TextureChanges::default(),
+            pixels_per_point: 1.0,
+        }
+    }
 }
 
 /// The second half of a turn of the main loop starts here, while the frame before renders:
@@ -417,18 +511,18 @@ fn take_back(
     rendered.map(|rendered| rendered.presented).transpose()
 }
 
-/// Hands the frame over to the render thread: what the layers drew in the game's view, the main
-/// window's central area `view` in points, the UI in `ui` over it, and what the windows of their
-/// own drew, in `windows`.
+/// Hands the frame over to the render thread: what the layers drew in the game's view, `view` in
+/// the main window's pixels, the UI in `ui` over it, and what the windows of their own drew, in
+/// `windows`.
 fn hand_off(
     render: &mut RenderThread,
     cx: &mut Context,
-    view: egui::Rect,
+    view: Viewport,
     ui: MainUi,
     windows: Vec<Drawn>,
 ) {
     render.hand(|frame| {
-        cx.extract(frame, viewport(view, ui.pixels_per_point));
+        cx.extract(frame, view);
         frame.primitives = ui.primitives;
         frame.textures = ui.textures;
         frame.pixels_per_point = ui.pixels_per_point;
@@ -780,7 +874,8 @@ mod tests {
             )),
             ..Default::default()
         };
-        let mut output = run_frame(stack, cx, dt, stepper, egui, dock, input);
+        let pass = run_frame(stack, cx, dt, stepper, Some((egui, dock, input)));
+        let (mut output, _) = pass.expect("a pass, given egui");
         // As the renderer would have.
         output.textures_delta.clear();
         let mut frame = render_thread::Extracted::default();
@@ -1448,7 +1543,8 @@ mod tests {
         for _ in 0..2 {
             let (cx, clock, stepper) = (&mut cx, &mut clock, &mut stepper);
             let dt = clock.start_frame();
-            let mut output = run_frame(&mut stack, cx, dt, stepper, &egui, &mut dock, input());
+            let ui = Some((&egui, &mut dock, input()));
+            let (mut output, _) = run_frame(&mut stack, cx, dt, stepper, ui).expect("a pass");
             // As the renderer would have.
             output.textures_delta.clear();
         }
@@ -1473,7 +1569,8 @@ mod tests {
         let mut stepper = Stepper::default();
         let egui = egui_context();
         let (cx, dt, stepper) = (&mut cx, clock.start_frame(), &mut stepper);
-        let mut output = run_frame(&mut stack, cx, dt, stepper, &egui, &mut dock, input);
+        let ui = Some((&egui, &mut dock, input));
+        let (mut output, _) = run_frame(&mut stack, cx, dt, stepper, ui).expect("a pass");
         // As the renderer would have.
         output.textures_delta.clear();
         let mut expected = Draws::default();
@@ -1576,7 +1673,8 @@ mod tests {
         // The dock places a panel in its first frame, and draws it from the next.
         for _ in 0..3 {
             let (cx, dt, stepper) = (&mut cx, clock.start_frame(), &mut stepper);
-            let mut output = run_frame(&mut stack, cx, dt, stepper, &egui, &mut dock, input());
+            let ui = Some((&egui, &mut dock, input()));
+            let (mut output, _) = run_frame(&mut stack, cx, dt, stepper, ui).expect("a pass");
             output.textures_delta.clear();
             texts.clear();
             for clipped in output.shapes {

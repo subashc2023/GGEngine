@@ -186,6 +186,9 @@ pub struct World {
     /// Each living entity by its ID; looked up, never iterated. Hashed with SipHash, keyed at
     /// random, so that IDs from files can't be chosen to collide.
     by_id: HashMap<EntityId, Entity>,
+    /// The room `by_id` was given as it last grew, which the entries its removals leave hide from
+    /// its `capacity`: [`find_by_id`](Self::find_by_id) keeps it at most half full.
+    id_room: usize,
     /// How many vacant slots keep each ID: the IDs of the entities a delete took, which no draw
     /// gives to another entity while an undo can give them back, as it gives back their slots.
     /// Looked up, never iterated, and hashed as `by_id` is.
@@ -207,6 +210,8 @@ pub struct World {
     components: Components,
     /// The component types of the table an entity moves to.
     scratch: Vec<ComponentId>,
+    /// What spawning a model has spawned so far, in memory kept from one spawn to the next.
+    spawned: Vec<Entity>,
 }
 
 impl Default for World {
@@ -261,6 +266,7 @@ impl World {
             resets: Vec::new(),
             reset_count: 0,
             by_id: HashMap::new(),
+            id_room: 0,
             kept: HashMap::new(),
             stream: IdStream::new(seed),
             serial: next_serial(),
@@ -269,6 +275,7 @@ impl World {
             by_signature: HashMap::new(),
             components,
             scratch: Vec::new(),
+            spawned: Vec::new(),
         }
     }
 
@@ -316,7 +323,7 @@ impl World {
                 self.stream.reseed();
                 continue;
             }
-            self.by_id.insert(id, entity);
+            self.find_by_id(id, entity);
             return id;
         }
     }
@@ -335,12 +342,26 @@ impl World {
             entity, expected,
             "a scene's entity takes the handle predicted for it"
         );
-        let given = self.by_id.insert(id, entity);
+        let given = self.find_by_id(id, entity);
         assert!(
             given.is_none(),
             "a scene gives ID {id}, which a living entity has"
         );
         self.place(entity, id, row);
+    }
+
+    /// A list, empty, in memory kept from the last, for [`Model::spawn`](crate::Model::spawn) to
+    /// note what it spawns in, and give back through [`keep_spawned`](Self::keep_spawned), so that
+    /// a model spawned as a game runs allocates nothing once the world has room for it.
+    pub(crate) fn take_spawned(&mut self) -> Vec<Entity> {
+        let mut spawned = mem::take(&mut self.spawned);
+        spawned.clear();
+        spawned
+    }
+
+    /// Keeps `spawned`'s memory for the next [`take_spawned`](Self::take_spawned).
+    pub(crate) fn keep_spawned(&mut self, spawned: Vec<Entity>) {
+        self.spawned = spawned;
     }
 
     /// Puts `entity`, whose slot holds none, with ID `id`, which the world finds it by already,

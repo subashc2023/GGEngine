@@ -293,7 +293,11 @@ are read only where they cross into files, tools and diagnostics, and as drawing
 each batch and each z: written only as an entity is spawned into the slot and removed from it, and
 read through the entity's handle, checked first, so that a stale handle never names the entity now
 in its slot. A map hashed with SipHash, so that IDs from files can't be chosen to collide, finds an
-entity by its ID, and another counts the IDs deletes keep; both are looked up, never iterated.
+entity by its ID, and another counts the IDs deletes keep; both are looked up, never iterated. The
+first keeps room for twice the most entities it has found: once the entries that removals leave
+use up its room, std's map makes room in place if it's at most half full, and grows otherwise, at
+a time its keys decide, so that entities coming and going at a population the world has held
+never grow it.
 
 Reflection names each component type by its identifier, unless `#[reflect(name = "...")]` gives
 another, and two types of one name are an error rather than a guess. The derive writes the
@@ -435,7 +439,9 @@ so that none is left holding what it saw pressed; a stick or a trigger that a la
 from rest stays, for the layers below, as they last saw it until it rests. Ticks, updates and UI
 go up from the bottom.
 Headless runs have no window or gamepad events, but their layers tick, update and draw UI all the
-same.
+same. A layer that keeps `Layer::ui`'s default draws none, and an app none of whose layers draw UI,
+and whose windows the OS frames, runs without egui from its second frame: its frames collect no
+input for egui and run no pass, egui sees no events, and the game's view fills the window.
 
 egui, the engine's immediate-mode UI, is the top overlay: it sees every event first and keeps
 those it wants, such as a click on one of its panels, and `gg-renderer` draws its meshes over
@@ -737,8 +743,10 @@ job changes only its own rows, work
 splits at a fixed number of rows, and no thread changes its floating-point environment, so that
 results don't depend on how many threads there are or which takes what; outside the pool, as in
 tests and with `--threads 1`, jobs run one after another on the thread that calls. Steady-state
-ticks allocate nothing on any thread. Drawing hands the job threads, too, the roots it blends
-between ticks, in runs of rows, after the frame's ticks.
+ticks allocate nothing on any thread, entities coming and going among them, and nor do the frames
+of an app without UI; egui allocates as it lays out and tessellates, so frames that draw UI do.
+Drawing hands the job threads, too, the roots it blends between ticks, in runs of rows, after the
+frame's ticks.
 
 Rendering runs on a thread of its own, `gg-render`, a frame behind. Once a frame's UI is drawn
 and tessellated, the main thread takes the renderer back from the render thread, waiting for it to

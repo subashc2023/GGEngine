@@ -27,7 +27,8 @@ use crate::render_thread::Extracted;
 use crate::{Event, Input, MeshDraw, Model, Transform, Ui, World};
 
 /// A part of an app that the main loop drives. Every method has a default that does nothing,
-/// so a layer implements only what it uses.
+/// so a layer implements only what it uses; [`ui`](Self::ui)'s also tells the engine that the
+/// layer draws no UI.
 ///
 /// The world changes only as the layers attach and detach, and at their ticks: the rest of a
 /// layer reads it, and queues commands, data of its own, for its next tick to apply, so that the
@@ -74,8 +75,12 @@ pub trait Layer {
     }
 
     /// Called every frame, after the updates, to draw UI: dockable panels, and anything else
-    /// egui draws.
-    fn ui(&mut self, _cx: &mut Context, _ui: &mut Ui<'_>) {}
+    /// egui draws. A layer that keeps this default draws none, and an app none of whose layers
+    /// draw UI, and whose windows the OS frames, runs without egui from its second frame, so that
+    /// its frames neither collect egui's input nor lay out and tessellate an empty UI.
+    fn ui(&mut self, _cx: &mut Context, ui: &mut Ui<'_>) {
+        ui.default_ui(type_name::<Self>());
+    }
 }
 
 /// A layer's queue of commands, without their type, as [`Layer::commands`] gives it to the engine,
@@ -184,6 +189,12 @@ pub struct Context {
 impl Context {
     pub(crate) fn new(window: Option<Window>) -> Self {
         Self::with_world(window, World::default())
+    }
+
+    /// A run's context, in `window`, if it has one, whose world draws its entities' IDs from
+    /// `seed`, or from a seed drawn at random without one.
+    pub(crate) fn of_run(window: Option<Window>, seed: Option<u64>) -> Self {
+        Self::with_world(window, seed.map_or_else(World::default, World::seeded))
     }
 
     /// A context without a window, a renderer or a stack, whose world draws its entities' IDs from
@@ -538,6 +549,9 @@ pub(crate) struct Stack {
     layers: Vec<Box<dyn Layer>>,
     /// The name of each layer's type, in the same order, which a recording names it by.
     names: Vec<&'static str>,
+    /// The full name of each layer's type, in the same order, which tells a layer's own default
+    /// `ui` from another layer's that its `ui` calls.
+    types: Vec<&'static str>,
     /// Where the overlays start.
     overlays: usize,
     /// What records the run, if it's recorded.
@@ -549,6 +563,7 @@ impl Stack {
     pub(crate) fn push_layer<L: Layer + 'static>(&mut self, layer: L) {
         self.layers.insert(self.overlays, Box::new(layer));
         self.names.insert(self.overlays, short_name::<L>());
+        self.types.insert(self.overlays, type_name::<L>());
         self.overlays += 1;
     }
 
@@ -556,6 +571,7 @@ impl Stack {
     pub(crate) fn push_overlay<L: Layer + 'static>(&mut self, overlay: L) {
         self.layers.push(Box::new(overlay));
         self.names.push(short_name::<L>());
+        self.types.push(type_name::<L>());
     }
 
     /// The names of the layers' types, from the bottom up.
@@ -649,12 +665,18 @@ impl Stack {
         }
     }
 
-    /// Draws UI from the bottom up, so the layers above draw over those below.
-    pub(crate) fn ui(&mut self, cx: &mut Context, ui: &mut Ui<'_>) {
+    /// Draws UI from the bottom up, so the layers above draw over those below, and returns
+    /// whether any layer draws UI: every layer does but one whose `ui` is its own type's default,
+    /// [`Layer::ui`]'s. One whose `ui` calls another layer's default draws UI as far as this goes,
+    /// whatever it draws.
+    pub(crate) fn ui(&mut self, cx: &mut Context, ui: &mut Ui<'_>) -> bool {
         let _zone = gg_core::zone!();
-        for layer in &mut self.layers {
+        let mut draws = false;
+        for (layer, &own) in self.layers.iter_mut().zip(&self.types) {
             layer.ui(cx, ui);
+            draws |= ui.take_default_ui() != Some(own);
         }
+        draws
     }
 
     /// Records `event` in the input state that layers poll, then hands it down from the top
@@ -901,6 +923,64 @@ mod tests {
             let _ = stack.event(&mut cx, &key);
         }
         assert_eq!(*held.borrow(), [true, false]);
+    }
+
+    /// Keeps [`Layer::ui`]'s default.
+    struct Quiet;
+
+    impl Layer for Quiet {}
+
+    /// Draws nothing, through a `ui` of its own.
+    struct Blank;
+
+    impl Layer for Blank {
+        fn ui(&mut self, _: &mut Context, _: &mut Ui<'_>) {}
+    }
+
+    /// Draws what the layer it wraps does, through a `ui` of its own.
+    struct Wrapper(Quiet);
+
+    impl Layer for Wrapper {
+        fn ui(&mut self, cx: &mut Context, ui: &mut Ui<'_>) {
+            self.0.ui(cx, ui);
+        }
+    }
+
+    /// Whether `stack`'s layers draw UI, as a pass of egui's tells.
+    fn draws_ui(mut stack: Stack) -> bool {
+        let egui = crate::egui_context();
+        let mut dock = crate::dock::Dock::new(None, crate::chrome::Chrome::Os);
+        let mut cx = Context::new(None);
+        let mut draws = false;
+        let mut output = egui.run_ui(egui::RawInput::default(), |root| {
+            dock.begin(root);
+            draws |= stack.ui(&mut cx, &mut Ui::new(root, &mut dock));
+            dock.end(root);
+        });
+        // As the renderer would have.
+        output.textures_delta.clear();
+        draws
+    }
+
+    /// A layer draws UI unless its `ui` is its own type's default: one that has a `ui` of its own
+    /// draws, though it draws nothing, as does one whose `ui` calls another layer's default.
+    #[test]
+    fn layers_draw_ui_unless_theirs_is_the_default() {
+        let stack = |push: &dyn Fn(&mut Stack)| {
+            let mut stack = Stack::default();
+            push(&mut stack);
+            stack
+        };
+        assert!(!draws_ui(stack(&|_| {})), "no layers");
+        assert!(!draws_ui(stack(&|stack| {
+            stack.push_layer(Quiet);
+            stack.push_overlay(Quiet);
+        })));
+        assert!(draws_ui(stack(&|stack| {
+            stack.push_layer(Quiet);
+            stack.push_overlay(Blank);
+        })));
+        assert!(draws_ui(stack(&|stack| stack.push_layer(Wrapper(Quiet)))));
     }
 
     #[test]

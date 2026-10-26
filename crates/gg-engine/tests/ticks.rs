@@ -2,7 +2,8 @@
 //! run a system on the job system's threads and another on the ticks' thread alone, and hash the
 //! world, as a recorded run's do, once their first ticks have run; before the job system's threads
 //! start, as in a run on one thread, and after, from the first tick after, since starting them
-//! makes what they keep.
+//! makes what they keep; and ticks that despawn entities and spawn others in their place, as a
+//! game's bullets and particles come and go.
 //!
 //! It runs in one process with a main of its own, so that no other test's threads run beside it,
 //! and counts every allocation the process makes while the ticks run, whichever thread makes it.
@@ -11,6 +12,7 @@
 #![allow(unsafe_code)]
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::collections::VecDeque;
 use std::hint::black_box;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -18,12 +20,18 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use gg_engine::math::Vec3;
-use gg_engine::{Component, Context, Layer, Tick, Transform, World};
+use gg_engine::{Component, Context, Entity, Layer, Tick, Transform, World};
 
 /// The ticks run before counting, as a run's first ticks size what the world and the layer keep.
 const WARM_UP: u64 = 64;
 /// The ticks counted.
 const COUNTED: u64 = 1_000;
+/// The parents, each with a child, that churn, and how many of them each tick replaces.
+const SUBTREES: usize = 2_000;
+const REPLACED: usize = 20;
+/// The ticks of churn counted: far more than the world's map of IDs takes, at this population,
+/// to run out of room, so that one that grew at a time its keys pick would grow among them.
+const CHURNED: u64 = 20_000;
 
 /// System's allocator, which counts the allocations made while `COUNTING` is set.
 struct Counting;
@@ -153,6 +161,39 @@ fn ticks(movers: &mut Movers, cx: &mut Context, number: &mut u64, count: u64) {
     }
 }
 
+/// Parents, each with a child, of which each tick despawns the oldest `REPLACED` and spawns as many
+/// anew in their place.
+struct Churn {
+    roots: VecDeque<Entity>,
+}
+
+impl Churn {
+    fn new(world: &mut World) -> Self {
+        let mut churn = Self {
+            roots: VecDeque::with_capacity(SUBTREES),
+        };
+        for _ in 0..SUBTREES {
+            churn.spawn(world);
+        }
+        churn
+    }
+
+    fn spawn(&mut self, world: &mut World) {
+        let root = world.spawn(Transform::default());
+        let child = world.spawn(Transform::default());
+        world.set_parent(child, Some(root)).expect("both alive");
+        self.roots.push_back(root);
+    }
+
+    fn tick(&mut self, world: &mut World) {
+        for _ in 0..REPLACED {
+            let oldest = self.roots.pop_front().expect("a full pool");
+            world.despawn(oldest).expect("alive");
+            self.spawn(world);
+        }
+    }
+}
+
 /// Checks that what the job system's other threads allocate is counted: that a pass whose rows
 /// allocate once each on those threads counts as many allocations as such rows at least. The
 /// ticks' thread holds its rows until one has run on another thread, since rows this quick it could
@@ -230,4 +271,24 @@ fn main() {
     }
     workers_are_counted(cx.world_mut());
     println!("allocations on the job system's other threads count");
+
+    // A turn of the pool first, as a run's first ticks of churn take what its tables keep.
+    let mut churn = Churn::new(cx.world_mut());
+    for _ in 0..SUBTREES / REPLACED {
+        churn.tick(cx.world_mut());
+    }
+    let counted = allocations(|| {
+        for _ in 0..CHURNED {
+            churn.tick(cx.world_mut());
+        }
+    });
+    assert_eq!(
+        counted, 0,
+        "{CHURNED} ticks that each replaced {REPLACED} of {SUBTREES} parents and their children \
+         allocated {counted} times"
+    );
+    println!(
+        "{CHURNED} ticks that each replaced {REPLACED} of {SUBTREES} parents and their children \
+         allocated nothing"
+    );
 }

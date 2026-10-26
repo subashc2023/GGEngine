@@ -388,10 +388,11 @@ fn replace_grid(world: &mut World, text: &str) -> Result<(), Error> {
 /// Moves each drifter to where it is `t` seconds after the swarm starts, on the job system's
 /// threads; and resets the interpolation of each that wraps from one side of the field to the
 /// other, which it puts in `wrapped`, so that it doesn't draw on its way across.
-fn drift(world: &mut World, t: f64, wrapped: &mut Vec<Entity>) {
+fn drift(world: &mut World, t: f64, wrapped: &mut Mutex<Vec<Entity>>) {
     let _zone = gg_engine::zone!();
-    // Kept for its memory. The jobs find them in any order, which drawing alone reads.
-    let found = Mutex::new(mem::take(wrapped));
+    // Kept for its memory, and the lock with it, which macOS's std makes as it's first taken. The
+    // jobs find them in any order, which drawing alone reads.
+    let found = &*wrapped;
     world
         .query_mut::<(Entity, &Drifter, &mut Transform)>()
         .par_for_each(|(entity, drifter, transform)| {
@@ -402,7 +403,7 @@ fn drift(world: &mut World, t: f64, wrapped: &mut Vec<Entity>) {
             }
             *transform = to;
         });
-    *wrapped = found.into_inner().expect("no job panicked holding it");
+    let wrapped = wrapped.get_mut().expect("no job panicked holding it");
     for &entity in wrapped.iter() {
         let reset = world.reset_interpolation(entity);
         reset.expect("a drifter just moved is alive");
@@ -553,8 +554,9 @@ struct Sandbox {
     scene: Option<Scene>,
     /// What the panels, the File menu and the actions changed since the last tick.
     commands: Vec<Command>,
-    /// The drifters that wrapped at a tick, kept for its memory: empty between ticks.
-    wrapped: Vec<Entity>,
+    /// The drifters that wrapped at a tick, kept for its memory, with its lock: empty between
+    /// ticks.
+    wrapped: Mutex<Vec<Entity>>,
 }
 
 /// What the sandbox's keys and gamepads do, beside the camera controller's.
@@ -656,7 +658,7 @@ impl Sandbox {
             swarm: SWARM_START,
             scene: None,
             commands: Vec::new(),
-            wrapped: Vec::new(),
+            wrapped: Mutex::new(Vec::new()),
         }
     }
 
@@ -888,7 +890,8 @@ impl Layer for Sandbox {
             self.resize_swarm(world, swarm, t);
         }
         drift(world, t, &mut self.wrapped);
-        self.wrapped.clear();
+        let wrapped = self.wrapped.get_mut();
+        wrapped.expect("no job panicked holding it").clear();
         spin(world, Tick::DT);
         steer(world, Tick::DT);
     }
@@ -1131,17 +1134,18 @@ mod tests {
                 lap(start.y, velocity.y, FIELD.y),
             ]
         };
-        let (mut wrapped, mut seen) = (Vec::new(), 0);
+        let (mut found, mut seen) = (Mutex::new(Vec::new()), 0);
         for tick in 1..=256 {
             let [before, t] = [tick - 1, tick].map(|tick| Tick::DT.as_secs_f64() * f64::from(tick));
-            drift(&mut world, t, &mut wrapped);
+            drift(&mut world, t, &mut found);
             let lapped = drifters
                 .iter()
                 .filter(|(_, drifter)| laps(drifter, t) != laps(drifter, before));
             let mut want: Vec<Entity> = lapped.map(|&(entity, _)| entity).collect();
             want.sort();
+            let wrapped = found.get_mut().expect("no job panicked holding it");
             wrapped.sort();
-            assert_eq!(wrapped, want, "tick {tick}");
+            assert_eq!(*wrapped, want, "tick {tick}");
             seen += wrapped.len();
             wrapped.clear();
         }

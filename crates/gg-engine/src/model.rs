@@ -117,7 +117,7 @@ impl Model {
     /// file's order, so that a world seeded alike spawns the model alike.
     pub fn spawn(&self, world: &mut World, at: Transform) -> Entity {
         let root = world.spawn(at);
-        let mut spawned = Vec::with_capacity(self.parts.len());
+        let mut spawned = world.take_spawned();
         for part in &self.parts {
             let entity = match part.draw {
                 Some(draw) => world.spawn((part.transform, draw)),
@@ -128,6 +128,7 @@ impl Model {
             set.expect("a new entity takes an earlier one as its parent");
             spawned.push(entity);
         }
+        world.keep_spawned(spawned);
         root
     }
 }

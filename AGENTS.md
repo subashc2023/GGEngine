@@ -147,9 +147,12 @@ another platform could break.
 - Diagnostics are data: log through `tracing` with fields rather than printing, and give every
   error and warning a stable code and the thing it is about, as
   [ARCHITECTURE.md](ARCHITECTURE.md#diagnostics) describes.
-- Steady-state frames don't allocate: per-frame data lives in frame arenas and ring buffers, and
-  gg-engine's `ticks` test checks ticks on every thread. Tracy's client allocates as it records,
-  so check allocations without the `tracy` feature.
+- Steady-state frames don't allocate: per-frame data lives in frame arenas and ring buffers.
+  gg-engine's `ticks` test checks ticks on every thread, entities coming and going among them,
+  and its `frames` test, a GPU test, headless frames of an app without UI; egui allocates, so
+  frames that draw UI do. After changing the windowed loop, run `cargo test -p gg-engine --test
+  frames -- --windowed`, without `dev`, with the mouse over its window: winit allocates for each
+  key on Windows. Tracy's client allocates as it records, so check allocations without `tracy`.
 
 ## Workflow
 

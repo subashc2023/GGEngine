@@ -16,6 +16,7 @@ impl Clone for World {
             resets,
             reset_count,
             by_id,
+            id_room,
             kept,
             stream,
             serial: _,
@@ -24,6 +25,7 @@ impl Clone for World {
             by_signature,
             components,
             scratch: _,
+            spawned: _,
         } = self;
         Self {
             meta: meta.clone(),
@@ -31,7 +33,9 @@ impl Clone for World {
             entity_ids: entity_ids.clone(),
             resets: resets.clone(),
             reset_count: *reset_count,
+            // With its buckets, and so its room.
             by_id: by_id.clone(),
+            id_room: *id_room,
             kept: kept.clone(),
             stream: *stream,
             serial: next_serial(),
@@ -40,6 +44,7 @@ impl Clone for World {
             by_signature: by_signature.clone(),
             components: components.clone(),
             scratch: Vec::new(),
+            spawned: Vec::new(),
         }
     }
 
@@ -55,6 +60,7 @@ impl Clone for World {
             resets,
             reset_count,
             by_id,
+            id_room,
             kept,
             stream,
             serial: _,
@@ -63,6 +69,7 @@ impl Clone for World {
             by_signature,
             components,
             scratch: _,
+            spawned: _,
         } = source;
         if !self.components.same(components) {
             // Its tables' ids would name other types than `source`'s same ids.
@@ -85,7 +92,9 @@ impl Clone for World {
         self.entity_ids.clone_from(entity_ids);
         self.resets.clone_from(resets);
         self.reset_count = *reset_count;
+        // With `source`'s buckets, and so its room.
         self.by_id.clone_from(by_id);
+        self.id_room = *id_room;
         self.kept.clone_from(kept);
         self.stream = *stream;
         self.version = *version;

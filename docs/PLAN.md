@@ -280,10 +280,22 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   with frames in flight, and the cache filling, loading whole and refusing damage, on the RTX 4090
   and the AMD iGPU. In windowed sandboxes there, a second run hits the cache for every pipeline:
   the AMD iGPU makes the sprite pipeline in 126 µs rather than 20.6 ms.
+- **Steady-state frames allocate nothing** (2026-10-26): an app none of whose layers draw UI,
+  keeping `Layer::ui`'s default, and whose windows the OS frames, runs without egui from its second
+  frame, whose empty pass had made 16 allocations a frame, and its input 6 more windowed; the
+  world's map of IDs keeps room for twice the most entities it has found, so that entities coming
+  and going never grow it at a time its keys pick; and spawning a model borrows the world's
+  memory. gg-engine's `frames` test runs such an app through the main loop headless, seeded and
+  three fifths of a tick apart, so that it draws between ticks: sprites, games' meshes, a model
+  and a mirrored copy, a turning hierarchy and 2,000 drifters that wrap, while its ticks replace
+  sprites and models. It counts no allocation on any thread over 160 frames, on the RTX 4090 and
+  the AMD iGPU, and CI runs it on lavapipe; `ticks` counts none over 20,000 ticks that replace
+  parents and their children, which without the room allocate. Frames that draw UI allocate, in
+  egui, as the sandbox's do.
 
-## Now: Phase 4's seventh milestone
+## Now: Phase 4's eighth milestone
 
-[Phase 4](#next)'s seventh milestone is picked from what the phase has left as it starts, and its
+[Phase 4](#next)'s eighth milestone is picked from what the phase has left as it starts, and its
 plan says when it's done.
 
 ## Next
@@ -294,14 +306,15 @@ Each phase ends in something you can run and check.
    reload. Render extraction, with the render thread a frame behind simulation and rendering
    interpolated between fixed steps. *Done when* the sandbox draws a textured, depth-tested glTF
    mesh and thousands of moving entities, Tracy shows simulation and rendering overlapping,
-   steady-state frames don't allocate, and a RenderDoc capture shows named resources and labeled
-   passes.
+   steady-state frames of an app that draws no UI don't allocate, and a RenderDoc capture shows
+   named resources and labeled passes.
 5. **Tool API and hot reload: v0.1.** The tool API in development builds, as
    [ARCHITECTURE.md](../ARCHITECTURE.md#agents-and-tools) describes. `tools/gg`, the
    command-line tool: build, run and test with machine-readable results; launch and supervise a
    game's development build, restarting it from its last snapshot after a crash or hang; talk to
-   it through the API. An MCP server with the same reach. Scene files edited while the game runs
-   apply as operations. `subsecond` patches edits inside function bodies into the running game;
+   it through the API. An MCP server with the same reach. Assets named by their paths, which scenes
+   save and a restart from a snapshot carries across a rebuild. Scene files edited while the game
+   runs apply as operations. `subsecond` patches edits inside function bodies into the running game;
    it patches only the game's main crate and needs Dioxus's `dx` tool to build patches. Any
    other change rebuilds the game and restarts it from a snapshot, matching each changed
    component to its new layout by field name. *Done when* the v0.1 loop works: watching the
@@ -342,16 +355,18 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Shipping profile (LTO, `codegen-units = 1`) | Phase 7, with the player |
 | Compiling trace and debug events out of shipping builds, through `tracing`'s `release_max_level_*` features | Phase 7, with the shipping profile |
 | No console window for shipping builds on Windows (`windows_subsystem = "windows"` on the player); the JSON log still records the run | Phase 7, with the shipping profile |
-| Checking the sandbox by hand on Linux, and on macOS with KosmicKrisp (Vulkan SDK 1.4.363.0 or later, the first conformant build), its gamepads too, and the render thread there: acquiring, presenting and rebuilding swapchains as windows resize off the main thread under KosmicKrisp, and on Wayland a frame in flight presenting at its old size after a maximize | A Linux machine and an Apple Silicon Mac are at hand |
+| Checking the sandbox by hand on Linux, and on macOS with KosmicKrisp (Vulkan SDK 1.4.363.0 or later, the first conformant build), its gamepads too, and the render thread there: acquiring, presenting and rebuilding swapchains as windows resize off the main thread under KosmicKrisp, and on Wayland a frame in flight presenting at its old size after a maximize; and the `frames` test on macOS, whose CI runner has no GPU to run it: std's mutexes there are boxed as they're first locked, so a mutex made each frame allocates there alone | A Linux machine and an Apple Silicon Mac are at hand |
 | Deleting old JSON logs; every run's log is kept | Logs pile up enough to matter |
 | A clean shutdown on Ctrl+C, which now ends the process at once; the JSON log keeps every line written until then, and a recording every whole line but its `end` | A headless run that goes on until it's stopped, such as a dedicated server |
 | GPU tests in Windows and macOS CI, which skip them because hosted runners there have no GPU | A self-hosted runner with a GPU, or a Vulkan driver that runs on those runners without one |
-| egui, the dock and the Inspector behind `dev`: the player links them and runs an empty UI pass every frame; `Ui`, which `Layer::ui` takes, is the type to turn into a no-op | Phase 7, with the shipping profile |
+| Checking windowed frames' allocations in CI, under Xvfb on Linux, with lavapipe presenting and input through XTest; they're checked by hand, with `cargo test -p gg-engine --test frames -- --windowed` | A change to the windowed loop allocates where the check by hand didn't look |
+| egui, the dock and the Inspector behind `dev`: the player links them, though it runs egui for its first frame alone, as an app none of whose layers draw UI does; `Ui`, which `Layer::ui` takes, is the type to turn into a no-op | Phase 7, with the shipping profile |
 | The main thread takes the renderer back once a frame's UI is drawn, so a frame's input is read about a frame before it renders: a refresh under `--vsync`; and drawing between ticks draws the world up to a tick behind the simulation. Starting each frame once the render thread has acquired the image it renders into would win the first back, and extrapolating from the latest ticks the second | A game's input latency needs it |
 | Answering at once what a driver sends the main thread's windows from the render thread: the main thread's wait answers each time a millisecond's wait times out, which Windows' timer tick stretches to about 16 ms, so a sent message can hold a frame that long. A Win32 event the render thread sets, waited on with `MsgWaitForMultipleObjectsEx`, would wake for both | A driver's sent messages show as stalls, such as while a window resizes |
 | Pushing and popping layers while the app runs; `App` fixes the stack before it starts | A tool or game needs a layer for only part of a run |
 | Composed text from an input method (winit's `Ime` events), for languages typed through one | A game takes text input, such as chat |
-| Steady-state frames that draw UI allocate: in egui's layout and tessellation, in the dock's own bookkeeping, which copies each frame's panel and menu names and torn-off windows' titles, and makes its arrangement and its list of groups left to draw anew, and in the Inspector, which reads its rows' names, the picked entity's components as values and its children's IDs anew | Phase 4, with the allocation check; the overlay is for development |
+| Frames that draw UI allocate, the sandbox's about 900 times a frame and egui's empty pass 16: egui as it lays out and tessellates, and as it collects its input, 6 times a frame windowed, where winit reads the window's title; the dock, which copies each frame's panel and menu names and torn-off windows' titles, and makes its arrangement and its list of groups left to draw anew; the Inspector, which reads its rows' names, the picked entity's components as values and its children's IDs anew; and the render thread, which lists the windows of their own each frame one is open | A game's shipping frames draw UI, or Phase 7 puts egui behind `dev` |
+| Counting what the Vulkan loader, the drivers, the validation layer and VMA allocate beneath the engine, through `VkAllocationCallbacks`, which drivers may bypass for their own: the `frames` test counts Rust's allocator | A profile shows them allocating each frame |
 | Keeping within the GPU's memory budget (`VK_EXT_memory_budget` through VMA) | Phase 7, with streaming |
 | Removing meshes, shaders and textures, which last until the app ends, and replacing meshes and textures; shaders are replaced as they reload | Phase 7, with asset hot reload |
 | Per-frame data in a buffer: shaders get the camera's view and projection as one matrix, and see the world through each draw's transform, but not the camera's position, the time or the lights | Phase 6, with lighting |
@@ -372,7 +387,7 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Sprite sheets with space between or around their cells, as some tile sets come; `SpriteSheet` takes cells packed edge to edge from the top left | A game's art comes that way |
 | Tiling one cell of a sheet: a repeating sampler repeats the whole texture | A game tiles part of an atlas, such as a background |
 | A sprite that samples past its rectangle, so that a seamless texture tiled across sprites side by side blends across their edges under a linear sampler | A game tiles one texture across sprites |
-| A tile map in the engine, which scenes save; the sandbox's map is code of its own | Phase 4, which names assets |
+| A tile map in the engine, which scenes save; the sandbox's map is code of its own | Phase 5, which names assets |
 | glTF that `Context::add_model` refuses or ignores, as it lists: lighting and the material's other textures, skins and animations, morph targets, cameras, models without a scene and scenes other than the default, sparse accessors and accessors without a buffer view, primitives other than triangle lists, samplers that wrap across and down differently, minification filters, texture transforms, quantized or compressed meshes and textures (KHR_mesh_quantization, Draco, meshopt, Basis Universal), and integers written as floats, such as `1.0`, which glTF allows | Each with the first model that needs it; lighting and the other textures in Phase 6, compression with Phase 7's cooker |
 | Decoding images off the main thread; `Context::add_texture` and `add_model` decode before they return | Phase 7, with the streaming loader |
 | Models that take more than 4 GiB to read, of their buffers, decoded images, vertices and nodes, which `add_model` refuses with `engine.unsupported_model` | Phase 7, with streaming and the GPU's memory budget |
@@ -402,7 +417,8 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | A stick's way or a trigger's travel as a button, pressed past a point and released before it, as menus take a stick; `bind` refuses one, and a trigger's press is a button of its own | A game's menus take a stick |
 | Rumble: gilrs's force feedback is off, and with it its thread | A game rumbles |
 | Fewer commands from a moving stick, by quantizing its value or folding a layer's queue: a frame gives one for each stick and trigger that moved, and one more for each of its pad's button events between its moves, up to the pad's report rate, about 125 a second on Windows.Gaming.Input | Recordings grow too large, or input goes over a network |
-| gilrs's allocations: on Windows.Gaming.Input, its polling thread's, which reads every pad every 8 ms, and the string of a pad's ID that each event the frame takes asks Windows for; and the channel's blocks, which the frame that takes their last event frees. The engine's own feeding of pads to actions allocates only as a pad first reports, and as a second pad first holds more than one does | Phase 4's allocation check of frames, which counts every thread, as gg-engine's `ticks` test does ticks |
+| gilrs's allocations: on Windows.Gaming.Input, its polling thread's, which reads every pad every 8 ms, and the string of a pad's ID that each event the frame takes asks Windows for; and the channel's blocks, which the frame that takes their last event frees. The engine's own feeding of pads to actions allocates only as a pad first reports, and as a second pad first holds more than one does; the windowed check of frames runs without a pad | A game's frames must allocate nothing with a pad connected |
+| winit's allocations on Windows as it takes each key's press and release: a list for each message's text, and one of the messages it collects; Linux's keyboard reuses a buffer | A game's frames must allocate nothing as keys are pressed on Windows, or winit stops |
 | Letting go, for the layers below one that handles a stick or a trigger away from rest, of the ways it left: they keep what they last saw until it rests, so that a stick rolled from right to up in a menu leaves the game going right | A game's menus take a stick |
 | Controls the engine doesn't name, C, Z and paddles, and triggers a Linux driver reports as Z axes ([gilrs #200](https://gitlab.com/gilrs-project/gilrs/-/issues/200)), which are dropped | A pad that needs them, or the check by hand on Linux |
 | Codes for dependencies' own warnings, which reach the log as they give them: as a pad connects on Windows.Gaming.Input, gilrs warns, without a code, that it has no mapping for it, since that backend gives every pad a nil UUID, and goes on with its default mapping, the right one there | Phase 5, as the tool API serves diagnostics |
@@ -410,14 +426,14 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Wave operations in games' shaders, and the other SPIR-V capabilities a device's properties decide rather than its features, which the check refuses | A game's shader needs them |
 | Hot reloading the engine's own shaders, which the build compiles in | Work on the engine's shaders wants it |
 | Watching shaders' files through the OS's notifications, rather than by their times and lengths every tenth of a second, which reads every watched file each time, and, while a shader fails, every file in the directories its files are in, but none in directories within them: an include in one of those that a failing shader found broken, fixed where it is, waits for another change | Phase 7, with asset hot reload, or a game with many shaders |
-| The shader watcher allocates as it looks: each shader's stamps, collected at every look on every platform; on Windows, each file's path, which it converts to UTF-16 to read the file's times; and the entries of a failing shader's directories, which it lists | Phase 4's allocation check of frames, if it checks windowed runs |
+| The shader watcher allocates as it looks: each shader's stamps, collected at every look on every platform; on Windows, each file's path, which it converts to UTF-16 to read the file's times; and the entries of a failing shader's directories, which it lists; the windowed check of frames runs without `dev` | A development build's frames must allocate nothing on any thread |
 | Compiling at once the shaders whose changes hold on the same look, rather than one after another: after an edit to an include that N shaders share, the last reloads about N tenths of a second after the first, and no file is looked at meanwhile | A game with many shaders that share an include |
 | `VK_KHR_pipeline_binary`, which saves and loads pipelines whole; ash 0.38 lacks it | ash's next release, or a driver whose pipeline cache keeps less |
 | Saving the pipeline cache as pipelines are made rather than as the run ends, which a crash skips | Phase 5, which restarts games after a crash |
 | Pruning the pipeline cache, which keeps every pipeline it was given, an edited shader's old ones too | It grows to tens of megabytes |
 | Requiring a slangc that decorates sampled images `NonUniform` itself, Slang 2026.11's or later, such as the Vulkan SDK 1.4.363's, and dropping gg-renderer's `decorate_non_uniform`, which does it for older ones | The engine requires the Vulkan SDK 1.4.363 or later |
 | Games' shaders compile with slangc as they're added, so running a game needs the Vulkan SDK | Phase 7, which cooks shaders |
-| A library of assets: shaders, textures and models load from the paths the game gives, the sandbox giving its source's, and nothing finds one by path or name, so a file added twice loads twice; scenes and the tool API will name them | Phase 4, with assets |
+| A library of assets: shaders, textures and models load from the paths the game gives, the sandbox giving its source's, and nothing finds one by path or name, so a file added twice loads twice; scenes and the tool API will name them | Phase 5, which names assets |
 | `Layer::attach` can't fail, so a layer whose shader doesn't compile, or whose texture or model doesn't load, panics, as the sandbox does | A game loads assets as it starts |
 | 8- and 16-bit vertex fields, whose features Vulkan 1.4 guarantees but the device doesn't enable | A mesh packs its vertices, as Phase 7's cooker will |
 | The instance and VMA asking for Vulkan 1.4, and the validation layer's settings given through ash's `LayerSettingEXT::values`: ash 0.38 has 1.3's headers, so they ask for 1.3 and reach what 1.4 added through the extensions it promoted, and the settings are filled in by hand, since `values` counts bytes ([ash #985](https://github.com/ash-rs/ash/issues/985)) | ash's next release |
@@ -450,9 +466,9 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Micro-benchmarks, with criterion | A CPU hot path gets a target of its own; batching's is a frame time, which `engine.perf` measures |
 | Gates on time in CI: hosted runners' times vary too much to gate on | A self-hosted runner, as for the GPU tests |
 | A component type's default as a value, to add one without giving every field; `Create` and `Add` take whole values | The Inspector or the tool API adds components |
-| Moving values to a type that changed: matching fields by name and by alias, defaults for fields added, and fields dropped; a scene with a field its type hasn't, or without one it has, is refused | Phase 4, when `Sprite` gains its texture's name, or Phase 5's hot reload |
+| Moving values to a type that changed: matching fields by name and by alias, defaults for fields added, and fields dropped; a scene with a field its type hasn't, or without one it has, is refused | Phase 5, when `Sprite` gains its texture's name, or with its hot reload |
 | In the Inspector, turning an option on or off, switching to a variant with fields, and adding or removing a list's elements; by path, a value sets them whole | A component needs one edited |
-| `Sprite.texture` and `MeshDraw` are opaque: shown, but not set, saved, hashed or carried across a rebuild | Phase 4, which names assets |
+| `Sprite.texture` and `MeshDraw` are opaque: shown, but not set, saved, hashed or carried across a rebuild | Phase 5, which names assets |
 | Flags for fields that saving, the world's hash or replication skip, and fields that are read only; `Parent` is read only as a whole type, which `set_field` refuses | Each with its first user |
 | Generic types deriving `Reflect` or `Component` | A game needs one |
 | Drag speeds as hints; the Inspector picks them from a field's bounds and kind | A field drags too coarsely or too finely |
@@ -466,7 +482,7 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Copying the world as only the last tick a frame runs starts: a frame that catches up copies it as each of its ticks starts | A profile shows a catching-up frame's copies |
 | Copying the world, and finding what each row draws from, on the job system's threads, or only for the rows that moved: both run on the main thread, for the swarm about 0.19 ms a tick and 0.10 ms a frame that ticked; and blending only the rows that moved, which takes the job threads about 2.6 ms of their time a frame | A profile shows them |
 | Sets that jump: an Inspector set of a moving entity's transform, and its undo, glide there over a tick, as a drag does, rather than reset its interpolation | Phase 5's tool API, whose agents move things by setting them |
-| Headless frames at a fraction of a tick of their own, for captures between ticks and for perf runs that measure blending, which headless frames, drawing their ticks, leave out | Phase 5's headless captures, or a change to blending that needs measuring headless |
+| A flag for headless frames at a fraction of a tick of their own, for captures between ticks and for perf runs that measure blending, which headless frames, drawing their ticks, leave out; tests have them, through `App::headless_step` | Phase 5's headless captures, or a change to blending that needs measuring headless |
 | Interpolation across rollback: a world restored in a tick draws where the tick left it, all of it, so rollback that restores every tick would draw at the tick rate; how rollback restores is decided with it | Rollback |
 | Reparenting that keeps where a child is in the world, by decomposing its matrix, which loses any shear; `set_parent` keeps its own transform | The editor's scene tree, or an agent attaching something where it stands |
 | Spawning a child into its table at once from code: `spawn`, then `set_parent`, moves it to another table; a load and a create operation spawn one there | A profile |
@@ -476,12 +492,13 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Errors carrying their entity, and a scene's line and column, as fields, not only in their message | The tool API returns errors as data |
 | Drawing rows at one z in ID order for less. Every frame reads them in that order rather than their tables', about 0.9 ms of the swarm's 4.3 ms frame in release; a frame that changes rows or z's, or follows a restore, sorts them by ID again, about 2.5 ms more for 100,000; and 100,000 sprites each at a z of their own, as sorting by y gives them, take about 2 ms more than before, for a group and an item each. Tables kept in ID order would make the reads a sweep, and a radix sort the sort quicker | A game's frames need the time |
 | Linked prefab instances, with overrides, nesting, apply and revert; a placement is a flattened copy, each ID mixed from its instance's and its own, which links will keep | The editor, or a game editing a prefab its scenes hold many copies of |
+| Placing a prefab without parsing it again: `World::place_prefab` parses its text each time, which allocates | A game places prefabs as it runs, rather than as it loads |
 | A derive hint for `Component::base`, and opaque values in lists and options, which saving refuses, as does a set's undo (`reflect.opaque`) where the old value holds something opaque in a variant, an option or a list; a type with opaque fields implements `Component` by hand to load, as `Sprite` does | A game's component holds something opaque |
 | Names in scenes beyond ASCII identifiers, which saving refuses (`scene.bad_name`) | A game names a type or a field so |
 | Loading a scene in place of the entities it replaces, in one step; a load refuses IDs the world has | The editor, or Phase 5's scene files applied as operations |
 | A version in scene files, a file without one reading as the first | The first change to the format that old files can't be read by |
 | Comments in scene files, which a save drops | People annotate scenes |
-| Reading and writing scene files in the engine, atomically; the engine takes and gives text, and the sandbox writes its own | Phase 4, with assets |
+| Reading and writing scene files in the engine, atomically; the engine takes and gives text, and the sandbox writes its own | Phase 5, which names assets |
 | The log in `Context`, every layer's and the tool API's clients each undoing their own, and an undo logged as an operation; the Inspector keeps a log of its own | Phase 5, the tool API |
 | Replaying a log into another world, which maps values' handles to IDs, as a recording's commands are; `set_field` and operations store a dead handle without complaint | Phase 5, the tool API |
 | A delete saying what refers to its entities from outside, or refusing; those references dangle until it's undone, and the world doesn't save in between | An agent deletes through the tool API |

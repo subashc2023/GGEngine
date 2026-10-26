@@ -8,11 +8,11 @@ use std::ops::ControlFlow;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use egui::ViewportId;
 use gg_core::{Error, Result};
-use gg_renderer::{Renderer, Settings};
+use gg_renderer::{Renderer, Settings, Viewport};
 use tracing::{debug, info, trace};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize, Position};
@@ -34,8 +34,8 @@ use crate::viewports::{self, Viewports, WindowInput};
 #[cfg(target_os = "windows")]
 use crate::windows_frame::Frame;
 use crate::{
-    App, Clock, Context, Event, Ran, Stepper, egui_context, event, hand_off, run_frame, settings,
-    take_back, tessellate,
+    App, Clock, Context, Event, MainUi, Ran, Stepper, egui_context, event, hand_off, keeps_egui,
+    run_frame, settings, take_back, tessellate, viewport,
 };
 
 pub(crate) fn run(app: &mut App, args: &Args) -> Result<Ran> {
@@ -67,6 +67,7 @@ pub(crate) fn run(app: &mut App, args: &Args) -> Result<Ran> {
         hot_reload: None,
         resized: None,
         egui: egui_context(),
+        egui_runs: true,
         egui_winit: None,
         viewports: None,
         gamepads: Gamepads::default(),
@@ -120,6 +121,8 @@ struct Handler<'a> {
     /// from rendering.
     resized: Option<PhysicalSize<u32>>,
     egui: egui::Context,
+    /// Whether frames run egui's pass, as they do until one shows that it has nothing to draw.
+    egui_runs: bool,
     /// egui's view of the window, which turns its events into egui's input.
     egui_winit: Option<WindowInput>,
     /// The windows of their own that panels tear off into.
@@ -179,7 +182,7 @@ impl Handler<'_> {
             window.clone(),
             self.chrome,
         ));
-        self.cx = Context::new(Some(crate::Window::new(window.clone())));
+        self.cx = Context::of_run(Some(crate::Window::new(window.clone())), self.app.seed);
         self.gamepads = Gamepads::open(window.has_focus());
         self.window = Some(window);
         self.app.stack.attach(&mut self.cx);
@@ -211,24 +214,29 @@ impl Handler<'_> {
         ) else {
             return;
         };
-        let input = viewports.input(egui_winit);
+        let input = self.egui_runs.then(|| viewports.input(egui_winit));
         #[cfg(target_os = "windows")]
         if let Some(frame) = &self.frame {
             self.dock.set_maximize(frame.maximize());
         }
         // egui opens the windows of their own during the main window's pass.
-        let mut output = viewports::with_event_loop(event_loop, || {
+        let pass = viewports::with_event_loop(event_loop, || {
             run_frame(
                 &mut self.app.stack,
                 &mut self.cx,
                 self.clock.start_frame(),
                 &mut self.stepper,
-                &self.egui,
-                &mut self.dock,
-                input,
+                input.map(|input| (&self.egui, &mut self.dock, input)),
             )
         });
-        let (ui, tessellated) = tessellate(&self.egui, &mut output);
+        let mut output = pass.map(|(output, layers_draw)| {
+            self.egui_runs = keeps_egui(&self.app.stack, layers_draw, self.chrome);
+            output
+        });
+        let (ui, tessellated) = match &mut output {
+            Some(output) => tessellate(&self.egui, output),
+            None => (MainUi::none(), Duration::ZERO),
+        };
         // Shaders compiled again since, which the frame handed off below draws with.
         #[cfg(feature = "dev")]
         if let Some(hot_reload) = &mut self.hot_reload {
@@ -256,16 +264,31 @@ impl Handler<'_> {
             }
         }
         // A run that's ending hands over no more frames: one past `--frames` would present.
-        let outputs = mem::take(&mut output.viewport_output);
         let mut close = false;
         if !event_loop.exiting() {
             let renderer = render.renderer();
             if let Some(size) = self.resized.take() {
                 renderer.resize(size.width, size.height);
             }
-            let windows;
-            (windows, close) = viewports.end_frame(&self.egui, egui_winit, outputs, renderer);
-            hand_off(render, &mut self.cx, self.dock.central(), ui, windows);
+            let (view, windows) = match &mut output {
+                Some(output) => {
+                    let outputs = mem::take(&mut output.viewport_output);
+                    let windows;
+                    (windows, close) =
+                        viewports.end_frame(&self.egui, egui_winit, outputs, renderer);
+                    (viewport(self.dock.central(), ui.pixels_per_point), windows)
+                }
+                // Without egui, the game's view is the whole window.
+                None => {
+                    let size = window.inner_size();
+                    let view = Viewport {
+                        origin: [0, 0],
+                        size: [size.width, size.height],
+                    };
+                    (view, Vec::new())
+                }
+            };
+            hand_off(render, &mut self.cx, view, ui, windows);
         }
         #[cfg(target_os = "windows")]
         if let Some(frame) = &self.frame {
@@ -274,7 +297,9 @@ impl Handler<'_> {
         }
         // egui's requests of the main window, such as the cursor to show, which don't wait for
         // the frame to render.
-        (egui_winit.state).handle_platform_output(window, output.platform_output);
+        if let Some(output) = output {
+            (egui_winit.state).handle_platform_output(window, output.platform_output);
+        }
         if minimized {
             self.set_minimized(true);
         }
@@ -400,14 +425,16 @@ impl ApplicationHandler for Handler<'_> {
         // egui, the top overlay, sees each event first, and keeps the input it wants: a click
         // on one of its panels, or keys while one of its widgets has focus. Tab is the
         // exception: egui-winit keeps every Tab press, for egui to move focus between its
-        // widgets, so while none has focus, Tab goes past egui to the layers.
+        // widgets, so while none has focus, Tab goes past egui to the layers. Once egui has
+        // stopped running, as it does in an app that draws no UI, it sees none.
         let tab_for_layers = matches!(
             &event,
             WindowEvent::KeyboardInput { event, .. }
                 if event.logical_key == Key::Named(NamedKey::Tab)
         ) && !self.egui.egui_wants_keyboard_input();
         let mut consumed = false;
-        if !matches!(event, WindowEvent::RedrawRequested)
+        if self.egui_runs
+            && !matches!(event, WindowEvent::RedrawRequested)
             && !tab_for_layers
             && let (Some(window), Some(egui_winit)) = (&self.window, &mut self.egui_winit)
         {

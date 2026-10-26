@@ -36,11 +36,28 @@ const GRIP: f32 = 12.0;
 pub struct Ui<'a> {
     root: &'a mut egui::Ui,
     dock: &'a mut Dock,
+    /// The type of the last layer whose `ui` was [`Layer::ui`](crate::Layer::ui)'s default, which
+    /// draws none, since the stack last asked.
+    default_ui: Option<&'static str>,
 }
 
 impl<'a> Ui<'a> {
     pub(crate) fn new(root: &'a mut egui::Ui, dock: &'a mut Dock) -> Self {
-        Self { root, dock }
+        Self {
+            root,
+            dock,
+            default_ui: None,
+        }
+    }
+
+    /// Notes that layer type `layer`'s `ui` is [`Layer::ui`](crate::Layer::ui)'s default.
+    pub(crate) fn default_ui(&mut self, layer: &'static str) {
+        self.default_ui = Some(layer);
+    }
+
+    /// The type of the last layer whose `ui` was the default, since this was last asked.
+    pub(crate) fn take_default_ui(&mut self) -> Option<&'static str> {
+        self.default_ui.take()
     }
 
     /// Shows panel `name` this frame, with what `add_contents` draws in it. The user places

@@ -43,10 +43,14 @@ windows-sys = { workspace = true, features = [
 [target.'cfg(target_os = "windows")'.dev-dependencies]
 windows-sys = { workspace = true, features = ["Win32_System_LibraryLoader"] }
 
-# The allocation test has a main of its own, so that no other test's threads allocate as it
-# counts, and the job system's threads start once in its process, as in a run.
+# The allocation tests have mains of their own, so that no other test's threads allocate as they
+# count, and the job system's threads start once in their process, as in a run.
 [[test]]
 name = "ticks"
+harness = false
+
+[[test]]
+name = "frames"
 harness = false
 
 [lints]

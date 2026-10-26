@@ -162,6 +162,24 @@ impl World {
         self.by_id.get(&id).copied()
     }
 
+    /// Finds `entity` by `id` from now on, and returns the entity found by `id` before, if any, as
+    /// [`HashMap::insert`](std::collections::HashMap::insert) does.
+    ///
+    /// The map keeps room for twice as many entities as it finds. Once the entries its removals
+    /// leave have used up its room, std's map rehashes in place if it's at most half full, and
+    /// grows otherwise (hashbrown's `reserve_rehash_inner`), at a time its random keys decide. So
+    /// it grows here alone, as the world comes to hold more than half its room, to room for twice
+    /// as many, and spawning and despawning at a population the world has held never allocates.
+    pub(super) fn find_by_id(&mut self, id: EntityId, entity: Entity) -> Option<Entity> {
+        let finding = self.by_id.len() + 1;
+        if finding > self.id_room / 2 {
+            // Room for `finding + 1` more than the `finding - 1` it holds.
+            self.by_id.reserve(finding + 1);
+            self.id_room = self.by_id.capacity();
+        }
+        self.by_id.insert(id, entity)
+    }
+
     /// Where the stream the world draws its IDs from is, which a world seeded with it goes on
     /// from: its seed, until it draws one.
     pub(crate) fn stream_state(&self) -> u64 {

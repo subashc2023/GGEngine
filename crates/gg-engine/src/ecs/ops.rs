@@ -371,7 +371,7 @@ impl World {
         let entity = self.take_slot();
         let id = match id {
             Some(id) => {
-                self.by_id.insert(id, entity);
+                self.find_by_id(id, entity);
                 id
             }
             None => self.draw_id(entity),
@@ -481,7 +481,7 @@ impl World {
         } in taken
         {
             self.free_id(id);
-            self.by_id.insert(id, entity);
+            self.find_by_id(id, entity);
             self.place(entity, id, row);
             if let Some(parent) = parent {
                 links.push((parent.index, entity.index));
