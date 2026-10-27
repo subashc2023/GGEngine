@@ -4,15 +4,18 @@
 //! on one thread, jobs run one after another on the thread that calls.
 
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
-use std::time::{Duration, Instant};
 
 use gg_core::{Error, Result};
 
 /// Starts the pool of `threads` threads, the calling thread, which runs the ticks, as its first;
 /// with one thread, starts none. Fails with `engine.threads` if the threads can't start, or a pool
 /// was started before in the process.
+///
+/// Each thread allocates the first time it looks for a job to steal, as crossbeam-epoch records
+/// it, and on macOS the first time it sleeps for want of one, as std there makes the mutex and the
+/// condition variable it sleeps on: the pool's other threads in its first ticks, and the calling
+/// thread at the first tick that keeps it waiting long, which may come at any time. rayon-core
+/// doesn't say when a thread has slept, so nothing here can make them sooner.
 pub fn start(threads: NonZeroUsize) -> Result<()> {
     if threads.get() == 1 {
         return Ok(());
@@ -30,39 +33,7 @@ pub fn start(threads: NonZeroUsize) -> Result<()> {
                 format!("can't start {threads} threads for the jobs: {error}"),
             )
         })?;
-    warm_up();
     Ok(())
-}
-
-/// Has the calling thread, the pool's first, wait once for a job another thread took, and every
-/// thread find no job and sleep, so that what a thread allocates the first time it waits is
-/// allocated now rather than at some tick: crossbeam-epoch's record of the thread, made as it first
-/// looks for a job to steal, and, on macOS, the mutex and the condition variable it sleeps on,
-/// which std's there allocate as they're first used. Those are rayon-core's internals, so the
-/// `ticks` test checks that ticks allocate nothing after this.
-fn warm_up() {
-    let taken = AtomicBool::new(false);
-    let done = AtomicBool::new(false);
-    // A pool whose threads never take the job runs it here once this passes.
-    let deadline = Instant::now() + Duration::from_secs(1);
-    rayon_core::join(
-        || {
-            while !taken.load(Ordering::Acquire) && Instant::now() < deadline {
-                thread::yield_now();
-            }
-            done.store(true, Ordering::Release);
-        },
-        || {
-            taken.store(true, Ordering::Release);
-            while !done.load(Ordering::Acquire) && Instant::now() < deadline {
-                thread::yield_now();
-            }
-            // Long enough for the waiting thread to find no job to steal and sleep.
-            thread::sleep(Duration::from_millis(20));
-        },
-    );
-    // The others slept while `b` held: long enough for the thread that ran it to sleep too.
-    thread::sleep(Duration::from_millis(20));
 }
 
 /// Runs `a` and `b`: on a thread of the pool, `b` is offered to its other threads while this one
@@ -99,6 +70,10 @@ pub fn on_threads<R: Send>(threads: usize, f: impl FnOnce() -> R + Send) -> R {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
     use super::*;
 
     #[test]

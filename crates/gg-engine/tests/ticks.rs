@@ -1,9 +1,9 @@
 //! Steady-state ticks allocate nothing, on any thread: a layer's ticks that apply its commands,
 //! run a system on the job system's threads and another on the ticks' thread alone, and hash the
 //! world, as a recorded run's do, once their first ticks have run; before the job system's threads
-//! start, as in a run on one thread, and after, from the first tick after, since starting them
-//! makes what they keep; and ticks that despawn entities and spawn others in their place, as a
-//! game's bullets and particles come and go.
+//! start, as in a run on one thread, and after, once each thread has waited for jobs and slept, as
+//! it allocates the first time it does; and ticks that despawn entities and spawn others in their
+//! place, as a game's bullets and particles come and go.
 //!
 //! It runs in one process with a main of its own, so that no other test's threads run beside it,
 //! and counts every allocation the process makes while the ticks run, whichever thread makes it.
@@ -22,7 +22,8 @@ use std::time::{Duration, Instant};
 use gg_engine::math::Vec3;
 use gg_engine::{Component, Context, Entity, Layer, Tick, Transform, World};
 
-/// The ticks run before counting, as a run's first ticks size what the world and the layer keep.
+/// The ticks run before counting, on one thread and again on four, as a run's first ticks size
+/// what the world and the layer keep, and the pool's what its threads make as they first wait.
 const WARM_UP: u64 = 64;
 /// The ticks counted.
 const COUNTED: u64 = 1_000;
@@ -194,6 +195,30 @@ impl Churn {
     }
 }
 
+/// Has the ticks' thread wait 100 ms, with no job left to take, for rows another thread holds: long
+/// enough for it to find none and sleep, as it does only when a wait drags on, which ticks this
+/// quick can put off for a long while, though a run's ticks come to one at some point. The pool's
+/// other threads sleep at the end of every tick. The ticks' thread holds its rows until another
+/// thread has taken one, since rows this quick it could otherwise finish before a sleeping thread
+/// woke to take any, as on one or two cores.
+fn sleep_the_ticks_thread(world: &mut World) {
+    let held = AtomicBool::new(false);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    world.query_mut::<&Velocity>().par_for_each(|_| {
+        if !on_a_worker() {
+            while !held.load(Ordering::Relaxed) && Instant::now() < deadline {
+                thread::yield_now();
+            }
+        } else if !held.swap(true, Ordering::Relaxed) {
+            thread::sleep(Duration::from_millis(100));
+        }
+    });
+    assert!(
+        held.into_inner(),
+        "no row ran on the job system's other threads in 10 s"
+    );
+}
+
 /// Checks that what the job system's other threads allocate is counted: that a pass whose rows
 /// allocate once each on those threads counts as many allocations as such rows at least. The
 /// ticks' thread holds its rows until one has run on another thread, since rows this quick it could
@@ -239,12 +264,13 @@ fn main() {
     };
     movers.attach(&mut cx);
     let mut number = 0;
-    ticks(&mut movers, &mut cx, &mut number, WARM_UP);
     for threads in [1, 4] {
         if threads > 1 {
             let threads = NonZeroUsize::new(threads).expect("nonzero");
             gg_engine::start_jobs(threads).expect("the job system's threads start");
+            sleep_the_ticks_thread(cx.world_mut());
         }
+        ticks(&mut movers, &mut cx, &mut number, WARM_UP);
         let on = if threads == 1 {
             "one thread"
         } else {
