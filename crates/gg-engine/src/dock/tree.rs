@@ -1,7 +1,8 @@
 //! Where the panels are: in the main window, a tree of splits and tab groups around the central
 //! area, which stays the game's, or, in a dockspace, filling the main window, the game's view
 //! among them in a panel of its own; elsewhere, groups that float over the main window or in
-//! windows of their own. It's plain data, saved between runs.
+//! windows of their own; and which panels the user closed, which keep their places. It's plain
+//! data, saved between runs, and it places the panels an app docks as they first show.
 
 use std::mem;
 
@@ -52,6 +53,45 @@ pub(crate) enum Side {
 pub(crate) enum Zone {
     Center,
     Side(Side),
+}
+
+/// Where an app docks one of its panels as it first shows, as [`App::dock`](crate::App::dock)
+/// gives it: beside the panel named, or among its tabs, while that panel is docked in the main
+/// window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Docked {
+    /// Left of the panel named, taking a quarter of the view's panel or half of another's.
+    LeftOf(&'static str),
+    /// Right of the panel named, taking a quarter of the view's panel or half of another's.
+    RightOf(&'static str),
+    /// Above the panel named, taking a quarter of the view's panel or half of another's.
+    Above(&'static str),
+    /// Below the panel named, taking a quarter of the view's panel or half of another's.
+    Below(&'static str),
+    /// Among the tabs of the panel named, whose group goes on showing the tab it showed.
+    With(&'static str),
+}
+
+impl Docked {
+    /// The panel it docks beside, or among the tabs of.
+    fn target(self) -> &'static str {
+        let (Self::LeftOf(target)
+        | Self::RightOf(target)
+        | Self::Above(target)
+        | Self::Below(target)
+        | Self::With(target)) = self;
+        target
+    }
+
+    fn zone(self) -> Zone {
+        match self {
+            Self::LeftOf(_) => Zone::Side(Side::Left),
+            Self::RightOf(_) => Zone::Side(Side::Right),
+            Self::Above(_) => Zone::Side(Side::Top),
+            Self::Below(_) => Zone::Side(Side::Bottom),
+            Self::With(_) => Zone::Center,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -106,6 +146,10 @@ pub(crate) enum Place {
 pub(crate) struct Layout {
     pub(crate) main: Node,
     pub(crate) floating: Vec<Floating>,
+    /// The panels the user closed, which show nowhere, keeping their places, until opened again.
+    /// Layouts saved before panels could close have none.
+    #[serde(default)]
+    pub(crate) closed: Vec<String>,
     /// In a dockspace, the panel that shows the game's view: the dock fills the main window,
     /// without a central area for the game, as the layout's made or loaded for.
     #[serde(skip)]
@@ -124,7 +168,7 @@ pub(crate) struct Arrangement {
     pub(crate) groups: Vec<(NodeId, Rect)>,
     pub(crate) splitters: Vec<Splitter>,
     /// The central area, which is the game's. In a dockspace, the empty dock while the main tree
-    /// holds no panels, which a dropped group fills, and otherwise nothing.
+    /// shows no panel, which a dropped group fills, and otherwise nothing.
     pub(crate) central: Rect,
     /// The rect it's laid out in: the main window's, below its title bar. Groups floating over
     /// the main window stay in it.
@@ -163,6 +207,7 @@ impl Layout {
         let mut layout = Self {
             main: Node::Central,
             floating: Vec::new(),
+            closed: Vec::new(),
             view,
             next_id: CENTRAL + 1,
         };
@@ -190,7 +235,18 @@ impl Layout {
 
     /// Gives every node a new id, as a layout read from a file needs.
     pub(crate) fn renumber(&mut self) {
-        let mut next = CENTRAL + 1;
+        self.renumber_from(CENTRAL + 1);
+    }
+
+    /// Takes `other`'s place, its nodes numbered after this one's, so that no id comes back: a
+    /// window of its own is named by its group's, and a new group would get an old one's window.
+    pub(crate) fn replace(&mut self, mut other: Layout) {
+        other.renumber_from(self.next_id);
+        *self = other;
+    }
+
+    /// Gives every node a new id, from `next` on.
+    fn renumber_from(&mut self, mut next: NodeId) {
         let mut take = || {
             next += 1;
             next - 1
@@ -259,6 +315,76 @@ impl Layout {
         self.float(panel.to_owned(), place)
     }
 
+    /// Closes `panel`, which then shows nowhere, keeping its place, until it opens again, and
+    /// returns whether it closed: a dockspace's view never does, since nothing else shows the game.
+    pub(crate) fn close(&mut self, panel: &str) -> bool {
+        if self.view == Some(panel) {
+            return false;
+        }
+        if !self.is_closed(panel) {
+            self.closed.push(panel.to_owned());
+        }
+        true
+    }
+
+    /// Opens `panel` again, where it was.
+    pub(crate) fn open(&mut self, panel: &str) {
+        self.closed.retain(|closed| closed != panel);
+    }
+
+    pub(crate) fn is_closed(&self, panel: &str) -> bool {
+        self.closed.iter().any(|closed| closed == panel)
+    }
+
+    /// Adds `panel`, which the layout doesn't hold, where the app's `docked` says: beside the
+    /// group of the panel it names, docked in the main tree, taking its [share](Layout::share), or
+    /// among its tabs, which go on showing the tab they showed. A target the layout doesn't hold
+    /// stands for its own target, and so on. A panel the app doesn't place, or whose target floats
+    /// or comes to none, floats at `place`.
+    pub(crate) fn add(&mut self, panel: String, place: Place, docked: &[(&'static str, Docked)]) {
+        let to = self.docking(&panel, docked);
+        let group = self.float(panel, place);
+        let Some((target, zone)) = to else {
+            return;
+        };
+        let active = self.group(target).map(|tabs| tabs.active);
+        let moved = self.dock(group, target, zone);
+        debug_assert!(
+            moved,
+            "a group of the main tree takes panels beside it and among its tabs"
+        );
+        if zone == Zone::Center
+            && let Some(active) = active
+            && let Some(tabs) = self.group_mut(target)
+        {
+            tabs.active = active;
+        }
+    }
+
+    /// Where the app's `docked` docks `panel`: the group, docked in the main tree, of the panel it
+    /// names or of the one that stands for it, and the zone there.
+    fn docking(&self, panel: &str, docked: &[(&'static str, Docked)]) -> Option<(NodeId, Zone)> {
+        let entry = |panel: &str| {
+            docked
+                .iter()
+                .find_map(|&(p, how)| (p == panel).then_some(how))
+        };
+        let how = entry(panel)?;
+        let mut target = how.target();
+        // A step for each of the app's panels at most, so that targets standing for one another
+        // come to none.
+        for _ in 0..=docked.len() {
+            if let Some(group) = self.main.find(target) {
+                return Some((group, how.zone()));
+            }
+            if self.find(target).is_some() {
+                return None;
+            }
+            target = entry(target)?.target();
+        }
+        None
+    }
+
     /// Makes `panel` the one its group shows.
     pub(crate) fn activate(&mut self, panel: &str) {
         if let Some(tabs) = self.find(panel).and_then(|id| self.group_mut(id))
@@ -272,12 +398,14 @@ impl Layout {
     /// beside a node of the main tree, splitting it. Returns `false`, moving nothing, if `zone`
     /// isn't one of those for `target`: the central area takes panels only beside it, and a
     /// floating group only among its tabs. In a dockspace, the central area is the empty dock,
-    /// which takes the group in its place while the main tree holds no panels, and nothing beside
-    /// it.
+    /// which the dock offers while the main tree shows no panel, and which takes the group among
+    /// its tabs alone, filling the dock: in its place, or beside the panels the main tree holds,
+    /// which take no room until one shows again, and then the share a group docked beside the one
+    /// dropped would take.
     pub(crate) fn dock(&mut self, group: NodeId, target: NodeId, zone: Zone) -> bool {
         let dockspace = self.view.is_some();
         let fits = match zone {
-            Zone::Center if target == CENTRAL => dockspace && !self.main.has_panels(),
+            Zone::Center if target == CENTRAL => dockspace,
             Zone::Center => self.group(target).is_some(),
             Zone::Side(_) => !(dockspace && target == CENTRAL) && self.main.get(target).is_some(),
         };
@@ -287,10 +415,23 @@ impl Layout {
         if !fits || group == target {
             return false;
         }
+        let beside = self.share(group);
         let moved = self.floating.remove(from).tabs;
         match zone {
             // Groups the drag emptied, which it hasn't pruned yet, go with it.
-            Zone::Center if target == CENTRAL => self.main = Node::Tabs(moved),
+            Zone::Center if target == CENTRAL && !self.main.has_panels() => {
+                self.main = Node::Tabs(moved);
+            }
+            Zone::Center if target == CENTRAL => {
+                let id = self.new_id();
+                let hidden = mem::replace(&mut self.main, Node::Central);
+                self.main = Node::Split {
+                    id,
+                    axis: Axis::Horizontal,
+                    ratio: beside,
+                    children: Box::new([hidden, Node::Tabs(moved)]),
+                };
+            }
             Zone::Center => {
                 let tabs = self.group_mut(target).expect("checked above");
                 tabs.active = tabs.panels.len() + moved.active;
@@ -336,14 +477,16 @@ impl Layout {
     }
 
     /// Lays out the main tree in `rect`, the main window's below its title bar, where `shown`
-    /// says which panels show this frame. A group with none takes no room.
+    /// says which panels show this frame. A group with none takes no room, and a dockspace's main
+    /// tree showing none is the empty dock, which takes all of it.
     pub(crate) fn arrange(&self, rect: Rect, shown: &impl Fn(&str) -> bool) -> Arrangement {
-        // A dockspace's main tree holds no panels when it's the empty dock, or mid-drag, when the
-        // drag has emptied the groups it holds and not yet pruned them.
-        let central = if self.main.has_panels() {
-            Rect::NOTHING
-        } else {
+        // A dockspace's main tree shows no panel when it's the empty dock; mid-drag, when the drag
+        // has emptied the groups it holds and not yet pruned them; and while its panels are closed
+        // or unshown. A game's holds the central area, which is never empty.
+        let central = if self.main.is_empty(shown) {
             rect
+        } else {
+            Rect::NOTHING
         };
         let mut arrangement = Arrangement {
             strips: Vec::new(),
@@ -716,6 +859,7 @@ mod tests {
                 ]),
             },
             floating: Vec::new(),
+            closed: Vec::new(),
             view: None,
             next_id: 0,
         };
@@ -880,6 +1024,7 @@ mod tests {
                 ],
             ),
             floating: Vec::new(),
+            closed: Vec::new(),
             view: None,
             next_id: 0,
         };
@@ -932,9 +1077,10 @@ mod tests {
     fn a_dockspace_emptied_is_the_central_area_which_takes_a_group_in_its_place() {
         let mut layout = Layout::new(Some(VIEW));
         let window = Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 600.0));
-        // While the dock holds panels, its central area takes none.
+        // While the dock shows a panel, it has no empty dock, and its central area takes nothing
+        // beside it.
         let a = layout.float("A".to_owned(), AT);
-        assert!(!layout.dock(a, CENTRAL, Zone::Center));
+        assert_eq!(layout.arrange(window, &all).central, Rect::NOTHING);
         assert!(!layout.dock(a, CENTRAL, Zone::Side(Side::Left)));
         // Mid-drag, before the drag's end prunes it, the view's group is empty, and so is the dock.
         let view = layout.detach(VIEW, AT);
@@ -969,6 +1115,7 @@ mod tests {
                 children: Box::new([tabs.clone(), Node::Central]),
             },
             floating: Vec::new(),
+            closed: Vec::new(),
             view: Some(VIEW),
             next_id: 0,
         };
@@ -983,5 +1130,126 @@ mod tests {
         layout.main = tabs;
         layout.view = None;
         assert!(layout.check().is_err());
+    }
+
+    #[test]
+    fn a_closed_panel_keeps_its_place_and_the_view_never_closes() {
+        let mut layout = Layout::new(Some(VIEW));
+        let view = layout.find(VIEW).unwrap();
+        let a = layout.float("A".to_owned(), AT);
+        assert!(layout.dock(a, view, Zone::Side(Side::Right)));
+        let open = layout.clone();
+        assert!(layout.close("A") && layout.close("A"));
+        assert_eq!(layout.closed, ["A"]);
+        assert!(!layout.close(VIEW));
+        assert!(!layout.is_closed(VIEW));
+        // Its group isn't empty, and stays.
+        layout.prune();
+        assert_eq!(layout.find("A"), Some(a));
+        layout.open("A");
+        assert_eq!(layout, open);
+    }
+
+    #[test]
+    fn a_dockspace_showing_no_panel_is_the_empty_dock_which_takes_a_group_beside_the_hidden_ones() {
+        let mut layout = Layout::new(Some(VIEW));
+        let window = Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 600.0));
+        let view = layout.find(VIEW).unwrap();
+        let a = layout.float("A".to_owned(), AT);
+        assert!(layout.dock(a, view, Zone::Side(Side::Right)));
+        // The view floats, and A, docked alone, doesn't show.
+        let view = layout.detach(VIEW, AT);
+        layout.prune();
+        let hidden = |panel: &str| panel != "A";
+        assert_eq!(layout.arrange(window, &hidden).central, window);
+        assert!(layout.dock(view, CENTRAL, Zone::Center));
+        assert_eq!(layout.check(), Ok(()));
+        // The view fills the dock until A shows again, beside it, taking a quarter.
+        let arranged = layout.arrange(window, &hidden);
+        assert_eq!(arranged.groups, [(view, window)]);
+        assert_eq!(arranged.central, Rect::NOTHING);
+        assert_eq!(
+            layout.arrange(window, &all).groups,
+            [
+                (a, Rect::from_min_max(pos2(0.0, 0.0), pos2(246.0, 600.0))),
+                (
+                    view,
+                    Rect::from_min_max(pos2(254.0, 0.0), pos2(1000.0, 600.0))
+                ),
+            ]
+        );
+    }
+
+    /// Where the editor docks its panels.
+    const EDITOR: [(&str, Docked); 3] = [
+        ("Inspector", Docked::RightOf(VIEW)),
+        ("Entities", Docked::LeftOf(VIEW)),
+        ("Performance", Docked::Below("Inspector")),
+    ];
+
+    #[test]
+    fn panels_dock_as_the_app_says_beside_the_view_a_quarter_and_beside_others_half() {
+        let mut layout = Layout::new(Some(VIEW));
+        for (panel, _) in EDITOR {
+            layout.add(panel.to_owned(), AT, &EDITOR);
+        }
+        assert!(layout.floating.is_empty());
+        assert_eq!(layout.check(), Ok(()));
+        let window = Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 600.0));
+        let arranged = layout.arrange(window, &all);
+        let rect = |panel| {
+            let group = layout.find(panel);
+            let mut groups = arranged.groups.iter();
+            groups.find_map(|&(id, rect)| (Some(id) == group).then_some(rect))
+        };
+        // The Inspector takes a quarter of the window, and Entities a quarter of the rest.
+        let at = |min: [f32; 2], max: [f32; 2]| Some(Rect::from_min_max(min.into(), max.into()));
+        assert_eq!(rect("Entities"), at([0.0, 0.0], [182.5, 600.0]));
+        assert_eq!(rect(VIEW), at([190.5, 0.0], [746.0, 600.0]));
+        assert_eq!(rect("Inspector"), at([754.0, 0.0], [1000.0, 296.0]));
+        assert_eq!(rect("Performance"), at([754.0, 304.0], [1000.0, 600.0]));
+    }
+
+    #[test]
+    fn a_target_the_layout_doesnt_hold_stands_for_its_own_and_one_floating_or_none_floats() {
+        // Performance, below the Inspector, which isn't there yet: below the view, for now.
+        let mut layout = Layout::new(Some(VIEW));
+        layout.add("Performance".to_owned(), AT, &EDITOR);
+        let Node::Split {
+            axis: Axis::Vertical,
+            ratio,
+            children,
+            ..
+        } = &layout.main
+        else {
+            panic!("Performance is below the view: {:?}", layout.main);
+        };
+        assert_eq!(*ratio, 0.75);
+        assert!(matches!(&children[1], Node::Tabs(tabs) if tabs.panels == ["Performance"]));
+        // Targets standing for one another, a target nowhere, one floating, and none: they float.
+        let floats = |layout: &Layout, panel| {
+            let group = layout.find(panel).expect("the panel is in the layout");
+            layout
+                .floating(group)
+                .is_some_and(|f| f.tabs.panels == [panel])
+        };
+        let cycle = [("A", Docked::With("B")), ("B", Docked::With("A"))];
+        layout.add("A".to_owned(), AT, &cycle);
+        assert!(floats(&layout, "A"));
+        layout.add("B".to_owned(), AT, &[("B", Docked::Below("Nowhere"))]);
+        assert!(floats(&layout, "B"));
+        layout.add("C".to_owned(), AT, &[("C", Docked::With("A"))]);
+        assert!(floats(&layout, "C"));
+        layout.add("D".to_owned(), AT, &EDITOR);
+        assert!(floats(&layout, "D"));
+    }
+
+    #[test]
+    fn a_panel_docked_among_tabs_leaves_the_one_showing() {
+        let mut layout = Layout::new(Some(VIEW));
+        layout.add("Log".to_owned(), AT, &[("Log", Docked::With(VIEW))]);
+        let group = layout.group(layout.find(VIEW).unwrap()).unwrap();
+        assert_eq!(group.panels, [VIEW, "Log"]);
+        assert_eq!(group.showing(&all), Some(VIEW));
     }
 }

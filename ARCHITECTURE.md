@@ -60,7 +60,9 @@ sandbox  editor   player       apps/: executables
 - **`sandbox`:** the development playground for engine features.
 - **`editor`:** the editor, which becomes one more client of the tool API: a dock that fills its
   window, with the game's view in a panel among the others, which shows a world of the editor's
-  own until the tool API brings it a game.
+  own until the tool API brings it a game, and the engine's Inspector beside it. Its camera is its
+  own, one orbit camera driven alike in 2D and 3D, orthographic or with perspective, with a
+  toolbar and an orientation gizmo pinned over the view and a grid in either projection.
 - **`player`:** the reference player. It runs a cooked scene without game code and shows how a
   game builds its own player.
 
@@ -475,10 +477,25 @@ the view's panel too, which senses presses itself, so that one by its edge isn't
 or a splitter's a few points away. What reaches the layers is the view's to say: presses and the
 wheel over it, and the drags they start, and keys while it has focus, which a press on it gives,
 taking egui's, and a press anywhere else takes away; it has focus as the app starts. Releases
-reach them wherever they come. A panel shows from the frame after its layer starts showing it,
-since the dock lays out a frame before its panels draw, and keeps its place while it isn't shown.
-The layout is saved as RON in the OS's directory for per-user state, never beside the executable;
-headless runs neither read nor write it.
+reach them wherever they come. UI that a tool pins over the view, through `Ui::over_view`, shows
+above it and below what floats over it: a press there gives the view the keys too, but reaches
+the layers no more than the wheel over it does, so that a toolbar's buttons leave the keys with
+the view. Layers know where the view is from `Context::view`, in the window's pixels, as the
+cursor's position is.
+
+A panel shows from the frame after its layer starts showing it, since the dock lays out a frame
+before its panels draw, and keeps its place while it isn't shown. One the layout doesn't hold yet
+floats, unless the app docks it with `App::dock`, beside a panel docked in the main window or
+among its tabs, in the order the app gives: so an app makes its first layout, which Reset layout
+goes back to, and places a panel that an older layout lacks. With `App::custom_title_bar`, the
+dock adds a View menu after the layers' menus, and gives tabs a menu that closes their panel, but
+never a dockspace's view: a closed panel shows nowhere and keeps its place until the View menu
+opens it again, and a torn-off window whose panels are all closed closes until then. The View
+menu also saves the layout under a name, loads and deletes those saved, and resets it. The layout
+is saved as RON in the OS's directory for per-user state, never beside the executable, and those
+named in `layouts/` beside it, each a name of 1 to 64 letters, digits, spaces, `-` and `_` that
+Windows doesn't keep for a device, on every OS, since layouts move between machines
+(`engine.bad_layout_name`). Headless runs neither read nor write layouts.
 
 The torn-off windows are egui's immediate viewports: egui runs each one's pass inside the main
 window's, and the main window's frame renders them all. Only the main window's swapchain paces

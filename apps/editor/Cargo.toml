@@ -11,6 +11,7 @@ name = "gg-editor"
 path = "src/main.rs"
 
 [dependencies]
+bytemuck = { workspace = true, features = ["derive"] }
 # A development build, as tools are.
 gg-engine = { workspace = true, features = ["dev"] }
 

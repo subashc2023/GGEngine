@@ -321,6 +321,27 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   test the view among the UI's shapes; CI runs the editor headless. By hand on the RTX 4090,
   posted keys moved the camera after a click on the view and not after one on a panel, a key let
   go after a click on a panel stopped it, and the wheel over the view zoomed it.
+- **The editor's camera, tools and menus** (2026-10-27): the editor's own orbit camera works alike
+  in 2D and 3D, orthographic or with perspective: the wheel dollies toward the point under the
+  cursor, the middle button trucks and pedestals, the right button looks about, or pans
+  orthographically, and while it's held W, A, S and D fly and Q and E roll; Alt and the left button
+  orbit, Alt and the right dolly, and Home eases back to the start. A toolbar over the view picks
+  what the left button does (select, pan or orbit), the projection, and the grid and its plane; a
+  gizmo at its top right shows the camera's turn, snaps to the six axis views, and to the opposite
+  one on a second click, switches the projection and orbits by a drag. The grid draws in either
+  projection, crisp in an axis view and anti-aliased otherwise, fading toward the horizon, in place
+  however far from the origin. `Ui::over_view` pins UI over a dockspace's view, whose presses leave
+  the view the keys, and `Context::view` says where the view is. The dock closes panels and opens
+  them from a View menu, which saves, loads, deletes and resets named layouts too, and `App::dock`
+  gives an app its first layout: the editor's has Entities left of the view and the Inspector
+  right, over Performance. Unit tests check that the camera's moves keep the point under the cursor
+  in both projections, the grid's placement and its precision far from the origin, the gizmo's
+  hits, and the dock's closing, menus and layouts. By hand on the RTX 4090, through RenderDoc
+  captures of whole frames: the wheel and middle, right and Pan drags kept the point under the
+  cursor to the pixel, Home went back exactly, Q rolled with the right button held, Alt and the
+  left button orbited, the gizmo snapped to Top and flipped to Bottom, its label switched the
+  projection, and the View menu closed, reopened, saved, loaded, deleted and reset layouts; File >
+  Quit exited cleanly, and the sandbox's arrows still steer its triangle.
 
 ## Now: the editor's next milestone, or Phase 5's first
 
@@ -410,7 +431,7 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | A far plane for perspective, as glTF's `zfar` gives; it sees out to infinity | A glTF camera with one, or Phase 8's culling |
 | Keeping the view's depth past its pass, to sample: each frame clears it and doesn't store it | Post-processing, picking, or the tool API's captures |
 | A depth format for a device without D32_SFLOAT depth, which the engine refuses (`gpu.no_device`) | A target device lacks it |
-| Raw mouse motion and a grabbed cursor, for looking about past the window's edges: the fly camera controller looks by the cursor's moves while the right button is held | A game looks with the mouse, as first-person games do |
+| Raw mouse motion and a grabbed cursor, for looking about past the window's edges: the fly camera controller and the editor's camera look by the cursor's moves while the right button is held | A game looks with the mouse, as first-person games do |
 | Mipmaps and anisotropic filtering for the textures layers add: `add_texture` and `add_sprite_sheet` give them one level, sampled without anisotropy, so one drawn smaller than it is shimmers. A sprite sheet's cells, packed edge to edge, will then mix together at the smaller levels and under anisotropy, which reads past the texels the sprite shader keeps to, and need space around each cell or an array layer each | A game draws its own textures smaller than they are |
 | Keeping a masked texture's coverage as its levels shrink: averaging thins what its alpha cuts out, such as leaves and fences, at a distance, where scaling each level's alpha to keep the share above the cutoff would keep it | A masked model thins out at a distance |
 | Sprite sheets with space between or around their cells, as some tile sets come; `SpriteSheet` takes cells packed edge to edge from the top left | A game's art comes that way |
@@ -430,12 +451,23 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Host image copy where a transfer queue exists, or where the driver says it costs the GPU in reading the image, as KosmicKrisp's does, turning off Apple's lossless compression, so that macOS uploads through the graphics queue; and meshes written straight into GPU memory the CPU reaches, as ReBAR and unified memory allow, rather than copied | A measurement shows either is faster |
 | More than one camera or view, such as split screen or the editor's scene view | A game or the editor draws several |
 | The camera as a component of an entity, which a scene saves and a parent carries along; layers set the camera through `Context`, and the world doesn't hold it | A scene saves a camera, or a camera follows or rides an entity, with a world matrix for game code |
-| Converting between the view's pixels and the world, to pick what's under the cursor or zoom toward it; the orthographic camera controller zooms about the view's center, and in a dockspace the layers get the cursor in the window's pixels, with nothing to tell them where the view is | Something picks with the mouse, or a tool zooms toward the cursor |
+| Picking what's under the cursor: layers know where the view is (`Context::view`) and the cursor, in the same pixels, and the editor's camera finds the point under the cursor on a plane itself, but nothing finds what's drawn there; and the orthographic camera controller zooms about the view's center | Something picks with the mouse, or a game zooms toward the cursor |
 | A dockspace's view in a window of its own: it docks and floats over the main window alone, since only the main window's input reaches the layers, and its image is made at the main window's scale | The editor shows the game on a display of its own |
 | Showing which panel has the keys, such as an outline around the view while it has focus | Someone misses it, or Phase 9's editor |
 | Gamepads following a dockspace's view: they reach the layers whichever panel has the keys, as they do in games | The editor binds a pad, or a panel takes a pad's input |
 | Keeping a click that closes a menu from what's under it: it reaches the game's view there too, central or in a panel | It surprises someone, or Phase 9's editor |
-| A grid for cameras with perspective, fading toward the horizon: the editor's grid shader finds the view's corners on the plane z = 0 through an orthographic camera alone | The editor shows 3D, or Phase 9's scene view |
+| Hotkeys for the editor's tools: Q, W, E and R stay free for them, since the camera's keys act only while the right button is held | Phase 9's editor, with gizmos that move, turn and scale |
+| The editor's Select tool picking what's under the cursor, and F framing what's picked: Select does nothing yet | Picking |
+| Locking the editor's view against turning, as Unity's padlock does | Someone turns a 2D view by accident |
+| Switching to orthographic on an axis snap, as Blender's and Godot's gizmos do by default: the editor switches projection only when asked | Someone wants it |
+| The wheel setting the editor's fly speed while the right button is held, as Unity's, Unreal's and Godot's do: it dollies then too, and flying goes at the distance a second | Flying wants another speed |
+| Keeping the editor's camera, tool and grid between runs, as the dock keeps its layout | Someone misses them |
+| Easing the editor's switch between projections, which jumps | It jars someone |
+| A slot between the world's opaque and blended draws for the editor's grid, so that what's in front of its plane hides it and it shows over what's behind: it draws first, a backdrop that everything covers | The editor shows a world |
+| The editor's camera seeing Alt held from before the view had the keys: keys reach the layers only while the view has them, so Alt counts from a press after | Someone holds Alt first |
+| A rotating cursor for the editor's Orbit tool: egui has none, so it shows a hand | egui adds one, or someone misses it |
+| The lines across the editor's perspective grid reaching the horizon: they fade out some 65 to 200 camera heights away, since its f32 coordinates hold four decades of spacing; the lines toward the horizon go on | Someone misses them |
+| Cameras far from the origin: their matrices are f32, so 12,345 units out a view a tenth of a unit across moves in steps of about 1% | A game's world is that large |
 | Zooming from keys or a gamepad, as a rate beside the wheel's lines; the orthographic camera controller zooms by the wheel alone, in its own event handling. And zooming a camera with perspective, by its field of view or by moving it in, or changing the fly camera controller's speed by the wheel, which does nothing to it | A game binds zoom elsewhere, or zooms a camera with perspective |
 | Per-user bindings, kept as RON in the per-user directory beside the dock's layout, and a UI that binds them; a game binds its actions in code | A game ships its settings |
 | Chords, modifiers, holds and double taps, such as Ctrl and a key: there's no modifier state, and Ctrl+Z reaches layers as `ControlLeft` and `KeyZ` | A game binds a combination |
@@ -472,8 +504,6 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | The instance and VMA asking for Vulkan 1.4, and the validation layer's settings given through ash's `LayerSettingEXT::values`: ash 0.38 has 1.3's headers, so they ask for 1.3 and reach what 1.4 added through the extensions it promoted, and the settings are filled in by hand, since `values` counts bytes ([ash #985](https://github.com/ash-rs/ash/issues/985)) | ash's next release |
 | A swapchain without an sRGB format falls back to the first one offered, where colors come out too dark | A device offers no sRGB swapchain format |
 | Splits in a torn-off window, which holds one tab group | A tool wants panels side by side outside the main window |
-| Closing a panel from its tab; a panel shows while its layer shows it | Panels the user opens and closes, such as the editor's |
-| A first-run layout an app gives, such as the editor's panels docked around the view: a dockspace's view fills it, and other panels float as they first show | The editor has panels of its own, in Phase 9 |
 | Reordering tabs by dragging them along their bar; a drop among the tabs adds one at the end | Phase 9, the editor |
 | On Windows, an inner size asked of winit once a window whose title bar the UI draws is open (egui's `InnerSize`, `MinInnerSize` or `MaxInnerSize`) leaves its inside a frame smaller, since winit sizes it as though it had no frame | Something resizes such a window from code |
 | Leaving a taskbar that hides itself a pixel or two beside a maximized window whose title bar the UI draws, as Windows Terminal and Chromium do; the window covers the whole monitor, which may keep the taskbar from showing | Someone hides their taskbar |

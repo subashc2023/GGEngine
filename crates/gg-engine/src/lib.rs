@@ -65,7 +65,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use gg_core::Result;
-use gg_renderer::{MAX_TEXTURE_SIZE, Renderer, Settings, Validation, Viewport};
+use gg_renderer::{MAX_TEXTURE_SIZE, Renderer, Settings, Validation};
 use tracing::{debug, error, info, warn};
 
 pub use actions::{Actions, Binding, Change, Source, Toward};
@@ -73,7 +73,7 @@ use args::Args;
 pub use camera::{CameraAction, FlyAction, FlyCameraController, OrthographicCameraController};
 use chrome::Chrome;
 use dock::Dock;
-pub use dock::Ui;
+pub use dock::{Docked, Ui};
 pub use ecs::{
     Bundle, Component, Difference, Entities, Entity, EntityId, Log, Operation, Parent, Query,
     QueryIter, QueryIterMut, ReadOnlyQuery, World, WorldHash, Writable,
@@ -94,9 +94,10 @@ pub use gg_renderer::MeshDraw;
 /// What layers draw, which they add and draw through their [`Context`]: sprites, and the sprite
 /// sheets whose cells they show; meshes; shaders
 /// for their vertex types, each added with how it blends; the textures those shaders and sprites
-/// sample, and the samplers they sample them with; and the camera the game's view sees them from.
+/// sample, and the samplers they sample them with; the camera the game's view sees them from, and
+/// where that view is in the window.
 pub use gg_renderer::{
-    Blend, Camera, Mesh, Projection, Sampler, Shader, Sprite, SpriteSheet, Texture,
+    Blend, Camera, Mesh, Projection, Sampler, Shader, Sprite, SpriteSheet, Texture, Viewport,
 };
 pub use input::Input;
 pub use inspector::Inspector;
@@ -129,6 +130,8 @@ pub struct App {
     custom_title_bar: bool,
     /// The panel that shows the game's view, in a dock that fills the main window.
     view_panel: Option<&'static str>,
+    /// Where panels dock as they first show, in the order the app gave them.
+    docked: Vec<(&'static str, Docked)>,
     /// What the world's IDs are drawn from, rather than a seed drawn at random.
     seed: Option<u64>,
     /// How far apart headless frames are, rather than a tick each.
@@ -143,6 +146,7 @@ impl App {
             stack: Stack::default(),
             custom_title_bar: false,
             view_panel: None,
+            docked: Vec::new(),
             seed: None,
             headless_step: None,
         }
@@ -185,7 +189,9 @@ impl App {
     /// Has the UI draw the frames of the app's windows instead of the OS, with the menus layers
     /// add through [`Ui::menu`] in the main window's title bar, and the tab bars of torn-off
     /// panels as their windows' title bars: for tools, which want the room. On macOS the OS keeps
-    /// its buttons and edges. Games keep the OS's frame.
+    /// its buttons and edges. Games keep the OS's frame. The dock adds a View menu after the
+    /// layers' menus, which shows and hides panels and saves, loads and resets the layout, and
+    /// gives tabs a menu that closes their panels, as [`Ui::menu`] and [`Ui::panel`] say.
     #[must_use]
     pub fn custom_title_bar(mut self) -> Self {
         self.custom_title_bar = true;
@@ -197,11 +203,40 @@ impl App {
     /// keep: for tools. The view fills the dock until the user places other panels beside it, and
     /// it doesn't go into a window of its own. The layers get the mouse's presses and its wheel
     /// over the view, and the drags those start, and keys while the view has focus, which a press
-    /// on it gives and a press anywhere else takes; it has focus as the app starts. Releases
-    /// reach them wherever they come.
+    /// on it, or on what [`Ui::over_view`] shows over it, gives and a press anywhere else takes;
+    /// it has focus as the app starts. Releases reach them wherever they come.
     #[must_use]
     pub fn view_panel(mut self, name: &'static str) -> Self {
         self.view_panel = Some(name);
+        self
+    }
+
+    /// Docks panel `panel` where `docked` says as it first shows in a layout that doesn't hold
+    /// it: on the app's first run, after the View menu's Reset layout, and with a layout saved
+    /// before the app had the panel. Beside the game's view, a panel takes a quarter of the view's
+    /// panel, and beside another panel, half of it; tabbed with another, it leaves the tab that
+    /// showed showing. Panels that first show in the same frame dock in the order the app gives
+    /// them, whatever order the layers show them in. A target the layout doesn't hold yet stands
+    /// for its own target, if the app gives it one, and so on: a panel that shows before its
+    /// target docks beside the target's target for now. A panel whose target floats, or comes to
+    /// none, floats, as the panels the app doesn't dock do.
+    ///
+    /// The editor's panels dock around its view, the Inspector taking a quarter of the window,
+    /// Entities a quarter of the rest, and Performance below the Inspector:
+    ///
+    /// ```
+    /// use gg_engine::{App, Docked};
+    ///
+    /// let app = App::new("Editor")
+    ///     .custom_title_bar()
+    ///     .view_panel("Viewport")
+    ///     .dock("Inspector", Docked::RightOf("Viewport"))
+    ///     .dock("Entities", Docked::LeftOf("Viewport"))
+    ///     .dock("Performance", Docked::Below("Inspector"));
+    /// ```
+    #[must_use]
+    pub fn dock(mut self, panel: &'static str, docked: Docked) -> Self {
+        self.docked.push((panel, docked));
         self
     }
 }
@@ -330,7 +365,13 @@ fn run_headless(app: &mut App, args: &Args) -> Result<Ran> {
     let egui = egui_context();
     // Headless runs neither read nor save the layout, so that they're reproducible, and have no
     // window to frame.
-    let mut dock = Dock::new(None, Chrome::Os, app.view_panel);
+    let mut dock = Dock::new(
+        None,
+        Chrome::Os,
+        app.view_panel,
+        app.custom_title_bar,
+        &app.docked,
+    );
     let mut egui_runs = true;
     // The frames handed over to render, and those rendered.
     let (mut handed, mut frames) = (0, 0);
@@ -1566,7 +1607,7 @@ mod tests {
             )),
             ..Default::default()
         };
-        let mut dock = Dock::new(None, Chrome::Os, None);
+        let mut dock = Dock::new(None, Chrome::Os, None, false, &[]);
         let mut clock = Clock::default();
         let mut stepper = Stepper::lockstep();
         let egui = egui_context();
@@ -1594,7 +1635,7 @@ mod tests {
             )),
             ..Default::default()
         };
-        let mut dock = Dock::new(None, Chrome::Os, None);
+        let mut dock = Dock::new(None, Chrome::Os, None, false, &[]);
         let mut clock = Clock::default();
         let mut stepper = Stepper::default();
         let egui = egui_context();
@@ -1635,7 +1676,7 @@ mod tests {
         let mut cx = Context::new(None);
         stack.attach(&mut cx);
         let (mut stepper, egui) = (Stepper::default(), egui_context());
-        let mut dock = Dock::new(None, Chrome::Os, None);
+        let mut dock = Dock::new(None, Chrome::Os, None, false, &[]);
         let quarters = iter::repeat_n(Tick::DT / 4, 16);
         let dts = quarters.chain(iter::repeat_n(Tick::DT * 5 / 2, 3));
         // How far each frame is past its last tick: a quarter more each frame, from the fourth,
@@ -1670,7 +1711,7 @@ mod tests {
         let mut cx = Context::new(None);
         stack.attach(&mut cx);
         let (mut stepper, egui) = (Stepper::lockstep(), egui_context());
-        let mut dock = Dock::new(None, Chrome::Os, None);
+        let mut dock = Dock::new(None, Chrome::Os, None, false, &[]);
         for frame in 1..=5 {
             let ui = (&egui, &mut dock);
             let draws = drawn(&mut stack, &mut cx, Duration::ZERO, &mut stepper, ui);
@@ -1695,7 +1736,7 @@ mod tests {
             )),
             ..Default::default()
         };
-        let mut dock = Dock::new(None, Chrome::Os, None);
+        let mut dock = Dock::new(None, Chrome::Os, None, false, &[]);
         let mut clock = Clock::default();
         let mut stepper = Stepper::default();
         let egui = egui_context();
@@ -1741,6 +1782,23 @@ mod tests {
                 size: [488, 336],
             }
         );
+    }
+
+    #[test]
+    fn layers_know_where_the_view_was_handed_off_while_it_had_an_area() {
+        let mut cx = Context::new(None);
+        assert_eq!(cx.view(), None);
+        let mut frame = render_thread::Extracted::default();
+        let shown = egui::Rect::from_min_max(egui::pos2(10.0, 40.0), egui::pos2(410.0, 340.0));
+        cx.extract(&mut frame, viewport(shown, 1.5));
+        let view = Viewport {
+            origin: [15, 60],
+            size: [600, 450],
+        };
+        assert_eq!(cx.view(), Some(view));
+        // As while a tab shows over a dockspace's view, whose dock then has it nowhere.
+        cx.extract(&mut frame, viewport(egui::Rect::NOTHING, 1.5));
+        assert_eq!(cx.view(), None);
     }
 
     #[test]

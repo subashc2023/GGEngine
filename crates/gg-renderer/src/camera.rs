@@ -63,7 +63,7 @@ impl Camera {
     /// # Panics
     ///
     /// If its projection can't project, as [`Projection`] says.
-    pub(crate) fn view_projection(&self, aspect: f32) -> Mat4 {
+    pub fn view_projection(&self, aspect: f32) -> Mat4 {
         let projection = match self.projection {
             Projection::Orthographic { height, near, far } => {
                 assert!(

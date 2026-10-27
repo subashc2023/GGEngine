@@ -23,7 +23,7 @@ use winit::window::{Window, WindowId};
 
 use crate::args::Args;
 use crate::chrome::{self, Chrome};
-use crate::dock::{self, Dock};
+use crate::dock::{self, Dock, Under};
 #[cfg(feature = "dev")]
 use crate::hot_reload::HotReload;
 use crate::layer::Stack;
@@ -55,7 +55,13 @@ pub(crate) fn run(app: &mut App, args: &Args) -> Result<Ran> {
     let chrome = Chrome::new(app.custom_title_bar);
     let view_input = app.view_panel.map(|_| ViewInput::new());
     let mut handler = Handler {
-        dock: Dock::new(layout, chrome, app.view_panel),
+        dock: Dock::new(
+            layout,
+            chrome,
+            app.view_panel,
+            app.custom_title_bar,
+            &app.docked,
+        ),
         pipelines,
         app,
         args,
@@ -390,9 +396,9 @@ impl Handler<'_> {
             return Reach::Event;
         };
         let cursor = self.egui_winit.as_ref().map(WindowInput::cursor);
-        let over = cursor.is_some_and(|cursor| self.dock.over_view(&self.egui, cursor));
+        let under = cursor.map_or(Under::Other, |cursor| self.dock.under(&self.egui, cursor));
         let shown = self.dock.view().is_positive();
-        input.route(&self.egui, event, consumed, over, shown)
+        input.route(&self.egui, event, consumed, under, shown)
     }
 
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: Error) {
@@ -598,8 +604,9 @@ impl ApplicationHandler for Handler<'_> {
 
 /// What of the main window's input reaches the layers in a dockspace, whose game's view is a panel
 /// among egui's: the mouse's presses and its wheel over the view, and the drags those start, and
-/// keys while the view has focus, which a press on it gives and a press elsewhere takes away.
-/// Releases reach them wherever they come, so that none is left holding what it saw pressed.
+/// keys while the view has focus, which a press on it or on the UI over it gives and a press
+/// elsewhere takes away. Releases reach them wherever they come, so that none is left holding what
+/// it saw pressed.
 struct ViewInput {
     /// Whether the view has the keys, as it does from the start.
     focused: bool,
@@ -636,15 +643,15 @@ impl ViewInput {
         self.focused && shown
     }
 
-    /// What of `event` reaches the layers, as egui keeps it if `consumed`, with the cursor
-    /// `over` the view, which `shown` says shows. Releases always reach them. A press over the view
-    /// gives it focus and takes egui's.
+    /// What of `event` reaches the layers, as egui keeps it if `consumed`, with the cursor over
+    /// what `under` says, as the view, which `shown` says shows. Releases always reach them. A
+    /// press over the view, or over the UI over it, gives it focus and takes egui's.
     fn route(
         &mut self,
         egui: &egui::Context,
         event: &Event<'_>,
         consumed: bool,
-        over: bool,
+        under: Under,
         shown: bool,
     ) -> Reach {
         let reach = |reaches: bool| {
@@ -658,10 +665,10 @@ impl ViewInput {
             Event::MouseButton {
                 button,
                 pressed: true,
-            } => {
+            } => match under {
                 // egui uses the pointer for the view's own widget while a button is held there, and
                 // otherwise for one of its own, such as a splitter dragged over the view.
-                if over && (self.held != 0 || !egui.egui_is_using_pointer()) {
+                Under::View if self.held != 0 || !egui.egui_is_using_pointer() => {
                     self.held |= bit(button);
                     // egui keeps a text field's focus until a click elsewhere, which a drag isn't.
                     egui.memory_mut(|memory| memory.stop_text_input());
@@ -670,11 +677,18 @@ impl ViewInput {
                         Some((x, y)) => Reach::MoveThen { x, y },
                         None => Reach::Event,
                     }
-                } else {
+                }
+                // The UI over the view is egui's, but leaves the view the keys.
+                Under::Overlay => {
+                    egui.memory_mut(|memory| memory.stop_text_input());
+                    self.focus(true);
+                    Reach::Nothing
+                }
+                _ => {
                     self.focus(false);
                     Reach::Nothing
                 }
-            }
+            },
             Event::MouseButton {
                 button,
                 pressed: false,
@@ -682,7 +696,9 @@ impl ViewInput {
                 self.held &= !bit(button);
                 Reach::Event
             }
-            Event::Scroll(_) => reach(self.held != 0 || (over && !egui.egui_is_using_pointer())),
+            Event::Scroll(_) => {
+                reach(self.held != 0 || (under == Under::View && !egui.egui_is_using_pointer()))
+            }
             // egui uses the pointer while a button pressed over the view is held.
             Event::CursorMoved { x, y } => {
                 let reaches = !consumed || self.held != 0;
@@ -777,16 +793,19 @@ mod tests {
         let mut input = ViewInput::new();
         // Before it first shows, keys reach nothing.
         assert_eq!(
-            input.route(&egui, &key(true), false, false, false),
+            input.route(&egui, &key(true), false, Under::Other, false),
             Reach::Nothing
         );
         for event in [key(true), Event::Text("w"), key(false)] {
-            assert_eq!(input.route(&egui, &event, false, false, true), Reach::Event);
+            assert_eq!(
+                input.route(&egui, &event, false, Under::Other, true),
+                Reach::Event
+            );
         }
         // A press elsewhere takes the keys away, but not their releases.
         let elsewhere = button(MouseButton::Left, true);
         assert_eq!(
-            input.route(&egui, &elsewhere, true, false, true),
+            input.route(&egui, &elsewhere, true, Under::Other, true),
             Reach::Nothing
         );
         assert!(!input.keys(true));
@@ -795,15 +814,18 @@ mod tests {
             (Event::Text("w"), Reach::Nothing),
             (key(false), Reach::Event),
         ] {
-            assert_eq!(input.route(&egui, &event, false, false, true), reach);
+            assert_eq!(input.route(&egui, &event, false, Under::Other, true), reach);
         }
         // A press on the view, which egui counts as its own, gives them back.
         let press = button(MouseButton::Left, true);
-        assert_eq!(input.route(&egui, &press, true, true, true), Reach::Event);
+        assert_eq!(
+            input.route(&egui, &press, true, Under::View, true),
+            Reach::Event
+        );
         assert!(input.keys(true));
         // Not those egui keeps, as while one of its widgets has focus.
         assert_eq!(
-            input.route(&egui, &key(true), true, true, true),
+            input.route(&egui, &key(true), true, Under::View, true),
             Reach::Nothing
         );
     }
@@ -815,7 +837,10 @@ mod tests {
         assert!(egui.egui_wants_keyboard_input());
         let mut input = ViewInput::new();
         let press = button(MouseButton::Right, true);
-        assert_eq!(input.route(&egui, &press, true, true, true), Reach::Event);
+        assert_eq!(
+            input.route(&egui, &press, true, Under::View, true),
+            Reach::Event
+        );
         assert!(!egui.egui_wants_keyboard_input());
     }
 
@@ -825,44 +850,50 @@ mod tests {
         let mut input = ViewInput::new();
         let right = |pressed| button(MouseButton::Right, pressed);
         assert_eq!(
-            input.route(&egui, &right(true), true, true, true),
+            input.route(&egui, &right(true), true, Under::View, true),
             Reach::Event
         );
         // egui uses the pointer for the view's widget now, and the drag goes past the view.
         let using = context(true);
         for event in [MOVE, WHEEL] {
-            assert_eq!(input.route(&using, &event, true, false, true), Reach::Event);
+            assert_eq!(
+                input.route(&using, &event, true, Under::Other, true),
+                Reach::Event
+            );
         }
         // Another button pressed over the view joins in.
         let left = |pressed| button(MouseButton::Left, pressed);
         assert_eq!(
-            input.route(&using, &left(true), true, true, true),
+            input.route(&using, &left(true), true, Under::View, true),
             Reach::Event
         );
         assert_eq!(
-            input.route(&using, &right(false), true, false, true),
+            input.route(&using, &right(false), true, Under::Other, true),
             Reach::Event
         );
-        assert_eq!(input.route(&using, &MOVE, true, false, true), Reach::Event);
         assert_eq!(
-            input.route(&using, &left(false), true, false, true),
+            input.route(&using, &MOVE, true, Under::Other, true),
+            Reach::Event
+        );
+        assert_eq!(
+            input.route(&using, &left(false), true, Under::Other, true),
             Reach::Event
         );
         // Let go, egui's moves and wheel are egui's.
         for event in [MOVE, WHEEL] {
             assert_eq!(
-                input.route(&using, &event, true, true, true),
+                input.route(&using, &event, true, Under::View, true),
                 Reach::Nothing
             );
         }
         // The layers get the move they missed before the next press, which a drag starts from.
-        let next = input.route(&egui, &right(true), true, true, true);
+        let next = input.route(&egui, &right(true), true, Under::View, true);
         assert_eq!(next, Reach::MoveThen { x: 10.0, y: 20.0 });
         // A move they get leaves none to miss.
-        input.route(&egui, &right(false), false, true, true);
-        input.route(&egui, &MOVE, false, true, true);
+        input.route(&egui, &right(false), false, Under::View, true);
+        input.route(&egui, &MOVE, false, Under::View, true);
         assert_eq!(
-            input.route(&egui, &right(true), true, true, true),
+            input.route(&egui, &right(true), true, Under::View, true),
             Reach::Event
         );
     }
@@ -873,12 +904,12 @@ mod tests {
         let mut input = ViewInput::new();
         let press = button(MouseButton::Right, true);
         assert_eq!(
-            input.route(&using, &press, true, true, true),
+            input.route(&using, &press, true, Under::View, true),
             Reach::Nothing
         );
         assert!(!input.keys(true));
         assert_eq!(
-            input.route(&using, &WHEEL, true, true, true),
+            input.route(&using, &WHEEL, true, Under::View, true),
             Reach::Nothing
         );
     }
@@ -887,11 +918,44 @@ mod tests {
     fn the_wheel_over_the_view_reaches_the_layers_and_elsewhere_doesn_t() {
         let egui = context(false);
         let mut input = ViewInput::new();
-        assert_eq!(input.route(&egui, &WHEEL, true, true, true), Reach::Event);
         assert_eq!(
-            input.route(&egui, &WHEEL, true, false, true),
+            input.route(&egui, &WHEEL, true, Under::View, true),
+            Reach::Event
+        );
+        assert_eq!(
+            input.route(&egui, &WHEEL, true, Under::Other, true),
             Reach::Nothing
         );
+    }
+
+    #[test]
+    fn a_press_on_ui_over_the_view_gives_it_the_keys_and_reaches_egui_alone() {
+        let egui = context(false);
+        egui.memory_mut(|memory| memory.request_focus(Id::unique("text")));
+        let mut input = ViewInput::new();
+        let left = |pressed| button(MouseButton::Left, pressed);
+        assert_eq!(
+            input.route(&egui, &left(true), true, Under::Other, true),
+            Reach::Nothing
+        );
+        assert!(!input.keys(true));
+        assert_eq!(
+            input.route(&egui, &left(true), true, Under::Overlay, true),
+            Reach::Nothing
+        );
+        assert!(input.keys(true));
+        assert!(!egui.egui_wants_keyboard_input());
+        // Its release reaches the layers, as every release does, but it holds nothing.
+        assert_eq!(
+            input.route(&egui, &left(false), true, Under::Overlay, true),
+            Reach::Event
+        );
+        for event in [MOVE, WHEEL] {
+            assert_eq!(
+                input.route(&egui, &event, true, Under::Overlay, true),
+                Reach::Nothing
+            );
+        }
     }
 
     #[test]
@@ -899,10 +963,19 @@ mod tests {
         let egui = context(false);
         let mut input = ViewInput::new();
         let press = button(MouseButton::Right, true);
-        assert_eq!(input.route(&egui, &press, true, true, true), Reach::Event);
+        assert_eq!(
+            input.route(&egui, &press, true, Under::View, true),
+            Reach::Event
+        );
         let lost = Event::Focused(false);
-        assert_eq!(input.route(&egui, &lost, false, true, true), Reach::Event);
-        assert_eq!(input.route(&egui, &MOVE, true, true, true), Reach::Nothing);
+        assert_eq!(
+            input.route(&egui, &lost, false, Under::View, true),
+            Reach::Event
+        );
+        assert_eq!(
+            input.route(&egui, &MOVE, true, Under::View, true),
+            Reach::Nothing
+        );
         // The view keeps the keys.
         assert!(input.keys(true));
     }
@@ -912,7 +985,13 @@ mod tests {
         let egui = context(false);
         let mut input = ViewInput::new();
         let other = button(MouseButton::Other(7), true);
-        assert_eq!(input.route(&egui, &other, true, true, true), Reach::Event);
-        assert_eq!(input.route(&egui, &MOVE, true, true, true), Reach::Nothing);
+        assert_eq!(
+            input.route(&egui, &other, true, Under::View, true),
+            Reach::Event
+        );
+        assert_eq!(
+            input.route(&egui, &MOVE, true, Under::View, true),
+            Reach::Nothing
+        );
     }
 }

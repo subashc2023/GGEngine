@@ -172,6 +172,8 @@ pub struct Context {
     textures: Textures,
     /// What to draw this frame.
     draws: Draws,
+    /// Where the game's view was as the last frame handed it off, while it had an area.
+    view: Option<Viewport>,
     world: World,
     /// What drawing the world sorts and computes, kept between frames.
     scratch: Scratch,
@@ -223,6 +225,7 @@ impl Context {
             shaders: Shaders::default(),
             textures: Textures::default(),
             draws: Draws::default(),
+            view: None,
             world,
             scratch: Scratch::default(),
             past: Past::default(),
@@ -261,6 +264,17 @@ impl Context {
     /// [`Projection`](crate::Projection) says.
     pub fn set_camera(&mut self, camera: Camera) {
         self.camera = camera;
+    }
+
+    /// Where the game's view was in the main window as the last frame handed it to the renderer:
+    /// its physical pixels from the window's top left, as [`Input::cursor`] places the cursor. The
+    /// view is the main window's central area, which the panels dock around, or the panel that
+    /// [`App::view_panel`](crate::App::view_panel) names. `None` while it has no area, as in a
+    /// dockspace's first frame and while another panel's tab shows over the view's, and in replays,
+    /// which render nothing. For what's presented, such as a camera that keeps the point under the
+    /// cursor where it is, rather than the world.
+    pub fn view(&self) -> Option<Viewport> {
+        self.view
     }
 
     /// Compiles the Slang shader at `path` for layers to draw meshes of vertex type `V` with from
@@ -465,12 +479,14 @@ impl Context {
         draw::draw_world(world, past, alpha, &mut self.draws, &mut self.scratch);
     }
 
-    /// Fills in `frame` with this frame's render data, with the game's view at `viewport`: its
-    /// draws, for the last frame's, which it forgets, keeping their memory for the next; and what's
-    /// been added since a frame last took it, after what `frame` still holds.
+    /// Fills in `frame` with this frame's render data, with the game's view at `viewport`, which
+    /// [`view`](Self::view) gives from then on: its draws, for the last frame's, which it forgets,
+    /// keeping their memory for the next; and what's been added since a frame last took it, after
+    /// what `frame` still holds.
     pub(crate) fn extract(&mut self, frame: &mut Extracted, viewport: Viewport) {
         frame.clear_color = self.clear_color;
         frame.viewport = viewport;
+        self.view = (viewport.size[0] > 0 && viewport.size[1] > 0).then_some(viewport);
         frame.camera = self.camera;
         mem::swap(&mut frame.draws, &mut self.draws);
         self.draws.clear();
@@ -949,7 +965,7 @@ mod tests {
     /// Whether `stack`'s layers draw UI, as a pass of egui's tells.
     fn draws_ui(mut stack: Stack) -> bool {
         let egui = crate::egui_context();
-        let mut dock = crate::dock::Dock::new(None, crate::chrome::Chrome::Os, None);
+        let mut dock = crate::dock::Dock::new(None, crate::chrome::Chrome::Os, None, false, &[]);
         let mut cx = Context::new(None);
         let mut draws = false;
         let mut output = egui.run_ui(egui::RawInput::default(), |root| {

@@ -517,6 +517,7 @@ dependencies = [
 name = "editor"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "gg-engine",
 ]
 

@@ -1,23 +1,28 @@
 //! The dock in a frame: the strips it takes off the main window's edges, the groups it draws as
-//! layers show their panels, in a dockspace the panel that shows the game's view, and the drags
-//! that dock, float and tear off panels.
+//! layers show their panels, in a dockspace the panel that shows the game's view, the drags that
+//! dock, float and tear off panels, and the menus that close and open them and save, load and
+//! reset the layout.
 
 use std::any::Any;
 use std::collections::HashSet;
+use std::fmt::Debug;
+use std::hash::Hash;
 use std::mem;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use egui::menu::{MenuConfig, SubMenuButton};
 use egui::{
-    Align, Area, Button, CentralPanel, Context, CursorIcon, Frame, Id, LayerId, Order,
-    PaintCallback, Painter, Panel, Pos2, Rect, Sense, StrokeKind, UiBuilder, Vec2, ViewportBuilder,
-    ViewportClass, ViewportCommand, ViewportId, pos2, vec2,
+    Align, Align2, Area, Button, CentralPanel, Context, CursorIcon, Frame, Id, Key, LayerId, Order,
+    PaintCallback, Painter, Panel, PointerButton, PopupCloseBehavior, Pos2, Rect, Response, Sense,
+    StrokeKind, TextEdit, UiBuilder, Vec2, ViewportBuilder, ViewportClass, ViewportCommand,
+    ViewportId, pos2, vec2,
 };
 use gg_renderer::ViewCallback;
 use tracing::warn;
 
 use super::file;
-use super::tree::{Arrangement, Axis, CENTRAL, Layout, NodeId, Place, Side, Zone};
+use super::tree::{Arrangement, Axis, CENTRAL, Docked, Layout, NodeId, Place, Side, Zone};
 #[cfg(target_os = "windows")]
 use crate::chrome::Caption;
 use crate::chrome::{self, Chrome, Icon, Look, TitleBar};
@@ -34,6 +39,10 @@ const INSET: f32 = 4.0;
 const TARGET: f32 = 32.0;
 /// The side of a floating group's resize grip, in points.
 const GRIP: f32 = 12.0;
+/// How far UI over the game's view keeps from its edges, in points.
+const OVER_VIEW: f32 = 8.0;
+/// The menu the dock adds its items to.
+const VIEW_MENU: &str = "View";
 
 /// What layers draw their UI through, in [`Layer::ui`](crate::Layer::ui): panels, which the user
 /// docks, and egui itself for everything else.
@@ -70,9 +79,16 @@ impl<'a> Ui<'a> {
     /// shows the game's view; or floating, over the main window or in windows of their own. A
     /// panel shows from the frame after its layer starts showing it, since the dock lays out a
     /// frame before its panels draw, and keeps its place while it isn't shown; `add_contents` runs
-    /// when its tab is the one showing. `name` titles the panel and is its identity: the dock
-    /// keeps panels' places by name, between runs too, and a second panel of the same name in a
-    /// frame doesn't show.
+    /// when its tab is the one showing. A panel the layout doesn't hold yet floats, unless
+    /// [`App::dock`](crate::App::dock) docks it. `name` titles the panel and is its identity: the
+    /// dock keeps panels' places by name, between runs too, and a second panel of the same name
+    /// in a frame doesn't show.
+    ///
+    /// With [`App::custom_title_bar`](crate::App::custom_title_bar), the user closes any panel but
+    /// the game's view from its tab's menu or the View menu, and opens it again from the View
+    /// menu. A closed panel shows nowhere and keeps its place, between runs too, while its layer
+    /// goes on showing it, and `add_contents` doesn't run. A torn-off window whose panels are all
+    /// closed closes, and opens again where it was.
     pub fn panel(&mut self, name: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
         self.dock.panel(self.root, name, add_contents);
     }
@@ -83,11 +99,57 @@ impl<'a> Ui<'a> {
     /// [`App::custom_title_bar`](crate::App::custom_title_bar) the menu bar is the title bar;
     /// otherwise it's a bar of its own below the OS's, from the frame after a menu first shows.
     ///
+    /// With [`App::custom_title_bar`](crate::App::custom_title_bar), the dock adds a View menu
+    /// after the layers' menus: a checkbox for each panel the layers show, but the game's view,
+    /// which opens and closes it; then items that save the layout under a name, load or delete a
+    /// layout saved, and reset the layout to the app's first, as
+    /// [`App::dock`](crate::App::dock) docks it, with no panel closed. What they change, they
+    /// change as the frame ends. Headless runs keep no layout, so their View menu saves, loads and
+    /// deletes none. A layer's own menu named View gets the dock's items after its own.
+    ///
     /// A Quit item closes the main window as the OS's close button does, which the layers get
     /// as [`Event::CloseRequested`](crate::Event::CloseRequested) first:
     /// `ui.ctx().send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close)`.
     pub fn menu(&mut self, name: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
-        self.dock.bar.menu(name, add_contents);
+        let dock = &mut *self.dock;
+        match &mut dock.menu {
+            Some(menu) if name == VIEW_MENU => {
+                let (known, layout, saves) = (&dock.known, &dock.layout, dock.file.is_some());
+                dock.bar.menu(name, |ui| {
+                    add_contents(ui);
+                    ui.separator();
+                    menu.ui(ui, known, layout, saves);
+                });
+            }
+            _ => dock.bar.menu(name, add_contents),
+        }
+    }
+
+    /// Shows what `add_contents` draws over the game's view, at `align` within it, 8 points in
+    /// from its edges: above the view, and below what else is over it, such as panels floating
+    /// over it, and menus. `id` tells it from other UI over the view. A press on it gives the view
+    /// the keys, as a press on the view does, without reaching the layers, and the wheel over it
+    /// doesn't reach them either: so a tool's toolbar or gizmo over the view leaves the view its
+    /// keys, unless it opens a popup, which takes them as egui's UI does. Shows nothing, and
+    /// returns `None`, while the view doesn't show, and in apps without
+    /// [`App::view_panel`](crate::App::view_panel).
+    pub fn over_view<R>(
+        &mut self,
+        id: impl Hash + Debug,
+        align: Align2,
+        add_contents: impl FnOnce(&mut egui::Ui) -> R,
+    ) -> Option<R> {
+        self.dock
+            .show_over_view(self.root.ctx(), id, align, add_contents)
+    }
+
+    /// What egui makes of the game's view this frame, in apps with
+    /// [`App::view_panel`](crate::App::view_panel): its rect, in the main window's points; whether
+    /// the pointer is on it, rather than on what's over it (`hovered`); and whether a drag that
+    /// started on it goes on, with any button (`dragged`); such as to set the cursor over it.
+    /// `None` while the view doesn't show, and in apps without a view panel.
+    pub fn view(&self) -> Option<Response> {
+        self.dock.spot.as_ref().map(|spot| spot.response.clone())
     }
 
     /// egui, for UI that isn't a panel.
@@ -111,7 +173,8 @@ pub(crate) struct Dock {
     arrangement: Arrangement,
     /// The groups drawn this frame.
     drawn: HashSet<NodeId>,
-    /// Panels shown for the first time this frame, which float from the next.
+    /// Panels shown this frame that the layout doesn't hold, which it places as the frame ends:
+    /// where the app docks them, or floating.
     new: Vec<String>,
     /// A tab clicked this frame, whose panel shows from the next, so that the layout holds
     /// still while panels draw.
@@ -123,17 +186,67 @@ pub(crate) struct Dock {
     splitter_grab: f32,
     /// Where a dockspace's view shows this frame, once its panel draws.
     spot: Option<Spot>,
+    /// The layers of the UI shown over the view this frame so far, and those of the last frame,
+    /// which tell the input that comes between frames what's over the view: egui forgets which
+    /// layers are another's as a frame ends.
+    overlays: Vec<LayerId>,
+    overlaid: Vec<LayerId>,
     /// The renderer's callback that draws the view in its panel.
     callback: Arc<dyn Any + Send + Sync>,
+    /// The panels the layers showed last frame, closed ones too, in the order they showed them,
+    /// and those shown this frame so far.
+    known: Vec<String>,
+    knowing: Vec<String>,
+    /// Where the app docks its panels as they first show, in its order.
+    docked: Vec<(&'static str, Docked)>,
+    /// The View menu, in apps that have it, where tabs close their panels too.
+    menu: Option<ViewMenu>,
+}
+
+/// The View menu's items that save and load layouts, and what the menus chose this frame.
+#[derive(Default)]
+struct ViewMenu {
+    /// What the View menu and the tabs' menus chose, which the frame's end does.
+    chosen: Vec<Choice>,
+    /// The names of the layouts saved, alphabetically, as they were last read.
+    saved: Vec<String>,
+    /// What's typed in the field that names a layout to save, and why the name last saved from it
+    /// was refused.
+    name: String,
+    refused: Option<String>,
+}
+
+/// What the user chose from a menu.
+enum Choice {
+    Close(String),
+    Open(String),
+    Save(String),
+    Load(String),
+    Delete(String),
+    Reset,
 }
 
 /// Where the game's view shows in a dockspace.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Spot {
     /// In the main window's points.
     rect: Rect,
     /// The background's when its group is docked, or its group's area's when it floats.
     layer: LayerId,
+    /// What egui made of the view's widget.
+    response: Response,
+}
+
+/// What's at a point of the main window, as the last frame drew it, for what of its input reaches
+/// the layers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Under {
+    /// A dockspace's view, clear of what's over it.
+    View,
+    /// UI that [`Ui::over_view`] shows over the view.
+    Overlay,
+    /// Anything else: egui's.
+    Other,
 }
 
 struct Drag {
@@ -185,15 +298,31 @@ enum Zones {
 impl Dock {
     /// A dock with the layout saved in `file`, or kept in memory only without one, in windows
     /// framed as `chrome` says: with a `view`, a dockspace, whose panel of that name shows the
-    /// game's view. A file that can't be read logs a warning, and the dock starts as new.
-    pub(crate) fn new(file: Option<PathBuf>, chrome: Chrome, view: Option<&'static str>) -> Self {
-        let layout = match &file {
+    /// game's view. With `menu`, the main window has the View menu, and tabs close their panels.
+    /// `docked` says where the app docks its panels as they first show, in its order. A file that
+    /// can't be read logs a warning, and the dock starts as new.
+    pub(crate) fn new(
+        file: Option<PathBuf>,
+        chrome: Chrome,
+        view: Option<&'static str>,
+        menu: bool,
+        docked: &[(&'static str, Docked)],
+    ) -> Self {
+        let mut layout = match &file {
             Some(path) => file::load(path, view).unwrap_or_else(|error| {
                 warn!(code = error.code(), path = %path.display(), "{error:#}; the dock starts as new");
                 Layout::new(view)
             }),
             None => Layout::new(view),
         };
+        // Without the View menu, nothing would open them again.
+        if !menu {
+            layout.closed.clear();
+        }
+        let menu = menu.then(|| ViewMenu {
+            saved: file.as_deref().map(saved).unwrap_or_default(),
+            ..ViewMenu::default()
+        });
         let arrangement = layout.arrange(Rect::NOTHING, &|_| false);
         Self {
             layout,
@@ -210,7 +339,13 @@ impl Dock {
             hover: None,
             splitter_grab: 0.0,
             spot: None,
+            overlays: Vec::new(),
+            overlaid: Vec::new(),
             callback: Arc::new(ViewCallback),
+            known: Vec::new(),
+            knowing: Vec::new(),
+            docked: docked.to_vec(),
+            menu,
         }
     }
 
@@ -233,23 +368,64 @@ impl Dock {
     /// in a dockspace, its panel's inside once it draws, and nothing while it doesn't.
     pub(crate) fn view(&self) -> Rect {
         match self.layout.view {
-            Some(_) => self.spot.map_or(Rect::NOTHING, |spot| spot.rect),
+            Some(_) => self.spot.as_ref().map_or(Rect::NOTHING, |spot| spot.rect),
             None => self.arrangement.central,
         }
     }
 
-    /// Whether `pos`, in the main window's points, is on a dockspace's view as the last frame
-    /// drew it: not under a group or a menu over it, nor on the resize grip of the group it floats
-    /// in, which lies over its bottom-right corner.
-    pub(crate) fn over_view(&self, egui: &Context, pos: Pos2) -> bool {
-        let Some(spot) = self.spot else {
-            return false;
+    /// What's at `pos`, in the main window's points, as the last frame drew it: UI that
+    /// [`Ui::over_view`] showed over a dockspace's view; the view, but under a group or a menu
+    /// over it, or on the resize grip of the group it floats in, which lies over its bottom-right
+    /// corner; or else egui's.
+    pub(crate) fn under(&self, egui: &Context, pos: Pos2) -> Under {
+        let Some(spot) = &self.spot else {
+            return Under::Other;
         };
+        let layer = egui.layer_id_at(pos);
+        if layer.is_some_and(|layer| self.overlaid.contains(&layer)) {
+            return Under::Overlay;
+        }
         let floats = spot.layer.order != Order::Background;
         let grip = Rect::from_min_max(spot.rect.max - Vec2::splat(GRIP), spot.rect.max);
-        spot.rect.contains(pos)
-            && egui.layer_id_at(pos) == Some(spot.layer)
-            && !(floats && grip.contains(pos))
+        if spot.rect.contains(pos) && layer == Some(spot.layer) && !(floats && grip.contains(pos)) {
+            Under::View
+        } else {
+            Under::Other
+        }
+    }
+
+    /// Shows UI over a dockspace's view, as [`Ui::over_view`] says, in an area of the view's
+    /// layer's order just above it: egui's sublayer, which it forgets as each frame ends.
+    fn show_over_view<R>(
+        &mut self,
+        ctx: &Context,
+        id: impl Hash + Debug,
+        align: Align2,
+        add_contents: impl FnOnce(&mut egui::Ui) -> R,
+    ) -> Option<R> {
+        let spot = self.spot.as_ref()?;
+        let (rect, parent) = (spot.rect, spot.layer);
+        let shown = Area::new(Id::unique(("gg dock over view", id)))
+            .order(parent.order)
+            .pivot(align)
+            .fixed_pos(align.pos_in_rect(&rect.shrink(OVER_VIEW)))
+            .constrain_to(rect)
+            // Its own presses, so that egui's hit test doesn't take one near its edge for the
+            // view's, a few points off.
+            .sense(Sense::CLICK | Sense::DRAG)
+            .show(ctx, add_contents);
+        let layer = shown.response.layer_id;
+        ctx.set_sublayer(parent, layer);
+        self.overlays.push(layer);
+        // egui raises an area that's pressed, which as a sublayer stays over its parent: the
+        // group the view floats in comes up with it, as a press in the group raises it.
+        if parent.order != Order::Background
+            && shown.response.contains_pointer()
+            && ctx.input(|i| i.pointer.any_pressed())
+        {
+            ctx.move_to_top(parent);
+        }
+        Some(shown.inner)
     }
 
     /// Where the title bar was right-clicked since this was last asked, in the main window's
@@ -326,9 +502,14 @@ impl Dock {
     }
 
     fn panel(&mut self, root: &mut egui::Ui, name: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
-        if !self.showing.insert(name.to_owned()) {
+        if self.knowing.iter().any(|known| known == name) {
             return;
         }
+        self.knowing.push(name.to_owned());
+        if self.layout.is_closed(name) {
+            return;
+        }
+        self.showing.insert(name.to_owned());
         let Some(id) = self.layout.find(name) else {
             self.new.push(name.to_owned());
             return;
@@ -340,9 +521,16 @@ impl Dock {
         }
     }
 
-    /// Ends a frame: finishes the title bar, draws what the panels didn't, moves the drag along,
-    /// and makes the frame's changes to the layout.
+    /// Ends a frame: adds the View menu after the layers' menus and finishes the title bar, draws
+    /// what the panels didn't, moves the drag along, and makes the frame's changes to the layout:
+    /// those the menus chose, and the panels it doesn't hold, which dock where the app says, in its
+    /// order, or float.
     pub(crate) fn end(&mut self, root: &mut egui::Ui) {
+        if let Some(menu) = &mut self.menu {
+            let (known, layout, saves) = (&self.known, &self.layout, self.file.is_some());
+            self.bar
+                .menu(VIEW_MENU, |ui| menu.ui(ui, known, layout, saves));
+        }
         self.bar.end();
         let ctx = root.ctx().clone();
         // The tab bars of groups whose showing panel wasn't shown, so that the user can pick
@@ -378,17 +566,112 @@ impl Dock {
         if let Some(panel) = self.clicked.take() {
             self.layout.activate(&panel);
         }
-        for panel in mem::take(&mut self.new) {
+        self.choose();
+        // The app's panels first, in its order, so that each docks after its target, then the
+        // rest, in the order they showed.
+        let mut new = mem::take(&mut self.new);
+        let docked = &self.docked;
+        new.sort_by_key(|panel| {
+            let at = docked.iter().position(|&(p, _)| p == panel.as_str());
+            at.unwrap_or(docked.len())
+        });
+        for panel in new {
             let n = self.layout.floating.len() % 8;
             let at = 48.0 + 24.0 * n as f32;
             let place = Place::Main {
                 min: [at, at],
                 size: NEW_SIZE.into(),
             };
-            self.layout.float(panel, place);
+            self.layout.add(panel, place, &self.docked);
         }
         mem::swap(&mut self.shown, &mut self.showing);
         self.showing.clear();
+        mem::swap(&mut self.overlaid, &mut self.overlays);
+        self.overlays.clear();
+        mem::swap(&mut self.known, &mut self.knowing);
+        self.knowing.clear();
+    }
+
+    /// Does what the menus chose this frame, as it ends: closes and opens panels, saves, loads and
+    /// deletes layouts, and resets the layout.
+    fn choose(&mut self) {
+        let chosen = (self.menu.as_mut()).map(|menu| mem::take(&mut menu.chosen));
+        let Some(chosen) = chosen.filter(|chosen| !chosen.is_empty()) else {
+            return;
+        };
+        let _zone = gg_core::zone!();
+        for choice in chosen {
+            // Headless runs offer none of the named layouts' choices.
+            let path = self.file.as_deref();
+            match choice {
+                Choice::Close(panel) => {
+                    // Its tab doesn't linger a frame.
+                    if self.layout.close(&panel) {
+                        self.showing.remove(&panel);
+                    }
+                }
+                Choice::Open(panel) => {
+                    self.layout.open(&panel);
+                    // From the next frame, where it was, or where it's placed as this one ends.
+                    if self.knowing.contains(&panel) {
+                        if self.layout.find(&panel).is_none() {
+                            self.new.push(panel.clone());
+                        }
+                        self.showing.insert(panel);
+                    }
+                }
+                Choice::Reset => self.switch(Layout::new(self.layout.view)),
+                Choice::Load(name) => {
+                    let loaded = path.map(|path| file::load_named(path, &name, self.layout.view));
+                    match loaded {
+                        Some(Ok(layout)) => self.switch(layout),
+                        Some(Err(error)) => {
+                            let stays = "the dock stays as it was";
+                            warn!(code = error.code(), layout = %name, "{error:#}; {stays}");
+                        }
+                        None => {}
+                    }
+                }
+                Choice::Save(name) => {
+                    if let Some(path) = path {
+                        if let Err(error) = file::save_named(path, &name, &self.layout.saved()) {
+                            warn!(code = error.code(), layout = %name, "{error:#}");
+                        }
+                        if let Some(menu) = &mut self.menu {
+                            menu.saved = saved(path);
+                        }
+                    }
+                }
+                Choice::Delete(name) => {
+                    if let Some(path) = path {
+                        if let Err(error) = file::delete_named(path, &name) {
+                            warn!(code = error.code(), layout = %name, "{error:#}");
+                        }
+                        if let Some(menu) = &mut self.menu {
+                            menu.saved = saved(path);
+                        }
+                    }
+                }
+            }
+        }
+        self.save();
+    }
+
+    /// Has `layout` take the dock's place as the frame ends, its nodes numbered after the dock's:
+    /// from the next frame, the panels the layers showed in this one show where it says, but those
+    /// it closes, and where they're placed as the frame ends if it doesn't hold them.
+    fn switch(&mut self, layout: Layout) {
+        self.layout.replace(layout);
+        let open = |panel: &&String| !self.layout.is_closed(panel);
+        self.showing = self.knowing.iter().filter(open).cloned().collect();
+        let held = |panel: &&String| self.layout.find(panel).is_some();
+        self.new = (self.knowing.iter())
+            .filter(|panel| open(panel) && !held(panel))
+            .cloned()
+            .collect();
+        // What it dragged was the last layout's.
+        self.drag = None;
+        self.hover = None;
     }
 
     /// Draws group `id` where it is, with `add_contents` drawing the panel showing.
@@ -575,10 +858,11 @@ impl Dock {
 
     /// Draws a group into `ui`, filling it: its tab bar, with a tab for each of its panels shown
     /// last frame, then what `add_contents` draws of the one showing, or a dockspace's view.
-    /// Clicking a tab shows its panel from the next frame, and dragging a tab starts a drag, as
-    /// does dragging the bar of a group that moves by it (`movable`): one floating over the main
-    /// window, or one whose bar is its window's title bar, which then has a button that closes the
-    /// window (`close`).
+    /// Clicking a tab shows its panel from the next frame. Dragging a tab with the primary button
+    /// drags its panel; in a group that moves by its bar (`movable`), dragging the bar, or the only
+    /// tab showing, drags the group: one floating over the main window, or one whose bar is its
+    /// window's title bar, which then has a button that closes the window (`close`). With the View
+    /// menu, right-clicking a tab opens a menu that closes its panel, but the view's.
     fn body(
         &mut self,
         ui: &mut egui::Ui,
@@ -611,10 +895,14 @@ impl Dock {
         };
         let showing = tabs.showing(&|p| shown.contains(p));
         let view = showing.is_some() && showing == self.layout.view;
-        let single = tabs.panels.len() == 1;
+        let single = tabs.panels.iter().filter(|p| shown.contains(*p)).count() == 1;
         let floating = self.layout.floating(id).is_some();
+        // With the View menu, which opens them again; the view stays, since nothing else shows
+        // the game.
+        let closes = |panel: &str| self.menu.is_some() && Some(panel) != self.layout.view;
         let mut clicked = None;
         let mut dragged = None;
+        let mut closed = None;
         let mut tab_bar = ui.new_child(
             UiBuilder::new()
                 .max_rect(bar.with_min_x(bar.min.x + INSET))
@@ -627,8 +915,16 @@ impl Dock {
             if response.clicked() {
                 clicked = Some(panel.clone());
             }
-            if response.drag_started() {
+            // The primary button's alone: a right-press flicked off a tab does nothing.
+            if response.drag_started_by(PointerButton::Primary) {
                 dragged = Some((panel.clone(), response.rect));
+            }
+            if closes(panel) {
+                response.context_menu(|ui| {
+                    if ui.button("Close").clicked() {
+                        closed = Some(panel.clone());
+                    }
+                });
             }
         }
         // The view fills its panel; other panels' contents keep off its edges.
@@ -657,7 +953,9 @@ impl Dock {
             };
             let size = if floating { rect.size() } else { NEW_SIZE };
             self.start_drag(ctx, id, drag, size);
-        } else if background.is_some_and(|response| response.drag_started()) {
+        } else if background
+            .is_some_and(|response| response.drag_started_by(PointerButton::Primary))
+        {
             self.start_drag(
                 ctx,
                 id,
@@ -668,6 +966,11 @@ impl Dock {
         if clicked.is_some() {
             self.clicked = clicked;
         }
+        if let Some(panel) = closed
+            && let Some(menu) = &mut self.menu
+        {
+            menu.chosen.push(Choice::Close(panel));
+        }
     }
 
     /// Draws a dockspace's view into `ui`, its panel's inside, filling it, through the renderer's
@@ -676,7 +979,7 @@ impl Dock {
     /// it can't take egui's focus, so that Tab never lands on it.
     fn show_view(&mut self, ui: &mut egui::Ui) {
         let rect = ui.max_rect();
-        ui.interact(rect, Id::unique("gg dock view"), Sense::CLICK | Sense::DRAG);
+        let response = ui.interact(rect, Id::unique("gg dock view"), Sense::CLICK | Sense::DRAG);
         ui.painter().add(PaintCallback {
             rect,
             callback: self.callback.clone(),
@@ -684,6 +987,7 @@ impl Dock {
         self.spot = Some(Spot {
             rect,
             layer: ui.layer_id(),
+            response,
         });
     }
 
@@ -802,7 +1106,9 @@ impl Dock {
                 }
             }
             if let Dragging::Group(group) = drag.what {
-                self.hover = hover(&self.layout, &self.arrangement, ctx, pointer, group);
+                let shown = &self.shown;
+                let shown = |panel: &str| shown.contains(panel);
+                self.hover = hover(&self.layout, &self.arrangement, ctx, pointer, group, &shown);
             }
         }
         if down && focused {
@@ -875,6 +1181,96 @@ impl Dock {
             }
         }
     }
+}
+
+impl ViewMenu {
+    /// Draws the dock's items into the View menu's `ui`: a checkbox for each of the `known`
+    /// panels but a dockspace's view, alphabetically, which opens and closes it, then the items
+    /// that save the layout under a name, and load and delete layouts saved, which need the file
+    /// the dock saves its layout to (`saves`), and the one that resets it.
+    fn ui(&mut self, ui: &mut egui::Ui, known: &[String], layout: &Layout, saves: bool) {
+        let panels = known
+            .iter()
+            .filter(|panel| Some(panel.as_str()) != layout.view);
+        let mut panels: Vec<&String> = panels.collect();
+        panels.sort_by_cached_key(|panel| (panel.to_lowercase(), *panel));
+        for &panel in &panels {
+            let mut open = !layout.is_closed(panel);
+            if ui.checkbox(&mut open, panel.as_str()).changed() {
+                let panel = panel.clone();
+                let choice = if open {
+                    Choice::Open(panel)
+                } else {
+                    Choice::Close(panel)
+                };
+                self.chosen.push(choice);
+            }
+        }
+        if !panels.is_empty() {
+            ui.separator();
+        }
+        ui.add_enabled_ui(saves, |ui| {
+            // A click in its field leaves it open.
+            let config = MenuConfig::new().close_behavior(PopupCloseBehavior::CloseOnClickOutside);
+            let save = SubMenuButton::new("Save layout as…").config(config);
+            save.ui(ui, |ui| self.save_ui(ui));
+            ui.add_enabled_ui(!self.saved.is_empty(), |ui| {
+                ui.menu_button("Load layout", |ui| {
+                    for name in &self.saved {
+                        if ui.button(name.as_str()).clicked() {
+                            self.chosen.push(Choice::Load(name.clone()));
+                        }
+                    }
+                });
+                ui.menu_button("Delete layout", |ui| {
+                    for name in &self.saved {
+                        if ui.button(name.as_str()).clicked() {
+                            self.chosen.push(Choice::Delete(name.clone()));
+                        }
+                    }
+                });
+            });
+        });
+        if ui.button("Reset layout").clicked() {
+            self.chosen.push(Choice::Reset);
+        }
+    }
+
+    /// The submenu that saves the layout under the name typed in its field, as Save is clicked or
+    /// Enter pressed there, and says why a name it refuses can't be one.
+    fn save_ui(&mut self, ui: &mut egui::Ui) {
+        let field = ui.add(TextEdit::singleline(&mut self.name).hint_text("Name"));
+        if field.changed() {
+            self.refused = None;
+        }
+        if let Some(refused) = &self.refused {
+            ui.colored_label(ui.visuals().error_fg_color, refused.as_str());
+        }
+        let entered = field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+        if !(ui.button("Save").clicked() || entered) {
+            return;
+        }
+        match file::name(&self.name).map(str::to_owned) {
+            Ok(name) => {
+                self.chosen.push(Choice::Save(name));
+                self.name.clear();
+                ui.close();
+            }
+            Err(error) => {
+                warn!(code = error.code(), name = %self.name, "{error}");
+                self.refused = Some(error.to_string());
+            }
+        }
+    }
+}
+
+/// The names of the layouts saved beside the app's layout file at `path`, or, with a warning, none
+/// if they can't be listed.
+fn saved(path: &Path) -> Vec<String> {
+    file::names(path).unwrap_or_else(|error| {
+        warn!(code = error.code(), "{error:#}");
+        Vec::new()
+    })
 }
 
 /// The widget that holds egui's drag while the dock drags.
@@ -989,14 +1385,16 @@ fn place_at(
 
 /// What group `dragged`, at `pointer` in the main window's points, is over: the windows of their
 /// own, above the main window, then the groups floating over it, then the docked groups and
-/// the central area. The group of a dockspace's view stays over the main window, so it's over
-/// no window of its own.
+/// the central area. A floating group none of whose panels show (`shown`) shows nowhere, so it's
+/// none of them. The group of a dockspace's view stays over the main window, so it's over no
+/// window of its own.
 fn hover(
     layout: &Layout,
     arrangement: &Arrangement,
     ctx: &Context,
     pointer: Pos2,
     dragged: NodeId,
+    shown: &impl Fn(&str) -> bool,
 ) -> Option<Hover> {
     let at = |node, rect: Rect, window, zones, pos| Hover {
         node,
@@ -1009,11 +1407,8 @@ fn hover(
         share: layout.share(node),
     };
     let others = || {
-        layout
-            .floating
-            .iter()
-            .rev()
-            .filter(|f| f.tabs.id != dragged)
+        let floating = layout.floating.iter().rev();
+        floating.filter(|f| f.tabs.id != dragged && f.tabs.showing(shown).is_some())
     };
     if !layout.holds_view(dragged)
         && let Some(px) = to_desktop(ctx, pointer)
@@ -1124,31 +1519,48 @@ fn paint_hover(ctx: &Context, hover: &Hover) {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::fs;
     use std::rc::Rc;
 
+    use egui::epaint::ClippedShape;
     use egui::{
-        Event, ImmediateViewport, Modifiers, PointerButton, RawInput, ResizeDirection,
-        ViewportEvent, ViewportIdMap, ViewportInfo,
+        Event, ImmediateViewport, Modifiers, RawInput, ResizeDirection, Shape, ViewportEvent,
+        ViewportIdMap, ViewportInfo,
     };
 
     use super::super::tree::{Node, Tabs};
     use super::*;
     use crate::chrome::BAR;
+    use crate::dirs::tests::Scratch;
 
     const SCREEN: Vec2 = vec2(800.0, 600.0);
 
-    /// egui and a dock, run a frame at a time on made-up input, with panels A and B showing.
+    /// egui and a dock, run a frame at a time on made-up input, with panels A and B showing, or
+    /// those it's given, and the menus it's given.
     struct Run {
         ctx: Context,
         dock: Dock,
         frame: u32,
         pointer: Pos2,
+        /// The panels the layers show each frame, and the menus they add, in order. A panel shows
+        /// `In <its name>`, and a menu `<its name> item`.
+        panels: Vec<&'static str>,
+        menus: Vec<&'static str>,
         /// Where the windows are on the desktop, for a run with windows of their own.
         viewports: Vec<(ViewportId, ViewportInfo)>,
         /// What the passes of windows of their own get, when they run as the engine runs them.
         passes: Option<Rc<RefCell<Passes>>>,
         /// What egui asked of each window in the last frame.
         commands: Vec<(ViewportId, ViewportCommand)>,
+        /// Whether frames show a toolbar 100 by 30 points over the view, at its top left; and
+        /// last frame, where it showed, and what egui made of the view.
+        toolbar: bool,
+        shown: Option<Rect>,
+        view: Option<Response>,
+        /// What the main window's pass drew in the last frame, and the windows of their own egui
+        /// showed, with what it asked of them.
+        shapes: Vec<ClippedShape>,
+        windows: Vec<(ViewportId, ViewportBuilder)>,
     }
 
     /// What each window's next pass gets: where the windows are, and its events.
@@ -1167,24 +1579,41 @@ mod tests {
 
         /// Under the frame `chrome` says.
         fn with_chrome(chrome: Chrome) -> Self {
-            Self::with_dock(Dock::new(None, chrome, None))
+            Self::with_dock(Dock::new(None, chrome, None, false, &[]))
         }
 
         /// A dockspace under the frame `chrome` says, whose view, panel [`VIEW`], fills the dock
         /// once it shows, under A and B, floating.
         fn dockspace(chrome: Chrome) -> Self {
-            Self::with_dock(Dock::new(None, chrome, Some(VIEW)))
+            Self::with_dock(Dock::new(None, chrome, Some(VIEW), false, &[]))
+        }
+
+        /// With the View menu, and no file for the layout, as headless runs have.
+        fn with_menu() -> Self {
+            Self::with_dock(Dock::new(None, Chrome::Os, None, true, &[]))
         }
 
         fn with_dock(dock: Dock) -> Self {
+            Self::showing(dock, &["A", "B"])
+        }
+
+        /// Runs a couple of frames, the layers showing `panels`.
+        fn showing(dock: Dock, panels: &[&'static str]) -> Self {
             let mut run = Self {
                 ctx: crate::egui_context(),
                 dock,
                 frame: 0,
                 pointer: Pos2::ZERO,
+                panels: panels.to_vec(),
+                menus: Vec::new(),
                 viewports: Vec::new(),
                 passes: None,
                 commands: Vec::new(),
+                toolbar: false,
+                shown: None,
+                view: None,
+                shapes: Vec::new(),
+                windows: Vec::new(),
             };
             run.frames(2);
             run
@@ -1288,18 +1717,36 @@ mod tests {
                 passes.time = time;
             }
             self.frame += 1;
-            let dock = &mut self.dock;
+            let (dock, panels, menus) = (&mut self.dock, &self.panels, &self.menus);
+            let toolbar = self.toolbar;
+            let (mut shown, mut view) = (None, None);
             let mut output = self.ctx.run_ui(input, |root| {
                 dock.begin(root);
                 let mut ui = Ui::new(root, dock);
-                for name in ["A", "B"] {
+                for &name in menus {
+                    ui.menu(name, |ui| {
+                        ui.label(format!("{name} item"));
+                    });
+                }
+                for &name in panels {
                     ui.panel(name, |ui| {
-                        ui.label(name);
+                        ui.label(format!("In {name}"));
+                    });
+                }
+                view = ui.view();
+                if toolbar {
+                    shown = ui.over_view("toolbar", Align2::LEFT_TOP, |ui| {
+                        ui.allocate_exact_size(vec2(100.0, 30.0), Sense::click()).0
                     });
                 }
                 dock.end(root);
             });
+            (self.shown, self.view) = (shown, view);
             output.textures_delta.clear();
+            self.shapes = mem::take(&mut output.shapes);
+            let windows = output.viewport_output.iter();
+            let windows = windows.filter(|&(&id, _)| id != ViewportId::ROOT);
+            self.windows = (windows.map(|(&id, output)| (id, output.builder.clone()))).collect();
             // As the OS and the engine would: a window moves where egui asks, and a close comes
             // back as an event, which the next frame's passes see.
             self.commands.clear();
@@ -1389,12 +1836,110 @@ mod tests {
         }
 
         fn button(&mut self, pressed: bool) {
+            self.press(PointerButton::Primary, pressed);
+        }
+
+        /// Presses `button`, or lets go of it, where the pointer is.
+        fn press(&mut self, button: PointerButton, pressed: bool) {
             self.frame(vec![Event::PointerButton {
                 pos: self.pointer,
-                button: PointerButton::Primary,
+                button,
                 pressed,
                 modifiers: Modifiers::NONE,
             }]);
+        }
+
+        /// Clicks `button` at `pos`.
+        fn click_with(&mut self, button: PointerButton, pos: Pos2) {
+            self.move_to(pos);
+            self.press(button, true);
+            self.press(button, false);
+        }
+
+        /// Clicks at the middle of `text`, the topmost the main window's last pass drew.
+        fn click_text(&mut self, text: &str) {
+            self.click_with(PointerButton::Primary, self.text(text));
+        }
+
+        /// The middle of `text`, the topmost the main window's last pass drew.
+        fn text(&self, text: &str) -> Pos2 {
+            let texts = self.texts(text);
+            texts
+                .first()
+                .unwrap_or_else(|| panic!("{text:?} shows"))
+                .center()
+        }
+
+        /// Where the main window's last pass drew `text`, topmost first.
+        fn texts(&self, text: &str) -> Vec<Rect> {
+            self.texts_where(|drawn| drawn == text)
+        }
+
+        /// Where the main window's last pass drew the texts `matches` picks, topmost first.
+        fn texts_where(&self, matches: impl Fn(&str) -> bool) -> Vec<Rect> {
+            fn find(shape: &Shape, matches: &impl Fn(&str) -> bool, found: &mut Vec<Rect>) {
+                match shape {
+                    Shape::Vec(shapes) => {
+                        for shape in shapes {
+                            find(shape, matches, found);
+                        }
+                    }
+                    Shape::Text(text) if matches(text.galley.text()) => {
+                        found.push(text.galley.rect.translate(text.pos.to_vec2()));
+                    }
+                    _ => {}
+                }
+            }
+            let mut found = Vec::new();
+            for clipped in &self.shapes {
+                find(&clipped.shape, &matches, &mut found);
+            }
+            found.sort_by(|a, b| a.min.y.total_cmp(&b.min.y));
+            found
+        }
+
+        /// Clicks at the middle of `text` as a menu shows it, over everything else.
+        fn click_in_menu(&mut self, text: &str) {
+            let over = |rect: &&Rect| {
+                let layer = self.ctx.layer_id_at(rect.center());
+                layer.is_some_and(|layer| layer.order == Order::Foreground)
+            };
+            let texts = self.texts(text);
+            let at = texts.iter().find(over);
+            let at = at
+                .unwrap_or_else(|| panic!("a menu shows {text:?}"))
+                .center();
+            self.click_with(PointerButton::Primary, at);
+        }
+
+        /// Opens the View menu, and then its submenu `submenu` if there's one.
+        fn open_view_menu(&mut self, submenu: Option<&str>) {
+            // Its first pass sizes it, unseen.
+            self.click_text(VIEW_MENU);
+            self.frames(1);
+            if let Some(submenu) = submenu {
+                self.move_to(self.text(submenu));
+                self.frames(1);
+            }
+        }
+
+        /// Closes the menus open, as Escape does.
+        fn escape(&mut self) {
+            self.frame(vec![Event::Key {
+                key: Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::NONE,
+            }]);
+            self.frames(1);
+        }
+
+        /// Runs a frame in which the user chooses `choice` from a menu.
+        fn choose(&mut self, choice: Choice) {
+            let menu = self.dock.menu.as_mut().expect("the dock has the View menu");
+            menu.chosen.push(choice);
+            self.frame(Vec::new());
         }
 
         /// Presses at `from` and drags to `to` over a few frames, still holding on.
@@ -1835,7 +2380,8 @@ mod tests {
             (pos2(100.0, 100.0), false),
             (pos2(600.0, view.min.y - 2.0), false),
         ] {
-            assert_eq!(run.dock.over_view(&run.ctx, at), over, "docked, at {at:?}");
+            let under = run.dock.under(&run.ctx, at);
+            assert_eq!(under == Under::View, over, "docked, at {at:?}");
         }
         // Floating at (150, 150), over A and B and the empty dock: clear of them, over them, on its
         // tab bar, on its grip, and off it.
@@ -1848,12 +2394,96 @@ mod tests {
             (content.max - Vec2::splat(GRIP / 2.0), false),
             (pos2(700.0, 550.0), false),
         ] {
-            assert_eq!(
-                run.dock.over_view(&run.ctx, at),
-                over,
-                "floating, at {at:?}"
-            );
+            let under = run.dock.under(&run.ctx, at);
+            assert_eq!(under == Under::View, over, "floating, at {at:?}");
         }
+    }
+
+    /// Where `panel`'s group floats over the main window.
+    fn floating_rect(run: &Run, panel: &str) -> Rect {
+        let Place::Main { min, size } = run.floating(panel) else {
+            panic!(
+                "{panel} floats over the main window: {:?}",
+                run.floating(panel)
+            );
+        };
+        Rect::from_min_size(min.into(), size.into())
+    }
+
+    #[test]
+    fn ui_over_the_view_shows_above_it_and_below_groups_floating_over_it() {
+        let mut run = Run::dockspace(Chrome::Os);
+        run.toolbar = true;
+        // A, smaller, floats over the toolbar's right end.
+        let a = run.layout().find("A").unwrap();
+        run.dock.layout.floating_mut(a).unwrap().place = Place::Main {
+            min: [48.0, 48.0],
+            size: [200.0, 200.0],
+        };
+        run.frames(2);
+        let toolbar = run.shown.expect("the view shows");
+        assert_eq!(toolbar.min, run.dock.view().min + Vec2::splat(OVER_VIEW));
+        let a = floating_rect(&run, "A");
+        let y = toolbar.max.y - 4.0;
+        let (clear, covered) = (pos2(toolbar.min.x + 4.0, y), pos2(a.min.x + 4.0, y));
+        assert!(!a.contains(clear) && a.contains(covered) && toolbar.contains(covered));
+        for (at, under) in [
+            (clear, Under::Overlay),
+            (covered, Under::Other),
+            (pos2(600.0, 450.0), Under::View),
+        ] {
+            assert_eq!(run.dock.under(&run.ctx, at), under, "docked, at {at:?}");
+        }
+
+        // The view floats over A and B, with its toolbar.
+        float_view(&mut run, [200.0, 200.0], vec2(400.0, 300.0));
+        let toolbar = run.shown.expect("the view shows");
+        assert_eq!(toolbar.min, run.dock.view().min + Vec2::splat(OVER_VIEW));
+        let y = toolbar.min.y + 4.0;
+        let (clear, covered) = (pos2(a.max.x + 4.0, y), pos2(a.max.x - 4.0, y));
+        assert!(!a.contains(clear) && a.contains(covered) && toolbar.contains(covered));
+        assert_eq!(run.dock.under(&run.ctx, covered), Under::Overlay);
+        // A press on the view raises its group, and the toolbar with it.
+        run.move_to(pos2(450.0, 400.0));
+        run.button(true);
+        run.button(false);
+        assert_eq!(run.dock.under(&run.ctx, covered), Under::Overlay);
+        // A raised by a press on its bar, clear of the others, is over the toolbar.
+        run.move_to(bar(a.min) - vec2(200.0, 0.0) + vec2(20.0, 0.0));
+        run.button(true);
+        run.button(false);
+        assert_eq!(run.dock.under(&run.ctx, covered), Under::Other);
+        assert_eq!(run.dock.under(&run.ctx, clear), Under::Overlay);
+        // A press on the toolbar raises the view's group, as a press in it does.
+        run.move_to(clear);
+        run.button(true);
+        run.button(false);
+        assert_eq!(run.dock.under(&run.ctx, covered), Under::Overlay);
+    }
+
+    #[test]
+    fn ui_over_the_view_and_the_view_s_response_are_there_while_it_shows() {
+        let mut run = Run::dockspace(Chrome::Os);
+        run.toolbar = true;
+        run.frames(2);
+        let view = run.view.clone().expect("the view shows");
+        assert_eq!(view.rect, run.dock.view());
+        // Hovered on it, clear of A and B, and not on the toolbar over it.
+        run.move_to(pos2(600.0, 450.0));
+        assert!(run.view.as_ref().unwrap().hovered());
+        run.move_to(run.shown.unwrap().center());
+        assert!(!run.view.as_ref().unwrap().hovered());
+        // Nowhere while a tab shows over it.
+        let view = run.layout().find(VIEW).unwrap();
+        let a = run.layout().find("A").unwrap();
+        assert!(run.dock.layout.dock(a, view, Zone::Center));
+        run.frames(2);
+        assert!(run.shown.is_none() && run.view.is_none());
+        // Nor in a game's dock, whose view is the central area.
+        let mut run = Run::new();
+        run.toolbar = true;
+        run.frames(2);
+        assert!(run.shown.is_none() && run.view.is_none());
     }
 
     #[test]
@@ -1956,5 +2586,395 @@ mod tests {
                 "embedded: {embedded}"
             );
         }
+    }
+
+    /// How far a docked group's edge keeps from the line it shares with another, for the handle
+    /// between them, in points.
+    const GAP: f32 = 4.0;
+
+    /// Whether anything of `panel`'s shows: its tab, or what it draws.
+    fn shows(run: &Run, panel: &str) -> bool {
+        let contents = format!("In {panel}");
+        !run.texts_where(|text| text == panel || text == contents)
+            .is_empty()
+    }
+
+    #[test]
+    fn a_closed_panel_takes_no_tab_or_room_from_the_frame_it_closes_and_comes_back_where_it_was() {
+        let mut run = Run::with_menu();
+        let a = run.layout().find("A").unwrap();
+        assert!(run.dock.layout.dock(a, CENTRAL, Zone::Side(Side::Left)));
+        run.frames(2);
+        let docked = run.docked("A");
+        run.choose(Choice::Close("A".to_owned()));
+        run.frames(1);
+        assert!(!shows(&run, "A"));
+        let arranged = &run.dock.arrangement;
+        assert!(arranged.strips.is_empty(), "{:?}", arranged.strips);
+        assert_eq!(arranged.central, arranged.area);
+        assert_eq!(run.layout().find("A"), Some(a));
+        run.choose(Choice::Open("A".to_owned()));
+        run.frames(1);
+        assert_eq!(run.docked("A"), docked);
+        assert!(shows(&run, "A"));
+    }
+
+    #[test]
+    fn a_floating_group_whose_only_panel_closes_hides_where_it_was_and_is_no_target() {
+        let mut run = Run::with_menu();
+        let place = run.floating("A");
+        run.choose(Choice::Close("A".to_owned()));
+        run.frames(1);
+        assert!(!shows(&run, "A"));
+        // B's bar, onto the middle of where A's group was.
+        let a = Rect::from_min_size(pos2(48.0, 48.0), NEW_SIZE);
+        run.drag(bar(pos2(72.0, 72.0)), target(a, Zone::Center));
+        assert_ne!(run.layout().find("B"), run.layout().find("A"));
+        run.choose(Choice::Open("A".to_owned()));
+        run.frames(1);
+        assert_eq!(run.floating("A"), place);
+        assert!(shows(&run, "A"));
+    }
+
+    #[test]
+    fn a_torn_off_window_whose_only_panel_closes_closes_and_opens_again_where_it_was() {
+        let mut run = Run::with_dock(Dock::new(None, Chrome::Drawn, None, true, &[]));
+        run.open_windows();
+        run.run_window_passes();
+        let a = run.tear_off("A", pos2(1200.0, 100.0));
+        let place = run.floating("A");
+        let shown = |run: &Run| run.windows.iter().any(|&(id, _)| id == a);
+        assert!(shown(&run));
+        run.choose(Choice::Close("A".to_owned()));
+        run.frames(1);
+        assert!(!shown(&run));
+        assert_eq!(run.floating("A"), place);
+        // While it's closed, a group dropped where it was doesn't dock in it, though egui still
+        // has it there, as it does the frame it closes.
+        let (inner, ppp) = run.window(a);
+        let center = inner.center() * ppp;
+        let to = pos2(center.x / 1.5 - 100.0, center.y / 1.5 - 50.0);
+        run.drag(bar(pos2(72.0, 72.0)), to);
+        assert_ne!(run.layout().find("B"), run.layout().find("A"));
+        // The engine closed it, and opens it again where it was, at the main window's scale.
+        run.viewports.retain(|&(id, _)| id != a);
+        run.choose(Choice::Open("A".to_owned()));
+        run.frames(1);
+        let Place::Window { position, .. } = place else {
+            panic!("A is in a window of its own: {place:?}");
+        };
+        let at = pos2(position[0] as f32 / 1.5, position[1] as f32 / 1.5);
+        let asked = run.windows.iter().find(|&&(id, _)| id == a);
+        assert_eq!(asked.and_then(|(_, builder)| builder.position), Some(at));
+        assert_eq!(run.floating("A"), place);
+    }
+
+    #[test]
+    fn dragging_the_only_tab_showing_moves_its_group_with_its_closed_panels() {
+        let mut run = Run::with_menu();
+        let (a, b) = (
+            run.layout().find("A").unwrap(),
+            run.layout().find("B").unwrap(),
+        );
+        assert!(run.dock.layout.dock(b, a, Zone::Center));
+        run.choose(Choice::Close("B".to_owned()));
+        run.frames(1);
+        let from = first_tab(pos2(48.0, 48.0));
+        run.drag(from, from + vec2(100.0, 50.0));
+        assert_eq!(run.layout().floating.len(), 1);
+        assert_eq!(run.layout().find("B"), run.layout().find("A"));
+        assert!(
+            matches!(
+                run.floating("A"),
+                Place::Main {
+                    min: [148.0, 98.0],
+                    ..
+                }
+            ),
+            "{:?}",
+            run.floating("A")
+        );
+    }
+
+    #[test]
+    fn with_its_docked_panels_closed_and_the_view_floating_the_empty_dock_takes_the_view_back() {
+        let mut run = Run::with_dock(Dock::new(None, Chrome::Os, Some(VIEW), true, &[]));
+        let view = run.layout().find(VIEW).unwrap();
+        let a = run.layout().find("A").unwrap();
+        assert!(run.dock.layout.dock(a, view, Zone::Side(Side::Right)));
+        float_view(&mut run, [150.0, 150.0], NEW_SIZE);
+        run.choose(Choice::Close("A".to_owned()));
+        run.frames(1);
+        let area = run.dock.arrangement.area;
+        assert_eq!(run.dock.arrangement.central, area);
+        // The view's tab, onto the empty dock's one target, at its middle.
+        run.drag(first_tab(pos2(150.0, 150.0)), area.center());
+        assert_eq!(run.docked(VIEW), area);
+        // A shows again beside it, taking a quarter of the dock.
+        run.choose(Choice::Open("A".to_owned()));
+        run.frames(1);
+        let quarter = area.min.x + area.width() / 4.0;
+        assert_eq!(run.docked("A"), area.with_max_x(quarter - GAP));
+        assert_eq!(run.docked(VIEW), area.with_min_x(quarter + GAP));
+    }
+
+    #[test]
+    fn a_tabs_right_click_closes_its_panel_with_the_view_menu_and_never_the_views() {
+        for menu in [false, true] {
+            let mut run = Run::with_dock(Dock::new(None, Chrome::Os, None, menu, &[]));
+            run.click_with(PointerButton::Secondary, first_tab(pos2(48.0, 48.0)));
+            run.frames(1);
+            assert_eq!(
+                run.texts("Close").is_empty(),
+                !menu,
+                "with the menu: {menu}"
+            );
+            if menu {
+                run.click_in_menu("Close");
+                run.frames(1);
+                assert!(run.layout().is_closed("A"));
+                assert!(!shows(&run, "A"));
+            }
+        }
+        let mut run = Run::with_dock(Dock::new(None, Chrome::Os, Some(VIEW), true, &[]));
+        // The view's tab, below the menu bar's View.
+        let tab = run.texts(VIEW)[1].center();
+        run.click_with(PointerButton::Secondary, tab);
+        run.frames(1);
+        assert!(run.texts("Close").is_empty());
+    }
+
+    #[test]
+    fn a_right_press_dragged_off_a_tab_starts_no_drag() {
+        let mut run = Run::new();
+        let place = run.floating("A");
+        let from = first_tab(pos2(48.0, 48.0));
+        run.move_to(from);
+        run.press(PointerButton::Secondary, true);
+        for step in 1..=8 {
+            run.move_to(from + vec2(30.0, 20.0) * step as f32);
+            assert!(run.dock.drag.is_none(), "at step {step}");
+        }
+        run.press(PointerButton::Secondary, false);
+        run.frames(2);
+        assert_eq!(run.floating("A"), place);
+        assert_eq!(run.layout().floating.len(), 2);
+    }
+
+    #[test]
+    fn the_view_menu_follows_the_layers_and_lists_their_panels_alphabetically_but_the_view() {
+        let dock = Dock::new(None, Chrome::Os, Some("Viewport"), true, &[]);
+        let mut run = Run::showing(dock, &["b", "C", "A"]);
+        run.menus = vec!["File", "Edit"];
+        // Closed, the panels show only in the menu, unchecked.
+        for panel in ["A", "b", "C"] {
+            assert!(run.dock.layout.close(panel));
+        }
+        run.frames(2);
+        let x = |run: &Run, text| run.texts(text)[0].min.x;
+        assert!(x(&run, "File") < x(&run, "Edit") && x(&run, "Edit") < x(&run, VIEW_MENU));
+        run.open_view_menu(None);
+        let y = |run: &Run, text| run.texts(text)[0].min.y;
+        assert!(y(&run, "A") < y(&run, "b") && y(&run, "b") < y(&run, "C"));
+        assert!(y(&run, "C") < y(&run, "Reset layout"));
+        assert_eq!(run.texts("Viewport").len(), 1, "the view's tab alone");
+        // Checked, a panel opens.
+        run.click_in_menu("b");
+        run.frames(1);
+        assert_eq!(run.layout().closed, ["A", "C"]);
+        assert!(shows(&run, "b"));
+        // Unchecked, it closes.
+        run.open_view_menu(None);
+        run.click_in_menu("b");
+        run.frames(1);
+        assert!(run.layout().is_closed("b"));
+        // Reset, they all show, as new panels, and the view fills the dock again.
+        let place = Place::Main {
+            min: [300.0, 300.0],
+            size: NEW_SIZE.into(),
+        };
+        run.dock.layout.detach("Viewport", place);
+        run.dock.layout.prune();
+        run.frames(2);
+        run.open_view_menu(None);
+        run.click_in_menu("Reset layout");
+        // egui's first pass of a new group's area sizes it, unseen.
+        run.frames(2);
+        assert!(run.layout().closed.is_empty());
+        assert_eq!(run.docked("Viewport"), run.dock.arrangement.area);
+        for panel in ["A", "b", "C"] {
+            assert!(
+                run.layout()
+                    .floating(run.layout().find(panel).unwrap())
+                    .is_some()
+            );
+            assert!(shows(&run, panel), "{panel}");
+        }
+    }
+
+    #[test]
+    fn a_layers_own_view_menu_gets_the_docks_items_after_its_own() {
+        let mut run = Run::with_menu();
+        run.menus = vec![VIEW_MENU];
+        run.frames(2);
+        assert_eq!(run.texts(VIEW_MENU).len(), 1);
+        run.open_view_menu(None);
+        let y = |run: &Run, text| run.texts(text)[0].min.y;
+        assert!(y(&run, "View item") < y(&run, "Save layout as…"));
+        assert!(y(&run, "View item") < y(&run, "Reset layout"));
+    }
+
+    #[test]
+    fn layouts_save_under_names_load_and_delete_from_the_view_menu() {
+        let dir = Scratch::new("dock-view-menu");
+        let file = dir.0.join("layout.ron");
+        let mut run = Run::with_dock(Dock::new(Some(file), Chrome::Os, None, true, &[]));
+        let saved = |run: &Run| run.dock.menu.as_ref().unwrap().saved.clone();
+        run.choose(Choice::Close("B".to_owned()));
+        // Typed in the field, a name saves the layout as Save is clicked, trimmed.
+        run.open_view_menu(Some("Save layout as…"));
+        run.click_in_menu("Name");
+        run.frame(vec![Event::Text(" Mine ".to_owned())]);
+        run.click_in_menu("Save");
+        run.frames(1);
+        assert_eq!(saved(&run), ["Mine"]);
+        assert!(dir.0.join("layouts/Mine.ron").is_file());
+        // B shows again, and loading the layout closes it again.
+        run.choose(Choice::Open("B".to_owned()));
+        assert!(!run.layout().is_closed("B"));
+        run.open_view_menu(Some("Load layout"));
+        run.click_in_menu("Mine");
+        run.frames(1);
+        assert!(run.layout().is_closed("B"));
+        assert!(!shows(&run, "B"));
+        run.open_view_menu(Some("Delete layout"));
+        run.click_in_menu("Mine");
+        run.frames(1);
+        assert!(saved(&run).is_empty());
+        assert!(!dir.0.join("layouts/Mine.ron").exists());
+        // A name it refuses, it says why by the field.
+        run.open_view_menu(Some("Save layout as…"));
+        run.click_in_menu("Name");
+        run.frame(vec![Event::Text("con".to_owned())]);
+        run.click_in_menu("Save");
+        run.frames(1);
+        let refused = |text: &str| text.contains("which Windows keeps for a device");
+        assert_eq!(run.texts_where(refused).len(), 1);
+        assert!(saved(&run).is_empty());
+    }
+
+    #[test]
+    fn a_layout_that_cant_be_used_is_refused_and_the_dock_stays_as_it_was() {
+        let dir = Scratch::new("dock-refused");
+        fs::create_dir_all(dir.0.join("layouts")).expect("a directory");
+        fs::write(dir.0.join("layouts/Broken.ron"), "not a layout").expect("the file is written");
+        let file = dir.0.join("layout.ron");
+        let mut run = Run::with_dock(Dock::new(Some(file), Chrome::Os, None, true, &[]));
+        assert_eq!(run.dock.menu.as_ref().unwrap().saved, ["Broken"]);
+        let layout = run.layout().clone();
+        run.choose(Choice::Load("Broken".to_owned()));
+        run.frames(1);
+        assert_eq!(run.layout(), &layout);
+        assert!(shows(&run, "A") && shows(&run, "B"));
+    }
+
+    #[test]
+    fn without_a_layout_file_the_view_menu_saves_loads_and_deletes_none_but_resets() {
+        let mut run = Run::with_menu();
+        // As though a layout were saved, which the submenus would list.
+        run.dock.menu.as_mut().unwrap().saved = vec!["Mine".to_owned()];
+        run.choose(Choice::Close("A".to_owned()));
+        for submenu in ["Save layout as…", "Load layout", "Delete layout"] {
+            run.open_view_menu(Some(submenu));
+            run.frames(1);
+            assert!(run.texts("Name").is_empty(), "{submenu}");
+            assert!(run.texts("Mine").is_empty(), "{submenu}");
+            run.escape();
+        }
+        run.open_view_menu(None);
+        run.click_in_menu("Reset layout");
+        assert!(run.layout().closed.is_empty());
+    }
+
+    /// Where the editor docks its panels, around the view.
+    const EDITOR: [(&str, Docked); 3] = [
+        ("Inspector", Docked::RightOf(VIEW)),
+        ("Entities", Docked::LeftOf(VIEW)),
+        ("Performance", Docked::Below("Inspector")),
+    ];
+
+    #[test]
+    fn a_first_run_docks_the_panels_as_the_app_says_whatever_order_they_show_in() {
+        let dock = Dock::new(None, Chrome::Os, Some(VIEW), true, &EDITOR);
+        let run = Run::showing(dock, &["Performance", "Entities", "Inspector"]);
+        assert!(run.layout().floating.is_empty());
+        let area = run.dock.arrangement.area;
+        // The Inspector takes a quarter of the window, and Entities a quarter of the rest.
+        let right = area.max.x - area.width() / 4.0;
+        let inspector = run.docked("Inspector");
+        assert_eq!(inspector.min.x, right + GAP);
+        let left = area.min.x + (right - GAP - area.min.x) / 4.0;
+        assert_eq!(run.docked("Entities").max.x, left - GAP);
+        let performance = run.docked("Performance");
+        assert_eq!(performance.x_range(), inspector.x_range());
+        assert!(performance.min.y > inspector.max.y);
+    }
+
+    #[test]
+    fn a_layout_saved_without_a_panel_docks_it_as_the_app_says() {
+        let dir = Scratch::new("dock-older");
+        let file = dir.0.join("layout.ron");
+        let mut older = Layout::new(Some(VIEW));
+        let place = Place::Main {
+            min: [48.0, 48.0],
+            size: NEW_SIZE.into(),
+        };
+        older.add("Entities".to_owned(), place, &EDITOR);
+        file::save(&file, &older).expect("the layout is saved");
+        let dock = Dock::new(Some(file), Chrome::Os, Some(VIEW), true, &EDITOR);
+        let run = Run::showing(dock, &["Entities", "Inspector"]);
+        assert!(run.layout().floating.is_empty());
+        assert!(run.docked("Inspector").min.x > run.docked(VIEW).max.x);
+        assert!(run.docked("Entities").max.x < run.docked(VIEW).min.x);
+    }
+
+    /// The ids of `layout`'s nodes.
+    fn ids(layout: &Layout) -> Vec<NodeId> {
+        fn walk(node: &Node, ids: &mut Vec<NodeId>) {
+            match node {
+                Node::Split { id, children, .. } => {
+                    ids.push(*id);
+                    walk(&children[0], ids);
+                    walk(&children[1], ids);
+                }
+                Node::Tabs(tabs) => ids.push(tabs.id),
+                Node::Central => {}
+            }
+        }
+        let mut ids = Vec::new();
+        walk(&layout.main, &mut ids);
+        ids.extend(layout.floating.iter().map(|f| f.tabs.id));
+        ids
+    }
+
+    #[test]
+    fn node_ids_keep_increasing_through_a_reset_and_a_load() {
+        let dir = Scratch::new("dock-ids");
+        let file = dir.0.join("layout.ron");
+        let mut run = Run::with_dock(Dock::new(Some(file), Chrome::Os, Some(VIEW), true, &[]));
+        run.choose(Choice::Save("Mine".to_owned()));
+        let before = ids(run.layout());
+        run.choose(Choice::Reset);
+        let reset = ids(run.layout());
+        let after = |earlier: &[NodeId], later: &[NodeId]| {
+            later
+                .iter()
+                .all(|id| earlier.iter().all(|earlier| id > earlier))
+        };
+        assert!(after(&before, &reset), "{before:?}, then {reset:?}");
+        run.choose(Choice::Load("Mine".to_owned()));
+        let loaded = ids(run.layout());
+        assert_eq!(loaded.len(), before.len());
+        assert!(after(&reset, &loaded), "{reset:?}, then {loaded:?}");
     }
 }
