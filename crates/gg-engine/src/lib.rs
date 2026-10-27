@@ -127,6 +127,8 @@ pub struct App {
     name: &'static str,
     stack: Stack,
     custom_title_bar: bool,
+    /// The panel that shows the game's view, in a dock that fills the main window.
+    view_panel: Option<&'static str>,
     /// What the world's IDs are drawn from, rather than a seed drawn at random.
     seed: Option<u64>,
     /// How far apart headless frames are, rather than a tick each.
@@ -140,6 +142,7 @@ impl App {
             name,
             stack: Stack::default(),
             custom_title_bar: false,
+            view_panel: None,
             seed: None,
             headless_step: None,
         }
@@ -186,6 +189,19 @@ impl App {
     #[must_use]
     pub fn custom_title_bar(mut self) -> Self {
         self.custom_title_bar = true;
+        self
+    }
+
+    /// Shows the game's view in a panel of its own, `name`, which the user docks and floats as the
+    /// layers' panels, and has the dock fill the main window, without the central area games
+    /// keep: for tools. The view fills the dock until the user places other panels beside it, and
+    /// it doesn't go into a window of its own. The layers get the mouse's presses and its wheel
+    /// over the view, and the drags those start, and keys while the view has focus, which a press
+    /// on it gives and a press anywhere else takes; it has focus as the app starts. Releases
+    /// reach them wherever they come.
+    #[must_use]
+    pub fn view_panel(mut self, name: &'static str) -> Self {
+        self.view_panel = Some(name);
         self
     }
 }
@@ -314,7 +330,7 @@ fn run_headless(app: &mut App, args: &Args) -> Result<Ran> {
     let egui = egui_context();
     // Headless runs neither read nor save the layout, so that they're reproducible, and have no
     // window to frame.
-    let mut dock = Dock::new(None, Chrome::Os);
+    let mut dock = Dock::new(None, Chrome::Os, app.view_panel);
     let mut egui_runs = true;
     // The frames handed over to render, and those rendered.
     let (mut handed, mut frames) = (0, 0);
@@ -341,9 +357,9 @@ fn run_headless(app: &mut App, args: &Args) -> Result<Ran> {
             );
             let (ui, tessellated, view) = match pass {
                 Some((mut output, layers_draw)) => {
-                    egui_runs = keeps_egui(&app.stack, layers_draw, Chrome::Os);
+                    egui_runs = keeps_egui(&app.stack, layers_draw, Chrome::Os, &dock);
                     let (ui, tessellated) = tessellate(&egui, &mut output);
-                    let view = viewport(dock.central(), ui.pixels_per_point);
+                    let view = viewport(dock.view(), ui.pixels_per_point);
                     (ui, tessellated, view)
                 }
                 None => {
@@ -449,11 +465,11 @@ fn run_frame(
 }
 
 /// Whether egui runs from the next frame on, after a pass in which `layers_draw` says whether any
-/// of `stack`'s layers draw UI, in windows framed as `chrome` says. Once none does, and the OS
-/// frames the windows, egui would show nothing, so it stops for the rest of the run: whether a
-/// layer draws UI is its type's, which no later frame changes.
-fn keeps_egui(stack: &Stack, layers_draw: bool, chrome: Chrome) -> bool {
-    let keeps = layers_draw || chrome != Chrome::Os;
+/// of `stack`'s layers draw UI, in windows framed as `chrome` says. Once none does, the OS frames
+/// the windows, and the game's view isn't in `dock`'s panel, egui would show nothing, so it stops
+/// for the rest of the run: whether a layer draws UI is its type's, which no later frame changes.
+fn keeps_egui(stack: &Stack, layers_draw: bool, chrome: Chrome, dock: &Dock) -> bool {
+    let keeps = layers_draw || chrome != Chrome::Os || dock.is_dockspace();
     if !keeps {
         debug!(
             layers = ?stack.names(),
@@ -1550,7 +1566,7 @@ mod tests {
             )),
             ..Default::default()
         };
-        let mut dock = Dock::new(None, Chrome::Os);
+        let mut dock = Dock::new(None, Chrome::Os, None);
         let mut clock = Clock::default();
         let mut stepper = Stepper::lockstep();
         let egui = egui_context();
@@ -1578,7 +1594,7 @@ mod tests {
             )),
             ..Default::default()
         };
-        let mut dock = Dock::new(None, Chrome::Os);
+        let mut dock = Dock::new(None, Chrome::Os, None);
         let mut clock = Clock::default();
         let mut stepper = Stepper::default();
         let egui = egui_context();
@@ -1619,7 +1635,7 @@ mod tests {
         let mut cx = Context::new(None);
         stack.attach(&mut cx);
         let (mut stepper, egui) = (Stepper::default(), egui_context());
-        let mut dock = Dock::new(None, Chrome::Os);
+        let mut dock = Dock::new(None, Chrome::Os, None);
         let quarters = iter::repeat_n(Tick::DT / 4, 16);
         let dts = quarters.chain(iter::repeat_n(Tick::DT * 5 / 2, 3));
         // How far each frame is past its last tick: a quarter more each frame, from the fourth,
@@ -1654,7 +1670,7 @@ mod tests {
         let mut cx = Context::new(None);
         stack.attach(&mut cx);
         let (mut stepper, egui) = (Stepper::lockstep(), egui_context());
-        let mut dock = Dock::new(None, Chrome::Os);
+        let mut dock = Dock::new(None, Chrome::Os, None);
         for frame in 1..=5 {
             let ui = (&egui, &mut dock);
             let draws = drawn(&mut stack, &mut cx, Duration::ZERO, &mut stepper, ui);
@@ -1679,7 +1695,7 @@ mod tests {
             )),
             ..Default::default()
         };
-        let mut dock = Dock::new(None, Chrome::Os);
+        let mut dock = Dock::new(None, Chrome::Os, None);
         let mut clock = Clock::default();
         let mut stepper = Stepper::default();
         let egui = egui_context();

@@ -21,6 +21,7 @@ crates/           libraries
   gg-macros/      the derives gg-engine re-exports
 apps/             executables
   sandbox/        development playground
+  editor/         the editor: the game's view in a panel among dockable panels
   player/         reference player: runs cooked scenes without game code
 docs/PLAN.md      the roadmap (see Workflow)
 ```
@@ -36,6 +37,7 @@ change against the rest yourself.
 ```sh
 cargo build                       # the whole workspace
 cargo run -p sandbox
+cargo run -p editor
 cargo run -p sandbox -- --help    # the flags every app shares
 cargo run -p sandbox -- --headless --frames 60   # does the engine run? 0 means cleanly
 cargo run -p sandbox -- --record run.recording   # a run's seed, commands and hashes
@@ -117,12 +119,12 @@ CI ([ci.yml](.github/workflows/ci.yml)) runs the gates on every push, on Windows
 and ARM64, and on macOS, on ARM64 alone, the shipping gate on Linux x86-64 alone, and the layering
 check. Its Linux jobs run the GPU
 tests and the sandbox headless on lavapipe, with and without Tracy, check that the run logged
-`engine.perf` and ticked and rendered once a frame, and record a run on four threads and replay it,
-on the default and on one; Windows' and macOS's runners have no GPU, so there `GG_SKIP_GPU_TESTS`
-skips the GPU tests. lavapipe has no queue for transfers alone, so CI never uploads through one:
-after changing uploads, run the GPU tests on a GPU that has one, as NVIDIA's do. Its minutes are
-billed, a macOS minute at ten times a Linux one, so push a branch to probe CI only for a change
-another platform could break.
+`engine.perf` and ticked and rendered once a frame, record a run on four threads and replay it, on
+the default and on one, and run the editor headless; Windows' and macOS's runners have no GPU, so
+there `GG_SKIP_GPU_TESTS` skips the GPU tests. lavapipe has no queue for transfers alone, so CI
+never uploads through one: after changing uploads, run the GPU tests on a GPU that has one, as
+NVIDIA's do. Its minutes are billed, a macOS minute at ten times a Linux one, so push a branch to
+probe CI only for a change another platform could break.
 
 ## Rust
 

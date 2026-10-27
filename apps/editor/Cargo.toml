@@ -1,0 +1,18 @@
+[package]
+name = "editor"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+# Engine executables get a `gg-` prefix, clear of GPU drivers' profiles for executables of the same
+# name.
+[[bin]]
+name = "gg-editor"
+path = "src/main.rs"
+
+[dependencies]
+# A development build, as tools are.
+gg-engine = { workspace = true, features = ["dev"] }
+
+[lints]
+workspace = true

@@ -1,19 +1,23 @@
 //! The dock in a frame: the strips it takes off the main window's edges, the groups it draws as
-//! layers show their panels, and the drags that dock, float and tear off panels.
+//! layers show their panels, in a dockspace the panel that shows the game's view, and the drags
+//! that dock, float and tear off panels.
 
+use std::any::Any;
 use std::collections::HashSet;
 use std::mem;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use egui::{
-    Align, Area, Button, Context, CursorIcon, Frame, Id, LayerId, Order, Painter, Panel, Pos2,
-    Rect, Sense, StrokeKind, UiBuilder, Vec2, ViewportBuilder, ViewportClass, ViewportCommand,
-    ViewportId, pos2, vec2,
+    Align, Area, Button, CentralPanel, Context, CursorIcon, Frame, Id, LayerId, Order,
+    PaintCallback, Painter, Panel, Pos2, Rect, Sense, StrokeKind, UiBuilder, Vec2, ViewportBuilder,
+    ViewportClass, ViewportCommand, ViewportId, pos2, vec2,
 };
+use gg_renderer::ViewCallback;
 use tracing::warn;
 
 use super::file;
-use super::tree::{self, Arrangement, Axis, CENTRAL, Layout, NodeId, Place, Side, Zone};
+use super::tree::{Arrangement, Axis, CENTRAL, Layout, NodeId, Place, Side, Zone};
 #[cfg(target_os = "windows")]
 use crate::chrome::Caption;
 use crate::chrome::{self, Chrome, Icon, Look, TitleBar};
@@ -61,12 +65,14 @@ impl<'a> Ui<'a> {
     }
 
     /// Shows panel `name` this frame, with what `add_contents` draws in it. The user places
-    /// panels: in tab groups docked around the central area, or floating, over the main window
-    /// or in windows of their own. A panel shows from the frame after its layer starts showing
-    /// it, since the dock lays out a frame before its panels draw, and keeps its place while it
-    /// isn't shown; `add_contents` runs when its tab is the one showing. `name` titles the
-    /// panel and is its identity: the dock keeps panels' places by name, between runs too, and
-    /// a second panel of the same name in a frame doesn't show.
+    /// panels: in tab groups docked around the central area, or, with
+    /// [`App::view_panel`](crate::App::view_panel), filling the main window beside the panel that
+    /// shows the game's view; or floating, over the main window or in windows of their own. A
+    /// panel shows from the frame after its layer starts showing it, since the dock lays out a
+    /// frame before its panels draw, and keeps its place while it isn't shown; `add_contents` runs
+    /// when its tab is the one showing. `name` titles the panel and is its identity: the dock
+    /// keeps panels' places by name, between runs too, and a second panel of the same name in a
+    /// frame doesn't show.
     pub fn panel(&mut self, name: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
         self.dock.panel(self.root, name, add_contents);
     }
@@ -115,6 +121,19 @@ pub(crate) struct Dock {
     hover: Option<Hover>,
     /// Where the pointer holds the splitter it drags, from the split, in points.
     splitter_grab: f32,
+    /// Where a dockspace's view shows this frame, once its panel draws.
+    spot: Option<Spot>,
+    /// The renderer's callback that draws the view in its panel.
+    callback: Arc<dyn Any + Send + Sync>,
+}
+
+/// Where the game's view shows in a dockspace.
+#[derive(Clone, Copy)]
+struct Spot {
+    /// In the main window's points.
+    rect: Rect,
+    /// The background's when its group is docked, or its group's area's when it floats.
+    layer: LayerId,
 }
 
 struct Drag {
@@ -148,6 +167,8 @@ struct Hover {
     /// The zones it offers, and the one under the pointer.
     zones: Zones,
     zone: Option<Zone>,
+    /// The share of its rect that a group docked beside it takes.
+    share: f32,
 }
 
 /// Which drop targets a node has.
@@ -157,21 +178,21 @@ enum Zones {
     All,
     /// The central area: beside it only.
     Sides,
-    /// A floating group: among its tabs only.
+    /// A floating group, or a dockspace's empty dock: among its tabs only.
     Center,
 }
 
 impl Dock {
     /// A dock with the layout saved in `file`, or kept in memory only without one, in windows
-    /// framed as `chrome` says. A file that can't be read logs a warning, and the dock starts
-    /// empty.
-    pub(crate) fn new(file: Option<PathBuf>, chrome: Chrome) -> Self {
+    /// framed as `chrome` says: with a `view`, a dockspace, whose panel of that name shows the
+    /// game's view. A file that can't be read logs a warning, and the dock starts as new.
+    pub(crate) fn new(file: Option<PathBuf>, chrome: Chrome, view: Option<&'static str>) -> Self {
         let layout = match &file {
-            Some(path) => file::load(path).unwrap_or_else(|error| {
-                warn!(code = error.code(), path = %path.display(), "{error:#}; the dock starts empty");
-                Layout::new()
+            Some(path) => file::load(path, view).unwrap_or_else(|error| {
+                warn!(code = error.code(), path = %path.display(), "{error:#}; the dock starts as new");
+                Layout::new(view)
             }),
-            None => Layout::new(),
+            None => Layout::new(view),
         };
         let arrangement = layout.arrange(Rect::NOTHING, &|_| false);
         Self {
@@ -188,6 +209,8 @@ impl Dock {
             drag: None,
             hover: None,
             splitter_grab: 0.0,
+            spot: None,
+            callback: Arc::new(ViewCallback),
         }
     }
 
@@ -201,9 +224,32 @@ impl Dock {
         }
     }
 
-    /// The central area, the game's view, in the main window's points, as this frame arranged it.
-    pub(crate) fn central(&self) -> Rect {
-        self.arrangement.central
+    /// Whether the dock fills the main window, with the game's view in a panel of its own.
+    pub(crate) fn is_dockspace(&self) -> bool {
+        self.layout.view.is_some()
+    }
+
+    /// Where the game's view shows this frame, in the main window's points: the central area, or,
+    /// in a dockspace, its panel's inside once it draws, and nothing while it doesn't.
+    pub(crate) fn view(&self) -> Rect {
+        match self.layout.view {
+            Some(_) => self.spot.map_or(Rect::NOTHING, |spot| spot.rect),
+            None => self.arrangement.central,
+        }
+    }
+
+    /// Whether `pos`, in the main window's points, is on a dockspace's view as the last frame
+    /// drew it: not under a group or a menu over it, nor on the resize grip of the group it floats
+    /// in, which lies over its bottom-right corner.
+    pub(crate) fn over_view(&self, egui: &Context, pos: Pos2) -> bool {
+        let Some(spot) = self.spot else {
+            return false;
+        };
+        let floats = spot.layer.order != Order::Background;
+        let grip = Rect::from_min_max(spot.rect.max - Vec2::splat(GRIP), spot.rect.max);
+        spot.rect.contains(pos)
+            && egui.layer_id_at(pos) == Some(spot.layer)
+            && !(floats && grip.contains(pos))
     }
 
     /// Where the title bar was right-clicked since this was last asked, in the main window's
@@ -226,21 +272,27 @@ impl Dock {
 
     /// Starts a frame: takes the title bar off the top of `root`, then the strips along the main
     /// window's edges that docked groups fill, leaving it the central area. egui counts the bar
-    /// and the strips as its own, and the central area as the game's.
+    /// and the strips as its own, and the central area as the game's. A dockspace has no central
+    /// area: egui counts the whole dock as its own, and the panel that shows the game's view draws
+    /// first.
     pub(crate) fn begin(&mut self, root: &mut egui::Ui) {
         self.bar.begin(root);
-        if root.ctx().embed_viewports() {
+        let view = self.layout.view;
+        let embedded = root.ctx().embed_viewports();
+        for floating in &mut self.layout.floating {
             // Without windows of their own, floating groups float over the main window, and the
-            // layout keeps their windows' places for runs with them.
-            for floating in &mut self.layout.floating {
-                if let Place::Window { position, size } = floating.place {
-                    let min = from_desktop(root.ctx(), position).unwrap_or(pos2(48.0, 48.0));
-                    floating.kept = Some(floating.place);
-                    floating.place = Place::Main {
-                        min: min.into(),
-                        size,
-                    };
-                }
+            // layout keeps their windows' places for runs with them. The view's group never has
+            // one, since only the main window's input reaches the layers.
+            let holds_view = view.is_some_and(|view| floating.tabs.holds(view));
+            if let Place::Window { position, size } = floating.place
+                && (embedded || holds_view)
+            {
+                let min = from_desktop(root.ctx(), position).unwrap_or(pos2(48.0, 48.0));
+                floating.kept = (!holds_view).then_some(floating.place);
+                floating.place = Place::Main {
+                    min: min.into(),
+                    size,
+                };
             }
         }
         let shown = &self.shown;
@@ -263,7 +315,14 @@ impl Dock {
                 .show_separator_line(false)
                 .show(root, |_| {});
         }
+        // Before any group draws: one drawn before would be drawn again as the frame ends.
         self.drawn.clear();
+        self.spot = None;
+        if let Some(view) = view {
+            // The rest is the empty dock where no group is.
+            CentralPanel::default().frame(fill).show(root, |_| {});
+            self.panel(root, view, |_| {});
+        }
     }
 
     fn panel(&mut self, root: &mut egui::Ui, name: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
@@ -515,10 +574,11 @@ impl Dock {
     }
 
     /// Draws a group into `ui`, filling it: its tab bar, with a tab for each of its panels shown
-    /// last frame, then what `add_contents` draws of the one showing. Clicking a tab shows its
-    /// panel from the next frame, and dragging a tab starts a drag, as does dragging the bar of
-    /// a group that moves by it (`movable`): one floating over the main window, or one whose
-    /// bar is its window's title bar, which then has a button that closes the window (`close`).
+    /// last frame, then what `add_contents` draws of the one showing, or a dockspace's view.
+    /// Clicking a tab shows its panel from the next frame, and dragging a tab starts a drag, as
+    /// does dragging the bar of a group that moves by it (`movable`): one floating over the main
+    /// window, or one whose bar is its window's title bar, which then has a button that closes the
+    /// window (`close`).
     fn body(
         &mut self,
         ui: &mut egui::Ui,
@@ -550,6 +610,7 @@ impl Dock {
             return;
         };
         let showing = tabs.showing(&|p| shown.contains(p));
+        let view = showing.is_some() && showing == self.layout.view;
         let single = tabs.panels.len() == 1;
         let floating = self.layout.floating(id).is_some();
         let mut clicked = None;
@@ -570,9 +631,17 @@ impl Dock {
                 dragged = Some((panel.clone(), response.rect));
             }
         }
-        let mut content_ui =
-            ui.new_child(UiBuilder::new().max_rect(content.shrink(spacing.item_spacing.x)));
+        // The view fills its panel; other panels' contents keep off its edges.
+        let inside = if view {
+            content
+        } else {
+            content.shrink(spacing.item_spacing.x)
+        };
+        let mut content_ui = ui.new_child(UiBuilder::new().max_rect(inside));
         content_ui.set_clip_rect(content.intersect(ui.clip_rect()));
+        if view {
+            self.show_view(&mut content_ui);
+        }
         add_contents(&mut content_ui);
 
         let ctx = ui.ctx();
@@ -599,6 +668,23 @@ impl Dock {
         if clicked.is_some() {
             self.clicked = clicked;
         }
+    }
+
+    /// Draws a dockspace's view into `ui`, its panel's inside, filling it, through the renderer's
+    /// callback, and notes where it is. It senses presses itself, so that egui's hit test takes
+    /// one there as the view's, rather than a tab's or a splitter's within a few points of it, and
+    /// it can't take egui's focus, so that Tab never lands on it.
+    fn show_view(&mut self, ui: &mut egui::Ui) {
+        let rect = ui.max_rect();
+        ui.interact(rect, Id::unique("gg dock view"), Sense::CLICK | Sense::DRAG);
+        ui.painter().add(PaintCallback {
+            rect,
+            callback: self.callback.clone(),
+        });
+        self.spot = Some(Spot {
+            rect,
+            layer: ui.layer_id(),
+        });
     }
 
     fn start_drag(
@@ -875,7 +961,8 @@ fn rounded(px: Pos2) -> [i32; 2] {
 
 /// Where a group held at `grab` by the pointer at `pointer`, in the main window's points, goes:
 /// over the main window while the pointer is over the dock's `area`, and otherwise in a window
-/// of its own, where egui opens them, whose inside is `frame` from its outside corner.
+/// of its own, where egui opens them, whose inside is `frame` from its outside corner. The next
+/// frame floats a dockspace's view's group back over the main window, before it draws.
 fn place_at(
     ctx: &Context,
     area: Rect,
@@ -902,7 +989,8 @@ fn place_at(
 
 /// What group `dragged`, at `pointer` in the main window's points, is over: the windows of their
 /// own, above the main window, then the groups floating over it, then the docked groups and
-/// the central area.
+/// the central area. The group of a dockspace's view stays over the main window, so it's over
+/// no window of its own.
 fn hover(
     layout: &Layout,
     arrangement: &Arrangement,
@@ -918,6 +1006,7 @@ fn hover(
         zone: targets(rect, zones)
             .find(|(_, target)| target.contains(pos))
             .map(|(zone, _)| zone),
+        share: layout.share(node),
     };
     let others = || {
         layout
@@ -926,7 +1015,9 @@ fn hover(
             .rev()
             .filter(|f| f.tabs.id != dragged)
     };
-    if let Some(px) = to_desktop(ctx, pointer) {
+    if !layout.holds_view(dragged)
+        && let Some(px) = to_desktop(ctx, pointer)
+    {
         for floating in others() {
             let id = floating.tabs.id;
             let Some((inner, ppp)) = geometry(ctx, window_id(id)) else {
@@ -957,10 +1048,15 @@ fn hover(
     {
         return Some(at(id, rect, None, Zones::All, pointer));
     }
+    // A dockspace's is the empty dock, which a group fills.
+    let zones = match layout.view {
+        Some(_) => Zones::Center,
+        None => Zones::Sides,
+    };
     let central = arrangement.central;
     central
         .contains(pointer)
-        .then(|| at(CENTRAL, central, None, Zones::Sides, pointer))
+        .then(|| at(CENTRAL, central, None, zones, pointer))
 }
 
 /// The drop targets over `rect`: a cross of squares at its center, the middle one for its tabs
@@ -1009,7 +1105,7 @@ fn paint_hover(ctx: &Context, hover: &Hover) {
     let visuals = ctx.global_style().visuals.clone();
     let selection = visuals.selection.bg_fill;
     if let Some(zone) = hover.zone {
-        let rect = preview(hover.rect, zone, tree::share(hover.node));
+        let rect = preview(hover.rect, zone, hover.share);
         painter.rect_filled(rect, 0.0, selection.gamma_multiply(0.35));
     }
     for (zone, target) in targets(hover.rect, hover.zones) {
@@ -1071,9 +1167,19 @@ mod tests {
 
         /// Under the frame `chrome` says.
         fn with_chrome(chrome: Chrome) -> Self {
+            Self::with_dock(Dock::new(None, chrome, None))
+        }
+
+        /// A dockspace under the frame `chrome` says, whose view, panel [`VIEW`], fills the dock
+        /// once it shows, under A and B, floating.
+        fn dockspace(chrome: Chrome) -> Self {
+            Self::with_dock(Dock::new(None, chrome, Some(VIEW)))
+        }
+
+        fn with_dock(dock: Dock) -> Self {
             let mut run = Self {
                 ctx: crate::egui_context(),
-                dock: Dock::new(None, chrome),
+                dock,
                 frame: 0,
                 pointer: Pos2::ZERO,
                 viewports: Vec::new(),
@@ -1084,25 +1190,37 @@ mod tests {
             run
         }
 
-        /// A run with windows of their own, whose main window's inside starts at (100, 50) on
-        /// the desktop, at 1.5 pixels a point. Without egui's callback for them, which the
-        /// renderer gives it, they show in the main window.
+        /// A run with windows of their own, as [`Run::open_windows`] opens them.
         fn with_windows(chrome: Chrome) -> Self {
             let mut run = Self::with_chrome(chrome);
-            run.ctx.set_embed_viewports(false);
+            run.open_windows();
+            run
+        }
+
+        /// Has windows of their own open from the next frame, the main window's inside at
+        /// (100, 50) on the desktop, at 1.5 pixels a point. Without egui's callback for them,
+        /// which the renderer gives it, they show in the main window.
+        fn open_windows(&mut self) {
+            self.ctx.set_embed_viewports(false);
             let main = ViewportInfo {
                 inner_rect: Some(Rect::from_min_size(pos2(100.0, 50.0), SCREEN)),
                 native_pixels_per_point: Some(1.5),
                 ..ViewportInfo::default()
             };
-            run.viewports.push((ViewportId::ROOT, main));
+            self.viewports.push((ViewportId::ROOT, main));
+        }
+
+        /// A run with windows of their own, framed by the UI, whose passes run as
+        /// [`Run::run_window_passes`] runs them.
+        fn with_window_passes() -> Self {
+            let mut run = Self::with_windows(Chrome::Drawn);
+            run.run_window_passes();
             run
         }
 
-        /// A run with windows of their own, framed by the UI, whose passes run as the engine
-        /// runs them: through egui's callback, each with its own input.
-        fn with_window_passes() -> Self {
-            let mut run = Self::with_windows(Chrome::Drawn);
+        /// Has the passes of windows of their own run as the engine runs them: through egui's
+        /// callback, each with its own input.
+        fn run_window_passes(&mut self) {
             let passes = Rc::new(RefCell::new(Passes::default()));
             let shared = passes.clone();
             // The callback is the test thread's.
@@ -1128,8 +1246,7 @@ mod tests {
                 let mut output = ctx.run_ui(input, |ui| viewport_ui_cb(ui));
                 output.textures_delta.clear();
             });
-            run.passes = Some(passes);
-            run
+            self.passes = Some(passes);
         }
 
         /// Puts `panel`'s group in a window of its own without a frame, whose inside is at `min`
@@ -1652,6 +1769,192 @@ mod tests {
                     (run.commands.iter()).any(|(_, command)| *command == ViewportCommand::Close);
                 assert!(!closes, "at {at:?}: {:?}", run.commands);
             }
+        }
+    }
+
+    /// The panel that shows the view of the tests' dockspaces.
+    const VIEW: &str = "View";
+
+    /// How tall a group's tab bar is, in points.
+    fn tab_bar(run: &Run) -> f32 {
+        let spacing = &run.ctx.global_style().spacing;
+        spacing.interact_size.y + 2.0 * spacing.item_spacing.y
+    }
+
+    /// Floats the view's group over the main window at `min`, `size` points inside.
+    fn float_view(run: &mut Run, min: [f32; 2], size: Vec2) -> NodeId {
+        let place = Place::Main {
+            min,
+            size: size.into(),
+        };
+        let id = run.dock.layout.detach(VIEW, place);
+        run.dock.layout.prune();
+        run.frames(2);
+        id
+    }
+
+    #[test]
+    fn a_dockspace_s_view_fills_it_and_egui_counts_all_of_it_its_own() {
+        let mut run = Run::dockspace(Chrome::Drawn);
+        let dock = Rect::from_min_max(pos2(0.0, BAR), SCREEN.to_pos2());
+        assert_eq!(run.docked(VIEW), dock);
+        assert_eq!(run.dock.view(), dock.with_min_y(BAR + tab_bar(&run)));
+        // On the view, clear of A and B, which float over it at (48, 48) and (72, 72); then
+        // there, on the empty dock, once the view floats.
+        let clear = pos2(600.0, 450.0);
+        run.move_to(clear);
+        assert!(run.ctx.egui_wants_pointer_input());
+        float_view(&mut run, [100.0, 100.0], vec2(200.0, 150.0));
+        assert_eq!(run.layout().main, Node::Central);
+        run.move_to(clear);
+        assert!(run.ctx.egui_wants_pointer_input());
+    }
+
+    #[test]
+    fn a_tab_showing_over_the_view_leaves_it_nowhere() {
+        let mut run = Run::dockspace(Chrome::Os);
+        let view = run.layout().find(VIEW).unwrap();
+        let a = run.layout().find("A").unwrap();
+        assert!(run.dock.layout.dock(a, view, Zone::Center));
+        run.frames(2);
+        assert_eq!(run.dock.view(), Rect::NOTHING);
+        run.dock.layout.activate(VIEW);
+        run.frames(1);
+        assert!(run.dock.view().is_positive());
+    }
+
+    #[test]
+    fn over_the_view_is_on_it_alone() {
+        let mut run = Run::dockspace(Chrome::Os);
+        // egui's first pass of a new area sizes it, and doesn't take input.
+        run.frames(1);
+        let view = run.dock.view();
+        // Clear of A and B, under them, and on the view's tab bar.
+        for (at, over) in [
+            (pos2(600.0, 450.0), true),
+            (pos2(100.0, 100.0), false),
+            (pos2(600.0, view.min.y - 2.0), false),
+        ] {
+            assert_eq!(run.dock.over_view(&run.ctx, at), over, "docked, at {at:?}");
+        }
+        // Floating at (150, 150), over A and B and the empty dock: clear of them, over them, on its
+        // tab bar, on its grip, and off it.
+        float_view(&mut run, [150.0, 150.0], vec2(300.0, 200.0));
+        let content = run.dock.view();
+        for (at, over) in [
+            (pos2(420.0, 300.0), true),
+            (pos2(200.0, 250.0), true),
+            (pos2(300.0, content.min.y - 4.0), false),
+            (content.max - Vec2::splat(GRIP / 2.0), false),
+            (pos2(700.0, 550.0), false),
+        ] {
+            assert_eq!(
+                run.dock.over_view(&run.ctx, at),
+                over,
+                "floating, at {at:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_press_on_the_view_by_its_tab_is_the_view_s() {
+        let mut run = Run::dockspace(Chrome::Os);
+        let view = run.dock.view();
+        // Within egui's reach of the view's tab, whose drag would pull it out of its group.
+        let at = pos2(view.min.x + INSET + 4.0, view.min.y + 1.0);
+        run.drag(at, at + vec2(0.0, 100.0));
+        assert!(
+            matches!(&run.layout().main, Node::Tabs(tabs) if tabs.panels == [VIEW]),
+            "{:?}",
+            run.layout().main
+        );
+        assert_eq!(run.dock.view(), view);
+    }
+
+    #[test]
+    fn the_view_s_group_dragged_off_the_main_window_floats_over_it() {
+        let mut run = Run::dockspace(Chrome::Os);
+        run.open_windows();
+        run.drag(first_tab(Pos2::ZERO), pos2(-40.0, 300.0));
+        assert!(
+            matches!(run.floating(VIEW), Place::Main { .. }),
+            "{:?}",
+            run.floating(VIEW)
+        );
+    }
+
+    #[test]
+    fn the_view_s_group_docks_into_no_window_of_its_own() {
+        let mut run = Run::dockspace(Chrome::Drawn);
+        run.open_windows();
+        run.run_window_passes();
+        let a = run.tear_off("A", pos2(1200.0, 100.0));
+        // Its bar clear of B, and in the 600 by 400 points from the dock's top left that egui's
+        // first pass of a new area keeps it in, sizing it.
+        let min = pos2(150.0, 150.0);
+        float_view(&mut run, min.into(), NEW_SIZE);
+        assert_eq!(
+            run.floating(VIEW),
+            Place::Main {
+                min: min.into(),
+                size: NEW_SIZE.into()
+            }
+        );
+        // The center of A's window, which holds its target among A's tabs, in the main window's
+        // points.
+        let (inner, ppp) = run.window(a);
+        let center = inner.center() * ppp;
+        let to = pos2(center.x / 1.5 - 100.0, center.y / 1.5 - 50.0);
+        run.drag(bar(min), to);
+        assert!(
+            matches!(run.floating(VIEW), Place::Main { .. }),
+            "{:?}",
+            run.floating(VIEW)
+        );
+        let a = run.layout().find("A").unwrap();
+        assert_eq!(run.layout().group(a).unwrap().panels, ["A"]);
+    }
+
+    #[test]
+    fn the_view_pulled_out_and_dropped_on_the_empty_dock_fills_it_again() {
+        let mut run = Run::dockspace(Chrome::Os);
+        let dock = Rect::from_min_size(Pos2::ZERO, SCREEN);
+        // Its tab, out of its bar, and onto the empty dock's one target, at its center.
+        run.drag(first_tab(Pos2::ZERO), dock.center());
+        assert_eq!(run.docked(VIEW), dock);
+        assert!(run.layout().floating.iter().all(|f| !f.tabs.holds(VIEW)));
+    }
+
+    #[test]
+    fn a_view_saved_in_a_window_of_its_own_floats_over_the_main_window_for_good() {
+        for embedded in [false, true] {
+            let mut run = Run::dockspace(Chrome::Os);
+            run.open_windows();
+            run.ctx.set_embed_viewports(embedded);
+            let id = run.dock.layout.detach(
+                VIEW,
+                Place::Main {
+                    min: [0.0, 0.0],
+                    size: NEW_SIZE.into(),
+                },
+            );
+            run.dock.layout.prune();
+            run.dock.layout.floating_mut(id).unwrap().place = Place::Window {
+                position: desktop(pos2(150.0, 120.0)),
+                size: NEW_SIZE.into(),
+            };
+            run.frames(2);
+            let floats = Place::Main {
+                min: [150.0, 120.0],
+                size: NEW_SIZE.into(),
+            };
+            assert_eq!(run.floating(VIEW), floats, "embedded: {embedded}");
+            let saved = run.layout().saved();
+            assert_eq!(
+                saved.floating(id).unwrap().place,
+                floats,
+                "embedded: {embedded}"
+            );
         }
     }
 }

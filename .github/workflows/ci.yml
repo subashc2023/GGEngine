@@ -124,6 +124,10 @@ jobs:
           cargo run -p sandbox --locked -- --headless --frames 60 --threads 4 --record target/run.recording
           cargo run -p sandbox --locked -- --replay target/run.recording
           cargo run -p sandbox --locked -- --replay target/run.recording --threads 1
+      # Whether the editor runs, its view a panel that the UI draws among its own, exiting 0.
+      - name: Run the editor headless
+        if: matrix.container
+        run: cargo run -p editor --locked -- --headless --frames 60
       # With Tracy's client, which records into memory with no viewer and exits as usual. Hosted
       # runners are VMs, whose clocks Tracy otherwise refuses on x86.
       - name: Run the sandbox headless with Tracy

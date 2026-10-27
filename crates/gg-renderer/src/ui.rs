@@ -12,6 +12,9 @@ use gg_gpu::{
 };
 use tracing::warn;
 
+use crate::Viewport;
+use crate::view::{ViewCallback, ViewPass};
+
 static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/egui.spv"));
 
 /// One frame of egui's output: the meshes to draw, and the texture changes to apply first,
@@ -21,6 +24,22 @@ pub struct Ui<'a> {
     pub textures: &'a mut TexturesDelta,
     /// Physical pixels per egui point.
     pub pixels_per_point: f32,
+}
+
+/// The game's view, for the main window's UI to draw where it paints a [`ViewCallback`]: the pass
+/// that draws it, its image's index this frame, and its size.
+pub(crate) struct View<'a> {
+    pub(crate) pass: &'a ViewPass,
+    pub(crate) image: u32,
+    pub(crate) size: [u32; 2],
+}
+
+/// Whether `primitives` paint a [`ViewCallback`].
+pub(crate) fn draws_view(primitives: &[ClippedPrimitive]) -> bool {
+    primitives.iter().any(|clipped| match &clipped.primitive {
+        Primitive::Callback(callback) => callback.callback.is::<ViewCallback>(),
+        Primitive::Mesh(_) => false,
+    })
 }
 
 /// Draws egui's meshes, and keeps the textures they sample, which every window's UI shares.
@@ -125,7 +144,8 @@ impl UiPass {
         Ok(())
     }
 
-    /// Draws egui's meshes, with `ppp` physical pixels per point.
+    /// Draws egui's meshes, with `ppp` physical pixels per point, and the game's `view`, given for
+    /// the main window's UI alone while it has an area, where the UI paints a [`ViewCallback`].
     ///
     /// # Panics
     ///
@@ -135,6 +155,7 @@ impl UiPass {
         pass: &mut Pass<'_, '_>,
         primitives: &[ClippedPrimitive],
         ppp: f32,
+        view: Option<View<'_>>,
     ) -> Result<()> {
         let _zone = gg_core::zone!();
         let [width, height] = pass.size();
@@ -152,22 +173,48 @@ impl UiPass {
             primitive,
         } in primitives
         {
-            // Callbacks paint with a renderer of their own, which the engine doesn't offer.
-            let Primitive::Mesh(mesh) = primitive else {
-                continue;
-            };
-            let Some((texture, sampler)) = self.textures.get(&mesh.texture_id) else {
-                continue;
-            };
             // The clip rectangle in pixels, rounded as egui's own renderers round it.
             let min_x = (clip_rect.min.x * ppp).round().clamp(0.0, width as f32) as u32;
             let min_y = (clip_rect.min.y * ppp).round().clamp(0.0, height as f32) as u32;
             let max_x = (clip_rect.max.x * ppp).round().clamp(0.0, width as f32) as u32;
             let max_y = (clip_rect.max.y * ppp).round().clamp(0.0, height as f32) as u32;
-            if max_x <= min_x || max_y <= min_y || mesh.indices.is_empty() {
+            if max_x <= min_x || max_y <= min_y {
                 continue;
             }
-            pass.set_scissor([min_x, min_y], [max_x - min_x, max_y - min_y]);
+            let clip = Viewport {
+                origin: [min_x, min_y],
+                size: [max_x - min_x, max_y - min_y],
+            };
+            let mesh = match primitive {
+                Primitive::Mesh(mesh) => mesh,
+                // Other callbacks paint with a renderer of their own, which the engine doesn't
+                // offer.
+                Primitive::Callback(callback) => {
+                    if let Some(view) = &view
+                        && callback.callback.is::<ViewCallback>()
+                    {
+                        // From the callback's top left, rounded as the engine rounds the view's
+                        // rect to size its image.
+                        let min = callback.rect.min.to_vec2() * ppp;
+                        let origin = [min.x.round() as u32, min.y.round() as u32];
+                        let viewport = Viewport {
+                            origin,
+                            size: view.size,
+                        };
+                        view.pass.draw(pass, viewport, view.image, Some(clip));
+                        pass.set_viewport([0, 0], [width, height]);
+                        pass.set_pipeline(pipeline);
+                    }
+                    continue;
+                }
+            };
+            let Some((texture, sampler)) = self.textures.get(&mesh.texture_id) else {
+                continue;
+            };
+            if mesh.indices.is_empty() {
+                continue;
+            }
+            pass.set_scissor(clip.origin, clip.size);
             let vertices = pass.upload(bytemuck::cast_slice(&mesh.vertices))?;
             let indices = pass.upload(bytemuck::cast_slice(&mesh.indices))?;
             // The shader's `Push`: the vertices' address, the screen's size in points, then the

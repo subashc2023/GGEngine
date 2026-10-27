@@ -13,13 +13,14 @@ use std::fs::{self, File};
 use std::io::BufWriter;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use bytemuck::NoUninit;
 use gg_core::math::{self, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{
     AlphaMode, Blend, Camera, DrawCounts, Draws, Material, MeshDraw, Meshes, Mipmaps, ModelVertex,
     Projection, RenderData, Renderer, Sampler, Settings, Shaders, Sprite, SpriteSheet, Texture,
-    Textures, Ui, UploadPath, Uploads, Viewport, Wrap,
+    Textures, Ui, UploadPath, Uploads, ViewCallback, Viewport, Wrap,
 };
 
 fn main() {
@@ -52,6 +53,10 @@ fn main() {
         batches_match_their_reference,
     );
     run("views_match_their_reference", views_match_their_reference);
+    run(
+        "a_view_in_the_ui_matches_its_reference",
+        a_view_in_the_ui_matches_its_reference,
+    );
     run(
         "replaced_shaders_draw_from_the_next_frame",
         replaced_shaders_draw_from_the_next_frame,
@@ -1528,6 +1533,130 @@ fn mipmaps_match_their_reference(path: UploadPath) {
     };
     render_without_ui(&mut renderer, data);
     check(renderer, "mipmaps", WIDTH, HEIGHT);
+}
+
+/// Draws a view where the UI paints a `ViewCallback`, among the UI's shapes rather than under them
+/// all, and compares the frame with its reference image: a red rect under the view, which shows
+/// where the callback's clip rect cuts the view's edges, and a green one over it. The view is a
+/// blue square that fills it, under a triangle in red, green and blue. The callback is off
+/// `data.viewport`'s origin, the frame's corner, where the frame shows the view without one, so
+/// that the view shown there too, unclipped, or over the green rect, changes thousands of pixels. A
+/// frame whose view has no area draws the UI alone.
+fn a_view_in_the_ui_matches_its_reference() {
+    const WIDTH: u32 = 320;
+    const HEIGHT: u32 = 200;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut meshes = Meshes::default();
+    let mut shaders = Shaders::default();
+    let mut textures = Textures::default();
+    let mut uploads = Uploads::default();
+    // 4 units from the view's bottom to its top, which is 160 pixels: 40 pixels a unit.
+    let camera = Camera {
+        projection: Projection::Orthographic {
+            height: 4.0,
+            near: -1.0,
+            far: 1.0,
+        },
+        ..Camera::default()
+    };
+    let flat = shaders
+        .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+        .expect("a shader");
+    let colored = shaders
+        .add::<[f32; 7], ()>("vertex color", &shader("vertex_color.slang"), Blend::Opaque)
+        .expect("a shader");
+    let corners = [
+        [-0.5, -0.5, 0.0],
+        [0.5, -0.5, 0.0],
+        [0.5, 0.5, 0.0],
+        [-0.5, 0.5, 0.0],
+    ];
+    let square = meshes
+        .add("square", &corners, &[0, 1, 2, 2, 3, 0])
+        .expect("a mesh");
+    let corner = |[x, y, z]: [f32; 3], [r, g, b, a]: [f32; 4]| [x, y, z, r, g, b, a];
+    let vertices = [
+        corner([0.0, 0.5, 0.0], [1.0, 0.0, 0.0, 1.0]),
+        corner([0.5, -0.5, 0.0], [0.0, 1.0, 0.0, 1.0]),
+        corner([-0.5, -0.5, 0.0], [0.0, 0.0, 1.0, 1.0]),
+    ];
+    let triangle = meshes
+        .add("triangle", &vertices, &[0, 1, 2])
+        .expect("a mesh");
+    let mut draws = Draws::default();
+    let blue = Vec4::new(0.2, 0.3, 0.8, 1.0);
+    draws.push(square, flat, Mat4::from_scale(Vec3::splat(10.0)), blue);
+    draws.push(triangle, colored, Mat4::from_scale(Vec3::splat(3.0)), ());
+
+    let egui = egui::Context::default();
+    let rect = |[x0, y0]: [f32; 2], [x1, y1]: [f32; 2]| {
+        egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1))
+    };
+    let input = egui::RawInput {
+        screen_rect: Some(rect([0.0, 0.0], [WIDTH as f32, HEIGHT as f32])),
+        ..Default::default()
+    };
+    let mut output = egui.run_ui(input, |ui| {
+        let painter = ui.painter();
+        let red = egui::Color32::from_rgb(200, 60, 60);
+        painter.rect_filled(rect([8.0, 8.0], [208.0, 128.0]), 0.0, red);
+        // 240 by 160 points, a pixel each, clipped by 10 points top and bottom and 40 on the right.
+        let clipped = painter.with_clip_rect(rect([40.0, 30.0], [240.0, 170.0]));
+        clipped.add(egui::PaintCallback {
+            rect: rect([40.0, 20.0], [280.0, 180.0]),
+            callback: Arc::new(ViewCallback),
+        });
+        let green = egui::Color32::from_rgb(60, 200, 60);
+        painter.rect_filled(rect([120.0, 80.0], [180.0, 120.0]), 4.0, green);
+    });
+    let primitives = egui.tessellate(output.shapes, output.pixels_per_point);
+    for size in [[240, 160], [0, 0]] {
+        uploads.take(&mut meshes, &mut shaders, &mut textures);
+        let ui = Ui {
+            primitives: &primitives,
+            textures: &mut output.textures_delta,
+            pixels_per_point: output.pixels_per_point,
+        };
+        let data = RenderData {
+            clear_color: CLEAR,
+            viewport: Viewport {
+                origin: [0, 0],
+                size,
+            },
+            camera,
+            uploads: &mut uploads,
+            draws: &draws,
+        };
+        assert!(
+            renderer.render(data, ui, &mut []).expect("a frame"),
+            "an offscreen image can always be rendered into"
+        );
+        let pixels = (renderer.read_back())
+            .expect("the frame's pixels")
+            .expect("a headless renderer's frame can be read back");
+        if size == [0, 0] {
+            // In the callback's clip, clear of the rects, the clear color, encoded; in the red
+            // rect, red.
+            let pixel = |x: u32, y: u32| {
+                let at = ((y * WIDTH + x) * 4) as usize;
+                [pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3]]
+            };
+            for (x, y, want) in [(220, 150, [39, 48, 63, 255]), (100, 50, [200, 60, 60, 255])] {
+                let got = pixel(x, y);
+                let close = got.iter().zip(want).all(|(&a, b)| a.abs_diff(b) <= 1);
+                assert!(close, "at ({x}, {y}), {got:?} rather than {want:?}");
+            }
+        } else {
+            compare("view_in_ui", WIDTH, HEIGHT, &pixels);
+        }
+    }
+    let validation = renderer.validation();
+    drop(renderer);
+    assert_eq!(
+        validation.messages(),
+        0,
+        "validation reported problems; the log above says what"
+    );
 }
 
 /// Renders a frame of `data`, without UI.

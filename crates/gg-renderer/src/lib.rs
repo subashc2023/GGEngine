@@ -38,6 +38,7 @@ pub use shader::{Compiled, Shader, ShaderSource, Shaders};
 pub use sprite::{Sprite, SpriteSheet};
 pub use texture::{Mipmaps, Texture, Textures};
 pub use ui::Ui;
+pub use view::ViewCallback;
 
 use mesh::MeshPass;
 use ui::UiPass;
@@ -211,7 +212,8 @@ pub struct RenderData<'a> {
     /// in linear RGBA.
     pub clear_color: [f32; 4],
     /// Where the game's view shows in the frame. The meshes are drawn into an image of the view's
-    /// own, its size, which the frame then shows there.
+    /// own, its size, which the frame then shows there, under the UI; or, if the main window's UI
+    /// paints a [`ViewCallback`], where that is instead.
     pub viewport: Viewport,
     /// What the view sees the world from.
     pub camera: Camera,
@@ -541,11 +543,19 @@ impl Renderer {
         let mut pass = frame
             .begin_pass(0, c"frame", data.clear_color, None)
             .expect("a frame's first target has an image");
-        if let Some(image) = view {
-            self.view.draw(&mut pass, data.viewport, image);
+        // Under the whole UI, unless it paints the view among its own shapes.
+        if let Some(image) = view
+            && !ui::draws_view(ui.primitives)
+        {
+            self.view.draw(&mut pass, data.viewport, image, None);
         }
+        let view = view.map(|image| ui::View {
+            pass: &self.view,
+            image,
+            size: data.viewport.size,
+        });
         self.ui
-            .draw(&mut pass, ui.primitives, ui.pixels_per_point)?;
+            .draw(&mut pass, ui.primitives, ui.pixels_per_point, view)?;
         drop(pass);
         let drawn = self
             .window_keys
@@ -553,9 +563,10 @@ impl Renderer {
             .filter_map(|key| windows.iter().find(|(drawn, _)| drawn == key));
         for (target, (_, ui)) in (1..).zip(drawn) {
             let black = [0.0, 0.0, 0.0, 1.0];
+            // The view shows in the main window alone.
             if let Some(mut pass) = frame.begin_pass(target, c"window", black, None) {
                 self.ui
-                    .draw(&mut pass, ui.primitives, ui.pixels_per_point)?;
+                    .draw(&mut pass, ui.primitives, ui.pixels_per_point, None)?;
             }
         }
         self.ui.free_textures();

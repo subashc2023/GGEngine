@@ -309,11 +309,24 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   of the release sandbox shows rendering on its own thread beside the ticks. The `frames` test
   counts no allocation in the frames of an app that draws no UI, in CI too. A RenderDoc capture of
   the sandbox, taken with `--capture`, names what the engine makes and labels its passes.
+- **The editor's shell** (2026-10-26): `apps/editor` opens a window whose UI's title bar holds its
+  menus, over a dock that fills it. `App::view_panel` makes the dock a dockspace, without the
+  central area games keep, and the game's view a panel of its own, which docks, tabs and floats
+  over the main window but never tears off, drawn where the UI paints a `ViewCallback`, in the UI's
+  order. The layers get presses and the wheel over the view and the drags they start, and keys
+  while it has focus, which a press on it gives and a press elsewhere takes; releases always. Until
+  the tool API brings it a game, the view shows a grid through the orthographic camera controller,
+  as 2D games see theirs, drawn by a shader of the editor's own that keeps each line a pixel wide
+  at any zoom. Unit tests check the dockspace, the view's panel and the input's routing, and a GPU
+  test the view among the UI's shapes; CI runs the editor headless. By hand on the RTX 4090,
+  posted keys moved the camera after a click on the view and not after one on a panel, a key let
+  go after a click on a panel stopped it, and the wheel over the view zoomed it.
 
-## Now: Phase 5's first milestone
+## Now: the editor's next milestone, or Phase 5's first
 
-[Phase 5](#next) starts once the flagship game is decided, as [Open questions](#open-questions)
-asks. Its first milestone is chosen as it starts, and its plan says when it's done.
+The next milestone is the editor's, or [Phase 5](#next)'s first once the flagship game is decided,
+as [Open questions](#open-questions) asks. It's chosen as it starts, and its plan says when it's
+done.
 
 ## Next
 
@@ -417,8 +430,12 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Host image copy where a transfer queue exists, or where the driver says it costs the GPU in reading the image, as KosmicKrisp's does, turning off Apple's lossless compression, so that macOS uploads through the graphics queue; and meshes written straight into GPU memory the CPU reaches, as ReBAR and unified memory allow, rather than copied | A measurement shows either is faster |
 | More than one camera or view, such as split screen or the editor's scene view | A game or the editor draws several |
 | The camera as a component of an entity, which a scene saves and a parent carries along; layers set the camera through `Context`, and the world doesn't hold it | A scene saves a camera, or a camera follows or rides an entity, with a world matrix for game code |
-| The game's view in a panel that docks and tabs, and keys reaching the layers only while it has focus, as editors' views do; the view is the central area, and keys reach the layers wherever the pointer is unless one of egui's widgets has focus | A tool in the game's process shows the view among its panels |
-| Converting between the view's pixels and the world, to pick what's under the cursor or zoom toward it; the orthographic camera controller zooms about the view's center | Something picks with the mouse, or a tool zooms toward the cursor |
+| Converting between the view's pixels and the world, to pick what's under the cursor or zoom toward it; the orthographic camera controller zooms about the view's center, and in a dockspace the layers get the cursor in the window's pixels, with nothing to tell them where the view is | Something picks with the mouse, or a tool zooms toward the cursor |
+| A dockspace's view in a window of its own: it docks and floats over the main window alone, since only the main window's input reaches the layers, and its image is made at the main window's scale | The editor shows the game on a display of its own |
+| Showing which panel has the keys, such as an outline around the view while it has focus | Someone misses it, or Phase 9's editor |
+| Gamepads following a dockspace's view: they reach the layers whichever panel has the keys, as they do in games | The editor binds a pad, or a panel takes a pad's input |
+| Keeping a click that closes a menu from what's under it: it reaches the game's view there too, central or in a panel | It surprises someone, or Phase 9's editor |
+| A grid for cameras with perspective, fading toward the horizon: the editor's grid shader finds the view's corners on the plane z = 0 through an orthographic camera alone | The editor shows 3D, or Phase 9's scene view |
 | Zooming from keys or a gamepad, as a rate beside the wheel's lines; the orthographic camera controller zooms by the wheel alone, in its own event handling. And zooming a camera with perspective, by its field of view or by moving it in, or changing the fly camera controller's speed by the wheel, which does nothing to it | A game binds zoom elsewhere, or zooms a camera with perspective |
 | Per-user bindings, kept as RON in the per-user directory beside the dock's layout, and a UI that binds them; a game binds its actions in code | A game ships its settings |
 | Chords, modifiers, holds and double taps, such as Ctrl and a key: there's no modifier state, and Ctrl+Z reaches layers as `ControlLeft` and `KeyZ` | A game binds a combination |
@@ -456,6 +473,7 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | A swapchain without an sRGB format falls back to the first one offered, where colors come out too dark | A device offers no sRGB swapchain format |
 | Splits in a torn-off window, which holds one tab group | A tool wants panels side by side outside the main window |
 | Closing a panel from its tab; a panel shows while its layer shows it | Panels the user opens and closes, such as the editor's |
+| A first-run layout an app gives, such as the editor's panels docked around the view: a dockspace's view fills it, and other panels float as they first show | The editor has panels of its own, in Phase 9 |
 | Reordering tabs by dragging them along their bar; a drop among the tabs adds one at the end | Phase 9, the editor |
 | On Windows, an inner size asked of winit once a window whose title bar the UI draws is open (egui's `InnerSize`, `MinInnerSize` or `MaxInnerSize`) leaves its inside a frame smaller, since winit sizes it as though it had no frame | Something resizes such a window from code |
 | Leaving a taskbar that hides itself a pixel or two beside a maximized window whose title bar the UI draws, as Windows Terminal and Chromium do; the window covers the whole monitor, which may keep the taskbar from showing | Someone hides their taskbar |

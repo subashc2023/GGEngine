@@ -407,9 +407,9 @@ impl Context {
     /// Draws `mesh` with `shader` this frame, where `transform` places it in the world, over the
     /// meshes drawn before it but where an opaque one is nearer, in the game's view as the camera
     /// sees it; the shader gets `params`. The view is the main window's central area, which the
-    /// panels dock around. Consecutive draws of one mesh with one shader render as one instanced
-    /// draw, whatever their transforms and parameters, so a frame of many takes few draws on the
-    /// GPU.
+    /// panels dock around, or the panel that [`App::view_panel`](crate::App::view_panel) names.
+    /// Consecutive draws of one mesh with one shader render as one instanced draw, whatever their
+    /// transforms and parameters, so a frame of many takes few draws on the GPU.
     pub fn draw<V, P: NoUninit>(
         &mut self,
         mesh: Mesh<V>,
@@ -949,7 +949,7 @@ mod tests {
     /// Whether `stack`'s layers draw UI, as a pass of egui's tells.
     fn draws_ui(mut stack: Stack) -> bool {
         let egui = crate::egui_context();
-        let mut dock = crate::dock::Dock::new(None, crate::chrome::Chrome::Os);
+        let mut dock = crate::dock::Dock::new(None, crate::chrome::Chrome::Os, None);
         let mut cx = Context::new(None);
         let mut draws = false;
         let mut output = egui.run_ui(egui::RawInput::default(), |root| {

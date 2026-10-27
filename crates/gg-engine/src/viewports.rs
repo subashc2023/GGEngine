@@ -488,6 +488,11 @@ impl WindowInput {
         }
     }
 
+    /// Where the cursor last was in the window, in points.
+    pub(crate) fn cursor(&self) -> Pos2 {
+        self.cursor
+    }
+
     /// Hands `event` to egui. egui-winit drops a button's release when the cursor has left the
     /// window and not moved since, which would leave egui's drags, and the dock's, holding on,
     /// so that release goes in at the cursor's last position.

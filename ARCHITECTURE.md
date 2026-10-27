@@ -32,8 +32,8 @@ are in [AGENTS.md](AGENTS.md).
 ## Crates
 
 ```text
-   sandbox     player          apps/: executables
-        \       /
+sandbox  editor   player       apps/: executables
+       \    |    /
         gg-engine - gg-macros  crates/: libraries
             |
        gg-renderer
@@ -58,6 +58,9 @@ are in [AGENTS.md](AGENTS.md).
   `Reflect` and `Component`. Rust builds a derive as a crate of its own; only `gg-engine`
   depends on it, and games derive through `gg-engine`.
 - **`sandbox`:** the development playground for engine features.
+- **`editor`:** the editor, which becomes one more client of the tool API: a dock that fills its
+  window, with the game's view in a panel among the others, which shows a world of the editor's
+  own until the tool API brings it a game.
 - **`player`:** the reference player. It runs a cooked scene without game code and shows how a
   game builds its own player.
 
@@ -116,7 +119,6 @@ before:
 - `tools/gg`: the command-line tool; `tools/*` joins the workspace members then. The tool API's
   message types move into a crate that it and `gg-engine` share.
 - `tools/cook`: the offline asset cooker.
-- `apps/editor`: the editor, one more client of the tool API.
 - `games/`: games built alongside the engine, starting with the flagship; `games/*` joins the
   workspace members with the first one.
 - `gg-scene`, `gg-physics`, `gg-audio` and the like: when each outgrows a module of
@@ -456,18 +458,27 @@ input for egui and run no pass, egui sees no events, and the game's view fills t
 egui, the engine's immediate-mode UI, is the top overlay: it sees every event first and keeps
 those it wants, such as a click on one of its panels, and `gg-renderer` draws its meshes over
 the frame. Key and button releases reach the layers regardless, so that none is left holding a
-key or button it saw pressed. Tab reaches egui only while one of its widgets has focus, to move
-between them; otherwise it goes to the layers alone, since egui would take focus with it.
+key or button it saw pressed. Tab reaches egui only while one of its widgets has focus, or while a
+dockspace's view, below, hasn't the keys, to move between them; otherwise it goes to the layers
+alone, since egui would take focus with it.
 
 Layers draw UI through `Ui`: dockable panels, and egui itself for anything else. The dock is the
 engine's own, since egui's docking crates can't put a panel in a window of its own. Panels sit
 in tab groups, docked in strips along the main window's edges around a central area that stays
 the game's, or floating: over the main window, or torn off into a window of their own, which
 holds one group. egui counts only the strips and groups as its own, so input over the central
-area goes to the layers. A panel shows from the frame after its layer starts showing it, since
-the dock lays out a frame before its panels draw, and keeps its place while it isn't shown. The
-layout is saved as RON in the OS's directory for per-user state, never
-beside the executable; headless runs neither read nor write it.
+area goes to the layers. Tools call `App::view_panel` instead, for a dockspace: the dock fills
+the main window, without a central area, and the game's view is a panel of its own, which docks,
+tabs and floats over the main window as the others do, but never goes into a window of its own,
+since only the main window's input reaches the layers. egui counts all of a dockspace as its own,
+the view's panel too, which senses presses itself, so that one by its edge isn't taken for a tab's
+or a splitter's a few points away. What reaches the layers is the view's to say: presses and the
+wheel over it, and the drags they start, and keys while it has focus, which a press on it gives,
+taking egui's, and a press anywhere else takes away; it has focus as the app starts. Releases
+reach them wherever they come. A panel shows from the frame after its layer starts showing it,
+since the dock lays out a frame before its panels draw, and keeps its place while it isn't shown.
+The layout is saved as RON in the OS's directory for per-user state, never beside the executable;
+headless runs neither read nor write it.
 
 The torn-off windows are egui's immediate viewports: egui runs each one's pass inside the main
 window's, and the main window's frame renders them all. Only the main window's swapchain paces
@@ -536,10 +547,12 @@ Each frame the engine extracts that frame's render data, as plain data, which th
 hands `gg-renderer`: the color the view clears to, the game's view, the camera it sees the world
 from, and what to draw in it, in order: meshes, each with a shader for its vertex type, the
 parameters that shader takes, and a transform that places it in the world. The view is the main
-window's central area, which the
-dock leaves the game. It renders into an image of its own, the central area's size in pixels,
-made again as that size changes, which the frame then shows there, with the UI over it, so that
-HDR and tonemapping, post-processing and the tool API's captures read the view whole; and games'
+window's central area, which the dock leaves the game, or a dockspace's view panel. It renders
+into an image of its own, that area's size in pixels, made again as that size changes, which the
+frame then shows there, a pixel to a pixel, so that HDR and tonemapping, post-processing and the
+tool API's captures read the view whole: under the whole UI, or, from a panel, where the UI paints
+a callback that stands for it, in the UI's order and clipped as the UI clips it, so that the panels
+floating over it and the menus show over it; and games'
 pipelines are made for that image's format, 8-bit sRGB, whatever the window presents, and for the
 depth image beside it, of 32-bit floats, which every draw into the view tests. Depth runs
 reversed, from 1 at the near plane to 0 far away, which keeps a float's precision where it's
