@@ -3,7 +3,7 @@
 //! own viewpoint from the keyboard, the mouse and gamepads, an orthographic one as 2D games do, and
 //! one that flies, as 3D tools do.
 
-use std::f32::consts::{FRAC_PI_2, PI};
+use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI};
 use std::ops::ControlFlow;
 use std::time::Duration;
 
@@ -49,10 +49,11 @@ impl Writable for Camera {}
 /// An enum of `Orthographic { height, near, far }` and `Perspective { fov, near }`, its field of
 /// view shown in degrees, set whole. It refuses one that can't project (`engine.bad_projection`),
 /// on which rendering would panic, so that nothing reflection makes, as scenes, operations and
-/// the Inspector do, panics the render thread.
+/// the Inspector do, panics the render thread. Its fields' defaults, which project, are Hazel's
+/// scene camera's: 10 units high, from 1 behind to 1 in front; and 45°, from 0.01 in front.
 impl Reflect for Projection {
     fn describe(types: &mut Types) -> Result<Type> {
-        let field = |name: &'static str, show, doc: &'static str| Field {
+        let field = |name: &'static str, show, default: f32, doc: &'static str| Field {
             name: name.into(),
             ty: Type::F32,
             meta: Meta {
@@ -60,6 +61,7 @@ impl Reflect for Projection {
                 doc: doc.into(),
                 ..Meta::default()
             },
+            default: Some(default.to_value()),
         };
         let variants = vec![
             reflect::Variant {
@@ -68,16 +70,19 @@ impl Reflect for Projection {
                     field(
                         "height",
                         Show::Plain,
+                        10.0,
                         "How much of the world the view spans from bottom to top: more than 0.",
                     ),
                     field(
                         "near",
                         Show::Plain,
+                        -1.0,
                         "Where what it shows starts, in front of it; behind it, if negative.",
                     ),
                     field(
                         "far",
                         Show::Plain,
+                        1.0,
                         "Where what it shows ends, in front of it, other than its near.",
                     ),
                 ],
@@ -89,12 +94,14 @@ impl Reflect for Projection {
                     field(
                         "fov",
                         Show::Degrees,
+                        FRAC_PI_4,
                         "How much the view spans from bottom to top: more than 0° and less than \
                          180°.",
                     ),
                     field(
                         "near",
                         Show::Plain,
+                        0.01,
                         "How far in front of it what it shows starts, more than 0; it shows all \
                          beyond, however far.",
                     ),
@@ -875,6 +882,42 @@ mod tests {
             let back = Projection::from_value(&projection.to_value()).expect("it projects");
             assert_eq!(format!("{back:?}"), format!("{projection:?}"));
         }
+    }
+
+    /// A camera's default, which an add makes, is orthographic, 10 units high, and projects; and
+    /// it isn't primary, so that adding one changes no view. Switched to perspective by default,
+    /// it's 45° from 0.01 in front, and projects too.
+    #[test]
+    fn a_cameras_default_projects_and_isnt_primary() {
+        let mut world = World::default();
+        world.register::<Camera>().expect("registered");
+        let camera = world.default_of("Camera").expect("a default");
+        let camera = Camera::from_value(&camera).expect("made");
+        let orthographic = Projection::Orthographic {
+            height: 10.0,
+            near: -1.0,
+            far: 1.0,
+        };
+        assert_eq!(
+            camera,
+            Camera {
+                projection: orthographic,
+                primary: false,
+            }
+        );
+        assert!(camera.projection.projects());
+        let types = world.types();
+        let projection = types.find("Projection").expect("described");
+        let Shape::Enum(variants) = &types.info(projection).shape else {
+            panic!("a projection is an enum");
+        };
+        let perspective = types.variant_default(&variants[1]).expect("a default");
+        let perspective = Projection::from_value(&perspective).expect("it projects");
+        let expected = Projection::Perspective {
+            fov: FRAC_PI_4,
+            near: 0.01,
+        };
+        assert_eq!(perspective, expected);
     }
 
     /// A named camera saves as its fields, its name as `Name: ("Camera")`, and what a load of it

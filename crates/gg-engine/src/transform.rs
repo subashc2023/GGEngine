@@ -19,6 +19,7 @@ pub struct Transform {
     pub translation: Vec3,
     /// As a unit quaternion.
     pub rotation: Quat,
+    #[reflect(default = Vec3::ONE)]
     pub scale: Vec3,
 }
 

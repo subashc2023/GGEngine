@@ -112,7 +112,7 @@ impl Editor {
 #[derive(Clone, Copy, Component)]
 struct CameraController {
     /// How fast it goes, in units a second.
-    #[reflect(min = 0.0)]
+    #[reflect(min = 0.0, default = 5.0)]
     speed: f32,
     /// Which way it goes, across and up; one longer than 1 goes no faster than 1 does.
     heading: Vec2,

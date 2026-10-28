@@ -25,10 +25,10 @@ impl Writable for Sprite {}
 
 /// Taken apart whole, so that a field `gg-renderer` adds fails to compile here until it's
 /// described. Its texture is opaque, so that no value makes the index of a texture, which shaders
-/// sample unchecked.
+/// sample unchecked. Its fields' defaults are the default sprite's.
 impl Reflect for Sprite {
     fn describe(types: &mut Types) -> Result<Type> {
-        let field = |name: &'static str, ty, show, doc: &'static str| Field {
+        let field = |name: &'static str, ty, show, default, doc: &'static str| Field {
             name: name.into(),
             ty,
             meta: Meta {
@@ -36,7 +36,9 @@ impl Reflect for Sprite {
                 doc: doc.into(),
                 ..Meta::default()
             },
+            default,
         };
+        let base = Sprite::default();
         let doc =
             "What a sprite shows: a rectangle of a texture, tinted, on a square a unit across.";
         types.add::<Self>("Sprite".into(), doc.into(), |types| {
@@ -45,6 +47,7 @@ impl Reflect for Sprite {
                     "color",
                     Type::Vec4,
                     Show::Color,
+                    Some(base.color.to_value()),
                     "In linear RGBA, alpha not multiplied in, which multiplies the texture's \
                      colors and alpha.",
                 ),
@@ -52,12 +55,14 @@ impl Reflect for Sprite {
                     "texture",
                     Type::Opaque,
                     Show::Plain,
+                    None,
                     "The texture it shows, which code sets.",
                 ),
                 field(
                     "rect",
                     <[Vec2; 2]>::describe(types)?,
                     Show::Plain,
+                    Some(base.rect.to_value()),
                     "The part of the texture it shows, its top left then its bottom right, from \
                      (0, 0) at the texture's top left to (1, 1) at its bottom right.",
                 ),
@@ -65,6 +70,7 @@ impl Reflect for Sprite {
                     "sampler",
                     Sampler::describe(types)?,
                     Show::Plain,
+                    Some(base.sampler.to_value()),
                     "How the texture is sampled.",
                 ),
             ];

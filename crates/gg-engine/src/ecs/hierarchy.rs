@@ -180,6 +180,14 @@ impl World {
         Ok(iter::successors(first, next).map(|slot| self.entity_at(slot)))
     }
 
+    /// `entity`'s parent, as its [`Parent`] has it; `None` if it's a root.
+    ///
+    /// Fails with `ecs.no_entity` if it isn't alive.
+    pub fn parent(&self, entity: Entity) -> Result<Option<Entity>> {
+        self.locate(entity)?;
+        Ok(self.parent_of(entity.index))
+    }
+
     /// Removes `entity`, its components and its descendants, children before their parents.
     ///
     /// Fails with `ecs.no_entity` if it isn't alive, removing nothing.

@@ -17,9 +17,9 @@ impl World {
     /// type registers the first time an entity has one too, so this is for those that tools should
     /// list before then.
     ///
-    /// Fails with `reflect.name_taken` if another type has its name, and with `ecs.bad_exclusive`
-    /// if it names an exclusive field that isn't a `bool` of its own, as
-    /// [`Component::exclusive`] says.
+    /// Fails with `reflect.name_taken` if another type has its name; with `reflect.bad_default` if
+    /// a field's default is outside its bounds, or opaque; and with `ecs.bad_exclusive` if it
+    /// names an exclusive field that isn't a `bool` of its own, as [`Component::exclusive`] says.
     pub fn register<T: Component>(&mut self) -> Result<()> {
         self.components.register::<T>().map(drop)
     }
@@ -34,6 +34,30 @@ impl World {
         self.components.names()
     }
 
+    /// The default of component type `component`, as [`Types::default_value`] makes it, and as
+    /// an add of it makes it: what's opaque, from [`Component::base`]. So what it returns adds,
+    /// as [`Operation::Add`](crate::Operation::Add)'s value; descriptions don't change once
+    /// they're registered, so it's the same each time.
+    ///
+    /// Fails with `reflect.unknown_type` if no component type is named `component`; as
+    /// `default_value` does, such as with `reflect.no_default` for an entity; and as an add does
+    /// for a value it refuses, such as with `reflect.opaque` for one opaque as a whole without a
+    /// `base`, which a [`MeshDraw`](crate::MeshDraw) is. Every error names the component, and the
+    /// path to where it failed.
+    pub fn default_of(&self, component: &str) -> Result<Value> {
+        let id = self.named(component)?;
+        let about = |error: Error| {
+            let (at, what) = reflect::located(&error);
+            let message = format!("can't make a default `{at}`: {what}");
+            error.with_message(message)
+        };
+        let ty = self.components.ty(id);
+        let value = self.types().default_value(&ty, &reflect::Meta::default());
+        let value = value.map_err(|error| about(reflect::within(error, component)))?;
+        self.build(id, component, &value).map_err(about)?;
+        Ok(value)
+    }
+
     /// The living entities, table by table, in the order queries find them; with `with`, those
     /// with that component. Skipping entities skips whole tables, so a page of them costs a step a
     /// table, and one for each entity on the page.
@@ -41,18 +65,29 @@ impl World {
     /// Fails with `reflect.unknown_type` if no component type is named `with`.
     pub fn entities(&self, with: Option<&str>) -> Result<Entities<'_>> {
         let with = with.map(|name| self.named(name)).transpose()?;
-        let len = self
-            .tables
-            .iter()
-            .filter(|table| has(table, with))
-            .map(|table| table.entities.len())
-            .sum();
-        Ok(Entities {
-            tables: self.tables.iter(),
-            with,
-            rows: slice::Iter::default(),
-            len,
-        })
+        Ok(self.listing(with, None))
+    }
+
+    /// The roots of the hierarchy: the living entities without a [`Parent`], table by table, in
+    /// the order queries find them, and skipped a table at a time, as
+    /// [`entities`](Self::entities) are.
+    pub fn roots(&self) -> Entities<'_> {
+        self.listing(None, Some(self.parent_type()))
+    }
+
+    /// `entity`'s place among the [`roots`](Self::roots), which costs a step a table to find;
+    /// `None` if it isn't alive, or is a child.
+    pub fn root_index(&self, entity: Entity) -> Option<usize> {
+        let at = self.location(entity)?;
+        let parent = Some(self.parent_type());
+        let table = at.table as usize;
+        if !has(&self.tables[table], None, parent) {
+            return None;
+        }
+        let roots = self.tables[..table].iter();
+        let roots = roots.filter(|table| has(table, None, parent));
+        let before: usize = roots.map(|table| table.entities.len()).sum();
+        Some(before + at.row as usize)
     }
 
     /// The names of `entity`'s components' types, in the order they registered.
@@ -184,6 +219,30 @@ impl World {
         };
         Ok(column)
     }
+
+    /// The id of [`Parent`], which every world has registered.
+    fn parent_type(&self) -> ComponentId {
+        let id = self.component::<Parent>();
+        id.expect("every world has registered `Parent`")
+    }
+
+    /// The living entities of the tables with component `with` and without `without`, of those
+    /// given.
+    fn listing(&self, with: Option<ComponentId>, without: Option<ComponentId>) -> Entities<'_> {
+        let len = self
+            .tables
+            .iter()
+            .filter(|table| has(table, with, without))
+            .map(|table| table.entities.len())
+            .sum();
+        Entities {
+            tables: self.tables.iter(),
+            with,
+            without,
+            rows: slice::Iter::default(),
+            len,
+        }
+    }
 }
 
 /// `error`, from `doing`, such as getting or setting, the field at `path` of `entity`'s
@@ -201,16 +260,17 @@ pub(super) fn about(
     error.with_message(message)
 }
 
-/// Whether `table` has component `with`, if it's given.
-fn has(table: &Table, with: Option<ComponentId>) -> bool {
-    with.is_none_or(|id| table.has(id))
+/// Whether `table` has component `with` and hasn't `without`, of those given.
+fn has(table: &Table, with: Option<ComponentId>, without: Option<ComponentId>) -> bool {
+    with.is_none_or(|id| table.has(id)) && without.is_none_or(|id| !table.has(id))
 }
 
-/// The entities [`World::entities`] lists, table by table.
+/// The entities [`World::entities`] and [`World::roots`] list, table by table.
 pub struct Entities<'w> {
     /// The tables after the one it's in.
     tables: slice::Iter<'w, Table>,
     with: Option<ComponentId>,
+    without: Option<ComponentId>,
     /// The rows left of the table it's in.
     rows: slice::Iter<'w, Entity>,
     /// The entities left.
@@ -218,10 +278,10 @@ pub struct Entities<'w> {
 }
 
 impl Entities<'_> {
-    /// Moves to the next table that has the component, and returns whether there was one.
+    /// Moves to the next table it lists, and returns whether there was one.
     fn next_table(&mut self) -> bool {
-        let with = self.with;
-        match self.tables.find(|table| has(table, with)) {
+        let (with, without) = (self.with, self.without);
+        match self.tables.find(|table| has(table, with, without)) {
             Some(table) => {
                 self.rows = table.entities.iter();
                 true
@@ -1029,5 +1089,60 @@ mod tests {
             error.to_string().contains("`A`, `B` and `Transform`"),
             "{error}"
         );
+    }
+
+    /// Panics unless `world`'s roots are its living entities without a parent, in the order
+    /// queries find them, skipped as they're listed, each at its place, and that `gone` and the
+    /// children have none.
+    fn check_roots(world: &World, gone: &[Entity]) {
+        let living: Vec<Entity> = world.query::<Entity>().collect();
+        let expected: Vec<Entity> = living
+            .iter()
+            .copied()
+            .filter(|&entity| world.get::<Parent>(entity).is_none())
+            .collect();
+        assert_eq!(world.roots().len(), expected.len());
+        assert_eq!(world.roots().collect::<Vec<_>>(), expected);
+        for first in 0..=expected.len() {
+            let mut roots = world.roots();
+            assert_eq!(roots.nth(first), expected.get(first).copied(), "{first}");
+            assert_eq!(roots.len(), expected.len().saturating_sub(first + 1));
+        }
+        for entity in living {
+            let at = expected.iter().position(|&root| root == entity);
+            assert_eq!(world.root_index(entity), at, "{entity}");
+        }
+        for &gone in gone {
+            assert_eq!(world.root_index(gone), None, "{gone}");
+        }
+    }
+
+    #[test]
+    fn roots_are_listed_and_placed_a_table_at_a_time() {
+        let mut world = World::default();
+        check_roots(&world, &[]);
+        // Tables of A, of A's children, which sit between tables of roots, of A and B, and of B.
+        let a: Vec<Entity> = (0..4).map(|_| world.spawn(A)).collect();
+        world.set_parent(a[1], Some(a[0])).expect("no cycle");
+        let both: Vec<Entity> = (0..3).map(|i| world.spawn((A, B(i)))).collect();
+        let b: Vec<Entity> = (0..2).map(|i| world.spawn(B(i))).collect();
+        world.set_parent(b[1], Some(both[2])).expect("no cycle");
+        check_roots(&world, &[]);
+        assert_eq!(world.parent(b[1]).expect("alive"), Some(both[2]));
+        // A root despawned from the middle of its table, whose last row takes its place.
+        world.despawn(both[0]).expect("alive");
+        check_roots(&world, &[both[0]]);
+        // A root moved to another table's end, and a child made a root again.
+        world.insert(a[2], B(9)).expect("alive");
+        world.set_parent(a[1], None).expect("a root");
+        check_roots(&world, &[both[0]]);
+        world.remove::<B>(a[2]).expect("alive");
+        check_roots(&world, &[both[0]]);
+        // A parent despawned takes its child with it.
+        world.despawn(both[2]).expect("alive");
+        check_roots(&world, &[both[0], both[2], b[1]]);
+        assert_eq!(world.parent(a[0]).expect("alive"), None);
+        let error = world.parent(b[1]).expect_err("despawned");
+        assert_eq!(error.code(), "ecs.no_entity");
     }
 }

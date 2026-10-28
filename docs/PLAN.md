@@ -383,6 +383,34 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   squares 258 px down the view, 2.499 units; the Inspector showed its heading while held and 0
   after; a right press mid-hold handed the view back to the editor's camera with "Camera" stopped
   where it was; and File > Quit exited cleanly.
+- **The panels** (2026-10-28): the Entities panel shows the world's hierarchy as a tree, finding
+  only the rows in view, whose arrows open and close a parent's rows; it creates empty entities
+  and children and deletes subtrees, from the Entity menu, a row's context menu and the one below
+  the rows, where a click unpicks. The Inspector panel switches an enum's variant, as a camera's
+  projection, to the fields it last had while the entity was drawn, or else their defaults; sets a
+  vector a component at a time, each beside a button of its axis that resets it to its default, as
+  a rotation's angles have; adds components, of their types' defaults, and removes them. Each is
+  an operation or a set that the Inspector's log undoes, queued for its next tick as a command
+  that recordings keep. Reflection gives a field a default, the one `#[reflect(default = ...)]`
+  gives, checked as its type registers (`reflect.bad_default`), or else its type's, and refuses one
+  for an entity or a type that holds itself without end (`reflect.no_default`); `World::default_of`
+  makes a component's, and `World::roots`, `root_index` and `parent` list the hierarchy. Unit tests
+  check the defaults of every kind under bounds, hints read through the derive, a bad default
+  refused at registration, a cycle, every engine component's default made, and two compile-fail
+  doctests; roots and their places through spawns, parenting, despawns and table moves; the tree's
+  pages against a listing of every row at offsets up to 50,000, a frame scrolled over thousands of
+  roots, and arrows on parents alone; creating, deleting, adding and removing from each menu,
+  undone and redone, and a menu acting on its entity as its row moves; the commands as values;
+  switching variants and back, a variant holding what's opaque disabled, each axis's reset, a drag
+  of one axis while a system moves another, and sets of a vector and of its components drawn in
+  order; and the sandbox's references and live recording replay unchanged. By hand on the RTX 4090:
+  Entity > Create Empty picked "Empty Entity"; Add Component gave it a white square and an
+  orthographic camera, height 10, not primary, which left the view as it was; Perspective showed
+  fov 45° and Edit > Undo took it back; Blue's Z and scale X buttons set them to 0 and 1, an edit
+  each, named by its path; Remove Component took the square away; Create Empty Child showed the
+  child under its parent's open row, whose arrow closed and opened it; Delete despawned it, Undo
+  brought it back under its parent, and a click below the rows unpicked; the sandbox's Entity >
+  Unpick unpicked its triangle; and File > Quit exited both cleanly.
 
 ## Now: the editor's next milestone, or Phase 5's first
 
@@ -579,16 +607,15 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | `MeshDraw` parameters of more than 64 bytes, which draw through `Context::draw` | Phase 6, with materials |
 | Micro-benchmarks, with criterion | A CPU hot path gets a target of its own; batching's is a frame time, which `engine.perf` measures |
 | Gates on time in CI: hosted runners' times vary too much to gate on | A self-hosted runner, as for the GPU tests |
-| A component type's default as a value, to add one without giving every field; `Create` and `Add` take whole values | The Inspector or the tool API adds components |
 | Moving values to a type that changed: matching fields by name and by alias, defaults for fields added, and fields dropped; a scene with a field its type hasn't, or without one it has, is refused | Phase 5, when `Sprite` gains its texture's name, or with its hot reload |
-| In the Inspector, turning an option on or off, switching to a variant with fields, as a camera's projection from orthographic to perspective, and adding or removing a list's elements; by path, a value sets them whole | Someone switches a camera's projection in the Inspector, or another component needs one edited |
+| In the Inspector, turning an option on or off, and adding or removing a list's elements; by path, a value sets them whole | A component needs one edited |
 | `Sprite.texture` and `MeshDraw` are opaque: shown, but not set, saved, hashed or carried across a rebuild | Phase 5, which names assets |
 | Flags for fields that saving, the world's hash or replication skip, and fields that are read only; `Parent` is read only as a whole type, which `set_field` refuses | Each with its first user |
 | Generic types deriving `Reflect` or `Component` | A game needs one |
 | Drag speeds as hints; the Inspector picks them from a field's bounds and kind | A field drags too coarsely or too finely |
-| The Inspector setting only the part of a vector that changed, at its own path, such as `translation.x`: it sets the whole vector, as the panel last read it, after the ticks of the layers below it, so that dragging the x of something that moves, as the editor's driven cameras and the sandbox's triangle do, holds its y where it was, and an undo takes back the moves made since too | Someone edits something as it moves |
+| The Inspector setting only the part that changed of a rotation, and of a vector inside an option or a variant: it sets them whole, as the panel last read them, after the ticks of the layers below it, so that turning one angle of something that spins, as the sandbox's triangle does, holds the others where they were, and an undo takes back the spin made since too | Someone edits a rotation, or a vector held so, as it moves |
 | Paths resolved once and kept, for sets made again and again | A profile |
-| Picking an entity for a field, a parent or a child picked by clicking it, the Entities panel as a tree, and picking in the view; entities are shown by their names, where they have one, and their IDs, and found by an ID pasted in | Picking in the view, or Phase 9's scene tree |
+| Picking an entity for a field, a parent or a child picked by clicking it, and picking in the view; the Entities panel scrolling to an entity found, or to a root that an add or a remove moved to the end of another table, and so of the tree's roots; entities are shown by their names, where they have one, and their IDs, and found by an ID pasted in | Picking in the view, or Phase 9's scene tree |
 | Finding an entity by its name: the Find field takes an ID | A world names more entities than the Entities panel shows at once |
 | Entities rows of one line: a row wider than its panel wraps, as one whose name has a line break does, though the list skips the rows out of view as though each were one line tall, as egui's `show_rows` takes them; and an empty name shows as it is | A world of more entities than the panel shows, in a narrow panel, or names from players |
 | World transforms stored and propagated after the ticks, with change detection; drawing computes each child's from its ancestors, every frame, as the latest tick left them, for its z, and blended between ticks, to draw it | Physics, or a profile showing the walks up the hierarchy |
@@ -620,8 +647,12 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Replaying a log into another world, which maps values' handles to IDs, as a recording's commands are; `set_field` and operations store a dead handle without complaint | Phase 5, the tool API |
 | A delete saying what refers to its entities from outside, or refusing; those references dangle until it's undone, and the world doesn't save in between | An agent deletes through the tool API |
 | Undoing a create whose entity has children since that the create didn't make, such as game code gave it, by keeping them where they are; it's refused (`ecs.has_children`), and the log drops it | An agent attaches children to what another's create made, or the editor |
-| Layers holding what a restore takes back: the sandbox's swarm is in the world, but the Inspector's log and pick outlive a restore, and nothing tells a layer that `Context`'s world was restored, so the sandbox doesn't snapshot | The Inspector or the tool API deletes, or something restores the running world, such as rollback or Phase 5's restart |
-| Creating, deleting, adding, removing and reparenting from the Inspector, which sets fields | The editor, or a game's tools |
+| Layers holding what a restore takes back: the sandbox's swarm is in the world, but the Inspector's log and pick outlive a restore, and nothing tells a layer that `Context`'s world was restored, so the sandbox doesn't snapshot | Something restores the running world, such as rollback or Phase 5's restart |
+| Reparenting from the panels: dragging a row onto another, and taking a `Parent` away, as Remove Component would, making its entity a root; `Parent` is read only, so the Inspector offers neither | The editor's scene tree |
+| Duplicating an entity, with its descendants, from the panels | Someone duplicates from the panels, as Hazel's later episodes do |
+| Picking several entities, to edit or delete them at once | Someone edits many entities alike |
+| A search field in Add Component's menu, which lists every type registered | A game registers more types than the menu shows at once |
+| A Delete key for the entity picked: keys reach egui even while the view has them, so it would delete during play, as Ctrl+Z undoes during it; the Entity menu and a row's context menu delete | Keys go to the panel under the pointer, or the view takes them from egui |
 | A bound on the log, which keeps a session's entries, a delete's components and slots among them, until it's cleared | A session's memory shows it |
 | A log that outlives a run or a restore: inverses that keep components typed can't be saved, and a restored world refuses every inverse from before, the slots kept when the snapshot was taken staying unused; a snapshot could keep the log's place, which a restore would rewind it to | Phase 5's restart from a snapshot |
 | A depth limit on values set or created by name, as scenes' 64; a deeper one recurses without one | The tool API takes values from outside |

@@ -69,7 +69,7 @@ pub enum Operation {
 
 impl Operation {
     /// The entity it changes or creates; `None` for a create given no ID, until it's applied.
-    pub(super) fn entity(&self) -> Option<EntityId> {
+    pub(crate) fn entity(&self) -> Option<EntityId> {
         match self {
             Self::Create { entity, .. } => *entity,
             Self::Delete { entity }
@@ -656,7 +656,12 @@ impl World {
 
     /// Component `id`, of the type named `name`, made from `value` as a scene's is, in a one-row
     /// column; checked as `set_field` checks a value.
-    fn build(&self, id: ComponentId, name: &str, value: &Value) -> Result<Box<dyn AnyColumn>> {
+    pub(super) fn build(
+        &self,
+        id: ComponentId,
+        name: &str,
+        value: &Value,
+    ) -> Result<Box<dyn AnyColumn>> {
         let at = |error: Error| {
             let (inner, what) = reflect::located(&error);
             let message = format!("at `{}`: {what}", reflect::join(name, &inner));

@@ -46,8 +46,8 @@ struct Info {
 impl Components {
     /// `T`'s id, which it gets once it's described, the first time it's asked for.
     ///
-    /// Fails as describing it does, such as with `reflect.name_taken`; and with
-    /// `ecs.bad_exclusive` if it names an exclusive field that isn't a `bool` of its own, as
+    /// Fails as describing it does, such as with `reflect.name_taken` or `reflect.bad_default`; and
+    /// with `ecs.bad_exclusive` if it names an exclusive field that isn't a `bool` of its own, as
     /// [`Component::exclusive`] says.
     pub fn register<T: Component>(&mut self) -> Result<ComponentId> {
         if let Some(&id) = self.ids.get(&TypeId::of::<T>()) {

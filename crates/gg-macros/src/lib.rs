@@ -488,6 +488,17 @@ impl<'a> Field<'a> {
     fn describe(&self) -> TokenStream {
         let r = reflect();
         let Self { name, ty, doc, .. } = self;
+        let default = match &self.hints.default {
+            // Bound to its type first, so that one of another type is reported at it, as a
+            // mismatch.
+            Some(expr) => quote! {
+                ::std::option::Option::Some({
+                    let default: #ty = #expr;
+                    <#ty as #r::Reflect>::to_value(&default)
+                })
+            },
+            None => quote!(::std::option::Option::None),
+        };
         let ty = match self.hints.opaque {
             Some(_) => quote!(#r::Type::Opaque),
             None => quote!(<#ty as #r::Reflect>::describe(types)?),
@@ -517,6 +528,7 @@ impl<'a> Field<'a> {
                     show: #show,
                     doc: ::std::borrow::Cow::Borrowed(#doc),
                 },
+                default: #default,
             }
         }
     }
@@ -608,6 +620,8 @@ fn once<T>(hint: &mut Option<T>, value: T, meta: &ParseNestedMeta) -> syn::Resul
 struct FieldHints {
     min: Option<Bound>,
     max: Option<Bound>,
+    /// An expression of its type, in its own unit.
+    default: Option<Expr>,
     degrees: Option<Span>,
     color: Option<Span>,
     opaque: Option<Span>,
@@ -625,6 +639,9 @@ impl FieldHints {
                 } else if meta.path.is_ident("max") {
                     let bound = Bound::parse(&meta)?;
                     once(&mut hints.max, bound, &meta)
+                } else if meta.path.is_ident("default") {
+                    let default = meta.value()?.parse()?;
+                    once(&mut hints.default, default, &meta)
                 } else if meta.path.is_ident("degrees") {
                     once(&mut hints.degrees, span, &meta)
                 } else if meta.path.is_ident("color") {
@@ -634,8 +651,9 @@ impl FieldHints {
                 } else {
                     Err(meta.error(
                         "unknown hint: a field takes `min = ..` and `max = ..`, which bound it, \
-                         `degrees` for an angle in radians, `color` for a linear color, and \
-                         `opaque`, which reflection keeps but doesn't read",
+                         `default = ..`, its value unless something says otherwise, `degrees` \
+                         for an angle in radians, `color` for a linear color, and `opaque`, \
+                         which reflection keeps but doesn't read",
                     ))
                 }
             })?;
@@ -646,12 +664,13 @@ impl FieldHints {
                 "a field is shown in degrees or as a color, not both",
             ));
         }
-        let shown = hints.min.is_some()
+        let other = hints.min.is_some()
             || hints.max.is_some()
+            || hints.default.is_some()
             || hints.degrees.is_some()
             || hints.color.is_some();
         if let Some(opaque) = hints.opaque
-            && shown
+            && other
         {
             return Err(syn::Error::new(
                 opaque,

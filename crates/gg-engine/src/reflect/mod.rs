@@ -128,6 +128,11 @@ pub struct Field {
     pub name: Name,
     pub ty: Type,
     pub meta: Meta,
+    /// What it is unless something says otherwise, as in a component added, if its description
+    /// gives it, as `#[reflect(default = ..)]` does: otherwise its type's, under its bounds, as
+    /// [`Types::field_default`] makes it. The field's, not its [`Meta`]'s, which reaches its parts
+    /// and elements: a vector's default isn't its components'.
+    pub default: Option<Value>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -221,8 +226,9 @@ impl Types {
     /// types they hold. A type already described isn't again, so that a recursive type, such as
     /// `struct Node { kids: Vec<Node> }`, describes itself once.
     ///
-    /// Fails with `reflect.name_taken` if another type has `name`, and as `describe` does: either
-    /// way it leaves the types as they were, without `T` or any type described since.
+    /// Fails with `reflect.name_taken` if another type has `name`; with `reflect.bad_default` if a
+    /// field's [`default`](Field::default) is outside its bounds, or opaque; and as `describe`
+    /// does: either way it leaves the types as they were, without `T` or any type described since.
     pub fn add<T: ?Sized + 'static>(
         &mut self,
         name: Name,
@@ -258,19 +264,210 @@ impl Types {
         });
         self.by_name.insert(name, index);
         self.by_type.insert(type_id, index);
-        match describe(self) {
-            Ok(shape) => {
-                self.entries[index.0 as usize].info.shape = shape;
-                Ok(Type::Named(index))
+        // Every type described since too, now that each has its shape: a default that holds this
+        // type, in a type it holds, was checked against its placeholder.
+        let described = describe(self).and_then(|shape| {
+            self.entries[index.0 as usize].info.shape = shape;
+            let len = self.entries.len() as u32;
+            (index.0..len).try_for_each(|i| self.check_defaults(TypeIndex(i)))
+        });
+        if let Err(error) = described {
+            for entry in self.entries.drain(index.0 as usize..) {
+                self.by_name.remove(&entry.info.name);
+                self.by_type.remove(&entry.type_id);
             }
-            Err(error) => {
-                for entry in self.entries.drain(index.0 as usize..) {
-                    self.by_name.remove(&entry.info.name);
-                    self.by_type.remove(&entry.type_id);
-                }
-                Err(error)
-            }
+            return Err(error);
         }
+        Ok(Type::Named(index))
+    }
+
+    /// Checks the defaults that `index`'s fields, and its variants', give against their bounds,
+    /// as [`check`] checks a value set: what's not given is made within them. One that's opaque
+    /// as a whole is refused, since it would give nothing: what's opaque is kept, not made.
+    fn check_defaults(&self, index: TypeIndex) -> Result<()> {
+        let info = self.info(index);
+        // The fields of the struct, or of its variant `variant`.
+        let checked = |fields: &[Field], variant: Option<&Name>| -> Result<()> {
+            let owner = || match variant {
+                Some(variant) => format!("{}::{variant}", info.name),
+                None => info.name.to_string(),
+            };
+            for field in fields {
+                let Some(default) = &field.default else {
+                    continue;
+                };
+                if matches!(default, Value::Opaque) {
+                    let message = format!(
+                        "`{}`'s field `{}` is opaque, which reflection keeps but doesn't make, so \
+                         it takes no default",
+                        owner(),
+                        field.name
+                    );
+                    return Err(Error::new("reflect.bad_default", message));
+                }
+                check(self, &field.ty, &field.meta, default).map_err(|error| {
+                    let (path, what) = located(&error);
+                    let message = format!(
+                        "`{}`'s field `{}` defaults to a value it refuses: {what}",
+                        owner(),
+                        join(&field.name, &path)
+                    );
+                    Error::new("reflect.bad_default", message)
+                })?;
+            }
+            Ok(())
+        };
+        match &info.shape {
+            Shape::Struct { fields, .. } => checked(fields, None),
+            Shape::Enum(variants) => variants
+                .iter()
+                .try_for_each(|variant| checked(&variant.fields, Some(&variant.name))),
+            Shape::Opaque => Ok(()),
+        }
+    }
+
+    /// The default of a value of `ty`, in a field of hints `meta`, whose bounds alone it reads, for
+    /// its numbers, its vectors' components and its elements: [`Meta::default`] gives none. A
+    /// number is 0, or the bound nearest 0 if 0 is outside them, rounded to an integer of its
+    /// type inside them, or for an `f32`, to the `f32` it's compared with; a bool is false; a
+    /// quaternion the identity; a string empty; an option `None`; a list empty; an array that many
+    /// of its element's default; a struct each field's [`field_default`](Self::field_default); an
+    /// enum its first variant, as [`variant_default`](Self::variant_default) makes it; and
+    /// what's opaque [`Value::Opaque`], which keeps what a component's
+    /// [`base`](crate::Component::base) gives it.
+    ///
+    /// Fails with `reflect.no_default` for an entity, of which there's none to name; for a number
+    /// whose bounds leave none of its type between them; for an enum without variants; and for a
+    /// type whose default holds one of its own without end, which only a description written by
+    /// hand can give, since a derived type holds itself only in an option or a list. The path to
+    /// where it failed leads the message.
+    pub fn default_value(&self, ty: &Type, meta: &Meta) -> Result<Value> {
+        self.default_inside(ty, meta, &mut Vec::new())
+    }
+
+    /// The default of `field`: the one its description gives, or else its type's under its
+    /// bounds, as [`default_value`](Self::default_value) makes it, and fails.
+    pub fn field_default(&self, field: &Field) -> Result<Value> {
+        self.field_inside(field, &mut Vec::new())
+    }
+
+    /// `variant`, with each field's [`field_default`](Self::field_default), as switching an enum
+    /// to it makes it; an enum's default is its first variant's.
+    ///
+    /// Fails as `field_default` does, at the field that failed.
+    pub fn variant_default(&self, variant: &Variant) -> Result<Value> {
+        self.variant_inside(variant, &mut Vec::new())
+    }
+
+    /// [`default_value`](Self::default_value), inside the defaults of `named`, from the outside
+    /// in: a cycle is found as a type it holds already, rather than by how deep it goes.
+    fn default_inside(&self, ty: &Type, meta: &Meta, named: &mut Vec<TypeIndex>) -> Result<Value> {
+        let none = || no_number(self, ty, meta);
+        // Finite, as `check` takes only finite numbers: a bound beyond an `f32`'s range rounds to
+        // an infinite one.
+        let component = || {
+            let x = nearest_zero(meta, Bound::as_f32, Bound::as_f32);
+            x.filter(|x| x.is_finite()).ok_or_else(none)
+        };
+        let value = match ty {
+            Type::Bool => Value::Bool(false),
+            &Type::Int { bits, signed } => {
+                let (least, most) = if signed {
+                    (-(1i128 << (bits - 1)), (1i128 << (bits - 1)) - 1)
+                } else {
+                    (0, (1i128 << bits) - 1)
+                };
+                let n = nearest_zero(meta, ceiled, floored).filter(|n| (least..=most).contains(n));
+                let n = n.ok_or_else(none)?;
+                if signed {
+                    Value::Int(n as i64)
+                } else {
+                    Value::UInt(n as u64)
+                }
+            }
+            Type::F32 => Value::F32(component()?),
+            Type::F64 => {
+                let x = nearest_zero(meta, Bound::as_f64, Bound::as_f64);
+                Value::F64(x.filter(|x| x.is_finite()).ok_or_else(none)?)
+            }
+            Type::String => Value::String(String::new()),
+            Type::Vec2 => Value::Vec2(Vec2::splat(component()?)),
+            Type::Vec3 => Value::Vec3(Vec3::splat(component()?)),
+            Type::Vec4 => Value::Vec4(Vec4::splat(component()?)),
+            Type::Quat => Value::Quat(Quat::IDENTITY),
+            Type::Entity => {
+                return Err(Error::new(
+                    "reflect.no_default",
+                    "an entity has no default, since a handle to none can't be saved or set; a \
+                     field that may hold none is an `Option<Entity>`, whose default is `None`",
+                ));
+            }
+            Type::Option(_) => Value::Option(None),
+            Type::List(_) => Value::List(Vec::new()),
+            Type::Array(_, 0) => Value::List(Vec::new()),
+            Type::Array(inner, len) => {
+                let item = self.default_inside(inner, meta, named);
+                Value::List(vec![
+                    item.map_err(|error| within(error, "[0]"))?;
+                    *len as usize
+                ])
+            }
+            Type::Named(index) => {
+                let info = self.info(*index);
+                if named.contains(index) {
+                    return Err(Error::new(
+                        "reflect.no_default",
+                        format!("`{0}`'s default holds a `{0}`, without end", info.name),
+                    ));
+                }
+                named.push(*index);
+                let value = match &info.shape {
+                    Shape::Struct { fields, .. } => {
+                        self.fields_inside(fields, named).map(Value::Struct)
+                    }
+                    Shape::Enum(variants) => match variants.first() {
+                        Some(first) => self.variant_inside(first, named),
+                        None => Err(Error::new(
+                            "reflect.no_default",
+                            format!("`{}` has no variants, so it has no default", info.name),
+                        )),
+                    },
+                    Shape::Opaque => Ok(Value::Opaque),
+                };
+                named.pop();
+                value?
+            }
+            Type::Opaque => Value::Opaque,
+        };
+        Ok(value)
+    }
+
+    fn field_inside(&self, field: &Field, named: &mut Vec<TypeIndex>) -> Result<Value> {
+        match &field.default {
+            Some(default) => Ok(default.clone()),
+            None => self.default_inside(&field.ty, &field.meta, named),
+        }
+    }
+
+    /// Each of `fields`' defaults, by name.
+    fn fields_inside(
+        &self,
+        fields: &[Field],
+        named: &mut Vec<TypeIndex>,
+    ) -> Result<Vec<(Name, Value)>> {
+        let defaults = fields.iter().map(|field| {
+            let default = self.field_inside(field, named);
+            Ok((
+                field.name.clone(),
+                default.map_err(|error| within(error, &field.name))?,
+            ))
+        });
+        defaults.collect()
+    }
+
+    fn variant_inside(&self, variant: &Variant, named: &mut Vec<TypeIndex>) -> Result<Value> {
+        let fields = self.fields_inside(&variant.fields, named)?;
+        Ok(Value::Variant(variant.name.clone(), fields))
     }
 
     /// The type named `name`, if there's one.
@@ -314,10 +511,14 @@ impl Types {
 ///   need; and `opaque`, on a `Clone` type, has reflection keep its values but not read them, as
 ///   for a handle that a value must never make;
 /// - on a field, `min = ..` and `max = ..` bound its numbers, and its vectors' components, in its
-///   own unit, such as radians: a value set outside them is refused; `degrees` shows an `f32` of
-///   radians, or of radians a second, in degrees; `color` shows a `Vec3` or `Vec4` as a linear
-///   color, alpha not multiplied in; and `opaque` keeps a field of a `Clone` type that isn't
-///   reflected, which reads as [`Value::Opaque`].
+///   own unit, such as radians: a value set outside them is refused; `default = ..` gives its
+///   [`default`](Field::default), an expression of its type in its own unit, run as the type
+///   registers, which its bounds must take, though a field of a type opaque as a whole takes none
+///   (`reflect.bad_default`), and without it its type's is its default, under its bounds, as
+///   [`Types::default_value`] makes it; `degrees` shows an `f32` of radians, or of radians a
+///   second, in degrees; `color` shows a `Vec3` or `Vec4` as a linear color, alpha not multiplied
+///   in; and `opaque` keeps a field of a `Clone` type that isn't reflected, which reads as
+///   [`Value::Opaque`], and takes no other hint.
 ///
 /// Each hint is given once, and a variant takes none, nor does a field of an opaque type.
 ///
@@ -328,9 +529,9 @@ impl Types {
 /// /// How a light shines.
 /// #[derive(Clone, Component)]
 /// struct Light {
-///     #[reflect(color)]
+///     #[reflect(color, default = Vec3::ONE)]
 ///     color: Vec3,
-///     #[reflect(min = 0.0)]
+///     #[reflect(min = 0.0, default = 1.0)]
 ///     intensity: f32,
 ///     /// Of its cone, from its axis.
 ///     #[reflect(degrees, min = 0.0, max = 3.1416)]
@@ -353,8 +554,8 @@ impl Types {
 /// }
 /// ```
 ///
-/// Nor does a hint it doesn't know, one that doesn't suit its field, one given twice, or one on a
-/// variant or inside an opaque type:
+/// Nor does a hint it doesn't know, one that doesn't suit its field, one given twice or beside
+/// `opaque`, or one on a variant or inside an opaque type:
 ///
 /// ```compile_fail
 /// #[derive(Clone, gg_engine::Component)]
@@ -366,9 +567,19 @@ impl Types {
 /// struct Turned(#[reflect(degrees)] gg_engine::math::Vec3);
 /// ```
 ///
+/// ```compile_fail,E0308
+/// #[derive(Clone, gg_engine::Component)]
+/// struct Speed(#[reflect(default = 1)] f32);
+/// ```
+///
 /// ```compile_fail
 /// #[derive(Clone, gg_engine::Component)]
 /// struct Bounded(#[reflect(min = 0, min = 1)] f32);
+/// ```
+///
+/// ```compile_fail
+/// #[derive(Clone, gg_engine::Component)]
+/// struct Held(#[reflect(opaque, default = 0)] u32);
 /// ```
 ///
 /// ```compile_fail
@@ -737,12 +948,7 @@ fn in_range(meta: &Meta, number: Number) -> Result<()> {
         Number::Float(x) => x.is_finite(),
     };
     if !finite {
-        let range = match (meta.min, meta.max) {
-            (Some(min), Some(max)) => format!("from {min} to {max}"),
-            (Some(min), None) => format!("of {min} and up"),
-            (None, Some(max)) => format!("up to {max}"),
-            (None, None) => unreachable!("only a field with bounds is checked"),
-        };
+        let range = range(meta);
         return out(format!("{number} is outside the field's range, {range}"));
     }
     if let Some(min) = meta.min
@@ -756,6 +962,62 @@ fn in_range(meta: &Meta, number: Number) -> Result<()> {
         return out(format!("{number} is above the field's max, {max}"));
     }
     Ok(())
+}
+
+/// `meta`'s bounds, which it has, as a phrase: such as `from 0 to 1`.
+fn range(meta: &Meta) -> String {
+    match (meta.min, meta.max) {
+        (Some(min), Some(max)) => format!("from {min} to {max}"),
+        (Some(min), None) => format!("of {min} and up"),
+        (None, Some(max)) => format!("up to {max}"),
+        (None, None) => unreachable!("only bounds leave a number out"),
+    }
+}
+
+/// The number nearest 0 within `meta`'s bounds, its min as `least` rounds it and its max as
+/// `most` does: 0, or the bound nearest it if it's outside them; `None` if they leave none.
+fn nearest_zero<T: Copy + Default + PartialOrd>(
+    meta: &Meta,
+    least: fn(Bound) -> T,
+    most: fn(Bound) -> T,
+) -> Option<T> {
+    let zero = T::default();
+    let (min, max) = (meta.min.map(least), meta.max.map(most));
+    let nearest = match (min, max) {
+        (Some(min), _) if min > zero => min,
+        (_, Some(max)) if max < zero => max,
+        _ => zero,
+    };
+    let inside = min.is_none_or(|min| min <= nearest) && max.is_none_or(|max| nearest <= max);
+    inside.then_some(nearest)
+}
+
+/// The least integer that isn't below `bound`.
+fn ceiled(bound: Bound) -> i128 {
+    match bound {
+        Bound::Int(n) => n,
+        Bound::Float(x) => x.ceil() as i128,
+    }
+}
+
+/// The most integer that isn't above `bound`.
+fn floored(bound: Bound) -> i128 {
+    match bound {
+        Bound::Int(n) => n,
+        Bound::Float(x) => x.floor() as i128,
+    }
+}
+
+/// The error that `meta`'s bounds leave no value of `ty`, a number or a vector, between them.
+fn no_number(types: &Types, ty: &Type, meta: &Meta) -> Error {
+    Error::new(
+        "reflect.no_default",
+        format!(
+            "{} has no value in the field's range, {}, to be its default",
+            what_is(types, ty),
+            range(meta)
+        ),
+    )
 }
 
 /// Where a path leads in a type: the parts to take, from the outside in, the type it reaches, and
@@ -1650,6 +1912,412 @@ pub(crate) mod tests {
         let half = meta(Some(Bound::Float(0.5)), None);
         assert!(check(&int, &half, Value::Int(0)).is_err());
         assert!(check(&int, &half, Value::Int(1)).is_ok());
+    }
+
+    #[test]
+    fn a_type_defaults_to_zero_or_the_bound_nearest_it() {
+        let types = Types::default();
+        let meta = |min, max| Meta {
+            min,
+            max,
+            ..Meta::default()
+        };
+        let none = Meta::default;
+        let int = |bits, signed| Type::Int { bits, signed };
+        let entities = |len| Type::Array(Box::new(Type::Entity), len);
+        for (ty, meta, expected) in [
+            (Type::Bool, none(), Value::Bool(false)),
+            (int(8, true), none(), Value::Int(0)),
+            (int(8, false), none(), Value::UInt(0)),
+            (
+                int(32, true),
+                meta(Some(Bound::Int(3)), None),
+                Value::Int(3),
+            ),
+            (
+                int(32, true),
+                meta(None, Some(Bound::Int(-3))),
+                Value::Int(-3),
+            ),
+            // Rounded to an integer inside them.
+            (
+                int(8, false),
+                meta(Some(Bound::Float(0.5)), None),
+                Value::UInt(1),
+            ),
+            (
+                int(8, true),
+                meta(None, Some(Bound::Float(-0.5))),
+                Value::Int(-1),
+            ),
+            (
+                int(16, true),
+                meta(Some(Bound::Int(-5)), Some(Bound::Float(5.5))),
+                Value::Int(0),
+            ),
+            (
+                int(64, false),
+                meta(Some(Bound::Int(u64::MAX.into())), None),
+                Value::UInt(u64::MAX),
+            ),
+            (
+                int(64, true),
+                meta(None, Some(Bound::Int(i64::MIN.into()))),
+                Value::Int(i64::MIN),
+            ),
+            (Type::F32, none(), Value::F32(0.0)),
+            // As `check` compares with it: rounded to an f32.
+            (
+                Type::F32,
+                meta(Some(Bound::Float(0.1)), None),
+                Value::F32(0.1),
+            ),
+            (
+                Type::F64,
+                meta(Some(Bound::Float(0.1)), None),
+                Value::F64(0.1),
+            ),
+            (
+                Type::F64,
+                meta(None, Some(Bound::Int(-2))),
+                Value::F64(-2.0),
+            ),
+            (
+                Type::F32,
+                meta(Some(Bound::Int(-1)), Some(Bound::Int(1))),
+                Value::F32(0.0),
+            ),
+            (Type::Vec2, none(), Value::Vec2(Vec2::ZERO)),
+            (
+                Type::Vec3,
+                meta(Some(Bound::Int(1)), None),
+                Value::Vec3(Vec3::ONE),
+            ),
+            (
+                Type::Vec4,
+                meta(None, Some(Bound::Float(-0.5))),
+                Value::Vec4(Vec4::splat(-0.5)),
+            ),
+            (Type::Quat, none(), Value::Quat(Quat::IDENTITY)),
+            (Type::String, none(), Value::String(String::new())),
+            (
+                Type::Option(Box::new(Type::Entity)),
+                none(),
+                Value::Option(None),
+            ),
+            (
+                Type::List(Box::new(Type::Entity)),
+                none(),
+                Value::List(Vec::new()),
+            ),
+            (entities(0), none(), Value::List(Vec::new())),
+            (
+                Type::Array(Box::new(Type::F32), 3),
+                meta(Some(Bound::Int(2)), None),
+                Value::List(vec![Value::F32(2.0); 3]),
+            ),
+            (Type::Opaque, none(), Value::Opaque),
+        ] {
+            let made = types.default_value(&ty, &meta);
+            let made = made.unwrap_or_else(|error| panic!("{ty:?}, {meta:?}: {error}"));
+            assert!(same(&made, &expected), "{ty:?}, {meta:?}: {made:?}");
+            let checked = check(&types, &ty, &meta, &made);
+            assert!(checked.is_ok(), "{ty:?}, {meta:?}: {checked:?}");
+        }
+        for (ty, meta, says) in [
+            (
+                int(8, false),
+                meta(Some(Bound::Int(300)), None),
+                "a u8 has no value in the field's range, of 300 and up, to be its default",
+            ),
+            (int(8, false), meta(None, Some(Bound::Int(-1))), "up to -1"),
+            (
+                int(8, true),
+                meta(Some(Bound::Int(-200)), Some(Bound::Int(-150))),
+                "an i8 has no value in the field's range, from -200 to -150",
+            ),
+            (
+                int(32, true),
+                meta(Some(Bound::Float(0.5)), Some(Bound::Float(0.7))),
+                "from 0.5 to 0.7",
+            ),
+            (
+                int(64, true),
+                meta(Some(Bound::Int(i128::from(i64::MAX) + 1)), None),
+                "an i64",
+            ),
+            (
+                Type::F32,
+                meta(Some(Bound::Int(2)), Some(Bound::Int(1))),
+                "an f32 has no value in the field's range, from 2 to 1",
+            ),
+            (
+                Type::Vec2,
+                meta(Some(Bound::Int(2)), Some(Bound::Int(1))),
+                "a Vec2",
+            ),
+            // Beyond an f32's range, which rounds it to an infinite bound, outside every range.
+            (
+                Type::F32,
+                meta(Some(Bound::Float(1e39)), None),
+                "an f32 has no value in the field's range",
+            ),
+            (Type::Vec3, meta(None, Some(Bound::Float(-1e39))), "a Vec3"),
+            (Type::Entity, none(), "is an `Option<Entity>`"),
+            (entities(2), none(), "at `[0]`: an entity has no default"),
+        ] {
+            let error = types.default_value(&ty, &meta).expect_err(says);
+            assert_eq!(error.code(), "reflect.no_default", "{error}");
+            assert!(error.to_string().contains(says), "{error}");
+        }
+    }
+
+    /// Lit by its hints' defaults, but for `spare`'s, which is its type's, as `shade`'s is.
+    #[derive(Clone, Debug, PartialEq, Reflect)]
+    struct Lamp {
+        #[reflect(min = 0.0, default = 2.5)]
+        intensity: f32,
+        #[reflect(degrees, default = std::f32::consts::FRAC_PI_4)]
+        cone: f32,
+        shade: Shade,
+        spare: Shade,
+        watts: Watts,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Reflect)]
+    struct Watts(#[reflect(min = 1, default = 60)] u16);
+
+    #[derive(Clone, Debug, PartialEq, Reflect)]
+    enum Shade {
+        Ring {
+            #[reflect(default = Vec2::ONE)]
+            size: Vec2,
+            #[reflect(min = 1)]
+            rings: u8,
+        },
+        Dome(#[reflect(min = 0.5)] f32),
+    }
+
+    /// A struct's default is its fields', each the one its hint gives, or else its type's under
+    /// its bounds; an enum's is its first variant, with its fields' defaults; and a type held
+    /// twice is no cycle.
+    #[test]
+    fn defaults_are_the_hints_or_else_the_types() {
+        let mut types = Types::default();
+        let lamp = Lamp::describe(&mut types).expect("described");
+        let ring = Value::Variant(
+            "Ring".into(),
+            vec![
+                ("size".into(), Value::Vec2(Vec2::ONE)),
+                ("rings".into(), Value::UInt(1)),
+            ],
+        );
+        let expected = Value::Struct(vec![
+            ("intensity".into(), Value::F32(2.5)),
+            ("cone".into(), Value::F32(std::f32::consts::FRAC_PI_4)),
+            ("shade".into(), ring.clone()),
+            ("spare".into(), ring.clone()),
+            (
+                "watts".into(),
+                Value::Struct(vec![("0".into(), Value::UInt(60))]),
+            ),
+        ]);
+        let made = types
+            .default_value(&lamp, &Meta::default())
+            .expect("a default");
+        assert!(same(&made, &expected), "{made:?}");
+        let made = Lamp::from_value(&made).expect("made");
+        assert_eq!(made.watts, Watts(60));
+        // The hints are the fields' defaults, as their types' own values.
+        let intensity = field(&types, &lamp, "intensity");
+        assert_eq!(intensity.default, Some(Value::F32(2.5)));
+        assert_eq!(field(&types, &lamp, "shade").default, None);
+        let watts = Type::Named(types.find("Watts").expect("described"));
+        assert_eq!(field(&types, &watts, "0").default, Some(Value::UInt(60)));
+        let shade = types.find("Shade").expect("described");
+        let Shape::Enum(variants) = &types.info(shade).shape else {
+            panic!("a shade is an enum");
+        };
+        assert_eq!(variants[0].fields[0].default, Some(Value::Vec2(Vec2::ONE)));
+        assert_eq!(
+            types.variant_default(&variants[0]).expect("a default"),
+            ring
+        );
+        let dome = Value::Variant("Dome".into(), vec![("0".into(), Value::F32(0.5))]);
+        assert_eq!(
+            types.variant_default(&variants[1]).expect("a default"),
+            dome
+        );
+        // A field without one has its type's, under its own bounds.
+        let rings = types.field_default(&variants[0].fields[1]);
+        assert_eq!(rings.expect("a default"), Value::UInt(1));
+    }
+
+    /// What a description written by hand makes a struct that holds itself, without end.
+    enum Loop {}
+
+    /// What a description written by hand makes an enum without variants.
+    enum Never {}
+
+    #[test]
+    fn a_default_without_end_or_without_a_variant_is_refused() {
+        let mut types = Types::default();
+        let looped = types.add::<Loop>("Loop".into(), "".into(), |types| {
+            let index = types.find("Loop").expect("reserved");
+            let next = Field {
+                name: "next".into(),
+                ty: Type::Named(index),
+                meta: Meta::default(),
+                default: None,
+            };
+            Ok(Shape::Struct {
+                fields: vec![next],
+                tuple: false,
+            })
+        });
+        let looped = looped.expect("described");
+        let error = types.default_value(&looped, &Meta::default());
+        let error = error.expect_err("without end");
+        assert_eq!(error.code(), "reflect.no_default");
+        assert_eq!(
+            error.to_string(),
+            "at `next`: `Loop`'s default holds a `Loop`, without end"
+        );
+        let never = types.add::<Never>("Never".into(), "".into(), |_| Ok(Shape::Enum(Vec::new())));
+        let never = never.expect("described");
+        let error = types.default_value(&never, &Meta::default());
+        let error = error.expect_err("no variants");
+        assert_eq!(error.code(), "reflect.no_default");
+        assert!(
+            error.to_string().contains("`Never` has no variants"),
+            "{error}"
+        );
+    }
+
+    #[derive(Clone, Reflect)]
+    struct Light {
+        #[reflect(min = 0, default = -1.0)]
+        intensity: f32,
+    }
+
+    /// Registered, it describes its field's type, whose default its own bounds refuse.
+    #[derive(Clone, crate::Component)]
+    struct Dim {
+        light: Light,
+    }
+
+    #[derive(Clone, Reflect)]
+    enum Glow {
+        Off,
+        Tinted(#[reflect(color, max = 1, default = Vec3::new(1.0, 2.0, 1.0))] Vec3),
+    }
+
+    /// Registered, it describes `Moons`, whose default holds an orbit its bounds refuse, which
+    /// only `Orbit`'s description, finished after it, says.
+    #[derive(Clone, crate::Component)]
+    struct Orbit {
+        moons: Moons,
+        #[reflect(min = 0)]
+        radius: i32,
+    }
+
+    #[derive(Clone, Reflect)]
+    struct Moons {
+        #[reflect(default = vec![Orbit { moons: Moons { orbits: Vec::new() }, radius: -1 }])]
+        orbits: Vec<Orbit>,
+    }
+
+    /// Opaque as a whole, so that a default gives it nothing.
+    #[derive(Clone, Reflect)]
+    #[reflect(opaque)]
+    struct Socket;
+
+    #[derive(Clone, crate::Component)]
+    struct Plugged {
+        #[reflect(default = Socket)]
+        socket: Socket,
+    }
+
+    /// A default its field's bounds refuse is refused as its type registers, even one holding the
+    /// type registering, checked once that's described; and so is one opaque as a whole, which
+    /// would give nothing. Either leaves the type unregistered, and every type described with it.
+    #[test]
+    fn a_bad_default_is_refused_as_its_type_registers() {
+        let mut world = World::default();
+        let error = world.register::<Dim>().expect_err("a bad default");
+        assert_eq!(error.code(), "reflect.bad_default");
+        assert_eq!(
+            error.to_string(),
+            "`Light`'s field `intensity` defaults to a value it refuses: -1 is below the \
+             field's min, 0"
+        );
+        let error = world.register::<Orbit>().expect_err("a bad default");
+        assert_eq!(error.code(), "reflect.bad_default");
+        assert_eq!(
+            error.to_string(),
+            "`Moons`'s field `orbits[0].radius` defaults to a value it refuses: -1 is below the \
+             field's min, 0"
+        );
+        let error = world.register::<Plugged>().expect_err("an opaque default");
+        assert_eq!(error.code(), "reflect.bad_default");
+        assert_eq!(
+            error.to_string(),
+            "`Plugged`'s field `socket` is opaque, which reflection keeps but doesn't make, so it \
+             takes no default"
+        );
+        let names: Vec<&str> = world.types().iter().map(|(_, info)| &*info.name).collect();
+        assert_eq!(names, ["Parent"]);
+        assert_eq!(world.component_types().collect::<Vec<_>>(), ["Parent"]);
+        let mut types = Types::default();
+        let error = Glow::describe(&mut types).expect_err("a bad default");
+        assert_eq!(error.code(), "reflect.bad_default");
+        assert_eq!(
+            error.to_string(),
+            "`Glow::Tinted`'s field `0.y` defaults to a value it refuses: 2 is above the \
+             field's max, 1"
+        );
+        assert_eq!(types.iter().len(), 0);
+    }
+
+    /// Each of the engine's components' default makes it, as an add makes it: a transform the
+    /// identity, a sprite the default one and a name empty, and one with an opaque field, from
+    /// its base; while a mesh, opaque as a whole without a base, and a parent, which holds an
+    /// entity, have none.
+    #[test]
+    fn the_engines_components_defaults_make_them() {
+        let mut world = World::default();
+        for registered in [
+            world.register::<Transform>(),
+            world.register::<Sprite>(),
+            world.register::<MeshDraw>(),
+            world.register::<crate::Name>(),
+            world.register::<Everything>(),
+        ] {
+            registered.expect("registered");
+        }
+        let default = |name| {
+            let default = world.default_of(name);
+            default.unwrap_or_else(|error| panic!("{name}: {error}"))
+        };
+        assert!(same(&default("Transform"), &Transform::IDENTITY.to_value()));
+        assert!(same(&default("Sprite"), &Sprite::default().to_value()));
+        let unnamed = crate::Name(String::new()).to_value();
+        assert!(same(&default("Name"), &unnamed));
+        let Value::Struct(fields) = default("Everything") else {
+            panic!("everything is a struct");
+        };
+        assert_eq!(fields.last(), Some(&("handle".into(), Value::Opaque)));
+        for (name, code, at) in [
+            ("MeshDraw", "reflect.opaque", "`MeshDraw`"),
+            ("Parent", "reflect.no_default", "`Parent.0`"),
+        ] {
+            let error = world.default_of(name).expect_err(name);
+            assert_eq!(error.code(), code, "{error}");
+            let says = format!("can't make a default {at}: ");
+            assert!(error.to_string().starts_with(&says), "{error}");
+        }
+        let error = world.default_of("Inner").expect_err("a type of fields");
+        assert_eq!(error.code(), "reflect.unknown_type");
     }
 
     #[test]

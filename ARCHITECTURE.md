@@ -60,8 +60,9 @@ sandbox  editor   player       apps/: executables
 - **`sandbox`:** the development playground for engine features.
 - **`editor`:** the editor, which becomes one more client of the tool API: a dock that fills its
   window, with the game's view in a panel among the others, which shows a world of the editor's
-  own until the tool API brings it a game, three squares and two cameras, and the engine's Inspector
-  beside it. Its camera is its own, one orbit camera driven alike in 2D and 3D, orthographic or
+  own until the tool API brings it a game, three squares and two cameras, and the engine's Entities
+  and Inspector panels beside it, which create and delete entities and add, remove and edit their
+  components. Its camera is its own, one orbit camera driven alike in 2D and 3D, orthographic or
   with perspective, with a toolbar and an orientation gizmo pinned over the view and a grid in
   either projection; the toolbar has the view see through the world's primary camera instead, as
   the game would, until the editor's camera moves, and meanwhile W, A, S and D drive the world's
@@ -336,19 +337,32 @@ and diagnostics name an entity by its ID.
 
 Reflection names each component type by its identifier, unless `#[reflect(name = "...")]` gives
 another, and two types of one name are an error rather than a guess. The derive writes the
-description, with hints for bounds, angles, colors and fields kept opaque, and how a value is
-hashed. The engine's own components register as it starts, so that their names are taken first,
-and a game's the first time an entity has one; each struct or enum among their fields is described
-once, so a type can hold itself. Values cross as a closed `Value`: integers of fixed sizes only, so
-that a value means the same on every machine; `f32` apart from `f64`, so that bits come back as
-they went; an entity as its handle, as components hold one, `Parent` among them, which scenes
-write as IDs, and the tool API and replication will map to them; and `Opaque` for what reflection
-keeps but doesn't read, such as a texture's handle, which no value may make. The world reads and
-sets a field by its component's name and a path, such as `rect[1].y`: a set checks the whole value
-against the description before anything changes, refuses a number outside its field's bounds, and
-returns the old value, which sets it back unless code stored one that a set refuses. The Inspector
-edits components through these calls alone, as operations it queues for its next tick and its log
-undoes, which the tool API will serve.
+description, with hints for bounds, angles, colors, defaults and fields kept opaque, and how a
+value is hashed. The engine's own components register as it starts, so that their names are taken
+first, and a game's the first time an entity has one; each struct or enum among their fields is
+described once, so a type can hold itself. Values cross as a closed `Value`: integers of fixed
+sizes only, so that a value means the same on every machine; `f32` apart from `f64`, so that bits
+come back as they went; an entity as its handle, as components hold one, `Parent` among them,
+which scenes write as IDs, and the tool API and replication will map to them; and `Opaque` for
+what reflection keeps but doesn't read, such as a texture's handle, which no value may make. The
+world reads and sets a field by its component's name and a path, such as `rect[1].y`: a set checks
+the whole value against the description before anything changes, refuses a number outside its
+field's bounds, and returns the old value, which sets it back unless code stored one that a set
+refuses. The Inspector edits components through these calls alone, and creates and deletes
+entities and adds and removes components through operations, all of which it queues for its next
+tick and its log undoes, which the tool API will serve. It sets a vector a component at a time, at
+its own path, such as `translation.x`, so that dragging one leaves the others to what moves them;
+inside an option or a variant, and as a color or a rotation, it sets one whole.
+
+A field's default is the one `#[reflect(default = ...)]` gives, in the field's own type, checked
+as its type registers against its bounds, and refused on a field of a type opaque as a whole
+(`reflect.bad_default`); or else its type's: 0 or the bound nearest it, false, the identity, empty
+or `None`, a struct's from its fields' and an enum's its first variant's. Some types have none
+(`reflect.no_default`): an entity, since a handle to none can't be saved or set, so a component
+holds one in an `Option` or a list to have a default; a number whose bounds leave none of its
+type; and an enum without variants. `World::default_of` makes a component's default as an add
+would, so that adding one, switching an enum to another variant and resetting a field each start
+from a value no one had to give whole.
 
 Entities form a hierarchy, as scenes, prefabs and cameras that ride entities need: a child has its
 parent as its `Parent` component, and its `Transform` is relative to its parent's, so that a
@@ -370,6 +384,10 @@ another table, as `insert` and `remove` do; a snapshot copies them with the slot
 transforms aren't stored: drawing computes each child's from its ancestors, every frame, and where
 the world's camera sees from the same way, while a table of roots draws by its transforms alone,
 for one check a frame; the links cost each slot 16 bytes, whether its entity has a parent or not.
+The Entities panel shows the hierarchy as a tree: the roots, a table at a time, each open row
+followed by its children's, of which it finds only the page in view, so that a frame costs a few
+steps a table, and another for each open root, and one for each row under an open root or in view,
+never one for each root.
 
 A snapshot is the world copied: `World` is `Clone`, and `clone_from` restores a world from a
 snapshot, or takes a snapshot into one kept from before, in the memory it holds. It copies all of
