@@ -11,6 +11,7 @@ mod write;
 
 use std::borrow::Cow;
 use std::fs;
+use std::mem;
 use std::path::Path;
 
 use gg_core::{Error, Result};
@@ -108,13 +109,14 @@ impl World {
     /// loads it into the world [cleared](Self::clear), and returns its roots: all of them, or, if
     /// it's refused, none, the world as it was, its serial too. The IDs the world has are no bar,
     /// since its entities go: the scene it was saved to replaces it, under the same IDs. It's then
-    /// another world, as `clear` says.
+    /// another world, as `clear` says, which keeps the [`Resource`](crate::Resource)s.
     ///
     /// Fails as `load_scene` does, but for the IDs the world has.
     pub fn replace_scene(&mut self, text: &str) -> Result<Vec<Entity>> {
         let _zone = gg_core::zone!();
         let mut next = self.emptied();
         let roots = next.load_scene(text)?;
+        next.resources = mem::take(&mut self.resources);
         *self = next;
         Ok(roots)
     }

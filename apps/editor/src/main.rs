@@ -1,16 +1,19 @@
 //! The editor: the game's view in a panel among the editor's own, in a dock that fills its window.
 //! Until the tool API brings it a game, the view shows a world of the editor's own, three squares
 //! and two cameras, through the editor's camera, orthographic at first, as 2D games see theirs, over a
-//! grid, with a toolbar and a gizmo over it; or through the world's camera, as the game would, and
-//! then W, A, S and D drive the world's cameras, by a script of theirs, as a game's keys would. The
-//! Inspector edits the world, and undoes and redoes its edits. A click in the view picks what it
-//! shows there for the Inspector, or unpicks where it shows none, but with Pan or Orbit, whose
-//! left button moves the camera; and the view's bottom left names what it shows under the cursor,
-//! while the cursor is over it. Through the editor's camera, the toolbar's Move, Rotate and
-//! Scale, which W, E and R pick, as Q picks Select, show handles over what the Inspector has
-//! picked, whose drags move, turn and scale it, each an edit of the Inspector's. The File menu
-//! starts a new scene, emptying the world; opens one, whose entities replace the world's; and
-//! saves the world's entities as one, to the file it was opened from or saved to last, or as
+//! grid, with a toolbar and a gizmo over it; or through the world's camera, as the game would. The
+//! toolbar's Play has a copy of the world play in its place, as the game would, its scripts and its
+//! physics running, the view seeing through its camera, where W, A, S and D drive the world's
+//! cameras, by a script of theirs, as a game's keys would; and Stop brings back the world as it was
+//! edited, with its edits' history. The Inspector edits the world, and undoes and redoes its edits,
+//! and duplicates entities with Ctrl+D. A click in the view picks what it shows there for the
+//! Inspector, or unpicks where it shows none, but with Pan or Orbit, whose left button moves the
+//! camera; and the view's bottom left names what it shows under the cursor, while the cursor is
+//! over it. Through the editor's camera, the toolbar's Move, Rotate and Scale, which W, E and R
+//! pick, as Q picks Select, show handles over what the Inspector has picked, whose drags move, turn
+//! and scale it, each an edit of the Inspector's. The File menu starts a new scene, emptying the
+//! world; opens one, whose entities replace the world's, stopping it first if it plays; and saves
+//! the world as it was edited as one, to the file it was opened from or saved to last, or as
 //! another: through the OS's file dialogs, and with Ctrl+N, Ctrl+O, Ctrl+S and Ctrl+Shift+S, Cmd
 //! for Ctrl on macOS. The Assets panel shows the files in the editor's assets folder, a folder at a
 //! time, and a scene dragged from it onto the view opens as Open opens one. When a file can't be
@@ -25,6 +28,7 @@ mod overlay;
 use std::collections::VecDeque;
 use std::f32::consts::FRAC_PI_3;
 use std::ffi::OsStr;
+use std::mem;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -40,7 +44,7 @@ use gg_engine::{
     Actions, App, Binding, Camera, Change, Commands, Component, Context, Docked, Entity, EntityId,
     Event, FileDialog, Inspector, InspectorLink, Key, Layer, Name, PerfPanel, Pick, Pose,
     Projection, Reflect, Script, Source, Sprite, Tick, Transform, Ui, Viewpoint, World,
-    run_scripts,
+    run_scripts, step_physics,
 };
 use tracing::warn;
 
@@ -69,11 +73,12 @@ fn app() -> App {
 
 /// The editor's layer: its camera, and the toolbar and gizmo over the view, and the name of what
 /// it shows under the cursor; the handles over what the Inspector has picked, which pick and edit
-/// through its link; the grid; the keys that drive the world's cameras; the File menu, which
-/// empties the world for a new scene, replaces it with a scene's and saves it as one, keeping the
-/// file it was opened from or saved to last for Save to write to; and the Assets panel, whose
-/// scenes open as they're dropped on the view, as Open opens one. It says why when a file can't be
-/// read, opened or written.
+/// through its link; the grid; the world playing, a copy of it in its place, and the world as it
+/// was edited aside, which Stop brings back; the keys that drive the world's cameras while it
+/// plays; the File menu, which empties the world for a new scene, replaces it with a scene's and
+/// saves it as one, keeping the file it was opened from or saved to last for Save to write to; and
+/// the Assets panel, whose scenes open as they're dropped on the view, as Open opens one. It says
+/// why when a file can't be read, opened or written.
 struct Editor {
     camera: OrbitCamera,
     toolbar: Toolbar,
@@ -97,12 +102,21 @@ struct Editor {
     grid: Option<Grid>,
     /// What drives the world's cameras.
     actions: Actions<Act>,
-    /// What the actions, the toolbar's switch and the File menu changed since the last tick,
-    /// which it applies.
+    /// What the actions, the toolbar and the File menu changed since the last tick, which it
+    /// applies.
     commands: Vec<Command>,
-    /// Whether the world's cameras take the keys: whether the view saw through the world's camera
-    /// as the commands last heard; false once an Open has stopped them.
+    /// Whether the world's cameras take the keys: whether the world played and the view saw
+    /// through its camera as the commands last heard; false once an Open has stopped them.
     gated: bool,
+    /// Whether the world plays, as the commands last queued say: Play and Stop, and a New or an
+    /// Open, which stops it.
+    playing: bool,
+    /// While the world plays, at its ticks, the world as it was edited, which a copy plays in
+    /// place of until Stop brings it back: what Save saves.
+    edited: Option<World>,
+    /// What the Inspector had picked as the last tick played or stopped the world, for the next
+    /// update to pick in the world in its place, so that the pick carries over by its ID.
+    carried: Option<Option<EntityId>>,
     /// The Assets panel, whose scenes open as they're dropped on the view.
     assets: Assets,
     /// The file the scene was opened from or saved to last, which Save writes to: none at first,
@@ -123,16 +137,23 @@ enum Act {
     Move,
 }
 
-/// What the editor's keys, its toolbar's switch and its File menu change of its world, queued as
-/// they change it and applied at its next tick: its commands, which a recording keeps.
+/// What the editor's keys, its toolbar and its File menu change of its world, queued as they change
+/// it and applied at its next tick: its commands, which a recording keeps.
 #[derive(Reflect)]
 enum Command {
     /// Has the world's cameras go this way, across and up, until the next.
     Move(Vec2),
-    /// Empties the world, for a new scene.
+    /// Has a copy of the world play in its place, its scripts and physics running at each tick,
+    /// keeping the world as it was edited aside; unless it plays already.
+    Play,
+    /// Brings back the world as it was edited, in place of the copy that played, which goes;
+    /// unless it doesn't play.
+    Stop,
+    /// Empties the world, for a new scene, stopping it first if it plays.
     New,
     /// Replaces the world's entities with those of the scene `text`, read from its file as it was
-    /// opened, so that a replay needs no file; or, if it's refused, leaves the world as it was.
+    /// opened, so that a replay needs no file, stopping it first if it plays; or, if it's refused,
+    /// leaves the world as it was, stopped.
     Open { text: String },
 }
 
@@ -159,6 +180,9 @@ impl Editor {
             actions,
             commands: Vec::new(),
             gated: false,
+            playing: false,
+            edited: None,
+            carried: None,
             assets: Assets::new(assets_folder()),
             scene: None,
             opening: VecDeque::new(),
@@ -166,11 +190,35 @@ impl Editor {
         }
     }
 
-    /// Queues what the world's cameras do as the view starts or stops seeing through the world's
-    /// camera, however the toolbar's switch went: go the way the keys held say, or stop, so that
-    /// they move only while the view sees through it, from the next tick.
+    /// Queues Play or Stop as the toolbar's Play went since the commands last heard: the view sees
+    /// through the world's camera as it plays, while the world has one, and through the editor's
+    /// as it stops.
+    fn play(&mut self) {
+        let play = self.toolbar.play;
+        if play != self.playing {
+            self.playing = play;
+            self.toolbar.world_camera = play;
+            self.commands
+                .push(if play { Command::Play } else { Command::Stop });
+        }
+    }
+
+    /// Has the toolbar's Play off, for a New or an Open, which stops the world at its tick, and the
+    /// view see through the editor's camera.
+    fn stop_playing(&mut self) {
+        if self.playing {
+            self.playing = false;
+            self.toolbar.play = false;
+            self.toolbar.world_camera = false;
+        }
+    }
+
+    /// Queues what the world's cameras do as the world and the view start or stop seeing through
+    /// the world's camera while it plays, however the toolbar went: go the way the keys held say,
+    /// or stop, so that they move only while the world plays and the view sees through its camera,
+    /// from the next tick.
     fn gate(&mut self) {
-        let through = self.toolbar.world_camera;
+        let through = self.toolbar.world_camera && self.playing;
         if through != self.gated {
             self.gated = through;
             let heading = if through {
@@ -186,7 +234,10 @@ impl Editor {
     /// chooses it: Open and Save As show the OS's dialog, which blocks the frame until it closes.
     fn choose(&mut self, cx: &mut Context, item: FileItem) {
         match (item, self.scene.clone()) {
-            (FileItem::New, _) => self.commands.push(Command::New),
+            (FileItem::New, _) => {
+                self.stop_playing();
+                self.commands.push(Command::New);
+            }
             (FileItem::Open, _) => {
                 let picked = cx.pick_file(&self.dialog(false));
                 if let Some(path) = picked {
@@ -223,11 +274,12 @@ impl Editor {
         }
     }
 
-    /// Reads the scene at `path`, whose entities replace the world's at the next tick, and whose
-    /// file is then the scene's; or, if it can't be read, says why.
+    /// Reads the scene at `path`, whose entities replace the world's at the next tick, stopping it
+    /// if it plays, and whose file is then the scene's; or, if it can't be read, says why.
     fn open(&mut self, path: PathBuf) {
         match gg_engine::read_scene(&path) {
             Ok(text) => {
+                self.stop_playing();
                 self.opening.push_back(path);
                 self.commands.push(Command::Open { text });
             }
@@ -369,9 +421,10 @@ impl Editor {
         handled
     }
 
-    /// Saves `world`, as the last tick left it, to the file at `path`, which is then the scene's;
-    /// or, if it can't, says why.
+    /// Saves `world`, as the last tick left it, or, while it plays, the world as it was edited, to
+    /// the file at `path`, which is then the scene's; or, if it can't, says why.
     fn save(&mut self, world: &World, path: PathBuf) {
+        let world = self.edited.as_ref().unwrap_or(world);
         let saved = whole_scene(world).and_then(|text| gg_engine::write_scene(&path, &text));
         match saved {
             Ok(()) => self.scene = Some(path),
@@ -725,8 +778,11 @@ impl Layer for Editor {
 
     fn tick(&mut self, world: &mut World, tick: Tick) {
         let Self {
+            link,
             commands,
             gated,
+            edited,
+            carried,
             scene,
             opening,
             message,
@@ -736,11 +792,32 @@ impl Layer for Editor {
         for command in commands.drain(..) {
             match command {
                 Command::Move(heading) => steer(world, heading),
+                // The copy is another world, so the Inspector puts the edits made to this one
+                // aside, until Stop brings it back.
+                Command::Play => {
+                    if edited.is_none() {
+                        let copy = world.clone();
+                        *edited = Some(mem::replace(world, copy));
+                        *carried = Some(link.picked());
+                    }
+                }
+                Command::Stop => {
+                    if let Some(back) = edited.take() {
+                        *world = back;
+                        *carried = Some(link.picked());
+                    }
+                }
                 Command::New => {
+                    if let Some(back) = edited.take() {
+                        *world = back;
+                    }
                     world.clear();
                     *scene = None;
                 }
                 Command::Open { text } => {
+                    if let Some(back) = edited.take() {
+                        *world = back;
+                    }
                     let path = opening.pop_front();
                     match world.replace_scene(&text) {
                         Ok(_) => {
@@ -763,11 +840,16 @@ impl Layer for Editor {
             steer(world, Vec2::ZERO);
             *gated = false;
         }
+        // Only while it plays, so that otherwise the world changes only by edits, which undo.
+        if edited.is_none() {
+            return;
+        }
         // Not once the world's last primary camera has gone, as the frame's later ticks would, until
         // its update turns the view back to the editor's camera and stops them.
         if has_camera(world) {
             run_scripts::<CameraController>(world, tick);
         }
+        step_physics(world);
     }
 
     fn commands(&mut self) -> Option<&mut dyn Commands> {
@@ -778,10 +860,16 @@ impl Layer for Editor {
         self.camera.update(dt);
         let plane = grid::shown(&self.camera.viewpoint(), self.toolbar.plane);
         self.camera.settle(plane.normal());
+        self.play();
         // Off once the world has no primary camera, as its ticks left it, so that no frame shows
         // the default viewpoint as the last one goes.
         self.toolbar.world_camera &= has_camera(cx.world());
         self.gate();
+        // The pick, by its ID, in the world that played or stopped in place of the one it was in,
+        // which the Inspector's tick has unpicked.
+        if let Some(pick) = self.carried.take() {
+            self.link.pick(pick);
+        }
         // What the view showed under the latest press off the handles, once that comes back.
         if let Some(found) = answer(&mut self.asked, cx.picked()) {
             self.link.pick(found);
@@ -937,7 +1025,8 @@ impl Layer for Editor {
         if let Some(icon) = icon {
             ui.egui().set_cursor_icon(icon);
         }
-        // As the toolbar's switch went.
+        // As the toolbar's Play and switch went.
+        self.play();
         self.gate();
     }
 }
@@ -947,7 +1036,7 @@ mod tests {
     use std::fs;
 
     use gg_engine::reflect::Value;
-    use gg_engine::{MouseButton, Scroll, Viewport};
+    use gg_engine::{BoxCollider2D, MouseButton, RigidBody2D, Scroll, Viewport};
 
     use super::*;
 
@@ -1356,12 +1445,13 @@ mod tests {
     }
 
     /// W, A, S and D drive the world's cameras, by their script at the editor's ticks, while the
-    /// view sees through the world's camera: at their speed, 5 units a second, a 64th of it a tick;
-    /// a release stops them, and so does the view going back to the editor's camera, whichever way
-    /// it does; while it's on the editor's camera, they queue nothing, and once it sees through the
-    /// world's again, the cameras go the way the keys held say.
+    /// world plays and the view sees through the world's camera: at their speed, 5 units a second,
+    /// a 64th of it a tick; a release stops them, and so does the view going back to the editor's
+    /// camera, whichever way it does; while it's on the editor's camera, or the world doesn't play,
+    /// they queue nothing, and once it sees through the world's again, the cameras go the way the
+    /// keys held say. Stop brings them back where they were.
     #[test]
-    fn w_a_s_and_d_drive_the_worlds_cameras_while_the_view_sees_through_them() {
+    fn w_a_s_and_d_drive_the_worlds_cameras_while_it_plays_and_the_view_sees_through_them() {
         let mut editor = fresh();
         let mut cx = Context::seeded(1);
         spawn_world(cx.world_mut());
@@ -1376,13 +1466,17 @@ mod tests {
         // A tick's step, 5 units a second for a 64th of one.
         let step = 5.0 / 64.0;
         let [up_a_step, right_a_step] = [Vec3::Y, Vec3::X].map(|way| way * step);
-        // On the editor's camera, W queues nothing.
+        // On the editor's camera, W queues nothing; nor through the world's camera, as the
+        // toolbar's switch has it, while the world doesn't play.
         let _ = editor.event(&mut cx, &key(Key::KeyW, true));
         assert!(editor.commands.is_empty());
         assert_eq!(ticks.run(&mut editor, &mut cx, 4), start);
-        // Seeing through the world's camera, as the toolbar's switch has it, they go up with W
-        // held, a step a tick.
         editor.toolbar.world_camera = true;
+        editor.update(&mut cx, Duration::ZERO);
+        assert!(editor.commands.is_empty());
+        assert_eq!(ticks.run(&mut editor, &mut cx, 4), start);
+        // Played, through its camera, they go up with W held, a step a tick.
+        editor.toolbar.play = true;
         editor.update(&mut cx, Duration::ZERO);
         assert_eq!(last_move(&editor), Some(Vec2::Y));
         let up = moved(&start, up_a_step, 8);
@@ -1444,6 +1538,10 @@ mod tests {
         assert_eq!(ticks.run(&mut editor, &mut cx, 4), held);
         let _ = editor.event(&mut cx, &key(Key::KeyW, true));
         assert!(editor.commands.is_empty());
+        // Stopped, the world as it was edited comes back, its cameras where they started.
+        editor.toolbar.play = false;
+        editor.update(&mut cx, Duration::ZERO);
+        assert_eq!(ticks.run(&mut editor, &mut cx, 1), start);
     }
 
     /// Every living entity's ID in `world`, in order.
@@ -1602,11 +1700,12 @@ mod tests {
         assert_eq!(editor.scene, Some(scratch.0.join("Boss.RON")));
     }
 
-    /// An Open stops the world's cameras, whichever way the scene was saved with them going, since
-    /// only keys held while the view sees through the world's camera drive them: the next update
-    /// has them go the way the keys held say if it does, and leaves them stopped if it doesn't.
+    /// An Open stops the world playing, and its cameras, whichever way the scene was saved with
+    /// them going, since only keys held while the world plays and the view sees through its camera
+    /// drive them: they go again once it plays again, the way the keys held say.
     #[test]
-    fn an_open_stops_the_worlds_cameras_until_the_keys_drive_them() {
+    fn an_open_stops_the_world_and_its_cameras_until_it_plays_again() {
+        let scratch = Scratch::new("open-stops");
         let mut editor = fresh();
         let mut cx = Context::seeded(1);
         spawn_world(cx.world_mut());
@@ -1617,8 +1716,8 @@ mod tests {
                 .map(|controller| controller.heading)
                 .collect::<Vec<_>>()
         };
-        // Seeing through the world's camera with W held, they go up, and are saved going up.
-        editor.toolbar.world_camera = true;
+        // Playing, through the world's camera with W held, they go up, and are saved going up.
+        editor.toolbar.play = true;
         editor.update(&mut cx, Duration::ZERO);
         let w = Event::Key {
             key: Key::KeyW,
@@ -1628,26 +1727,23 @@ mod tests {
         let _ = editor.event(&mut cx, &w);
         ticks.run(&mut editor, &mut cx, 1);
         assert_eq!(headings(cx.world()), [Vec2::Y; 2]);
-        let going_up = whole_scene(cx.world()).expect("saved");
-        editor.commands.push(Command::Open {
-            text: going_up.clone(),
-        });
+        let going_up = scratch.0.join("going-up.ron");
+        let text = whole_scene(cx.world()).expect("saved");
+        gg_engine::write_scene(&going_up, &text).expect("written");
+        editor.open(going_up);
+        assert!(!editor.toolbar.play && !editor.toolbar.world_camera);
         ticks.run(&mut editor, &mut cx, 1);
-        assert_eq!(headings(cx.world()), [Vec2::ZERO; 2]);
-        assert!(!editor.gated);
-        editor.update(&mut cx, Duration::ZERO);
-        assert_eq!(last_move(&editor), Some(Vec2::Y));
-        ticks.run(&mut editor, &mut cx, 1);
-        assert_eq!(headings(cx.world()), [Vec2::Y; 2]);
-        // Back on the editor's camera, W still held.
-        editor.toolbar.world_camera = false;
-        editor.update(&mut cx, Duration::ZERO);
-        editor.commands.push(Command::Open { text: going_up });
-        ticks.run(&mut editor, &mut cx, 1);
+        assert!(editor.edited.is_none(), "stopped");
         assert_eq!(headings(cx.world()), [Vec2::ZERO; 2]);
         assert!(!editor.gated);
         editor.update(&mut cx, Duration::ZERO);
         assert!(editor.commands.is_empty());
+        // Played again, W still held.
+        editor.toolbar.play = true;
+        editor.update(&mut cx, Duration::ZERO);
+        assert_eq!(last_move(&editor), Some(Vec2::Y));
+        ticks.run(&mut editor, &mut cx, 1);
+        assert_eq!(headings(cx.world()), [Vec2::Y; 2]);
     }
 
     /// `key` pressed with `modifiers`, as egui gets it, or repeating as it's held, if `repeat`.
@@ -1696,14 +1792,15 @@ mod tests {
     }
 
     /// A key pressed with Ctrl held, or Cmd on macOS, is a shortcut's, such as Ctrl+S's S, and
-    /// drives none of the world's cameras while the view sees through them; its release still lets
-    /// go of a key held before, so that S held, then Ctrl, then S let go, stops them.
+    /// drives none of the world's cameras while it plays and the view sees through them; its
+    /// release still lets go of a key held before, so that S held, then Ctrl, then S let go, stops
+    /// them.
     #[test]
     fn a_shortcuts_key_drives_no_camera() {
         let mut editor = fresh();
         let mut cx = Context::seeded(1);
         spawn_world(cx.world_mut());
-        editor.toolbar.world_camera = true;
+        editor.toolbar.play = true;
         editor.update(&mut cx, Duration::ZERO);
         editor.commands.clear();
         let s = |pressed| Event::Key {
@@ -1768,6 +1865,8 @@ mod tests {
     fn the_file_menus_commands_are_values_a_recording_keeps() {
         let mut editor = fresh();
         let text = "(\n    entities: {},\n)\n";
+        editor.commands.push(Command::Play);
+        editor.commands.push(Command::Stop);
         editor.commands.push(Command::New);
         editor.commands.push(Command::Open {
             text: text.to_owned(),
@@ -1776,6 +1875,8 @@ mod tests {
         let values: Vec<Value> = (0..queue.len()).map(|i| queue.value(i)).collect();
         let open = vec![("text".into(), Value::String(text.to_owned()))];
         let expected = [
+            Value::Variant("Play".into(), Vec::new()),
+            Value::Variant("Stop".into(), Vec::new()),
             Value::Variant("New".into(), Vec::new()),
             Value::Variant("Open".into(), open),
         ];
@@ -1788,9 +1889,81 @@ mod tests {
         }
         assert!(matches!(
             &editor.commands[..],
-            [Command::New, Command::Open { text: read }, Command::Move(to)]
-                if read == text && *to == heading
+            [
+                Command::Play,
+                Command::Stop,
+                Command::New,
+                Command::Open { text: read },
+                Command::Move(to),
+            ] if read == text && *to == heading
         ));
+    }
+
+    /// A box that falls when the world plays, over nothing.
+    fn falling() -> (Transform, RigidBody2D, BoxCollider2D) {
+        let at = Transform {
+            translation: Vec3::new(0.0, 4.0, 0.0),
+            ..Transform::IDENTITY
+        };
+        (at, RigidBody2D::default(), BoxCollider2D::default())
+    }
+
+    /// Play has a copy of the world play in its place at the next tick, its scripts and physics
+    /// running there, and nothing moving before; Stop brings back the world as it was edited, the
+    /// very one, by its serial, which the Inspector finds its edits' history again by, what changed
+    /// as the copy played gone; and the pick carries over each. Save saves the world as it was
+    /// edited meanwhile, and New and Open stop it first.
+    #[test]
+    fn play_runs_a_copy_and_stop_brings_back_the_world_as_it_was_edited() {
+        let scratch = Scratch::new("play");
+        let mut editor = fresh();
+        let mut cx = Context::seeded(1);
+        spawn_world(cx.world_mut());
+        let dropped = cx.world_mut().spawn(falling());
+        let (edited, scene) = (cx.world().serial(), whole_scene(cx.world()).expect("saved"));
+        let mut ticks = Ticks { number: 0 };
+        let height = |cx: &Context| {
+            let at = cx.world().get::<Transform>(dropped).expect("alive");
+            at.translation.y
+        };
+        ticks.run(&mut editor, &mut cx, 4);
+        assert_eq!(height(&cx), 4.0, "it doesn't play");
+        editor.toolbar.play = true;
+        editor.update(&mut cx, Duration::ZERO);
+        assert!(
+            editor.toolbar.world_camera,
+            "it plays through the world's camera"
+        );
+        assert!(matches!(editor.commands[..], [Command::Play, ..]));
+        ticks.run(&mut editor, &mut cx, 32);
+        assert_ne!(cx.world().serial(), edited, "a copy plays");
+        assert!(height(&cx) < 3.0, "it falls");
+        assert!(editor.carried.is_some());
+        editor.update(&mut cx, Duration::ZERO);
+        assert_eq!(editor.carried, None, "picked");
+        // Changed as it plays, and saved meanwhile as it was edited.
+        let copy = cx.world().entity(cx.world().id(dropped).expect("alive"));
+        cx.world_mut().despawn(copy.expect("alive")).expect("alive");
+        let saved = scratch.0.join("saved.ron");
+        editor.save(cx.world(), saved.clone());
+        let text = gg_engine::read_scene(&saved).expect("written");
+        assert_eq!(text, scene);
+        editor.toolbar.play = false;
+        editor.update(&mut cx, Duration::ZERO);
+        assert!(!editor.toolbar.world_camera);
+        ticks.run(&mut editor, &mut cx, 4);
+        assert_eq!(cx.world().serial(), edited, "the very world");
+        assert_eq!(whole_scene(cx.world()).expect("saved"), scene);
+        assert!(editor.edited.is_none());
+        // Played again, then New, which stops it first and empties the world as it was edited.
+        editor.toolbar.play = true;
+        editor.update(&mut cx, Duration::ZERO);
+        ticks.run(&mut editor, &mut cx, 1);
+        editor.choose(&mut cx, FileItem::New);
+        assert!(!editor.toolbar.play);
+        ticks.run(&mut editor, &mut cx, 1);
+        assert!(editor.edited.is_none());
+        assert_eq!(ids(cx.world()), []);
     }
 
     /// Every scene in the editor's assets folder, and in the folders under it, opens in the

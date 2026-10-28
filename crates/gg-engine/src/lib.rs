@@ -44,6 +44,7 @@ mod model;
 mod name;
 mod pads;
 mod perf;
+mod physics;
 mod pipeline_cache;
 mod recording;
 pub mod reflect;
@@ -85,7 +86,8 @@ use dock::Dock;
 pub use dock::{Docked, Ui};
 pub use ecs::{
     Bundle, Component, Difference, Entities, Entity, EntityId, Log, Operation, Parent, Pose, Query,
-    QueryIter, QueryIterMut, ReadOnlyQuery, World, WorldHash, Writable, read_scene, write_scene,
+    QueryIter, QueryIterMut, ReadOnlyQuery, Resource, World, WorldHash, Writable, read_scene,
+    write_scene,
 };
 /// The UI library layers draw with, in [`Layer::ui`]; apps use it from here, so that they
 /// share the engine's version.
@@ -118,6 +120,7 @@ pub use model::Model;
 pub use name::Name;
 pub use perf::PerfPanel;
 use perf::{Perf, Summary};
+pub use physics::{BodyType, BoxCollider2D, Physics2D, RigidBody2D, step_physics};
 use recording::Recorder;
 #[doc(hidden)]
 pub use recording::Replay;

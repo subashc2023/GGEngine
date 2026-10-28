@@ -34,8 +34,9 @@ use crate::{
 /// component as a list, to pick one from, and finds one by an ID pasted into its Find field, from
 /// a scene or a log, opening the rows above its own; a click below the rows, or the Entity menu,
 /// unpicks. A row's context menu, the one below the rows and the Entity menu create empty
-/// entities, which they pick, and delete entities, with their descendants. The Inspector panel
-/// shows the picked entity's components, each field with a widget for its type and hints, and
+/// entities, which they pick, and a row's and the Entity menu duplicate entities, picking the
+/// copy, with Ctrl+D (Cmd+D on macOS) too, and delete them, with their descendants. The Inspector
+/// panel shows the picked entity's components, each field with a widget for its type and hints, and
 /// sets a field as its widget changes it, through a [`Log`] of the edits, as [`World::set_field`]
 /// does. That checks the value: a value refused shows beside its field, and is logged, as an
 /// operation refused is, which shows above the components. An enum switches its variant from a
@@ -49,7 +50,9 @@ use crate::{
 /// only at ticks; until then, a field set is drawn as the set will make it, and a refusal, and the
 /// Edit menu's names, show from the tick. A world cleared, replaced or restored, which is another,
 /// as [`World::serial`] says, unpicks and closes every row at the next tick, which drops the edits
-/// made to the world before, and those queued for it. Another layer picks and edits as the panels
+/// made to the world before, and those queued for it; but the very world it left coming back, as
+/// an app that swaps one world for another and back has it, as the editor's Play and Stop do,
+/// finds its edits, pick and open rows as they were. Another layer picks and edits as the panels
 /// do through the [`InspectorLink`] that [`link`](Self::link) gives it.
 #[derive(Default)]
 pub struct Inspector {
@@ -70,8 +73,11 @@ pub struct Inspector {
     /// The edits made, which undo and redo step through.
     log: Log,
     /// The serial of the world the log, the pick and the open rows are of, as the last tick found
-    /// it: another, as a world cleared, replaced or restored is, lets go of them at the next.
+    /// it: another, as a world cleared, replaced or restored is, puts them aside at the next.
     world: Option<u64>,
+    /// The log, the pick and the open rows of the world the Inspector left last, which they come
+    /// back from if that world comes back.
+    left: Option<Left>,
     /// Why the last operation, undo or redo was refused, until the next edit, operation, undo or
     /// redo.
     not_done: Option<String>,
@@ -82,6 +88,14 @@ pub struct Inspector {
     open: Option<Gesture>,
     /// What it shares with its links.
     link: Rc<RefCell<Linked>>,
+}
+
+/// What the Inspector had of a world it left, by its serial.
+struct Left {
+    world: u64,
+    log: Log,
+    picked: Option<EntityId>,
+    expanded: HashSet<EntityId>,
 }
 
 /// Whose gesture an edit going on is: the panels', which their input ends, or the link's, which
@@ -281,6 +295,9 @@ const REDO: [KeyboardShortcut; 2] = [
     KeyboardShortcut::new(Modifiers::COMMAND, egui::Key::Y),
 ];
 
+/// Duplicates the entity picked, as Hazel's Ctrl+D does.
+const DUPLICATE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, egui::Key::D);
+
 /// A step through the log of edits, as the Edit menu or a key asks for one.
 #[derive(Clone, Copy)]
 enum Step {
@@ -290,35 +307,40 @@ enum Step {
 
 /// What a frame's input, in the windows the panels draw in, says of the edits: a press, which
 /// starts another, and a release, which ends one; whether a widget has the pointer or the keys,
-/// which keeps one going; and the step through them a key asks for.
+/// which keeps one going; the step through them a key asks for; and whether Ctrl+D asks for the
+/// entity picked to be duplicated.
 #[derive(Default)]
 struct Cues {
     pressed: bool,
     released: bool,
     held: bool,
     step: Option<Step>,
+    duplicate: bool,
 }
 
 impl Cues {
     /// Adds what `egui`'s input says, as the window that's drawing has it: a panel's own, if it's
-    /// torn off, or the main one. Its keys ask for a step unless a text field there has them, which
-    /// undo its own text.
+    /// torn off, or the main one. Its keys ask for a step, or a duplicate, unless a text field
+    /// there has them, which undo its own text.
     fn read(&mut self, egui: &egui::Context) {
         let pointer =
             egui.input(|input| (input.pointer.any_pressed(), input.pointer.any_released()));
         self.pressed |= pointer.0;
         self.released |= pointer.1;
         self.held |= egui.egui_is_using_pointer() || egui.egui_wants_keyboard_input();
-        if self.step.is_some() || egui.text_edit_focused() {
+        if egui.text_edit_focused() {
             return;
         }
-        self.step = egui.input_mut(|input| {
+        egui.input_mut(|input| {
             // Redo's first, since a shortcut matches with Shift held as well.
-            if REDO.iter().any(|redo| input.consume_shortcut(redo)) {
-                Some(Step::Redo)
-            } else {
-                input.consume_shortcut(&UNDO).then_some(Step::Undo)
+            if self.step.is_none() {
+                if REDO.iter().any(|redo| input.consume_shortcut(redo)) {
+                    self.step = Some(Step::Redo);
+                } else if input.consume_shortcut(&UNDO) {
+                    self.step = Some(Step::Undo);
+                }
             }
+            self.duplicate |= input.consume_shortcut(&DUPLICATE);
         });
     }
 }
@@ -366,6 +388,8 @@ enum Command {
     },
     /// Deletes the entity with this ID, and its descendants.
     Delete(EntityId),
+    /// Copies the entity with this ID, and its descendants.
+    Duplicate(EntityId),
     /// Gives the entity with this ID a component of the type named, made from the value.
     Add(EntityId, String, Value),
     /// Takes the component of the type named away from the entity with this ID.
@@ -375,9 +399,9 @@ enum Command {
 /// The Inspector's commands, which a recording reads as values: variants `Set`, with the
 /// entity's ID as text, the component and the path, and the value; `Seal`; `Undo`; `Redo`;
 /// `Create`, with its parent's ID as text, if it has one, and its components as a struct, a field
-/// each named as its type; `Delete`, with the entity's ID as text; `Add`, with the entity's ID as
-/// text, the component and its value; and `Remove`, with the entity's ID as text and the
-/// component.
+/// each named as its type; `Delete` and `Duplicate`, with the entity's ID as text; `Add`, with the
+/// entity's ID as text, the component and its value; and `Remove`, with the entity's ID as text
+/// and the component.
 #[derive(Default)]
 struct Queue(Vec<Command>);
 
@@ -413,6 +437,7 @@ impl Commands for Queue {
                 )
             }
             Command::Delete(id) => ("Delete", vec![entity(id)]),
+            Command::Duplicate(id) => ("Duplicate", vec![entity(id)]),
             Command::Add(id, component, value) => (
                 "Add",
                 vec![
@@ -480,9 +505,13 @@ impl Commands for Queue {
                     components: components.clone(),
                 }
             }
-            "Delete" => {
+            "Delete" | "Duplicate" => {
                 let [entity] = reflect::pick(fields, ["entity"])?;
-                Command::Delete(id(entity, "entity")?)
+                let entity = id(entity, "entity")?;
+                match name {
+                    "Delete" => Command::Delete(entity),
+                    _ => Command::Duplicate(entity),
+                }
             }
             "Add" => {
                 let names = ["entity", "component", "value"];
@@ -497,7 +526,15 @@ impl Commands for Queue {
             }
             other => {
                 let names = [
-                    "Set", "Seal", "Undo", "Redo", "Create", "Delete", "Add", "Remove",
+                    "Set",
+                    "Seal",
+                    "Undo",
+                    "Redo",
+                    "Create",
+                    "Delete",
+                    "Duplicate",
+                    "Add",
+                    "Remove",
                 ];
                 return Err(reflect::no_variant(other, &names));
             }
@@ -521,11 +558,22 @@ impl Layer for Inspector {
         // Another world's entities aren't those the pick, the rows, the log and the commands
         // queued name, though they may have their IDs, as a scene reopened gives them back; nor
         // are those the link asked for since the last pass. A replay drops the commands at the
-        // same tick.
-        if self.world.is_some_and(|serial| serial != world.serial()) {
-            self.log.clear(world);
+        // same tick. The pick, the rows and the log go aside, for the world they're of to find
+        // again if it comes back, and those of the one left before go, whose world never will.
+        if let Some(serial) = self.world.filter(|&serial| serial != world.serial()) {
+            let left = Left {
+                world: serial,
+                log: mem::take(&mut self.log),
+                picked: self.picked,
+                expanded: mem::take(&mut self.expanded),
+            };
             self.unpick();
-            self.expanded.clear();
+            if let Some(back) = self.left.take().filter(|left| left.world == world.serial()) {
+                self.log = back.log;
+                self.picked = back.picked;
+                self.expanded = back.expanded;
+            }
+            self.left = Some(left);
             self.not_done = None;
             self.not_found = None;
             self.open = None;
@@ -564,8 +612,9 @@ impl Layer for Inspector {
             let scroll = egui::ScrollArea::vertical();
             scroll.show(ui, |ui| self.inspect(world, ui, &mut pass));
         });
-        // The Edit menu's keys, wherever the panels are.
+        // The Edit and Entity menus' keys, wherever the panels are.
         pass.cues.read(ui.egui());
+        self.duplicate_picked(world, &mut pass);
         // Every pass, even one egui discards, which alone had the frame's input; and empty ones
         // too, whose cues end an edit.
         self.queue(pass);
@@ -634,14 +683,18 @@ impl Inspector {
     }
 
     /// The Entity menu: Create Empty, which makes a root; while an entity is picked, Unpick; and,
-    /// while it's alive, Create Empty Child, which makes a child of it, and Delete, which deletes
-    /// it and its descendants. The operation chosen goes in `operations`.
+    /// while it's alive, Create Empty Child, which makes a child of it, Duplicate, which copies it
+    /// and its descendants, as Ctrl+D (Cmd+D on macOS) does too, and Delete, which deletes it and
+    /// its descendants. The operation chosen goes in `operations`.
     fn entity_menu(&mut self, world: &World, ui: &mut egui::Ui, operations: &mut Vec<Command>) {
         let live = self.picked.filter(|&id| world.entity(id).is_some());
         if ui.button("Create Empty").clicked() {
             operations.push(empty(None));
         }
         let child = ui.add_enabled(live.is_some(), egui::Button::new("Create Empty Child"));
+        let shortcut = ui.ctx().format_shortcut(&DUPLICATE);
+        let duplicate = egui::Button::new("Duplicate").shortcut_text(shortcut);
+        let duplicate = ui.add_enabled(live.is_some(), duplicate);
         let delete = ui.add_enabled(live.is_some(), egui::Button::new("Delete"));
         // A pick despawned unpicks too, since it stays picked for an undo to bring it back.
         let unpick = ui.add_enabled(self.picked.is_some(), egui::Button::new("Unpick"));
@@ -654,8 +707,20 @@ impl Inspector {
         if child.clicked() {
             operations.push(empty(Some(id)));
         }
+        if duplicate.clicked() {
+            operations.push(Command::Duplicate(id));
+        }
         if delete.clicked() {
             operations.push(Command::Delete(id));
+        }
+    }
+
+    /// Has `pass` duplicate the entity picked, while it's alive in `world`, if its input's Ctrl+D
+    /// asks for that.
+    fn duplicate_picked(&self, world: &World, pass: &mut Pass) {
+        let live = self.picked.filter(|&id| world.entity(id).is_some());
+        if let Some(id) = live.filter(|_| pass.cues.duplicate) {
+            pass.operations.push(Command::Duplicate(id));
         }
     }
 
@@ -747,6 +812,10 @@ impl Inspector {
                 self.operate(world, create);
             }
             Command::Delete(entity) => self.operate(world, Operation::Delete { entity }),
+            Command::Duplicate(entity) => {
+                let copies = Vec::new();
+                self.operate(world, Operation::Duplicate { entity, copies });
+            }
             Command::Add(entity, component, value) => {
                 self.forget(entity, &component);
                 let component = component.into();
@@ -766,8 +835,8 @@ impl Inspector {
     }
 
     /// Applies `operation`, which the panels chose, through the log, which ends the edit going on;
-    /// then picks the entity a create made, opening the rows of its ancestors. A refusal shows
-    /// above the components, and is logged.
+    /// then picks the entity a create made, or a duplicate's copy of its entity, opening the rows
+    /// of its ancestors. A refusal shows above the components, and is logged.
     fn operate(&mut self, world: &mut World, operation: Operation) {
         let (entity, said) = (operation.entity().map(display), operation.to_string());
         if let Err(error) = self.log.apply(world, operation) {
@@ -776,10 +845,11 @@ impl Inspector {
             return;
         }
         self.not_done = None;
-        let Some(&Operation::Create {
-            entity: Some(made), ..
-        }) = self.log.undoable()
-        else {
+        let made = self.log.undoable().and_then(|done| match done {
+            Operation::Create { .. } | Operation::Duplicate { .. } => done.entity(),
+            _ => None,
+        });
+        let Some(made) = made else {
             return;
         };
         self.pick(made);
@@ -903,6 +973,9 @@ impl Inspector {
                 label.context_menu(|ui| {
                     if ui.button("Create Empty Child").clicked() {
                         operations.push(empty(Some(id)));
+                    }
+                    if ui.button("Duplicate Entity").clicked() {
+                        operations.push(Command::Duplicate(id));
                     }
                     if ui.button("Delete Entity").clicked() {
                         operations.push(Command::Delete(id));
@@ -3198,6 +3271,7 @@ mod tests {
         let operations = vec![
             empty(None),
             empty(Some(picked)),
+            Command::Duplicate(picked),
             Command::Delete(picked),
             Command::Add(picked, "Sprite".to_owned(), Sprite::default().to_value()),
             Command::Remove(picked, "Everything".to_owned()),
@@ -3216,7 +3290,17 @@ mod tests {
         assert_eq!(
             names,
             [
-                "Set", "Set", "Seal", "Undo", "Redo", "Set", "Create", "Create", "Delete", "Add",
+                "Set",
+                "Set",
+                "Seal",
+                "Undo",
+                "Redo",
+                "Set",
+                "Create",
+                "Create",
+                "Duplicate",
+                "Delete",
+                "Add",
                 "Remove"
             ]
         );
@@ -3261,7 +3345,7 @@ mod tests {
         let error = again.push(&Value::Variant("Cut".into(), Vec::new()));
         let error = error.expect_err("no such command").to_string();
         assert!(
-            error.contains("`Create`, `Delete`, `Add` and `Remove`"),
+            error.contains("`Create`, `Delete`, `Duplicate`, `Add` and `Remove`"),
             "{error}"
         );
         // The operations' values, refused where they're wrong.
@@ -3638,6 +3722,7 @@ mod tests {
             };
             inspector.entity_menu(world, ui, &mut pass.operations);
             pass.cues.read(ui.ctx());
+            inspector.duplicate_picked(world, &mut pass);
             make(inspector, world, pass);
         });
         output.textures_delta.clear();
@@ -3801,6 +3886,56 @@ mod tests {
             assert_eq!(counted(&world), 9, "{case}");
             assert!(inspector.log.undoable().is_some(), "{case}");
         }
+    }
+
+    /// The very world the Inspector left coming back, as when a layer swaps a copy in to play and
+    /// back to stop, finds its edits, its pick and its open rows as they were, and its undo undoes
+    /// in it; the copy's go, and so do those of a world left before, which never comes back.
+    #[test]
+    fn the_world_left_coming_back_finds_its_edits_pick_and_rows() {
+        let mut world = World::default();
+        let [parent, child] = [(); 2].map(|()| world.spawn(everything()));
+        world.set_parent(child, Some(parent)).expect("no cycle");
+        let picked = id(&world, child);
+        let count = |value| Pass {
+            sets: vec![Edit {
+                component: "Everything".to_owned(),
+                path: "count".to_owned(),
+                value: Value::UInt(value),
+            }],
+            ..Pass::default()
+        };
+        let mut inspector = Inspector::default();
+        inspector.pick(picked);
+        inspector.expanded.insert(id(&world, parent));
+        make(&mut inspector, &mut world, count(7));
+        // Swapped for a copy, edited there, and back.
+        let copy = world.clone();
+        let mut left = mem::replace(&mut world, copy);
+        Layer::tick(&mut inspector, &mut world, Tick { number: 1 });
+        assert_eq!(inspector.log.undoable(), None, "the copy's own");
+        assert_eq!(inspector.picked, None);
+        inspector.pick(picked);
+        make(&mut inspector, &mut world, count(8));
+        mem::swap(&mut world, &mut left);
+        Layer::tick(&mut inspector, &mut world, Tick { number: 2 });
+        assert_eq!(inspector.picked, Some(picked));
+        assert!(inspector.expanded.contains(&id(&world, parent)));
+        let counted = |world: &World| world.get::<Everything>(child).expect("alive").count;
+        assert_eq!(counted(&world), 7);
+        inspector.queue(Pass {
+            chosen: Some(Step::Undo),
+            ..Pass::default()
+        });
+        Layer::tick(&mut inspector, &mut world, Tick { number: 3 });
+        assert_eq!(counted(&world), 42, "undone in it");
+        // A world cleared is another for good: neither it nor the copy comes back.
+        world.clear();
+        Layer::tick(&mut inspector, &mut world, Tick { number: 4 });
+        mem::swap(&mut world, &mut left);
+        Layer::tick(&mut inspector, &mut world, Tick { number: 5 });
+        assert_eq!(inspector.log.undoable(), None, "the copy's went");
+        assert_eq!(inspector.picked, None);
     }
 
     /// Every row of the tree, the naive way: each root in turn, each followed, if its row is open,
@@ -4050,8 +4185,9 @@ mod tests {
 
     /// The Entities panel's context menus, which a secondary click opens and egui sizes in a
     /// frame of their own: below the rows, one makes a root; and on a row, one makes a child of
-    /// its entity, or deletes it with its descendants. Each is made at the next tick, which picks
-    /// what a create made and shows its row; and each is undone and redone.
+    /// its entity, duplicates it or deletes it, with its descendants. Each is made at the next
+    /// tick, which picks what a create made, or the copy, and shows its row; and each is undone,
+    /// and the creates and the delete redone.
     #[test]
     fn context_menus_create_and_delete_entities() {
         let mut world = creating();
@@ -4111,6 +4247,18 @@ mod tests {
             made.push(id(&world, child));
             parent = child;
         }
+        // The whole subtree duplicated from the root's row, the copy of the root picked, and
+        // undone.
+        let (undo, redo) = (shortcut(egui::Key::Z, false), shortcut(egui::Key::Z, true));
+        let texts = run(&mut inspector, &mut world, Vec::new());
+        let at = find(&texts, &row(&world, root), &row(&world, root)).center();
+        choose(&mut inspector, &mut world, at, "Duplicate Entity");
+        assert_eq!(alive(&world), 6);
+        let copy = world.roots().find(|&other| other != root).expect("a copy");
+        assert_eq!(inspector.picked, Some(id(&world, copy)));
+        run(&mut inspector, &mut world, undo.clone());
+        assert_eq!(alive(&world), 3);
+        inspector.pick(made[1]);
         // The whole subtree deleted from the root's row, the pick staying on what's gone.
         let texts = run(&mut inspector, &mut world, Vec::new());
         let at = find(&texts, &row(&world, root), &row(&world, root)).center();
@@ -4123,7 +4271,6 @@ mod tests {
             "{texts:?}"
         );
         // Undone, it comes back, under its IDs; then each create is undone, and each redone.
-        let (undo, redo) = (shortcut(egui::Key::Z, false), shortcut(egui::Key::Z, true));
         run(&mut inspector, &mut world, undo.clone());
         assert_eq!(alive(&world), 3);
         assert!(made.iter().all(|&made| world.entity(made).is_some()));
@@ -4177,10 +4324,11 @@ mod tests {
         assert!(world.contains(b) && world.contains(c));
     }
 
-    /// The Entity menu makes a root; and, while the entity picked is alive, makes a child of it
-    /// and deletes it; and unpicks it, despawned too.
+    /// The Entity menu makes a root; and, while the entity picked is alive, makes a child of it,
+    /// duplicates it, as Ctrl+D does, picking the copy, and deletes it; and unpicks it, despawned
+    /// too.
     #[test]
-    fn the_entity_menu_creates_deletes_and_unpicks() {
+    fn the_entity_menu_creates_duplicates_deletes_and_unpicks() {
         let mut world = creating();
         let ctx = crate::egui_context();
         let mut inspector = Inspector::default();
@@ -4198,7 +4346,9 @@ mod tests {
         let texts = run(&mut inspector, &mut world, Vec::new());
         let item = |name: &str| click(Primary, find(&texts, name, name).center());
         // Without a pick, only Create Empty acts.
-        for name in ["Create Empty Child", "Delete", "Unpick"] {
+        let duplicate = shortcut(egui::Key::D, false);
+        run(&mut inspector, &mut world, duplicate.clone());
+        for name in ["Create Empty Child", "Duplicate", "Delete", "Unpick"] {
             run(&mut inspector, &mut world, item(name));
         }
         assert_eq!(world.entities(None).expect("every entity").len(), 0);
@@ -4214,6 +4364,24 @@ mod tests {
         let child_id = id(&world, child);
         assert_eq!(inspector.picked, Some(child_id));
         assert!(inspector.expanded.contains(&id(&world, root)));
+        // Each copy the last of the root's children, and picked; the second a copy of the first.
+        for events in [item("Duplicate"), duplicate] {
+            run(&mut inspector, &mut world, events);
+            let children: Vec<Entity> = world.children(root).expect("alive").collect();
+            let &copy = children.last().expect("a copy");
+            assert_eq!(inspector.picked, Some(id(&world, copy)));
+            assert_eq!(
+                world.get::<crate::Name>(copy),
+                Some(&called("Empty Entity"))
+            );
+        }
+        assert_eq!(world.children(root).expect("alive").count(), 3);
+        run(&mut inspector, &mut world, shortcut(egui::Key::Z, false));
+        assert_eq!(world.children(root).expect("alive").count(), 2, "undone");
+        // Drawn picked, so that Delete is enabled in the frame before the click, which egui finds
+        // it among.
+        inspector.pick(child_id);
+        run(&mut inspector, &mut world, Vec::new());
         run(&mut inspector, &mut world, item("Delete"));
         assert!(!world.contains(child));
         // Still picked, for an undo to bring it back; but its pick despawned unpicks too.

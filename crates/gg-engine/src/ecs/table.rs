@@ -299,6 +299,9 @@ pub trait AnyColumn: Any + Send + Sync {
     /// A copy of the column.
     fn cloned(&self) -> Box<dyn AnyColumn>;
 
+    /// A copy of `row`'s value, in a one-row column of its own.
+    fn clone_row(&self, row: usize) -> Box<dyn AnyColumn>;
+
     /// Makes `to`, a column of the same type, a copy of this one, in the memory it holds.
     fn copy_to(&self, to: &mut dyn AnyColumn);
 
@@ -336,6 +339,10 @@ impl<T: Component> AnyColumn for Vec<T> {
 
     fn cloned(&self) -> Box<dyn AnyColumn> {
         Box::new(self.clone())
+    }
+
+    fn clone_row(&self, row: usize) -> Box<dyn AnyColumn> {
+        Box::new(vec![self[row].clone()])
     }
 
     fn copy_to(&self, to: &mut dyn AnyColumn) {

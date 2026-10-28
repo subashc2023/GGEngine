@@ -61,22 +61,27 @@ sandbox  editor   player       apps/: executables
 - **`editor`:** the editor, which becomes one more client of the tool API: a dock that fills its
   window, with the game's view in a panel among the others, which shows a world of the editor's
   own until the tool API brings it a game, three squares and two cameras, and the engine's Entities
-  and Inspector panels beside it, which create and delete entities and add, remove and edit their
-  components. Its camera is its own, one orbit camera driven alike in 2D and 3D, orthographic or
-  with perspective, with a toolbar and an orientation gizmo pinned over the view and a grid in
-  either projection; the toolbar has the view see through the world's primary camera instead, as
-  the game would, until the editor's camera moves, and meanwhile W, A, S and D drive the world's
-  cameras, by a script of theirs, as a game's keys would. A click in the view picks what it shows
-  there, through the Inspector's link, and the view's bottom left names what it shows under the
-  cursor, from a pick there every frame; the toolbar's Move, Rotate and Scale, which W, E and R
-  choose as Q chooses Select, show handles over what's picked, the same size on screen at any
-  distance, whose drags move, turn and scale it along its own axes, each an edit the Inspector's
-  log undoes, the command key snapping to half units, 45° and halves. Its File menu starts a new
-  scene, opens one, whose entities replace the world's, and saves the world's entities as one,
-  through the OS's file dialogs, with Ctrl+N, Ctrl+O, Ctrl+S and Ctrl+Shift+S. Its Assets panel,
-  a content browser, shows the files in its assets folder, beside its source, until the tool API
-  brings a game's, a folder at a time; a scene dragged from it onto the view opens as Open opens
-  one.
+  and Inspector panels beside it, which create, duplicate and delete entities and add, remove and
+  edit their components. Its camera is its own, one orbit camera driven alike in 2D and 3D,
+  orthographic or with perspective, with a toolbar and an orientation gizmo pinned over the view
+  and a grid in either projection; the toolbar has the view see through the world's primary camera
+  instead, as the game would, until the editor's camera moves. Its Play has a copy of the world
+  play in the world's place, as the game would, its scripts and physics running at its ticks and
+  the view seeing through its camera, where W, A, S and D drive the world's cameras, by a script of
+  theirs, as a game's keys would; Stop brings back the world as it was edited, the very one, which
+  the Inspector finds its edits' history again by, so that outside play the world changes only by
+  edits, which undo. Play and Stop are commands, which recordings keep; Play is the toolbar's last
+  button, since the toolbar spans the view's middle, where Hazel's is. A click in the view picks
+  what it shows there, through the Inspector's link, and the view's bottom left names what it
+  shows under the cursor, from a pick there every frame; the toolbar's Move, Rotate and Scale,
+  which W, E and R choose as Q chooses Select, show handles over what's picked, the same size on
+  screen at any distance, whose drags move, turn and scale it along its own axes, each an edit the
+  Inspector's log undoes, the command key snapping to half units, 45° and halves. Its File menu
+  starts a new scene, opens one, whose entities replace the world's, stopping it first if it
+  plays, and saves the world's entities as one, as they were edited while it plays, through the
+  OS's file dialogs, with Ctrl+N, Ctrl+O, Ctrl+S and Ctrl+Shift+S. Its Assets panel, a content
+  browser, shows the files in its assets folder, beside its source, until the tool API brings a
+  game's, a folder at a time; a scene dragged from it onto the view opens as Open opens one.
 - **`player`:** the reference player. It runs a cooked scene without game code and shows how a
   game builds its own player.
 
@@ -226,14 +231,18 @@ A project's state is text that people and agents edit, diff and merge with ordin
   than sequential, so entities added on two branches neither collide nor land on the same
   lines.
 - **Operations.** Every authoring change, by a person or an agent, is an operation with an
-  inverse: create or delete an entity, add or remove a component, set a field, reparent. An
-  operation names entities by their IDs and carries values as reflection's. Applying one checks
-  everything before anything changes, and gives what undoes it: another operation, but for a
-  delete and a remove, whose inverses keep what they took out, typed, so that what's opaque
+  inverse: create, duplicate or delete an entity, add or remove a component, set a field,
+  reparent. An operation names entities by their IDs and carries values as reflection's. Applying
+  one checks everything before anything changes, and gives what undoes it: another operation, but
+  for a delete and a remove, whose inverses keep what they took out, typed, so that what's opaque
   comes back too. A delete keeps its entities' slots and IDs, so that undoing it gives each back
-  under its handle and ID, and every reference to it is whole again. Undoing a create takes out
-  the entity it made alone, kept the same way, and is refused (`ecs.has_children`) if the entity
-  has children since, which the create didn't make. A component can name a `bool` field of its
+  under its handle and ID, and every reference to it is whole again. A duplicate copies an entity
+  and its descendants, their components typed, so that what's opaque comes too, each under an ID
+  drawn for it, which the operation then holds, the copy the last of its parent's children, a
+  reference among them to its copy, as a prefab's, and an exclusive field false on each copy.
+  Undoing a create or a duplicate takes out the entities it made alone, kept the same way, and is
+  refused if any other is under them since, which it didn't make (`ecs.has_children`), or one of
+  them is gone (`ecs.no_entity`). A component can name a `bool` field of its
   own exclusive, as a camera's `primary` is: a create, an add or a set that makes it true on one
   entity makes it false on every other, and its inverse makes theirs true again, so that one edit,
   a person's or an agent's, switches which entity has it, and one undo switches it back. Code and
@@ -358,11 +367,11 @@ what reflection keeps but doesn't read, such as a texture's handle, which no val
 world reads and sets a field by its component's name and a path, such as `rect[1].y`: a set checks
 the whole value against the description before anything changes, refuses a number outside its
 field's bounds, and returns the old value, which sets it back unless code stored one that a set
-refuses. The Inspector edits components through these calls alone, and creates and deletes
-entities and adds and removes components through operations, all of which it queues for its next
-tick and its log undoes, which the tool API will serve. It sets a vector a component at a time, at
-its own path, such as `translation.x`, so that dragging one leaves the others to what moves them;
-inside an option or a variant, and as a color or a rotation, it sets one whole.
+refuses. The Inspector edits components through these calls alone, and creates, duplicates and
+deletes entities and adds and removes components through operations, all of which it queues for
+its next tick and its log undoes, which the tool API will serve. It sets a vector a component at
+a time, at its own path, such as `translation.x`, so that dragging one leaves the others to what
+moves them; inside an option or a variant, and as a color or a rotation, it sets one whole.
 
 A field's default is the one `#[reflect(default = ...)]` gives, in the field's own type, checked
 as its type registers against its bounds, and refused on a field of a type opaque as a whole
@@ -406,26 +415,38 @@ snapshot, or takes a snapshot into one kept from before, in the memory it holds.
 the world: each slot under its generation, the free ones in the order they're taken and the vacant
 ones vacant, with the IDs they keep; each entity under its handle and ID, in its table and row,
 with its links; the tables in the order they were made, cutting away those made since; the stream
-the IDs come from; and the component types. So a restored world goes on as the world the snapshot
-was taken from did, spawning the same handles with the same IDs and finding entities in the same
-order, and gives out again the handles and IDs given out since the snapshot. A copy is another
-world, with a serial of its own: drawing sorts its rows again, and it refuses what undoes an
-operation applied before, as another world's, so that undo history doesn't outlive a restore, and
-the slots a log kept when the snapshot was taken stay vacant for good, with their IDs, since
-freeing them would change the handles and IDs to come. A snapshot taken again, or restored, is
-copied into memory already held, so that one taken every frame allocates nothing while the
-tables, the component types and the world's size stay, for components whose `Clone` allocates
-nothing.
+the IDs come from; the component types; and the resources. So a restored world goes on as the
+world the snapshot was taken from did, spawning the same handles with the same IDs and finding
+entities in the same order, and gives out again the handles and IDs given out since the snapshot.
+A copy is another world, with a serial of its own: drawing sorts its rows again, and it refuses
+what undoes an operation applied before, as another world's, so that undo history doesn't outlive
+a restore, and the slots a log kept when the snapshot was taken stay vacant for good, with their
+IDs, since freeing them would change the handles and IDs to come. A snapshot taken again, or
+restored, is copied into memory already held, so that one taken every frame allocates nothing
+while the tables, the component types and the world's size stay, for components and resources
+whose `Clone` allocates nothing.
+
+A world holds resources beside its entities: a value of each type that's `Clone`, `Send` and
+`Sync`, for the rest of the simulation, such as 2D physics' bodies and contacts. Snapshots copy
+them and restores bring them back, so that a restored world steps as the one it was taken from
+did; clearing a world or replacing its entities keeps them, as it keeps the component types; and
+no scene, hash, recording or dump holds them, so a resource holds what the simulation carries on
+from, or makes again from the entities, as physics makes its bodies. `World::resource_scope`
+lends a system the world and a resource apart, so that it steps one over the other without
+allocating.
 
 A world can be emptied, or have its entities replaced with a scene's, as the editor's New and Open
 do. `World::clear` despawns every entity and frees every slot, the vacant ones a log keeps too,
 each under its next generation, so that no handle names another entity; `World::replace_scene`
 loads a scene into the world so emptied, all or nothing, so that the IDs the world had are free
-for it and a world opens the file it was saved to. Either way the component types and the stream
-of IDs stay, so that no ID is drawn twice, and the world is another, as a restored one is, with a
-serial of its own (`World::serial`): it refuses what undoes an operation applied before, which is
-what makes freeing the slots a log kept safe. The Inspector, finding another serial at its tick,
-drops its log, its pick and its open rows, and the commands it queued for the world before.
+for it and a world opens the file it was saved to. Either way the component types, the resources
+and the stream of IDs stay, so that no ID is drawn twice, and the world is another, as a restored
+one is, with a serial of its own (`World::serial`): it refuses what undoes an operation applied
+before, which is what makes freeing the slots a log kept safe. The Inspector, finding another
+serial at its tick, drops the commands it queued for the world before, and puts its log, its pick
+and its open rows aside, dropping those of the world it left before: so they come back only with
+the very world they're of, as when the editor's Stop brings back the world a copy played in place
+of, and a world cleared, replaced or restored, which never comes back, leaves them behind.
 
 A world's hash has two parts. Its content is what it holds: a term for each component of each
 entity, from the entity's ID, the type's name and the words the type's derive writes, its fields in
@@ -434,11 +455,11 @@ one, since arithmetic leaves a NaN's sign to the CPU; summed, so that where the 
 doesn't count, and leaving out what's opaque. Its layout is how the world holds them, which the
 order queries find entities in follows from: its tables in the order they were made, with their
 types and their rows' IDs in order, each parent's children in their order, and the state of its
-stream of IDs. Neither reads slots, handles or the order types registered in, so that a scene
-loaded into another world has the content it had. Undoing a log gives back the content, though not
-always the layout, since what an undo puts back goes last in its table, and the IDs a create drew
-stay drawn: rewinding the stream would hand an ID out twice. Hashing reads every component, without
-allocating.
+stream of IDs. Neither reads slots, handles, the order types registered in or the resources, so
+that a scene loaded into another world has the content it had. Undoing a log gives back the
+content, though not always the layout, since what an undo puts back goes last in its table, and
+the IDs a create drew stay drawn: rewinding the stream would hand an ID out twice. Hashing reads
+every component, without allocating.
 
 The simulation steps in ticks, 64 a second whatever the frame rate, each 15.625 ms, exact in
 `f32`, `f64` and nanoseconds. A frame runs the ticks the time since the last one owes, at most 8,
@@ -647,6 +668,25 @@ off. A pad that disconnects lets go of what it held. If gilrs can't start, the r
 World space is right-handed with +Y up, as glTF's is: a camera without rotation looks down -Z,
 with +X to its right, as glTF's cameras do. glTF assets need no conversion as they're imported,
 and scenes, physics and the editor share these axes.
+
+## Physics
+
+2D physics is rapier's, in gg-engine's `physics` module, and games reach it through components: an
+entity with a `Transform` and a `RigidBody2D` is a body, dynamic, kinematic or static, moving in the
+XY plane, its velocities in the component; and a `BoxCollider2D` beside it is the box it collides
+as, in its entity's space, so that it turns and scales with it. `step_physics` is a system a
+layer's tick runs, after what sets velocities, such as scripts: it takes in the bodies that came
+and went, and the changes to their components that its last step didn't make, a game's or an
+edit's; steps rapier a tick; and writes each body's translation across and up and its velocities
+back, and turns its rotation about Z as far as the body turned, so that its z and any tilt stay.
+rapier's state, its bodies, colliders and contacts and what sleeps, is the world's `Physics2D`
+resource, which the first step makes, with Earth's gravity as though a unit were a meter: so
+snapshots copy it, and a restored world steps as the one it was taken from did, which bodies made
+again from their components alone wouldn't. Its workspace isn't state, and a copy makes its own.
+rapier2d is built with `enhanced-determinism`, so that a step gives the same bits on every platform,
+which a test of a pile of boxes' hash checks in CI; its glam is another version than the engine's,
+so vectors cross between them as numbers. A body under a parent isn't moved, since its transform is
+in its parent's space, and is warned of once (`physics.child_body`).
 
 ## Rendering
 
@@ -960,6 +1000,7 @@ main thread.
 | Math | `glam`, with its `scalar-math` and `libm` features; `libm` |
 | Jobs | `rayon-core`'s thread pool and `join`; not rayon's parallel iterators, whose splits and reductions follow the number of threads |
 | ECS | Our own; see [ECS](#ecs) |
+| Physics | `rapier2d`, with `enhanced-determinism`, for 2D, its state a resource of the world; see [Physics](#physics) |
 | Logs and profiling | `tracing` for logs; Tracy, through `tracy-client`, for CPU zones and GPU timestamps |
 | Frame captures | RenderDoc, through its in-application API, which `gg-gpu` finds in the process with `libloading` |
 | Agent access | MCP and a command-line tool, both clients of the [tool API](#agents-and-tools) |

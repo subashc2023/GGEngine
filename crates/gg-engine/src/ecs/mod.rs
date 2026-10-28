@@ -3,8 +3,8 @@
 //! name; entities' persistent IDs; the hierarchy, in which entities' parents carry their children
 //! along; scenes, the world's entities as text; operations, the authoring changes made to it, each
 //! with its inverse, and their log; snapshots, the world copied whole, which restore it; the
-//! world's hash, of what it holds and how, which two runs compare at each tick; and what tells two
-//! worlds apart, field by field.
+//! world's hash, of what it holds and how, which two runs compare at each tick; what tells two
+//! worlds apart, field by field; and resources, what a world holds beside its entities.
 
 mod by_name;
 mod diff;
@@ -14,6 +14,7 @@ mod id;
 mod log;
 mod ops;
 mod query;
+mod resources;
 mod scene;
 mod snapshot;
 mod table;
@@ -39,6 +40,8 @@ use id::IdStream;
 pub use log::Log;
 pub use ops::Operation;
 pub use query::{Query, QueryIter, QueryIterMut, ReadOnlyQuery};
+pub use resources::Resource;
+use resources::Resources;
 pub(crate) use scene::{MAX_DEPTH, float, quote};
 pub use scene::{read_scene, write_scene};
 pub(crate) use table::ComponentId;
@@ -155,16 +158,17 @@ impl fmt::Debug for Entity {
 /// order they're taken, and those kept for the entities a [`Log`] can put back still kept, with
 /// their IDs; each entity under its handle and its ID, in its table and row, with its parent and
 /// children, and when its interpolation was last reset; the tables in the order they were made,
-/// those made since a snapshot cut away as it's restored; the stream the IDs come from; and the
-/// component types. So a world restored goes on as the world the snapshot was taken from did:
+/// those made since a snapshot cut away as it's restored; the stream the IDs come from; the
+/// component types; and its [`Resource`]s. So a world restored goes on as the world the snapshot
+/// was taken from did:
 /// given the same changes, it spawns the same handles with the same IDs, and its queries find the
 /// same order, as it gives out again the handles and IDs given out since the snapshot. But it's
 /// another world: drawing sorts its rows again, and doesn't interpolate into it from the world
 /// before, and it refuses what undoes an operation applied before, as another world's, so that the
 /// slots kept when the snapshot was taken are never used again. Taken again, or restored, a
 /// snapshot is copied into the memory the world holds, which allocates nothing while the tables,
-/// the component types and the world's size stay as they were, for components whose `Clone`
-/// allocates nothing.
+/// the component types and the world's size stay as they were, for components and resources whose
+/// `Clone` allocates nothing.
 ///
 /// ```
 /// use gg_engine::{Transform, World};
@@ -228,6 +232,8 @@ pub struct World {
     spawned: Vec<Entity>,
     /// The entities a pass of a script runs for, in memory kept from one pass to the next.
     scripted: Vec<Entity>,
+    /// What it holds beside its entities.
+    resources: Resources,
 }
 
 impl Default for World {
@@ -293,6 +299,7 @@ impl World {
             scratch: Vec::new(),
             spawned: Vec::new(),
             scripted: Vec::new(),
+            resources: Resources::default(),
         }
     }
 
@@ -554,12 +561,14 @@ impl World {
 
     /// Despawns every entity, and lets go of what logs keep for their undos, the slots and IDs of
     /// the entities deletes took, so that no handle from before names an entity. The component
-    /// types stay, and no ID drawn before is drawn again. The world is then another, as a restored
-    /// one is, which refuses what undoes an operation applied before, as [`serial`](Self::serial)
-    /// says; so whoever keeps a [`Log`] of it clears the log too.
+    /// types and the [`Resource`]s stay, and no ID drawn before is drawn again. The world is then
+    /// another, as a restored one is, which refuses what undoes an operation applied before, as
+    /// [`serial`](Self::serial) says; so whoever keeps a [`Log`] of it clears the log too.
     pub fn clear(&mut self) {
         let _zone = gg_core::zone!();
-        *self = self.emptied();
+        let mut emptied = self.emptied();
+        emptied.resources = mem::take(&mut self.resources);
+        *self = emptied;
     }
 
     /// The entities with every component `Q` reads, table by table, as `Q` takes them: such as
@@ -761,7 +770,8 @@ impl World {
     /// after the free ones and in slot order, as despawning each in turn would, so that no handle
     /// from before names an entity in it. It keeps the component types, the stream of IDs, so that
     /// none is drawn twice, and the count of resets; and has no tables, as a world made hasn't, so
-    /// that it costs the slots, never the components.
+    /// that it costs the slots, never the components; nor resources, which whoever empties it
+    /// moves over, since copying them would allocate.
     fn emptied(&self) -> World {
         let slots = self.meta.len();
         let mut was_free = vec![false; slots];
@@ -792,6 +802,7 @@ impl World {
             scratch: Vec::new(),
             spawned: Vec::new(),
             scripted: Vec::new(),
+            resources: Resources::default(),
         };
         // Alive, vacant or retired; a retired slot stays so.
         for (index, free) in (0..).zip(was_free) {

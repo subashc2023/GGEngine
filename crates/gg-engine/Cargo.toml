@@ -13,6 +13,7 @@ gg-core.workspace = true
 gg-macros.workspace = true
 gg-renderer.workspace = true
 png.workspace = true
+rapier2d.workspace = true
 rayon-core.workspace = true
 rfd = { workspace = true, optional = true }
 ron.workspace = true

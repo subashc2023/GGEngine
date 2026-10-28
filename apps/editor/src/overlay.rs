@@ -1,5 +1,6 @@
 //! What the editor draws over its view: a toolbar at the view's top left, which picks what the
-//! left button does, the projection and the grid; a gizmo at its top right, which shows which way
+//! left button does, the projection and the grid, and plays the world and stops it; a gizmo at its
+//! top right, which shows which way
 //! the camera faces, and turns it; at its bottom left, the name of what the view shows under the
 //! cursor; and round its edges, while a scene from the Assets panel is held over it, an outline.
 
@@ -31,7 +32,7 @@ const LABEL: f32 = 18.0;
 const INSET: f32 = 8.0;
 
 /// What the toolbar sets: what the left button does over the view, whether the grid shows, and in
-/// which plane, and whether the view sees through the world's camera.
+/// which plane, whether the view sees through the world's camera, and whether the world plays.
 pub struct Toolbar {
     pub tool: Tool,
     pub grid: bool,
@@ -39,6 +40,8 @@ pub struct Toolbar {
     /// Whether the view sees through the world's camera, as the game would, rather than the
     /// editor's, and shows neither the grid nor the gizmo.
     pub world_camera: bool,
+    /// Whether the world plays, as the game would: a copy of it, in its place until it stops.
+    pub play: bool,
 }
 
 impl Default for Toolbar {
@@ -48,17 +51,19 @@ impl Default for Toolbar {
             grid: true,
             plane: Plane::XY,
             world_camera: false,
+            play: false,
         }
     }
 }
 
 impl Toolbar {
     /// Draws the toolbar into `ui`: the tools, whose tooltips name the keys that pick them, the
-    /// camera's projection, which a click switches, the grid's switch and its plane, and the
-    /// switch that sees through the world's camera, which is off while the world has no primary
-    /// camera, as `has_camera` says, each with a tooltip. While the view sees through the world's
-    /// camera, the projection's and the grid's buttons are off, since what they change doesn't
-    /// show. It opens nothing, since a popup would take the view's keys.
+    /// camera's projection, which a click switches, the grid's switch and its plane, the switch
+    /// that sees through the world's camera, which is off while the world has no primary camera,
+    /// as `has_camera` says, and Play, which plays the world and, lit, stops it, each with a
+    /// tooltip. While the view sees through the world's camera, the projection's and the grid's
+    /// buttons are off, since what they change doesn't show. It opens nothing, since a popup would
+    /// take the view's keys.
     pub fn show(&mut self, ui: &mut egui::Ui, camera: &mut OrbitCamera, has_camera: bool) {
         // The key that snaps a drag of the handles, which egui's shortcuts take as the command key.
         let snaps = if cfg!(target_os = "macos") {
@@ -153,12 +158,27 @@ impl Toolbar {
                     .inner
                     .on_hover_text(
                         "World camera: the view sees through the world's primary camera, as the \
-                         game does, and W, A, S and D drive the world's cameras; moving the \
-                         editor's camera comes back to it",
+                         game does, and while the world plays, W, A, S and D drive the world's \
+                         cameras; moving the editor's camera comes back to it",
                     )
                     .on_disabled_hover_text("World camera: the world has no primary camera");
                 if through.clicked() {
                     self.world_camera = !self.world_camera;
+                }
+                ui.separator();
+                let tip = if self.play {
+                    "Stop: brings back the world as it was before Play, with its edits' history"
+                } else {
+                    "Play: a copy of the world plays in its place, as the game would, its scripts \
+                     and physics running and the view seeing through its camera, until Stop; \
+                     what's edited meanwhile goes with the copy"
+                };
+                let icon = if self.play { Icon::Stop } else { Icon::Play };
+                if icon_button(ui, icon, self.play)
+                    .on_hover_text(tip)
+                    .clicked()
+                {
+                    self.play = !self.play;
                 }
             });
         });
@@ -202,6 +222,10 @@ enum Icon {
     Grid,
     /// A film camera: its body, and its lens.
     Camera,
+    /// A triangle pointing right, as a player's.
+    Play,
+    /// A square, as a player's.
+    Stop,
 }
 
 impl Icon {
@@ -281,6 +305,11 @@ impl Icon {
                 let body = [at(1.5, 4.5), at(10.0, 4.5), at(10.0, 11.5), at(1.5, 11.5)];
                 painter.add(Shape::closed_line(body.to_vec(), line));
                 triangle([at(10.5, 8.0), at(15.0, 4.5), at(15.0, 11.5)]);
+            }
+            Self::Play => triangle([at(3.5, 2.0), at(3.5, 14.0), at(14.0, 8.0)]),
+            Self::Stop => {
+                let square = Rect::from_min_max(at(3.0, 3.0), at(13.0, 13.0));
+                painter.rect_filled(square, 1.0, color);
             }
         }
     }

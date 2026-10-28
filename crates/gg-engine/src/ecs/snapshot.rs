@@ -27,6 +27,7 @@ impl Clone for World {
             scratch: _,
             spawned: _,
             scripted: _,
+            resources,
         } = self;
         Self {
             meta: meta.clone(),
@@ -47,6 +48,7 @@ impl Clone for World {
             scratch: Vec::new(),
             spawned: Vec::new(),
             scripted: Vec::new(),
+            resources: resources.clone(),
         }
     }
 
@@ -73,6 +75,7 @@ impl Clone for World {
             scratch: _,
             spawned: _,
             scripted: _,
+            resources,
         } = source;
         if !self.components.same(components) {
             // Its tables' ids would name other types than `source`'s same ids.
@@ -101,6 +104,7 @@ impl Clone for World {
         self.kept.clone_from(kept);
         self.stream = *stream;
         self.version = *version;
+        self.resources.clone_from(resources);
         self.serial = next_serial();
     }
 }

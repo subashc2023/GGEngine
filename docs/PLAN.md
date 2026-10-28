@@ -500,6 +500,38 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   held a scene tapped as though dragged, since posted input can't drag, New emptied the world and
   a tap on the view opened `squares.ron` there, under its file's IDs; both runs exited cleanly
   under validation.
+- **Play, 2D physics and duplicating** (2026-10-28): Hazel's next four episodes, made the engine's
+  way. A world holds resources beside its entities, which snapshots copy and restores bring back,
+  clearing and replacing its entities keep, and no scene, hash, recording or dump holds;
+  `World::resource_scope` lends a system the world and one apart. 2D physics is rapier2d's, built
+  with `enhanced-determinism`: `RigidBody2D`, dynamic, kinematic or static, with its rotation
+  fixed or not and its velocities, and `BoxCollider2D` are the engine's components, and
+  `step_physics`, a system, steps the world's `Physics2D` resource a tick, taking in bodies and
+  edits as they come and writing back translations, turns about Z and velocities; a body under a
+  parent isn't moved (`physics.child_body`). Duplicating is an operation, which copies an entity's
+  subtree typed, under IDs drawn for it, references among it to the copies and exclusive fields
+  false, and which the Entity menu, a row's menu and Ctrl+D apply, picking the copy; undoing a
+  create or a duplicate takes out what it made. The editor's toolbar has Play, which has a copy of
+  the world play in its place, scripts and physics running and the view seeing through its camera,
+  where W, A, S and D drive the cameras; and Stop, which brings back the world as it was edited,
+  the very one, whose edits' history the Inspector finds again, putting a world's aside as it
+  leaves it; outside play, only edits change the world. Save saves the world as edited, and New and
+  Open stop it first; `apps/editor/assets/scenes/physics.ron` holds a floor, a ramp, crates and a
+  bouncy box. The rest was here: entities' persistent IDs, which scenes keep, Hazel's UUIDs; a
+  world copied whole, Hazel's scene copy; Ctrl+S; and the sprite shader's texture index, read by
+  the instance, which isn't interpolated. Unit tests check resources through snapshots, clears,
+  replaces and scopes; bodies falling and resting, edits between steps, bodies going with their
+  entities, children, kinematic pushes and fixed rotations, and a snapshot stepping as its world
+  did, bit for bit, where bodies made again don't; a pile's hash, the same in debug and release,
+  which CI checks on every platform; duplicates' copies, IDs, references, exclusive fields and
+  refusals, undone and redone; the Inspector's Duplicate, Ctrl+D and the world it left coming back;
+  and the editor's Play and Stop, W, A, S and D only while playing, Save and New meanwhile. By hand
+  on the RTX 4090: Add Component listed RigidBody2D and BoxCollider2D and gave them to Red; Entity >
+  Duplicate made a second Red, picked; Play showed both falling through the world's camera, the
+  copy still picked, and Stop brought them back, with Undo duplicate in the Edit menu, which took
+  the copy out; through a build that opened `physics.ron` as it started, Play stacked the crates on
+  the floor, one resting on the ramp, and Stop left the view as it started, pixel for pixel; both
+  runs exited cleanly under validation.
 
 ## Now: the editor's next milestone, or Phase 5's first
 
@@ -547,7 +579,7 @@ Each phase ends in something you can run and check.
    logs and errors, and the game's view embedded, all through the tool API. *Done when* the
    editor has no path into the game but the tool API, and the v0.1 loop works from inside it.
 
-Later: Luau scripting and mods; networking (replication, lockstep, rollback); physics, audio,
+Later: Luau scripting and mods; networking (replication, lockstep, rollback); 3D physics, audio,
 animation, UI; upscalers (DLSS, FSR, XeSS); ray-traced effects where the driver exposes ray
 tracing (no macOS driver does today); and the built-in coding agent for v1.
 
@@ -558,7 +590,7 @@ Defects left in because fixing them costs more than they do are in [DEFECTS.md](
 | Skipped | Add when |
 |---|---|
 | The engine as a dynamic library in development builds, to shorten relinks | Rebuilding a game gets slow |
-| Optimized dependencies in dev builds (`[profile.dev.package."*"] opt-level = 3`); zune-jpeg alone is, as it took about 0.75 s to decode the sandbox's truck unoptimized | Another heavy dependency, such as physics, makes debug builds slow |
+| Optimized dependencies in dev builds (`[profile.dev.package."*"] opt-level = 3`); zune-jpeg alone is, as it took about 0.75 s to decode the sandbox's truck unoptimized, and rapier2d isn't, which steps a pile of 13 bodies in about half a millisecond a tick unoptimized | Physics or another heavy dependency makes debug builds slow |
 | Shipping profile (LTO, `codegen-units = 1`) | Phase 7, with the player |
 | Compiling trace and debug events out of shipping builds, through `tracing`'s `release_max_level_*` features | Phase 7, with the shipping profile |
 | No console window for shipping builds on Windows (`windows_subsystem = "windows"` on the player); the JSON log still records the run | Phase 7, with the shipping profile |
@@ -720,7 +752,7 @@ Defects left in because fixing them costs more than they do are in [DEFECTS.md](
 | Picking an entity for a field, a parent or a child picked by clicking it; the Entities panel scrolling to an entity found or picked in the view, or to a root that an add or a remove moved to the end of another table, and so of the tree's roots; entities are shown by their names, where they have one, and their IDs, and found by an ID pasted in | Phase 9's scene tree |
 | Finding an entity by its name: the Find field takes an ID | A world names more entities than the Entities panel shows at once |
 | Entities rows of one line: a row whose name has a line break is as many lines tall, though the list skips the rows out of view as though each were one line tall, as egui's `show_rows` takes them; a row wider than its panel stays one line, cut off at its edge; and an empty name shows as it is | A world of more entities than the panel shows, or names from players |
-| World transforms stored and propagated after the ticks, with change detection; drawing computes each child's from its ancestors, every frame, as the latest tick left them, for its z, and blended between ticks, to draw it | Physics, or a profile showing the walks up the hierarchy |
+| World transforms stored and propagated after the ticks, with change detection; drawing computes each child's from its ancestors, every frame, as the latest tick left them, for its z, and blended between ticks, to draw it | Bodies under a parent, or a profile showing the walks up the hierarchy |
 | Where an entity draws between ticks, for a layer's viewpoint that follows it, which would otherwise judder against it, since layers read the world up to a tick ahead of where it draws: `World::pose` gives where the latest tick left it, and the engine's drawing and the world's camera compute their own | A layer's viewpoint that follows an entity |
 | Turning interpolation off for an entity or a subtree, so that it draws at its ticks; every entity draws between them | A game wants something drawn at its ticks |
 | Rotations of more than half a turn a tick, which draw the shorter way round, the other way; Hermite easing from velocities would draw them, and curves between ticks | Something spins that fast, or a curve between ticks shows |
@@ -748,16 +780,25 @@ Defects left in because fixing them costs more than they do are in [DEFECTS.md](
 | The scene's file named in the editor's title bar, and a list of recent scenes: Save writes to the file opened or saved last, which nothing shows | Someone loses track of which file Save writes |
 | Dragging a scene onto the view from the Assets panel torn off into a window of its own: egui's drag stays in the window it started in, so the view never sees it let go | Someone drags from a torn-off Assets panel |
 | Listing the Assets panel's folder off the main thread, as a thread watching it would: it's listed on the main thread each second it shows, which a folder of many thousands of files would hold up for milliseconds | A game's folder that big, once the tool API brings one |
+| The Play button centered over the view, as Hazel's is, or in the title bar, as Unity's: it's at the end of the editor's toolbar, which spans the view's middle | The title bar takes a layer's UI, or the toolbar moves |
+| Pause, step and Simulate, physics through the editor's camera, as Hazel's later episodes add | Someone steps through a play |
+| Play in a process of its own, through the tool API, so that a crash as the world plays stops only the game | Phase 9's editor |
+| Keeping edits made as the world plays, which go with the copy, as Unity's do; and showing that it plays beyond the lit Stop and the view through the world's camera, such as a tint round the view | Someone loses an edit made while playing, or edits a playing world for the scene |
+| Bodies under a parent, moved in the world's space as their ancestors carry them, and colliders on a body's children; a body under a parent isn't moved (`physics.child_body`) | A game builds a body of parts, or nests one |
+| Colliders other than boxes, such as circles, capsules and polygons; joints; sensors; and contacts and queries, such as raycasts, for scripts | Each with its first game use |
+| 3D physics | A 3D game |
+| Gravity from a scene or a setting: `Physics2D::gravity` is code's, Earth's by default | A game sets its own |
+| Physics steps that allocate nothing: rapier allocates as contacts come and go, and the `ticks` test steps no physics | A game's ticks must allocate nothing with physics |
+| Physics' state in the world's hash, `--dump` and `World::difference`, which read entities alone, as they read no resource: a step that goes another way inside rapier shows in the bodies' transforms a tick later | A replay goes another way inside physics unseen for long |
 | The log in `Context`, every layer's and the tool API's clients each undoing their own, and an undo logged as an operation; the Inspector keeps a log of its own | Phase 5, the tool API |
 | Replaying a log into another world, which maps values' handles to IDs, as a recording's commands are; `set_field` and operations store a dead handle without complaint | Phase 5, the tool API |
 | A delete saying what refers to its entities from outside, or refusing; those references dangle until it's undone, and the world doesn't save in between | An agent deletes through the tool API |
 | Undoing a create whose entity has children since that the create didn't make, such as game code gave it, by keeping them where they are; it's refused (`ecs.has_children`), and the log drops it | An agent attaches children to what another's create made, or the editor |
 | Layers holding what a restore takes back: the sandbox's swarm is in the world, and the Inspector drops its log and pick once the world's serial is another's, but nothing else tells a layer that `Context`'s world was restored, so the sandbox doesn't snapshot | Something restores the running world, such as rollback or Phase 5's restart |
 | Reparenting from the panels: dragging a row onto another, and taking a `Parent` away, as Remove Component would, making its entity a root; `Parent` is read only, so the Inspector offers neither | The editor's scene tree |
-| Duplicating an entity, with its descendants, from the panels | Someone duplicates from the panels, as Hazel's later episodes do |
 | Picking several entities, to edit or delete them at once | Someone edits many entities alike |
 | A search field in Add Component's menu, which lists every type registered | A game registers more types than the menu shows at once |
-| A Delete key for the entity picked: keys reach egui even while the view has them, so it would delete during play, as Ctrl+Z undoes during it; the Entity menu and a row's context menu delete | Keys go to the panel under the pointer, or the view takes them from egui |
+| A Delete key for the entity picked: keys reach egui even while the view has them, so it would delete as the world plays, its keys driving it, as Ctrl+Z undoes and Ctrl+D duplicates then; the Entity menu and a row's context menu delete | Keys go to the panel under the pointer, or the view takes them from egui |
 | A bound on the log, which keeps a session's entries, a delete's components and slots among them, until it's cleared | A session's memory shows it |
 | A log that outlives a run or a restore: inverses that keep components typed can't be saved, and a restored world refuses every inverse from before, the slots kept when the snapshot was taken staying unused; a snapshot could keep the log's place, which a restore would rewind it to | Phase 5's restart from a snapshot |
 | A depth limit on values set or created by name, as scenes' 64; a deeper one recurses without one | The tool API takes values from outside |

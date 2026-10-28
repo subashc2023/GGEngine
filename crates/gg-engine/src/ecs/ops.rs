@@ -27,12 +27,14 @@ use crate::reflect::{self, Name, Value};
 /// refuses a value; and as making the component from it on its type's
 /// [`base`](crate::Component::base) is, such as with `reflect.opaque` for a type that's opaque as
 /// a whole, as [`MeshDraw`](crate::MeshDraw) is. A create is refused with `ecs.id_taken` for an ID
-/// a living entity has; a remove with `reflect.missing_component`; a set as `set_field` refuses
-/// it; and a reparent as [`World::set_parent`] refuses it.
+/// a living entity has, and a duplicate for one of its copies' IDs that a living entity has, or a
+/// delete keeps for its undo, and with `ops.bad_copies` for copies' IDs given other than one each;
+/// a remove with `reflect.missing_component`; a set as `set_field` refuses it; and a reparent as
+/// [`World::set_parent`] refuses it.
 ///
 /// A create, an add or a set that makes a component's [exclusive](crate::Component::exclusive)
 /// field true on its entity makes it false on every other entity with the component, and its
-/// inverse makes theirs true again.
+/// inverse makes theirs true again; a duplicate's copies have it false.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Operation {
     /// Spawns an entity with `components`, each a type's name and its whole value, made as a
@@ -42,6 +44,16 @@ pub enum Operation {
         entity: Option<EntityId>,
         parent: Option<EntityId>,
         components: Vec<(Name, Value)>,
+    },
+    /// Spawns a copy of `entity` and of each of its descendants, with their components as they are,
+    /// typed, so that what's opaque comes too, but each exclusive field false, and each reference
+    /// to one of them to its copy, as a prefab's are: the copy of `entity` the last of its parent's
+    /// children, or a root, and each descendant's under its parent's copy, in the order of the
+    /// originals. The copies' IDs are `copies`, `entity`'s copy's first, each parent's before its
+    /// children's; or ones drawn if it's empty, which applying it writes in.
+    Duplicate {
+        entity: EntityId,
+        copies: Vec<EntityId>,
     },
     /// Despawns `entity` and its descendants.
     Delete { entity: EntityId },
@@ -68,10 +80,12 @@ pub enum Operation {
 }
 
 impl Operation {
-    /// The entity it changes or creates; `None` for a create given no ID, until it's applied.
+    /// The entity it changes or creates, a duplicate's copy of its entity; `None` for a create or a
+    /// duplicate given no IDs, until it's applied.
     pub(crate) fn entity(&self) -> Option<EntityId> {
         match self {
             Self::Create { entity, .. } => *entity,
+            Self::Duplicate { copies, .. } => copies.first().copied(),
             Self::Delete { entity }
             | Self::Add { entity, .. }
             | Self::Remove { entity, .. }
@@ -91,6 +105,7 @@ impl fmt::Display for Operation {
                 ..
             } => write!(f, "create {entity}"),
             Self::Create { entity: None, .. } => f.write_str("create an entity"),
+            Self::Duplicate { entity, .. } => write!(f, "duplicate {entity}"),
             Self::Delete { entity } => write!(f, "delete {entity}"),
             Self::Add {
                 entity, component, ..
@@ -133,13 +148,14 @@ enum Undo {
         component: ComponentId,
         column: Box<dyn AnyColumn>,
     },
-    /// Takes out the entity a create made, `entity`, keeping its slot and ID as a delete does, if
-    /// it has no children: those the log gave it have been undone before it, so any it has are the
-    /// game's, which a delete would take with it.
-    Uncreate(EntityId),
+    /// Takes out the entities a create or a duplicate made, their IDs, the root's first, keeping
+    /// their slots and IDs as a delete does, if the root's subtree is them alone: what the log
+    /// gave them has been undone before it, so any other is the game's, which a delete would take
+    /// with it.
+    Uncreate(Vec<EntityId>),
     /// Puts back the entities a delete took, in the order it took them: children before their
-    /// parents, each parent's first to last, and the root last; or, if `created`, the one entity a
-    /// create made, which undoing it took out.
+    /// parents, each parent's first to last, and the root last; or, if `created`, those a create or
+    /// a duplicate made, which undoing it took out.
     Restore {
         taken: Vec<Taken>,
         created: bool,
@@ -178,9 +194,13 @@ impl World {
     pub(super) fn apply(&mut self, operation: &mut Operation) -> Result<Inverse> {
         let _zone = gg_core::zone!();
         let undo = self.applied(operation)?;
-        // So that the log holds the ID drawn, which a replay creates the entity with.
-        if let (Operation::Create { entity, .. }, Undo::Uncreate(id)) = (&mut *operation, &undo) {
-            *entity = Some(*id);
+        // So that the log holds the IDs drawn, which a replay creates the entities with.
+        match (&mut *operation, &undo) {
+            (Operation::Create { entity, .. }, Undo::Uncreate(made)) => {
+                *entity = made.first().copied()
+            }
+            (Operation::Duplicate { copies, .. }, Undo::Uncreate(made)) => copies.clone_from(made),
+            _ => {}
         }
         let undo = self.exclude(operation, undo);
         Ok(Inverse {
@@ -252,10 +272,10 @@ impl World {
                     component: name.to_owned().into(),
                 })
             }
-            Undo::Uncreate(entity) => {
-                let made = self.can_uncreate(*entity)?;
+            Undo::Uncreate(made) => {
+                let root = self.can_uncreate(made)?;
                 Undo::Restore {
-                    taken: self.vacate_subtree(made),
+                    taken: self.vacate_subtree(root),
                     created: true,
                 }
             }
@@ -263,7 +283,8 @@ impl World {
                 self.can_restore(taken)?;
                 let root = taken.last().expect("a delete takes its entity");
                 if *created {
-                    Undo::Uncreate(root.id)
+                    // The root first, which was taken last.
+                    Undo::Uncreate(taken.iter().rev().map(|taken| taken.id).collect())
                 } else {
                     Undo::Apply(Operation::Delete { entity: root.id })
                 }
@@ -324,7 +345,11 @@ impl World {
             Operation::Set {
                 component, path, ..
             } => vec![(component, path)],
-            Operation::Delete { .. } | Operation::Remove { .. } | Operation::Reparent { .. } => {
+            // A duplicate's copies have their exclusive fields false.
+            Operation::Duplicate { .. }
+            | Operation::Delete { .. }
+            | Operation::Remove { .. }
+            | Operation::Reparent { .. } => {
                 return undo;
             }
         };
@@ -400,7 +425,10 @@ impl World {
                 components,
             } => {
                 let id = self.create(*entity, *parent, components).map_err(refused)?;
-                Undo::Uncreate(id)
+                Undo::Uncreate(vec![id])
+            }
+            Operation::Duplicate { entity, copies } => {
+                Undo::Uncreate(self.duplicate(*entity, copies).map_err(refused)?)
             }
             Operation::Delete { entity } => {
                 let root = self.living(*entity).map_err(refused)?;
@@ -542,22 +570,155 @@ impl World {
         taken
     }
 
-    /// The entity a create made, `entity`, if undoing the create can take it out again: it's alive,
-    /// and has no children, which the create didn't make.
-    fn can_uncreate(&self, entity: EntityId) -> Result<Entity> {
-        let made = self.living(entity)?;
-        let mut children = self.children(made).expect("alive");
-        if let Some(child) = children.next() {
-            let child = self.id(child).expect("alive");
+    /// The root of what a create or a duplicate made, `made`, the root's ID first, if undoing it
+    /// can take them out again: the root is alive, and its subtree is them alone, every one of
+    /// them, without what the create or the duplicate didn't make.
+    fn can_uncreate(&self, made: &[EntityId]) -> Result<Entity> {
+        let root = self.living(made[0])?;
+        let mut under = Vec::new();
+        let mut at = 0;
+        let mut parent = root;
+        loop {
+            under.extend(self.children(parent).expect("alive"));
+            let Some(&next) = under.get(at) else {
+                break;
+            };
+            parent = next;
+            at += 1;
+        }
+        let mut ours = made[1..].to_vec();
+        ours.sort_unstable();
+        let theirs = under.iter().map(|&entity| self.id(entity).expect("alive"));
+        if let Some(other) = theirs.clone().find(|id| ours.binary_search(id).is_err()) {
+            let child = self.living(other).and_then(|other| self.parent(other));
+            let place = if child.is_ok_and(|parent| parent == Some(root)) {
+                "its child"
+            } else {
+                "under it"
+            };
             return Err(Error::new(
                 "ecs.has_children",
                 format!(
-                    "entity {child} is its child, which the create didn't make: an undo takes only \
-                     what its create made"
+                    "entity {other} is {place}, which wasn't made with it: an undo takes only what \
+                     was made"
                 ),
             ));
         }
-        Ok(made)
+        if under.len() != ours.len() {
+            let mut found: Vec<EntityId> = theirs.collect();
+            found.sort_unstable();
+            let gone = ours.iter().find(|id| found.binary_search(id).is_err());
+            let gone = gone.expect("fewer under it, all of them made");
+            return Err(Error::new(
+                "ecs.no_entity",
+                format!("entity {gone}, which it made, isn't under it any more"),
+            ));
+        }
+        Ok(root)
+    }
+
+    /// Spawns a copy of `entity`'s subtree, as [`Operation::Duplicate`] says, under the IDs `ids`,
+    /// or drawn if it's empty; and returns the copies' IDs, `entity`'s copy's first.
+    fn duplicate(&mut self, entity: EntityId, ids: &[EntityId]) -> Result<Vec<EntityId>> {
+        let root = self.living(entity)?;
+        // The subtree, each parent before its children, each beside its parent's place here.
+        let mut originals = vec![(root, None)];
+        let mut at = 0;
+        while let Some(&(parent, _)) = originals.get(at) {
+            let children = self.children(parent).expect("alive");
+            originals.extend(children.map(|child| (child, Some(at))));
+            at += 1;
+        }
+        if !ids.is_empty() {
+            if ids.len() != originals.len() {
+                return Err(Error::new(
+                    "ops.bad_copies",
+                    format!(
+                        "it's given {} IDs for {} copies, one for each of the entity and its \
+                         descendants",
+                        ids.len(),
+                        originals.len()
+                    ),
+                ));
+            }
+            for (given, id) in ids.iter().enumerate() {
+                if self.reserved(*id) {
+                    return Err(Error::new(
+                        "ecs.id_taken",
+                        format!("entity {id} is in the world already, or a delete keeps its ID"),
+                    ));
+                }
+                if ids[..given].contains(id) {
+                    return Err(Error::new(
+                        "ops.bad_copies",
+                        format!("it's given ID {id} twice, but each copy has its own"),
+                    ));
+                }
+            }
+        }
+        let parent_id = self.component::<Parent>();
+        let parent_id = parent_id.expect("every world has registered `Parent`");
+        // Each original's components, copied before anything changes, but its `Parent`, which its
+        // copy's is.
+        let rows: Vec<Row> = originals
+            .iter()
+            .map(|&(original, _)| {
+                let at = self.location(original).expect("alive");
+                let table = &self.tables[at.table as usize];
+                let columns = table.components.iter().zip(&table.columns);
+                let columns = columns.filter(|&(&component, _)| component != parent_id);
+                let copied = columns
+                    .map(|(&component, column)| (component, column.clone_row(at.row as usize)));
+                copied.collect()
+            })
+            .collect();
+        let root_parent = self.parent(root).expect("alive");
+        let mut made: Vec<(Entity, EntityId)> = Vec::with_capacity(rows.len());
+        for (given, (mut row, &(_, under))) in rows.into_iter().zip(&originals).enumerate() {
+            let parent = under.map_or(root_parent, |under| Some(made[under].0));
+            if let Some(parent) = parent {
+                let column: Box<dyn AnyColumn> = Box::new(vec![Parent(parent)]);
+                row.push((parent_id, column));
+                row.sort_unstable_by_key(|&(component, _)| component);
+            }
+            let copy = self.take_slot();
+            let id = match ids.get(given) {
+                Some(&id) => {
+                    self.find_by_id(id, copy);
+                    id
+                }
+                None => self.draw_id(copy),
+            };
+            self.place(copy, id, row);
+            if let Some(parent) = parent {
+                self.append(parent.index, copy.index);
+            }
+            made.push((copy, id));
+        }
+        // References among the originals are to their copies, as a prefab's are, and exclusive
+        // fields are false, as the copies are placed.
+        let originals: Vec<Entity> = originals
+            .into_iter()
+            .map(|(original, _)| original)
+            .collect();
+        let copies: Vec<Entity> = made.iter().map(|&(copy, _)| copy).collect();
+        for &copy in &copies {
+            let at = self.location(copy).expect("alive");
+            let components = self.tables[at.table as usize].components.clone();
+            for component in components.into_iter().filter(|&id| id != parent_id) {
+                let name = self.components.name(component).to_owned();
+                let mut value = self.get_field(copy, &name, "").expect("one it has");
+                if retarget(&mut value, &originals, &copies) {
+                    let set = self.set_field(copy, &name, "", &value);
+                    set.expect("its own value, of its own entities");
+                }
+                if let Some(field) = self.components.exclusive(component) {
+                    let set = self.set_field(copy, &name, field, &Value::Bool(false));
+                    set.expect("an exclusive field is a `bool` of a component it has");
+                }
+            }
+        }
+        Ok(made.into_iter().map(|(_, id)| id).collect())
     }
 
     /// Whether the component a remove took, `component`, can go back on `entity`.
@@ -672,6 +833,27 @@ impl World {
         let mut column = self.components.new_column(id);
         column.push_value(value).map_err(at)?;
         Ok(column)
+    }
+}
+
+/// Points each entity `value` holds that's one of `originals` at its copy, the one in its place in
+/// `copies`; returns whether it held one.
+fn retarget(value: &mut Value, originals: &[Entity], copies: &[Entity]) -> bool {
+    match value {
+        Value::Entity(entity) => {
+            let at = originals.iter().position(|original| original == entity);
+            at.map(|at| *entity = copies[at]).is_some()
+        }
+        Value::Option(Some(value)) => retarget(value, originals, copies),
+        Value::List(values) => values.iter_mut().fold(false, |held, value| {
+            retarget(value, originals, copies) | held
+        }),
+        Value::Struct(fields) | Value::Variant(_, fields) => {
+            fields.iter_mut().fold(false, |held, (_, value)| {
+                retarget(value, originals, copies) | held
+            })
+        }
+        _ => false,
     }
 }
 
@@ -849,6 +1031,10 @@ pub(super) mod tests {
                 ],
             },
             Operation::Delete { entity: a },
+            Operation::Duplicate {
+                entity: a,
+                copies: Vec::new(),
+            },
             Operation::Add {
                 entity: g,
                 component: "Transform".into(),
@@ -888,6 +1074,100 @@ pub(super) mod tests {
         let all = x.world.get::<Everything>(x.f).expect("everything");
         assert_eq!(all.handle, Handle(99));
         assert_eq!(x.world.get::<Sealed>(x.g), Some(&Sealed(5)));
+    }
+
+    /// A duplicate copies an entity and its descendants, typed, with what's opaque, each under an
+    /// ID of its own, written into it: the entity's copy the last of its parent's children, each
+    /// other copy under its parent's, in the order of the originals; a reference to one of them
+    /// points at its copy, and one to an entity outside stays. Undoing it is refused once one of
+    /// its copies has a child it didn't make, and once one is gone, changing nothing.
+    #[test]
+    fn a_duplicate_copies_a_subtree_typed_under_ids_of_its_own() {
+        let mut x = fixture();
+        // `f`, which targets `e`, under `a` with it; `g`, opaque as a whole, too.
+        x.world.set_parent(x.f, Some(x.a)).expect("no cycle");
+        x.world.set_parent(x.g, Some(x.f)).expect("no cycle");
+        let mut duplicate = Operation::Duplicate {
+            entity: x.id(x.a),
+            copies: Vec::new(),
+        };
+        let mut inverse = x.world.apply(&mut duplicate).expect("applied");
+        let Operation::Duplicate { copies, .. } = &duplicate else {
+            unreachable!("applied as it was")
+        };
+        let copied = copies.iter().map(|&id| x.world.entity(id).expect("alive"));
+        let copied: Vec<Entity> = copied.collect();
+        // Each parent before its children: `a`, then `b`, `c`, `d` and `f`, then `e` and `g`.
+        let [a, b, c, d, f, e, g] = copied[..] else {
+            panic!("seven copies: {copies:?}");
+        };
+        assert_eq!(children(&x.world, x.r), [x.a, x.s, a]);
+        assert_eq!(children(&x.world, a), [b, c, d, f]);
+        assert_eq!(children(&x.world, b), [e]);
+        assert_eq!(children(&x.world, f), [g]);
+        for (copy, original) in [(a, x.a), (b, x.b), (c, x.c), (d, x.d), (e, x.e), (f, x.f)] {
+            let at = x.world.get::<Transform>(copy);
+            assert_eq!(at, x.world.get::<Transform>(original));
+            assert_ne!(x.world.id(copy), Some(x.id(original)));
+        }
+        let sprite = x.world.get::<Sprite>(a).expect("copied");
+        assert_eq!(sprite.texture, x.texture, "opaque");
+        assert_eq!(x.world.get::<Sealed>(g), Some(&Sealed(5)));
+        let all = x.world.get::<Everything>(f).expect("copied");
+        assert_eq!(all.target, Some(e), "its copy's");
+        assert_eq!(all.handle, Handle(99));
+        let all = x.world.get::<Everything>(x.f).expect("kept");
+        assert_eq!(all.target, Some(x.e));
+        check_ids(&x.world);
+        check_links(&x.world);
+        // Another target, outside what's copied, stays.
+        let mut again = Operation::Duplicate {
+            entity: x.id(x.f),
+            copies: Vec::new(),
+        };
+        let redo = x.world.apply(&mut again).expect("applied");
+        let again = x.world.entity(again.entity().expect("written in"));
+        let all = x.world.get::<Everything>(again.expect("alive"));
+        assert_eq!(all.expect("copied").target, Some(x.e));
+        x.world.release(redo);
+        // A child it didn't make, then one of its copies gone: refused, changing nothing.
+        let extra = x.world.spawn(Transform::IDENTITY);
+        x.world.set_parent(extra, Some(c)).expect("no cycle");
+        for (code, case) in [
+            ("ecs.has_children", "a child it didn't make"),
+            ("ecs.no_entity", "a copy gone"),
+        ] {
+            if code == "ecs.no_entity" {
+                x.world.despawn(extra).expect("alive");
+                x.world.despawn(d).expect("alive");
+            }
+            let before = sorted(&x.world);
+            let refused = x.world.undo(&mut inverse).expect_err(case);
+            assert_eq!(refused.code(), code, "{refused}");
+            assert!(same_snapshots(&sorted(&x.world), &before), "{case}");
+        }
+    }
+
+    /// A duplicate's copies of an exclusive field are false, so that it stays true on one entity at
+    /// most: the original's.
+    #[test]
+    fn a_duplicates_exclusive_fields_are_false() {
+        let (mut world, [lit, ..], _) = lamps();
+        let mut duplicate = Operation::Duplicate {
+            entity: world.id(lit).expect("alive"),
+            copies: Vec::new(),
+        };
+        world.apply(&mut duplicate).expect("applied");
+        let copy = world.entity(duplicate.entity().expect("written in"));
+        let copy = world.get::<Lamp>(copy.expect("alive")).expect("copied");
+        assert_eq!(
+            copy,
+            &Lamp {
+                lit: false,
+                watts: 40
+            }
+        );
+        assert!(world.get::<Lamp>(lit).expect("kept").lit);
     }
 
     #[test]
@@ -1068,6 +1348,28 @@ pub(super) mod tests {
                     parent: Some(unknown),
                 },
                 "ecs.no_entity",
+            ),
+            (
+                Operation::Duplicate {
+                    entity: unknown,
+                    copies: Vec::new(),
+                },
+                "ecs.no_entity",
+            ),
+            // `a`'s subtree is five.
+            (
+                Operation::Duplicate {
+                    entity: a,
+                    copies: vec![fresh()],
+                },
+                "ops.bad_copies",
+            ),
+            (
+                Operation::Duplicate {
+                    entity: s,
+                    copies: vec![e],
+                },
+                "ecs.id_taken",
             ),
         ];
         for (mut operation, code) in cases {

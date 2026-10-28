@@ -25,7 +25,9 @@ use crate::perf::Perf;
 use crate::recording::Recorder;
 use crate::reflect::{Reflect, Value};
 use crate::render_thread::Extracted;
-use crate::{EntityId, Event, Input, MeshDraw, Model, Name, Transform, Ui, World};
+use crate::{
+    BoxCollider2D, EntityId, Event, Input, MeshDraw, Model, Name, RigidBody2D, Transform, Ui, World,
+};
 
 /// A part of an app that the main loop drives. Every method has a default that does nothing,
 /// so a layer implements only what it uses; [`ui`](Self::ui)'s also tells the engine that the
@@ -241,7 +243,9 @@ impl Context {
             world.register::<Sprite>()?;
             world.register::<MeshDraw>()?;
             world.register::<Camera>()?;
-            world.register::<Name>()
+            world.register::<Name>()?;
+            world.register::<RigidBody2D>()?;
+            world.register::<BoxCollider2D>()
         });
         registered.expect("the engine's components describe themselves");
         Self {
