@@ -483,6 +483,23 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   By hand on the RTX 4090, through a build that held the hover where the last click picked, since
   posted input can't hover: the corner named Red, nothing over empty space, Green, and Blue
   through the world's camera, and the editor exited cleanly under validation.
+- **Content browser** (2026-10-28): the editor's Assets panel, docked below the view, shows the
+  files in `apps/editor/assets` a folder at a time, as Hazel's content browser does: folders
+  first, then files, by name, a double click showing a folder and Back the one above, as far up
+  as the root; and a scene dragged from it onto the view, which an outline marks while one's held
+  over it, opens as Open opens one. It lists its folder again each second it shows, and the folder
+  holds `scenes/squares.ron`, the editor's starting world. The rest of Hazel's episode was here
+  already, or waits: its camera in a uniform buffer and its shaders as SPIR-V, Vulkan's ways; its
+  cache of compiled shaders, for Phase 7, which cooks them; and dropping a texture onto a sprite,
+  for Phase 5, which names assets. Unit tests check the listing's order and kinds, a Cyrillic name
+  among them, the double click and Back, the listing again a second on and a folder gone; a scene
+  dragged from the panel onto a view that senses presses as the dock's does opening, outlined
+  while it's over the view, and one let go elsewhere, or another file, opening nothing; and that
+  the folder's scenes open and save as they were saved. By hand on the RTX 4090: the panel docked
+  below the view, a double click showed `assets/scenes` and Back `assets`; through a build that
+  held a scene tapped as though dragged, since posted input can't drag, New emptied the world and
+  a tap on the view opened `squares.ron` there, under its file's IDs; both runs exited cleanly
+  under validation.
 
 ## Now: the editor's next milestone, or Phase 5's first
 
@@ -694,7 +711,7 @@ Defects left in because fixing them costs more than they do are in [DEFECTS.md](
 | Gates on time in CI: hosted runners' times vary too much to gate on | A self-hosted runner, as for the GPU tests |
 | Moving values to a type that changed: matching fields by name and by alias, defaults for fields added, and fields dropped; a scene with a field its type hasn't, or without one it has, is refused | Phase 5, when `Sprite` gains its texture's name, or with its hot reload |
 | In the Inspector, turning an option on or off, and adding or removing a list's elements; by path, a value sets them whole | A component needs one edited |
-| `Sprite.texture` and `MeshDraw` are opaque: shown, but not set, saved, hashed or carried across a rebuild | Phase 5, which names assets |
+| `Sprite.texture` and `MeshDraw` are opaque: shown, but not set, saved, hashed or carried across a rebuild; so the Assets panel's images drag nowhere, where Hazel's drop onto a sprite | Phase 5, which names assets |
 | Flags for fields that saving, the world's hash or replication skip, and fields that are read only; `Parent` is read only as a whole type, which `set_field` refuses | Each with its first user |
 | Generic types deriving `Reflect` or `Component` | A game needs one |
 | Drag speeds as hints; the Inspector picks them from a field's bounds and kind | A field drags too coarsely or too finely |
@@ -727,8 +744,10 @@ Defects left in because fixing them costs more than they do are in [DEFECTS.md](
 | Loading a scene in place of some of a world's entities in one step, as the sandbox's grid reload does in three; a load refuses IDs the world has, and `World::replace_scene` replaces all of its entities | Phase 5's scene files applied as operations |
 | A version in scene files, a file without one reading as the first | The first change to the format that old files can't be read by |
 | Comments in scene files, which a save drops | People annotate scenes |
-| A prompt before the editor's New, Open or Quit discards edits not saved: they discard them | Someone loses work, or Phase 9's editor |
+| A prompt before the editor's New, Open or Quit, or a scene dropped on its view, discards edits not saved: they discard them | Someone loses work, or Phase 9's editor |
 | The scene's file named in the editor's title bar, and a list of recent scenes: Save writes to the file opened or saved last, which nothing shows | Someone loses track of which file Save writes |
+| Dragging a scene onto the view from the Assets panel torn off into a window of its own: egui's drag stays in the window it started in, so the view never sees it let go | Someone drags from a torn-off Assets panel |
+| Listing the Assets panel's folder off the main thread, as a thread watching it would: it's listed on the main thread each second it shows, which a folder of many thousands of files would hold up for milliseconds | A game's folder that big, once the tool API brings one |
 | The log in `Context`, every layer's and the tool API's clients each undoing their own, and an undo logged as an operation; the Inspector keeps a log of its own | Phase 5, the tool API |
 | Replaying a log into another world, which maps values' handles to IDs, as a recording's commands are; `set_field` and operations store a dead handle without complaint | Phase 5, the tool API |
 | A delete saying what refers to its entities from outside, or refusing; those references dangle until it's undone, and the world doesn't save in between | An agent deletes through the tool API |

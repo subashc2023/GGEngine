@@ -73,7 +73,10 @@ sandbox  editor   player       apps/: executables
   distance, whose drags move, turn and scale it along its own axes, each an edit the Inspector's
   log undoes, the command key snapping to half units, 45° and halves. Its File menu starts a new
   scene, opens one, whose entities replace the world's, and saves the world's entities as one,
-  through the OS's file dialogs, with Ctrl+N, Ctrl+O, Ctrl+S and Ctrl+Shift+S.
+  through the OS's file dialogs, with Ctrl+N, Ctrl+O, Ctrl+S and Ctrl+Shift+S. Its Assets panel,
+  a content browser, shows the files in its assets folder, beside its source, until the tool API
+  brings a game's, a folder at a time; a scene dragged from it onto the view opens as Open opens
+  one.
 - **`player`:** the reference player. It runs a cooked scene without game code and shows how a
   game builds its own player.
 

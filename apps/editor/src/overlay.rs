@@ -1,13 +1,13 @@
 //! What the editor draws over its view: a toolbar at the view's top left, which picks what the
 //! left button does, the projection and the grid; a gizmo at its top right, which shows which way
-//! the camera faces, and turns it; and at its bottom left, the name of what the view shows under
-//! the cursor.
+//! the camera faces, and turns it; at its bottom left, the name of what the view shows under the
+//! cursor; and round its edges, while a scene from the Assets panel is held over it, an outline.
 
 use std::f32::consts::{PI, TAU};
 
 use gg_engine::egui::{
     self, Align2, Atom, Button, Color32, CursorIcon, FontId, Frame, Id, Margin, Painter, Pos2,
-    Rect, Response, Rgba, Sense, Shape, Stroke, TextStyle, Visuals, vec2,
+    Rect, Response, Rgba, Sense, Shape, Stroke, StrokeKind, TextStyle, Visuals, vec2,
 };
 use gg_engine::math::{self, Quat, libm};
 
@@ -508,6 +508,14 @@ pub fn name_hovered(egui: &egui::Context, view: &Response, name: String) {
     let inner = outer - margin;
     painter.add(frame.paint(inner));
     painter.galley(inner.min, galley, color);
+}
+
+/// Outlines `view`, where a scene dragged from the Assets panel and let go opens, inside its edges
+/// in the selection's color: painted on the view's own layer, as the name under the cursor is.
+pub fn outline_drop(egui: &egui::Context, view: &Response) {
+    let painter = egui.layer_painter(view.layer_id).with_clip_rect(view.rect);
+    let color = egui.global_style().visuals.selection.stroke.color;
+    painter.rect_stroke(view.rect, 0.0, Stroke::new(2.0, color), StrokeKind::Inside);
 }
 
 #[cfg(test)]

@@ -12,9 +12,11 @@
 //! starts a new scene, emptying the world; opens one, whose entities replace the world's; and
 //! saves the world's entities as one, to the file it was opened from or saved to last, or as
 //! another: through the OS's file dialogs, and with Ctrl+N, Ctrl+O, Ctrl+S and Ctrl+Shift+S, Cmd
-//! for Ctrl on macOS. When a file can't be read, opened or written, it says why, until that's
-//! dismissed.
+//! for Ctrl on macOS. The Assets panel shows the files in the editor's assets folder, a folder at a
+//! time, and a scene dragged from it onto the view opens as Open opens one. When a file can't be
+//! read, opened or written, it says why, until that's dismissed.
 
+mod assets;
 mod camera;
 mod grid;
 mod handles;
@@ -29,8 +31,8 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use gg_engine::egui::{
-    self, Align2, Button, CursorIcon, Id, KeyboardShortcut, Modal, Modifiers, ViewportCommand,
-    ViewportId,
+    self, Align2, Button, CursorIcon, Id, KeyboardShortcut, Modal, Modifiers, Response,
+    ViewportCommand, ViewportId,
 };
 use gg_engine::math::{Vec2, Vec3, Vec4};
 use gg_engine::reflect::Error;
@@ -42,6 +44,7 @@ use gg_engine::{
 };
 use tracing::warn;
 
+use assets::{Assets, DraggedScene};
 use camera::{Move, OrbitCamera, Screen, Side, Tool};
 use grid::Grid;
 use handles::{Aim, Handles, Picked, Reading, Reply, Sight};
@@ -56,7 +59,8 @@ fn app() -> App {
     let app = app
         .dock("Inspector", Docked::RightOf("Viewport"))
         .dock("Entities", Docked::LeftOf("Viewport"))
-        .dock("Performance", Docked::Below("Inspector"));
+        .dock("Performance", Docked::Below("Inspector"))
+        .dock("Assets", Docked::Below("Viewport"));
     let inspector = Inspector::default();
     let link = inspector.link();
     let app = app.layer(Editor::new(link));
@@ -65,10 +69,11 @@ fn app() -> App {
 
 /// The editor's layer: its camera, and the toolbar and gizmo over the view, and the name of what
 /// it shows under the cursor; the handles over what the Inspector has picked, which pick and edit
-/// through its link; the grid; the keys that drive the world's cameras; and the File menu, which
+/// through its link; the grid; the keys that drive the world's cameras; the File menu, which
 /// empties the world for a new scene, replaces it with a scene's and saves it as one, keeping the
-/// file it was opened from or saved to last for Save to write to, and says why when a file can't
-/// be read, opened or written.
+/// file it was opened from or saved to last for Save to write to; and the Assets panel, whose
+/// scenes open as they're dropped on the view, as Open opens one. It says why when a file can't be
+/// read, opened or written.
 struct Editor {
     camera: OrbitCamera,
     toolbar: Toolbar,
@@ -98,6 +103,8 @@ struct Editor {
     /// Whether the world's cameras take the keys: whether the view saw through the world's camera
     /// as the commands last heard; false once an Open has stopped them.
     gated: bool,
+    /// The Assets panel, whose scenes open as they're dropped on the view.
+    assets: Assets,
     /// The file the scene was opened from or saved to last, which Save writes to: none at first,
     /// and after New.
     scene: Option<PathBuf>,
@@ -152,6 +159,7 @@ impl Editor {
             actions,
             commands: Vec::new(),
             gated: false,
+            assets: Assets::new(assets_folder()),
             scene: None,
             opening: VecDeque::new(),
             message: None,
@@ -232,10 +240,7 @@ impl Editor {
     /// with `.ron` after is one the dialog didn't ask about replacing, so it isn't replaced: the
     /// editor says so, and saves nothing.
     fn save_as(&mut self, world: &World, mut picked: PathBuf) {
-        let ron = picked
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("ron"));
-        if !ron {
+        if !is_scene(&picked) {
             picked.as_mut_os_string().push(".ron");
             if picked.exists() {
                 let message = format!(
@@ -374,6 +379,17 @@ impl Editor {
         }
     }
 
+    /// Opens the scene dragged from the Assets panel and let go over `view`, the game's view, if
+    /// one was this frame, as Open opens one; and outlines the view while one's held over it.
+    fn take_drop(&mut self, egui: &egui::Context, view: &Response) {
+        if view.dnd_hover_payload::<DraggedScene>().is_some() {
+            overlay::outline_drop(egui, view);
+        }
+        if let Some(dropped) = view.dnd_release_payload::<DraggedScene>() {
+            self.open(dropped.0.clone());
+        }
+    }
+
     /// Shows the message, if there is one, in front of the UI, which it keeps clicks from, until
     /// it's dismissed: by its OK, Escape or a click outside it.
     fn show_message(&mut self, egui: &egui::Context) {
@@ -498,6 +514,19 @@ fn steer(world: &mut World, heading: Vec2) {
     for controller in world.query_mut::<&mut CameraController>() {
         controller.heading = heading;
     }
+}
+
+/// The editor's assets folder, `assets` beside its source, found from where it was built, as the
+/// sandbox finds its files: what the Assets panel shows until the tool API brings a game.
+fn assets_folder() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("assets")
+}
+
+/// Whether `path` names a scene's file, as the File menu's dialogs show them: one whose name ends
+/// in `.ron`, in any case.
+fn is_scene(path: &Path) -> bool {
+    let extension = path.extension();
+    extension.is_some_and(|extension| extension.eq_ignore_ascii_case("ron"))
 }
 
 /// `world`'s roots and their descendants, every entity it has, as a scene's text.
@@ -830,6 +859,10 @@ impl Layer for Editor {
             .input_mut(|input| file_shortcut(&mut input.events));
         if let Some(item) = clicked.or(pressed) {
             self.choose(cx, item);
+        }
+        ui.panel("Assets", |ui| self.assets.show(ui));
+        if let Some(view) = ui.view() {
+            self.take_drop(ui.egui(), &view);
         }
         self.show_message(ui.egui());
         // What the view shows under the cursor, while the cursor's over it: a pick at the cursor
@@ -1492,10 +1525,10 @@ mod tests {
 
     /// A directory of a test's own in the OS's temporary directory, made empty, and removed as the
     /// test ends, failed or not.
-    struct Scratch(PathBuf);
+    pub(crate) struct Scratch(pub(crate) PathBuf);
 
     impl Scratch {
-        fn new(name: &str) -> Self {
+        pub(crate) fn new(name: &str) -> Self {
             let dir = std::env::temp_dir().join(format!("gg-editor-{name}-{}", std::process::id()));
             let _ = fs::remove_dir_all(&dir);
             fs::create_dir(&dir).expect("made");
@@ -1758,5 +1791,141 @@ mod tests {
             [Command::New, Command::Open { text: read }, Command::Move(to)]
                 if read == text && *to == heading
         ));
+    }
+
+    /// Every scene in the editor's assets folder, and in the folders under it, opens in the
+    /// editor's world, as one dropped from the Assets panel does, and saves as it was saved: so a
+    /// change to the editor's types, or to how scenes are written, that leaves one behind fails.
+    #[test]
+    fn the_assets_scenes_open_and_save_as_they_were_saved() {
+        let mut folders = vec![assets_folder()];
+        let mut scenes = Vec::new();
+        while let Some(folder) = folders.pop() {
+            for entry in fs::read_dir(&folder).expect("listed") {
+                let path = entry.expect("listed").path();
+                if path.is_dir() {
+                    folders.push(path);
+                } else if is_scene(&path) {
+                    scenes.push(path);
+                }
+            }
+        }
+        assert!(!scenes.is_empty(), "the assets folder holds a scene");
+        for path in scenes {
+            let mut cx = Context::seeded(1);
+            // As the editor starts, which registers its types with the world.
+            spawn_world(cx.world_mut());
+            let text = gg_engine::read_scene(&path).expect("read");
+            let opened = cx.world_mut().replace_scene(&text);
+            opened.unwrap_or_else(|error| panic!("{}: {error:#}", path.display()));
+            let saved = whole_scene(cx.world()).expect("saved");
+            assert_eq!(saved, text, "{}", path.display());
+        }
+    }
+
+    /// The text drawn in `shapes`, a frame's output, each with where it was drawn.
+    pub(crate) fn texts(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, egui::Rect)> {
+        fn find(shape: &egui::Shape, texts: &mut Vec<(String, egui::Rect)>) {
+            match shape {
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        find(shape, texts);
+                    }
+                }
+                egui::Shape::Text(text) => {
+                    texts.push((text.galley.text().to_owned(), text.visual_bounding_rect()));
+                }
+                _ => {}
+            }
+        }
+        let mut texts = Vec::new();
+        for clipped in shapes {
+            find(&clipped.shape, &mut texts);
+        }
+        texts
+    }
+
+    /// Where `text` was drawn among `texts`.
+    pub(crate) fn find(texts: &[(String, egui::Rect)], text: &str) -> egui::Rect {
+        let found = texts.iter().find(|(drawn, _)| drawn == text);
+        found.unwrap_or_else(|| panic!("no {text}: {texts:?}")).1
+    }
+
+    /// The events of a drag with the primary button from `from` to `to`, a frame's each, as egui
+    /// gets them: past how far a click goes in the frame after the press, then to `to`, then let go.
+    pub(crate) fn drag(from: egui::Pos2, to: egui::Pos2) -> Vec<egui::Event> {
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        vec![
+            egui::Event::PointerMoved(from),
+            button(from, true),
+            egui::Event::PointerMoved(from + egui::vec2(12.0, 0.0)),
+            egui::Event::PointerMoved(to),
+            egui::Event::PointerMoved(to + egui::vec2(1.0, 1.0)),
+            button(to + egui::vec2(1.0, 1.0), false),
+        ]
+    }
+
+    /// A scene dragged from the Assets panel and let go over the view opens, as Open opens one: its
+    /// text is queued for the next tick, and its file is the scene's then. One let go elsewhere
+    /// opens nothing, nor does another kind of file, which doesn't drag.
+    #[test]
+    fn a_scene_dragged_from_the_assets_panel_onto_the_view_opens() {
+        let scratch = Scratch::new("dropped");
+        let mut cx = Context::seeded(1);
+        spawn_world(cx.world_mut());
+        let scene = scratch.0.join("level.ron");
+        fs::write(&scene, whole_scene(cx.world()).expect("saved")).expect("written");
+        fs::write(scratch.0.join("logo.png"), "not a scene").expect("written");
+        let mut editor = fresh();
+        editor.assets = Assets::new(scratch.0.clone());
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 400.0));
+        let (panel, view) = screen.split_left_right_at_x(400.0);
+        // A frame of the panel beside a view that senses presses as the dock's does.
+        let frame = |editor: &mut Editor, event: Option<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                events: event.into_iter().collect(),
+                ..egui::RawInput::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                let sense = egui::Sense::CLICK | egui::Sense::DRAG;
+                let response = ui.interact(view, Id::unique("test view"), sense);
+                let builder = egui::UiBuilder::new().max_rect(panel);
+                ui.scope_builder(builder, |ui| editor.assets.show(ui));
+                editor.take_drop(ui.ctx(), &response);
+            });
+            output.textures_delta.clear();
+            output.shapes
+        };
+        // The drag from `from` to `to`, and whether each of its frames outlined the view.
+        let drop = |editor: &mut Editor, from: egui::Rect, to| {
+            let frames = drag(from.center(), to).into_iter();
+            let shapes = frames.map(|event| frame(editor, Some(event)));
+            let outlined = |shapes: Vec<egui::epaint::ClippedShape>| {
+                let outline = |shape: &_| matches!(shape, egui::Shape::Rect(r) if r.rect == view);
+                shapes.iter().any(|clipped| outline(&clipped.shape))
+            };
+            shapes.map(outlined).collect::<Vec<bool>>()
+        };
+        frame(&mut editor, None);
+        let shown = texts(&frame(&mut editor, None));
+        let (level, logo) = (find(&shown, "level.ron"), find(&shown, "logo.png"));
+        let elsewhere = egui::pos2(200.0, 350.0);
+        for (from, to) in [(logo, view.center()), (level, elsewhere)] {
+            assert_eq!(drop(&mut editor, from, to), [false; 6]);
+            assert!(editor.commands.is_empty() && editor.opening.is_empty());
+        }
+        // Outlined once it's over the view, until it's let go.
+        let outlined = drop(&mut editor, level, view.center());
+        assert_eq!(outlined, [false, false, false, true, true, true]);
+        let text = fs::read_to_string(&scene).expect("read");
+        assert!(matches!(&editor.commands[..], [Command::Open { text: read }] if *read == text));
+        assert_eq!(editor.opening, [scene]);
     }
 }
