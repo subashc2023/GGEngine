@@ -24,13 +24,14 @@ apps/             executables
   editor/         the editor: the game's view in a panel among dockable panels
   player/         reference player: runs cooked scenes without game code
 docs/PLAN.md      the roadmap (see Workflow)
+docs/DEFECTS.md   known defects, left in because a fix costs more than they do (see Workflow)
 ```
 
 Dependencies point down: apps → `gg-engine` → `gg-renderer` → `gg-gpu` → `gg-core`, and any
 crate may use `gg-core`. Cargo catches only some breaches of the layering rules in
 ARCHITECTURE.md, and `cargo deny check bans` (from [deny.toml](deny.toml)) catches skip-level
-edges and the wrong crate using `ash`, `winit`, `gilrs`, `rayon-core` or Tracy's client: check a
-change against the rest yourself.
+edges and the wrong crate using `ash`, `winit`, `gilrs`, `rfd`, `rayon-core` or Tracy's client:
+check a change against the rest yourself.
 
 ## Commands
 
@@ -173,7 +174,8 @@ probe CI only for a change another platform could break.
 - `docs/PLAN.md` holds the current milestone, the phases after it, deferred work and open
   questions; read it before roadmap work, and update it in the same commit as the work it
   tracks. When a milestone is done, replace its section with one line under Done and move what
-  was skipped to Deferred.
+  was skipped to Deferred. A defect left in because its fix costs more than it's worth goes in
+  `docs/DEFECTS.md` instead, by area: what it costs, the fix, and when the fix would be worth it.
 - Open questions are the user's to decide: bring a recommendation instead of settling one
   yourself. Once one is decided, the answer goes in ARCHITECTURE.md and the question leaves
   docs/PLAN.md.
@@ -181,7 +183,7 @@ probe CI only for a change another platform could break.
 ## Keeping the docs lean
 
 - Each fact has one home: this file for how to work here, ARCHITECTURE.md for the design,
-  docs/PLAN.md for the work. Link instead of copying.
+  docs/PLAN.md for the work, docs/DEFECTS.md for the defects kept. Link instead of copying.
 - They state current decisions, not their history. When something changes, rewrite or delete
   the old text instead of adding a note below it. Git keeps the history, so a finished
   milestone's details go in its commit message.

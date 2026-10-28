@@ -44,7 +44,9 @@ use crate::{
 /// them, a drag, or a number typed, as one edit. The panels queue each frame's edits,
 /// operations, undos and redos, which the Inspector's next tick makes, so that the world changes
 /// only at ticks; until then, a field set is drawn as the set will make it, and a refusal, and the
-/// Edit menu's names, show from the tick.
+/// Edit menu's names, show from the tick. A world cleared, replaced or restored, which is another,
+/// as [`World::serial`] says, unpicks and closes every row at the next tick, which drops the edits
+/// made to the world before, and those queued for it.
 #[derive(Default)]
 pub struct Inspector {
     /// By its ID, which outlives it, so that a pick despawned is still named by its ID: its name
@@ -63,6 +65,9 @@ pub struct Inspector {
     refusals: Vec<Refusal>,
     /// The edits made, which undo and redo step through.
     log: Log,
+    /// The serial of the world the log, the pick and the open rows are of, as the last tick found
+    /// it: another, as a world cleared, replaced or restored is, lets go of them at the next.
+    world: Option<u64>,
     /// Why the last operation, undo or redo was refused, until the next edit, operation, undo or
     /// redo.
     not_done: Option<String>,
@@ -319,6 +324,19 @@ impl Layer for Inspector {
 
     fn tick(&mut self, world: &mut World, _: Tick) {
         let mut queued = mem::take(&mut self.queued.0);
+        // Another world's entities aren't those the pick, the rows, the log and the commands
+        // queued name, though they may have their IDs, as a scene reopened gives them back. A
+        // replay drops the commands at the same tick.
+        if self.world.is_some_and(|serial| serial != world.serial()) {
+            self.log.clear(world);
+            self.unpick();
+            self.expanded.clear();
+            self.not_done = None;
+            self.not_found = None;
+            self.open = false;
+            queued.clear();
+        }
+        self.world = Some(world.serial());
         for command in queued.drain(..) {
             self.run(world, command);
         }
@@ -588,9 +606,10 @@ impl Inspector {
         });
     }
 
-    /// Draws `entity`'s row: its label, which picks it, and whose context menu makes an empty
-    /// child of it or deletes it, the operation chosen going in `operations`; in the tree, at
-    /// `depth`, after an arrow that shows and hides its children's rows, if it has any.
+    /// Draws `entity`'s row: its label, across the rest of the row, which picks it, and whose
+    /// context menu makes an empty child of it or deletes it, the operation chosen going in
+    /// `operations`; in the tree, at `depth`, after an arrow that shows and hides its children's
+    /// rows, if it has any.
     fn row(
         &mut self,
         world: &World,
@@ -610,7 +629,12 @@ impl Inspector {
                     self.arrow(world, ui, entity, id, depth);
                 }
                 let picked = self.picked == Some(id);
-                let label = ui.selectable_label(picked, row_label(world, entity, id));
+                // On one line, as a horizontal row has it, since the rows' paging takes each to be
+                // one tall: a vertical layout would wrap it.
+                let label = egui::Button::selectable(picked, row_label(world, entity, id))
+                    .wrap_mode(egui::TextWrapMode::Extend);
+                let across = egui::Layout::top_down_justified(egui::Align::LEFT);
+                let label = ui.with_layout(across, |ui| ui.add(label)).inner;
                 if label.clicked() {
                     self.pick(id);
                 }
@@ -991,9 +1015,11 @@ const PARENT: &str = "Parent";
 /// haven't the midline one, `⋯`.
 const MORE: &str = "…";
 
-/// The menu of `component`, beside its header, `header`, whose Remove Component takes it away from
-/// the entity of ID `id`, the operation going in `operations`. It's in a child of `ui`, which
-/// leaves the cursor where the header's body left it, for the next header.
+/// The menu of `component`, at the right end of the row of its header, `header`, as it shows,
+/// whose Remove Component takes it away from the entity of ID `id`, the operation going in
+/// `operations`. A framed header is as wide as `ui`, and the menu is over its end, taking the
+/// clicks there from it, since it's made after it. It's in a child of `ui`, which leaves the
+/// cursor where the header's body left it, for the next header.
 fn component_menu(
     ui: &mut egui::Ui,
     header: egui::Rect,
@@ -1002,10 +1028,19 @@ fn component_menu(
     operations: &mut Vec<Command>,
 ) {
     let size = egui::Vec2::splat(ui.spacing().interact_size.y);
-    let at = egui::pos2(header.right() + ui.spacing().item_spacing.x, header.top());
+    // `ui`'s end rather than the header's, which is the end of its name where it isn't framed;
+    // but no further than where `ui` is cut off, since rows wider than the panel, as a narrow
+    // Inspector's axes are, widen `ui` past its edge; and short of the strip along that edge where
+    // a scroll area's bar floats over its contents, which takes the clicks there.
+    let scroll = &ui.spacing().scroll;
+    let bar = scroll.bar_width + scroll.bar_outer_margin;
+    let right = ui.max_rect().right().min(ui.clip_rect().right()) - bar;
+    let at = egui::pos2(right - size.x, header.top());
+    // Laid out from its right, so that the button ends there however wide its label makes it.
     let child = egui::UiBuilder::new()
         .id_salt(("component menu", component))
-        .max_rect(egui::Rect::from_min_size(at, size));
+        .max_rect(egui::Rect::from_min_size(at, size))
+        .layout(egui::Layout::right_to_left(egui::Align::Center));
     let mut menu = ui.new_child(child);
     let button = egui::Button::new(MORE).min_size(size);
     egui::menu::MenuButton::from_button(button).ui(&mut menu, |ui| {
@@ -1800,20 +1835,37 @@ fn float(ui: &mut egui::Ui, x: f64, meta: &Meta, is_f32: bool) -> Option<f64> {
     ui.add(drag).changed().then(|| shown / scale)
 }
 
-/// The button of axis `axis`, in its color, as high and as wide as a field's widget is high:
-/// whether it was clicked.
+/// The button of axis `axis`, in its color, as high and as wide as a field's widget is high, its
+/// label egui's strong text, the brightest against the color, in the family [`crate::BOLD`] names
+/// where the context binds it: a game may set fonts of its own, and egui draws text in a family it
+/// hasn't bound as boxes. Whether it was clicked.
 fn axis_button(ui: &mut egui::Ui, axis: usize) -> bool {
     let (_, label, fill, hovered) = AXES[axis];
     let rgb = |[r, g, b]: [u8; 3]| egui::Color32::from_rgb(r, g, b);
     let size = egui::Vec2::splat(ui.spacing().interact_size.y);
+    // Found among the few families bound, rather than looked up by a key made of the name, which
+    // would allocate for each button each frame; the family found is shared, not copied.
+    let bold = ui.ctx().fonts(|fonts| {
+        let mut families = fonts.definitions().families.keys();
+        let bold = |family: &&egui::FontFamily| {
+            matches!(family, egui::FontFamily::Name(name) if **name == *crate::BOLD)
+        };
+        families.find(bold).cloned()
+    });
+    let label = egui::RichText::new(label).strong();
+    let label = match bold {
+        Some(bold) => label.family(bold),
+        None => label,
+    };
     // Its own colors, in a scope of its own: `Button::fill` would keep it from lighting up as
-    // it's hovered.
+    // it's hovered; and no padding beside its label, which would widen it past its height.
     ui.scope(|ui| {
+        ui.spacing_mut().button_padding.x = 0.0;
         let widgets = &mut ui.visuals_mut().widgets;
         widgets.inactive.weak_bg_fill = rgb(fill);
         widgets.hovered.weak_bg_fill = rgb(hovered);
         widgets.active.weak_bg_fill = rgb(fill);
-        let button = egui::Button::new(egui::RichText::new(label).strong()).min_size(size);
+        let button = egui::Button::new(label).min_size(size);
         ui.add(button).clicked()
     })
     .inner
@@ -3388,6 +3440,96 @@ mod tests {
         assert!(said, "{texts:?}");
     }
 
+    /// A world cleared, replaced or restored, as a layer below the Inspector's would at its tick,
+    /// is another, which the Inspector's next tick finds: it unpicks, closes every row, forgets
+    /// what was refused and clears its log, so that Undo names nothing; and drops what was queued
+    /// for the world before, rather than make it in this one, where a replace or a restore gives
+    /// the entity it named back under its ID, or have it refused, as the world cleared would.
+    /// Edits from then on are this world's.
+    #[test]
+    fn another_world_unpicks_and_drops_the_edits_made_to_the_one_before() {
+        let ctx = crate::egui_context();
+        let count = |value| Edit {
+            component: "Everything".to_owned(),
+            path: "count".to_owned(),
+            value: Value::UInt(value),
+        };
+        let set = |value| Pass {
+            sets: vec![count(value)],
+            ..Pass::default()
+        };
+        let mut time = 0.0;
+        for case in ["cleared", "replaced", "restored"] {
+            let mut world = World::default();
+            let [parent, child] = [(); 2].map(|()| world.spawn(everything()));
+            world.set_parent(child, Some(parent)).expect("no cycle");
+            let saved = world.save_scene(&[parent]).expect("saved");
+            let snapshot = world.clone();
+            let picked = id(&world, child);
+            let mut inspector = Inspector::default();
+            inspector.pick(picked);
+            inspector.expanded.insert(id(&world, parent));
+            make(&mut inspector, &mut world, set(7));
+            // Refused, and shown beside its field.
+            inspector.apply(&mut world, Some(picked), count(200));
+            time += 1.0;
+            let texts = menu(&mut inspector, &mut world, &ctx, time, Vec::new());
+            let undo = format!("Undo set `Everything.count` of {picked}");
+            let named = texts.iter().any(|(text, _)| *text == undo);
+            assert!(named, "{case}: {texts:?}");
+            inspector.not_done = Some("can't undo it".to_owned());
+            inspector.not_found = Some("no entity has ID 0123456789abcdef".to_owned());
+            // For the next tick: a delete, then a set of a gesture that goes on.
+            inspector.queue(Pass {
+                operations: vec![Command::Delete(picked)],
+                ..Pass::default()
+            });
+            inspector.queue(Pass {
+                cues: Cues {
+                    held: true,
+                    ..Cues::default()
+                },
+                ..set(9)
+            });
+            assert_eq!(inspector.queued.len(), 2, "{case}");
+            match case {
+                "cleared" => world.clear(),
+                "replaced" => {
+                    world.replace_scene(&saved).expect("replaced");
+                }
+                _ => world.clone_from(&snapshot),
+            }
+            Layer::tick(&mut inspector, &mut world, Tick { number: 0 });
+            assert_eq!(inspector.log.undoable(), None, "{case}");
+            assert_eq!(inspector.picked, None, "{case}");
+            assert!(inspector.expanded.is_empty(), "{case}");
+            assert!(inspector.refusals.is_empty(), "{case}");
+            // Dropped, not refused, as the delete would be in the world cleared.
+            assert_eq!(inspector.not_done, None, "{case}");
+            assert_eq!(inspector.not_found, None, "{case}");
+            assert!(inspector.queued.is_empty() && !inspector.open, "{case}");
+            time += 1.0;
+            let texts = menu(&mut inspector, &mut world, &ctx, time, Vec::new());
+            let unnamed = texts.iter().any(|(text, _)| text == "Undo");
+            assert!(unnamed, "{case}: {texts:?}");
+            if case == "cleared" {
+                assert_eq!(world.entities(None).expect("every entity").len(), 0);
+                continue;
+            }
+            // Given back under its ID, neither set nor deleted; and edited from then on.
+            let entity = world.entity(picked).expect("given back");
+            let counted = |world: &World| {
+                let all = world.get::<Everything>(entity);
+                all.expect("everything").count
+            };
+            assert_eq!(counted(&world), 42, "{case}");
+            inspector.pick(picked);
+            make(&mut inspector, &mut world, set(9));
+            assert_eq!(counted(&world), 9, "{case}");
+            assert!(inspector.log.undoable().is_some(), "{case}");
+        }
+    }
+
     /// Every row of the tree, the naive way: each root in turn, each followed, if its row is open,
     /// by the rows of each of its children in turn.
     fn flatten(world: &World, expanded: &HashSet<EntityId>) -> Vec<(Entity, usize)> {
@@ -3835,6 +3977,51 @@ mod tests {
         assert!(texts.iter().any(|(text, _)| text == nothing), "{texts:?}");
     }
 
+    /// A click across a row, well right of its label's text, picks its entity, in the tree and in
+    /// the list of those with a component; and each row is a line tall, as their paging takes it,
+    /// one whose label is wider than the panel too.
+    #[test]
+    fn a_click_across_a_row_picks_its_entity() {
+        let mut world = World::default();
+        let long = "long ".repeat(40);
+        let [a, b, c] = ["a", long.as_str(), "c"].map(|name| world.spawn(called(name)));
+        let ctx = crate::egui_context();
+        let mut inspector = Inspector::default();
+        let mut time = 0.0;
+        let mut run = |inspector: &mut Inspector, world: &mut World, events| {
+            let mut texts = Vec::new();
+            for events in [events, Vec::new(), Vec::new()] {
+                time += 1.0;
+                texts = frame(inspector, world, &ctx, time, events).0;
+            }
+            texts
+        };
+        let spacing = ctx.global_style().spacing.clone();
+        let line = spacing.interact_size.y + spacing.item_spacing.y;
+        for with in [None, Some("Name")] {
+            inspector.with = with.map(str::to_owned);
+            let texts = run(&mut inspector, &mut world, Vec::new());
+            let row = |entity| {
+                let label = row_label(&world, entity, id(&world, entity));
+                find(&texts, &label, &label)
+            };
+            let rows = [a, b, c].map(row);
+            let wide = rows[1];
+            assert!(wide.width() > 800.0 && wide.height() < line, "{wide:?}");
+            // Where the texts of the rows around it end below, which none of theirs hangs under,
+            // as the g of "long" does: two lines apart.
+            let apart = rows[2].max.y - rows[0].max.y;
+            assert!((apart - 2.0 * line).abs() < 1.0, "{with:?}: {apart}");
+            // Near the right edge of the Entities panel, the screen's left half.
+            for (entity, label) in [(c, rows[2]), (a, rows[0])] {
+                let at = egui::pos2(790.0, label.center().y);
+                assert!(at.x > label.max.x + 400.0, "{label:?}");
+                run(&mut inspector, &mut world, click(Primary, at));
+                assert_eq!(inspector.picked, Some(id(&world, entity)), "{with:?}");
+            }
+        }
+    }
+
     /// An entity found by its ID shows its row: the rows above it open.
     #[test]
     fn finding_an_entity_opens_the_rows_above_it() {
@@ -4001,6 +4188,117 @@ mod tests {
         assert_eq!(back, Some(color));
     }
 
+    /// A component's header is framed, as wide as the Inspector panel: a click on it, however far
+    /// right of its name, closes and opens it, while its menu, over its right end, opens from its
+    /// button and leaves it as it was.
+    #[test]
+    fn a_header_spans_its_panel_under_its_menu() {
+        let mut world = World::default();
+        let entity = world.spawn(Sprite::default());
+        let ctx = crate::egui_context();
+        let mut inspector = Inspector::default();
+        inspector.pick(id(&world, entity));
+        let mut time = 0.0;
+        let mut run = |inspector: &mut Inspector, world: &mut World, events| {
+            let mut texts = Vec::new();
+            for events in [events, Vec::new(), Vec::new()] {
+                time += 1.0;
+                texts = frame(inspector, world, &ctx, time, events).0;
+            }
+            texts
+        };
+        let open = |texts: &[Text]| texts.iter().any(|(text, _)| text == "color");
+        let texts = run(&mut inspector, &mut world, Vec::new());
+        assert!(open(&texts), "{texts:?}");
+        let header = find(&texts, "Sprite", "Sprite");
+        let menu = find(&texts, "Sprite", MORE);
+        // At the right end of the Inspector panel, the screen's right half, on the header's row.
+        assert!(menu.max.x > 1550.0 && menu.max.x <= 1600.0, "{menu:?}");
+        let level = (menu.center().y - header.center().y).abs();
+        assert!(level < 4.0, "{menu:?}, {header:?}");
+        let beside = egui::pos2(menu.min.x - 40.0, header.center().y);
+        assert!(beside.x > header.max.x + 500.0, "{header:?}");
+        let texts = run(&mut inspector, &mut world, click(Primary, beside));
+        assert!(!open(&texts), "closed: {texts:?}");
+        let texts = run(&mut inspector, &mut world, click(Primary, beside));
+        assert!(open(&texts), "opened: {texts:?}");
+        let texts = run(&mut inspector, &mut world, click(Primary, menu.center()));
+        in_menu(&ctx, &texts, "Remove Component");
+        assert!(open(&texts), "left open: {texts:?}");
+    }
+
+    /// A component's menu shows, and opens from a click anywhere on its button, in an Inspector
+    /// panel narrower and shorter than its contents: their rows run past its right edge, cut off,
+    /// as a narrow one's axes do, and its scroll bar floats along that edge. It's at the end of
+    /// what shows of its header, short of the bar.
+    #[test]
+    fn a_components_menu_opens_in_a_panel_smaller_than_its_contents() {
+        let mut world = World::default();
+        let entity = world.spawn((Transform::IDENTITY, Sprite::default()));
+        let ctx = crate::egui_context();
+        let mut inspector = Inspector::default();
+        inspector.pick(id(&world, entity));
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 900.0));
+        let panel = egui::Rect::from_min_max(egui::pos2(1380.0, 0.0), egui::pos2(1600.0, 150.0));
+        let mut time = 0.0;
+        // A frame given `events`, then two that settle what they did, as the dock draws the panel,
+        // cut off at its edges, with the Inspector's own scroll area; the last one's texts.
+        let mut run = |events: Vec<egui::Event>| {
+            let mut texts = Vec::new();
+            for events in [events, Vec::new(), Vec::new()] {
+                time += 1.0;
+                let input = egui::RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(time),
+                    events,
+                    ..egui::RawInput::default()
+                };
+                let mut output = ctx.run_ui(input, |ui| {
+                    let mut pass = Pass::default();
+                    let inspect = egui::UiBuilder::new().id_salt("Inspector").max_rect(panel);
+                    ui.scope_builder(inspect, |ui| {
+                        ui.set_clip_rect(panel);
+                        let scroll = egui::ScrollArea::vertical();
+                        scroll.show(ui, |ui| inspector.inspect(&world, ui, &mut pass));
+                    });
+                    inspector.queue(pass);
+                });
+                output.textures_delta.clear();
+                texts.clear();
+                for clipped in &output.shapes {
+                    find_texts(&clipped.shape, &mut texts);
+                }
+            }
+            texts
+        };
+        let texts = run(Vec::new());
+        // The rows of axes run past the panel's edge, their Z buttons cut off, undrawn.
+        let z = texts.iter().any(|(text, _)| text == "Z");
+        assert!(!z, "the axes within the panel: {texts:?}");
+        let header = find(&texts, "Transform", "Transform");
+        let menu = find(&texts, "Transform", MORE);
+        assert!(panel.contains_rect(menu), "{menu:?} out of {panel:?}");
+        assert!(
+            menu.max.x > panel.max.x - 40.0,
+            "{menu:?} at the panel's end"
+        );
+        let row = header.y_range();
+        assert!(
+            row.contains(menu.center().y),
+            "{menu:?} off {header:?}'s row"
+        );
+        let opened = |texts: &[Text]| texts.iter().any(|(text, _)| text == "Remove Component");
+        let texts = run(click(Primary, menu.center()));
+        in_menu(&ctx, &texts, "Remove Component");
+        let texts = run(click(Primary, menu.center()));
+        assert!(!opened(&texts), "closed: {texts:?}");
+        // Its right end, beside its label, in the button's padding, 8 points wide: the end toward
+        // the scroll bar.
+        let end = egui::pos2(menu.max.x + 6.0, menu.center().y);
+        let texts = run(click(Primary, end));
+        in_menu(&ctx, &texts, "Remove Component");
+    }
+
     /// An enum with fields switches its variant from a choice of them: to one it had while the
     /// entity was drawn, with the fields it had then; to one it hadn't, with its fields' defaults;
     /// and on another entity, to the defaults again.
@@ -4157,6 +4455,57 @@ mod tests {
         let rect = world.get::<Sprite>(entity).expect("a sprite").rect;
         assert_eq!(rect, [Vec2::new(0.1, 0.2), Vec2::new(1.0, 0.6)]);
         assert_eq!(inspector.log.operations().len(), 4);
+    }
+
+    /// The axis buttons' labels draw in the family [`crate::BOLD`] names where the context binds
+    /// it, as the engine's does, and else in egui's proportional one, as in a context with egui's
+    /// own fonts, or a game's: never in a family that isn't bound.
+    #[test]
+    fn axis_buttons_are_bold_where_the_family_is_bound() {
+        /// Each text `shape` draws, by its sections, and its family.
+        fn families(shape: &egui::Shape, found: &mut Vec<(String, egui::FontFamily)>) {
+            match shape {
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        families(shape, found);
+                    }
+                }
+                egui::Shape::Text(text) => {
+                    for section in &text.galley.job.sections {
+                        let bytes = &section.byte_range;
+                        let part = &text.galley.text()[bytes.start.0..bytes.end.0];
+                        found.push((part.to_owned(), section.format.font_id.family.clone()));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut world = World::default();
+        let entity = world.spawn(Transform::IDENTITY);
+        let bold = egui::FontFamily::Name(crate::BOLD.into());
+        for (ctx, family) in [
+            (crate::egui_context(), bold),
+            (egui::Context::default(), egui::FontFamily::Proportional),
+        ] {
+            let mut inspector = Inspector::default();
+            inspector.pick(id(&world, entity));
+            let mut found = Vec::new();
+            for time in 0..3 {
+                let time = f64::from(time);
+                let (shapes, _) =
+                    frame_shapes(&mut inspector, &mut world, &ctx, time, Vec::new(), true);
+                found.clear();
+                for clipped in &shapes {
+                    families(&clipped.shape, &mut found);
+                }
+            }
+            for axis in ["X", "Y", "Z"] {
+                let drawn = found.iter().filter(|(text, _)| text == axis);
+                let drawn_in: Vec<&egui::FontFamily> = drawn.map(|(_, family)| family).collect();
+                // A translation's, a rotation's and a scale's.
+                assert_eq!(drawn_in, [&family; 3], "{axis}");
+            }
+        }
     }
 
     /// A drag of an axis sets that component alone, at its own path, so that a system moving

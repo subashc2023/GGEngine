@@ -66,7 +66,9 @@ sandbox  editor   player       apps/: executables
   with perspective, with a toolbar and an orientation gizmo pinned over the view and a grid in
   either projection; the toolbar has the view see through the world's primary camera instead, as
   the game would, until the editor's camera moves, and meanwhile W, A, S and D drive the world's
-  cameras, by a script of theirs, as a game's keys would.
+  cameras, by a script of theirs, as a game's keys would. Its File menu starts a new scene, opens
+  one, whose entities replace the world's, and saves the world's entities as one, through the OS's
+  file dialogs, with Ctrl+N, Ctrl+O, Ctrl+S and Ctrl+Shift+S.
 - **`player`:** the reference player. It runs a cooked scene without game code and shows how a
   game builds its own player.
 
@@ -96,18 +98,18 @@ Cargo's cycle check enforces rule 1, and rule 2's ban on `gg-*` dependencies. It
 skip-level edge such as `gg-engine` → `gg-gpu`, which forms no cycle, so
 [deny.toml](deny.toml) names the only crates that may depend directly on `gg-gpu`,
 `gg-renderer`, `gg-macros`, `ash`, `ash-window`, `winit`, `egui-winit`, `gilrs`, `gilrs-core`,
-`rayon-core`, `tracy-client` and `tracy-client-sys`, and CI checks it with cargo-deny. Rule 4,
-and what a crate does with the dependencies it may have, are left to review.
+`rfd`, `rayon-core`, `tracy-client` and `tracy-client-sys`, and CI checks it with cargo-deny.
+Rule 4, and what a crate does with the dependencies it may have, are left to review.
 
 ### Builds
 
 `gg-engine`'s development tooling sits behind its `dev` feature, which development builds turn
-on, as the sandbox does, and shipping builds never do: hot reload of games' shaders for now, the
-tool API and the debug UI to come. Shipping builds run cooked data only. Cargo merges the features
-of every package a command selects, so `--workspace`, a bare `cargo build` and `--bin gg-player`
-would all hand the player `dev`. Shipping builds therefore select the player alone, with
-`-p player`, and a game's shipping build selects the game alone the same way; the shipping gate,
-`cargo clippy -p player`, checks `gg-engine` as they build it.
+on, as the sandbox does, and shipping builds never do: hot reload of games' shaders and the OS's
+file dialogs for now, the tool API and the debug UI to come. Shipping builds run cooked data
+only. Cargo merges the features of every package a command selects, so `--workspace`, a bare
+`cargo build` and `--bin gg-player` would all hand the player `dev`. Shipping builds therefore
+select the player alone, with `-p player`, and a game's shipping build selects the game alone the
+same way; the shipping gate, `cargo clippy -p player`, checks `gg-engine` as they build it.
 
 Tracy is a feature of its own, `tracy`, off by default and in no shipping build: it compiles
 Tracy's C++ client, which listens on the machine's loopback and keeps what it records in memory
@@ -405,6 +407,16 @@ copied into memory already held, so that one taken every frame allocates nothing
 tables, the component types and the world's size stay, for components whose `Clone` allocates
 nothing.
 
+A world can be emptied, or have its entities replaced with a scene's, as the editor's New and Open
+do. `World::clear` despawns every entity and frees every slot, the vacant ones a log keeps too,
+each under its next generation, so that no handle names another entity; `World::replace_scene`
+loads a scene into the world so emptied, all or nothing, so that the IDs the world had are free
+for it and a world opens the file it was saved to. Either way the component types and the stream
+of IDs stay, so that no ID is drawn twice, and the world is another, as a restored one is, with a
+serial of its own (`World::serial`): it refuses what undoes an operation applied before, which is
+what makes freeing the slots a log kept safe. The Inspector, finding another serial at its tick,
+drops its log, its pick and its open rows, and the commands it queued for the world before.
+
 A world's hash has two parts. Its content is what it holds: a term for each component of each
 entity, from the entity's ID, the type's name and the words the type's derive writes, its fields in
 order, an entity it holds by its ID, or 0 if it's dead, and a float by its bits, but every NaN as
@@ -492,9 +504,10 @@ so apps and games never see their types.
 An app is a stack of layers, which its `main` describes on `App`: layers, then overlays above
 them. Each layer attaches when the app starts and detaches when it ends, ticks with the
 simulation, as [ECS](#ecs) describes, updates every frame with the time since the last, for what's
-presented, handles events and draws UI. Frames pause while the main window is minimized, and on
-Windows while the window menu that the UI's title bar opens is open, which the OS runs in a loop
-of its own; the first update after either gets no time, rather than the pause's length. An event
+presented, handles events and draws UI. Frames pause while the main window is minimized, while a
+file dialog is open, and on Windows while the window menu that the UI's title bar opens is open,
+which the OS runs in a loop of its own; the first update after each gets no time, rather than the
+pause's length. An event
 goes down the stack from the top overlay until a layer handles it, but for a key's or a button's
 release, a gamepad's stick or trigger back at rest and the loss of focus, which go to every layer,
 so that none is left holding what it saw pressed; a stick or a trigger that a layer handles away
@@ -510,7 +523,10 @@ those it wants, such as a click on one of its panels, and `gg-renderer` draws it
 the frame. Key and button releases reach the layers regardless, so that none is left holding a
 key or button it saw pressed. Tab reaches egui only while one of its widgets has focus, or while a
 dockspace's view, below, hasn't the keys, to move between them; otherwise it goes to the layers
-alone, since egui would take focus with it.
+alone, since egui would take focus with it. Its text is Inter, regular, and bold where the
+Inspector's axis buttons name their axes, with egui's own fonts after it for what Inter lacks,
+such as egui's icons, and egui's monospace; its theme is the OS's, light or dark, as egui follows
+it, with collapsing headers framed across their width.
 
 Layers draw UI through `Ui`: dockable panels, and egui itself for anything else. The dock is the
 engine's own, since egui's docking crates can't put a panel in a window of its own. Panels sit
@@ -565,6 +581,14 @@ over the button. Elsewhere the UI's edges have the OS resize a window, and on ma
 its own buttons and the edges. Games keep the OS's frame. A menu quits by sending egui's `Close`
 to the main window, which, like the OS's close button, gives the layers `CloseRequested` first;
 egui's own Ctrl or Cmd+Q is off, since a game may use those keys.
+
+In development builds a layer asks for a file to open or save as through the OS's own dialog,
+`Context::pick_file`: Windows' common item dialog, macOS's panels or the XDG desktop portal, through
+rfd, modal over the main window. It blocks the frame that asks, so frames pause until it closes,
+and the clock restarts after, as after the window menu, so that neither the frame times nor the
+next update count the pause. On Windows the dialog's modal loop goes on answering the window's
+messages meanwhile; on Linux the portal's call answers none until it returns, which
+[DEFECTS.md](docs/DEFECTS.md) weighs. A headless run has no dialog: it picks nothing.
 
 Layers can also poll input, through their `Context` rather than a global, for what's presented:
 which keys and mouse buttons are held, and where the cursor is. That state follows the events the
@@ -896,7 +920,8 @@ main thread.
 | GPU API | Vulkan through `ash`: one backend, no multi-API abstraction layer |
 | GPU memory | VMA through our own binding in `gg-gpu`, for its budgets, aliasing, pools and defragmentation |
 | Window and input | `winit`, with `ash-window` for surfaces and `gilrs` for gamepads |
-| UI | egui, drawn by `gg-renderer`, with a dock of our own: the engine's overlay and the editor alike |
+| UI | egui, drawn by `gg-renderer`, with a dock of our own: the engine's overlay and the editor alike; its text in Inter |
+| File dialogs | The OS's own, through `rfd`, in development builds |
 | Project state | RON in a canonical form; see [Project state](#project-state) |
 | Math | `glam`, with its `scalar-math` and `libm` features; `libm` |
 | Jobs | `rayon-core`'s thread pool and `join`; not rayon's parallel iterators, whose splits and reductions follow the number of threads |

@@ -411,6 +411,37 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   child under its parent's open row, whose arrow closed and opened it; Delete despawned it, Undo
   brought it back under its parent, and a click below the rows unpicked; the sandbox's Entity >
   Unpick unpicked its triangle; and File > Quit exited both cleanly.
+- **Styling and scene files** (2026-10-28): the UI draws in Inter, with egui's fonts behind it
+  for what Inter lacks, and the Inspector's X, Y and Z buttons square, in its bold; a component's
+  header is framed across the panel, its menu at the end of what shows of it, short of the scroll
+  bar, and an Entities row picks from anywhere across it. `World::clear` empties a world, and
+  `World::replace_scene` replaces its entities with a scene's, all or nothing; the world is then
+  another, by `World::serial`, and refuses the inverses from before, and the Inspector lets go of
+  its log, pick and open rows as the serial changes. `write_scene` writes a scene file whole or not
+  at all, through a file of its own beside it, and through a link to the file it names, keeping
+  that file's permissions and refusing one that's read only, as the dock's layout and the pipeline
+  cache are now written too; `read_scene` reads one (`scene.file`); and the sandbox's grid uses
+  both. In development builds `Context::pick_file` shows the OS's file dialog, through rfd, modal
+  over the main window, frames pausing until it closes. The editor's File menu has New, Open...,
+  Save and Save As..., with Ctrl+N, Ctrl+O, Ctrl+S and Ctrl+Shift+S: New and Open are commands that
+  recordings keep, Open with the scene's text, and Save and Save As write at once. It says why a
+  file can't be read, opened or written until that's dismissed, and a shortcut's key drives none
+  of the world's cameras. Unit tests check clearing and replacing, in the world's model test too,
+  the Inspector's reset, whole writes that leave a user's file beside them alone and refuse one
+  that's read only, and on Unix keep a link and its file's permissions, the fonts and headers, a
+  click at a row's far right, a menu opening from either end of its button in a panel smaller than
+  its contents, the editor's commands, its shortcuts with each platform's modifiers, Save As's
+  `.ron` and its refusal to replace a file unasked, and the message's dismissal; the sandbox's
+  references and live recording replay unchanged. By hand on the RTX 4090: Inter and the bold axes
+  showed; a click at the far right of Blue's row picked it; Save As through Windows' dialog wrote
+  `level.ron`, the dialog adding the extension; New emptied the world, Undo disabled; Open brought
+  back the five entities under their IDs; a broken file showed its line and column, the world and
+  its Undo kept; opening again dropped the pick and Undo; Save rewrote the file in place, byte for
+  byte; the working directory stayed as it was; the frame times left out the seconds the dialogs
+  were open (34 ms at most); Ctrl held with S moved no camera, where S alone did; and File > Quit
+  exited cleanly. After the review's fixes, the axis buttons showed square, a translation's row
+  fitting the Inspector as the editor first lays it out; a click at the right end of a "…" opened
+  its menu; and Save As wrote the same scene, its IDs aside, through the new writing.
 
 ## Now: the editor's next milestone, or Phase 5's first
 
@@ -464,6 +495,8 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 
 ## Deferred
 
+Defects left in because fixing them costs more than they do are in [DEFECTS.md](DEFECTS.md).
+
 | Skipped | Add when |
 |---|---|
 | The engine as a dynamic library in development builds, to shorten relinks | Rebuilding a game gets slow |
@@ -471,7 +504,7 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Shipping profile (LTO, `codegen-units = 1`) | Phase 7, with the player |
 | Compiling trace and debug events out of shipping builds, through `tracing`'s `release_max_level_*` features | Phase 7, with the shipping profile |
 | No console window for shipping builds on Windows (`windows_subsystem = "windows"` on the player); the JSON log still records the run | Phase 7, with the shipping profile |
-| Checking the sandbox by hand on Linux, and on macOS with KosmicKrisp (Vulkan SDK 1.4.363.0 or later, the first conformant build), its gamepads too, and the render thread there: acquiring, presenting and rebuilding swapchains as windows resize off the main thread under KosmicKrisp, and on Wayland a frame in flight presenting at its old size after a maximize; and the `frames` test on macOS, whose CI runner has no GPU to run it: std's mutexes there are boxed as they're first locked, so a mutex made each frame allocates there alone | A Linux machine and an Apple Silicon Mac are at hand |
+| Checking the sandbox by hand on Linux, and on macOS with KosmicKrisp (Vulkan SDK 1.4.363.0 or later, the first conformant build), its gamepads and the editor's file dialogs too, and the render thread there: acquiring, presenting and rebuilding swapchains as windows resize off the main thread under KosmicKrisp, and on Wayland a frame in flight presenting at its old size after a maximize; and the `frames` test on macOS, whose CI runner has no GPU to run it: std's mutexes there are boxed as they're first locked, so a mutex made each frame allocates there alone | A Linux machine and an Apple Silicon Mac are at hand |
 | Deleting old JSON logs; every run's log is kept | Logs pile up enough to matter |
 | A clean shutdown on Ctrl+C, which now ends the process at once; the JSON log keeps every line written until then, and a recording every whole line but its `end` | A headless run that goes on until it's stopped, such as a dedicated server |
 | GPU tests in Windows and macOS CI, which skip them because hosted runners there have no GPU | A self-hosted runner with a GPU, or a Vulkan driver that runs on those runners without one |
@@ -580,6 +613,7 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | A swapchain without an sRGB format falls back to the first one offered, where colors come out too dark | A device offers no sRGB swapchain format |
 | Splits in a torn-off window, which holds one tab group | A tool wants panels side by side outside the main window |
 | Reordering tabs by dragging them along their bar; a drop among the tabs adds one at the end | Phase 9, the editor |
+| A minimum width for each panel, as Hazel keeps its Properties panel 370 pixels wide: a split keeps each side 48 points, and the Inspector's rows of axes clip in a narrower panel | Someone narrows the Inspector past its rows |
 | On Windows, an inner size asked of winit once a window whose title bar the UI draws is open (egui's `InnerSize`, `MinInnerSize` or `MaxInnerSize`) leaves its inside a frame smaller, since winit sizes it as though it had no frame | Something resizes such a window from code |
 | Leaving a taskbar that hides itself a pixel or two beside a maximized window whose title bar the UI draws, as Windows Terminal and Chromium do; the window covers the whole monitor, which may keep the taskbar from showing | Someone hides their taskbar |
 | Checking Windows' frame on Windows 10, whose DWM may draw no border along the top of a window whose inside reaches it | Someone runs the tools on Windows 10 |
@@ -617,7 +651,7 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Paths resolved once and kept, for sets made again and again | A profile |
 | Picking an entity for a field, a parent or a child picked by clicking it, and picking in the view; the Entities panel scrolling to an entity found, or to a root that an add or a remove moved to the end of another table, and so of the tree's roots; entities are shown by their names, where they have one, and their IDs, and found by an ID pasted in | Picking in the view, or Phase 9's scene tree |
 | Finding an entity by its name: the Find field takes an ID | A world names more entities than the Entities panel shows at once |
-| Entities rows of one line: a row wider than its panel wraps, as one whose name has a line break does, though the list skips the rows out of view as though each were one line tall, as egui's `show_rows` takes them; and an empty name shows as it is | A world of more entities than the panel shows, in a narrow panel, or names from players |
+| Entities rows of one line: a row whose name has a line break is as many lines tall, though the list skips the rows out of view as though each were one line tall, as egui's `show_rows` takes them; a row wider than its panel stays one line, cut off at its edge; and an empty name shows as it is | A world of more entities than the panel shows, or names from players |
 | World transforms stored and propagated after the ticks, with change detection; drawing computes each child's from its ancestors, every frame, as the latest tick left them, for its z, and blended between ticks, to draw it | Physics, or a profile showing the walks up the hierarchy |
 | A world matrix for game code, and where an entity draws between ticks, for a layer's viewpoint that follows it, which would otherwise judder against it, since layers read the world up to a tick ahead of where it draws; the engine's drawing and the world's camera compute their own | A layer's viewpoint that follows an entity, or a system that needs a child's place in the world |
 | Turning interpolation off for an entity or a subtree, so that it draws at its ticks; every entity draws between them | A game wants something drawn at its ticks |
@@ -639,15 +673,16 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Placing a prefab without parsing it again: `World::place_prefab` parses its text each time, which allocates | A game places prefabs as it runs, rather than as it loads |
 | A derive hint for `Component::base`, and opaque values in lists and options, which saving refuses, as does a set's undo (`reflect.opaque`) where the old value holds something opaque in a variant, an option or a list; a type with opaque fields implements `Component` by hand to load, as `Sprite` does | A game's component holds something opaque |
 | Names in scenes beyond ASCII identifiers, which saving refuses (`scene.bad_name`) | A game names a type or a field so |
-| Loading a scene in place of the entities it replaces, in one step; a load refuses IDs the world has | The editor, or Phase 5's scene files applied as operations |
+| Loading a scene in place of some of a world's entities in one step, as the sandbox's grid reload does in three; a load refuses IDs the world has, and `World::replace_scene` replaces all of its entities | Phase 5's scene files applied as operations |
 | A version in scene files, a file without one reading as the first | The first change to the format that old files can't be read by |
 | Comments in scene files, which a save drops | People annotate scenes |
-| Reading and writing scene files in the engine, atomically; the engine takes and gives text, and the sandbox writes its own | Phase 5, which names assets |
+| A prompt before the editor's New, Open or Quit discards edits not saved: they discard them | Someone loses work, or Phase 9's editor |
+| The scene's file named in the editor's title bar, and a list of recent scenes: Save writes to the file opened or saved last, which nothing shows | Someone loses track of which file Save writes |
 | The log in `Context`, every layer's and the tool API's clients each undoing their own, and an undo logged as an operation; the Inspector keeps a log of its own | Phase 5, the tool API |
 | Replaying a log into another world, which maps values' handles to IDs, as a recording's commands are; `set_field` and operations store a dead handle without complaint | Phase 5, the tool API |
 | A delete saying what refers to its entities from outside, or refusing; those references dangle until it's undone, and the world doesn't save in between | An agent deletes through the tool API |
 | Undoing a create whose entity has children since that the create didn't make, such as game code gave it, by keeping them where they are; it's refused (`ecs.has_children`), and the log drops it | An agent attaches children to what another's create made, or the editor |
-| Layers holding what a restore takes back: the sandbox's swarm is in the world, but the Inspector's log and pick outlive a restore, and nothing tells a layer that `Context`'s world was restored, so the sandbox doesn't snapshot | Something restores the running world, such as rollback or Phase 5's restart |
+| Layers holding what a restore takes back: the sandbox's swarm is in the world, and the Inspector drops its log and pick once the world's serial is another's, but nothing else tells a layer that `Context`'s world was restored, so the sandbox doesn't snapshot | Something restores the running world, such as rollback or Phase 5's restart |
 | Reparenting from the panels: dragging a row onto another, and taking a `Parent` away, as Remove Component would, making its entity a root; `Parent` is read only, so the Inspector offers neither | The editor's scene tree |
 | Duplicating an entity, with its descendants, from the panels | Someone duplicates from the panels, as Hazel's later episodes do |
 | Picking several entities, to edit or delete them at once | Someone edits many entities alike |

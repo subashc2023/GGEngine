@@ -14,6 +14,7 @@ path = "src/main.rs"
 bytemuck = { workspace = true, features = ["derive"] }
 # A development build, as tools are.
 gg-engine = { workspace = true, features = ["dev"] }
+tracing.workspace = true
 
 [lints]
 workspace = true

@@ -2,7 +2,7 @@
 //! describes, so that saving the same entities always gives the same bytes, and changing a field
 //! changes only its lines. The engine writes the text itself, and `ron` only reads it, through
 //! seeds that reflection's descriptions drive. A prefab is a scene of one subtree, which is placed
-//! as a copy whose IDs are mixed from its own.
+//! as a copy whose IDs are mixed from its own. Scene files are written whole or not at all.
 
 mod read;
 #[cfg(test)]
@@ -10,8 +10,10 @@ pub(super) mod tests;
 mod write;
 
 use std::borrow::Cow;
+use std::fs;
+use std::path::Path;
 
-use gg_core::Result;
+use gg_core::{Error, Result};
 
 use super::id::{self, EntityId};
 use super::table::AnyColumn;
@@ -31,6 +33,32 @@ pub(super) static NO_HINTS: Meta = Meta {
     show: Show::Plain,
     doc: Cow::Borrowed(""),
 };
+
+/// Writes the scene `text`, such as [`World::save_scene`] gives, to the file at `path`, whole or
+/// not at all: to a file of its own beside it, which it flushes to the disk and then renames over
+/// it, so that a save cut short, by a crash or the power going, leaves the last file whole. Through
+/// a link it writes the file the link names, which keeps its permissions. It makes no directories.
+///
+/// Fails with `scene.file`, naming the path, if the file is read only, or can't be written or
+/// replaced, removing what it wrote beside it.
+pub fn write_scene(path: &Path, text: &str) -> Result<()> {
+    let _zone = gg_core::zone!();
+    crate::dirs::write_whole(path, text.as_bytes()).map_err(|e| {
+        let message = format!("can't save the scene to {}", path.display());
+        Error::new("scene.file", message).with_source(e)
+    })
+}
+
+/// The text of the scene file at `path`, whole, for [`World::load_scene`].
+///
+/// Fails with `scene.file`, naming the path, if it can't be read or isn't UTF-8.
+pub fn read_scene(path: &Path) -> Result<String> {
+    let _zone = gg_core::zone!();
+    fs::read_to_string(path).map_err(|e| {
+        let message = format!("can't read the scene from {}", path.display());
+        Error::new("scene.file", message).with_source(e)
+    })
+}
 
 impl World {
     /// `roots` and their descendants as a scene's canonical text: a prefab, for one root. Each
@@ -74,6 +102,21 @@ impl World {
         let entities = read::parse(self, text, false)?;
         let ids = entities.iter().map(|entity| entity.id).collect();
         Ok(self.commit(entities, ids, None))
+    }
+
+    /// Replaces the world's entities with the scene `text`'s, as [`load_scene`](Self::load_scene)
+    /// loads it into the world [cleared](Self::clear), and returns its roots: all of them, or, if
+    /// it's refused, none, the world as it was, its serial too. The IDs the world has are no bar,
+    /// since its entities go: the scene it was saved to replaces it, under the same IDs. It's then
+    /// another world, as `clear` says.
+    ///
+    /// Fails as `load_scene` does, but for the IDs the world has.
+    pub fn replace_scene(&mut self, text: &str) -> Result<Vec<Entity>> {
+        let _zone = gg_core::zone!();
+        let mut next = self.emptied();
+        let roots = next.load_scene(text)?;
+        *self = next;
+        Ok(roots)
     }
 
     /// Places the prefab `text`, a scene of one subtree, as a copy of it whose root is the last of

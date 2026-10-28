@@ -1,12 +1,12 @@
 //! Development playground: test scenes and debug tooling for engine work.
 
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_3, TAU};
+use std::mem;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Mutex;
 use std::time::Duration;
-use std::{fs, io, mem};
 
 use bytemuck::NoUninit;
 use gg_engine::egui::{self, ViewportCommand, ViewportId};
@@ -311,8 +311,7 @@ fn scene(name: &str) -> PathBuf {
 /// The text of scene `name`, and its path; the sandbox stops without it, saying why.
 fn read_scene(name: &str) -> (String, PathBuf) {
     let path = scene(name);
-    let text = fs::read_to_string(&path);
-    let text = text.unwrap_or_else(|e| panic!("can't read {}: {e}", path.display()));
+    let text = gg_engine::read_scene(&path).unwrap_or_else(|error| panic!("{error:#}"));
     (text, path)
 }
 
@@ -322,28 +321,20 @@ fn grid(world: &World) -> Vec<Entity> {
     cells.map(|(cell, _)| cell).collect()
 }
 
-/// Saves the grid to `scenes/grid.ron`, through a file beside it that then replaces it, so that a
+/// Saves the grid to `scenes/grid.ron`, as [`gg_engine::write_scene`] writes a scene, so that a
 /// save cut short leaves the last grid whole.
 fn save_grid(world: &World) -> Result<(), Error> {
-    let path = scene("grid.ron");
     let text = world.save_scene(&grid(world))?;
-    let error = |e: io::Error| {
-        let message = format!("can't save the grid to {}", path.display());
-        Error::new("sandbox.grid_file", message).with_source(e)
-    };
-    let temporary = path.with_extension("ron.new");
-    fs::write(&temporary, text).map_err(error)?;
-    fs::rename(&temporary, &path).map_err(error)
+    gg_engine::write_scene(&scene("grid.ron"), &text)
 }
 
 /// The grid scene's text, from `scenes/grid.ron`; or, if it can't be read, logs why.
 fn read_grid() -> Option<String> {
     let path = scene("grid.ron");
-    match fs::read_to_string(&path) {
+    match gg_engine::read_scene(&path) {
         Ok(text) => Some(text),
-        Err(e) => {
-            let path = path.display();
-            error!(code = "sandbox.grid_file", %path, "Can't read the grid from {path}: {e}");
+        Err(error) => {
+            error!(code = error.code(), path = %path.display(), "{error:#}");
             None
         }
     }
@@ -1079,6 +1070,8 @@ impl Layer for Sandbox {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     /// A world that knows the sandbox's types, and the engine's, as the app's does.

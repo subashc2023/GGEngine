@@ -40,6 +40,7 @@ pub use log::Log;
 pub use ops::Operation;
 pub use query::{Query, QueryIter, QueryIterMut, ReadOnlyQuery};
 pub(crate) use scene::{MAX_DEPTH, float, quote};
+pub use scene::{read_scene, write_scene};
 pub(crate) use table::ComponentId;
 use table::{AnyColumn, Components, Row, Table};
 
@@ -207,9 +208,10 @@ pub struct World {
     /// Where the next entity's ID comes from.
     stream: IdStream,
     /// Which world this is among the process's, so that the order drawing keeps for one world,
-    /// where it draws the world's entities on from, and the entities a pass of scripts listed in it
-    /// never pass for another's, as when a game replaces its world; a world copied takes another,
-    /// as does a world restored from a copy.
+    /// where it draws the world's entities on from, the entities a pass of scripts listed in it,
+    /// and what undoes an operation applied to it never pass for another's, as when a game
+    /// replaces its world; a world copied takes another, as does a world restored from a copy,
+    /// cleared, or whose entities a scene replaced.
     serial: u64,
     /// How many times entities' rows have changed, as entities are spawned, despawned or moved to
     /// other tables: drawing keeps the order it sorted while it and `serial` stay.
@@ -242,7 +244,7 @@ impl Default for World {
 /// How many worlds the process has made, which numbers each.
 static WORLDS: AtomicU64 = AtomicU64::new(0);
 
-/// A serial no other world has had, for a world made, copied or restored.
+/// A serial no other world has had, for a world made, copied, restored, cleared or replaced.
 fn next_serial() -> u64 {
     WORLDS.fetch_add(1, Ordering::Relaxed)
 }
@@ -550,6 +552,16 @@ impl World {
         Ok(())
     }
 
+    /// Despawns every entity, and lets go of what logs keep for their undos, the slots and IDs of
+    /// the entities deletes took, so that no handle from before names an entity. The component
+    /// types stay, and no ID drawn before is drawn again. The world is then another, as a restored
+    /// one is, which refuses what undoes an operation applied before, as [`serial`](Self::serial)
+    /// says; so whoever keeps a [`Log`] of it clears the log too.
+    pub fn clear(&mut self) {
+        let _zone = gg_core::zone!();
+        *self = self.emptied();
+    }
+
     /// The entities with every component `Q` reads, table by table, as `Q` takes them: such as
     /// `world.query::<(Entity, &Transform)>()`. It only reads; [`query_mut`](Self::query_mut)
     /// changes components too.
@@ -580,6 +592,15 @@ impl World {
     /// `T`'s id, which its tables' columns are found by, if any entity has had one.
     pub(crate) fn component<T: Component>(&self) -> Option<ComponentId> {
         self.components.get(TypeId::of::<T>())
+    }
+
+    /// Which world this is among the process's: a copy is another, and so is the world after it's
+    /// restored from one, [cleared](Self::clear), or [replaced](Self::replace_scene). Another
+    /// refuses the entries a [`Log`] made before, what undoes each operation, as another world's;
+    /// so whoever keeps a log of a world, or entities picked in it, lets go of them as the serial
+    /// changes.
+    pub fn serial(&self) -> u64 {
+        self.serial
     }
 
     /// Which world this is, and how many times its entities' rows have changed, for drawing, which
@@ -735,6 +756,52 @@ impl World {
         }
     }
 
+    /// This world without its entities: each slot that held one, or that a log kept for one a
+    /// delete took, freed under its next generation, as [`free_slot`](Self::free_slot) frees it,
+    /// after the free ones and in slot order, as despawning each in turn would, so that no handle
+    /// from before names an entity in it. It keeps the component types, the stream of IDs, so that
+    /// none is drawn twice, and the count of resets; and has no tables, as a world made hasn't, so
+    /// that it costs the slots, never the components.
+    fn emptied(&self) -> World {
+        let slots = self.meta.len();
+        let mut was_free = vec![false; slots];
+        for &index in &self.free {
+            was_free[index as usize] = true;
+        }
+        let meta = self.meta.iter().map(|meta| Meta {
+            location: None,
+            links: Links::NONE,
+            ..*meta
+        });
+        let mut world = World {
+            meta: meta.collect(),
+            free: self.free.clone(),
+            entity_ids: vec![None; slots],
+            resets: vec![0; slots],
+            reset_count: self.reset_count,
+            by_id: HashMap::new(),
+            id_room: 0,
+            kept: HashMap::new(),
+            stream: self.stream,
+            serial: next_serial(),
+            // Its rows changed, as the serial says too.
+            version: self.version + 1,
+            tables: Vec::new(),
+            by_signature: HashMap::new(),
+            components: self.components.clone(),
+            scratch: Vec::new(),
+            spawned: Vec::new(),
+            scripted: Vec::new(),
+        };
+        // Alive, vacant or retired; a retired slot stays so.
+        for (index, free) in (0..).zip(was_free) {
+            if !free {
+                world.free_slot(index);
+            }
+        }
+        world
+    }
+
     /// Moves `entity`, at `at`, to the end of table `to`, with its components that `to` has. Its
     /// others must have left its row already.
     fn move_entity(&mut self, entity: Entity, at: Location, to: u32) {
@@ -843,7 +910,8 @@ mod tests {
 
     use super::hierarchy::tests::check_links;
     use super::id::splitmix64;
-    use super::id::tests::check_ids;
+    use super::id::tests::{check_ids, vacated};
+    use super::ops::tests::fixture;
     use super::*;
     use crate::reflect::Value;
 
@@ -928,6 +996,66 @@ mod tests {
             assert_eq!(error.code(), "ecs.no_entity");
         }
         assert_eq!(world.get::<Index>(next), Some(&Index(1)));
+    }
+
+    /// Clearing the world despawns every entity, and frees each slot that held one, or that a log
+    /// kept for one a delete took, under its next generation, after the free ones, a slot that
+    /// can't go higher retiring: so no handle from before names an entity after, and no ID drawn
+    /// before is drawn again. The component types stay; and the world is another, which refuses
+    /// the log's entries rather than put their entities back in slots it has let go.
+    #[test]
+    fn clearing_the_world_frees_every_slot_and_keeps_the_types() {
+        let mut x = fixture();
+        let worn = x.world.spawn(Index(0));
+        let worn_id = x.world.id(worn).expect("alive");
+        // As though its slot had held 4 billion entities.
+        x.world.meta[worn.slot()].generation = NonZeroU32::MAX;
+        x.world.despawn(x.g).expect("alive");
+        let mut log = Log::default();
+        let delete = Operation::Delete { entity: x.id(x.a) };
+        log.apply(&mut x.world, delete).expect("deleted");
+        assert_eq!(vacated(&x.world), 5, "a and its descendants, kept");
+        let handles = [x.g, x.r, x.a, x.s, x.b, x.c, x.d, x.e, x.f];
+        let mut ids: HashSet<EntityId> = handles.iter().map(|&entity| x.id(entity)).collect();
+        ids.insert(worn_id);
+        let types: Vec<String> = x.world.component_types().map(str::to_owned).collect();
+        let serial = x.world.serial();
+        let world = &mut x.world;
+        world.clear();
+        assert_ne!(world.serial(), serial);
+        check_ids(world);
+        check_links(world);
+        assert_eq!(world.entities(None).expect("every entity").len(), 0);
+        for entity in handles.into_iter().chain([worn]) {
+            assert!(!world.contains(entity), "{entity}");
+        }
+        assert!(ids.iter().all(|&id| world.entity(id).is_none()));
+        let listed = world.component_types().map(str::to_owned);
+        assert!(listed.eq(types), "the component types");
+        // g's slot, freed before, then the others in slot order, those the log kept among them;
+        // the worn one retired.
+        let slots = handles.map(|entity| entity.index);
+        assert_eq!(world.free, slots);
+        assert_eq!(vacated(world), 0, "the slots the log kept");
+        // Its entries are another world's: refused, not put back, and cleared, freeing nothing.
+        let error = log.undo(world).expect_err("another world's");
+        assert_eq!(error.code(), "ops.other_world", "{error}");
+        log.clear(world);
+        assert_eq!(world.free, slots, "freed once");
+        // The slots freed take new entities, under handles and IDs of their own, and then a new
+        // slot does, never the retired one.
+        let spawned: Vec<Entity> = (1..11).map(|i| world.spawn(Index(i))).collect();
+        assert_eq!(
+            spawned.last().map(|entity| entity.index),
+            Some(worn.index + 1)
+        );
+        for &entity in &spawned {
+            assert!(!handles.contains(&entity), "{entity}");
+            let id = world.id(entity).expect("alive");
+            assert!(!ids.contains(&id), "{id} drawn again");
+        }
+        check_ids(world);
+        check_links(world);
     }
 
     /// A reset of an entity's interpolation is its slot's alone, and changes neither the hash nor
@@ -1082,9 +1210,9 @@ mod tests {
     }
 
     /// Takes random steps, spawning, despawning, giving and taking components and changing them
-    /// through queries and by name, and setting parents, and after each checks the world against a
-    /// model of it: a list of each living entity's components, parent and ID, and when it became
-    /// its parent's child.
+    /// through queries and by name, setting parents, and now and then clearing the world, and
+    /// after each checks the world against a model of it: a list of each living entity's
+    /// components, parent and ID, and when it became its parent's child.
     #[test]
     fn the_world_matches_a_model() {
         // Seeded, so that its IDs are the same every run too.
@@ -1102,6 +1230,8 @@ mod tests {
         };
         // The step at which each child became its parent's, which orders its siblings.
         let mut joined: HashMap<Entity, usize> = HashMap::new();
+        // How many steps cleared the world.
+        let mut cleared = 0;
         // Its types in the order A, C, B, D, so that C's column comes between A's and B's, and a
         // query of B then A takes them out of their order in the tables.
         let first = world.spawn((A(0), C, B(0), D("0".to_owned())));
@@ -1157,6 +1287,17 @@ mod tests {
                         ),
                     };
                     live.push(spawned(&world, entity, has));
+                }
+                2 if rng.below(40) == 0 => {
+                    // Every entity at once.
+                    let serial = world.serial();
+                    world.clear();
+                    assert_ne!(world.serial(), serial, "step {step}");
+                    let gone = live.drain(..).map(|(entity, has)| (entity, has.id));
+                    dead.extend(
+                        gone.map(|(entity, id)| (entity, id.expect("drawn as it spawned"))),
+                    );
+                    cleared += 1;
                 }
                 2 if !live.is_empty() => {
                     // With its descendants.
@@ -1430,6 +1571,7 @@ mod tests {
                 "step {step}"
             );
         }
+        assert!(cleared > 0, "no step cleared the world");
     }
 
     #[test]

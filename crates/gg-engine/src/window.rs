@@ -216,6 +216,7 @@ impl Handler<'_> {
         gamepads.poll(|event| {
             let _ = dispatch(&mut app.stack, cx, &event);
         });
+        self.take_pause();
         let (Some(window), Some(render), Some(egui_winit), Some(viewports)) = (
             &self.window,
             &mut self.render,
@@ -346,6 +347,17 @@ impl Handler<'_> {
         if let Some(at) = at {
             window.show_window_menu(at);
             #[cfg(target_os = "windows")]
+            self.clock.resume();
+        }
+    }
+
+    /// Restarts the clock if a layer paused the frames since it was last read, as a file dialog
+    /// does while it's open, so that neither the frame the pause came in nor the update after it
+    /// counts the pause. Where the clock is read, as a frame starts and as the run ends, rather
+    /// than as a frame ends, so that it covers a dialog that a layer shows for an event between
+    /// frames, such as the OS's close button, as well as one from its update or its UI.
+    fn take_pause(&mut self) {
+        if mem::take(&mut self.cx.paused) {
             self.clock.resume();
         }
     }
@@ -551,6 +563,7 @@ impl ApplicationHandler for Handler<'_> {
     fn exiting(&mut self, _: &ActiveEventLoop) {
         // The last frame ends here, and the frame handed over last renders, and counts, before
         // the run's end is timed.
+        self.take_pause();
         (self.cx.perf).finish(self.clock.since_last(Instant::now()));
         let stopped = self.render.take().and_then(|render| {
             match panic::catch_unwind(AssertUnwindSafe(|| render.stop())) {

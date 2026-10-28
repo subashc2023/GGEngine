@@ -20,6 +20,7 @@ deny = [
     { crate = "ash-window", wrappers = ["gg-gpu"], reason = "gg-gpu owns Vulkan" },
     { crate = "winit", wrappers = ["gg-engine", "egui-winit"], reason = "gg-engine owns the window and input" },
     { crate = "egui-winit", wrappers = ["gg-engine"], reason = "gg-engine owns the window and input" },
+    { crate = "rfd", wrappers = ["gg-engine"], reason = "gg-engine owns the window, which dialogs belong to" },
     { crate = "gilrs", wrappers = ["gg-engine"], reason = "gg-engine owns the window and input" },
     { crate = "gilrs-core", wrappers = ["gilrs"], reason = "gg-engine owns the window and input" },
     { crate = "rayon-core", wrappers = ["gg-engine"], reason = "gg-engine's jobs module is the way into the pool" },

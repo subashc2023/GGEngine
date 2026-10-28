@@ -1,10 +1,12 @@
 //! The OS's directories where an app keeps its files for the user, never beside the executable:
 //! one for what it keeps from run to run, such as the dock's layout, and one for what it can make
-//! again, such as its pipeline cache; and writing a file there whole.
+//! again, such as its pipeline cache; and writing a file whole, there or, as a scene's, anywhere.
 
 use std::ffi::OsString;
+use std::fs::{self, File};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::{fs, io};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Which of the per-user directories a file goes in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,17 +53,69 @@ pub(crate) fn dir(
     Some(dir.join(app))
 }
 
-/// Writes `data` to the file at `path`, making the directories it's in, through a file beside it
-/// named with `.new` after, which then replaces it, so that a crash while writing leaves the last
-/// one whole.
+/// Writes `data` to the file at `path` whole, as [`write_whole`] does, making the directories it's
+/// in.
 pub(crate) fn write(path: &Path, data: &[u8]) -> io::Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
-    let mut temporary = path.as_os_str().to_owned();
-    temporary.push(".new");
-    fs::write(&temporary, data)?;
-    fs::rename(&temporary, path)
+    write_whole(path, data)
+}
+
+/// Writes `data` to the file at `path` whole or not at all, so that a crash or the power going
+/// while it writes leaves the last one whole: to a file of its own beside the one `path` names,
+/// through any link, which it flushes to the disk and renames over that one, with its permissions.
+/// It refuses a file that's read only, on every OS, as Windows' rename would; replaces one with
+/// other hard links rather than writing through it, so that they keep what it held; makes no
+/// directories; and removes what it wrote if it fails.
+pub(crate) fn write_whole(path: &Path, data: &[u8]) -> io::Result<()> {
+    // The file a link names, so that the link stays one, and its permissions, which the file
+    // renamed over it takes rather than the umask's.
+    let (target, permissions) = match fs::canonicalize(path) {
+        Ok(target) => {
+            let permissions = fs::metadata(&target)?.permissions();
+            if permissions.readonly() {
+                let message = "it's read only";
+                return Err(io::Error::new(io::ErrorKind::PermissionDenied, message));
+            }
+            (target, Some(permissions))
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => (path.to_owned(), None),
+        Err(e) => return Err(e),
+    };
+    let (temporary, file) = create_beside(&target)?;
+    let written = flush(file, data, permissions).and_then(|()| fs::rename(&temporary, &target));
+    if written.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    written
+}
+
+/// A file new to the disk beside `target`, named after it with this process's ID, a count and
+/// `.new` after, so that none already there, such as one a user named so, is emptied or replaced.
+fn create_beside(target: &Path) -> io::Result<(PathBuf, File)> {
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    loop {
+        let mut name = target.as_os_str().to_owned();
+        let count = COUNT.fetch_add(1, Ordering::Relaxed);
+        name.push(format!(".{}-{count}.new", std::process::id()));
+        let name = PathBuf::from(name);
+        match File::options().write(true).create_new(true).open(&name) {
+            Ok(file) => return Ok((name, file)),
+            // One a run that crashed left, whose process had this one's ID.
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Writes `data` to `file`, gives it `permissions`, if any, and flushes it to the disk, closing it.
+fn flush(mut file: File, data: &[u8], permissions: Option<fs::Permissions>) -> io::Result<()> {
+    file.write_all(data)?;
+    if let Some(permissions) = permissions {
+        file.set_permissions(permissions)?;
+    }
+    file.sync_all()
 }
 
 #[cfg(test)]

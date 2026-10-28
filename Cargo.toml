@@ -46,6 +46,11 @@ raw-window-handle = { version = "0.6.2", features = ["std"] }
 # one keeps its job on the stack, where a call from outside the pool allocates through its queue.
 # Not rayon's parallel iterators, whose splits and reductions follow the number of threads.
 rayon-core = "1.13.0"
+# The OS's own file dialogs, for tools: Windows' common item dialog, macOS's open and save panels,
+# and elsewhere the XDG desktop portal's, through D-Bus, whose library it loads as it runs, or
+# zenity's without a portal. Its defaults, so that on Wayland the portal's dialog attaches to the
+# window it's shown over.
+rfd = "0.17.2"
 ron = "0.12.2"
 scoped-tls = "1.0.1"
 serde = { version = "1.0.229", features = ["derive"] }

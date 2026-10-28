@@ -14,6 +14,7 @@ gg-macros.workspace = true
 gg-renderer.workspace = true
 png.workspace = true
 rayon-core.workspace = true
+rfd = { workspace = true, optional = true }
 ron.workspace = true
 scoped-tls.workspace = true
 serde.workspace = true
@@ -26,8 +27,8 @@ zune-jpeg.workspace = true
 # The engine's zones for Tracy, through gg-core's profile module.
 tracy = ["gg-core/tracy"]
 # Development tooling, which development builds turn on and shipping builds never do: hot reload of
-# games' shaders, for now.
-dev = []
+# games' shaders, and the OS's file dialogs, for now.
+dev = ["dep:rfd"]
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { workspace = true, features = [

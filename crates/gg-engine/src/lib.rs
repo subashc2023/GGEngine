@@ -22,6 +22,9 @@ mod actions;
 mod args;
 mod camera;
 mod chrome;
+// In development builds alone, as `dev` has it.
+#[cfg(feature = "dev")]
+mod dialog;
 mod dirs;
 mod dock;
 mod draw;
@@ -76,11 +79,13 @@ pub use camera::{
     Camera, CameraAction, FlyAction, FlyCameraController, OrthographicCameraController,
 };
 use chrome::Chrome;
+#[cfg(feature = "dev")]
+pub use dialog::FileDialog;
 use dock::Dock;
 pub use dock::{Docked, Ui};
 pub use ecs::{
     Bundle, Component, Difference, Entities, Entity, EntityId, Log, Operation, Parent, Query,
-    QueryIter, QueryIterMut, ReadOnlyQuery, World, WorldHash, Writable,
+    QueryIter, QueryIterMut, ReadOnlyQuery, World, WorldHash, Writable, read_scene, write_scene,
 };
 /// The UI library layers draw with, in [`Layer::ui`]; apps use it from here, so that they
 /// share the engine's version.
@@ -453,11 +458,43 @@ fn run_headless(app: &mut App, args: &Args) -> Result<Ran> {
 /// again for a pass whose limit isn't the last one's.
 const MAX_TEXTURE_SIDE: usize = MAX_TEXTURE_SIZE as usize;
 
-/// egui, without its shortcut that closes the window, Ctrl or Cmd+Q: a game may use those keys,
-/// and apps quit from their own menus.
+/// The name of the font family [`egui_context`] binds to Inter's bold weight, which the
+/// Inspector's axis buttons draw in.
+pub(crate) const BOLD: &str = "Bold";
+
+/// egui in the engine's UI font, Inter: its regular weight for proportional text, and its bold
+/// in the family [`BOLD`] names, each followed by egui's own proportional fonts, for the glyphs
+/// Inter lacks, such as egui's icons; monospace text stays in egui's font, and every size egui's.
+/// Collapsing headers are framed, as wide as their `Ui`, in the light theme and the dark, which
+/// follows the OS's. The fonts are in the binary, and egui parses a family's as it first lays out
+/// text in it. Without egui's shortcut that closes the window, Ctrl or Cmd+Q: a game may use
+/// those keys, and apps quit from their own menus.
 fn egui_context() -> egui::Context {
     let egui = egui::Context::default();
     egui.options_mut(|options| options.quit_shortcuts.clear());
+    let mut fonts = egui::FontDefinitions::default();
+    let fallbacks = fonts.families[&egui::FontFamily::Proportional].clone();
+    let inter: [(egui::FontFamily, &str, &'static [u8]); 2] = [
+        (
+            egui::FontFamily::Proportional,
+            "Inter",
+            include_bytes!("../assets/fonts/Inter/Inter-Regular.ttf"),
+        ),
+        (
+            egui::FontFamily::Name(BOLD.into()),
+            "Inter Bold",
+            include_bytes!("../assets/fonts/Inter/Inter-Bold.ttf"),
+        ),
+    ];
+    for (family, name, data) in inter {
+        let data = std::sync::Arc::new(egui::FontData::from_static(data));
+        fonts.font_data.insert(name.to_owned(), data);
+        let mut chain = vec![name.to_owned()];
+        chain.extend(fallbacks.iter().cloned());
+        fonts.families.insert(family, chain);
+    }
+    egui.set_fonts(fonts);
+    egui.all_styles_mut(|style| style.visuals.collapsing_header_frame = true);
     egui
 }
 
@@ -1855,6 +1892,44 @@ mod tests {
             egui::Shape::Text(text) => texts.push(text.galley.text().to_owned()),
             _ => {}
         }
+    }
+
+    /// The UI draws in Inter: proportional text in its regular weight, and the family [`BOLD`]
+    /// names in its bold, each falling back to egui's own proportional fonts; monospace in egui's.
+    /// Collapsing headers are framed in the light theme and the dark, whichever the OS has.
+    #[test]
+    fn the_ui_draws_in_inter_with_its_headers_framed() {
+        let egui = egui_context();
+        // egui makes its fonts as its first pass begins.
+        let mut output = egui.run_ui(egui::RawInput::default(), |_| {});
+        // As the renderer would have.
+        output.textures_delta.clear();
+        let icon = egui::special_emojis::GITHUB.to_string();
+        egui.fonts_mut(|fonts| {
+            for (family, font) in [
+                (egui::FontFamily::Proportional, "Inter"),
+                (egui::FontFamily::Name(BOLD.into()), "Inter Bold"),
+            ] {
+                let chain = fonts.definitions().families[&family].clone();
+                assert_eq!(chain[0], font);
+                assert!(chain.iter().any(|name| name == "egui-icons"), "{chain:?}");
+                let in_font = |names: &Vec<String>| names.iter().any(|name| name == font);
+                let characters = fonts.characters(&family);
+                // The axes' letters, and the components' menus' ellipsis.
+                let has = |c| characters.get(&c).is_some_and(in_font);
+                assert!("XYZW…".chars().all(has), "{font} lacks one");
+                let id = egui::FontId::new(14.0, family);
+                assert!(fonts.has_glyphs(&id, &icon), "{font} falls back");
+            }
+            let monospace = &fonts.definitions().families[&egui::FontFamily::Monospace];
+            assert_eq!(monospace[0], "Hack");
+        });
+        for theme in [egui::Theme::Light, egui::Theme::Dark] {
+            let style = egui.style_of(theme);
+            assert!(style.visuals.collapsing_header_frame, "{theme:?}");
+        }
+        let preference = egui.options(|options| options.theme_preference);
+        assert_eq!(preference, egui::ThemePreference::System);
     }
 
     #[test]

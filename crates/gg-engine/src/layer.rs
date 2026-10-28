@@ -61,9 +61,10 @@ pub trait Layer {
     }
 
     /// Called every frame, after the frame's ticks, with the time since the last frame: zero for
-    /// the first, and for the first after the window is restored from being minimized, so that
-    /// the pause doesn't count as one long frame. For what's presented, such as the viewpoint the
-    /// view sees from, rather than the world, which changes at ticks.
+    /// the first, and for the first after frames pause, as while the window is minimized or a
+    /// file dialog is open, so that the pause doesn't count as one long frame. For what's
+    /// presented, such as the viewpoint the view sees from, rather than the world, which changes
+    /// at ticks.
     fn update(&mut self, _cx: &mut Context, _dt: Duration) {}
 
     /// Called for each event that the layers above didn't handle. `Break` handles it, so the
@@ -192,6 +193,10 @@ pub struct Context {
     /// How long frames take, which the main loop measures and
     /// [`PerfPanel`](crate::PerfPanel) shows.
     pub(crate) perf: Perf,
+    /// Set once a layer has shown something that paused the frames while it was open, such as a
+    /// file dialog, until the main loop takes it to restart its clock, so that no frame's time
+    /// counts the pause.
+    pub(crate) paused: bool,
 }
 
 impl Context {
@@ -241,6 +246,7 @@ impl Context {
             past: Past::default(),
             attached: false,
             perf: Perf::default(),
+            paused: false,
         }
     }
 
@@ -475,6 +481,33 @@ impl Context {
              command for its next tick"
         );
         &mut self.world
+    }
+
+    /// Shows `dialog`, a file dialog of the OS's own, over the main window, modal, and returns
+    /// the path chosen as it closes: `None` if it was cancelled, or if there's no window, as in
+    /// headless runs and tests, which show none. For tools' menus, from [`Layer::ui`], as an
+    /// item's click opens it. Frames pause while it's open, the render thread finishing the frame
+    /// it has, and no frame's time counts the pause: the next update gets none, as the first
+    /// after the window is restored from being minimized does.
+    #[cfg(feature = "dev")]
+    pub fn pick_file(&mut self, dialog: &crate::FileDialog<'_>) -> Option<std::path::PathBuf> {
+        let Some(window) = &self.window else {
+            tracing::debug!(
+                code = "engine.no_dialog",
+                title = dialog.title,
+                "No window to show the file dialog {:?} over, so it isn't shown",
+                dialog.title
+            );
+            return None;
+        };
+        let picked = dialog.show(&window.raw);
+        self.paused = true;
+        tracing::debug!(
+            title = dialog.title,
+            picked = picked.as_ref().map(|path| path.display().to_string()),
+            "File dialog closed"
+        );
+        picked
     }
 
     /// Copies where the world's entities are, as a tick starts, for the frames after it to draw
@@ -1054,5 +1087,22 @@ mod tests {
             message.contains("\"truck\"") && message.contains(&path.display().to_string()),
             "{message}"
         );
+    }
+
+    /// Without a window, as in headless runs and tests, a file dialog shows nothing, so it picks
+    /// nothing and pauses no frames.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_file_dialog_without_a_window_picks_nothing() {
+        let mut cx = Context::seeded(0);
+        let dialog = crate::FileDialog {
+            title: "Save the scene as",
+            save: true,
+            filter: Some(("Scenes", &["ron"])),
+            directory: Some(Path::new("scenes")),
+            file_name: Some("grid.ron"),
+        };
+        assert_eq!(cx.pick_file(&dialog), None);
+        assert!(!cx.paused);
     }
 }

@@ -1,6 +1,10 @@
+use std::fs;
+
 use gg_core::math::{Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{Mipmaps, Textures};
 
+use super::{read_scene, write_scene};
+use crate::dirs::tests::Scratch;
 use crate::ecs::hierarchy::tests::check_links;
 use crate::ecs::id::tests::check_ids;
 use crate::ecs::id::{IdStream, placed};
@@ -194,6 +198,81 @@ fn a_scene_loads_and_saves_as_its_canonical_text() {
         world.save_scene(&[]).expect("saved"),
         "(\n    entities: {},\n)\n"
     );
+}
+
+/// A scene file reads back as it was written, and a write over it replaces it, through a file of
+/// its own beside it, which it leaves behind neither then nor when it can't replace what's there;
+/// a file of the user's named as such a file might be is left as it was. A file that's read only
+/// is refused, on every OS, and kept. A write into a directory that isn't there and a read of a
+/// file that isn't fail, naming the file.
+#[test]
+fn a_scene_file_is_written_whole() {
+    let dir = Scratch::new("scene-file");
+    fs::create_dir_all(&dir.0).expect("a directory");
+    let path = dir.0.join("grid.ron");
+    // A draft of the user's, named as a scene's temporary file once was.
+    let draft = dir.0.join("grid.ron.new");
+    fs::write(&draft, "a draft").expect("a draft");
+    let listed = || {
+        let entries = fs::read_dir(&dir.0).expect("listed");
+        let mut names: Vec<_> = entries.map(|e| e.expect("an entry").file_name()).collect();
+        names.sort();
+        names
+    };
+    let empty = "(\n    entities: {},\n)\n";
+    for text in [GOLDEN, empty] {
+        write_scene(&path, text).unwrap_or_else(|error| panic!("{error:#}"));
+        assert_eq!(read_scene(&path).ok().as_deref(), Some(text));
+        assert_eq!(listed(), ["grid.ron", "grid.ron.new"]);
+    }
+    assert_eq!(fs::read_to_string(&draft).ok().as_deref(), Some("a draft"));
+    // A directory, which a file can't replace.
+    let taken = dir.0.join("taken");
+    fs::create_dir(&taken).expect("a directory");
+    let error = write_scene(&taken, GOLDEN).expect_err("a directory in the way");
+    assert_eq!(error.code(), "scene.file", "{error:#}");
+    assert_eq!(listed(), ["grid.ron", "grid.ron.new", "taken"]);
+    let writable = fs::metadata(&path).expect("written").permissions();
+    let mut read_only = writable.clone();
+    read_only.set_readonly(true);
+    fs::set_permissions(&path, read_only).expect("made read only");
+    let refused = write_scene(&path, GOLDEN);
+    fs::set_permissions(&path, writable).expect("made writable again");
+    let error = refused.expect_err("read only");
+    assert_eq!(error.code(), "scene.file", "{error:#}");
+    assert_eq!(read_scene(&path).ok().as_deref(), Some(empty));
+    assert_eq!(listed(), ["grid.ron", "grid.ron.new", "taken"]);
+    let missing = dir.0.join("missing").join("grid.ron");
+    let named = missing.display().to_string();
+    let errors = [
+        write_scene(&missing, GOLDEN).expect_err("no directory"),
+        read_scene(&missing).expect_err("no file"),
+    ];
+    for error in errors {
+        assert_eq!(error.code(), "scene.file", "{error:#}");
+        assert!(error.to_string().contains(&named), "{error}");
+    }
+}
+
+/// Through a link, a scene file's write replaces the file the link names, which keeps its
+/// permissions, and the link stays one.
+#[cfg(unix)]
+#[test]
+fn a_scene_file_is_written_through_a_link_keeping_its_permissions() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let dir = Scratch::new("scene-link");
+    fs::create_dir_all(&dir.0).expect("a directory");
+    let shared = dir.0.join("shared.ron");
+    fs::write(&shared, "old").expect("written");
+    fs::set_permissions(&shared, fs::Permissions::from_mode(0o664)).expect("group-writable");
+    let link = dir.0.join("level.ron");
+    symlink(&shared, &link).expect("a link");
+    write_scene(&link, GOLDEN).unwrap_or_else(|error| panic!("{error:#}"));
+    let linked = fs::symlink_metadata(&link).expect("there");
+    assert!(linked.file_type().is_symlink());
+    assert_eq!(read_scene(&shared).ok().as_deref(), Some(GOLDEN));
+    let mode = fs::metadata(&shared).expect("there").permissions().mode();
+    assert_eq!(mode & 0o777, 0o664);
 }
 
 #[test]
@@ -392,6 +471,65 @@ fn a_refused_scene_changes_nothing_and_says_where() {
     let says = format!("{line}:{col}: entity 9f86d081884c7d65 is in the world already");
     assert!(error.to_string().starts_with(&says), "{error}");
     unchanged(&mut world, &mut twin, "an ID taken");
+}
+
+/// A scene replaces the world's entities as it loads into the world cleared, byte for byte; one
+/// refused is refused as that load is, and changes nothing, the world's serial neither; and the
+/// scene the world was saved to, which a load refuses for its IDs, replaces it under them.
+#[test]
+fn a_scene_replaces_the_worlds_entities_all_or_nothing() {
+    let mut world = golden_world(20);
+    world.spawn(Transform::IDENTITY);
+    let before: Vec<Entity> = world.entities(None).expect("every entity").collect();
+    let mut cleared = world.clone();
+    let serial = world.serial();
+    let roots = world
+        .replace_scene(GOLDEN)
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_ne!(world.serial(), serial);
+    cleared.clear();
+    let loaded = cleared.load_scene(GOLDEN).expect("loaded");
+    assert_eq!(roots, loaded, "the same handles");
+    assert_eq!(world.save_scene(&roots).expect("saved"), GOLDEN);
+    assert_eq!(cleared.save_scene(&loaded).expect("saved"), GOLDEN);
+    assert!(before.iter().all(|&entity| !world.contains(entity)));
+    unchanged(
+        &mut world,
+        &mut cleared,
+        "replaced, and loaded into the world cleared",
+    );
+    check_ids(&world);
+    check_links(&world);
+    for (from, to, code) in [
+        ("stops: [],\n", "stops: []\n", "scene.syntax"),
+        ("Patrol:", "Patrolling:", "reflect.unknown_type"),
+    ] {
+        let text = replace_last(GOLDEN, from, to);
+        let serial = world.serial();
+        let error = world.replace_scene(&text).expect_err(to);
+        assert_eq!(error.code(), code, "{error}");
+        let mut empty = world.clone();
+        empty.clear();
+        let expected = empty.load_scene(&text).expect_err(to);
+        assert_eq!(error.to_string(), expected.to_string());
+        assert_eq!(world.serial(), serial, "{error}");
+        assert!(roots.iter().all(|&root| world.contains(root)), "{error}");
+        assert_eq!(world.save_scene(&roots).expect("saved"), GOLDEN, "{error}");
+        unchanged(&mut world, &mut cleared, &error.to_string());
+    }
+    // Reopened, as a file the world was saved to is.
+    let saved = world.save_scene(&roots).expect("saved");
+    let error = world.load_scene(&saved).expect_err("its IDs");
+    assert_eq!(error.code(), "ecs.id_taken", "{error}");
+    let again = world.replace_scene(&saved).expect("replaced");
+    assert_eq!(world.id(again[0]), Some(id("2b7e151628aed2a6")));
+    assert_eq!(world.save_scene(&again).expect("saved"), saved);
+    assert!(
+        roots.iter().all(|&root| !world.contains(root)),
+        "the old handles"
+    );
+    check_ids(&world);
+    check_links(&world);
 }
 
 /// Holds what's opaque in a list and an option, which a load can't make unless its base has it.

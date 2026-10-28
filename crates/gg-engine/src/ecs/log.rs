@@ -18,8 +18,9 @@ use super::ops::{Inverse, Operation};
 /// by an undo or a redo the world refuses; or by [`clear`](Self::clear). A log dropped without
 /// `clear` leaves those slots unused for good, so whoever keeps one clears it. A world restored
 /// from a snapshot refuses the entries from before, as another world's, and the slots kept when
-/// the snapshot was taken stay unused in it for good; so whoever restores a world clears its log
-/// too.
+/// the snapshot was taken stay unused in it for good; a world [cleared](World::clear), or whose
+/// entities a scene [replaced](World::replace_scene), refuses them too, having let their slots go
+/// itself. So whoever restores, clears or replaces a world clears its log too.
 #[derive(Default)]
 pub struct Log {
     /// Applied and not undone, the first applied first.
