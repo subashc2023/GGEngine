@@ -33,7 +33,7 @@ pub use by_name::Entities;
 pub use diff::Difference;
 pub use hash::{Digest, WorldHash};
 use hierarchy::Links;
-pub use hierarchy::Parent;
+pub use hierarchy::{Parent, Pose};
 pub use id::EntityId;
 use id::IdStream;
 pub use log::Log;

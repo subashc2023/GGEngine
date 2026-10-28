@@ -18,7 +18,7 @@ use egui::{
     StrokeKind, TextEdit, UiBuilder, Vec2, ViewportBuilder, ViewportClass, ViewportCommand,
     ViewportId, pos2, vec2,
 };
-use gg_renderer::ViewCallback;
+use gg_renderer::{ViewCallback, Viewport};
 use tracing::warn;
 
 use super::file;
@@ -129,10 +129,10 @@ impl<'a> Ui<'a> {
     /// from its edges: above the view, and below what else is over it, such as panels floating
     /// over it, and menus. `id` tells it from other UI over the view. A press on it gives the view
     /// the keys, as a press on the view does, without reaching the layers, and the wheel over it
-    /// doesn't reach them either: so a tool's toolbar or gizmo over the view leaves the view its
-    /// keys, unless it opens a popup, which takes them as egui's UI does. Shows nothing, and
-    /// returns `None`, while the view doesn't show, and in apps without
-    /// [`App::view_panel`](crate::App::view_panel).
+    /// doesn't reach them either, while keys follow the cursor over it as over the view: so a
+    /// tool's toolbar or gizmo over the view leaves the view its keys, unless it opens a popup,
+    /// which takes them as egui's UI does. Shows nothing, and returns `None`, while the view
+    /// doesn't show, and in apps without [`App::view_panel`](crate::App::view_panel).
     pub fn over_view<R>(
         &mut self,
         id: impl Hash + Debug,
@@ -150,6 +150,19 @@ impl<'a> Ui<'a> {
     /// `None` while the view doesn't show, and in apps without a view panel.
     pub fn view(&self) -> Option<Response> {
         self.dock.spot.as_ref().map(|spot| spot.response.clone())
+    }
+
+    /// Where the game's view is as this frame renders it, in the main window's physical pixels
+    /// from its top left, as [`Input::cursor`](crate::Input::cursor) places the cursor, and as
+    /// [`Context::view`](crate::Context::view) gives it once the frame is handed to the renderer:
+    /// the main window's central area, or the panel that
+    /// [`App::view_panel`](crate::App::view_panel) names, rounded to pixels as egui rounds its clip
+    /// rectangles; such as to draw over the view where the frame draws the world. `None` while it
+    /// has no area.
+    pub fn viewport(&self) -> Option<Viewport> {
+        let ppp = self.root.ctx().pixels_per_point();
+        let viewport = crate::viewport(self.dock.view(), ppp);
+        (viewport.size[0] > 0 && viewport.size[1] > 0).then_some(viewport)
     }
 
     /// egui, for UI that isn't a panel.
@@ -1553,10 +1566,11 @@ mod tests {
         /// What egui asked of each window in the last frame.
         commands: Vec<(ViewportId, ViewportCommand)>,
         /// Whether frames show a toolbar 100 by 30 points over the view, at its top left; and
-        /// last frame, where it showed, and what egui made of the view.
+        /// last frame, where it showed, what egui made of the view, and where it was in pixels.
         toolbar: bool,
         shown: Option<Rect>,
         view: Option<Response>,
+        viewport: Option<Viewport>,
         /// What the main window's pass drew in the last frame, and the windows of their own egui
         /// showed, with what it asked of them.
         shapes: Vec<ClippedShape>,
@@ -1612,6 +1626,7 @@ mod tests {
                 toolbar: false,
                 shown: None,
                 view: None,
+                viewport: None,
                 shapes: Vec::new(),
                 windows: Vec::new(),
             };
@@ -1719,7 +1734,7 @@ mod tests {
             self.frame += 1;
             let (dock, panels, menus) = (&mut self.dock, &self.panels, &self.menus);
             let toolbar = self.toolbar;
-            let (mut shown, mut view) = (None, None);
+            let (mut shown, mut view, mut viewport) = (None, None, None);
             let mut output = self.ctx.run_ui(input, |root| {
                 dock.begin(root);
                 let mut ui = Ui::new(root, dock);
@@ -1733,7 +1748,7 @@ mod tests {
                         ui.label(format!("In {name}"));
                     });
                 }
-                view = ui.view();
+                (view, viewport) = (ui.view(), ui.viewport());
                 if toolbar {
                     shown = ui.over_view("toolbar", Align2::LEFT_TOP, |ui| {
                         ui.allocate_exact_size(vec2(100.0, 30.0), Sense::click()).0
@@ -1741,7 +1756,7 @@ mod tests {
                 }
                 dock.end(root);
             });
-            (self.shown, self.view) = (shown, view);
+            (self.shown, self.view, self.viewport) = (shown, view, viewport);
             output.textures_delta.clear();
             self.shapes = mem::take(&mut output.shapes);
             let windows = output.viewport_output.iter();
@@ -2468,6 +2483,8 @@ mod tests {
         run.frames(2);
         let view = run.view.clone().expect("the view shows");
         assert_eq!(view.rect, run.dock.view());
+        // In pixels, as the frame renders it.
+        assert_eq!(run.viewport, Some(crate::viewport(view.rect, 1.0)));
         // Hovered on it, clear of A and B, and not on the toolbar over it.
         run.move_to(pos2(600.0, 450.0));
         assert!(run.view.as_ref().unwrap().hovered());
@@ -2478,12 +2495,14 @@ mod tests {
         let a = run.layout().find("A").unwrap();
         assert!(run.dock.layout.dock(a, view, Zone::Center));
         run.frames(2);
-        assert!(run.shown.is_none() && run.view.is_none());
-        // Nor in a game's dock, whose view is the central area.
+        assert!(run.shown.is_none() && run.view.is_none() && run.viewport.is_none());
+        // Nor in a game's dock, whose view is the central area, which renders all the same.
         let mut run = Run::new();
         run.toolbar = true;
         run.frames(2);
         assert!(run.shown.is_none() && run.view.is_none());
+        let central = crate::viewport(run.dock.view(), 1.0);
+        assert!(central.size[0] > 0 && run.viewport == Some(central));
     }
 
     #[test]

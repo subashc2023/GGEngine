@@ -3,14 +3,20 @@
 //! and two cameras, through the editor's camera, orthographic at first, as 2D games see theirs, over a
 //! grid, with a toolbar and a gizmo over it; or through the world's camera, as the game would, and
 //! then W, A, S and D drive the world's cameras, by a script of theirs, as a game's keys would. The
-//! Inspector edits the world, and undoes and redoes its edits. The File menu starts a new scene,
-//! emptying the world; opens one, whose entities replace the world's; and saves the world's
-//! entities as one, to the file it was opened from or saved to last, or as another: through the
-//! OS's file dialogs, and with Ctrl+N, Ctrl+O, Ctrl+S and Ctrl+Shift+S, Cmd for Ctrl on macOS.
-//! When a file can't be read, opened or written, it says why, until that's dismissed.
+//! Inspector edits the world, and undoes and redoes its edits. A click in the view picks what it
+//! shows there for the Inspector, or unpicks where it shows none, but with Pan or Orbit, whose
+//! left button moves the camera. Through the editor's camera, the toolbar's Move, Rotate and
+//! Scale, which W, E and R pick, as Q picks Select, show handles over what the Inspector has
+//! picked, whose drags move, turn and scale it, each an edit of the Inspector's. The File menu
+//! starts a new scene, emptying the world; opens one, whose entities replace the world's; and
+//! saves the world's entities as one, to the file it was opened from or saved to last, or as
+//! another: through the OS's file dialogs, and with Ctrl+N, Ctrl+O, Ctrl+S and Ctrl+Shift+S, Cmd
+//! for Ctrl on macOS. When a file can't be read, opened or written, it says why, until that's
+//! dismissed.
 
 mod camera;
 mod grid;
+mod handles;
 mod overlay;
 
 use std::collections::VecDeque;
@@ -28,14 +34,16 @@ use gg_engine::egui::{
 use gg_engine::math::{Vec2, Vec3, Vec4};
 use gg_engine::reflect::Error;
 use gg_engine::{
-    Actions, App, Binding, Camera, Change, Commands, Component, Context, Docked, Entity, Event,
-    FileDialog, Inspector, Key, Layer, Name, PerfPanel, Projection, Reflect, Script, Source,
-    Sprite, Tick, Transform, Ui, World, run_scripts,
+    Actions, App, Binding, Camera, Change, Commands, Component, Context, Docked, Entity, EntityId,
+    Event, FileDialog, Inspector, InspectorLink, Key, Layer, Name, PerfPanel, Pick, Pose,
+    Projection, Reflect, Script, Source, Sprite, Tick, Transform, Ui, Viewpoint, World,
+    run_scripts,
 };
 use tracing::warn;
 
 use camera::{Move, OrbitCamera, Screen, Side, Tool};
 use grid::Grid;
+use handles::{Aim, Handles, Picked, Reading, Reply, Sight};
 use overlay::Toolbar;
 
 fn main() -> ExitCode {
@@ -48,17 +56,33 @@ fn app() -> App {
         .dock("Inspector", Docked::RightOf("Viewport"))
         .dock("Entities", Docked::LeftOf("Viewport"))
         .dock("Performance", Docked::Below("Inspector"));
-    let app = app.layer(Editor::new());
-    app.overlay(PerfPanel).overlay(Inspector::default())
+    let inspector = Inspector::default();
+    let link = inspector.link();
+    let app = app.layer(Editor::new(link));
+    app.overlay(PerfPanel).overlay(inspector)
 }
 
-/// The editor's layer: its camera, and the toolbar and gizmo over the view; the grid; the keys
-/// that drive the world's cameras; and the File menu, which empties the world for a new scene,
-/// replaces it with a scene's and saves it as one, keeping the file it was opened from or saved
-/// to last for Save to write to, and says why when a file can't be read, opened or written.
+/// The editor's layer: its camera, and the toolbar and gizmo over the view; the handles over what
+/// the Inspector has picked, which pick and edit through its link; the grid; the keys that drive
+/// the world's cameras; and the File menu, which empties the world for a new scene, replaces it
+/// with a scene's and saves it as one, keeping the file it was opened from or saved to last for
+/// Save to write to, and says why when a file can't be read, opened or written.
 struct Editor {
     camera: OrbitCamera,
     toolbar: Toolbar,
+    handles: Handles,
+    /// The Inspector's, which says what's picked, and takes the handles' edits.
+    link: InspectorLink,
+    /// What the view on screen sees from: what the last update had it see from, while that's the
+    /// editor's camera, which the handles are hit against.
+    shown: Option<Viewpoint>,
+    /// Where the last press over the view off the handles asked to pick, in the main window's
+    /// pixels, until `event` asks the engine, keeping the ticket in `asked`.
+    picking: Option<[f64; 2]>,
+    /// The ticket of the latest pick asked for, until its answer comes back, which `update` has
+    /// the Inspector pick, as [`answer`] says: a later press's takes its place, and a grab of a
+    /// handle drops it, so that it picks nothing else under the drag.
+    asked: Option<Pick>,
     /// The grid, once attached.
     grid: Option<Grid>,
     /// What drives the world's cameras.
@@ -101,7 +125,8 @@ enum Command {
 }
 
 impl Editor {
-    fn new() -> Self {
+    /// The editor, whose handles pick and edit through `link`, the Inspector's.
+    fn new(link: InspectorLink) -> Self {
         let mut actions = Actions::default();
         let wasd = Binding::Axis2 {
             x: [Key::KeyA, Key::KeyD].map(Source::Key),
@@ -112,6 +137,11 @@ impl Editor {
         Self {
             camera: OrbitCamera::new(),
             toolbar: Toolbar::default(),
+            handles: Handles::default(),
+            link,
+            shown: None,
+            picking: None,
+            asked: None,
             grid: None,
             actions,
             commands: Vec::new(),
@@ -229,6 +259,103 @@ impl Editor {
                 commands.push(Command::Move(heading));
             }
         });
+    }
+
+    /// Has Q, W, E or R pick its tool, Select, Move, Rotate or Scale, for `event`, a press of it,
+    /// not a repeat; but not one with `command` held, Ctrl, or Cmd on macOS, which is a
+    /// shortcut's; nor while the view sees through the world's camera, whose W, A, S and D drive
+    /// the world's cameras; nor while the editor's camera flies, as its keys steer it; nor during a
+    /// drag of the handles.
+    fn choose_tool(&mut self, event: &Event<'_>, command: bool) {
+        let Event::Key {
+            key,
+            pressed: true,
+            repeat: false,
+        } = *event
+        else {
+            return;
+        };
+        let busy = self.toolbar.world_camera || self.camera.flies() || self.handles.dragging();
+        if command || busy {
+            return;
+        }
+        self.toolbar.tool = match key {
+            Key::KeyQ => Tool::Select,
+            Key::KeyW => Tool::Move,
+            Key::KeyE => Tool::Rotate,
+            Key::KeyR => Tool::Scale,
+            _ => return,
+        };
+    }
+
+    /// What the Inspector has picked, as `world` has it, while it's alive with a transform, as the
+    /// handles see it.
+    fn picked(&self, world: &World) -> Option<Picked> {
+        let id = self.link.picked()?;
+        let entity = world.entity(id)?;
+        let local = *world.get::<Transform>(entity)?;
+        let parent = match world.parent(entity).ok()? {
+            Some(parent) => world.pose(parent).ok()?,
+            None => Pose::IDENTITY,
+        };
+        Some(Picked {
+            entity: id,
+            serial: world.serial(),
+            local,
+            parent,
+            stepped: self.link.stepped(),
+            waiting: self.link.waiting(),
+        })
+    }
+
+    /// Does what `event` does, as the editor reads the window, `reading`, with what the Inspector
+    /// has picked, `picked`: first the handles, which take a press that grabs one from the camera,
+    /// and while a drag lasts, every other press, the wheel and Home, setting what the drag gives
+    /// through the link and sealing its edit as it ends, or as the pick, the world or the
+    /// Inspector's steps change; and which have a press off them ask for a pick. Then Q, W, E and
+    /// R, which pick a tool; then the camera, which the view goes back to as it takes a press, the
+    /// wheel or Home; then the keys that drive the world's cameras.
+    fn take(
+        &mut self,
+        event: &Event<'_>,
+        reading: &Reading,
+        picked: Option<Picked>,
+    ) -> ControlFlow<()> {
+        if self.handles.hold(picked.as_ref()) {
+            self.link.seal();
+        }
+        let aim = Aim {
+            tool: self.toolbar.tool,
+            viewpoint: self.shown,
+            picked,
+            camera: self.camera.moving().is_some(),
+            easing: self.camera.eases(),
+        };
+        match self.handles.event(event, reading, &aim) {
+            // The drag drops a pick asked for before it, whose answer would pick something else
+            // under it.
+            Reply::Take => {
+                self.asked = None;
+                return ControlFlow::Break(());
+            }
+            Reply::Set(entity, field) => {
+                self.link
+                    .set(entity, "Transform", field.path(), field.value());
+            }
+            Reply::Seal => self.link.seal(),
+            // For `event`, which has the context, to ask of the engine.
+            Reply::Pick(at) => self.picking = Some(at),
+            Reply::Pass => {}
+        }
+        self.choose_tool(event, reading.command);
+        let handled = self.camera.event(event, reading.screen, self.toolbar.tool);
+        // What the editor's camera takes moves it, from where it was: the view goes back to it.
+        if handled.is_break() {
+            self.toolbar.world_camera = false;
+        }
+        self.drive(event, reading.command);
+        self.gate();
+        handled
     }
 
     /// Saves `world`, as the last tick left it, to the file at `path`, which is then the scene's;
@@ -371,6 +498,21 @@ fn steer(world: &mut World, heading: Vec2) {
 fn whole_scene(world: &World) -> Result<String, Error> {
     let roots: Vec<Entity> = world.roots().collect();
     world.save_scene(&roots)
+}
+
+/// What the answers to picks that came back, `answers`, each a pick's ticket and the entity the
+/// view showed there, if any, pick through the Inspector's link: once the latest pick asked for,
+/// `asked`, has its answer, which forgets it, the entity it found, or none, which unpicks, as an
+/// entity no longer alive does; `None` while it waits. The answers to picks that a later press
+/// superseded pick nothing.
+fn answer<T: Copy + PartialEq>(
+    asked: &mut Option<T>,
+    answers: &[(T, Option<EntityId>)],
+) -> Option<Option<EntityId>> {
+    let ticket = (*asked)?;
+    let &(_, found) = answers.iter().find(|&&(answered, _)| answered == ticket)?;
+    *asked = None;
+    Some(found)
 }
 
 /// An item of the File menu, which its shortcut chooses too.
@@ -544,11 +686,24 @@ impl Layer for Editor {
         // the default viewpoint as the last one goes.
         self.toolbar.world_camera &= has_camera(cx.world());
         self.gate();
+        // What the view showed under the latest press off the handles, once that comes back.
+        if let Some(found) = answer(&mut self.asked, cx.picked()) {
+            self.link.pick(found);
+        }
+        // A drag of the handles ends as the pick changes or dies, the world is another, the
+        // Inspector undoes or redoes, or the view goes to the world's camera.
+        let ended = self.handles.hold(self.picked(cx.world()).as_ref());
+        let left = self.toolbar.world_camera && self.handles.end();
+        if ended || left {
+            self.link.seal();
+        }
         if self.toolbar.world_camera {
+            self.shown = None;
             return;
         }
         let camera = self.camera.viewpoint();
         cx.set_viewpoint(camera);
+        self.shown = Some(camera);
         // Fitted to the view as the last frame showed it, which has nowhere to fit it at first.
         if self.toolbar.grid
             && let (Some(grid), Some(view)) = (&self.grid, cx.view())
@@ -571,13 +726,16 @@ impl Layer for Editor {
             [Key::ControlLeft, Key::ControlRight]
         };
         let command = command.into_iter().any(|key| input.key_down(key));
-        let handled = self.camera.event(event, screen, self.toolbar.tool);
-        // What the editor's camera takes moves it, from where it was: the view goes back to it.
-        if handled.is_break() {
-            self.toolbar.world_camera = false;
+        let reading = Reading {
+            screen,
+            command,
+            cursor: input.cursor(),
+        };
+        let picked = self.picked(cx.world());
+        let handled = self.take(event, &reading, picked);
+        if let Some(at) = self.picking.take() {
+            self.asked = cx.pick(at);
         }
-        self.drive(event, command);
-        self.gate();
         handled
     }
 
@@ -607,9 +765,33 @@ impl Layer for Editor {
             self.choose(cx, item);
         }
         self.show_message(ui.egui());
+        let picked = self.picked(cx.world());
         let Self {
-            camera, toolbar, ..
+            camera,
+            toolbar,
+            handles,
+            ..
         } = self;
+        // The handles, on the view's own layer: over the world it shows, and under what's over it,
+        // as the frame renders the view, through the editor's camera.
+        if let (Some(view), Some(pixels), Some(viewpoint)) =
+            (ui.view(), ui.viewport(), cx.viewpoint())
+        {
+            let scale = cx.window().map_or(1.0, |window| window.scale() as f32);
+            if let Some(sight) = Sight::new(viewpoint, pixels, scale) {
+                let egui = ui.egui();
+                let ppp = egui.pixels_per_point();
+                let painter = egui.layer_painter(view.layer_id).with_clip_rect(view.rect);
+                // The one a press would grab: none while the camera drags or eases, nor with Alt
+                // held, which orbits.
+                let input = cx.input();
+                let alt = input.key_down(Key::AltLeft) || input.key_down(Key::AltRight);
+                let hover = view.hover_pos().filter(|_| view.hovered());
+                let hover = hover.filter(|_| camera.moving().is_none() && !camera.eases() && !alt);
+                let hover = hover.map(|at| Vec2::new(at.x, at.y) * ppp);
+                handles.paint(&painter, ppp, &sight, toolbar.tool, picked.as_ref(), hover);
+            }
+        }
         let has_camera = has_camera(cx.world());
         ui.over_view("toolbar", Align2::LEFT_TOP, |ui| {
             toolbar.show(ui, camera, has_camera);
@@ -634,7 +816,7 @@ impl Layer for Editor {
             Some(Move::Look) => Some(CursorIcon::Crosshair),
             Some(Move::Dolly) => Some(CursorIcon::ZoomIn),
             None if hovered => match toolbar.tool {
-                Tool::Select => None,
+                Tool::Select | Tool::Move | Tool::Rotate | Tool::Scale => None,
                 Tool::Pan => Some(CursorIcon::Move),
                 Tool::Orbit => Some(CursorIcon::Grab),
             },
@@ -653,16 +835,278 @@ mod tests {
     use std::fs;
 
     use gg_engine::reflect::Value;
-    use gg_engine::{EntityId, MouseButton};
+    use gg_engine::{MouseButton, Scroll, Viewport};
 
     use super::*;
+
+    /// The editor, linked to an Inspector of its own.
+    fn fresh() -> Editor {
+        Editor::new(Inspector::default().link())
+    }
+
+    /// A view whose top left isn't the window's, at 1.5 pixels a point, as the camera's tests have:
+    /// through the editor's camera as it starts, 10 units tall, the origin at its middle, (500,
+    /// 350), and a unit 60 pixels across.
+    const VIEW: Viewport = Viewport {
+        origin: [100, 50],
+        size: [800, 600],
+    };
+
+    /// On Move's X arrow, as the editor's camera starts, for an entity at the origin: 105 of its
+    /// 150 pixels, 70 points, right of the middle.
+    const ON_X: [f64; 2] = [605.0, 350.0];
+
+    /// What the editor reads of the window with the cursor at `at`, Alt held if `alt`.
+    fn reading(at: [f64; 2], alt: bool) -> Reading {
+        Reading {
+            screen: Screen {
+                view: Some(VIEW),
+                scale: 1.5,
+                alt,
+            },
+            command: false,
+            cursor: Some(at),
+        }
+    }
+
+    /// An entity at the origin, unturned, at its own size, as the Inspector has picked it.
+    fn at_the_origin() -> Option<Picked> {
+        Some(Picked {
+            entity: "0123456789abcdef".parse().expect("an ID"),
+            serial: 1,
+            local: Transform::IDENTITY,
+            parent: Pose::IDENTITY,
+            stepped: 0,
+            waiting: false,
+        })
+    }
+
+    /// What `editor` does with the cursor moved to `at`, and then with `button` pressed or let go
+    /// there, as it reads the window there, with `picked` picked.
+    fn press_at(
+        editor: &mut Editor,
+        picked: Option<Picked>,
+        at: [f64; 2],
+        button: MouseButton,
+        pressed: bool,
+    ) -> ControlFlow<()> {
+        let moved = Event::CursorMoved { x: at[0], y: at[1] };
+        let _ = editor.take(&moved, &reading(at, false), picked);
+        let event = Event::MouseButton { button, pressed };
+        editor.take(&event, &reading(at, false), picked)
+    }
+
+    /// An editor dragging Move's X arrow of `at_the_origin`, through its camera as it starts.
+    fn dragging() -> Editor {
+        let mut editor = fresh();
+        editor.toolbar.tool = Tool::Move;
+        editor.shown = Some(editor.camera.viewpoint());
+        let pressed = press_at(&mut editor, at_the_origin(), ON_X, MouseButton::Left, true);
+        assert_eq!(pressed, ControlFlow::Break(()));
+        assert!(editor.handles.dragging());
+        editor
+    }
+
+    /// A drag of a handle sets one field of the picked entity through the Inspector's link, the
+    /// latest value of it alone between the Inspector's passes, and seals the edit as it ends; the
+    /// camera sees the moves: here Move's X arrow, dragged right along it, and off it a little.
+    #[test]
+    fn a_drag_of_a_handle_sets_one_field_of_the_pick_and_seals() {
+        let mut editor = dragging();
+        let picked = at_the_origin();
+        for x in [620.0, 650.0, 680.0] {
+            let moved = Event::CursorMoved { x, y: 360.0 };
+            let handled = editor.take(&moved, &reading([x, 360.0], false), picked);
+            assert_eq!(handled, ControlFlow::Continue(()));
+        }
+        let at = [680.0, 360.0];
+        let _ = press_at(&mut editor, picked, at, MouseButton::Left, false);
+        assert!(!editor.handles.dragging());
+        let pending = editor.link.pending();
+        let [Some((id, component, path, Value::Vec3(moved))), None] = &pending[..] else {
+            panic!("a set and a seal: {pending:?}");
+        };
+        let entity = picked.expect("picked").entity;
+        let field = (*id, component.as_str(), path.as_str());
+        assert_eq!(field, (entity, "Transform", "translation"));
+        // 75 pixels right, at 60 a unit.
+        assert!(
+            moved.abs_diff_eq(Vec3::new(1.25, 0.0, 0.0), 1e-4),
+            "{moved}"
+        );
+        assert_eq!(editor.picking, None, "it picked nothing");
+    }
+
+    /// While a drag of the handles lasts, the editor takes the other buttons' presses, the wheel
+    /// and Home from its camera, which neither drags, dollies nor goes home; and while the camera
+    /// drags, a press on a handle grabs nothing, and asks for no pick.
+    #[test]
+    fn the_handles_and_the_camera_keep_out_of_each_others_drags() {
+        let mut editor = dragging();
+        let picked = at_the_origin();
+        // Away from where it starts, which Home would ease it back to.
+        editor.camera.orbit(Vec2::new(40.0, 20.0));
+        let seen = editor.camera.viewpoint();
+        let press = |button| Event::MouseButton {
+            button,
+            pressed: true,
+        };
+        let home = Event::Key {
+            key: Key::Home,
+            pressed: true,
+            repeat: false,
+        };
+        let wheel = Event::Scroll(Scroll::Lines { x: 0.0, y: 2.0 });
+        for event in [
+            press(MouseButton::Middle),
+            press(MouseButton::Right),
+            wheel,
+            home,
+        ] {
+            let handled = editor.take(&event, &reading(ON_X, false), picked);
+            assert_eq!(handled, ControlFlow::Break(()), "{event:?}");
+        }
+        editor.camera.update(Duration::from_secs(1));
+        assert_eq!(editor.camera.moving(), None);
+        assert_eq!(editor.camera.viewpoint(), seen);
+        let _ = press_at(&mut editor, picked, ON_X, MouseButton::Left, false);
+        let panning = press_at(&mut editor, picked, ON_X, MouseButton::Middle, true);
+        assert_eq!(panning, ControlFlow::Break(()));
+        assert_eq!(editor.camera.moving(), Some(Move::Pan));
+        let left = press_at(&mut editor, picked, ON_X, MouseButton::Left, true);
+        assert_eq!(left, ControlFlow::Continue(()));
+        assert!(!editor.handles.dragging());
+        assert_eq!(editor.picking, None);
+    }
+
+    /// Q, W, E and R pick Select, Move, Rotate and Scale as they're pressed: not as they repeat,
+    /// with Ctrl held, through the world's camera, while the editor's camera flies, nor during a
+    /// drag of the handles.
+    #[test]
+    fn q_w_e_and_r_pick_the_tools() {
+        let mut editor = fresh();
+        let key = |key, repeat| Event::Key {
+            key,
+            pressed: true,
+            repeat,
+        };
+        for (pressed, tool) in [
+            (Key::KeyW, Tool::Move),
+            (Key::KeyE, Tool::Rotate),
+            (Key::KeyR, Tool::Scale),
+            (Key::KeyQ, Tool::Select),
+        ] {
+            editor.choose_tool(&key(pressed, false), false);
+            assert_eq!(editor.toolbar.tool, tool);
+        }
+        editor.choose_tool(&key(Key::KeyW, true), false);
+        editor.choose_tool(&key(Key::KeyW, false), true);
+        assert_eq!(editor.toolbar.tool, Tool::Select, "repeating, or with Ctrl");
+        editor.toolbar.world_camera = true;
+        editor.choose_tool(&key(Key::KeyW, false), false);
+        assert_eq!(
+            editor.toolbar.tool,
+            Tool::Select,
+            "through the world's camera"
+        );
+        editor.toolbar.world_camera = false;
+        let right = |pressed| Event::MouseButton {
+            button: MouseButton::Right,
+            pressed,
+        };
+        let screen = reading(ON_X, false).screen;
+        let _ = editor.camera.event(&right(true), screen, Tool::Select);
+        assert!(editor.camera.flies());
+        editor.choose_tool(&key(Key::KeyE, false), false);
+        assert_eq!(editor.toolbar.tool, Tool::Select, "flying");
+        let mut editor = dragging();
+        let _ = editor.take(
+            &key(Key::KeyR, false),
+            &reading(ON_X, false),
+            at_the_origin(),
+        );
+        assert_eq!(editor.toolbar.tool, Tool::Move, "dragging");
+        let _ = press_at(&mut editor, at_the_origin(), ON_X, MouseButton::Left, false);
+        let _ = editor.take(
+            &key(Key::KeyR, false),
+            &reading(ON_X, false),
+            at_the_origin(),
+        );
+        assert_eq!(editor.toolbar.tool, Tool::Scale, "let go");
+    }
+
+    /// A press of the left button over the view off the handles asks for a pick at the cursor,
+    /// with Select, Move, Rotate and Scale, through the world's camera too, which it leaves the
+    /// view seeing through; but not with Alt, which orbits, with Pan or Orbit, or with nothing
+    /// under it to pick, as a press on a handle has. A grab of a handle drops the pick asked
+    /// before it.
+    #[test]
+    fn a_press_off_the_handles_asks_for_a_pick() {
+        let off = [200.0, 500.0];
+        for tool in [Tool::Select, Tool::Move, Tool::Rotate, Tool::Scale] {
+            let mut editor = fresh();
+            editor.toolbar.tool = tool;
+            editor.shown = Some(editor.camera.viewpoint());
+            let pressed = press_at(&mut editor, at_the_origin(), off, MouseButton::Left, true);
+            assert_eq!(pressed, ControlFlow::Continue(()), "{tool:?}");
+            assert_eq!(editor.picking, Some(off), "{tool:?}");
+        }
+        let mut editor = fresh();
+        editor.toolbar.world_camera = true;
+        let pressed = press_at(&mut editor, at_the_origin(), ON_X, MouseButton::Left, true);
+        assert_eq!(pressed, ControlFlow::Continue(()));
+        assert_eq!(editor.picking, Some(ON_X));
+        assert!(editor.toolbar.world_camera);
+        for tool in [Tool::Pan, Tool::Orbit] {
+            let mut editor = fresh();
+            editor.toolbar.tool = tool;
+            let _ = press_at(&mut editor, at_the_origin(), off, MouseButton::Left, true);
+            assert_eq!(editor.picking, None, "{tool:?}");
+        }
+        let mut editor = fresh();
+        let alt = Event::MouseButton {
+            button: MouseButton::Left,
+            pressed: true,
+        };
+        let _ = editor.take(&alt, &reading(off, true), at_the_origin());
+        assert_eq!(editor.picking, None, "with Alt");
+        let editor = dragging();
+        assert_eq!(editor.picking, None, "on a handle");
+        let mut editor = fresh();
+        editor.toolbar.tool = Tool::Move;
+        editor.shown = Some(editor.camera.viewpoint());
+        editor.asked = Context::seeded(0).pick([0.0, 0.0]);
+        assert!(editor.asked.is_some());
+        let grabbed = press_at(&mut editor, at_the_origin(), ON_X, MouseButton::Left, true);
+        assert_eq!(grabbed, ControlFlow::Break(()));
+        assert_eq!(editor.asked, None, "a grab drops the pick asked before it");
+    }
+
+    /// The answer to the latest pick asked for picks what it found, or unpicks for none; answers
+    /// to older picks, which a later press superseded, pick nothing; and once answered, a pick is
+    /// forgotten.
+    #[test]
+    fn the_latest_picks_answer_picks() {
+        let [a, b]: [EntityId; 2] =
+            ["0123456789abcdef", "fedcba9876543210"].map(|id| id.parse().expect("an ID"));
+        let mut asked = Some(2_u32);
+        assert_eq!(answer(&mut asked, &[]), None, "until it comes");
+        assert_eq!(answer(&mut asked, &[(1, Some(a))]), None, "an older pick's");
+        assert_eq!(asked, Some(2));
+        let answers = [(1, Some(a)), (2, Some(b))];
+        assert_eq!(answer(&mut asked, &answers), Some(Some(b)));
+        assert_eq!(asked, None);
+        assert_eq!(answer(&mut asked, &answers), None, "answered");
+        let mut asked = Some(3);
+        assert_eq!(answer(&mut asked, &[(3, None)]), Some(None), "unpicks");
+    }
 
     /// The view sees through the world's camera while the toolbar says to and the world has a
     /// primary one, without the editor's viewpoint; and the editor's camera's moves, a press and
     /// Home, look through it again, while a press it doesn't take leaves the view as it is.
     #[test]
     fn the_view_sees_through_the_worlds_camera_until_the_editors_moves() {
-        let mut editor = Editor::new();
+        let mut editor = fresh();
         // What a frame's update has the view see from, in a context of its own, so that no frame
         // before it set it, of the world `spawn` makes.
         let frame = |editor: &mut Editor, spawn: fn(&mut World)| {
@@ -754,7 +1198,7 @@ mod tests {
     /// world's again, the cameras go the way the keys held say.
     #[test]
     fn w_a_s_and_d_drive_the_worlds_cameras_while_the_view_sees_through_them() {
-        let mut editor = Editor::new();
+        let mut editor = fresh();
         let mut cx = Context::seeded(1);
         spawn_world(cx.world_mut());
         let mut ticks = Ticks { number: 0 };
@@ -849,7 +1293,7 @@ mod tests {
     /// New, at its tick, empties the world and forgets the scene's file, so that Save saves as.
     #[test]
     fn new_empties_the_world_and_forgets_the_scenes_file() {
-        let mut editor = Editor::new();
+        let mut editor = fresh();
         let mut cx = Context::seeded(1);
         spawn_world(cx.world_mut());
         editor.scene = Some(PathBuf::from("editor.ron"));
@@ -867,7 +1311,7 @@ mod tests {
     /// text was refused.
     #[test]
     fn an_open_replaces_the_world_unless_its_refused() {
-        let mut editor = Editor::new();
+        let mut editor = fresh();
         let mut cx = Context::seeded(1);
         spawn_world(cx.world_mut());
         let saved = whole_scene(cx.world()).expect("saved");
@@ -942,7 +1386,7 @@ mod tests {
     fn the_world_saved_and_opened_again_saves_the_same_bytes() {
         let scratch = Scratch::new("saved-and-opened");
         let directory = &scratch.0;
-        let mut editor = Editor::new();
+        let mut editor = fresh();
         let mut cx = Context::seeded(1);
         spawn_world(cx.world_mut());
         editor.save_as(cx.world(), directory.join("scene"));
@@ -973,7 +1417,7 @@ mod tests {
     #[test]
     fn save_as_ends_the_name_in_ron_and_replaces_no_file_unasked() {
         let scratch = Scratch::new("save-as");
-        let mut editor = Editor::new();
+        let mut editor = fresh();
         let mut cx = Context::seeded(1);
         spawn_world(cx.world_mut());
         for (picked, saved) in [
@@ -999,7 +1443,7 @@ mod tests {
     /// has them go the way the keys held say if it does, and leaves them stopped if it doesn't.
     #[test]
     fn an_open_stops_the_worlds_cameras_until_the_keys_drive_them() {
-        let mut editor = Editor::new();
+        let mut editor = fresh();
         let mut cx = Context::seeded(1);
         spawn_world(cx.world_mut());
         let mut ticks = Ticks { number: 0 };
@@ -1092,7 +1536,7 @@ mod tests {
     /// go of a key held before, so that S held, then Ctrl, then S let go, stops them.
     #[test]
     fn a_shortcuts_key_drives_no_camera() {
-        let mut editor = Editor::new();
+        let mut editor = fresh();
         let mut cx = Context::seeded(1);
         spawn_world(cx.world_mut());
         editor.toolbar.world_camera = true;
@@ -1115,7 +1559,7 @@ mod tests {
     /// A message shows until it's dismissed: by Escape, or a click outside it.
     #[test]
     fn a_message_shows_until_its_dismissed() {
-        let mut editor = Editor::new();
+        let mut editor = fresh();
         let ctx = egui::Context::default();
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
         let frame = |editor: &mut Editor, events: Vec<egui::Event>| {
@@ -1158,7 +1602,7 @@ mod tests {
     /// it, still reads as one.
     #[test]
     fn the_file_menus_commands_are_values_a_recording_keeps() {
-        let mut editor = Editor::new();
+        let mut editor = fresh();
         let text = "(\n    entities: {},\n)\n";
         editor.commands.push(Command::New);
         editor.commands.push(Command::Open {

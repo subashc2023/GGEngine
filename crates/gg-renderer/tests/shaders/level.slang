@@ -20,6 +20,7 @@ struct Push {
     float4x4 clip_from_world;
     Vertex* vertices;
     float4x4* transforms;
+    uint2* ids;
     Params* params;
 };
 [[vk::push_constant]] ConstantBuffer<Push> push;
@@ -28,6 +29,7 @@ struct Varyings {
     float4 position : SV_Position;
     float2 uv;
     nointerpolation uint instance;
+    nointerpolation uint2 id;
 };
 
 [shader("vertex")]
@@ -38,13 +40,27 @@ Varyings vertex_main(uint index: SV_VulkanVertexID, uint instance: SV_VulkanInst
     out.position = mul(push.clip_from_world, world);
     out.uv = vertex.uv;
     out.instance = instance;
+    out.id = push.ids[instance];
     return out;
 }
 
+struct Targets {
+    float4 color : SV_Target0;
+    uint2 id : SV_Target1;
+};
+
 [shader("fragment")]
-float4 fragment_main(Varyings input) : SV_Target {
+Targets fragment_main(Varyings input) {
     Params params = push.params[input.instance];
     Texture2D texture = textures[NonUniformResourceIndex(params.texture)];
     SamplerState sampler = samplers[NonUniformResourceIndex(params.sampler)];
-    return texture.SampleLevel(sampler, input.uv, params.level);
+    float4 color = texture.SampleLevel(sampler, input.uv, params.level);
+    // What's fully transparent, which picks see through.
+    if (color.a == 0.0) {
+        discard;
+    }
+    Targets out;
+    out.color = color;
+    out.id = input.id;
+    return out;
 }

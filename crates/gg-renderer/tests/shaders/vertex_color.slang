@@ -11,12 +11,14 @@ struct Push {
     float4x4 clip_from_world;
     Vertex* vertices;
     float4x4* transforms;
+    uint2* ids;
 };
 [[vk::push_constant]] ConstantBuffer<Push> push;
 
 struct Varyings {
     float4 position : SV_Position;
     float4 color;
+    nointerpolation uint2 id;
 };
 
 [shader("vertex")]
@@ -26,10 +28,19 @@ Varyings vertex_main(uint index: SV_VulkanVertexID, uint instance: SV_VulkanInst
     Varyings out;
     out.position = mul(push.clip_from_world, world);
     out.color = vertex.color;
+    out.id = push.ids[instance];
     return out;
 }
 
+struct Targets {
+    float4 color : SV_Target0;
+    uint2 id : SV_Target1;
+};
+
 [shader("fragment")]
-float4 fragment_main(Varyings input) : SV_Target {
-    return input.color;
+Targets fragment_main(Varyings input) {
+    Targets out;
+    out.color = input.color;
+    out.id = input.id;
+    return out;
 }

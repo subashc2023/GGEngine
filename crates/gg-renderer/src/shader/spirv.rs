@@ -98,7 +98,7 @@ const DRAW_INDEX: u32 = 4426;
 const DIM_2D: u32 = 1;
 
 /// What the engine pushes before each draw, a [`Push`]: each member at its offset, in order.
-const PUSHED: [(u32, &str, Pushed); 4] = [
+const PUSHED: [(u32, &str, Pushed); 5] = [
     (
         offset_of!(Push, clip_from_world) as u32,
         "the matrix from the world to clip space",
@@ -113,6 +113,11 @@ const PUSHED: [(u32, &str, Pushed); 4] = [
         offset_of!(Push, transforms) as u32,
         "the instances' transforms' address",
         Pushed::Transforms,
+    ),
+    (
+        offset_of!(Push, ids) as u32,
+        "the instances' IDs' address",
+        Pushed::Ids,
     ),
     (
         offset_of!(Push, params) as u32,
@@ -130,6 +135,8 @@ enum Pushed {
     Vertices,
     /// The address of the instances' transforms, a float4x4 each.
     Transforms,
+    /// The address of the instances' IDs, a uint2 each.
+    Ids,
     /// The address of the instances' parameters, a `P` each.
     Params,
 }
@@ -191,6 +198,7 @@ enum Type {
     Bool,
     Int {
         width: u32,
+        signed: bool,
     },
     Float {
         width: u32,
@@ -324,7 +332,10 @@ impl Module {
                     .insert((id, member, decoration), value);
             }
             (OP_TYPE_BOOL, &[id]) => self.add_type(id, Type::Bool),
-            (OP_TYPE_INT, &[id, width, _]) => self.add_type(id, Type::Int { width }),
+            (OP_TYPE_INT, &[id, width, signedness]) => {
+                let signed = signedness != 0;
+                self.add_type(id, Type::Int { width, signed });
+            }
             (OP_TYPE_FLOAT, &[id, width, ..]) => self.add_type(id, Type::Float { width }),
             (OP_TYPE_VECTOR, &[id, component, count]) => {
                 self.add_type(id, Type::Vector { component, count });
@@ -429,6 +440,22 @@ impl Module {
         matches!(self.types.get(&ty), Some(Type::Float { width: 32 }))
     }
 
+    /// Whether `ty` is a vector of two 32-bit integers, and if so whether they're signed: a uint2
+    /// is `Some(false)`, and an int2 `Some(true)`.
+    fn signed_int2(&self, ty: u32) -> Option<bool> {
+        let Some(&Type::Vector {
+            component,
+            count: 2,
+        }) = self.types.get(&ty)
+        else {
+            return None;
+        };
+        match self.types.get(&component) {
+            Some(&Type::Int { width: 32, signed }) => Some(signed),
+            _ => None,
+        }
+    }
+
     /// What `pointer` points at, if it's a pointer of storage class `storage`.
     fn pointee(&self, pointer: u32, storage: u32) -> Option<u32> {
         match self.types.get(&pointer) {
@@ -450,9 +477,9 @@ impl Module {
         scalars: &mut Vec<Scalar>,
     ) -> Result<(), String> {
         match self.types.get(&ty) {
-            Some(Type::Int { width: 32 }) => scalars.push(Scalar { at, float: false }),
+            Some(Type::Int { width: 32, .. }) => scalars.push(Scalar { at, float: false }),
             Some(Type::Float { width: 32 }) => scalars.push(Scalar { at, float: true }),
-            Some(Type::Int { width }) => return Err(format!("a {width}-bit integer")),
+            Some(Type::Int { width, .. }) => return Err(format!("a {width}-bit integer")),
             Some(Type::Float { width }) => return Err(format!("a {width}-bit float")),
             Some(&Type::Vector { component, count }) => {
                 for i in 0..count {
@@ -601,6 +628,19 @@ impl Module {
                         breaches.push(format!(
                             "its push constants' {name} isn't the address of float4x4s, where \
                              the engine pushes {pushed}"
+                        ));
+                    }
+                }
+                // Not a struct: a P* params of 8 bytes declared where the IDs go would read as
+                // their address otherwise.
+                Pushed::Ids => {
+                    let ids = self.pointee(ty, PHYSICAL_STORAGE_BUFFER);
+                    let stride = self.decoration(ty, ARRAY_STRIDE);
+                    let uint2 = ids.is_some_and(|ty| self.signed_int2(ty) == Some(false));
+                    if !uint2 || stride.is_some_and(|stride| stride != 8) {
+                        breaches.push(format!(
+                            "its push constants' {name} isn't the address of uint2s, where the \
+                             engine pushes {pushed}"
                         ));
                     }
                 }
@@ -786,16 +826,16 @@ impl Module {
     }
 
     fn check_fragment_outputs(&self, outputs: &[&Variable], breaches: &mut Vec<String>) {
-        let mut color = false;
+        let (mut color, mut id) = (false, false);
         for output in outputs {
             let name = self.interface_name(output.id);
             // ", color," of a field it returns, or nothing of what it returns whole.
             let named = (name.as_ref()).map_or_else(String::new, |name| format!(", {name},"));
             let location = self.decoration(output.id, LOCATION);
+            let ty = self.pointee(output.ty, OUTPUT);
             match (self.decoration(output.id, BUILT_IN), location) {
                 (None, Some(0)) => {
                     color = true;
-                    let ty = self.pointee(output.ty, OUTPUT);
                     let float4 = ty.and_then(|ty| self.types.get(&ty)).is_some_and(|ty| {
                         matches!(ty, &Type::Vector { component, count: 4 }
                             if self.is_float(component))
@@ -806,12 +846,25 @@ impl Module {
                         ));
                     }
                 }
+                (None, Some(1)) => {
+                    id = true;
+                    match ty.and_then(|ty| self.signed_int2(ty)) {
+                        Some(false) => {}
+                        Some(true) => breaches.push(format!(
+                            "its fragment stage writes its ID{named} as int2: write uint2, as \
+                             the view's IDs are unsigned"
+                        )),
+                        None => breaches.push(format!(
+                            "its fragment stage writes its ID{named} as what isn't a uint2"
+                        )),
+                    }
+                }
                 (None, location) => {
                     let what = name.unwrap_or_else(|| "its color".to_owned());
                     let at = location.map_or_else(String::new, |at| format!(" at location {at}"));
                     breaches.push(format!(
-                        "its fragment stage writes {what}{at}, where the engine draws into one \
-                         target, at location 0"
+                        "its fragment stage writes {what}{at}, where the engine draws into two \
+                         targets: the color at location 0, and the ID at location 1"
                     ));
                 }
                 (Some(FRAG_DEPTH), _) => breaches.push(
@@ -826,12 +879,20 @@ impl Module {
                 ),
                 (Some(built_in), _) => breaches.push(format!(
                     "its fragment stage writes built-in {built_in}{named} where it returns only \
-                     its color"
+                     its color and its ID"
                 )),
             }
         }
         if !color {
             breaches.push("its fragment stage returns no color at location 0".to_owned());
+        }
+        if !id {
+            breaches.push(
+                "its fragment stage writes no entity ID at location 1: beside its color it returns \
+                 its draw's ID, a uint2, its instance's, read through `uint2* ids` in its push \
+                 constants, before `P* params`, or 0 where it draws no entity"
+                    .to_owned(),
+            );
         }
     }
 

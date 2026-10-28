@@ -2,7 +2,7 @@
 //! left button does, the projection and the grid, and a gizmo at its top right, which shows which
 //! way the camera faces, and turns it.
 
-use std::f32::consts::PI;
+use std::f32::consts::{PI, TAU};
 
 use gg_engine::egui::{
     self, Align2, Atom, Button, Color32, CursorIcon, FontId, Frame, Id, Margin, Painter, Pos2,
@@ -49,27 +49,63 @@ impl Default for Toolbar {
 }
 
 impl Toolbar {
-    /// Draws the toolbar into `ui`: the tools, the camera's projection, which a click switches,
-    /// the grid's switch and its plane, and the switch that sees through the world's camera, which
-    /// is off while the world has no primary camera, as `has_camera` says, each with a tooltip.
-    /// While the view sees through the world's camera, the projection's and the grid's buttons are
-    /// off, since what they change doesn't show. It opens nothing, since a popup would take the
-    /// view's keys.
+    /// Draws the toolbar into `ui`: the tools, whose tooltips name the keys that pick them, the
+    /// camera's projection, which a click switches, the grid's switch and its plane, and the
+    /// switch that sees through the world's camera, which is off while the world has no primary
+    /// camera, as `has_camera` says, each with a tooltip. While the view sees through the world's
+    /// camera, the projection's and the grid's buttons are off, since what they change doesn't
+    /// show. It opens nothing, since a popup would take the view's keys.
     pub fn show(&mut self, ui: &mut egui::Ui, camera: &mut OrbitCamera, has_camera: bool) {
+        // The key that snaps a drag of the handles, which egui's shortcuts take as the command key.
+        let snaps = if cfg!(target_os = "macos") {
+            "Cmd"
+        } else {
+            "Ctrl"
+        };
         panel(ui).show(ui, |ui| {
             ui.horizontal(|ui| {
                 for (tool, icon, tip) in [
-                    (Tool::Select, Icon::Select, "Select"),
+                    (
+                        Tool::Select,
+                        Icon::Select,
+                        "Select (Q): the left button picks what the view shows there".to_owned(),
+                    ),
+                    (
+                        Tool::Move,
+                        Icon::Move,
+                        format!(
+                            "Move (W): the handles move what's picked along its axes, across its \
+                             planes, or in the view's plane; {snaps} snaps to half units"
+                        ),
+                    ),
+                    (
+                        Tool::Rotate,
+                        Icon::Rotate,
+                        format!(
+                            "Rotate (E): the rings turn what's picked about its axes, and the \
+                             outer one about the view's; {snaps} snaps to 45°"
+                        ),
+                    ),
+                    (
+                        Tool::Scale,
+                        Icon::Scale,
+                        format!(
+                            "Scale (R): the handles scale what's picked along its axes, and the \
+                             middle one all three ways; {snaps} snaps to halves"
+                        ),
+                    ),
                     (
                         Tool::Pan,
                         Icon::Pan,
-                        "Pan: the left button trucks and pedestals, as the middle button does",
+                        "Pan: the left button trucks and pedestals, as the middle button does"
+                            .to_owned(),
                     ),
                     (
                         Tool::Orbit,
                         Icon::Orbit,
                         "Orbit: the left button turns the view about its pivot, as Alt and the \
-                         left button do",
+                         left button do"
+                            .to_owned(),
                     ),
                 ] {
                     if icon_button(ui, icon, self.tool == tool)
@@ -148,6 +184,13 @@ fn icon_button(ui: &mut egui::Ui, icon: Icon, selected: bool) -> Response {
 enum Icon {
     /// A pointer.
     Select,
+    /// Two arrows out of a corner, right and up, with a square between them, as Move's handles.
+    Move,
+    /// A ring, and another seen at a slant across it, as Rotate's.
+    Rotate,
+    /// Two lines out of a corner, right and up, each ending in a square, with one in the corner,
+    /// as Scale's handles.
+    Scale,
     /// Arrows each way.
     Pan,
     /// A circular arrow.
@@ -172,6 +215,30 @@ impl Icon {
             Self::Select => {
                 triangle([at(4.0, 1.5), at(4.0, 13.0), at(12.0, 9.5)]);
                 painter.line_segment([at(7.5, 10.0), at(10.0, 15.0)], Stroke::new(2.5, color));
+            }
+            Self::Move => {
+                painter.line_segment([at(3.0, 13.0), at(11.0, 13.0)], line);
+                painter.line_segment([at(3.0, 13.0), at(3.0, 5.0)], line);
+                triangle([at(15.0, 13.0), at(10.5, 10.5), at(10.5, 15.5)]);
+                triangle([at(3.0, 1.0), at(0.5, 5.5), at(5.5, 5.5)]);
+                let square = Rect::from_min_max(at(5.5, 7.5), at(8.5, 10.5));
+                painter.rect_filled(square, 0.0, color);
+            }
+            Self::Rotate => {
+                let center = at(8.0, 8.0);
+                painter.circle_stroke(center, 6.5 * scale, line);
+                // Seen at a slant: squashed across, as a ring about the view's up looks.
+                let way = |angle: f32| vec2(libm::cosf(angle) * 2.5, libm::sinf(angle) * 6.5);
+                let slant = (0..=24).map(|i| center + way(TAU * i as f32 / 24.0) * scale);
+                painter.add(Shape::line(slant.collect(), line));
+            }
+            Self::Scale => {
+                painter.line_segment([at(3.5, 12.5), at(11.0, 12.5)], line);
+                painter.line_segment([at(3.5, 12.5), at(3.5, 5.0)], line);
+                for (x, y) in [(13.0, 12.5), (3.5, 3.0), (3.5, 12.5)] {
+                    let square = Rect::from_center_size(at(x, y), vec2(4.0, 4.0) * scale);
+                    painter.rect_filled(square, 0.0, color);
+                }
             }
             Self::Pan => {
                 painter.line_segment([at(8.0, 4.0), at(8.0, 12.0)], line);

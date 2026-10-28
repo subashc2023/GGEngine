@@ -1,6 +1,7 @@
 //! Offscreen images: color images, which headless runs render into, tests read back, and later
-//! passes of a frame sample, such as the game's view; and depth images, which passes test their
-//! draws against.
+//! passes of a frame sample, such as the game's view; ID images, which passes render their draws'
+//! IDs into beside their targets, for frames to read pixels of back; and depth images, which
+//! passes test their draws against.
 
 use std::sync::Arc;
 
@@ -189,6 +190,108 @@ impl Drop for ColorImage {
             self.device.retire(Retired::Texture(
                 self.raw, self.view, allocation, self.index,
             ));
+        }
+    }
+}
+
+/// An image of IDs in GPU memory, which a pass renders beside its target, cleared to 0 as the pass
+/// starts, each draw writing its own where it shows: the low and high halves of a 64-bit number,
+/// such as an entity's. A frame whose pass rendered it reads pixels of it back, a few at a time,
+/// with [`Frame::read_ids`]. No shader samples it, so it takes no slot of the bindless set.
+/// Dropping it retires it until the GPU is done with it.
+///
+/// [`Frame::read_ids`]: crate::Frame::read_ids
+pub struct IdImage {
+    device: Arc<Device>,
+    raw: vk::Image,
+    view: vk::ImageView,
+    /// Taken when the image is dropped.
+    allocation: Option<Allocation>,
+    extent: vk::Extent2D,
+    /// The layout the work recorded so far leaves the image in.
+    layout: vk::ImageLayout,
+    /// The number of the frame whose pass last rendered into it; 0 for none.
+    rendered: u64,
+}
+
+impl IdImage {
+    /// The format of every ID image: two 32-bit unsigned integers, the low and high halves of an
+    /// ID. Vulkan requires every device to render into it and copy from it.
+    pub(crate) const FORMAT: vk::Format = vk::Format::R32G32_UINT;
+
+    /// An ID image of `width` by `height` pixels, with `name` as its debug name.
+    ///
+    /// # Panics
+    ///
+    /// If a side is 0.
+    pub fn new(device: &Arc<Device>, width: u32, height: u32, name: &str) -> Result<Self> {
+        let usage = vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC;
+        let (raw, view, allocation, extent) = allocate(
+            device,
+            [width, height],
+            Self::FORMAT,
+            usage,
+            COLOR_RANGE,
+            name,
+        )?;
+        // SAFETY: the image and view are live.
+        unsafe {
+            device.set_name(raw, name);
+            device.set_name(view, name);
+        }
+        Ok(Self {
+            device: device.clone(),
+            raw,
+            view,
+            allocation: Some(allocation),
+            extent,
+            layout: vk::ImageLayout::UNDEFINED,
+            rendered: 0,
+        })
+    }
+
+    /// The width and height in pixels.
+    pub fn size(&self) -> [u32; 2] {
+        [self.extent.width, self.extent.height]
+    }
+
+    /// The image, its view and its size, for recording commands that use it.
+    pub(crate) fn parts(&self) -> (vk::Image, vk::ImageView, vk::Extent2D) {
+        (self.raw, self.view, self.extent)
+    }
+
+    /// The handle of the device that made it.
+    pub(crate) fn device(&self) -> vk::Device {
+        self.device.handle()
+    }
+
+    pub(crate) fn layout(&self) -> vk::ImageLayout {
+        self.layout
+    }
+
+    /// Records the layout that the work recorded so far leaves the image in.
+    pub(crate) fn set_layout(&mut self, layout: vk::ImageLayout) {
+        self.layout = layout;
+    }
+
+    /// The number of the frame whose pass last rendered into it; 0 for none.
+    pub(crate) fn rendered(&self) -> u64 {
+        self.rendered
+    }
+
+    /// Records that a pass of frame `frame` renders into it, which leaves it in the layout it
+    /// renders in.
+    pub(crate) fn set_rendered(&mut self, frame: u64) {
+        self.rendered = frame;
+        self.layout = vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL;
+    }
+}
+
+impl Drop for IdImage {
+    fn drop(&mut self) {
+        if let Some(allocation) = self.allocation.take() {
+            let retired = Retired::Image(self.raw, self.view, allocation);
+            self.device.retire(retired);
         }
     }
 }

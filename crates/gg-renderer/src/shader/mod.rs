@@ -140,16 +140,23 @@ impl Shaders {
     /// that it keeps to this contract:
     ///
     /// - Its entry points are `vertex_main`, a vertex shader, and `fragment_main`, a fragment
-    ///   shader that returns one `float4`, and nothing else: the color, in linear RGBA.
+    ///   shader that returns a struct of two outputs, and nothing else: the color, a
+    ///   `float4 : SV_Target0`, in linear RGBA; and the draw's ID, a `uint2 : SV_Target1`, which
+    ///   the view keeps where the draw shows, for [picks](crate::Pick) to read back: its
+    ///   instance's, which the vertex shader reads from `ids[instance]` and hands on
+    ///   `nointerpolation`, or 0 where it draws no entity. A shader that blends should discard
+    ///   what's fully transparent, after it samples, as the engine's do: blending it changes no
+    ///   pixel, but its ID would hide what's behind it from picks.
     /// - Each run of consecutive draws of one mesh with it is one instanced draw, whose instances
     ///   are the draws. Its push constants are `struct { float4x4 clip_from_world; V* vertices;
-    ///   float4x4* transforms; P* params; }`, the only 88 bytes set. The first is the camera's
-    ///   view and projection, from the world to Vulkan's clip space; the second, the address of
-    ///   the mesh's vertices; the third, of the instances' transforms, each from the mesh's own
-    ///   space to the world's, for `mul(clip_from_world, mul(transforms[instance],
-    ///   float4(position, 1.0)))`; the fourth, of the instances' parameters, one `P` each, back to
-    ///   back, which a shader that takes none leaves out. A shader may end the struct after the
-    ///   last of them it reads, and one that reads none has none.
+    ///   float4x4* transforms; uint2* ids; P* params; }`, the only 96 bytes set. The first is the
+    ///   camera's view and projection, from the world to Vulkan's clip space; the second, the
+    ///   address of the mesh's vertices; the third, of the instances' transforms, each from the
+    ///   mesh's own space to the world's, for `mul(clip_from_world, mul(transforms[instance],
+    ///   float4(position, 1.0)))`; the fourth, of the instances' IDs, each the low and high halves
+    ///   of a 64-bit number; the fifth, of the instances' parameters, one `P` each, back to back,
+    ///   which a shader that takes none leaves out. A shader may end the struct after the last of
+    ///   them it reads, and one that reads none has none.
     /// - It reads only the vertex at `SV_VulkanVertexID` and the instance at
     ///   `SV_VulkanInstanceID`, not `SV_VertexID` or `SV_InstanceID`, which need a feature the
     ///   engine doesn't enable, nor vertex attributes. A fragment shader that reads its instance's
@@ -172,7 +179,9 @@ impl Shaders {
     ///
     /// The check sees each struct's size and that its fields are 32 bits each, but not what the
     /// fields are: fields of the same total size as its type's, in another order or of another
-    /// kind, such as a `uint` read as a float, draw garbage without a message. Nor does it see
+    /// kind, such as a `uint` read as a float, draw garbage without a message. It tells the push
+    /// constants apart by their places and types alone, so parameters that are one `uint2`,
+    /// declared where `ids` goes or swapped with it, read the IDs as their own. Nor does it see
     /// which way a matrix is laid out, or whether an index that can differ across a draw goes
     /// through `NonUniformResourceIndex`.
     ///
@@ -725,7 +734,17 @@ mod tests {
         );
         says(
             refusal::<Vertex, Color>("push_extra.slang"),
-            &["it reads brightness from its push constants, past the 88 bytes"],
+            &["it reads brightness from its push constants, past the 96 bytes"],
+        );
+        says(
+            refusal::<Vertex, Color>("float_ids.slang"),
+            &["its push constants' ids isn't the address of uint2s"],
+        );
+        // Parameters of 8 bytes, where the IDs go, and the IDs where the parameters go, which
+        // would pass for them.
+        says(
+            refusal::<Vertex, [u32; 2]>("ids_after_params.slang"),
+            &["its push constants' params isn't the address of uint2s"],
         );
         says(
             refusal::<Vertex, Color>("writes_vertices.slang"),
@@ -757,8 +776,16 @@ mod tests {
             refusal::<Vertex, Color>("outputs.slang"),
             &[
                 "its fragment stage returns its color, color, as what isn't a float4",
-                "its fragment stage writes glow at location 1",
+                "its fragment stage writes glow at location 2",
             ],
+        );
+        says(
+            refusal::<Vertex, Color>("no_id.slang"),
+            &["its fragment stage writes no entity ID at location 1"],
+        );
+        says(
+            refusal::<Vertex, Color>("signed_id.slang"),
+            &["its fragment stage writes its ID, id, as int2: write uint2"],
         );
         says(
             refusal::<Vertex, Color>("doubles.slang"),

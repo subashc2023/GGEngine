@@ -66,9 +66,13 @@ sandbox  editor   player       apps/: executables
   with perspective, with a toolbar and an orientation gizmo pinned over the view and a grid in
   either projection; the toolbar has the view see through the world's primary camera instead, as
   the game would, until the editor's camera moves, and meanwhile W, A, S and D drive the world's
-  cameras, by a script of theirs, as a game's keys would. Its File menu starts a new scene, opens
-  one, whose entities replace the world's, and saves the world's entities as one, through the OS's
-  file dialogs, with Ctrl+N, Ctrl+O, Ctrl+S and Ctrl+Shift+S.
+  cameras, by a script of theirs, as a game's keys would. A click in the view picks what it shows
+  there, through the Inspector's link; the toolbar's Move, Rotate and Scale, which W, E and R
+  choose as Q chooses Select, show handles over what's picked, the same size on screen at any
+  distance, whose drags move, turn and scale it along its own axes, each an edit the Inspector's
+  log undoes, the command key snapping to half units, 45° and halves. Its File menu starts a new
+  scene, opens one, whose entities replace the world's, and saves the world's entities as one,
+  through the OS's file dialogs, with Ctrl+N, Ctrl+O, Ctrl+S and Ctrl+Shift+S.
 - **`player`:** the reference player. It runs a cooked scene without game code and shows how a
   game builds its own player.
 
@@ -384,8 +388,10 @@ the last of its old parent's. So despawning an entity despawns its descendants, 
 and the links allocate nothing, though giving or taking away a `Parent` moves the child to
 another table, as `insert` and `remove` do; a snapshot copies them with the slots. World
 transforms aren't stored: drawing computes each child's from its ancestors, every frame, and where
-the world's camera sees from the same way, while a table of roots draws by its transforms alone,
-for one check a frame; the links cost each slot 16 bytes, whether its entity has a parent or not.
+the world's camera sees from the same way, and `World::pose` an entity's for code, as the latest
+tick left it, its matrix and the way it faces, its ancestors' scales aside; a table of roots draws
+by its transforms alone, for one check a frame. The links cost each slot 16 bytes, whether its
+entity has a parent or not.
 The Entities panel shows the hierarchy as a tree: the roots, a table at a time, each open row
 followed by its children's, of which it finds only the page in view, so that a frame costs a few
 steps a table, and another for each open root, and one for each row under an open root or in view,
@@ -452,7 +458,11 @@ from the recorded edits; it can't be a component, since its inverses hold typed 
 the world they were made in. Operations are the commands of authoring: the Inspector's edits,
 undos and redos wait for its next tick, its panel drawing a field set as the set will make it
 until then, and a refusal and the Edit menu's names show from the tick; it queues no seal that
-would end no edit, so that frames that change nothing queue nothing.
+would end no edit, so that frames that change nothing queue nothing. Another layer picks and edits
+through the Inspector's link, `Inspector::link`, as the editor's view and handles do: a pick takes
+effect as the Inspector's next pass starts, and sets join its commands, a gesture's sets of one
+field, from its first set to its seal, one edit, whatever the panels' presses and releases do
+meanwhile, until a set, an operation, an undo or a redo of theirs ends it.
 
 ## Diagnostics
 
@@ -521,12 +531,12 @@ input for egui and run no pass, egui sees no events, and the game's view fills t
 egui, the engine's immediate-mode UI, is the top overlay: it sees every event first and keeps
 those it wants, such as a click on one of its panels, and `gg-renderer` draws its meshes over
 the frame. Key and button releases reach the layers regardless, so that none is left holding a
-key or button it saw pressed. Tab reaches egui only while one of its widgets has focus, or while a
-dockspace's view, below, hasn't the keys, to move between them; otherwise it goes to the layers
-alone, since egui would take focus with it. Its text is Inter, regular, and bold where the
-Inspector's axis buttons name their axes, with egui's own fonts after it for what Inter lacks,
-such as egui's icons, and egui's monospace; its theme is the OS's, light or dark, as egui follows
-it, with collapsing headers framed across their width.
+key or button it saw pressed. Tab goes to the layers alone while keys reach them, since egui would
+take focus with it: without a dockspace, while none of egui's widgets has focus, and in one, as
+its view says, below; otherwise it reaches egui, to move between its widgets. Its text is Inter,
+regular, and bold where the Inspector's axis buttons name their axes, with egui's own fonts after
+it for what Inter lacks, such as egui's icons, and egui's monospace; its theme is the OS's, light
+or dark, as egui follows it, with collapsing headers framed across their width.
 
 Layers draw UI through `Ui`: dockable panels, and egui itself for anything else. The dock is the
 engine's own, since egui's docking crates can't put a panel in a window of its own. Panels sit
@@ -539,13 +549,17 @@ tabs and floats over the main window as the others do, but never goes into a win
 since only the main window's input reaches the layers. egui counts all of a dockspace as its own,
 the view's panel too, which senses presses itself, so that one by its edge isn't taken for a tab's
 or a splitter's a few points away. What reaches the layers is the view's to say: presses and the
-wheel over it, and the drags they start, and keys while it has focus, which a press on it gives,
-taking egui's, and a press anywhere else takes away; it has focus as the app starts. Releases
-reach them wherever they come. UI that a tool pins over the view, through `Ui::over_view`, shows
-above it and below what floats over it: a press there gives the view the keys too, but reaches
-the layers no more than the wheel over it does, so that a toolbar's buttons leave the keys with
-the view. Layers know where the view is from `Context::view`, in the window's pixels, as the
-cursor's position is.
+wheel over it, and the drags they start; and keys while none of egui's widgets has focus, no modal
+of egui's is open and the view shows, if the view has focus, which a press on it gives, taking
+egui's, and a press anywhere else takes away, or the cursor is over it while egui drags none of
+its own widgets, so that keys follow the cursor onto the view; it has focus as the app starts.
+Modifier keys reach them wherever they're pressed while no widget of egui's has focus, so that one
+held from over a panel counts on the view, and releases wherever they come. UI that a tool pins
+over the view, through `Ui::over_view`, shows above it and below what floats over it: a press there
+gives the view the keys too, and keys follow the cursor over it as over the view, but a press
+there reaches the layers no more than the wheel over it does, so that a toolbar's buttons leave
+the keys with the view. Layers know where the view is from `Context::view`, in the window's pixels,
+as the cursor's position is.
 
 A panel shows from the frame after its layer starts showing it, since the dock lays out a frame
 before its panels draw, and keeps its place while it isn't shown. One the layout doesn't hold yet
@@ -642,8 +656,9 @@ frame then shows there, a pixel to a pixel, so that HDR and tonemapping, post-pr
 tool API's captures read the view whole: under the whole UI, or, from a panel, where the UI paints
 a callback that stands for it, in the UI's order and clipped as the UI clips it, so that the panels
 floating over it and the menus show over it; and games'
-pipelines are made for that image's format, 8-bit sRGB, whatever the window presents, and for the
-depth image beside it, of 32-bit floats, which every draw into the view tests. Depth runs
+pipelines are made for that image's format, 8-bit sRGB, whatever the window presents, for the image
+of IDs beside it, below, and for the depth image beside them, of 32-bit floats, which every draw
+into the view tests. Depth runs
 reversed, from 1 at the near plane to 0 far away, which keeps a float's precision where it's
 needed and lets perspective see infinitely far; each frame clears it to 0, and a draw shows where
 it's as near as what's drawn there or nearer, so that at one depth the later goes over, as 2D
@@ -665,6 +680,21 @@ against what's opaque. At one depth, an opaque mesh goes under what blends; a la
 hide the world's behind them, and its draws that blend go under the world's opaque ones behind them.
 Drawing sorts the rows of each batch and each z, which it keeps until a row, a z or a batch changes,
 and draws them out of their tables' order.
+
+Every draw into the view writes its ID beside its color, into an image of IDs the view's size, a
+64-bit number as two 32-bit halves, which each frame clears to 0: the world's draws their
+entities' IDs, and a layer's own draws 0. IDs don't blend: a draw's replaces what's under it
+wherever it shows, so a shader that blends discards what's fully transparent, as the engine's
+sprite and model shaders do, for what's behind it to show through to picks too. `Context::pick`
+asks which entity the view shows at a pixel of the main window, and gives a ticket, or none past
+the 64 a frame reads back; `Context::picked` gives the answers that came back with the last frame,
+for a frame. The frame that renders the view reads its picks' pixels back after its pass, into
+memory of its own, and the frame two after it, which reuses its resources once the GPU has
+finished it, finds them there; with the render thread a frame behind, an answer comes four frames
+after its pick, about 67 ms at 60 Hz, and one outside the view sooner, as none. The view renders
+its IDs every frame, picks or not: a pipeline is made for the targets its pass has, so leaving them
+out of frames that pick nothing would take a second pipeline for each shader, or
+`VK_EXT_dynamic_rendering_unused_attachments`.
 
 Frames draw the world between ticks, so that it moves as smoothly at any frame rate. As each tick
 starts, the engine copies where the world's entities are, outside the world, so that no hash,
@@ -696,9 +726,9 @@ buffer's address rather than through vertex input, and Slang lays out what a poi
 `#[repr(C)]` does, so a mesh's layout is between its vertex type and the shader's struct for it;
 draws take the indices. A shader is added for a vertex type and a type of parameters, such as a
 color, which each draw gives it: a mesh draws only with a shader for its own vertex type, and
-with parameters of that shader's type. Each frame copies the draws' transforms and parameters into
-the frame's own memory, where the shader reads them through their addresses too, so parameters can
-be as large as a shader needs. A shader is added with how it blends too, since Vulkan bakes
+with parameters of that shader's type. Each frame copies the draws' transforms, IDs and parameters
+into the frame's own memory, where the shader reads them through their addresses too, so parameters
+can be as large as a shader needs, and the shader writes each draw's ID beside its color. A shader is added with how it blends too, since Vulkan bakes
 blending into its pipeline: opaque, which writes its depth as well as testing it, or by the alpha
 it returns, not multiplied into its color, which only tests it, so that what's behind it shows
 through.
@@ -713,7 +743,7 @@ breaks it, naming each way (`renderer.shader_mismatch`). It checks:
 - the bindless set's textures and samplers, sampled without a depth comparison, and no other
   resources;
 - the vertex and instance indices, and no vertex attributes;
-- one float4 out;
+- one float4 out at location 0, the color, and one uint2 at location 1, the ID;
 - capabilities, only those the features the device enables give.
 
 It reads the SPIR-V because Slang's reflection names what a pointer points at but none of its
@@ -796,8 +826,8 @@ projection that can't project, which rendering would panic on, is refused wherev
 makes one (`engine.bad_projection`), so that no scene, operation or Inspector edit panics the
 render thread. A camera keeps no aspect ratio of its own until cameras render into targets of
 their own. Each frame the renderer pushes the view's matrices, column-major as glam's are, with
-the addresses of the vertices and of the draws' transforms and parameters: a shader places each
-vertex by its draw's transform, into the world, then by the view's.
+the addresses of the vertices and of the draws' transforms, IDs and parameters: a shader places
+each vertex by its draw's transform, into the world, then by the view's.
 
 A layer sets the view's viewpoint for a frame in place of the world's camera, a position, a
 rotation and a projection, through `Context::set_viewpoint`, as the editor's camera does; without

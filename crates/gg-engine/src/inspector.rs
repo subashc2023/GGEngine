@@ -4,13 +4,16 @@
 //! through its by-name calls, its IDs and its hierarchy, as the tool API will, so that an editor
 //! can show it for a game in another process, and names entities by their names, where they have
 //! one, and their IDs. Its edits and operations are its commands: the panels queue them, its next
-//! tick makes them, and a recording keeps them.
+//! tick makes them, and a recording keeps them. Its link lets another layer pick and edit as the
+//! panels do.
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::f64::consts::PI;
 use std::mem;
 use std::ops::Range;
+use std::rc::Rc;
 
 use egui::color_picker::Alpha;
 use egui::ecolor::{Hsva, HsvaGamma};
@@ -46,7 +49,8 @@ use crate::{
 /// only at ticks; until then, a field set is drawn as the set will make it, and a refusal, and the
 /// Edit menu's names, show from the tick. A world cleared, replaced or restored, which is another,
 /// as [`World::serial`] says, unpicks and closes every row at the next tick, which drops the edits
-/// made to the world before, and those queued for it.
+/// made to the world before, and those queued for it. Another layer picks and edits as the panels
+/// do through the [`InspectorLink`] that [`link`](Self::link) gives it.
 #[derive(Default)]
 pub struct Inspector {
     /// By its ID, which outlives it, so that a pick despawned is still named by its ID: its name
@@ -71,11 +75,201 @@ pub struct Inspector {
     /// Why the last operation, undo or redo was refused, until the next edit, operation, undo or
     /// redo.
     not_done: Option<String>,
-    /// What the panels did since the last tick, which it makes.
+    /// What the panels and the link did since the last tick, which it makes.
     queued: Queue,
-    /// Whether a set has been queued since the last seal, operation, undo or redo, which leave no
-    /// edit going on: a seal queued otherwise would end none, so none is.
-    open: bool,
+    /// Whose edit goes on, if a set has been queued since the last seal, operation, undo or redo,
+    /// which leave none going on: a seal queued otherwise would end none, so none is.
+    open: Option<Gesture>,
+    /// What it shares with its links.
+    link: Rc<RefCell<Linked>>,
+}
+
+/// Whose gesture an edit going on is: the panels', which their input ends, or the link's, which
+/// its seal ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Gesture {
+    Panels,
+    Link,
+}
+
+/// A link to an [`Inspector`], which [`Inspector::link`] gives, through which another layer picks
+/// and edits as the Inspector's panels do, such as with a tool's handles in the game's view: its
+/// sets join the Inspector's commands, which its next tick makes and a recording keeps, and its
+/// Edit menu undoes and redoes them as its own: a gesture of the link's sets of one field, from its
+/// first set to its seal, one edit, as the log merges a gesture's sets of one field. A layer keeps
+/// it, cloned, on the main thread, as layers are.
+#[derive(Clone)]
+pub struct InspectorLink(Rc<RefCell<Linked>>);
+
+/// What an Inspector shares with its links.
+#[derive(Default)]
+struct Linked {
+    /// The pick asked for since the Inspector's last pass, which its next makes: `Some(None)`
+    /// unpicks.
+    pick: Option<Option<EntityId>>,
+    /// The sets and the seals made since the Inspector's last pass, in order, each set the latest
+    /// of its field since the seal before it, where that latest came.
+    pending: Vec<Linking>,
+    /// Whether sets the Inspector has queued wait for its next tick.
+    queued: bool,
+    /// The entity picked, as of the Inspector's last pass or tick.
+    picked: Option<EntityId>,
+    /// How many undos and redos the Inspector's passes have asked for.
+    stepped: u64,
+}
+
+/// A set or a seal made through a link.
+enum Linking {
+    /// Sets a field of the entity with this ID.
+    Set(EntityId, Edit),
+    /// Ends the link's gesture.
+    Seal,
+}
+
+impl InspectorLink {
+    /// The entity the Inspector has picked, as of its last pass or tick, by its ID, which outlives
+    /// it: one despawned since stays picked, for an undo to bring it back.
+    pub fn picked(&self) -> Option<EntityId> {
+        self.0.borrow().picked
+    }
+
+    /// Has the Inspector pick the entity whose ID is `id` as its next pass starts, before its
+    /// panels, whether or not they show, opening the rows above its own, as its Find field does;
+    /// or unpick, for `None`, or for an ID no living entity has then. A pick asked for later in the
+    /// frame takes its place. A world cleared, replaced or restored before then, as
+    /// [`World::serial`] says, drops it.
+    pub fn pick(&self, id: Option<EntityId>) {
+        self.0.borrow_mut().pick = Some(id);
+    }
+
+    /// Sets field `path` of `entity`'s `component` to `value` at the Inspector's next tick, as the
+    /// panels' sets are made, `entity`'s whatever's picked by then: as part of the link's gesture,
+    /// which [`seal`](Self::seal) ends, so that the Edit menu undoes a drag of the field in one
+    /// step. The gesture's first set ends an edit of the panels' going on, and their presses and
+    /// releases don't end the link's, though a set, an operation, an undo or a redo of theirs does.
+    /// Between two of the Inspector's passes the link keeps the latest value of each field alone,
+    /// after the sets made since the field's last, so that a mouse that reports a thousand moves a
+    /// second doesn't set a thousand, and a vector set whole and one of its components still set in
+    /// the order they came. Until the tick, the Inspector panel draws the field as the set will
+    /// make it, while `entity` is picked; a refusal shows and is logged as the panels' do.
+    ///
+    /// `path` is a field of the component's own, such as `translation`, which holds nothing the
+    /// panels set at a path of its own, as a struct, a list or an array does; or a component of a
+    /// vector that's one, such as `translation.x`: neither the component whole nor inside a field
+    /// of another kind, whose sets the panel doesn't draw among those of the fields around them. A
+    /// debug build panics on one: on its path as it's set, and on its field's type as the
+    /// Inspector's next pass takes it.
+    pub fn set(&self, entity: EntityId, component: &str, path: &str, value: Value) {
+        debug_assert!(
+            own_field(path),
+            "a link sets a field of a component's own, or a component of a vector that's one; \
+             got `{path}`"
+        );
+        let pending = &mut self.0.borrow_mut().pending;
+        // The gesture's sets, since the last seal.
+        let seal = pending
+            .iter()
+            .rposition(|linking| matches!(linking, Linking::Seal));
+        let gesture = &mut pending[seal.map_or(0, |seal| seal + 1)..];
+        let same = gesture.iter().position(|linking| {
+            matches!(linking, Linking::Set(id, edit)
+                if *id == entity && edit.component == component && edit.path == path)
+        });
+        match same {
+            Some(i) => {
+                gesture[i..].rotate_left(1);
+                if let Some(Linking::Set(_, edit)) = gesture.last_mut() {
+                    edit.value = value;
+                }
+            }
+            None => pending.push(Linking::Set(
+                entity,
+                Edit {
+                    component: component.to_owned(),
+                    path: path.to_owned(),
+                    value,
+                },
+            )),
+        }
+    }
+
+    /// Ends the link's gesture, as the drag that made its sets ends: its next set begins another
+    /// edit.
+    pub fn seal(&self) {
+        let pending = &mut self.0.borrow_mut().pending;
+        if !matches!(pending.last(), Some(Linking::Seal)) {
+            pending.push(Linking::Seal);
+        }
+    }
+
+    /// Whether a set made through the link waits for the Inspector's tick: from the set until a
+    /// tick has made it, or has dropped it, refused or of a world cleared, replaced or restored
+    /// since. Until then, the value set is what the caller draws the field as.
+    pub fn waiting(&self) -> bool {
+        let linked = self.0.borrow();
+        let set = |linking: &Linking| matches!(linking, Linking::Set(..));
+        linked.queued || linked.pending.iter().any(set)
+    }
+
+    /// How many undos and redos the Inspector's passes have asked for, from its Edit menu or its
+    /// keys, which goes up as one does: an edit going on ends with each, so a drag that sees it
+    /// change ends too.
+    pub fn stepped(&self) -> u64 {
+        self.0.borrow().stepped
+    }
+
+    /// The sets and the seals made through the link since the Inspector's last pass, in order: a
+    /// set as its entity's ID, component, path and value, and a seal as `None`. For tests.
+    #[doc(hidden)]
+    pub fn pending(&self) -> Vec<Option<(EntityId, String, String, Value)>> {
+        let linked = self.0.borrow();
+        let pending = linked.pending.iter().map(|linking| match linking {
+            Linking::Set(id, edit) => Some((
+                *id,
+                edit.component.clone(),
+                edit.path.clone(),
+                edit.value.clone(),
+            )),
+            Linking::Seal => None,
+        });
+        pending.collect()
+    }
+}
+
+/// Whether `path` is a field of a component's own, or a component of a vector that's one, as far
+/// as its text tells: a name, and at most an axis after it.
+fn own_field(path: &str) -> bool {
+    let (field, axis) = path.split_once('.').unwrap_or((path, "x"));
+    let named = !field.is_empty() && !field.contains('[');
+    named && AXES.iter().any(|&(name, ..)| name == axis)
+}
+
+/// Whether `edit`, a link's, sets what a link may, as `world`'s types describe its component: a
+/// field of the component's own that holds nothing the panels set at a path of its own, as a
+/// struct, a list or an array does; or a component of a vector that's one.
+fn links_field(world: &World, edit: &Edit) -> bool {
+    let types = world.types();
+    let Some(index) = types.find(&edit.component) else {
+        return false;
+    };
+    let Shape::Struct { fields, .. } = &types.info(index).shape else {
+        return false;
+    };
+    let (name, axis) = match edit.path.split_once('.') {
+        Some((name, axis)) => (name, Some(axis)),
+        None => (edit.path.as_str(), None),
+    };
+    let Some(field) = fields.iter().find(|field| field.name == name) else {
+        return false;
+    };
+    match (&field.ty, axis) {
+        (Type::Vec2 | Type::Vec3 | Type::Vec4, Some(axis)) => {
+            AXES.iter().any(|&(named, ..)| named == axis)
+        }
+        (_, Some(_)) | (Type::List(_) | Type::Array(..), None) => false,
+        (&Type::Named(index), None) => !matches!(types.info(index).shape, Shape::Struct { .. }),
+        (_, None) => true,
+    }
 }
 
 /// Undoes the last edit.
@@ -325,16 +519,20 @@ impl Layer for Inspector {
     fn tick(&mut self, world: &mut World, _: Tick) {
         let mut queued = mem::take(&mut self.queued.0);
         // Another world's entities aren't those the pick, the rows, the log and the commands
-        // queued name, though they may have their IDs, as a scene reopened gives them back. A
-        // replay drops the commands at the same tick.
+        // queued name, though they may have their IDs, as a scene reopened gives them back; nor
+        // are those the link asked for since the last pass. A replay drops the commands at the
+        // same tick.
         if self.world.is_some_and(|serial| serial != world.serial()) {
             self.log.clear(world);
             self.unpick();
             self.expanded.clear();
             self.not_done = None;
             self.not_found = None;
-            self.open = false;
+            self.open = None;
             queued.clear();
+            let linked = &mut *self.link.borrow_mut();
+            linked.pick = None;
+            linked.pending.clear();
         }
         self.world = Some(world.serial());
         for command in queued.drain(..) {
@@ -342,6 +540,9 @@ impl Layer for Inspector {
         }
         // Kept for its memory.
         self.queued.0 = queued;
+        let linked = &mut *self.link.borrow_mut();
+        linked.queued = false;
+        linked.picked = self.picked;
     }
 
     fn commands(&mut self) -> Option<&mut dyn Commands> {
@@ -350,9 +551,10 @@ impl Layer for Inspector {
 
     fn ui(&mut self, cx: &mut Context, ui: &mut Ui<'_>) {
         let _zone = gg_core::zone!("inspector");
+        let world = cx.world();
+        self.follow(world);
         let mut pass = Pass::default();
         ui.menu("Edit", |ui| pass.chosen = self.edit_menu(ui));
-        let world = cx.world();
         ui.menu("Entity", |ui| {
             self.entity_menu(world, ui, &mut pass.operations)
         });
@@ -367,10 +569,48 @@ impl Layer for Inspector {
         // Every pass, even one egui discards, which alone had the frame's input; and empty ones
         // too, whose cues end an edit.
         self.queue(pass);
+        self.link.borrow_mut().picked = self.picked;
     }
 }
 
 impl Inspector {
+    /// A link through which another layer picks and edits as the panels do, as
+    /// [`InspectorLink`] says: each is a clone of one, which the Inspector shares.
+    pub fn link(&self) -> InspectorLink {
+        InspectorLink(self.link.clone())
+    }
+
+    /// Makes the pick the link asked for since the last pass, before the panels draw: a living
+    /// entity's ID picks it and opens the rows above its own, as Find does, and any other, or
+    /// none, unpicks. A debug build checks the link's sets against the world's types first, which
+    /// the link hasn't, as [`InspectorLink::set`] says.
+    fn follow(&mut self, world: &World) {
+        if cfg!(debug_assertions) {
+            for linking in &self.link.borrow().pending {
+                if let Linking::Set(_, edit) = linking {
+                    assert!(
+                        links_field(world, edit),
+                        "a link sets a field of a component's own that holds nothing the panels \
+                         set at a path of its own, or a component of a vector that's one; got \
+                         `{}` of `{}`",
+                        edit.path,
+                        edit.component
+                    );
+                }
+            }
+        }
+        let Some(pick) = self.link.borrow_mut().pick.take() else {
+            return;
+        };
+        match pick.and_then(|id| Some((id, world.entity(id)?))) {
+            Some((id, entity)) => {
+                self.pick(id);
+                self.open_ancestors(world, entity);
+            }
+            None => self.unpick(),
+        }
+    }
+
     /// The Edit menu: Undo and Redo, each naming the edit it steps through; returns the one
     /// clicked.
     fn edit_menu(&self, ui: &mut egui::Ui) -> Option<Step> {
@@ -419,11 +659,14 @@ impl Inspector {
         }
     }
 
-    /// Queues a pass of the panels, for the next tick to make: its sets of the picked entity's
+    /// Queues a pass of the panels, for the next tick to make: first what the link did since the
+    /// last pass, whose events came before the pass's input, its sets of one field as one edit
+    /// from its gesture's first set to its seal; then the pass's sets of the picked entity's
     /// fields, as one edit from a press of the pointer to its release, or while a widget has the
     /// keys, as its input says, so that a drag, or a number typed, is one edit; then its
     /// operations, each of which ends the edit going on; then the step the Edit menu chose, or a
-    /// key asks for.
+    /// key asks for. Each gesture's first set ends the other's edit going on, and the pass's input
+    /// ends only its own.
     fn queue(&mut self, pass: Pass) {
         let Pass {
             sets,
@@ -431,36 +674,55 @@ impl Inspector {
             cues,
             chosen,
         } = pass;
+        let mut linked = mem::take(&mut self.link.borrow_mut().pending);
+        for linking in linked.drain(..) {
+            match linking {
+                Linking::Set(id, edit) => {
+                    self.seal(Gesture::Panels);
+                    self.queued.0.push(Command::Set(id, edit));
+                    self.link.borrow_mut().queued = true;
+                    self.open = Some(Gesture::Link);
+                }
+                Linking::Seal => self.seal(Gesture::Link),
+            }
+        }
+        // Kept for its memory.
+        self.link.borrow_mut().pending = linked;
         // Before this pass's sets: a press begins another edit, even while a text field keeps
         // the keys.
         if cues.pressed {
-            self.seal();
+            self.seal(Gesture::Panels);
         }
-        if let Some(id) = self.picked {
+        if let Some(id) = self.picked
+            && !sets.is_empty()
+        {
+            self.seal(Gesture::Link);
             for edit in sets {
                 self.queued.0.push(Command::Set(id, edit));
-                self.open = true;
             }
+            self.open = Some(Gesture::Panels);
         }
         for operation in operations {
             self.queued.0.push(operation);
-            self.open = false;
+            self.open = None;
         }
         if cues.released || !cues.held {
-            self.seal();
+            self.seal(Gesture::Panels);
         }
         if let Some(step) = chosen.or(cues.step) {
             self.queued.0.push(Command::Step(step));
-            self.open = false;
+            self.open = None;
+            self.link.borrow_mut().stepped += 1;
         }
     }
 
-    /// Queues a seal, unless it would end no edit, so that a pass that does nothing queues
-    /// nothing: only a set the log takes begins one, and seals, operations, undos and redos
+    /// Queues a seal if `gesture`'s edit goes on, which it ends, so that a pass that does nothing
+    /// queues nothing: only a set the log takes begins one, and seals, operations, undos and redos
     /// end it.
-    fn seal(&mut self) {
-        if mem::take(&mut self.open) {
+    fn seal(&mut self, gesture: Gesture) {
+        if self.open == Some(gesture) {
             self.queued.0.push(Command::Seal);
+            self.open = None;
         }
     }
 
@@ -745,7 +1007,13 @@ impl Inspector {
             Command::Set(set, edit) if *set == id => Some(edit),
             _ => None,
         });
-        let waiting: Vec<&Edit> = queued.collect();
+        // Then the link's since the last pass, which the pass queues after those.
+        let linked = self.link.borrow();
+        let linking = linked.pending.iter().filter_map(|linking| match linking {
+            Linking::Set(set, edit) if *set == id => Some(edit),
+            _ => None,
+        });
+        let waiting: Vec<&Edit> = queued.chain(linking).collect();
         let heading = match entity_name(world, entity) {
             Some(name) => format!("{name}, entity {id}"),
             None => format!("Entity {id}"),
@@ -1952,8 +2220,10 @@ mod tests {
     }
 
     /// Draws the two panels side by side, each in a half of `ui` of its own, as the dock gives each
-    /// a rect of its own: below its rows, the Entities panel takes the rest of its half.
+    /// a rect of its own: below its rows, the Entities panel takes the rest of its half. First,
+    /// as a pass does, it makes the pick the link asked for.
     fn panels(inspector: &mut Inspector, world: &World, ui: &mut egui::Ui, pass: &mut Pass) {
+        inspector.follow(world);
         let (left, right) = ui.max_rect().split_left_right_at_fraction(0.5);
         let entities = egui::UiBuilder::new().id_salt("Entities").max_rect(left);
         ui.scope_builder(entities, |ui| inspector.entities(world, ui, pass));
@@ -3507,7 +3777,10 @@ mod tests {
             // Dropped, not refused, as the delete would be in the world cleared.
             assert_eq!(inspector.not_done, None, "{case}");
             assert_eq!(inspector.not_found, None, "{case}");
-            assert!(inspector.queued.is_empty() && !inspector.open, "{case}");
+            assert!(
+                inspector.queued.is_empty() && inspector.open.is_none(),
+                "{case}"
+            );
             time += 1.0;
             let texts = menu(&mut inspector, &mut world, &ctx, time, Vec::new());
             let unnamed = texts.iter().any(|(text, _)| text == "Undo");
@@ -4644,5 +4917,363 @@ mod tests {
         let offset = find(&texts, "Everything", "offset");
         let message = find(&texts, "offset", &says);
         assert!(message.min.y > offset.max.y, "{texts:?}");
+    }
+
+    /// The names of the commands `inspector` has queued, as a recording reads them.
+    fn queued_names(inspector: &Inspector) -> Vec<&'static str> {
+        let queue = &inspector.queued;
+        let names = (0..queue.len()).map(|i| match reflect::variant(&queue.value(i)) {
+            Ok(("Set", _)) => "Set",
+            Ok(("Seal", _)) => "Seal",
+            Ok(("Undo", _)) => "Undo",
+            other => panic!("not a set, a seal or an undo: {other:?}"),
+        });
+        names.collect()
+    }
+
+    /// A gesture of the link's is one edit, whatever the panels' input says meanwhile, which a drag
+    /// in the game's view doesn't come through: across passes whose cues let go, press and
+    /// release, its sets queue as `Set`s, its seal as a `Seal`, and one undo takes it back. Its
+    /// first set ends an edit of the panels' going on, and a set of the panels' ends it.
+    #[test]
+    fn a_gesture_of_the_links_is_one_edit_whatever_the_panels_cues() {
+        let mut world = World::default();
+        let entity = world.spawn((Transform::IDENTITY, everything()));
+        let picked = id(&world, entity);
+        let mut inspector = Inspector::default();
+        inspector.pick(picked);
+        let link = inspector.link();
+        let at = |x: f32| Value::Vec3(Vec3::new(x, 0.0, 0.0));
+        let count = |n| Edit {
+            component: "Everything".to_owned(),
+            path: "count".to_owned(),
+            value: Value::UInt(n),
+        };
+        let held = || Cues {
+            held: true,
+            ..Cues::default()
+        };
+        // A number being typed into the panel.
+        inspector.queue(Pass {
+            sets: vec![count(7)],
+            cues: held(),
+            ..Pass::default()
+        });
+        let cues = [
+            Cues::default(),
+            Cues {
+                pressed: true,
+                held: true,
+                ..Cues::default()
+            },
+            Cues {
+                released: true,
+                ..Cues::default()
+            },
+        ];
+        for (x, cues) in [1.0, 2.0, 3.0].into_iter().zip(cues) {
+            link.set(picked, "Transform", "translation", at(x));
+            inspector.queue(Pass {
+                cues,
+                ..Pass::default()
+            });
+        }
+        link.seal();
+        inspector.queue(Pass::default());
+        let names = ["Set", "Seal", "Set", "Set", "Set", "Seal"];
+        assert_eq!(queued_names(&inspector), names);
+        Layer::tick(&mut inspector, &mut world, Tick { number: 0 });
+        let translation = |world: &World| world.get::<Transform>(entity).map(|at| at.translation);
+        assert_eq!(translation(&world), Some(Vec3::new(3.0, 0.0, 0.0)));
+        assert_eq!(
+            inspector.log.operations().len(),
+            2,
+            "the count's, and the link's"
+        );
+        make(
+            &mut inspector,
+            &mut world,
+            Pass {
+                chosen: Some(Step::Undo),
+                ..Pass::default()
+            },
+        );
+        assert_eq!(translation(&world), Some(Vec3::ZERO));
+        let typed = world.get::<Everything>(entity).map(|all| all.count);
+        assert_eq!(typed, Some(7));
+        // The panels' set ends a gesture of the link's going on.
+        link.set(picked, "Transform", "translation", at(4.0));
+        inspector.queue(Pass::default());
+        inspector.queue(Pass {
+            sets: vec![count(9)],
+            cues: held(),
+            ..Pass::default()
+        });
+        assert_eq!(queued_names(&inspector), ["Set", "Seal", "Set"]);
+    }
+
+    /// A set through the link is its entity's, whatever's picked as it's queued: here one picked
+    /// through the link in the same pass.
+    #[test]
+    fn a_set_through_the_link_is_its_entitys_whatever_is_picked() {
+        let mut world = World::default();
+        let [a, b] = [(); 2].map(|()| world.spawn(everything()));
+        let [a_id, b_id] = [a, b].map(|entity| id(&world, entity));
+        let ctx = crate::egui_context();
+        let mut inspector = Inspector::default();
+        let link = inspector.link();
+        link.set(a_id, "Everything", "count", Value::UInt(7));
+        link.pick(Some(b_id));
+        frame(&mut inspector, &mut world, &ctx, 1.0, Vec::new());
+        let count = |entity| world.get::<Everything>(entity).map(|all| all.count);
+        assert_eq!([count(a), count(b)], [Some(7), Some(42)]);
+        assert_eq!((inspector.picked, link.picked()), (Some(b_id), Some(b_id)));
+    }
+
+    /// The link's sets wait from the frame they're made until a tick has made them: those of a
+    /// drag and the undo that follows them in one queue leave the world as it was, and nothing
+    /// waiting; and a refused one is dropped.
+    #[test]
+    fn the_links_sets_wait_until_a_tick_makes_them() {
+        let mut world = World::default();
+        let entity = world.spawn(Transform::IDENTITY);
+        let picked = id(&world, entity);
+        let mut inspector = Inspector::default();
+        let link = inspector.link();
+        let at = |x: f32| Value::Vec3(Vec3::new(x, 0.0, 0.0));
+        assert!(!link.waiting());
+        link.set(picked, "Transform", "translation", at(1.0));
+        assert!(link.waiting(), "from the set");
+        inspector.queue(Pass::default());
+        link.set(picked, "Transform", "translation", at(2.0));
+        inspector.queue(Pass {
+            chosen: Some(Step::Undo),
+            ..Pass::default()
+        });
+        assert!(link.waiting(), "until a tick");
+        Layer::tick(&mut inspector, &mut world, Tick { number: 0 });
+        assert!(!link.waiting());
+        assert_eq!(world.get::<Transform>(entity), Some(&Transform::IDENTITY));
+        // A rotation that isn't a unit, which the world refuses.
+        let skewed = Value::Quat(Quat::from_xyzw(0.0, 0.0, 2.0, 1.0));
+        link.set(picked, "Transform", "rotation", skewed);
+        make(&mut inspector, &mut world, Pass::default());
+        assert!(!link.waiting());
+        assert_eq!(world.get::<Transform>(entity), Some(&Transform::IDENTITY));
+    }
+
+    /// The Inspector panel draws a field as the link's set waiting for a tick will make it, from
+    /// the frame the set is made, after the sets queued before it.
+    #[test]
+    fn the_panel_draws_the_links_sets_from_the_frame_theyre_made() {
+        let mut world = World::default();
+        let entity = world.spawn(everything());
+        let picked = id(&world, entity);
+        let ctx = crate::egui_context();
+        let mut inspector = Inspector::default();
+        inspector.pick(picked);
+        let link = inspector.link();
+        for time in 0..3 {
+            frame(
+                &mut inspector,
+                &mut world,
+                &ctx,
+                f64::from(time),
+                Vec::new(),
+            );
+        }
+        let count = |n| Edit {
+            component: "Everything".to_owned(),
+            path: "count".to_owned(),
+            value: Value::UInt(n),
+        };
+        inspector.queue(Pass {
+            sets: vec![count(9)],
+            ..Pass::default()
+        });
+        link.set(picked, "Everything", "count", Value::UInt(7));
+        for time in 3..5 {
+            let time = f64::from(time);
+            let (texts, _) =
+                frame_ticking(&mut inspector, &mut world, &ctx, time, Vec::new(), false);
+            let (shown, _) = next_to(&texts, find(&texts, "Everything", "count"));
+            assert_eq!(shown, "7", "{time}");
+        }
+        let held = world.get::<Everything>(entity).map(|all| all.count);
+        assert_eq!(held, Some(42), "until a tick");
+    }
+
+    /// The link picks a living entity as the next pass starts, opening the rows above its own, and
+    /// unpicks for a despawned one's ID, one no entity had, or none; without a pick asked for, the
+    /// pick stays.
+    #[test]
+    fn the_link_picks_a_living_entity_and_unpicks_for_any_other() {
+        let mut world = World::default();
+        let [parent, child, gone] =
+            ["parent", "child", "gone"].map(|name| world.spawn(called(name)));
+        world.set_parent(child, Some(parent)).expect("no cycle");
+        let [parent_id, child_id, gone_id] = [parent, child, gone].map(|entity| id(&world, entity));
+        world.despawn(gone).expect("alive");
+        let unknown: EntityId = "0123456789abcdef".parse().expect("an ID");
+        assert_eq!(world.entity(unknown), None);
+        let ctx = crate::egui_context();
+        let mut inspector = Inspector::default();
+        let link = inspector.link();
+        let mut time = 0.0;
+        let mut pass = |inspector: &mut Inspector, world: &mut World| {
+            time += 1.0;
+            frame(inspector, world, &ctx, time, Vec::new());
+        };
+        link.pick(Some(child_id));
+        pass(&mut inspector, &mut world);
+        assert_eq!(
+            (inspector.picked, link.picked()),
+            (Some(child_id), Some(child_id))
+        );
+        assert!(inspector.expanded.contains(&parent_id));
+        for asked in [Some(gone_id), Some(unknown), None] {
+            inspector.pick(child_id);
+            link.pick(asked);
+            pass(&mut inspector, &mut world);
+            assert_eq!((inspector.picked, link.picked()), (None, None), "{asked:?}");
+        }
+        inspector.pick(child_id);
+        pass(&mut inspector, &mut world);
+        assert_eq!(link.picked(), Some(child_id));
+    }
+
+    /// A world restored, which is another, drops the link's sets queued for the world before and
+    /// those no pass has taken yet, and the pick it asked for.
+    #[test]
+    fn another_world_drops_what_the_link_asked_of_the_one_before() {
+        let mut world = World::default();
+        let entity = world.spawn(Transform::IDENTITY);
+        let picked = id(&world, entity);
+        let snapshot = world.clone();
+        let ctx = crate::egui_context();
+        let mut inspector = Inspector::default();
+        let link = inspector.link();
+        // So that it knows the world.
+        Layer::tick(&mut inspector, &mut world, Tick { number: 0 });
+        let at = |x: f32| Value::Vec3(Vec3::new(x, 0.0, 0.0));
+        link.set(picked, "Transform", "translation", at(1.0));
+        inspector.queue(Pass::default());
+        link.set(picked, "Transform", "translation", at(2.0));
+        link.pick(Some(picked));
+        world.clone_from(&snapshot);
+        Layer::tick(&mut inspector, &mut world, Tick { number: 1 });
+        assert!(!link.waiting() && link.pending().is_empty());
+        assert_eq!(world.get::<Transform>(entity), Some(&Transform::IDENTITY));
+        frame(&mut inspector, &mut world, &ctx, 1.0, Vec::new());
+        assert_eq!((inspector.picked, link.picked()), (None, None));
+    }
+
+    /// The link counts the undos and redos the passes ask for, from the Edit menu or the keys.
+    #[test]
+    fn the_link_counts_the_undos_and_redos_asked_for() {
+        let mut world = World::default();
+        let entity = world.spawn(everything());
+        let ctx = crate::egui_context();
+        let mut inspector = Inspector::default();
+        inspector.pick(id(&world, entity));
+        let link = inspector.link();
+        assert_eq!(link.stepped(), 0);
+        inspector.queue(Pass {
+            chosen: Some(Step::Undo),
+            ..Pass::default()
+        });
+        assert_eq!(link.stepped(), 1);
+        inspector.queue(Pass {
+            cues: Cues {
+                step: Some(Step::Redo),
+                ..Cues::default()
+            },
+            ..Pass::default()
+        });
+        assert_eq!(link.stepped(), 2);
+        inspector.queue(Pass::default());
+        assert_eq!(link.stepped(), 2, "a pass without a step");
+        frame(
+            &mut inspector,
+            &mut world,
+            &ctx,
+            1.0,
+            shortcut(egui::Key::Z, false),
+        );
+        assert_eq!(link.stepped(), 3);
+    }
+
+    /// Between passes the link keeps the latest value of each field of its gesture alone, and a
+    /// seal keeps those before it apart; a second seal ends nothing more.
+    #[test]
+    fn the_link_keeps_the_latest_value_of_each_field_between_passes() {
+        let link = Inspector::default().link();
+        let [a, b]: [EntityId; 2] =
+            ["0123456789abcdef", "fedcba9876543210"].map(|id| id.parse().expect("an ID"));
+        let at = |x: f32| Value::Vec3(Vec3::new(x, 0.0, 0.0));
+        for x in [1.0, 2.0] {
+            link.set(a, "Transform", "translation", at(x));
+            link.set(b, "Transform", "translation", at(x));
+        }
+        link.set(a, "Transform", "scale", at(5.0));
+        link.seal();
+        link.seal();
+        link.set(a, "Transform", "translation", at(3.0));
+        let set = |id, path: &str, x| Some((id, "Transform".to_owned(), path.to_owned(), at(x)));
+        assert_eq!(
+            link.pending(),
+            [
+                set(a, "translation", 2.0),
+                set(b, "translation", 2.0),
+                set(a, "scale", 5.0),
+                None,
+                set(a, "translation", 3.0)
+            ]
+        );
+    }
+
+    /// A debug build refuses a set through the link of the component whole, or inside a field of
+    /// another kind than a vector, which the panel couldn't draw as it'll be.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "a link sets a field of a component's own")]
+    fn a_link_refuses_a_set_inside_another_kind_of_field() {
+        let link = Inspector::default().link();
+        let id: EntityId = "0123456789abcdef".parse().expect("an ID");
+        link.set(id, "Everything", "maybe.level", Value::UInt(1));
+    }
+
+    /// A debug build refuses, as the Inspector's next pass takes it, a set through the link of a
+    /// field whose insides the panels set at paths of their own, as a struct's, which the panel
+    /// couldn't draw beside theirs.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "got `inner` of `Everything`")]
+    fn a_link_refuses_a_set_of_a_struct_whole() {
+        let mut world = World::default();
+        let entity = world.spawn(everything());
+        let mut inspector = Inspector::default();
+        let link = inspector.link();
+        let picked = id(&world, entity);
+        link.set(picked, "Everything", "inner", Value::Bool(false));
+        inspector.follow(&world);
+    }
+
+    /// A field's latest set through the link goes after the sets made since its last, so that a
+    /// vector set whole and one of its components still set in the order they came.
+    #[test]
+    fn the_links_latest_set_of_a_field_comes_after_those_made_since() {
+        let link = Inspector::default().link();
+        let id: EntityId = "0123456789abcdef".parse().expect("an ID");
+        let whole = |x: f32| Value::Vec3(Vec3::splat(x));
+        link.set(id, "Transform", "translation", whole(1.0));
+        link.set(id, "Transform", "translation.x", Value::F32(5.0));
+        link.set(id, "Transform", "translation", whole(2.0));
+        let set = |path: &str, value| Some((id, "Transform".to_owned(), path.to_owned(), value));
+        let expected = [
+            set("translation.x", Value::F32(5.0)),
+            set("translation", whole(2.0)),
+        ];
+        assert_eq!(link.pending(), expected);
     }
 }

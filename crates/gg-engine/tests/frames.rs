@@ -4,6 +4,9 @@
 //! drifters that wrap, whose ticks despawn and spawn entities, seen through a camera of the
 //! world's that a pivot the ticks turn carries round, run through the engine's main loop headless,
 //! three fifths of a tick apart, so that they draw between ticks, once its first frames have run.
+//! Every frame picks what the view shows at its middle, as the frame before had it, and outside it,
+//! from the first on, and headless, each answer comes back in the frame it's due: four frames after
+//! the one that asked, and two for the pick outside the view, which finds nothing.
 //!
 //! It runs in one process with a main of its own, so that no other test's threads run beside it,
 //! and counts every allocation the process makes through Rust's allocator while the frames run,
@@ -34,8 +37,8 @@ use std::time::Duration;
 use gg_engine::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_engine::{
     Actions, App, Binding, Blend, Camera, Change, Component, Context, Entity, Event, Key, Layer,
-    Mesh, MeshDraw, Model, MouseButton, Projection, Shader, Source, Sprite, SpriteSheet, Texture,
-    Tick, Transform, World,
+    Mesh, MeshDraw, Model, MouseButton, Pick, Projection, Shader, Source, Sprite, SpriteSheet,
+    Texture, Tick, Transform, World,
 };
 use serde_json::json;
 
@@ -58,6 +61,16 @@ const SUBTREES: usize = 256;
 const REPLACED: usize = 16;
 /// The pool of copies of a model, of which each tick replaces the oldest.
 const COPIES: usize = 8;
+/// The frames whose picks the app keeps, more than an answer takes to come back.
+const ASKED: usize = 8;
+
+/// The answers that came back: to the picks at the view's middle, those that found an entity and
+/// those that found none; to those outside it, which find none; and those that came back in
+/// another frame than they were due, or found an entity outside the view.
+static FOUND: AtomicU64 = AtomicU64::new(0);
+static MISSED: AtomicU64 = AtomicU64::new(0);
+static OUTSIDE: AtomicU64 = AtomicU64::new(0);
+static ASTRAY: AtomicU64 = AtomicU64::new(0);
 
 /// System's allocator, which counts the allocations made while `COUNTING` is set, and keeps where
 /// the first was made.
@@ -196,6 +209,9 @@ struct Scene {
     /// tick applies, here by forgetting.
     commands: Vec<Change<Act>>,
     frames: u64,
+    /// The tickets of the picks of each of the last frames, by its number modulo `ASKED`: at the
+    /// view's middle, then outside it.
+    asked: [Option<[Pick; 2]>; ASKED],
 }
 
 impl Scene {
@@ -386,6 +402,32 @@ impl Layer for Scene {
         cx.draw(quad, opaque, below, Vec4::new(0.5, 0.5, 0.5, 1.0));
         cx.draw_sprite(Mat4::from_translation(Vec3::new(0.0, 5.0, 0.0)), cell);
         self.frames += 1;
+        let frame = self.frames;
+        // The picks of the frame `back` before this one.
+        let asked = |back: u64| {
+            let frame = frame.checked_sub(back)?;
+            self.asked[frame as usize % ASKED]
+        };
+        for &(pick, entity) in cx.picked() {
+            let inside = asked(4).is_some_and(|[inside, _]| inside == pick);
+            let outside = asked(2).is_some_and(|[_, outside]| outside == pick);
+            let counted = match (inside, outside, entity) {
+                (true, _, Some(_)) => &FOUND,
+                (true, _, None) => &MISSED,
+                (_, true, None) => &OUTSIDE,
+                _ => &ASTRAY,
+            };
+            counted.fetch_add(1, Ordering::Relaxed);
+        }
+        // The view's middle, where the last frame had it, or a headless run's at first; and left of
+        // the window.
+        let middle = cx.view().map_or([640.0, 360.0], |view| {
+            let [x, y] = view.origin.map(f64::from);
+            let [width, height] = view.size.map(f64::from);
+            [x + width / 2.0, y + height / 2.0]
+        });
+        let picks = [middle, [-1.0, middle[1]]].map(|at| cx.pick(at).expect("two a frame"));
+        self.asked[frame as usize % ASKED] = Some(picks);
         if self.frames == WARM_UP {
             COUNTING.store(true, Ordering::SeqCst);
         } else if self.frames == WARM_UP + COUNTED {
@@ -546,4 +588,17 @@ fn main() {
     }
     let how = if windowed { "in a window" } else { "headless" };
     println!("{COUNTED} frames {how} allocated nothing");
+    // Headless, every frame renders, so each answer comes back in the frame it's due: all but
+    // those of the last four frames' picks at the middle, and of the last two's outside the view.
+    // A window's frames may not, as one that's minimized doesn't.
+    if !windowed {
+        let frames = WARM_UP + COUNTED + 1;
+        let [found, missed, outside, astray] =
+            [&FOUND, &MISSED, &OUTSIDE, &ASTRAY].map(|count| count.load(Ordering::SeqCst));
+        assert_eq!(astray, 0, "answers came back in frames they weren't due");
+        assert_eq!(found + missed, frames - 4, "picks at the middle answered");
+        assert!(found > 0, "no pick at the middle found an entity");
+        assert_eq!(outside, frames - 2, "the picks outside the view answered");
+        println!("{found} picks of {} found an entity", found + missed);
+    }
 }

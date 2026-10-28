@@ -1,13 +1,15 @@
 //! Turns the render data the engine hands it each frame into images, built on `gg-gpu`: meshes
 //! and sprites drawn in the game's view, as its camera sees them, with games' shaders and textures
-//! and the engine's own, models' unlit materials among them, and the UI over them; and the render
-//! graph, lighting, PBR materials and post-processing to come.
+//! and the engine's own, models' unlit materials among them, and the UI over them; picks, which
+//! read back the ID of the draw the view shows at a pixel; and the render graph, lighting, PBR
+//! materials and post-processing to come.
 //!
 //! It knows nothing about the scene, ECS or gameplay. It receives plain data, so rendering
 //! can run on its own thread, a frame behind simulation.
 
 mod mesh;
 mod model;
+mod pick;
 mod shader;
 mod sprite;
 mod texture;
@@ -25,14 +27,15 @@ use bytemuck::NoUninit;
 use gg_core::math::{Mat3, Mat4};
 use gg_core::{Error, Result};
 use gg_gpu::{
-    ColorImage, DepthImage, Device, Faces, Frames, Instance, InstanceDesc, Surface, Swapchain,
-    Target,
+    ColorImage, DepthImage, Device, Faces, Frames, IdImage, Instance, InstanceDesc, Surface,
+    Swapchain, Target,
 };
 use tracing::{info, trace};
 
 pub use gg_gpu::{Blend, MAX_TEXTURE_SIZE, Sampler, UploadPath, Validation, Window, Wrap};
 pub use mesh::{Mesh, MeshDraw, Meshes};
 pub use model::{AlphaMode, Material, ModelVertex};
+pub use pick::{MAX_PICKS, Pick};
 pub use shader::{Compiled, Shader, ShaderSource, Shaders};
 pub use sprite::{Sprite, SpriteSheet};
 pub use texture::{Mipmaps, Texture, Textures};
@@ -41,6 +44,7 @@ pub use view::ViewCallback;
 pub use viewpoint::{Projection, Viewpoint};
 
 use mesh::MeshPass;
+use pick::Picks;
 use ui::UiPass;
 use view::ViewPass;
 
@@ -54,18 +58,28 @@ pub struct Viewport {
 /// What a frame draws besides UI, in order, each over those before it, but where an opaque one
 /// before it is nearer: meshes, each with a shader for its vertex type, the parameters that shader
 /// takes, and where it is in the world. Each run of consecutive draws of one mesh with one shader
-/// that draw the same [`Faces`] renders as one instanced draw, whatever their transforms and
+/// that draw the same [`Faces`] renders as one instanced draw, whatever their transforms, IDs and
 /// parameters, a texture among them: every draw draws both faces of its mesh's triangles but a
-/// material's that isn't double-sided. Clearing it keeps its memory, so that a frame that draws no
-/// more than the last allocates nothing.
+/// material's that isn't double-sided. Each draw has an ID, a 64-bit number that the view writes
+/// where it shows, which [picks](Pick) read back: what the engine gives it, an entity's ID for a
+/// draw of the world's; 0 for a draw of no entity, as [`push`](Self::push) and
+/// [`push_sprite`](Self::push_sprite) give. Clearing it keeps its memory, so that a frame that
+/// draws no more than the last allocates nothing.
 #[derive(Debug, Default, PartialEq)]
 pub struct Draws {
     /// The runs, in order.
     runs: Vec<Run>,
     /// Every draw's transform, in order.
     transforms: Vec<Mat4>,
+    /// Every draw's ID, in order, as its low and high halves, which shaders write.
+    ids: Vec<[u32; 2]>,
     /// Every draw's parameters, one after another.
     params: Vec<u8>,
+}
+
+/// `id`'s low and high halves, as the view's IDs hold it: shaders have no 64-bit integers.
+fn halves(id: u64) -> [u32; 2] {
+    [id as u32, (id >> 32) as u32]
 }
 
 /// Consecutive draws of one mesh with one shader that draw the same faces: the instances of one
@@ -75,7 +89,7 @@ struct Run {
     mesh: u32,
     shader: u32,
     faces: Faces,
-    /// Where its draws' transforms are in `Draws::transforms`.
+    /// Where its draws' transforms and IDs are in `Draws::transforms` and `Draws::ids`.
     instances: Range<usize>,
     /// Where their parameters are in `Draws::params`.
     params: Range<usize>,
@@ -84,7 +98,7 @@ struct Run {
 impl Draws {
     /// Draws `mesh` with `shader`, which reads its vertex type and takes `params`, over the
     /// meshes drawn before it but where an opaque one is nearer. `transform` takes the mesh's own
-    /// space, which its vertices' positions are in, to the world's.
+    /// space, which its vertices' positions are in, to the world's. Its ID is 0, of no entity.
     pub fn push<V, P: NoUninit>(
         &mut self,
         mesh: Mesh<V>,
@@ -94,17 +108,20 @@ impl Draws {
     ) {
         let (instance, start) = (self.transforms.len(), self.params.len());
         self.transforms.push(transform);
+        self.ids.push([0; 2]);
         self.params.extend_from_slice(bytemuck::bytes_of(&params));
         self.extend_run(mesh.index, shader.index, Faces::Both, instance, start);
     }
 
     /// Draws `draw` over the meshes drawn before it but where an opaque one is nearer, as
-    /// [`push`](Self::push) draws its mesh with its shader and parameters. A material's draw that
-    /// isn't double-sided draws its mesh's fronts: the triangles whose corners wind counterclockwise,
-    /// as glTF's fronts do, or clockwise where `transform` mirrors them, as glTF has it.
-    pub fn push_draw(&mut self, transform: Mat4, draw: &MeshDraw) {
+    /// [`push`](Self::push) draws its mesh with its shader and parameters, with the ID `id`. A
+    /// material's draw that isn't double-sided draws its mesh's fronts: the triangles whose corners
+    /// wind counterclockwise, as glTF's fronts do, or clockwise where `transform` mirrors them, as
+    /// glTF has it.
+    pub fn push_draw(&mut self, transform: Mat4, draw: &MeshDraw, id: u64) {
         let (instance, start) = (self.transforms.len(), self.params.len());
         self.transforms.push(transform);
+        self.ids.push(halves(id));
         self.params.extend_from_slice(draw.params());
         let faces = if !draw.culls {
             Faces::Both
@@ -118,23 +135,26 @@ impl Draws {
 
     /// Draws `sprite` over the meshes drawn before it but where an opaque one is nearer, as
     /// [`Sprite`] describes. `transform` takes the sprite's own space, where it's a unit square
-    /// around the origin, to the world's.
+    /// around the origin, to the world's. Its ID is 0, of no entity.
     pub fn push_sprite(&mut self, transform: Mat4, sprite: Sprite) {
         self.push(sprite::QUAD, sprite::SHADER, transform, sprite.params());
     }
 
-    /// Draws each of `sprites`, a transform and a sprite, in turn, as
-    /// [`push_sprite`](Self::push_sprite) does, making room for them and joining a run once for
-    /// them all.
-    pub fn extend_sprites(&mut self, sprites: impl ExactSizeIterator<Item = (Mat4, Sprite)>) {
+    /// Draws each of `sprites`, a transform, a sprite and its ID, in turn, as
+    /// [`push_sprite`](Self::push_sprite) does, but with its ID, making room for them and joining a
+    /// run once for them all.
+    pub fn extend_sprites(&mut self, sprites: impl ExactSizeIterator<Item = (Mat4, Sprite, u64)>) {
         let (instance, start) = (self.transforms.len(), self.params.len());
         self.params
             .reserve(sprites.len() * size_of::<sprite::Params>());
-        let params = &mut self.params;
-        self.transforms.extend(sprites.map(|(transform, sprite)| {
+        self.ids.reserve(sprites.len());
+        let (ids, params) = (&mut self.ids, &mut self.params);
+        let transforms = sprites.map(|(transform, sprite, id)| {
+            ids.push(halves(id));
             params.extend_from_slice(bytemuck::bytes_of(&sprite.params()));
             transform
-        }));
+        });
+        self.transforms.extend(transforms);
         if self.transforms.len() > instance {
             let (quad, shader) = (sprite::QUAD.index, sprite::SHADER.index);
             self.extend_run(quad, shader, Faces::Both, instance, start);
@@ -168,6 +188,7 @@ impl Draws {
     pub fn clear(&mut self) {
         self.runs.clear();
         self.transforms.clear();
+        self.ids.clear();
         self.params.clear();
     }
 }
@@ -222,6 +243,11 @@ pub struct RenderData<'a> {
     pub uploads: &'a mut Uploads,
     /// What to draw.
     pub draws: &'a Draws,
+    /// What the frame asks of the view, at most [`MAX_PICKS`], which [`Renderer::picked`] answers,
+    /// as the frame two after the one that reads them begins: the frame reads them as it renders
+    /// the view, after those a frame with nothing to render into left, up to [`MAX_PICKS`] in all,
+    /// and the frames after it the rest.
+    pub picks: &'a [Pick],
 }
 
 /// How to set up a renderer.
@@ -259,9 +285,11 @@ pub struct Renderer {
     windows: Vec<Swapchain>,
     meshes: MeshPass,
     view: ViewPass,
-    /// What the game's view renders into, and the depth image its draws test, the size it last
-    /// had, which has an area.
-    view_image: Option<(ColorImage, DepthImage)>,
+    /// What the game's view renders into, the IDs its draws write beside it, and the depth image
+    /// they test, the size it last had, which has an area.
+    view_image: Option<(ColorImage, IdImage, DepthImage)>,
+    /// The picks asked of the view, from asked to answered.
+    picks: Picks,
     ui: UiPass,
     instance: Arc<Instance>,
     device: Arc<Device>,
@@ -359,6 +387,7 @@ impl Renderer {
             meshes: MeshPass::new(device),
             view: ViewPass::new(device, format)?,
             view_image: None,
+            picks: Picks::default(),
             ui: UiPass::new(device, format)?,
             instance: instance.clone(),
             device: device.clone(),
@@ -424,9 +453,12 @@ impl Renderer {
     /// changes. A window that isn't open, or whose swapchain has no image free yet, is left as it
     /// was.
     ///
+    /// It reads back the IDs at the pixels `data.picks` asks for, and answers, in
+    /// [`Renderer::picked`], those that the frame two before it read.
+    ///
     /// Returns `false` when there was nothing to render into, as when the window is minimized;
-    /// the meshes and textures stay in `data.uploads`, and the UIs' texture changes wait, for the
-    /// next frame that renders.
+    /// the meshes and textures stay in `data.uploads`, and the UIs' texture changes and the picks
+    /// wait, for the next frame that renders.
     ///
     /// An error ends the renderer, which can then only be dropped: a frame that failed can leave
     /// the GPU's copies of meshes and textures unfinished, so every later call fails with
@@ -443,8 +475,8 @@ impl Renderer {
     ///
     /// If `data.uploads` holds meshes, shaders or textures taken from another [`Meshes`],
     /// [`Shaders`] or [`Textures`] than those it held before, which could draw a mesh with a shader
-    /// for another vertex type or parameters of another type; or if its viewpoint's projection
-    /// can't project, as [`Projection`] says.
+    /// for another vertex type or parameters of another type; if its viewpoint's projection can't
+    /// project, as [`Projection`] says; or if it asks more than [`MAX_PICKS`] picks.
     pub fn render(
         &mut self,
         data: RenderData<'_>,
@@ -453,6 +485,7 @@ impl Renderer {
     ) -> Result<bool> {
         self.waited = Duration::ZERO;
         self.drawn = DrawCounts::default();
+        self.picks.ask(data.picks);
         if self.failed {
             return Err(Error::new(
                 "renderer.failed",
@@ -496,19 +529,20 @@ impl Renderer {
         // matter.
         let [width, height] = data.viewport.size;
         let view_projection = data.viewpoint.view_projection(width as f32 / height as f32);
-        // The view renders into an image of its own size, made again in the frame that changes
-        // its size, so that it never shows stretched; the old one retires until the frames that
-        // use it have finished. A drag that resizes the view makes an image every frame, which
-        // growing it in steps, and rendering into part of it, would not. A view without an area
-        // renders nothing, and keeps the image it had.
+        // The view renders into an image of its own size, with IDs and depth beside it, made again
+        // in the frame that changes its size, so that it never shows stretched; the old ones retire
+        // until the frames that use them have finished. A drag that resizes the view makes them
+        // every frame, which growing them in steps, and rendering into part of them, would not. A
+        // view without an area renders nothing, and keeps the images it had.
         let has_view = width > 0 && height > 0;
         if has_view
             && (self.view_image.as_ref())
-                .is_none_or(|(image, _)| image.size() != data.viewport.size)
+                .is_none_or(|(image, ..)| image.size() != data.viewport.size)
         {
             let image = ColorImage::new(&self.device, width, height, "view")?;
+            let ids = IdImage::new(&self.device, width, height, "view ids")?;
             let depth = DepthImage::new(&self.device, width, height, "view depth")?;
-            self.view_image = Some((image, depth));
+            self.view_image = Some((image, ids, depth));
             trace!(width, height, "View image made");
         }
         let target = match &mut self.output {
@@ -521,28 +555,39 @@ impl Renderer {
             .map(|(_, swapchain)| Target::Swapchain(swapchain));
         // After the output and the other windows, which keep their places.
         let view_target = 1 + self.window_keys.iter().filter(|key| has_ui(key)).count();
-        let (view, depth) = match &mut self.view_image {
-            Some((image, depth)) if has_view => (Some(Target::Image(image)), Some(&*depth)),
-            _ => (None, None),
+        let (view, ids, depth) = match &mut self.view_image {
+            Some((image, ids, depth)) if has_view => {
+                (Some(Target::Image(image)), Some(ids), Some(&*depth))
+            }
+            _ => (None, None, None),
         };
         let targets = iter::once(target).chain(others).chain(view);
         let Some(mut frame) = self.frames.begin(targets)? else {
             return Ok(false);
         };
+        // The frame two before has finished, and what it read with it.
+        self.picks.answer(frame.ids_read());
         self.meshes.upload(&mut frame, data.uploads)?;
         self.ui.write_textures(&mut frame)?;
-        let (counts, view) = if has_view {
-            let mut pass = frame
-                .begin_pass(view_target, c"view", data.clear_color, depth)
-                .expect("an offscreen image is always there");
-            let counts = self.meshes.draw(&mut pass, view_projection, data.draws)?;
-            drop(pass);
-            (counts, Some(frame.begin_sampling(view_target)))
-        } else {
-            (DrawCounts::default(), None)
+        let (counts, view) = match ids {
+            Some(ids) => {
+                let clear = data.clear_color;
+                let mut pass = frame
+                    .begin_pass(view_target, c"view", clear, depth, Some(&mut *ids))
+                    .expect("an offscreen image is always there");
+                let counts = self.meshes.draw(&mut pass, view_projection, data.draws)?;
+                drop(pass);
+                let pixels = self.picks.take(frame.number(), Some(ids.size()));
+                frame.read_ids(ids, pixels)?;
+                (counts, Some(frame.begin_sampling(view_target)))
+            }
+            None => {
+                self.picks.take(frame.number(), None);
+                (DrawCounts::default(), None)
+            }
         };
         let mut pass = frame
-            .begin_pass(0, c"frame", data.clear_color, None)
+            .begin_pass(0, c"frame", data.clear_color, None, None)
             .expect("a frame's first target has an image");
         // Under the whole UI, unless it paints the view among its own shapes.
         if let Some(image) = view
@@ -565,7 +610,7 @@ impl Renderer {
         for (target, (_, ui)) in (1..).zip(drawn) {
             let black = [0.0, 0.0, 0.0, 1.0];
             // The view shows in the main window alone.
-            if let Some(mut pass) = frame.begin_pass(target, c"window", black, None) {
+            if let Some(mut pass) = frame.begin_pass(target, c"window", black, None, None) {
                 self.ui
                     .draw(&mut pass, ui.primitives, ui.pixels_per_point, None)?;
             }
@@ -587,6 +632,17 @@ impl Renderer {
     /// it didn't, or if the view had no area. The UI's draws aren't counted.
     pub fn drawn(&self) -> DrawCounts {
         self.drawn
+    }
+
+    /// The answers to picks that came in during the last [`Renderer::render`]: each pick's tag,
+    /// with the ID of the draw on top at its pixel, as [`Draws`] gives it, in the frame that read
+    /// it, or 0 where none drew. That's the frame that asked it, or for a pick past the 64 a frame
+    /// reads, or asked while frames had nothing to render into, the next that could read it. A
+    /// pick of a pixel outside the view, as the frame that would read it renders it, is answered 0
+    /// there; the rest, as the frame two after the one that read them begins, once the GPU has
+    /// rendered that one.
+    pub fn picked(&self) -> &[(u64, u64)] {
+        self.picks.answered()
     }
 
     /// The GPU's name, such as `NVIDIA GeForce RTX 4090`.
@@ -662,11 +718,11 @@ mod tests {
         draws.push(triangle, other, at(6.0), red);
         // Back to sprites, after the rest, then more of them at once, which join their run.
         draws.push_sprite(at(7.0), Sprite::default());
-        let more = [at(8.0), at(9.0)].map(|at| (at, Sprite::default()));
+        let more = [(8.0, 8), (9.0, 9 | 1 << 32)].map(|(x, id)| (at(x), Sprite::default(), id));
         draws.extend_sprites(more.into_iter());
         // A draw without its types joins a run of its mesh and shader, as one with them does.
         draws.push(triangle, other, at(10.0), green);
-        draws.push_draw(at(11.0), &MeshDraw::new(triangle, other, blue));
+        draws.push_draw(at(11.0), &MeshDraw::new(triangle, other, blue), u64::MAX);
         draws.push(triangle, other, at(12.0), red);
         assert_eq!(
             runs(&draws),
@@ -696,6 +752,12 @@ mod tests {
         assert_eq!(&draws.params[triangles.params.clone()], colors);
         let sprites = draws.runs[4].params.clone();
         assert_eq!(sprites.len(), 3 * size_of::<sprite::Params>());
+        // Each draw's ID, as its low and high halves: 0 for those of no entity.
+        let mut ids = [[0; 2]; 13];
+        ids[8] = [8, 0];
+        ids[9] = [9, 1];
+        ids[11] = [u32::MAX; 2];
+        assert_eq!(draws.ids, ids);
 
         draws.clear();
         assert!(draws.is_empty());
@@ -705,6 +767,7 @@ mod tests {
         draws.push(square, flat, at(0.0), red);
         assert_eq!(runs(&draws), [(1, 1, 0..1)]);
         assert_eq!(draws.params.len(), size_of::<Vec4>());
+        assert_eq!(draws.ids, [[0; 2]]);
     }
 
     #[test]
@@ -730,7 +793,7 @@ mod tests {
         let faces = |draws: &Draws| draws.runs.iter().map(|run| run.faces).collect::<Vec<_>>();
         let mut draws = Draws::default();
         for transform in [at, mirrored, at] {
-            draws.push_draw(transform, &single);
+            draws.push_draw(transform, &single, 0);
         }
         let expected = [
             Faces::CounterClockwise,
@@ -740,12 +803,12 @@ mod tests {
         assert_eq!(faces(&draws), expected);
         // Mirroring twice turns it back.
         draws.clear();
-        draws.push_draw(mirrored * mirrored, &single);
+        draws.push_draw(mirrored * mirrored, &single, 0);
         assert_eq!(faces(&draws), [Faces::CounterClockwise]);
         // Draws that draw both faces, and sprites, never split for it.
         draws.clear();
         for transform in [at, mirrored, at] {
-            draws.push_draw(transform, &double);
+            draws.push_draw(transform, &double, 0);
         }
         for transform in [at, mirrored, at] {
             draws.push_sprite(transform, Sprite::default());

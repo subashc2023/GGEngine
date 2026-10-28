@@ -32,8 +32,14 @@ impl fmt::Debug for EntityId {
 }
 
 impl EntityId {
+    /// The ID that's `number`, as [`get`](Self::get) gives it, such as one drawing gave a draw;
+    /// `None` for 0, which no entity has.
+    pub(crate) fn new(number: u64) -> Option<Self> {
+        NonZeroU64::new(number).map(Self)
+    }
+
     /// The number it is.
-    pub(super) fn get(self) -> u64 {
+    pub(crate) fn get(self) -> u64 {
         self.0.get()
     }
 }

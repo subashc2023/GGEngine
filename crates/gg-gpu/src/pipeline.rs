@@ -9,23 +9,35 @@ use gg_core::{Error, Result};
 use tracing::debug;
 
 use crate::device::Retired;
-use crate::{DepthImage, Device, vk_error};
+use crate::{DepthImage, Device, IdImage, vk_error};
 
-/// The pixel formats of what a pass renders into, which pipelines are made for: its target's, and
-/// its depth image's, if it has one.
+/// The pixel formats of what a pass renders into, which pipelines are made for: its target's, its
+/// [`IdImage`]'s, if it has one, and its depth image's, if it has one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Format {
     pub(crate) color: vk::Format,
+    /// `UNDEFINED` for a pass without IDs.
+    pub(crate) ids: vk::Format,
     /// `UNDEFINED` for a pass without depth.
     pub(crate) depth: vk::Format,
 }
 
 impl Format {
-    /// A target's format, `color`, without depth.
+    /// A target's format, `color`, without IDs or depth.
     pub(crate) const fn new(color: vk::Format) -> Self {
         Self {
             color,
+            ids: vk::Format::UNDEFINED,
             depth: vk::Format::UNDEFINED,
+        }
+    }
+
+    /// This format with an [`IdImage`]'s: what a pass into a target of this format with IDs
+    /// renders into, as a second color target.
+    pub const fn with_ids(self) -> Self {
+        Self {
+            ids: IdImage::FORMAT,
+            ..self
         }
     }
 
@@ -36,6 +48,10 @@ impl Format {
             depth: DepthImage::FORMAT,
             ..self
         }
+    }
+
+    fn has_ids(self) -> bool {
+        self.ids != vk::Format::UNDEFINED
     }
 
     fn has_depth(self) -> bool {
@@ -97,7 +113,9 @@ pub struct GraphicsDesc<'a> {
     pub spirv: &'a [u8],
     pub vertex: &'a CStr,
     pub fragment: &'a CStr,
-    /// The formats of the targets it draws into.
+    /// The formats of the targets it draws into. Where they have IDs, its fragment shader writes
+    /// them at location 1, as two 32-bit unsigned integers, which replace what's there wherever it
+    /// draws, however its color blends.
     pub format: Format,
     pub blend: Blend,
     /// Whether it writes its depth where it draws, for later draws to test against. Only a
@@ -184,9 +202,14 @@ impl Pipeline {
                 .alpha_blend_op(vk::BlendOp::ADD),
         }
         .color_write_mask(vk::ColorComponentFlags::RGBA);
-        let attachments = [attachment];
+        // Integers don't blend (VUID-VkGraphicsPipelineCreateInfo-renderPass-06062), so the IDs'
+        // state differs from a blended color's, which takes independent blending.
+        let ids = vk::PipelineColorBlendAttachmentState::default()
+            .color_write_mask(vk::ColorComponentFlags::R | vk::ColorComponentFlags::G);
+        let targets = 1 + usize::from(desc.format.has_ids());
+        let attachments = [attachment, ids];
         let color_blend =
-            vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachments);
+            vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachments[..targets]);
         // Or equal, so that what draws later at one depth goes over what drew there before, as 2D
         // games stack what they draw at one z.
         let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
@@ -200,9 +223,9 @@ impl Pipeline {
             vk::DynamicState::FRONT_FACE,
         ];
         let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
-        let formats = [desc.format.color];
+        let formats = [desc.format.color, desc.format.ids];
         let mut rendering = vk::PipelineRenderingCreateInfo::default()
-            .color_attachment_formats(&formats)
+            .color_attachment_formats(&formats[..targets])
             .depth_attachment_format(desc.format.depth);
         // How long the driver took, and whether the device's pipeline cache held the pipeline.
         let mut feedback = vk::PipelineCreationFeedback::default();

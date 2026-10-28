@@ -314,7 +314,7 @@ mod tests {
         world.despawn(freed).expect("alive");
         let reused = world.spawn((at(6.0, 0.3), sprite(3.0)));
         assert_eq!(reused.slot(), freed.slot(), "the slot freed");
-        world.spawn((at(3.0, 0.1), sprite(1.0)));
+        let spawned = world.spawn((at(3.0, 0.1), sprite(1.0)));
         assert!(log.undo(&mut world).expect("undone"));
         moved(&mut world, deleted, at(8.0, 0.4));
         world.insert(given, at(4.0, 0.2)).expect("alive");
@@ -331,22 +331,28 @@ mod tests {
         };
         moved(&mut world, mirrored, flipped);
 
-        // Back to front by z.
+        // Back to front by z, each with its entity's ID, the deleted one's put back with its own.
+        let deleted = world.entity(id).expect("put back");
         let mut want = Draws::default();
-        for (matrix, n) in [
-            (at(1.0, 0.0).matrix(), 0.0),
-            (at(3.0, 0.1).matrix(), 1.0),
-            (at(4.0, 0.2).matrix(), 2.0),
-            (at(6.0, 0.3).matrix(), 3.0),
-            (at(8.0, 0.4).matrix(), 4.0),
-            (at(20.0, 0.0).matrix() * at(2.0, 0.5).matrix(), 5.0),
-            (Transform::IDENTITY.matrix() * at(10.0, 0.6).matrix(), 6.0),
-            (at(13.0, 0.7).matrix(), 7.0),
-            (at(14.0, 0.8).matrix(), 8.0),
-            (flipped.matrix(), 10.0),
-            (at(31.0, 0.9).matrix(), 11.0),
+        for (matrix, n, entity) in [
+            (at(1.0, 0.0).matrix(), 0.0, mover),
+            (at(3.0, 0.1).matrix(), 1.0, spawned),
+            (at(4.0, 0.2).matrix(), 2.0, given),
+            (at(6.0, 0.3).matrix(), 3.0, reused),
+            (at(8.0, 0.4).matrix(), 4.0, deleted),
+            (at(20.0, 0.0).matrix() * at(2.0, 0.5).matrix(), 5.0, child),
+            (
+                Transform::IDENTITY.matrix() * at(10.0, 0.6).matrix(),
+                6.0,
+                rooted,
+            ),
+            (at(13.0, 0.7).matrix(), 7.0, reset),
+            (at(14.0, 0.8).matrix(), 8.0, unfinite),
+            (flipped.matrix(), 10.0, mirrored),
+            (at(31.0, 0.9).matrix(), 11.0, swapped),
         ] {
-            want.push_sprite(matrix, sprite(n));
+            let id = world.id(entity).expect("alive").get();
+            want.extend_sprites(iter::once((matrix, sprite(n), id)));
         }
         assert_eq!(halfway(&world, &mut past), want);
     }
@@ -369,10 +375,14 @@ mod tests {
         moved(&mut world, moved_away, at(2.0, 0.5));
         moved(&mut world, sibling, at(2.0, 0.6));
         let mut want = Draws::default();
+        let id = |entity: Entity| world.id(entity).expect("alive").get();
         let carried = at(20.0, 0.0).matrix() * at(2.0, 0.5).matrix();
-        want.push_sprite(carried, sprite(5.0));
         let halfway_there = Transform::IDENTITY.matrix() * at(1.0, 0.6).matrix();
-        want.push_sprite(halfway_there, sprite(6.0));
+        let drawn = [
+            (carried, sprite(5.0), id(moved_away)),
+            (halfway_there, sprite(6.0), id(sibling)),
+        ];
+        want.extend_sprites(drawn.into_iter());
         assert_eq!(halfway(&world, &mut past), want);
     }
 
@@ -387,8 +397,9 @@ mod tests {
         past.capture(&world);
         world.clone_from(&snapshot);
         moved(&mut world, mover, at(2.0, 0.0));
+        let id = world.id(mover).expect("alive").get();
         let mut want = Draws::default();
-        want.push_sprite(at(2.0, 0.0).matrix(), sprite(0.0));
+        want.extend_sprites(iter::once((at(2.0, 0.0).matrix(), sprite(0.0), id)));
         assert_eq!(halfway(&world, &mut past), want, "restored");
 
         past.capture(&world);
@@ -396,8 +407,9 @@ mod tests {
         let same = other.spawn((at(4.0, 0.0), sprite(0.0)));
         assert_eq!(same, mover, "the same handle");
         world = other;
+        let id = world.id(same).expect("alive").get();
         let mut want = Draws::default();
-        want.push_sprite(at(4.0, 0.0).matrix(), sprite(0.0));
+        want.extend_sprites(iter::once((at(4.0, 0.0).matrix(), sprite(0.0), id)));
         assert_eq!(halfway(&world, &mut past), want, "replaced");
     }
 

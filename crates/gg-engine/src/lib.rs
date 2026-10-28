@@ -84,7 +84,7 @@ pub use dialog::FileDialog;
 use dock::Dock;
 pub use dock::{Docked, Ui};
 pub use ecs::{
-    Bundle, Component, Difference, Entities, Entity, EntityId, Log, Operation, Parent, Query,
+    Bundle, Component, Difference, Entities, Entity, EntityId, Log, Operation, Parent, Pose, Query,
     QueryIter, QueryIterMut, ReadOnlyQuery, World, WorldHash, Writable, read_scene, write_scene,
 };
 /// The UI library layers draw with, in [`Layer::ui`]; apps use it from here, so that they
@@ -109,11 +109,11 @@ pub use gg_renderer::{
     Blend, Mesh, Projection, Sampler, Shader, Sprite, SpriteSheet, Texture, Viewpoint, Viewport,
 };
 pub use input::Input;
-pub use inspector::Inspector;
+pub use inspector::{Inspector, InspectorLink};
 #[doc(hidden)]
 pub use jobs::{on_threads, start as start_jobs};
 use layer::Stack;
-pub use layer::{Commands, Context, Layer, Tick, Window};
+pub use layer::{Commands, Context, Layer, Pick, Tick, Window};
 pub use model::Model;
 pub use name::Name;
 pub use perf::PerfPanel;
@@ -122,7 +122,7 @@ use recording::Recorder;
 #[doc(hidden)]
 pub use recording::Replay;
 pub use reflect::Reflect;
-use render_thread::{RenderThread, TextureChanges};
+use render_thread::{Render, RenderThread, TextureChanges};
 pub use script::{Script, run_scripts};
 pub use transform::Transform;
 use viewports::Drawn;
@@ -213,9 +213,11 @@ impl App {
     /// layers' panels, and has the dock fill the main window, without the central area games
     /// keep: for tools. The view fills the dock until the user places other panels beside it, and
     /// it doesn't go into a window of its own. The layers get the mouse's presses and its wheel
-    /// over the view, and the drags those start, and keys while the view has focus, which a press
-    /// on it, or on what [`Ui::over_view`] shows over it, gives and a press anywhere else takes;
-    /// it has focus as the app starts. Releases reach them wherever they come.
+    /// over the view, and the drags those start; and keys while none of egui's widgets has focus,
+    /// no modal of egui's is open and the view shows, if the view has focus, which a press on it,
+    /// or on what [`Ui::over_view`] shows over it, gives and a press anywhere else takes, or the
+    /// cursor is over either; it has focus as the app starts. Modifier keys reach them wherever
+    /// they're pressed while no widget of egui's has focus, and releases wherever they come.
     #[must_use]
     pub fn view_panel(mut self, name: &'static str) -> Self {
         self.view_panel = Some(name);
@@ -598,10 +600,11 @@ fn tessellate(egui: &egui::Context, output: &mut egui::FullOutput) -> (MainUi, D
 }
 
 /// Takes the renderer back from rendering the frame before, which this frame, having tessellated
-/// its own UI in `tessellated`, is measured with, and returns whether that frame presented: `None`
-/// if no frame was rendering.
-fn take_back(
-    render: &mut RenderThread,
+/// its own UI in `tessellated`, is measured with, and the answers to picks that came in as it
+/// rendered, which `cx` gives in place of the last; and returns whether that frame presented:
+/// `None` if no frame was rendering.
+fn take_back<R: Render>(
+    render: &mut RenderThread<R>,
     cx: &mut Context,
     tessellated: Duration,
 ) -> Result<Option<bool>> {
@@ -609,14 +612,20 @@ fn take_back(
     let rendered = render.take();
     cx.perf
         .rendered(tessellated, start.elapsed(), rendered.as_ref());
+    let answers = if rendered.is_some() {
+        &render.frame().picked[..]
+    } else {
+        &[]
+    };
+    cx.take_answers(answers);
     rendered.map(|rendered| rendered.presented).transpose()
 }
 
 /// Hands the frame over to the render thread: what the layers drew in the game's view, `view` in
 /// the main window's pixels, the UI in `ui` over it, and what the windows of their own drew, in
 /// `windows`.
-fn hand_off(
-    render: &mut RenderThread,
+fn hand_off<R: Render>(
+    render: &mut RenderThread<R>,
     cx: &mut Context,
     view: Viewport,
     ui: MainUi,
@@ -1001,14 +1010,24 @@ mod tests {
         frame.draws
     }
 
-    /// What [`Slider`]'s sprites draw as: the slider at `slider`, the jumper at `jumper`, and the
-    /// one spawned at tick 2, once it's spawned.
-    fn slider_draws(slider: f32, jumper: f32, spawned: bool) -> Draws {
+    /// What [`Slider`]'s sprites in `world` draw as: the slider at `slider`, the jumper at
+    /// `jumper`, and the one spawned at tick 2, once it's spawned, each with its entity's ID,
+    /// found by its z.
+    fn slider_draws(world: &World, slider: f32, jumper: f32, spawned: bool) -> Draws {
+        let id = |z: f32| {
+            let mut placed = world.query::<(Entity, &Transform)>();
+            let found = placed.find(|(_, at)| at.translation.z == z);
+            let (entity, _) = found.expect("a sprite at each z");
+            world.id(entity).expect("alive").get()
+        };
         let mut want = Draws::default();
-        want.push_sprite(slid(slider, 0.0).matrix(), red());
-        want.push_sprite(slid(jumper, 0.1).matrix(), red());
+        let mut sprite = |x: f32, z: f32| {
+            want.extend_sprites(iter::once((slid(x, z).matrix(), red(), id(z))));
+        };
+        sprite(slider, 0.0);
+        sprite(jumper, 0.1);
         if spawned {
-            want.push_sprite(slid(5.0, 0.2).matrix(), red());
+            sprite(5.0, 0.2);
         }
         want
     }
@@ -1687,9 +1706,15 @@ mod tests {
         let (mut output, _) = run_frame(&mut stack, cx, dt, stepper, ui).expect("a pass");
         // As the renderer would have.
         output.textures_delta.clear();
+        // The layer's sprite, of no entity, then the world's, with its entity's ID.
+        let world = cx.world();
+        let red_one = world.query::<(Entity, &Sprite)>().next();
+        let (red_one, _) = red_one.expect("the sprite the layer spawned");
+        let id = world.id(red_one).expect("alive").get();
         let mut expected = Draws::default();
         expected.push_sprite(Mat4::IDENTITY, Sprite::default());
-        expected.push_sprite(Transform::IDENTITY.matrix(), red());
+        let red_one = (Transform::IDENTITY.matrix(), red(), id);
+        expected.extend_sprites(iter::once(red_one));
         let viewport = Viewport {
             origin: [0, 0],
             size: [640, 360],
@@ -1818,7 +1843,7 @@ mod tests {
             };
             // Tick 2 runs in frame 12, and tick 3 in frame 16.
             let jumper = if frame < 16 { 10.0 } else { 100.0 };
-            let want = slider_draws(slider, jumper, frame >= 12);
+            let want = slider_draws(cx.world(), slider, jumper, frame >= 12);
             assert_eq!(draws, want, "frame {frame}, after {} ticks", stepper.ticks);
         }
         stack.detach(&mut cx);
@@ -1838,7 +1863,7 @@ mod tests {
             let ui = (&egui, &mut dock);
             let draws = drawn(&mut stack, &mut cx, Duration::ZERO, &mut stepper, ui);
             let jumper = if frame < 4 { 10.0 } else { 100.0 };
-            let want = slider_draws(frame as f32, jumper, frame >= 3);
+            let want = slider_draws(cx.world(), frame as f32, jumper, frame >= 3);
             assert_eq!(draws, want, "frame {frame}");
         }
         stack.detach(&mut cx);

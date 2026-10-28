@@ -767,7 +767,8 @@ mod tests {
             parent.matrix() * local.matrix()
         };
         let mut want = Draws::default();
-        want.push_sprite(carried(1.0), Sprite::default());
+        let id = world.id(children[1]).expect("alive").get();
+        want.extend_sprites(std::iter::once((carried(1.0), Sprite::default(), id)));
         let mut draws = Draws::default();
         draw_world(&world, &past, 0.5, &mut draws, &mut Scratch::default());
         assert_eq!(draws, want);

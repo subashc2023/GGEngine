@@ -8,6 +8,9 @@
 // and brighten from there to the major lines' gray by 800. In an orthographic view that faces the
 // plane squarely they're crisp, a pixel each; in any other they're anti-aliased, each family of
 // lines by its own footprint, and fade toward grazing angles.
+//
+// The grid is a layer's draw, of no entity, so the ID it writes is 0; and it discards what's fully
+// transparent, which blending would leave as it was, as a shader that blends does for picks.
 
 // How the lines draw, which `Grid.lines` says: anti-aliased, seen through perspective from a point
 // or orthographically along a direction; or crisp, orthographically, facing the plane squarely.
@@ -38,6 +41,8 @@ struct Push {
     float2* corners;
     // Each instance's, from the square's space to the world's.
     float4x4* transforms;
+    // Each instance's ID, which the grid, of no entity, leaves unread.
+    uint2* ids;
     Grid* grids;
 };
 [[vk::push_constant]] ConstantBuffer<Push> push;
@@ -217,8 +222,13 @@ float4 smooth_lines(float2 at, float2 axes, float2 pixel, Grid grid) {
     return float4(color.rgb / max(color.a, 1e-6), alpha);
 }
 
+struct Targets {
+    float4 color : SV_Target0;
+    uint2 id : SV_Target1;
+};
+
 [shader("fragment")]
-float4 fragment_main(Varyings input) : SV_Target {
+Targets fragment_main(Varyings input) {
     Grid grid = push.grids[input.instance];
     // The plane units each coordinate changes by from one pixel to the next, the footprint across
     // each family of lines: the length of the coordinate's derivatives, as Ben Golus's grid takes
@@ -226,8 +236,18 @@ float4 fragment_main(Varyings input) : SV_Target {
     float2 dx = ddx(input.plane);
     float2 dy = ddy(input.plane);
     float2 pixel = float2(length(float2(dx.x, dy.x)), length(float2(dx.y, dy.y)));
+    float4 color;
     if (grid.lines == CRISP) {
-        return crisp_lines(input.plane, input.axes, pixel, grid);
+        color = crisp_lines(input.plane, input.axes, pixel, grid);
+    } else {
+        color = smooth_lines(input.plane, input.axes, pixel, grid);
     }
-    return smooth_lines(input.plane, input.axes, pixel, grid);
+    // After the derivatives, which a discard before them would leave undefined.
+    if (color.a == 0.0) {
+        discard;
+    }
+    Targets out;
+    out.color = color;
+    out.id = uint2(0, 0);
+    return out;
 }

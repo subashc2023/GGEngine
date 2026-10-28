@@ -186,8 +186,8 @@ impl Default for Meshes {
 }
 
 /// Draws meshes with their shaders into the game's view, an image whose format is
-/// [`ColorImage::FORMAT`], testing its depth image, and keeps on the GPU the meshes' vertices and
-/// indices and the textures the shaders sample.
+/// [`ColorImage::FORMAT`], writing their IDs beside it and testing its depth image, and keeps on
+/// the GPU the meshes' vertices and indices and the textures the shaders sample.
 pub(crate) struct MeshPass {
     device: Arc<Device>,
     /// Each shader's pipeline, by its handle.
@@ -264,7 +264,7 @@ impl MeshPass {
                     spirv: &added.spirv,
                     vertex: c"vertex_main",
                     fragment: c"fragment_main",
-                    format: ColorImage::FORMAT.with_depth(),
+                    format: ColorImage::FORMAT.with_ids().with_depth(),
                     blend: added.blend,
                     depth_write: shader::writes_depth(added.blend),
                 },
@@ -343,15 +343,15 @@ impl MeshPass {
     }
 
     /// Draws `draws` over the whole of the pass's target, where `view_projection` takes the world
-    /// to clip space, each run of them as one instanced draw, and copies each run's transforms and
-    /// parameters into the frame for its shader. Returns what it drew.
+    /// to clip space, each run of them as one instanced draw, and copies each run's transforms, IDs
+    /// and parameters into the frame for its shader. Returns what it drew.
     ///
     /// # Panics
     ///
     /// If a mesh drawn isn't one the pass has uploaded, a shader isn't one it has made a pipeline
     /// of, a mesh's vertices or a draw's parameters aren't the size its shader reads, a run has
     /// more instances than Vulkan's 32-bit count, or the pass isn't into an image of
-    /// [`ColorImage::FORMAT`] with a depth image.
+    /// [`ColorImage::FORMAT`] with IDs and a depth image.
     pub(crate) fn draw(
         &self,
         pass: &mut Pass<'_, '_>,
@@ -372,6 +372,7 @@ impl MeshPass {
                 .get(run.shader as usize)
                 .expect("a shader of the renderer's `Shaders`");
             let transforms = &draws.transforms[run.instances.clone()];
+            let ids = &draws.ids[run.instances.clone()];
             let params = &draws.params[run.params.clone()];
             // A draw pairs a mesh and parameters with a shader for their types, but handles from
             // another `Meshes` or `Shaders` could pair them with one that reads past them.
@@ -394,6 +395,7 @@ impl MeshPass {
             // Where the shader reads them during this frame, each array in an upload of its own,
             // so that each starts 16-byte aligned; a shader that takes no parameters gets 0.
             let transforms = pass.upload(bytemuck::cast_slice(transforms))?.address();
+            let ids = pass.upload(bytemuck::cast_slice(ids))?.address();
             let params = if params.is_empty() {
                 0
             } else {
@@ -403,6 +405,7 @@ impl MeshPass {
                 clip_from_world: view_projection,
                 vertices: mesh.vertices.address(),
                 transforms,
+                ids,
                 params,
             };
             pass.push_constants(bytemuck::bytes_of(&push));
@@ -417,7 +420,9 @@ impl MeshPass {
 
 /// What the mesh pass pushes before each draw, which a mesh shader's push constants read the
 /// start of, as [`Shaders::add`](crate::Shaders::add) describes. The matrix goes first, so that
-/// every offset is the same under every layout Slang gives push constants.
+/// every offset is the same under every layout Slang gives push constants; the IDs before the
+/// parameters, so that a shader that takes none still ends its struct after the last member it
+/// reads.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 pub(crate) struct Push {
@@ -427,6 +432,8 @@ pub(crate) struct Push {
     pub(crate) vertices: u64,
     /// The address of the instances' transforms.
     pub(crate) transforms: u64,
+    /// The address of the instances' IDs, each the low and high halves of a 64-bit number.
+    pub(crate) ids: u64,
     /// The address of the instances' parameters, or 0 for a shader that takes none.
     pub(crate) params: u64,
 }

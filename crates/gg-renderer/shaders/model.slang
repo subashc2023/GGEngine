@@ -1,14 +1,16 @@
 // Models' meshes, drawn unlit, as glTF's KHR_materials_unlit defines it: each fragment is its
 // material's color times its texture's, sampled at the vertices' texture coordinates, times the
-// vertices' color. Each instance is a mesh with its own transform and material. `ModelVertex` in
-// src/model.rs, which `Vertex` here matches field for field, and `Params`, which `Material` here
-// matches byte for byte.
+// vertices' color. Each instance is a mesh with its own transform, ID and material, writing its ID
+// where it shows. `ModelVertex` in src/model.rs, which `Vertex` here matches field for field, and
+// `Params`, which `Material` here matches byte for byte.
 //
-// As it is, it's for materials that blend by their alpha. model_opaque.slang and
-// model_masked.slang include it with OPAQUE or MASKED defined, for materials whose alpha glTF
-// ignores, or uses only to cut out what's less opaque than their cutoff: both are drawn fully
-// opaque, so they return an alpha of 1. Only the masked one discards, since a shader that can
-// discard loses early depth testing on some GPUs.
+// As it is, it's for materials that blend by their alpha, and discards what's fully transparent,
+// which blending would leave as it was, so that a pick there finds what's behind it; it writes no
+// depth, so it keeps early depth testing. model_opaque.slang and model_masked.slang include it
+// with OPAQUE or MASKED defined, for materials whose alpha glTF ignores, or uses only to cut out
+// what's less opaque than their cutoff: both are drawn fully opaque, so they return an alpha of 1.
+// Of those, only the masked one discards, since a shader that can discard while it writes depth
+// loses early depth testing on some GPUs.
 
 [[vk::binding(0, 0)]] Texture2D textures[];
 [[vk::binding(1, 0)]] SamplerState samplers[];
@@ -33,6 +35,8 @@ struct Push {
     Vertex* vertices;
     // Each instance's, from the mesh's space to the world's.
     float4x4* transforms;
+    // Each instance's: its entity's, or 0.
+    uint2* ids;
     Material* materials;
 };
 [[vk::push_constant]] ConstantBuffer<Push> push;
@@ -42,6 +46,7 @@ struct Varyings {
     float2 uv;
     float4 color;
     nointerpolation uint instance;
+    nointerpolation uint2 id;
 };
 
 [shader("vertex")]
@@ -53,11 +58,17 @@ Varyings vertex_main(uint index: SV_VulkanVertexID, uint instance: SV_VulkanInst
     out.uv = vertex.uv;
     out.color = vertex.color;
     out.instance = instance;
+    out.id = push.ids[instance];
     return out;
 }
 
+struct Targets {
+    float4 color : SV_Target0;
+    uint2 id : SV_Target1;
+};
+
 [shader("fragment")]
-float4 fragment_main(Varyings input) : SV_Target {
+Targets fragment_main(Varyings input) {
     Material material = push.materials[input.instance];
     // The instances of one draw can carry different textures and samplers. Decoded from sRGB to
     // linear as it's sampled, and the sRGB target encodes it again.
@@ -69,9 +80,16 @@ float4 fragment_main(Varyings input) : SV_Target {
     if (color.a < material.cutoff) {
         discard;
     }
+#elif !defined(OPAQUE)
+    if (color.a == 0.0) {
+        discard;
+    }
 #endif
 #if defined(OPAQUE) || defined(MASKED)
     color.a = 1.0;
 #endif
-    return color;
+    Targets out;
+    out.color = color;
+    out.id = input.id;
+    return out;
 }

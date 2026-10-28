@@ -16,21 +16,26 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use gg_core::{Error, Result};
-use gg_renderer::{DrawCounts, Draws, RenderData, Renderer, Uploads, Viewpoint, Viewport};
+use gg_renderer::{DrawCounts, Draws, Pick, RenderData, Renderer, Uploads, Viewpoint, Viewport};
 
 use crate::viewports::Drawn;
 #[cfg(target_os = "windows")]
 use crate::windows_wait::recv as wait;
 
 /// A frame's render data, which the main thread fills in and the render thread renders: plain
-/// data. Its draws and uploads keep their memory from frame to frame; its UI is egui's, made anew
-/// each frame.
+/// data. Its draws, uploads and picks keep their memory from frame to frame, and so do the answers
+/// to picks it brings back; its UI is egui's, made anew each frame.
 pub(crate) struct Extracted {
     pub(crate) clear_color: [f32; 4],
     pub(crate) viewport: Viewport,
     pub(crate) viewpoint: Viewpoint,
     pub(crate) draws: Draws,
     pub(crate) uploads: Uploads,
+    /// What the frame asks of the view, each pick's tag the number of the context's ticket.
+    pub(crate) picks: Vec<Pick>,
+    /// The answers to picks that came in as the frame rendered, as
+    /// [`Renderer::picked`] gives them.
+    pub(crate) picked: Vec<(u64, u64)>,
     /// The main window's UI, tessellated, and its texture changes.
     pub(crate) primitives: Vec<egui::ClippedPrimitive>,
     pub(crate) textures: TextureChanges,
@@ -50,6 +55,8 @@ impl Default for Extracted {
             viewpoint: Viewpoint::default(),
             draws: Draws::default(),
             uploads: Uploads::default(),
+            picks: Vec::new(),
+            picked: Vec::new(),
             primitives: Vec::new(),
             textures: TextureChanges::default(),
             pixels_per_point: 1.0,
@@ -85,7 +92,8 @@ pub(crate) struct Rendered {
 
 /// What renders frames on the render thread: the renderer, or a test's stand-in for it.
 pub(crate) trait Render: Send + 'static {
-    /// Renders `frame`, taking from it what it applies, such as its uploads and texture changes.
+    /// Renders `frame`, taking from it what it applies, such as its uploads and texture changes,
+    /// and giving it the answers to picks that came in, in place of those it held.
     fn render(&mut self, frame: &mut Extracted) -> Rendered;
 }
 
@@ -98,6 +106,7 @@ impl Render for Renderer {
             viewpoint: frame.viewpoint,
             uploads: &mut frame.uploads,
             draws: &frame.draws,
+            picks: &frame.picks,
         };
         let ui = gg_renderer::Ui {
             primitives: &frame.primitives,
@@ -106,6 +115,8 @@ impl Render for Renderer {
         };
         let mut windows: Vec<_> = frame.windows.iter_mut().map(Drawn::ui).collect();
         let presented = Renderer::render(self, data, ui, &mut windows);
+        frame.picked.clear();
+        frame.picked.extend_from_slice(self.picked());
         let drawn = self.drawn();
         gg_core::plot!("draws", drawn.draws as f64);
         gg_core::plot!("instances", drawn.instances as f64);
@@ -173,6 +184,16 @@ impl<R: Render> RenderThread<R> {
         let trip = (self.home.as_mut())
             .expect("the renderer is back between taking it and handing it over");
         &mut trip.renderer
+    }
+
+    /// The frame the renderer last rendered, while it's back, with what that brought back.
+    ///
+    /// # Panics
+    ///
+    /// If it's away, rendering a frame.
+    pub(crate) fn frame(&self) -> &Extracted {
+        let trip = (self.home.as_ref()).expect("the frame is back between frames");
+        &trip.frame
     }
 
     /// Hands the renderer over, to render the frame `fill` fills in from what the frame handed
@@ -288,7 +309,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::thread::ThreadId;
 
+    use gg_renderer::MAX_PICKS;
+
     use super::*;
+    use crate::{Context, EntityId, MainUi, hand_off, take_back};
 
     /// The longest the stand-in waits to be told to go on, and a test waits for it to start, past
     /// which the test fails rather than hangs.
@@ -296,7 +320,8 @@ mod tests {
 
     /// A stand-in for the renderer, which renders nothing. A frame tags itself with its clear
     /// color's red, which `Rendered::drawn.draws` gives back, beside the stand-in's `setting` in
-    /// `instances`; frame 2 fails and frame 3 panics, if `failing`.
+    /// `instances`; frame 2 fails and frame 3 panics, if `failing`. It answers each of a frame's
+    /// picks in that frame, with its pixel's column as the ID's low half and its row as the high.
     #[derive(Default)]
     struct Fake {
         setting: usize,
@@ -321,6 +346,12 @@ mod tests {
             if !self.leaves_textures {
                 frame.textures.0.clear();
             }
+            frame.picked.clear();
+            let answers = frame.picks.iter().map(|pick| {
+                let [x, y] = pick.pixel.map(u64::from);
+                (pick.tag, x | y << 32)
+            });
+            frame.picked.extend(answers);
             let presented = match tag {
                 2 if self.failing => Err(Error::new("test.failed", "frame 2 fails")),
                 3 if self.failing => panic!("frame 3 panics"),
@@ -439,6 +470,52 @@ mod tests {
         drop(render);
         assert_eq!(*rendered.lock().unwrap(), [0]);
         assert_eq!(*dropped.lock().unwrap(), Some(thread::current().id()));
+    }
+
+    /// Picks ride out with the frame that asks them, each at the pixel of the view under it, and
+    /// their answers come home with the frame into the context, for one frame: one at the view's
+    /// top left pixel, which the stand-in answers 0, as no entity; one inside, with the entity
+    /// whose ID the stand-in gives it; and those outside the view, past each of its edges and at
+    /// no number at all, `None`. A frame asks at most as many as a frame reads back, and the next
+    /// asks again.
+    #[test]
+    fn picks_ride_out_with_their_frame_and_their_answers_come_home_with_it() {
+        let mut render = RenderThread::start(Fake::default()).unwrap();
+        let mut cx = Context::seeded(0);
+        let view = Viewport {
+            origin: [10, 20],
+            size: [100, 50],
+        };
+        let pick = |cx: &mut Context, at| cx.pick(at).expect("fewer than a frame reads back");
+        let corner = pick(&mut cx, [10.0, 20.9]);
+        // At the view's pixel [2, 3].
+        let inside = pick(&mut cx, [12.7, 23.2]);
+        let outside = [
+            [9.9, 30.0],
+            [110.0, 30.0],
+            [50.0, 19.5],
+            [50.0, 70.0],
+            [f64::NAN, 30.0],
+        ]
+        .map(|at| pick(&mut cx, at));
+        hand_off(&mut render, &mut cx, view, MainUi::none(), Vec::new());
+        assert!(cx.picked().is_empty(), "nothing has come back yet");
+        let presented = take_back(&mut render, &mut cx, Duration::ZERO);
+        assert_eq!(presented.expect("a frame"), Some(true));
+        let mut answers = vec![(corner, None), (inside, EntityId::new(2 | 3 << 32))];
+        answers.extend(outside.map(|pick| (pick, None)));
+        assert_eq!(cx.picked(), answers);
+        // For one frame.
+        hand_off(&mut render, &mut cx, view, MainUi::none(), Vec::new());
+        take_back(&mut render, &mut cx, Duration::ZERO).expect("a frame");
+        assert!(cx.picked().is_empty(), "{:?}", cx.picked());
+        for _ in 0..MAX_PICKS {
+            pick(&mut cx, [50.0, 30.0]);
+        }
+        assert_eq!(cx.pick([50.0, 30.0]), None, "past what a frame reads back");
+        hand_off(&mut render, &mut cx, view, MainUi::none(), Vec::new());
+        assert!(cx.pick([50.0, 30.0]).is_some(), "the next frame's");
+        take_back(&mut render, &mut cx, Duration::ZERO).expect("a frame");
     }
 
     /// A texture change, as egui hands one out.

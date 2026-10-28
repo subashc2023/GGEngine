@@ -442,6 +442,37 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   exited cleanly. After the review's fixes, the axis buttons showed square, a translation's row
   fitting the Inspector as the editor first lays it out; a click at the right end of a "…" opened
   its menu; and Save As wrote the same scene, its IDs aside, through the new writing.
+- **Picking and transform handles** (2026-10-28): every draw into the game's view writes its ID
+  beside its color, into an image of IDs the view's size that each frame clears to 0: the world's
+  draws their entities' IDs, a layer's own 0. Every view shader writes it, at location 1, from the
+  IDs whose address the push constants gain, which the shader check requires; the engine's sprite
+  and blended model shaders discard what's fully transparent, so that picks see through it. The
+  frame that renders the view reads back up to 64 of its pixels after its pass, and the frame two
+  later finds them as it reuses its resources: `Context::pick` asks which entity the view shows at
+  a pixel and gives a ticket, or none past 64 a frame, and `Context::picked` gives the answers,
+  four frames later. `World::pose` gives an entity's matrix and facing as drawing composes them,
+  and `Ui::viewport` the view in pixels. Another layer picks and sets fields through the
+  Inspector's link, `Inspector::link`, a gesture's sets of one field one edit. Keys reach the
+  view while the cursor is over it, or since a press on it, unless one of egui's widgets has focus
+  or a modal is open; modifier keys reach it from anywhere. In the editor a click in the view
+  picks, and Q, W, E and R choose Select, Move, Rotate and Scale, whose handles, the same size on
+  screen at any distance, move, turn and scale what's picked along its own axes as drawing places
+  them, under a mirrored parent too, and the nearest square ones under a parent that skews them,
+  the command key snapping to half units, 45° and halves; none grabs while the camera eases. Unit
+  tests check the IDs read back two frames later; the picks' bookkeeping through frames that don't
+  begin and past what a frame reads, and the clear, which a draw in odd frames alone shows; the
+  shader check's refusals; picks riding out with their frame and their answers coming home, and
+  the cap; the link's gestures, its sets kept in the order they came, its picks and its refusals;
+  keys and modifiers routed; the pose against drawing, bit for bit; the handles' rays, hits, drags
+  and snapping in both projections, under turned, uneven, skewing, mirrored and tiny parents, and
+  how drags end; and the editor's tool keys, camera arbitration and picks. The `frames` test picks
+  every frame and, headless, gets each answer in the frame it's due, allocating nothing; windowed,
+  it allocated nothing either. The GPU tests pass on the RTX 4090 and the AMD iGPU. By hand on the
+  RTX 4090: clicks picked Red, Green and Blue, and one on nothing unpicked; W showed Move's
+  handles, and a drag of its X arrow moved Green 120 px, 1.451 units; E over the view, with a
+  panel holding the keys, chose Rotate; ring Z turned Blue about 45°, and Edit > Undo took the
+  drag back in one step; R and a 60 px drag of Scale's X arrow set 2.96; W with Ctrl held snapped
+  a 1.21-unit move to 1; and the editor exited cleanly under validation.
 
 ## Now: the editor's next milestone, or Phase 5's first
 
@@ -533,7 +564,10 @@ Defects left in because fixing them costs more than they do are in [DEFECTS.md](
 | Depth other than what a shader's blend implies: draws that ignore it, as gizmos and overlays do, a skybox that tests it without writing it, decals, and sprites cut out by their alpha that write it | Each with its first user |
 | Depth bias, whose sign flips with depth reversed | Phase 6, with shadow maps |
 | A far plane for perspective, as glTF's `zfar` gives; it sees out to infinity | A glTF camera with one, or Phase 8's culling |
-| Keeping the view's depth past its pass, to sample: each frame clears it and doesn't store it | Post-processing, picking, or the tool API's captures |
+| Keeping the view's depth past its pass, to sample: each frame clears it and doesn't store it | Post-processing, finding the point under the cursor, or the tool API's captures |
+| Rendering the view's IDs only in frames that pick: every frame renders them, since a pass without them takes pipelines made without them, a second for each shader, or `VK_EXT_dynamic_rendering_unused_attachments` | A profile shows them |
+| Answering picks sooner: a frame's picks are read as the frame two after it begins, after its wait for the GPU, so an answer comes four frames after its pick, about 67 ms at 60 Hz; reading them as soon as the timeline says the GPU has rendered them would win a frame or so | Picking that the latency shows in, such as highlighting what's under the cursor |
+| More than 64 picks a frame: `Context::pick` gives none past them, as many as a frame reads back | A layer picks more at once, such as many cursors or touches |
 | A depth format for a device without D32_SFLOAT depth, which the engine refuses (`gpu.no_device`) | A target device lacks it |
 | Raw mouse motion and a grabbed cursor, for looking about past the window's edges: the fly camera controller and the editor's camera look by the cursor's moves while the right button is held | A game looks with the mouse, as first-person games do |
 | Mipmaps and anisotropic filtering for the textures layers add: `add_texture` and `add_sprite_sheet` give them one level, sampled without anisotropy, so one drawn smaller than it is shimmers. A sprite sheet's cells, packed edge to edge, will then mix together at the smaller levels and under anisotropy, which reads past the texels the sprite shader keeps to, and need space around each cell or an array layer each | A game draws its own textures smaller than they are |
@@ -548,7 +582,7 @@ Defects left in because fixing them costs more than they do are in [DEFECTS.md](
 | Keeping a model's reads inside its folder where symlinks there lead out of it: its URIs can't leave the folder, but a link inside it is followed | Games load models from sources they don't trust, such as players' mods |
 | Mip levels made on the CPU, on the render thread, as the frame that uploads a model's texture renders: a 2,048 by 2,048 texture's take about 0.3 s of that frame in a debug build | Phase 7, which cooks them; or blits on the GPU, if a hitch shows first |
 | Layers making textures from their own pixels; `Textures::add` takes pixels, but `Context` adds only PNGs and JPEGs | A game makes its own textures |
-| Instances' transforms and parameters, and the UI's vertices, indices and texture changes, reach the GPU through the frame's arena, which merges the buffers it grew into, holding two to three times the largest frame for each frame in flight, in memory the CPU writes: by its growth rule, about 20 MB each for 100,000 sprites, which use 10.4 MB a frame | Phase 7, with the GPU's memory budget |
+| Instances' transforms, IDs and parameters, and the UI's vertices, indices and texture changes, reach the GPU through the frame's arena, which merges the buffers it grew into, holding two to three times the largest frame for each frame in flight, in memory the CPU writes: by its growth rule, about 20 MB each for 100,000 sprites, which use 11.2 MB a frame | Phase 7, with the GPU's memory budget |
 | A frame's copies through a transfer queue start only once it's submitted, after its passes are recorded, and the frame waits for them | A profile shows a frame waiting for its uploads |
 | Staging and the frame's arena kept within the device's `maxMemoryAllocationSize` and `maxBufferSize`, each at least 1 GiB: both grow by doubling, each staging buffer an allocation of its own, so a frame that adds more than that at once fails, which ends the run | A frame adds that much at once, or Phase 7, with the GPU's memory budget |
 | Images' sizes checked against the device's `maxImageDimension2D` and `maxFramebufferWidth` and `Height` as they're made; a pass checks its viewport against the device's limits, which an image past those exceeds only if it's past `maxViewportDimensions` too | A device's limits fall below a window's size |
@@ -558,20 +592,27 @@ Defects left in because fixing them costs more than they do are in [DEFECTS.md](
 | The editor drawing the world's cameras in its view, as outlines of what each sees | The editor shows a game's cameras |
 | Moving the world's camera from the editor's view, as Unreal's Pilot and Blender's Lock Camera to View do: a move of the editor's camera goes back to its own | Someone frames a camera's shot from the view |
 | A scene or prefab loaded with a primary camera making the world's other cameras not primary, as an operation's does: a load sets fields as they're written, and of several primary, the view sees through the lowest ID's, warning | A prefab brings a camera of its own, as a player's would |
-| Picking what's under the cursor: layers know where the view is (`Context::view`) and the cursor, in the same pixels, and the editor's camera finds the point under the cursor on a plane itself, but nothing finds what's drawn there; and the orthographic camera controller zooms about the view's center | Something picks with the mouse, or a game zooms toward the cursor |
+| Finding the point in the world under the cursor, as `Context::pick` finds the entity there: the editor's camera finds one on a plane itself, but nothing reads the view's depth; and the orthographic camera controller zooms about the view's center | Something places what it adds at the cursor's depth, or a game zooms toward the cursor |
 | A dockspace's view in a window of its own: it docks and floats over the main window alone, since only the main window's input reaches the layers, and its image is made at the main window's scale | The editor shows the game on a display of its own |
-| Showing which panel has the keys, such as an outline around the view while it has focus | Someone misses it, or Phase 9's editor |
+| Showing whether keys reach the view, such as an outline around it while they do: from a press on it, or with the cursor over it | Someone misses it, or Phase 9's editor |
 | Gamepads following a dockspace's view: they reach the layers whichever panel has the keys, as they do in games | The editor binds a pad, or a panel takes a pad's input |
 | Keeping a click that closes a menu from what's under it: it reaches the game's view there too, central or in a panel | It surprises someone, or Phase 9's editor |
-| Hotkeys for the editor's tools: Q, W, E and R stay free for them while the view sees through the editor's camera, since that camera's keys act only while the right button is held; seeing through the world's camera, W, A, S and D are the world's cameras' | Phase 9's editor, with gizmos that move, turn and scale |
-| The editor's Select tool picking what's under the cursor, and F framing what's picked: Select does nothing yet | Picking |
+| F framing what's picked, the editor's camera easing to see it whole | Someone frames often, or Phase 9's editor |
+| The handles along the world's axes as well as along the entity's own, as other editors' toggles have it: they turn with what's picked | Someone moves things along the world's axes |
+| Snapping steps of one's own: the command key snaps to half units, 45° and halves | Someone needs other steps |
+| The amount a drag of the handles has moved, turned or scaled, shown beside them as it goes | Someone wants exact drags without the Inspector |
+| Turning freely, as a trackball, by a drag inside Rotate's rings | Someone misses it |
+| The handles where the picked entity draws between ticks: they show where the latest tick left it, up to a tick ahead of where a moving entity draws | Someone edits something as it moves |
+| The handles along a skewed entity's axes: under a parent that scales unevenly, a turned entity's drawn axes aren't square to each other, and the handles show the nearest square ones, so their drags follow the cursor only roughly there; following the skew takes elliptical rings, and Scale along the drawn axis | Someone edits under a parent scaled unevenly |
+| An entity's own negative scale flipping its handles, as a parent's does: they run along its rotation alone, so a sprite flipped by its scale shows its X arrow away from where its +X draws | A game flips sprites by their scale, and the handles confuse someone |
+| Picking the next entity down where several overlap, by clicking again, and highlighting what a click would pick as the cursor goes over it | Someone picks what's hidden, or misses the highlight |
 | Locking the editor's view against turning, as Unity's padlock does | Someone turns a 2D view by accident |
 | Switching to orthographic on an axis snap, as Blender's and Godot's gizmos do by default: the editor switches projection only when asked | Someone wants it |
 | The wheel setting the editor's fly speed while the right button is held, as Unity's, Unreal's and Godot's do: it dollies then too, and flying goes at the distance a second | Flying wants another speed |
 | Keeping the editor's camera, tool and grid between runs, as the dock keeps its layout | Someone misses them |
 | Easing the editor's switch between projections, which jumps | It jars someone |
 | A slot between the world's opaque and blended draws for the editor's grid, so that what's in front of its plane hides it and it shows over what's behind: it draws first, a backdrop that everything covers | The editor shows a world |
-| The editor's camera seeing Alt held from before the view had the keys: keys reach the layers only while the view has them, so Alt counts from a press after | Someone holds Alt first |
+| A modifier key held from before the layers could see it: from a press while one of egui's widgets had focus, which egui keeps, or while another window had the keyboard, such as a torn-off panel's or another app's, it counts from its next press, or from its first repeat where the OS repeats modifiers, as Windows does | Someone holds one first |
 | A rotating cursor for the editor's Orbit tool: egui has none, so it shows a hand | egui adds one, or someone misses it |
 | The lines across the editor's perspective grid reaching the horizon: they fade out some 65 to 200 camera heights away, since its f32 coordinates hold four decades of spacing; the lines toward the horizon go on | Someone misses them |
 | Cameras far from the origin: their matrices are f32, so 12,345 units out a view a tenth of a unit across moves in steps of about 1% | A game's world is that large |
@@ -649,11 +690,11 @@ Defects left in because fixing them costs more than they do are in [DEFECTS.md](
 | Drag speeds as hints; the Inspector picks them from a field's bounds and kind | A field drags too coarsely or too finely |
 | The Inspector setting only the part that changed of a rotation, and of a vector inside an option or a variant: it sets them whole, as the panel last read them, after the ticks of the layers below it, so that turning one angle of something that spins, as the sandbox's triangle does, holds the others where they were, and an undo takes back the spin made since too | Someone edits a rotation, or a vector held so, as it moves |
 | Paths resolved once and kept, for sets made again and again | A profile |
-| Picking an entity for a field, a parent or a child picked by clicking it, and picking in the view; the Entities panel scrolling to an entity found, or to a root that an add or a remove moved to the end of another table, and so of the tree's roots; entities are shown by their names, where they have one, and their IDs, and found by an ID pasted in | Picking in the view, or Phase 9's scene tree |
+| Picking an entity for a field, a parent or a child picked by clicking it; the Entities panel scrolling to an entity found or picked in the view, or to a root that an add or a remove moved to the end of another table, and so of the tree's roots; entities are shown by their names, where they have one, and their IDs, and found by an ID pasted in | Phase 9's scene tree |
 | Finding an entity by its name: the Find field takes an ID | A world names more entities than the Entities panel shows at once |
 | Entities rows of one line: a row whose name has a line break is as many lines tall, though the list skips the rows out of view as though each were one line tall, as egui's `show_rows` takes them; a row wider than its panel stays one line, cut off at its edge; and an empty name shows as it is | A world of more entities than the panel shows, or names from players |
 | World transforms stored and propagated after the ticks, with change detection; drawing computes each child's from its ancestors, every frame, as the latest tick left them, for its z, and blended between ticks, to draw it | Physics, or a profile showing the walks up the hierarchy |
-| A world matrix for game code, and where an entity draws between ticks, for a layer's viewpoint that follows it, which would otherwise judder against it, since layers read the world up to a tick ahead of where it draws; the engine's drawing and the world's camera compute their own | A layer's viewpoint that follows an entity, or a system that needs a child's place in the world |
+| Where an entity draws between ticks, for a layer's viewpoint that follows it, which would otherwise judder against it, since layers read the world up to a tick ahead of where it draws: `World::pose` gives where the latest tick left it, and the engine's drawing and the world's camera compute their own | A layer's viewpoint that follows an entity |
 | Turning interpolation off for an entity or a subtree, so that it draws at its ticks; every entity draws between them | A game wants something drawn at its ticks |
 | Rotations of more than half a turn a tick, which draw the shorter way round, the other way; Hermite easing from velocities would draw them, and curves between ticks | Something spins that fast, or a curve between ticks shows |
 | Drawing an entity despawned in a tick on its way there until the next: it vanishes up to a tick before it reaches where it stopped | A game's despawns show it, as bullets vanishing short of what they hit |

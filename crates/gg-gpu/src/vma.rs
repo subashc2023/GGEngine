@@ -97,7 +97,7 @@ pub enum Memory {
     /// mapped, lives in the CPU's memory, and has memory of its own, so that freeing it gives the
     /// memory back.
     Staging,
-    /// The GPU writes it and the CPU reads it back. It stays mapped.
+    /// The GPU writes it and the CPU reads it back. It stays mapped, and has memory of its own.
     Readback,
 }
 
@@ -337,10 +337,15 @@ fn creation(memory: Memory) -> VmaAllocationCreateInfo {
                 | VmaAllocationCreateFlagBits::VMA_ALLOCATION_CREATE_MAPPED_BIT
                 | VmaAllocationCreateFlagBits::VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT,
         ),
+        // Dedicated, as staging is: where read-back has a memory type to itself, a cached one the
+        // GPU's and the uploads' memory don't use, as on an RTX 4090 or AMD's integrated Radeon,
+        // though not on lavapipe, whose one type holds everything, the kibibyte the frames read
+        // IDs back into would otherwise hold a block of VMA's, 32 MiB, for the run.
         Memory::Readback => (
             VmaMemoryUsage::VMA_MEMORY_USAGE_AUTO,
             VmaAllocationCreateFlagBits::VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT
-                | VmaAllocationCreateFlagBits::VMA_ALLOCATION_CREATE_MAPPED_BIT,
+                | VmaAllocationCreateFlagBits::VMA_ALLOCATION_CREATE_MAPPED_BIT
+                | VmaAllocationCreateFlagBits::VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT,
         ),
     };
     VmaAllocationCreateInfo {

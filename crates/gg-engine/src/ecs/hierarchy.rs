@@ -4,14 +4,16 @@
 //! and [`World::despawn`]; as a scene's entities are spawned with theirs, by
 //! [`World::load_scene`] and [`World::place_prefab`]; and through operations, as a create spawns
 //! an entity with its parent, which its undo takes out again, and a delete takes a subtree out,
-//! which its undo puts back.
+//! which its undo puts back. Where its ancestors carry an entity is its pose.
 
 use std::iter;
 
+use gg_core::math::{Mat4, Quat};
 use gg_core::{Error, Result};
 
 use super::table::Table;
 use super::{Component, Entity, World};
+use crate::Transform;
 use crate::reflect::Reflect;
 
 /// The entity this one is a child of, which carries it along: its
@@ -77,6 +79,31 @@ pub struct Parent(pub Entity);
 
 // And not `Writable`, so that only the world changes it.
 impl Component for Parent {}
+
+/// Where an entity is in the world, as [`World::pose`] gives it, as the latest tick left it: where
+/// frames draw it once they've drawn up to the tick, rather than where they draw it on the way.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pose {
+    /// The matrix from its own space to the world's: its [`Transform`]'s, then each of its
+    /// ancestors' in turn up to its root, as drawing carries it, bit for bit. An ancestor without
+    /// a transform carries its children as though its transform were the identity, at its parent's
+    /// origin, unturned and unscaled, and an entity without one is placed so too. Its last column
+    /// is where its origin is.
+    pub matrix: Mat4,
+    /// Which way it faces: its own rotation turned by each of its ancestors' in turn, their scales
+    /// aside, as the world's camera faces from it, so that a mirrored ancestor mirrors where it is
+    /// but not which way it faces. A root's is its own; a child's is normalized, since each product
+    /// of unit quaternions rounds a little off a unit.
+    pub rotation: Quat,
+}
+
+impl Pose {
+    /// The world's origin, unturned, at its own size: where a root's parent would be.
+    pub const IDENTITY: Self = Self {
+        matrix: Mat4::IDENTITY,
+        rotation: Quat::IDENTITY,
+    };
+}
 
 /// No slot.
 const NONE: u32 = u32::MAX;
@@ -186,6 +213,39 @@ impl World {
     pub fn parent(&self, entity: Entity) -> Result<Option<Entity>> {
         self.locate(entity)?;
         Ok(self.parent_of(entity.index))
+    }
+
+    /// Where `entity` is in the world, as the latest tick left it, as [`Pose`] says: such as for a
+    /// tool's handles, which show where it is and which way it faces.
+    ///
+    /// Fails with `ecs.no_entity` if it isn't alive.
+    pub fn pose(&self, entity: Entity) -> Result<Pose> {
+        self.locate(entity)?;
+        let own = self.get::<Transform>(entity).copied();
+        let own = own.unwrap_or(Transform::IDENTITY);
+        let Some(parent) = self.parent_of(entity.index) else {
+            return Ok(Pose {
+                matrix: own.matrix(),
+                rotation: own.rotation,
+            });
+        };
+        let transform = self.component::<Transform>();
+        let start = (own.matrix(), own.rotation);
+        let (matrix, rotation) =
+            self.lineage(Parent(parent))
+                .fold(start, |(at, rotation), (_, table, row)| {
+                    match transform.and_then(|id| table.column::<Transform>(id)) {
+                        Some(transforms) => {
+                            let ancestor = &transforms[row];
+                            (ancestor.matrix() * at, ancestor.rotation * rotation)
+                        }
+                        None => (at, rotation),
+                    }
+                });
+        Ok(Pose {
+            matrix,
+            rotation: rotation.normalize(),
+        })
     }
 
     /// Removes `entity`, its components and its descendants, children before their parents.
@@ -599,5 +659,61 @@ pub(super) mod tests {
             assert_eq!(world.get::<Parent>(child), Some(&Parent(parent)), "{child}");
         }
         check_links(&world);
+    }
+
+    /// An entity's pose is where drawing draws it, bit for bit, while it doesn't move: a child under
+    /// ancestors that turn and scale unevenly, one mirrored and one without a transform; its origin
+    /// and the way it faces are where the world's camera would see from. A root's is its
+    /// transform's, and an entity without one is at its parent's origin.
+    #[test]
+    fn a_pose_is_where_drawing_draws_an_entity() {
+        use gg_core::math::Vec3;
+        use gg_renderer::{Draws, Sprite};
+
+        use crate::draw::{self, Poses, Scratch};
+        use crate::interpolation::Past;
+
+        let placed = |x: f32, turn: f32, scale: [f32; 3]| Transform {
+            translation: Vec3::new(x, 0.25 * x, -0.5 * x),
+            rotation: Quat::from_rotation_z(turn) * Quat::from_rotation_x(0.5 * turn),
+            scale: Vec3::from(scale),
+        };
+        let mut world = World::default();
+        let root_at = placed(1.5, 0.7, [2.0, 0.5, 1.5]);
+        let root = world.spawn(root_at);
+        let bare = world.spawn(Mark(0));
+        let middle_at = placed(-0.75, -1.1, [0.5, 1.5, -1.0]);
+        let middle = world.spawn(middle_at);
+        let child_at = placed(0.3, 0.4, [1.0, 3.0, 1.0]);
+        let child = world.spawn((child_at, Sprite::default()));
+        for (child, parent) in [(bare, root), (middle, bare), (child, middle)] {
+            world.set_parent(child, Some(parent)).expect("no cycle");
+        }
+        let pose = world.pose(child).expect("alive");
+        let mut draws = Draws::default();
+        let past = Past::default();
+        draw::draw_world(&world, &past, 1.0, &mut draws, &mut Scratch::default());
+        // Its one sprite's transform, which `Debug` shows to the bit, a zero's sign too.
+        let drawn = format!("{draws:?}");
+        let matrix = format!("transforms: [{:?}]", pose.matrix);
+        assert!(drawn.contains(&matrix), "{matrix} in {drawn}");
+        let at = world.location(child).expect("alive");
+        let poses = Poses::new(&world, &past, 1.0).expect("transforms");
+        let (position, rotation) = poses.pose(at.table as usize, at.row as usize);
+        let bits = |floats: &[f32]| floats.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        let origin = pose.matrix.w_axis.truncate();
+        assert_eq!(bits(&origin.to_array()), bits(&position.to_array()));
+        assert_eq!(bits(&pose.rotation.to_array()), bits(&rotation.to_array()));
+        let root_pose = Pose {
+            matrix: root_at.matrix(),
+            rotation: root_at.rotation,
+        };
+        assert_eq!(world.pose(root).expect("alive"), root_pose);
+        let bare_pose = world.pose(bare).expect("alive");
+        assert_eq!(bare_pose.matrix, root_at.matrix());
+        assert!(bare_pose.rotation.abs_diff_eq(root_at.rotation, 1e-6));
+        world.despawn(root).expect("alive");
+        let error = world.pose(child).expect_err("despawned");
+        assert_eq!(error.code(), "ecs.no_entity");
     }
 }

@@ -355,7 +355,7 @@ enum Kind {
 }
 
 /// A row drawn: its entity's ID, which orders it among the rows of its batch, or of its z and kind,
-/// and where it is.
+/// and which it draws with, and where it is.
 struct Item {
     id: EntityId,
     /// Its segment, among the scratch's.
@@ -378,7 +378,8 @@ struct Group {
 /// and 0.0 one z, at one z sprites under meshes; each batch and each z in the order of their
 /// entities' IDs, so that entities that overlap at one depth keep how they stack as others come and
 /// go. Each draws `alpha` of the way from what `past` has it draw from to where the tick left it,
-/// while it draws between ticks; at 1, where the tick left it.
+/// while it draws between ticks; at 1, where the tick left it. Each draw's ID is its entity's, which
+/// picks read back where it shows.
 /// A child draws where its ancestors carry it, by its world matrix, its transform's and each of
 /// theirs drawn so, which it computes into `scratch` for each child once a frame; roots, in tables
 /// without a [`Parent`], draw by their transforms alone, which those that draw between ticks blend
@@ -524,7 +525,7 @@ pub(crate) fn draw_world(
                     let found = found(&mut sprites_at, item.segment, columns);
                     let (transforms, sprites, drawn) = found;
                     let row = item.row as usize;
-                    (matrix(transforms, drawn, row), sprites[row])
+                    (matrix(transforms, drawn, row), sprites[row], item.id.get())
                 }));
             }
             Kind::Opaque | Kind::Mesh => {
@@ -538,7 +539,8 @@ pub(crate) fn draw_world(
                     let found = found(&mut meshes_at, item.segment, columns);
                     let (transforms, meshes, drawn) = found;
                     let row = item.row as usize;
-                    draws.push_draw(matrix(transforms, drawn, row), &meshes[row]);
+                    let at = matrix(transforms, drawn, row);
+                    draws.push_draw(at, &meshes[row], item.id.get());
                 }
             }
         }
@@ -770,6 +772,7 @@ fn found<T: Copy>(
 #[cfg(test)]
 mod tests {
     use std::f32::consts::FRAC_PI_2;
+    use std::iter;
     use std::path::Path;
 
     use gg_core::math::{Quat, Vec3, Vec4};
@@ -780,6 +783,12 @@ mod tests {
 
     #[derive(Clone, Copy, Component)]
     struct Marked;
+
+    /// Draws `sprite` of entity `id` into `draws`, where `matrix` places it, as drawing the world
+    /// does: with the entity's ID.
+    fn sprite_of(draws: &mut Draws, matrix: Mat4, sprite: Sprite, id: EntityId) {
+        draws.extend_sprites(iter::once((matrix, sprite, id.get())));
+    }
 
     /// Where a scratch's buffers are, and how big, which drawing again without taking more memory
     /// leaves as they were.
@@ -894,10 +903,15 @@ mod tests {
             a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2))
         });
         let mut want = Draws::default();
+        let id = |entity: &Entity| world.id(*entity).expect("alive");
         for expected in &expected {
             match expected {
-                Expected::Sprite(_, at, sprite) => want.push_sprite(at.matrix(), *sprite),
-                Expected::Mesh(_, at, mesh) => want.push_draw(at.matrix(), mesh),
+                Expected::Sprite(entity, at, sprite) => {
+                    sprite_of(&mut want, at.matrix(), *sprite, id(entity));
+                }
+                Expected::Mesh(entity, at, mesh) => {
+                    want.push_draw(at.matrix(), mesh, id(entity).get());
+                }
             }
         }
         let mut draws = Draws::default();
@@ -934,11 +948,12 @@ mod tests {
         sprites.sort_by_key(|&(entity, ..)| world.id(entity));
         meshes.sort_by_key(|&(entity, ..)| world.id(entity));
         let mut want = Draws::default();
-        for &(_, at, sprite) in &sprites {
-            want.push_sprite(at.matrix(), sprite);
+        let id = |entity: Entity| world.id(entity).expect("alive");
+        for &(entity, at, sprite) in &sprites {
+            sprite_of(&mut want, at.matrix(), sprite, id(entity));
         }
-        for &(_, at, mesh) in &meshes {
-            want.push_draw(at.matrix(), &mesh);
+        for &(entity, at, mesh) in &meshes {
+            want.push_draw(at.matrix(), &mesh, id(entity).get());
         }
         let drawn = |world: &World, scratch: &mut Scratch| {
             let mut draws = Draws::default();
@@ -976,9 +991,9 @@ mod tests {
         };
         let mut world = World::default();
         let low = placed(1.0, 0.3, 0.0, [1.0; 2]);
-        world.spawn((low, sprite(1.0)));
+        let lowest = world.spawn((low, sprite(1.0)));
         let high = placed(2.0, 0.5, 0.0, [1.0; 2]);
-        world.spawn((high, sprite(2.0)));
+        let highest = world.spawn((high, sprite(2.0)));
         let pivot_at = placed(0.5, 0.4, 0.7, [2.0, 0.5]);
         let pivot = world.spawn(pivot_at);
         let grand_at = placed(0.25, 0.02, -1.1, [0.5, 1.5]);
@@ -1007,26 +1022,30 @@ mod tests {
 
         // Back to front: 0.3, 0.41, 0.43, 0.44, 0.445, 0.45 and 0.5 in the world, each child's
         // matrix its own, then each ancestor's in turn; at one z, sprites under meshes, each in the
-        // order of their IDs.
-        let mut twins = [0, 1].map(|i| (world.id(twins[i]), twins_at[i]));
+        // order of their IDs, which they draw with.
+        let id = |entity: Entity| world.id(entity).expect("alive");
+        let [lowest, middle_id, grand, meshed, kid, highest] =
+            [lowest, middle, grand, meshed, kid, highest].map(id);
+        let mut twins = [0, 1].map(|i| (id(twins[i]), twins_at[i]));
         twins.sort_by_key(|&(id, _)| id);
         let [pivot, middle] = [pivot_at.matrix(), middle_at.matrix()];
-        let twins = twins.map(|(_, at)| pivot * (middle * at.matrix()));
+        let twins = twins.map(|(id, at)| (id, pivot * (middle * at.matrix())));
         let mut want = Draws::default();
-        want.push_sprite(low.matrix(), sprite(1.0));
-        want.push_sprite(pivot * middle, sprite(4.0));
-        want.push_sprite(pivot * (middle * grand_at.matrix()), sprite(3.0));
-        let meshed = pivot * (middle * mesh_at.matrix());
-        want.push_sprite(meshed, sprite(5.0));
-        want.push_draw(meshed, &mesh);
-        for twin in twins {
-            want.push_sprite(twin, sprite(7.0));
+        sprite_of(&mut want, low.matrix(), sprite(1.0), lowest);
+        sprite_of(&mut want, pivot * middle, sprite(4.0), middle_id);
+        let grandchild = pivot * (middle * grand_at.matrix());
+        sprite_of(&mut want, grandchild, sprite(3.0), grand);
+        let meshed_at = pivot * (middle * mesh_at.matrix());
+        sprite_of(&mut want, meshed_at, sprite(5.0), meshed);
+        want.push_draw(meshed_at, &mesh, meshed.get());
+        for (id, twin) in twins {
+            sprite_of(&mut want, twin, sprite(7.0), id);
         }
-        for twin in twins {
-            want.push_draw(twin, &mesh);
+        for (id, twin) in twins {
+            want.push_draw(twin, &mesh, id.get());
         }
-        want.push_sprite(pivot * kid_at.matrix(), sprite(6.0));
-        want.push_sprite(high.matrix(), sprite(2.0));
+        sprite_of(&mut want, pivot * kid_at.matrix(), sprite(6.0), kid);
+        sprite_of(&mut want, high.matrix(), sprite(2.0), highest);
         let mut scratch = Scratch::default();
         let mut draws = Draws::default();
         draw_world(&world, &Past::default(), 1.0, &mut draws, &mut scratch);
@@ -1241,20 +1260,21 @@ mod tests {
             ..Sprite::default()
         };
         let (near, far) = (at_x(17.0, 0.1), at_x(18.0, 0.0));
-        world.spawn((near, sprite(17.0)));
-        world.spawn((far, sprite(18.0)));
+        let nearer = world.spawn((near, sprite(17.0)));
+        let farther = world.spawn((far, sprite(18.0)));
         let blending_at = at_x(19.0, 0.15);
         let blending = MeshDraw::new(triangles[0], blended, Vec4::splat(19.0));
-        world.spawn((blending_at, blending));
+        let blender = world.spawn((blending_at, blending));
 
-        want.sort_by_key(|&(shader, mesh, entity, ..)| (shader, mesh, world.id(entity)));
+        let id = |entity: Entity| world.id(entity).expect("alive");
+        want.sort_by_key(|&(shader, mesh, entity, ..)| (shader, mesh, id(entity)));
         let mut expected = Draws::default();
-        for (.., at, draw) in &want {
-            expected.push_draw(*at, draw);
+        for &(_, _, entity, at, draw) in &want {
+            expected.push_draw(at, &draw, id(entity).get());
         }
-        expected.push_sprite(far.matrix(), sprite(18.0));
-        expected.push_sprite(near.matrix(), sprite(17.0));
-        expected.push_draw(blending_at.matrix(), &blending);
+        sprite_of(&mut expected, far.matrix(), sprite(18.0), id(farther));
+        sprite_of(&mut expected, near.matrix(), sprite(17.0), id(nearer));
+        expected.push_draw(blending_at.matrix(), &blending, id(blender).get());
         let mut draws = Draws::default();
         draw_world(
             &world,
@@ -1305,7 +1325,8 @@ mod tests {
         for &(entity, from) in &movers {
             let to = world.get::<Transform>(entity).expect("alive");
             let drawn = interpolation::between(&from, to, 0.3).matrix();
-            want.push_sprite(drawn, Sprite::default());
+            let id = world.id(entity).expect("alive");
+            sprite_of(&mut want, drawn, Sprite::default(), id);
         }
         let bits = |draws: &Draws| format!("{draws:?}");
         let one = between_ticks(&world, &mut past, 0.3, &mut Scratch::default());
@@ -1336,7 +1357,9 @@ mod tests {
             ..Transform::IDENTITY
         };
         let mut want = Draws::default();
-        want.push_sprite(halfway.matrix() * local.matrix(), Sprite::default());
+        let drawn = halfway.matrix() * local.matrix();
+        let id = world.id(child).expect("alive");
+        sprite_of(&mut want, drawn, Sprite::default(), id);
         assert_eq!(draws, want);
     }
 
@@ -1366,14 +1389,14 @@ mod tests {
             scale: Vec3::new(0.123, 0.123, 1.0),
         };
         let mut world = World::default();
-        world.spawn((still, sprite(1.0)));
-        world.spawn((signed, sprite(2.0)));
+        let stays = world.spawn((still, sprite(1.0)));
+        let zero = world.spawn((signed, sprite(2.0)));
         let passer = world.spawn((at_x(0.0, 0.375), sprite(3.0)));
         let mesh = MeshDraw::new(triangle, flat, Vec4::ONE);
         let meshed = world.spawn((at_x(0.0, 0.9), mesh));
         // Children of a parent that stays where it is, one passing the other's z.
         let parent = world.spawn(at_x(10.0, 0.0));
-        let [_, passing] = [(0.75, 30.0), (0.6875, 31.0)].map(|(z, n)| {
+        let [passed, passing] = [(0.75, 30.0), (0.6875, 31.0)].map(|(z, n)| {
             let child = world.spawn((at_x(0.0, z), sprite(n)));
             world.set_parent(child, Some(parent)).expect("alive");
             child
@@ -1401,24 +1424,27 @@ mod tests {
         // Bit for bit, which `Debug` shows of a zero's sign, and `==` doesn't.
         let bits = |draws: &Draws| format!("{draws:?}");
         let mut kept = Scratch::default();
+        let id = |entity: Entity| world.id(entity).expect("alive");
         for alpha in [0.3, 0.7] {
             // Back to front by the tick's z: the one at -0.0, the swarm at 0.1 in ID order, the
             // still one at 0.5, the passer at 0.625, the children at 0.75 and 0.8125, then the
             // mesh at 0.9.
             let mut want = Draws::default();
-            want.push_sprite(signed.matrix(), sprite(2.0));
-            for &(_, i) in &swarm {
+            sprite_of(&mut want, signed.matrix(), sprite(2.0), id(zero));
+            for &(entity, i) in &swarm {
                 let drifted = at_x(lerp(i, i + 4.0, alpha), 0.1);
-                want.push_sprite(drifted.matrix(), sprite(4.0 + i));
+                sprite_of(&mut want, drifted.matrix(), sprite(4.0 + i), id(entity));
             }
-            want.push_sprite(still.matrix(), sprite(1.0));
-            let passer = at_x(0.0, lerp(0.375, 0.625, alpha));
-            want.push_sprite(passer.matrix(), sprite(3.0));
+            sprite_of(&mut want, still.matrix(), sprite(1.0), id(stays));
+            let passer_at = at_x(0.0, lerp(0.375, 0.625, alpha));
+            sprite_of(&mut want, passer_at.matrix(), sprite(3.0), id(passer));
             let parent = at_x(10.0, 0.0).matrix();
-            want.push_sprite(parent * at_x(0.0, 0.75).matrix(), sprite(30.0));
-            let passing = at_x(0.0, lerp(0.6875, 0.8125, alpha));
-            want.push_sprite(parent * passing.matrix(), sprite(31.0));
-            want.push_draw(at_x(lerp(0.0, 4.0, alpha), 0.9).matrix(), &mesh);
+            let passed_at = parent * at_x(0.0, 0.75).matrix();
+            sprite_of(&mut want, passed_at, sprite(30.0), id(passed));
+            let passing_at = parent * at_x(0.0, lerp(0.6875, 0.8125, alpha)).matrix();
+            sprite_of(&mut want, passing_at, sprite(31.0), id(passing));
+            let meshed_at = at_x(lerp(0.0, 4.0, alpha), 0.9).matrix();
+            want.push_draw(meshed_at, &mesh, id(meshed).get());
             let draws = between_ticks(&world, &mut past, alpha, &mut kept);
             assert_eq!(bits(&draws), bits(&want), "at {alpha}, a scratch kept");
             let draws = between_ticks(&world, &mut past, alpha, &mut Scratch::default());

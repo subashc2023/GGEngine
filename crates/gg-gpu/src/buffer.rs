@@ -108,13 +108,36 @@ impl Buffer {
     ///
     /// If the buffer isn't mapped.
     pub(crate) fn read(&self) -> Result<Vec<u8>> {
+        let mut bytes = vec![0; self.size as usize];
+        self.read_into(0, &mut bytes)?;
+        Ok(bytes)
+    }
+
+    /// Copies the buffer's bytes from `offset` into `out`, as many as it holds, once the GPU has
+    /// finished writing them, without allocating.
+    ///
+    /// # Panics
+    ///
+    /// If the buffer isn't mapped, or the bytes run past its end.
+    pub(crate) fn read_into(&self, offset: u64, out: &mut [u8]) -> Result<()> {
         let mapped = self.allocation().mapped();
         assert!(!mapped.is_null(), "only mapped buffers can be read");
+        let end = offset.checked_add(out.len() as u64);
+        assert!(
+            end.is_some_and(|end| end <= self.size),
+            "{} bytes at {offset} overflow a buffer of {}",
+            out.len(),
+            self.size
+        );
         self.device
             .allocator()
             .invalidate(self.allocation(), &self.name)?;
-        // SAFETY: the mapping covers the whole buffer, and the GPU's writes are visible.
-        Ok(unsafe { std::slice::from_raw_parts(mapped, self.size as usize) }.to_vec())
+        // SAFETY: the mapping covers the whole buffer, the range was just checked, and the GPU's
+        // writes are visible; `out` is the caller's own, so it doesn't overlap the mapping.
+        unsafe {
+            std::ptr::copy_nonoverlapping(mapped.add(offset as usize), out.as_mut_ptr(), out.len());
+        }
+        Ok(())
     }
 }
 

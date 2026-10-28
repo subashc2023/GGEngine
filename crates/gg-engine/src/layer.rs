@@ -11,8 +11,8 @@ use bytemuck::NoUninit;
 use gg_core::math::{Mat4, Vec2};
 use gg_core::{Error, Result};
 use gg_renderer::{
-    Blend, Draws, Mesh, Meshes, Mipmaps, Shader, Shaders, Sprite, SpriteSheet, Texture, Textures,
-    Viewpoint, Viewport,
+    Blend, Draws, MAX_PICKS, Mesh, Meshes, Mipmaps, Shader, Shaders, Sprite, SpriteSheet, Texture,
+    Textures, Viewpoint, Viewport,
 };
 use tracing::info;
 
@@ -25,7 +25,7 @@ use crate::perf::Perf;
 use crate::recording::Recorder;
 use crate::reflect::{Reflect, Value};
 use crate::render_thread::Extracted;
-use crate::{Event, Input, MeshDraw, Model, Name, Transform, Ui, World};
+use crate::{EntityId, Event, Input, MeshDraw, Model, Name, Transform, Ui, World};
 
 /// A part of an app that the main loop drives. Every method has a default that does nothing,
 /// so a layer implements only what it uses; [`ui`](Self::ui)'s also tells the engine that the
@@ -163,6 +163,11 @@ impl Tick {
     }
 }
 
+/// A ticket for a pick, which [`Context::pick`] gives, and its answer in [`Context::picked`] comes
+/// back with. Each is the next of a count, so a later pick's is greater.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Pick(u64);
+
 /// What layers can see and change of the running app.
 pub struct Context {
     window: Option<Window>,
@@ -181,6 +186,16 @@ pub struct Context {
     draws: Draws,
     /// Where the game's view was as the last frame handed it off, while it had an area.
     view: Option<Viewport>,
+    /// The number of the next pick's ticket.
+    tickets: u64,
+    /// The picks asked this frame, at most [`MAX_PICKS`], each with where, in the main window's
+    /// pixels.
+    picks: Vec<(Pick, [f64; 2])>,
+    /// The picks the last frame handed off asked outside the view, which no frame reads: answered
+    /// `None` with the answers that come back next.
+    unseen: Vec<Pick>,
+    /// The answers that came back with the frame last taken back.
+    picked: Vec<(Pick, Option<EntityId>)>,
     world: World,
     /// What drawing the world sorts and computes, kept between frames.
     scratch: Scratch,
@@ -241,6 +256,10 @@ impl Context {
             textures: Textures::default(),
             draws: Draws::default(),
             view: None,
+            tickets: 0,
+            picks: Vec::new(),
+            unseen: Vec::new(),
+            picked: Vec::new(),
             world,
             scratch: Scratch::default(),
             past: Past::default(),
@@ -295,6 +314,38 @@ impl Context {
         self.view
     }
 
+    /// Asks which of the world's entities the game's view shows at `at`, in the main window's
+    /// physical pixels from its top left, as [`Input::cursor`] places the cursor, in the frame
+    /// being made: the one whose sprite or mesh draws on top at that pixel; and returns the ticket
+    /// its answer comes back with in [`picked`](Self::picked), or `None` once the frame has asked
+    /// 64, as many as a frame reads back. The answer comes four frames after the frame that asks,
+    /// about 67 ms at 60 Hz: the main thread runs a frame ahead of the render thread, which reads
+    /// the pixel back with a frame that the GPU finishes two frames later. It's `None` where the
+    /// view shows no entity: where a layer's own draw is on top, as [`draw`](Self::draw) and
+    /// [`draw_sprite`](Self::draw_sprite) draw, where the view shows its clear color, and outside
+    /// the view, which is answered sooner, with the next answers to come back. Where a sprite or a
+    /// blended model is fully transparent, which their shaders discard, the pick finds what's
+    /// behind it. A frame whose rendering had nothing to render into, as when the window's
+    /// swapchain had no image to give, leaves its picks to the next that renders, which reads them
+    /// by what it shows. Replays, which render nothing, answer none.
+    pub fn pick(&mut self, at: [f64; 2]) -> Option<Pick> {
+        if self.picks.len() == MAX_PICKS {
+            return None;
+        }
+        let pick = Pick(self.tickets);
+        self.tickets += 1;
+        self.picks.push((pick, at));
+        Some(pick)
+    }
+
+    /// The answers that came back with the frame the main loop last took back from the render
+    /// thread: each a ticket that [`pick`](Self::pick) gave, with the entity the view showed at its
+    /// pixel, or `None`. Each is here for one frame, until the answers that come back with the
+    /// next take its place, after that frame's updates and UI; the entity may have gone since.
+    pub fn picked(&self) -> &[(Pick, Option<EntityId>)] {
+        &self.picked
+    }
+
     /// Compiles the Slang shader at `path` for layers to draw meshes of vertex type `V` with from
     /// then on, which takes parameters of type `P` with each draw, such as a color or a texture:
     /// `()` for none. `blend` says how its color goes over what's drawn before it, such as
@@ -303,12 +354,7 @@ impl Context {
     /// writes its depth too, so that what's behind it, drawn later, doesn't show over it, while one
     /// that blends doesn't, so that what's behind it shows through it. `name` names it in errors
     /// and GPU captures. The shader keeps to the contract that [`gg_renderer::Shaders::add`]
-    /// describes, which the engine checks: entry points `vertex_main` and `fragment_main`;
-    /// instanced draws, each run of consecutive draws of one mesh with the shader being one, with
-    /// push constants that hold the matrix from the world to clip space and the addresses of the
-    /// vertices, which it reads as `V` is laid out, of the instances' transforms, and of their
-    /// parameters, which it reads as `P` is; and textures sampled from the bindless set by the
-    /// handles in its parameters.
+    /// describes, which the engine checks.
     ///
     /// In a development build's windowed run, the shader compiles again as its file or a file it
     /// includes changes, and the next frame draws with it; a change that doesn't compile, or
@@ -441,7 +487,8 @@ impl Context {
     /// sees it; the shader gets `params`. The view is the main window's central area, which the
     /// panels dock around, or the panel that [`App::view_panel`](crate::App::view_panel) names.
     /// Consecutive draws of one mesh with one shader render as one instanced draw, whatever their
-    /// transforms and parameters, so a frame of many takes few draws on the GPU.
+    /// transforms and parameters, so a frame of many takes few draws on the GPU. It's of no
+    /// entity, so a [pick](Self::pick) where it's on top finds none.
     pub fn draw<V, P: NoUninit>(
         &mut self,
         mesh: Mesh<V>,
@@ -455,6 +502,7 @@ impl Context {
     /// Draws `sprite` this frame, where `transform` places it in the world, over the meshes drawn
     /// before it but where an opaque one is nearer, in the game's view as the camera sees it.
     /// Unscaled, a sprite is a unit square around the transform's translation, as [`Sprite`] says.
+    /// It's of no entity, so a [pick](Self::pick) where it's on top finds none.
     pub fn draw_sprite(&mut self, transform: Mat4, sprite: Sprite) {
         self.draws.push_sprite(transform, sprite);
     }
@@ -529,8 +577,10 @@ impl Context {
     /// Fills in `frame` with this frame's render data, with the game's view at `viewport`, which
     /// [`view`](Self::view) gives from then on: its draws, for the last frame's, which it forgets,
     /// keeping their memory for the next; the viewpoint a layer set this frame, which it forgets
-    /// too, or else where the world's camera sees from, or else the default; and what's been added
-    /// since a frame last took it, after what `frame` still holds.
+    /// too, or else where the world's camera sees from, or else the default; what's been added
+    /// since a frame last took it, after what `frame` still holds; and the picks asked this frame,
+    /// each at the pixel of the view under it, the floor of where it was asked less the view's
+    /// origin, but those outside the view, which the next answers to come back answer `None`.
     pub(crate) fn extract(&mut self, frame: &mut Extracted, viewport: Viewport) {
         frame.clear_color = self.clear_color;
         frame.viewport = viewport;
@@ -539,6 +589,32 @@ impl Context {
         mem::swap(&mut frame.draws, &mut self.draws);
         self.draws.clear();
         (frame.uploads).take(&mut self.meshes, &mut self.shaders, &mut self.textures);
+        frame.picks.clear();
+        let [left, top] = viewport.origin.map(f64::from);
+        let [width, height] = viewport.size.map(f64::from);
+        for (pick, [x, y]) in self.picks.drain(..) {
+            // Not a NaN, which no range contains.
+            let [x, y] = [x.floor() - left, y.floor() - top];
+            if (0.0..width).contains(&x) && (0.0..height).contains(&y) {
+                let pixel = [x as u32, y as u32];
+                frame.picks.push(gg_renderer::Pick { tag: pick.0, pixel });
+            } else {
+                self.unseen.push(pick);
+            }
+        }
+    }
+
+    /// Takes `answers`, which came back with the frame taken back from the render thread, each the
+    /// number of a pick's ticket with the ID the view showed at its pixel, in place of those
+    /// before; and answers `None` the picks the last frame handed off asked outside the view.
+    pub(crate) fn take_answers(&mut self, answers: &[(u64, u64)]) {
+        self.picked.clear();
+        for &(tag, id) in answers {
+            self.picked.push((Pick(tag), EntityId::new(id)));
+        }
+        for pick in self.unseen.drain(..) {
+            self.picked.push((pick, None));
+        }
     }
 
     /// The shaders layers added, for hot reload to put those it compiles again in their place.

@@ -45,12 +45,21 @@ const DEPTH: f32 = 1000.0;
 /// that runs along the plane would slide it away.
 const GRAZING: f32 = 0.002;
 
-/// What the left button does over the view, which the toolbar picks.
+/// What the left button does over the view, which the toolbar picks, and Q, W, E and R pick the
+/// first four of.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Tool {
-    /// Picks what's under the cursor, once there's anything to pick.
+    /// Picks what's under the cursor.
     #[default]
     Select,
+    /// Moves what's picked by its handles, along its axes, across its planes or in the view's
+    /// plane; and picks, off them.
+    Move,
+    /// Turns what's picked by its rings, about its axes or the view's; and picks, off them.
+    Rotate,
+    /// Scales what's picked by its handles, along its axes or all three ways at once; and picks,
+    /// off them.
+    Scale,
     /// Trucks and pedestals, as the middle button does.
     Pan,
     /// Orbits the pivot, as Alt and the left button do.
@@ -306,6 +315,24 @@ impl OrbitCamera {
         self.drag.map(|drag| drag.what)
     }
 
+    /// Whether it eases to where Home or a snap sends it.
+    pub fn eases(&self) -> bool {
+        self.ease.is_some()
+    }
+
+    /// Whether it flies: while the right button looks about or pans, as W, A, S and D then fly it
+    /// and Q and E roll it; not while another button pans.
+    pub fn flies(&self) -> bool {
+        matches!(
+            self.drag,
+            Some(Drag {
+                button: MouseButton::Right,
+                what: Move::Look | Move::Pan,
+                ..
+            })
+        )
+    }
+
     /// Feeds the camera an event the layer was sent, which it acts on as `screen` and `tool` say.
     /// `Break` when it took a press, the wheel or Home, each of which moves it, so that the layers
     /// below don't act on them too.
@@ -334,7 +361,9 @@ impl OrbitCamera {
                     (MouseButton::Right, false) => Move::Pan,
                     (MouseButton::Left, true) => Move::Orbit,
                     (MouseButton::Left, false) => match tool {
-                        Tool::Select => return ControlFlow::Continue(()),
+                        Tool::Select | Tool::Move | Tool::Rotate | Tool::Scale => {
+                            return ControlFlow::Continue(());
+                        }
                         Tool::Pan => Move::Pan,
                         Tool::Orbit => Move::Orbit,
                     },
@@ -415,17 +444,9 @@ impl OrbitCamera {
                 self.ease = None;
             }
         }
-        let keys = matches!(
-            self.drag,
-            Some(Drag {
-                button: MouseButton::Right,
-                what: Move::Look | Move::Pan,
-                ..
-            })
-        );
         let fly = self.actions.axis2(Action::Fly);
         let roll = self.actions.axis(Action::Roll);
-        if !keys || (fly == Vec2::ZERO && roll == 0.0) {
+        if !self.flies() || (fly == Vec2::ZERO && roll == 0.0) {
             return;
         }
         self.ease = None;
@@ -870,11 +891,14 @@ mod tests {
         let pose = camera.pose;
         camera.update(Duration::from_secs(1));
         assert_eq!(camera.pose, pose, "without a button");
+        assert!(!camera.flies());
         button(&mut camera, MouseButton::Middle, true, false, Tool::Select);
         camera.update(Duration::from_secs(1));
         assert_eq!(camera.pose, pose, "with the middle button");
+        assert!(!camera.flies(), "panning with the middle button");
         button(&mut camera, MouseButton::Middle, false, false, Tool::Select);
         button(&mut camera, MouseButton::Right, true, false, Tool::Select);
+        assert!(camera.flies());
         camera.update(Duration::from_millis(500));
         let rolled = camera.pose.roll - pose.roll;
         assert!((rolled - FRAC_PI_2 / 2.0).abs() < 1e-5, "{rolled}");
@@ -882,9 +906,16 @@ mod tests {
         // Alt and the right button dolly, without the keys.
         button(&mut camera, MouseButton::Right, false, false, Tool::Select);
         button(&mut camera, MouseButton::Right, true, true, Tool::Select);
+        assert!(!camera.flies(), "dollying");
         let pose = camera.pose;
         camera.update(Duration::from_secs(1));
         assert_eq!(camera.pose, pose, "dollying");
+        // Orthographic, the right button pans, and flies.
+        button(&mut camera, MouseButton::Right, false, true, Tool::Select);
+        camera.perspective = false;
+        button(&mut camera, MouseButton::Right, true, false, Tool::Select);
+        assert_eq!(camera.moving(), Some(Move::Pan));
+        assert!(camera.flies());
     }
 
     #[test]
@@ -947,6 +978,16 @@ mod tests {
                 Some(Move::Dolly),
             ),
             (false, MouseButton::Left, false, Tool::Select, None),
+            (false, MouseButton::Left, false, Tool::Move, None),
+            (true, MouseButton::Left, false, Tool::Rotate, None),
+            (false, MouseButton::Left, false, Tool::Scale, None),
+            (
+                false,
+                MouseButton::Left,
+                true,
+                Tool::Move,
+                Some(Move::Orbit),
+            ),
             (false, MouseButton::Left, false, Tool::Pan, Some(Move::Pan)),
             (
                 true,

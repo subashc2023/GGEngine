@@ -14,8 +14,8 @@ use std::sync::Arc;
 
 use ash::vk;
 use gg_gpu::{
-    ColorImage, DepthImage, Device, Frames, GpuBuffer, Instance, InstanceDesc, PLACED_TEXTURES,
-    Target, Texture, TextureFormat, UploadPath,
+    ColorImage, DepthImage, Device, Frames, GpuBuffer, IdImage, Instance, InstanceDesc, MAX_READS,
+    PLACED_TEXTURES, Target, Texture, TextureFormat, UploadPath,
 };
 
 fn main() {
@@ -49,6 +49,10 @@ fn main() {
         dropped_images_free_their_slots,
     );
     run("depth_clears_in_every_pass", depth_clears_in_every_pass);
+    run(
+        "ids_read_back_two_frames_later",
+        ids_read_back_two_frames_later,
+    );
     run(
         "filled_textures_can_be_written_over_on_every_path",
         filled_textures_can_be_written_over_on_every_path,
@@ -148,7 +152,7 @@ fn clear_reads_back() {
         for (target, srgb) in srgb.iter().enumerate() {
             let color = [linear(srgb[0]), linear(srgb[1]), linear(srgb[2]), 1.0];
             // A pass that draws nothing clears its target.
-            drop(frame.begin_pass(target, c"clear", color, None));
+            drop(frame.begin_pass(target, c"clear", color, None, None));
         }
         frame.submit().expect("the frame's submission");
     }
@@ -187,7 +191,7 @@ fn sampled_images_keep_their_layout() {
             .begin([Target::Image(&mut image)])
             .expect("a frame")
             .expect("an offscreen image can always be rendered into");
-        drop(frame.begin_pass(0, c"clear", [1.0, 0.0, 0.0, 1.0], None));
+        drop(frame.begin_pass(0, c"clear", [1.0, 0.0, 0.0, 1.0], None, None));
         frame.begin_sampling(0);
         frame.submit().expect("the frame's submission");
     }
@@ -240,12 +244,81 @@ fn depth_clears_in_every_pass() {
             .expect("a frame")
             .expect("an offscreen image can always be rendered into");
         for _ in 0..2 {
-            drop(frame.begin_pass(0, c"clear", [0.0, 0.0, 0.0, 1.0], Some(&depth)));
+            drop(frame.begin_pass(0, c"clear", [0.0, 0.0, 0.0, 1.0], Some(&depth), None));
         }
         frame.submit().expect("the frame's submission");
     }
 
     drop((frames, image, depth, device, instance));
+    assert_eq!(
+        validation.messages(),
+        0,
+        "validation reported problems; the log above says what"
+    );
+}
+
+/// Renders IDs beside an image in eight frames, each pass clearing them to 0, and reads pixels of
+/// them back: one in the first frame, none in the second, three in the third, none in the fourth,
+/// two in the fifth; in the sixth, sixty, then after another pass the four of ten more that the
+/// most a frame reads leaves, then none; and none in the last two. Each frame finds what the one two
+/// before it read, by its number, and none after a frame that read none, as the first two find of
+/// frame 0. Synchronization validation sees each copy wait for the pass before it, a pass for the
+/// copies before it, and the host for the copies. A pixel outside the IDs, and IDs no pass of the
+/// frame rendered, are refused before anything is recorded.
+fn ids_read_back_two_frames_later() {
+    let instance = instance();
+    let validation = instance.validation();
+    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let mut image = ColorImage::new(&device, 8, 4, "read test target").expect("an image");
+    let mut ids = IdImage::new(&device, 8, 4, "read test IDs").expect("an ID image");
+    let mut frames = Frames::new(&device).expect("frames");
+    let black = [0.0, 0.0, 0.0, 1.0];
+    let pixels: Vec<[u32; 2]> = (0..70).map(|i| [i % 8, i / 8 % 4]).collect();
+    // How many IDs each frame reads.
+    let counts = [1, 0, 3, 0, 2, MAX_READS, 0, 0];
+    for (number, count) in (1..).zip(counts) {
+        let mut frame = frames
+            .begin([Target::Image(&mut image)])
+            .expect("a frame")
+            .expect("an offscreen image can always be rendered into");
+        assert_eq!(frame.number(), number);
+        let (before, read) = frame.ids_read();
+        let expected = match number {
+            1 | 2 => (0, 0),
+            _ => (number - 2, counts[number as usize - 3]),
+        };
+        assert_eq!((before, read.len()), expected, "frame {number}");
+        assert!(read.iter().all(|&id| id == [0; 2]), "IDs read {read:?}");
+        if number == 2 {
+            // Frame 1's pass rendered them.
+            let message = panics(|| {
+                let _ = frame.read_ids(&mut ids, &pixels[..1]);
+            });
+            assert!(message.contains("no pass of frame 2"), "{message}");
+        }
+        drop(frame.begin_pass(0, c"ids", black, None, Some(&mut ids)));
+        if number == 3 {
+            let message = panics(|| {
+                let _ = frame.read_ids(&mut ids, &[[8, 0]]);
+            });
+            assert!(message.contains("outside the 8x4 IDs"), "{message}");
+        }
+        if count < MAX_READS {
+            let read = frame.read_ids(&mut ids, &pixels[..count]);
+            assert_eq!(read.expect("a read"), count, "frame {number}");
+        } else {
+            let read = |frame: &mut gg_gpu::Frame<'_>, ids: &mut IdImage, pixels| {
+                frame.read_ids(ids, pixels).expect("a read")
+            };
+            assert_eq!(read(&mut frame, &mut ids, &pixels[..60]), 60);
+            drop(frame.begin_pass(0, c"ids again", black, None, Some(&mut ids)));
+            assert_eq!(read(&mut frame, &mut ids, &pixels[60..]), 4);
+            assert_eq!(read(&mut frame, &mut ids, &pixels[..1]), 0);
+        }
+        frame.submit().expect("the frame's submission");
+    }
+
+    drop((frames, image, ids, device, instance));
     assert_eq!(
         validation.messages(),
         0,
@@ -294,7 +367,7 @@ fn filled_textures_can_be_written_over_on_every_path() {
                 let write = frame.write_texture(&mut texture, [i, 0], [1, 1], &[0; 4]);
                 write.expect("a write");
             }
-            drop(frame.begin_pass(0, c"clear", [0.0, 0.0, 0.0, 1.0], None));
+            drop(frame.begin_pass(0, c"clear", [0.0, 0.0, 0.0, 1.0], None, None));
             frame.submit().expect("the frame's submission");
         }
         drop((frames, texture, levels, buffer, image, device));
@@ -341,8 +414,8 @@ fn forgotten_frames_and_passes_are_caught() {
             .begin([Target::Image(&mut image)])
             .expect("a frame")
             .expect("an offscreen image can always be rendered into");
-        mem::forget(frame.begin_pass(0, c"forgotten", black, None));
-        let message = panics(|| drop(frame.begin_pass(0, c"next", black, None)));
+        mem::forget(frame.begin_pass(0, c"forgotten", black, None, None));
+        let message = panics(|| drop(frame.begin_pass(0, c"next", black, None, None)));
         assert!(message.contains("a pass was forgotten"), "{message}");
         let message = panics(|| {
             let _ = frame.submit();
@@ -366,8 +439,8 @@ fn forgotten_frames_and_passes_are_caught() {
 }
 
 /// Opens two devices, and gives a frame of the one objects the other made: a target, textures, a
-/// buffer, a depth image and an upload's indices. Each is refused before anything is recorded, so
-/// the frame goes on to submit.
+/// buffer, a depth image, an ID image and an upload's indices. Each is refused before anything is
+/// recorded, so the frame goes on to submit.
 fn another_devices_objects_are_refused() {
     let instance = instance();
     let validation = instance.validation();
@@ -376,6 +449,7 @@ fn another_devices_objects_are_refused() {
     let mut image = ColorImage::new(&device, 4, 4, "identity test target").expect("an image");
     let mut others_image = ColorImage::new(&other, 4, 4, "the other's image").expect("an image");
     let others_depth = DepthImage::new(&other, 4, 4, "the other's depth").expect("a depth image");
+    let mut others_ids = IdImage::new(&other, 4, 4, "the other's IDs").expect("an ID image");
     let format = TextureFormat::Rgba8Srgb;
     let others_texture = Texture::new(&other, 1, 1, format, false, "the other's texture");
     let mut others_texture = others_texture.expect("a texture");
@@ -404,7 +478,10 @@ fn another_devices_objects_are_refused() {
         let _ = frame.fill_buffer(&mut others_buffer, &[7; 12]);
     }));
     refused(panics(|| {
-        drop(frame.begin_pass(0, c"depth", black, Some(&others_depth)));
+        drop(frame.begin_pass(0, c"depth", black, Some(&others_depth), None));
+    }));
+    refused(panics(|| {
+        drop(frame.begin_pass(0, c"ids", black, None, Some(&mut others_ids)));
     }));
     let mut others_frame = others_frames
         .begin([Target::Image(&mut others_image)])
@@ -412,7 +489,7 @@ fn another_devices_objects_are_refused() {
         .expect("an offscreen image can always be rendered into");
     let others_indices = others_frame.upload(&[0; 12]).expect("an upload");
     let mut pass = frame
-        .begin_pass(0, c"identity", black, None)
+        .begin_pass(0, c"identity", black, None, None)
         .expect("an offscreen image is always there");
     refused(panics(|| pass.draw_indexed(others_indices, 0, 3, 0, 1)));
     drop(pass);
@@ -420,7 +497,8 @@ fn another_devices_objects_are_refused() {
     others_frame.submit().expect("the other frame's submission");
 
     drop((frames, others_frames, image, others_image, others_depth));
-    drop((others_texture, others_buffer, device, other, instance));
+    drop((others_ids, others_texture, others_buffer));
+    drop((device, other, instance));
     assert_eq!(
         validation.messages(),
         0,
@@ -471,7 +549,7 @@ fn passes_refuse_what_the_device_cant_draw() {
         .expect("a frame")
         .expect("an offscreen image can always be rendered into");
     let mut pass = frame
-        .begin_pass(0, c"limits", [0.0, 0.0, 0.0, 1.0], None)
+        .begin_pass(0, c"limits", [0.0, 0.0, 0.0, 1.0], None, None)
         .expect("an offscreen image is always there");
     let message = panics(|| pass.set_viewport([0, 0], [u32::MAX, 1]));
     assert!(message.contains("viewports of up to"), "{message}");

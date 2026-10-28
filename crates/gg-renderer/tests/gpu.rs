@@ -18,7 +18,7 @@ use std::sync::Arc;
 use bytemuck::NoUninit;
 use gg_core::math::{self, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{
-    AlphaMode, Blend, DrawCounts, Draws, Material, MeshDraw, Meshes, Mipmaps, ModelVertex,
+    AlphaMode, Blend, DrawCounts, Draws, Material, MeshDraw, Meshes, Mipmaps, ModelVertex, Pick,
     Projection, RenderData, Renderer, Sampler, Settings, Shaders, Sprite, SpriteSheet, Texture,
     Textures, Ui, UploadPath, Uploads, ViewCallback, Viewpoint, Viewport, Wrap,
 };
@@ -71,6 +71,10 @@ fn main() {
     run(
         "mixed_textures_match_their_reference",
         mixed_textures_match_their_reference,
+    );
+    run(
+        "picks_answer_what_their_frame_drew",
+        picks_answer_what_their_frame_drew,
     );
     // Once for each way of uploading that the GPU has.
     for path in UploadPath::ALL {
@@ -206,6 +210,7 @@ fn ui_matches_its_reference() {
             viewpoint: Viewpoint::default(),
             uploads: &mut uploads,
             draws: &draws,
+            picks: &[],
         };
         assert!(
             renderer.render(data, ui, &mut []).expect("a frame"),
@@ -272,7 +277,7 @@ fn meshes_match_their_reference(path: UploadPath) {
     draws.push(square, flat, transform(2.5, 30.0, [0.5, 0.5]), blue);
     let orange = Vec4::new(0.9, 0.4, 0.1, 1.0);
     let second = MeshDraw::new(square, flat, orange);
-    draws.push_draw(transform(0.8, 0.0, [3.2, 1.8]), &second);
+    draws.push_draw(transform(0.8, 0.0, [3.2, 1.8]), &second, 0);
     for frame in 0..3 {
         if frame == 2 {
             // Positions, then colors; no parameters.
@@ -302,6 +307,7 @@ fn meshes_match_their_reference(path: UploadPath) {
             viewpoint,
             uploads: &mut uploads,
             draws: &draws,
+            picks: &[],
         };
         render_without_ui(&mut renderer, data);
     }
@@ -416,6 +422,7 @@ fn textures_match_their_reference(path: UploadPath) {
             viewpoint,
             uploads: &mut uploads,
             draws: &draws,
+            picks: &[],
         };
         render_without_ui(&mut renderer, data);
     }
@@ -513,6 +520,7 @@ fn sprites_match_their_reference() {
             viewpoint,
             uploads: &mut uploads,
             draws: &draws,
+            picks: &[],
         };
         render_without_ui(&mut renderer, data);
     }
@@ -656,6 +664,7 @@ fn batches_match_their_reference() {
             viewpoint,
             uploads: &mut uploads,
             draws: &draws,
+            picks: &[],
         };
         render_without_ui(&mut renderer, data);
     }
@@ -831,6 +840,7 @@ fn sheets_match_their_reference(path: UploadPath) {
             viewpoint,
             uploads: &mut uploads,
             draws: &draws,
+            picks: &[],
         };
         render_without_ui(&mut renderer, data);
     }
@@ -955,6 +965,7 @@ fn views_match_their_reference() {
             viewpoint,
             uploads: &mut uploads,
             draws: &draws,
+            picks: &[],
         };
         render_without_ui(&mut renderer, data);
         match frame {
@@ -1083,6 +1094,7 @@ fn depth_matches_its_reference() {
             viewpoint,
             uploads: &mut uploads,
             draws: &draws,
+            picks: &[],
         };
         render_without_ui(&mut renderer, data);
     }
@@ -1144,6 +1156,7 @@ fn a_large_texture_draws_in_the_frame_that_adds_it(path: UploadPath) {
         },
         uploads: &mut uploads,
         draws: &draws,
+        picks: &[],
     };
     render_without_ui(&mut renderer, data);
     let validation = renderer.validation();
@@ -1278,7 +1291,7 @@ fn models_match_their_reference() {
     ];
     let mut draws = Draws::default();
     for (draw, transform) in &scene {
-        draws.push_draw(*transform, draw);
+        draws.push_draw(*transform, draw, 0);
     }
     for _ in 0..2 {
         uploads.take(&mut meshes, &mut shaders, &mut textures);
@@ -1291,6 +1304,7 @@ fn models_match_their_reference() {
             viewpoint,
             uploads: &mut uploads,
             draws: &draws,
+            picks: &[],
         };
         render_without_ui(&mut renderer, data);
     }
@@ -1406,7 +1420,7 @@ fn mixed_textures_match_their_reference() {
     for row in 0..rows {
         for column in 0..columns {
             let square = &squares[((column + row) % 2) as usize];
-            draws.push_draw(place(column, row, 0.0), square);
+            draws.push_draw(place(column, row, 0.0), square, 0);
         }
     }
     uploads.take(&mut meshes, &mut shaders, &mut textures);
@@ -1419,6 +1433,7 @@ fn mixed_textures_match_their_reference() {
         viewpoint,
         uploads: &mut uploads,
         draws: &draws,
+        picks: &[],
     };
     render_without_ui(&mut renderer, data);
     let instances = (columns * rows) as usize;
@@ -1429,6 +1444,202 @@ fn mixed_textures_match_their_reference() {
     };
     assert_eq!(renderer.drawn(), drawn, "each run is one instanced draw");
     check(renderer, "mixed_textures", WIDTH, HEIGHT);
+}
+
+/// Draws a scene of IDs into a view off the frame's corner in six frames, each draw's ID its kind
+/// in its high half and its frame's number in its low, so that an ID from another frame shows; two
+/// sprites that overlap trade places each frame, the later on top. Frames 1, 2 and 4 pick the same
+/// pixels, and each pick is answered as the frame two after the one that asked it begins, with
+/// what drew on top there in its own frame: the later sprite where they overlap, and the other
+/// alone; a game's mesh; the mesh through a sprite's wholly transparent texel, and the sprite
+/// through its opaque one; a half transparent sprite over the mesh; a model; 0 for a layer's sprite
+/// over the mesh, and for the clear, where a sprite of the odd frames alone drew in the frame
+/// before. Picks outside the view are answered 0 in the frame that asks them. Frame 3 picks
+/// nothing, so frame 5 answers nothing.
+fn picks_answer_what_their_frame_drew() {
+    const WIDTH: u32 = 96;
+    const HEIGHT: u32 = 64;
+    // What draws, each its ID's high half; and the pair's top, whichever is later.
+    const MESH: u64 = 1;
+    const MODEL: u64 = 2;
+    const FIRST: u64 = 3;
+    const SECOND: u64 = 4;
+    const HALVED: u64 = 5;
+    const BLENDED: u64 = 6;
+    const TOP: u64 = 7;
+    const ODD: u64 = 8;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut meshes = Meshes::default();
+    let mut shaders = Shaders::default();
+    let mut textures = Textures::default();
+    let mut uploads = Uploads::default();
+    // A unit a pixel, around the origin, of the view's 64 by 48 pixels.
+    let viewport = Viewport {
+        origin: [16, 8],
+        size: [64, 48],
+    };
+    let viewpoint = Viewpoint {
+        projection: Projection::Orthographic {
+            height: 48.0,
+            near: -1.0,
+            far: 1.0,
+        },
+        ..Viewpoint::default()
+    };
+    // Over the view's pixels from `[x0, y0]` to `[x1, y1]`, from its top left.
+    let over = |[x0, y0]: [f32; 2], [x1, y1]: [f32; 2]| {
+        let center = Vec3::new((x0 + x1) / 2.0 - 32.0, 24.0 - (y0 + y1) / 2.0, 0.0);
+        Mat4::from_translation(center) * Mat4::from_scale(Vec3::new(x1 - x0, y1 - y0, 1.0))
+    };
+    let flat = shaders
+        .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+        .expect("a shader");
+    let corners = [
+        [-0.5, -0.5, 0.0],
+        [0.5, -0.5, 0.0],
+        [0.5, 0.5, 0.0],
+        [-0.5, 0.5, 0.0],
+    ];
+    let square = meshes
+        .add("square", &corners, &[0, 1, 2, 2, 3, 0])
+        .expect("a mesh");
+    let mesh = MeshDraw::new(square, flat, Vec4::new(0.2, 0.3, 0.8, 1.0));
+    // Counterclockwise seen from +Z, its texture's top left at its top left.
+    let corner = |[x, y]: [f32; 2], uv: [f32; 2]| ModelVertex {
+        position: Vec3::new(x, y, 0.0),
+        uv: Vec2::from(uv),
+        color: Vec4::ONE,
+    };
+    let model_corners = [
+        corner([-0.5, -0.5], [0.0, 1.0]),
+        corner([0.5, -0.5], [1.0, 1.0]),
+        corner([0.5, 0.5], [1.0, 0.0]),
+        corner([-0.5, 0.5], [0.0, 0.0]),
+    ];
+    let model_square = meshes
+        .add("model square", &model_corners, &[0, 1, 2, 2, 3, 0])
+        .expect("a mesh");
+    let model = MeshDraw::with_material(model_square, &Material::default(), &mut shaders);
+    // Opaque on the left, wholly transparent on the right.
+    let half = [[200, 40, 40, 255], [0, 0, 0, 0]];
+    let half = textures
+        .add("half", [2, 1], half.as_flattened(), Mipmaps::None)
+        .expect("a texture");
+    let halved = Sprite {
+        texture: half,
+        sampler: Sampler::NearestClamp,
+        ..Sprite::default()
+    };
+    let tinted = |color: [f32; 4]| Sprite {
+        color: Vec4::from(color),
+        ..Sprite::default()
+    };
+    let id = |kind: u64, frame: u64| kind << 32 | frame;
+    let scene = |frame: u64| {
+        let mut draws = Draws::default();
+        draws.push_draw(over([20.0, 2.0], [40.0, 22.0]), &mesh, id(MESH, frame));
+        draws.push_draw(over([44.0, 2.0], [56.0, 14.0]), &model, id(MODEL, frame));
+        let first = (over([2.0, 2.0], [12.0, 12.0]), tinted([0.9, 0.4, 0.1, 1.0]));
+        let second = (over([6.0, 6.0], [16.0, 16.0]), tinted([0.1, 0.8, 0.3, 1.0]));
+        let pair = [(first, FIRST), (second, SECOND)];
+        let pair = if frame.is_multiple_of(2) {
+            [pair[1], pair[0]]
+        } else {
+            pair
+        };
+        let pair = pair.map(|((at, sprite), kind)| (at, sprite, id(kind, frame)));
+        draws.extend_sprites(pair.into_iter());
+        let halved = (over([24.0, 4.0], [32.0, 12.0]), halved, id(HALVED, frame));
+        let blended = tinted([1.0, 1.0, 1.0, 0.5]);
+        let blended = (
+            over([34.0, 14.0], [38.0, 20.0]),
+            blended,
+            id(BLENDED, frame),
+        );
+        draws.extend_sprites([halved, blended].into_iter());
+        // A layer's, of no entity.
+        draws.push_sprite(over([22.0, 14.0], [28.0, 20.0]), tinted([1.0; 4]));
+        if !frame.is_multiple_of(2) {
+            let odd = tinted([0.6, 0.6, 0.2, 1.0]);
+            let odd = (over([56.0, 36.0], [64.0, 44.0]), odd, id(ODD, frame));
+            draws.extend_sprites([odd].into_iter());
+        }
+        draws
+    };
+    // The pixels each frame that picks picks, and what draws on top there, or 0.
+    let pixels = [
+        ([8, 8], TOP),
+        ([3, 3], FIRST),
+        ([22, 4], MESH),
+        ([30, 8], MESH),
+        ([25, 8], HALVED),
+        ([36, 16], BLENDED),
+        ([24, 16], 0),
+        ([50, 8], MODEL),
+        ([60, 40], ODD),
+        ([64, 10], 0),
+        ([10, 48], 0),
+    ];
+    let tag = |frame: u64, i: usize| frame * 100 + i as u64;
+    // The answers to the picks of frame `frame` inside the view, or outside it.
+    let answers = |frame: u64, inside: bool| -> Vec<(u64, u64)> {
+        let top = if frame.is_multiple_of(2) {
+            FIRST
+        } else {
+            SECOND
+        };
+        let seen = |&(_, &([x, y], _)): &(usize, &([u32; 2], u64))| (x < 64 && y < 48) == inside;
+        (pixels.iter().enumerate().filter(seen))
+            .map(|(i, &(_, kind))| match kind {
+                0 => (tag(frame, i), 0),
+                ODD if frame.is_multiple_of(2) => (tag(frame, i), 0),
+                TOP => (tag(frame, i), id(top, frame)),
+                kind => (tag(frame, i), id(kind, frame)),
+            })
+            .collect()
+    };
+    let mut answered = Vec::new();
+    for frame in 1..=6 {
+        let draws = scene(frame);
+        let picks: Vec<Pick> = if [1, 2, 4].contains(&frame) {
+            let pick = |(i, &(pixel, _)): (usize, &([u32; 2], u64))| Pick {
+                tag: tag(frame, i),
+                pixel,
+            };
+            pixels.iter().enumerate().map(pick).collect()
+        } else {
+            Vec::new()
+        };
+        uploads.take(&mut meshes, &mut shaders, &mut textures);
+        let data = RenderData {
+            clear_color: CLEAR,
+            viewport,
+            viewpoint,
+            uploads: &mut uploads,
+            draws: &draws,
+            picks: &picks,
+        };
+        render_without_ui(&mut renderer, data);
+        answered.push(renderer.picked().to_vec());
+    }
+    let expected = [
+        answers(1, false),
+        answers(2, false),
+        answers(1, true),
+        [answers(2, true), answers(4, false)].concat(),
+        Vec::new(),
+        answers(4, true),
+    ];
+    for (frame, (answered, expected)) in (1..).zip(answered.iter().zip(&expected)) {
+        assert_eq!(answered, expected, "frame {frame}'s answers");
+    }
+    let validation = renderer.validation();
+    drop(renderer);
+    assert_eq!(
+        validation.messages(),
+        0,
+        "validation reported problems; the log above says what"
+    );
 }
 
 /// What `level.slang` takes with each draw.
@@ -1530,6 +1741,7 @@ fn mipmaps_match_their_reference(path: UploadPath) {
         viewpoint,
         uploads: &mut uploads,
         draws: &draws,
+        picks: &[],
     };
     render_without_ui(&mut renderer, data);
     check(renderer, "mipmaps", WIDTH, HEIGHT);
@@ -1626,6 +1838,7 @@ fn a_view_in_the_ui_matches_its_reference() {
             viewpoint,
             uploads: &mut uploads,
             draws: &draws,
+            picks: &[],
         };
         assert!(
             renderer.render(data, ui, &mut []).expect("a frame"),
@@ -1674,7 +1887,7 @@ fn render_without_ui(renderer: &mut Renderer, data: RenderData<'_>) {
 }
 
 /// What [`replaced_shaders_draw_from_the_next_frame`] writes as its shader, in the color `COLOR`
-/// stands for.
+/// stands for, of no entity.
 const REPLACED: &str = r#"
 struct Vertex {
     float3 position;
@@ -1694,9 +1907,17 @@ float4 vertex_main(uint index: SV_VulkanVertexID, uint instance: SV_VulkanInstan
     return mul(push.clip_from_world, world);
 }
 
+struct Targets {
+    float4 color : SV_Target0;
+    uint2 id : SV_Target1;
+};
+
 [shader("fragment")]
-float4 fragment_main() : SV_Target {
-    return COLOR;
+Targets fragment_main() {
+    Targets out;
+    out.color = COLOR;
+    out.id = uint2(0, 0);
+    return out;
 }
 "#;
 
@@ -1760,6 +1981,7 @@ fn replaced_shaders_draw_from_the_next_frame() {
             viewpoint,
             uploads: &mut uploads,
             draws: &draws,
+            picks: &[],
         };
         render_without_ui(&mut renderer, data);
         // Reading back waits for the GPU, so not between the first frame and the replacement.
@@ -1817,6 +2039,7 @@ fn pipelines_go_through_the_cache() {
             viewpoint: Viewpoint::default(),
             uploads: &mut uploads,
             draws: &draws,
+            picks: &[],
         };
         render_without_ui(renderer, data);
         (renderer.read_back())
