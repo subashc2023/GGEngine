@@ -60,9 +60,11 @@ sandbox  editor   player       apps/: executables
 - **`sandbox`:** the development playground for engine features.
 - **`editor`:** the editor, which becomes one more client of the tool API: a dock that fills its
   window, with the game's view in a panel among the others, which shows a world of the editor's
-  own until the tool API brings it a game, and the engine's Inspector beside it. Its camera is its
-  own, one orbit camera driven alike in 2D and 3D, orthographic or with perspective, with a
-  toolbar and an orientation gizmo pinned over the view and a grid in either projection.
+  own until the tool API brings it a game, three squares and two cameras, and the engine's Inspector
+  beside it. Its camera is its own, one orbit camera driven alike in 2D and 3D, orthographic or
+  with perspective, with a toolbar and an orientation gizmo pinned over the view and a grid in
+  either projection; the toolbar has the view see through the world's primary camera instead, as
+  the game would, until the editor's camera moves.
 - **`player`:** the reference player. It runs a cooked scene without game code and shows how a
   game builds its own player.
 
@@ -215,13 +217,17 @@ A project's state is text that people and agents edit, diff and merge with ordin
   comes back too. A delete keeps its entities' slots and IDs, so that undoing it gives each back
   under its handle and ID, and every reference to it is whole again. Undoing a create takes out
   the entity it made alone, kept the same way, and is refused (`ecs.has_children`) if the entity
-  has children since, which the create didn't make. The log keeps the operations applied, in
-  order, with their inverses: it undoes and redoes them, merges a gesture's sets of one field,
-  such as a drag's, into one edit, and drops an entry whose undo the world refuses, since the
-  world has moved on from it. A running game applies operations at its ticks, in the order they
-  arrive, so several clients can edit it at once, and their log gives undo, review and replay.
-  Editing a scene file while the game runs is an edit too: the engine applies the difference as
-  operations.
+  has children since, which the create didn't make. A component can name a `bool` field of its
+  own exclusive, as a camera's `primary` is: a create, an add or a set that makes it true on one
+  entity makes it false on every other, and its inverse makes theirs true again, so that one edit,
+  a person's or an agent's, switches which entity has it, and one undo switches it back. Code and
+  scenes set it as they set any field, on as many entities as they do. The log keeps the
+  operations applied, in order, with their inverses: it undoes and redoes them, merges a
+  gesture's sets of one field, such as a drag's, into one edit, and drops an entry whose undo the
+  world refuses, since the world has moved on from it. A running game applies operations at its
+  ticks, in the order they arrive, so several clients can edit it at once, and their log gives
+  undo, review and replay. Editing a scene file while the game runs is an edit too: the engine
+  applies the difference as operations.
 
 ## ECS
 
@@ -304,6 +310,11 @@ use up its room, std's map makes room in place if it's at most half full, and gr
 a time its keys decide, so that entities coming and going at a population the world has held
 never grow it.
 
+An entity can have a `Name`, a string for people, which the Entities and Inspector panels show it
+by and scenes save. It's optional, so that entities that come by the thousand, as a swarm's or a
+game's bullets do, hold none and spawn without allocating, and it isn't unique: files, operations
+and diagnostics name an entity by its ID.
+
 Reflection names each component type by its identifier, unless `#[reflect(name = "...")]` gives
 another, and two types of one name are an error rather than a guess. The derive writes the
 description, with hints for bounds, angles, colors and fields kept opaque, and how a value is
@@ -320,7 +331,7 @@ returns the old value, which sets it back unless code stored one that a set refu
 edits components through these calls alone, as operations it queues for its next tick and its log
 undoes, which the tool API will serve.
 
-Entities form a hierarchy, as scenes, prefabs and the camera as a component need: a child has its
+Entities form a hierarchy, as scenes, prefabs and cameras that ride entities need: a child has its
 parent as its `Parent` component, and its `Transform` is relative to its parent's, so that a
 parent carries its children along. The world keeps the hierarchy whole. A scene's entities, loaded
 or placed as a prefab, and those an operation creates or an undo puts back, are spawned with
@@ -337,9 +348,9 @@ its order, the root the last of its parent's children, and an undone reparent ma
 the last of its old parent's. So despawning an entity despawns its descendants, children first,
 and the links allocate nothing, though giving or taking away a `Parent` moves the child to
 another table, as `insert` and `remove` do; a snapshot copies them with the slots. World
-transforms aren't stored: drawing computes each child's from its ancestors, every frame, while a
-table of roots draws by its transforms alone, for one check a frame; the links cost each slot 16
-bytes, whether its entity has a parent or not.
+transforms aren't stored: drawing computes each child's from its ancestors, every frame, and where
+the world's camera sees from the same way, while a table of roots draws by its transforms alone,
+for one check a frame; the links cost each slot 16 bytes, whether its entity has a parent or not.
 
 A snapshot is the world copied: `World` is `Clone`, and `clone_from` restores a world from a
 snapshot, or takes a snapshot into one kept from before, in the memory it holds. It copies all of
@@ -561,8 +572,8 @@ and scenes, physics and the editor share these axes.
 ## Rendering
 
 Each frame the engine extracts that frame's render data, as plain data, which the render thread
-hands `gg-renderer`: the color the view clears to, the game's view, the camera it sees the world
-from, and what to draw in it, in order: meshes, each with a shader for its vertex type, the
+hands `gg-renderer`: the color the view clears to, the game's view, the viewpoint it sees the
+world from, and what to draw in it, in order: meshes, each with a shader for its vertex type, the
 parameters that shader takes, and a transform that places it in the world. The view is the main
 window's central area, which the dock leaves the game, or a dockspace's view panel. It renders
 into an image of its own, that area's size in pixels, made again as that size changes, which the
@@ -576,8 +587,7 @@ reversed, from 1 at the near plane to 0 far away, which keeps a float's precisio
 needed and lets perspective see infinitely far; each frame clears it to 0, and a draw shows where
 it's as near as what's drawn there or nearer, so that at one depth the later goes over, as 2D
 draws at one z stack.
-Layers add shaders, meshes and textures, draw them and set the camera through their `Context`,
-and the renderer's `Shaders`, `Meshes` and `Textures` hand out their handles at once, on the main
+Layers add shaders, meshes and textures and draw them through their `Context`, and the renderer's `Shaders`, `Meshes` and `Textures` hand out their handles at once, on the main
 thread; each frame's render data carries what's been added to them since, in order. After the
 frame's ticks and the layers' updates, the engine draws the world's entities that have a
 `Transform` and a sprite or a `MeshDraw`, a mesh with its shader and parameters held without
@@ -611,8 +621,10 @@ isn't finite, or with a scale whose sign changed, as a sprite mirrored has; and 
 tick, through `World::reset_interpolation`, as a teleport or a wrap is, which the world keeps for
 each slot, copied with snapshots and read by no hash, scene or recording. A row a despawn moved
 still blends. An entity despawned in a tick vanishes up to a tick before it reaches where it
-stopped, and an Inspector set glides there over a tick, as a drag does. Headless frames, a tick
-each, draw their tick as it leaves the world.
+stopped, and an Inspector set glides there over a tick, as a drag does. The world's camera sees
+from where its entity draws, so that one riding an entity moves with it, without juddering
+against it. Headless frames, a tick each, draw their tick as it leaves the world, and see it from
+where the tick left the camera.
 
 A game's shader is a Slang file that the engine compiles with slangc as a layer adds it, so one
 that doesn't compile fails there, with slangc's diagnostics naming the file and line; the renderer
@@ -704,19 +716,37 @@ pixels, which every Vulkan 1.4 device takes, and an image of no pixels, or one p
 egui hands on in release builds, makes no texture, so that what samples it draws nothing, the
 second with a warning (`renderer.bad_texture`).
 
-A camera is a position, a rotation and a projection: orthographic, as 2D games use, seeing as
-much of the world from bottom to top as the game sets, and as much across as the view's aspect
-ratio makes, so nothing stretches as the dock resizes the view; or perspective, seeing an angle
-from bottom to top, as glTF's cameras do, from a near plane out to infinity. Each frame the
-renderer pushes the camera's view and projection, column-major as glam's matrices are, with the
-addresses of the vertices and of the draws' transforms and parameters: a shader places each
-vertex by its draw's transform, into the world, then by the camera's. Layers can also steer the
-camera with the engine's camera controllers: the orthographic one, which moves, turns and zooms a
-2D camera, and the fly one, which moves a camera where it looks and looks about, from the keys, a
-gamepad's sticks or the mouse dragged with its right button, keeping it level. A layer keeps one
-and calls it from its own update and event, not adding it to the stack, so that the game can
-still place its camera itself or stop steering it. The camera isn't in the world: it moves every
-frame, by input, where the world changes only at ticks, so no hash, scene or recording holds it.
+A camera is an entity with a `Camera` and a `Transform`. The camera has a projection:
+orthographic, as 2D games use, seeing as much of the world from bottom to top as the game sets,
+and as much across as the view's aspect ratio makes, so nothing stretches as the dock resizes the
+view; or perspective, seeing an angle from bottom to top, as glTF's cameras do, from a near plane
+out to infinity. And it's primary or not: the view sees through the primary camera, and without
+one, as without cameras, from the default viewpoint. `primary` is the camera's exclusive field, so
+that making a camera primary, as the Inspector's checkbox or an agent's set does, makes every
+other not, as a Godot viewport has one current camera, and undoing it makes them primary again.
+Of several that code or a scene made primary, the view sees through the one of the lowest ID,
+since scenes keep no order cameras came in, with a warning (`engine.camera_tie`) as they come to
+be or change. It sees from where the camera's entity draws, between ticks too, its ancestors
+carrying it; facing as its own rotation and theirs turn it, their scales aside, so a scaled camera
+sees as an unscaled one, and a mirrored ancestor mirrors where it is but not which way it faces.
+Where it sees from, and which of several primary it sees through, are drawing's: no hash, scene
+or recording holds them, only the components. A
+projection that can't project, which rendering would panic on, is refused wherever reflection
+makes one (`engine.bad_projection`), so that no scene, operation or Inspector edit panics the
+render thread. A camera keeps no aspect ratio of its own until cameras render into targets of
+their own. Each frame the renderer pushes the view's matrices, column-major as glam's are, with
+the addresses of the vertices and of the draws' transforms and parameters: a shader places each
+vertex by its draw's transform, into the world, then by the view's.
+
+A layer sets the view's viewpoint for a frame in place of the world's camera, a position, a
+rotation and a projection, through `Context::set_viewpoint`, as the editor's camera does; without
+either, the view sees from the origin, 2 units tall. A viewpoint isn't in the world: it moves
+every frame, by input, where the world changes only at ticks, so no hash, scene or recording holds
+it. The engine's camera controllers steer one: the orthographic one, which moves, turns and zooms
+a 2D viewpoint, and the fly one, which moves a viewpoint where it looks and looks about, from the
+keys, a gamepad's sticks or the mouse dragged with its right button, keeping it level. A layer
+keeps one and calls it from its own update and event, not adding it to the stack, so that the
+game can still place its viewpoint itself or stop steering it.
 
 2D games draw sprites, which are draws like any other rather than a renderer of their own:
 `Context::draw_sprite` draws the engine's quad mesh with its sprite shader, whose parameters are a

@@ -18,9 +18,9 @@ use std::sync::Arc;
 use bytemuck::NoUninit;
 use gg_core::math::{self, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{
-    AlphaMode, Blend, Camera, DrawCounts, Draws, Material, MeshDraw, Meshes, Mipmaps, ModelVertex,
+    AlphaMode, Blend, DrawCounts, Draws, Material, MeshDraw, Meshes, Mipmaps, ModelVertex,
     Projection, RenderData, Renderer, Sampler, Settings, Shaders, Sprite, SpriteSheet, Texture,
-    Textures, Ui, UploadPath, Uploads, ViewCallback, Viewport, Wrap,
+    Textures, Ui, UploadPath, Uploads, ViewCallback, Viewpoint, Viewport, Wrap,
 };
 
 fn main() {
@@ -203,7 +203,7 @@ fn ui_matches_its_reference() {
                 origin: [0, 0],
                 size: [WIDTH, HEIGHT],
             },
-            camera: Camera::default(),
+            viewpoint: Viewpoint::default(),
             uploads: &mut uploads,
             draws: &draws,
         };
@@ -238,14 +238,14 @@ fn meshes_match_their_reference(path: UploadPath) {
     let mut uploads = Uploads::default();
     // 4 units from the view's bottom to its top, which is 160 pixels, so 40 pixels a unit both
     // ways; the view's center is (1, 0.5).
-    let camera = Camera {
+    let viewpoint = Viewpoint {
         position: Vec3::new(1.0, 0.5, 0.0),
         projection: Projection::Orthographic {
             height: 4.0,
             near: -1.0,
             far: 1.0,
         },
-        ..Camera::default()
+        ..Viewpoint::default()
     };
     let transform = |scale, turn: f32, [x, y]: [f32; 2]| {
         Mat4::from_scale_rotation_translation(
@@ -299,7 +299,7 @@ fn meshes_match_their_reference(path: UploadPath) {
                 origin: [40, 20],
                 size: [240, 160],
             },
-            camera,
+            viewpoint,
             uploads: &mut uploads,
             draws: &draws,
         };
@@ -336,13 +336,13 @@ fn textures_match_their_reference(path: UploadPath) {
     let mut textures = Textures::default();
     let mut uploads = Uploads::default();
     // 4 units from the view's bottom to its top, 40 pixels a unit, and 6 across, around the origin.
-    let camera = Camera {
+    let viewpoint = Viewpoint {
         projection: Projection::Orthographic {
             height: 4.0,
             near: -1.0,
             far: 1.0,
         },
-        ..Camera::default()
+        ..Viewpoint::default()
     };
     // Positions, then texture coordinates.
     let textured = shaders
@@ -413,7 +413,7 @@ fn textures_match_their_reference(path: UploadPath) {
                 origin: [0, 0],
                 size: [WIDTH, HEIGHT],
             },
-            camera,
+            viewpoint,
             uploads: &mut uploads,
             draws: &draws,
         };
@@ -440,13 +440,13 @@ fn sprites_match_their_reference() {
     let mut textures = Textures::default();
     let mut uploads = Uploads::default();
     // 4 units from the view's bottom to its top, 40 pixels a unit, and 6 across, around the origin.
-    let camera = Camera {
+    let viewpoint = Viewpoint {
         projection: Projection::Orthographic {
             height: 4.0,
             near: -1.0,
             far: 1.0,
         },
-        ..Camera::default()
+        ..Viewpoint::default()
     };
     // 4 by 4 texels, sRGB-encoded, red growing to the right and green downward; the bottom left
     // quarter is half transparent.
@@ -510,7 +510,7 @@ fn sprites_match_their_reference() {
                 origin: [0, 0],
                 size: [WIDTH, HEIGHT],
             },
-            camera,
+            viewpoint,
             uploads: &mut uploads,
             draws: &draws,
         };
@@ -543,13 +543,13 @@ fn batches_match_their_reference() {
     let mut textures = Textures::default();
     let mut uploads = Uploads::default();
     // 4 units from the view's bottom to its top, 40 pixels a unit, and 6 across, around the origin.
-    let camera = Camera {
+    let viewpoint = Viewpoint {
         projection: Projection::Orthographic {
             height: 4.0,
             near: -1.0,
             far: 1.0,
         },
-        ..Camera::default()
+        ..Viewpoint::default()
     };
     // 2 by 2 texels, sRGB-encoded: red and yellow over green and blue; and a checkerboard of light
     // and dark.
@@ -653,7 +653,7 @@ fn batches_match_their_reference() {
                 origin: [0, 0],
                 size: [WIDTH, HEIGHT],
             },
-            camera,
+            viewpoint,
             uploads: &mut uploads,
             draws: &draws,
         };
@@ -691,13 +691,13 @@ fn sheets_match_their_reference(path: UploadPath) {
     let mut textures = Textures::default();
     let mut uploads = Uploads::default();
     // 5 units from the view's bottom to its top, 40 pixels a unit, and 6 across, around the origin.
-    let camera = Camera {
+    let viewpoint = Viewpoint {
         projection: Projection::Orthographic {
             height: 5.0,
             near: -1.0,
             far: 1.0,
         },
-        ..Camera::default()
+        ..Viewpoint::default()
     };
     // 4 by 2 cells, sRGB-encoded: red, cyan, yellow and blue over green, magenta, slate and orange,
     // each lightest at its top left and darkest at its bottom right.
@@ -828,7 +828,7 @@ fn sheets_match_their_reference(path: UploadPath) {
                 origin: [0, 0],
                 size: [WIDTH, HEIGHT],
             },
-            camera,
+            viewpoint,
             uploads: &mut uploads,
             draws: &draws,
         };
@@ -860,14 +860,14 @@ fn views_match_their_reference() {
     let mut textures = Textures::default();
     let mut uploads = Uploads::default();
     // 4 units from the view's bottom to its top; the view's center is (1, 0.5).
-    let camera = Camera {
+    let viewpoint = Viewpoint {
         position: Vec3::new(1.0, 0.5, 0.0),
         projection: Projection::Orthographic {
             height: 4.0,
             near: -1.0,
             far: 1.0,
         },
-        ..Camera::default()
+        ..Viewpoint::default()
     };
     let transform = |scale, turn: f32, [x, y]: [f32; 2]| {
         Mat4::from_scale_rotation_translation(
@@ -952,7 +952,7 @@ fn views_match_their_reference() {
         let data = RenderData {
             clear_color: CLEAR,
             viewport,
-            camera,
+            viewpoint,
             uploads: &mut uploads,
             draws: &draws,
         };
@@ -1010,13 +1010,13 @@ fn depth_matches_its_reference() {
     let mut uploads = Uploads::default();
     // 4 in front of the origin, seeing a sixth of a turn from the view's bottom to its top: at z =
     // 0, about 4.6 units.
-    let camera = Camera {
+    let viewpoint = Viewpoint {
         position: Vec3::new(0.0, 0.0, 4.0),
         projection: Projection::Perspective {
             fov: PI / 3.0,
             near: 0.5,
         },
-        ..Camera::default()
+        ..Viewpoint::default()
     };
     let flat = shaders
         .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
@@ -1080,7 +1080,7 @@ fn depth_matches_its_reference() {
                 origin: [0, 0],
                 size: [WIDTH, HEIGHT],
             },
-            camera,
+            viewpoint,
             uploads: &mut uploads,
             draws: &draws,
         };
@@ -1134,13 +1134,13 @@ fn a_large_texture_draws_in_the_frame_that_adds_it(path: UploadPath) {
             origin: [0, 0],
             size: [SIDE, SIDE],
         },
-        camera: Camera {
+        viewpoint: Viewpoint {
             projection: Projection::Orthographic {
                 height: 2.0,
                 near: -1.0,
                 far: 1.0,
             },
-            ..Camera::default()
+            ..Viewpoint::default()
         },
         uploads: &mut uploads,
         draws: &draws,
@@ -1186,13 +1186,13 @@ fn models_match_their_reference() {
     let mut uploads = Uploads::default();
     // 4 in front of the origin, seeing a sixth of a turn from the view's bottom to its top: at z =
     // 0, about 4.6 units.
-    let camera = Camera {
+    let viewpoint = Viewpoint {
         position: Vec3::new(0.0, 0.0, 4.0),
         projection: Projection::Perspective {
             fov: PI / 3.0,
             near: 0.5,
         },
-        ..Camera::default()
+        ..Viewpoint::default()
     };
     // A unit square, counterclockwise seen from +Z, its texture's top left at its top left, in
     // `colors` from its bottom left counterclockwise.
@@ -1288,7 +1288,7 @@ fn models_match_their_reference() {
                 origin: [0, 0],
                 size: [WIDTH, HEIGHT],
             },
-            camera,
+            viewpoint,
             uploads: &mut uploads,
             draws: &draws,
         };
@@ -1324,13 +1324,13 @@ fn mixed_textures_match_their_reference() {
     let mut textures = Textures::default();
     let mut uploads = Uploads::default();
     // A unit a pixel, around the origin.
-    let camera = Camera {
+    let viewpoint = Viewpoint {
         projection: Projection::Orthographic {
             height: HEIGHT as f32,
             near: -1.0,
             far: 1.0,
         },
-        ..Camera::default()
+        ..Viewpoint::default()
     };
     // 2 by 2 texels, sRGB-encoded: red and yellow over green and blue; and a checkerboard of light
     // and dark, which a linear filter blends between its texels.
@@ -1416,7 +1416,7 @@ fn mixed_textures_match_their_reference() {
             origin: [0, 0],
             size: [WIDTH, HEIGHT],
         },
-        camera,
+        viewpoint,
         uploads: &mut uploads,
         draws: &draws,
     };
@@ -1458,13 +1458,13 @@ fn mipmaps_match_their_reference(path: UploadPath) {
     let mut textures = Textures::default();
     let mut uploads = Uploads::default();
     // A unit a pixel, around the origin.
-    let camera = Camera {
+    let viewpoint = Viewpoint {
         projection: Projection::Orthographic {
             height: HEIGHT as f32,
             near: -1.0,
             far: 1.0,
         },
-        ..Camera::default()
+        ..Viewpoint::default()
     };
     let leveled = shaders
         .add::<[f32; 5], Level>("level", &shader("level.slang"), Blend::Alpha)
@@ -1527,7 +1527,7 @@ fn mipmaps_match_their_reference(path: UploadPath) {
             origin: [0, 0],
             size: [WIDTH, HEIGHT],
         },
-        camera,
+        viewpoint,
         uploads: &mut uploads,
         draws: &draws,
     };
@@ -1551,13 +1551,13 @@ fn a_view_in_the_ui_matches_its_reference() {
     let mut textures = Textures::default();
     let mut uploads = Uploads::default();
     // 4 units from the view's bottom to its top, which is 160 pixels: 40 pixels a unit.
-    let camera = Camera {
+    let viewpoint = Viewpoint {
         projection: Projection::Orthographic {
             height: 4.0,
             near: -1.0,
             far: 1.0,
         },
-        ..Camera::default()
+        ..Viewpoint::default()
     };
     let flat = shaders
         .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
@@ -1623,7 +1623,7 @@ fn a_view_in_the_ui_matches_its_reference() {
                 origin: [0, 0],
                 size,
             },
-            camera,
+            viewpoint,
             uploads: &mut uploads,
             draws: &draws,
         };
@@ -1729,13 +1729,13 @@ fn replaced_shaders_draw_from_the_next_frame() {
         .expect("a mesh");
     let mut draws = Draws::default();
     draws.push(square, shader, Mat4::IDENTITY, ());
-    let camera = Camera {
+    let viewpoint = Viewpoint {
         projection: Projection::Orthographic {
             height: 2.0,
             near: -1.0,
             far: 1.0,
         },
-        ..Camera::default()
+        ..Viewpoint::default()
     };
     let center = |renderer: &mut Renderer| {
         let pixels = (renderer.read_back())
@@ -1757,7 +1757,7 @@ fn replaced_shaders_draw_from_the_next_frame() {
                 origin: [0, 0],
                 size: [SIZE, SIZE],
             },
-            camera,
+            viewpoint,
             uploads: &mut uploads,
             draws: &draws,
         };
@@ -1814,7 +1814,7 @@ fn pipelines_go_through_the_cache() {
                 origin: [0, 0],
                 size: [SIZE, SIZE],
             },
-            camera: Camera::default(),
+            viewpoint: Viewpoint::default(),
             uploads: &mut uploads,
             draws: &draws,
         };

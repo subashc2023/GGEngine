@@ -26,12 +26,15 @@ const GIZMO: f32 = 2.0 * (REACH + BALL) + 4.0;
 /// The height of the label under the gizmo, in points.
 const LABEL: f32 = 18.0;
 
-/// What the toolbar sets: what the left button does over the view, and whether the grid shows,
-/// and in which plane.
+/// What the toolbar sets: what the left button does over the view, whether the grid shows, and in
+/// which plane, and whether the view sees through the world's camera.
 pub struct Toolbar {
     pub tool: Tool,
     pub grid: bool,
     pub plane: Plane,
+    /// Whether the view sees through the world's camera, as the game would, rather than the
+    /// editor's, and shows neither the grid nor the gizmo.
+    pub world_camera: bool,
 }
 
 impl Default for Toolbar {
@@ -40,15 +43,19 @@ impl Default for Toolbar {
             tool: Tool::default(),
             grid: true,
             plane: Plane::XY,
+            world_camera: false,
         }
     }
 }
 
 impl Toolbar {
     /// Draws the toolbar into `ui`: the tools, the camera's projection, which a click switches,
-    /// and the grid's switch and its plane, each with a tooltip. It opens nothing, since a popup
-    /// would take the view's keys.
-    pub fn show(&mut self, ui: &mut egui::Ui, camera: &mut OrbitCamera) {
+    /// the grid's switch and its plane, and the switch that sees through the world's camera, which
+    /// is off while the world has no primary camera, as `has_camera` says, each with a tooltip.
+    /// While the view sees through the world's camera, the projection's and the grid's buttons are
+    /// off, since what they change doesn't show. It opens nothing, since a popup would take the
+    /// view's keys.
+    pub fn show(&mut self, ui: &mut egui::Ui, camera: &mut OrbitCamera, has_camera: bool) {
         panel(ui).show(ui, |ui| {
             ui.horizontal(|ui| {
                 for (tool, icon, tip) in [
@@ -73,28 +80,44 @@ impl Toolbar {
                     }
                 }
                 ui.separator();
-                let (label, tip) = if camera.perspective {
-                    ("Persp", "Perspective: click for orthographic")
-                } else {
-                    ("Ortho", "Orthographic: click for perspective")
-                };
-                if ui.button(label).on_hover_text(tip).clicked() {
-                    camera.perspective = !camera.perspective;
-                }
-                ui.separator();
-                if icon_button(ui, Icon::Grid, self.grid)
-                    .on_hover_text("Grid")
-                    .clicked()
-                {
-                    self.grid = !self.grid;
-                }
-                let tip = "The grid's plane; a view along an axis without perspective shows the \
-                           plane facing it";
-                for (plane, name) in [(Plane::XY, "XY"), (Plane::XZ, "XZ"), (Plane::YZ, "YZ")] {
-                    let button = Button::selectable(self.plane == plane, name);
-                    if ui.add(button).on_hover_text(tip).clicked() {
-                        self.plane = plane;
+                ui.add_enabled_ui(!self.world_camera, |ui| {
+                    let (label, tip) = if camera.perspective {
+                        ("Persp", "Perspective: click for orthographic")
+                    } else {
+                        ("Ortho", "Orthographic: click for perspective")
+                    };
+                    if ui.button(label).on_hover_text(tip).clicked() {
+                        camera.perspective = !camera.perspective;
                     }
+                    ui.separator();
+                    if icon_button(ui, Icon::Grid, self.grid)
+                        .on_hover_text("Grid")
+                        .clicked()
+                    {
+                        self.grid = !self.grid;
+                    }
+                    let tip = "The grid's plane; a view along an axis without perspective shows \
+                               the plane facing it";
+                    for (plane, name) in [(Plane::XY, "XY"), (Plane::XZ, "XZ"), (Plane::YZ, "YZ")] {
+                        let button = Button::selectable(self.plane == plane, name);
+                        if ui.add(button).on_hover_text(tip).clicked() {
+                            self.plane = plane;
+                        }
+                    }
+                });
+                ui.separator();
+                let through = ui.add_enabled_ui(has_camera, |ui| {
+                    icon_button(ui, Icon::Camera, self.world_camera)
+                });
+                let through = through
+                    .inner
+                    .on_hover_text(
+                        "World camera: the view sees through the world's primary camera, as the \
+                         game does; moving the editor's camera comes back to it",
+                    )
+                    .on_disabled_hover_text("World camera: the world has no primary camera");
+                if through.clicked() {
+                    self.world_camera = !self.world_camera;
                 }
             });
         });
@@ -130,6 +153,8 @@ enum Icon {
     Orbit,
     /// Lines across and down.
     Grid,
+    /// A film camera: its body, and its lens.
+    Camera,
 }
 
 impl Icon {
@@ -181,6 +206,11 @@ impl Icon {
                     painter.line_segment([at(2.0, t), at(14.0, t)], thin);
                 }
             }
+            Self::Camera => {
+                let body = [at(1.5, 4.5), at(10.0, 4.5), at(10.0, 11.5), at(1.5, 11.5)];
+                painter.add(Shape::closed_line(body.to_vec(), line));
+                triangle([at(10.5, 8.0), at(15.0, 4.5), at(15.0, 11.5)]);
+            }
         }
     }
 }
@@ -195,7 +225,7 @@ pub fn gizmo(ui: &mut egui::Ui, camera: &mut OrbitCamera, aligned: Option<Side>)
     let (axes, label) = rect.split_top_bottom_at_y(rect.min.y + GIZMO);
     let response = ui.interact(axes, Id::unique("gg editor gizmo"), Sense::click_and_drag());
     let center = axes.center();
-    let rotation = camera.camera().rotation;
+    let rotation = camera.viewpoint().rotation;
     let hovered = (response.hover_pos()).and_then(|pos| hit(rotation, pos - center));
     let painter = ui.painter_at(rect);
     let visuals = ui.visuals();
@@ -492,7 +522,7 @@ mod tests {
         let mut camera = OrbitCamera::new();
         click(&mut camera, middle + vec2(REACH, 0.0));
         camera.update(Duration::from_secs(1));
-        let forward = camera.camera().rotation * Vec3::NEG_Z;
+        let forward = camera.viewpoint().rotation * Vec3::NEG_Z;
         assert_eq!(Side::facing(forward), Some(Side::Right), "{forward}");
 
         let mut camera = OrbitCamera::new();
@@ -510,7 +540,7 @@ mod tests {
         press(&mut camera, middle, middle + vec2(20.0, 10.0));
         let mut orbited = OrbitCamera::new();
         orbited.orbit(math::Vec2::new(20.0, 10.0));
-        let (seen, want) = (camera.camera(), orbited.camera());
+        let (seen, want) = (camera.viewpoint(), orbited.viewpoint());
         assert!(
             seen.rotation.abs_diff_eq(want.rotation, 1e-6),
             "{} against {}",

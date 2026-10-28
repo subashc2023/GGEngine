@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use gg_core::{Error, Result};
 
 use super::{Component, Entity, World, hash};
-use crate::reflect::{Name, Reflect, Type, TypeIndex, Types, Value};
+use crate::reflect::{Name, Reflect, Shape, Type, TypeIndex, Types, Value};
 
 /// A component type's index among those a world has seen, in the order it first saw them: the
 /// world's own, which never leaves it.
@@ -37,6 +37,8 @@ struct Info {
     /// What the world's hash takes it as, from its name.
     key: u64,
     index: TypeIndex,
+    /// Its exclusive field's name, as [`Component::exclusive`] gives it.
+    exclusive: Option<&'static str>,
     /// Makes an empty column of the type, for a new table.
     new_column: fn() -> Box<dyn AnyColumn>,
 }
@@ -44,7 +46,9 @@ struct Info {
 impl Components {
     /// `T`'s id, which it gets once it's described, the first time it's asked for.
     ///
-    /// Fails as describing it does, such as with `reflect.name_taken`.
+    /// Fails as describing it does, such as with `reflect.name_taken`; and with
+    /// `ecs.bad_exclusive` if it names an exclusive field that isn't a `bool` of its own, as
+    /// [`Component::exclusive`] says.
     pub fn register<T: Component>(&mut self) -> Result<ComponentId> {
         if let Some(&id) = self.ids.get(&TypeId::of::<T>()) {
             return Ok(id);
@@ -77,10 +81,32 @@ impl Components {
                 ),
             ));
         }
+        let exclusive = T::exclusive();
+        if let Some(field) = exclusive {
+            let fields = match &self.types.info(index).shape {
+                Shape::Struct {
+                    fields,
+                    tuple: false,
+                } => &fields[..],
+                _ => &[],
+            };
+            let named = fields.iter().find(|of| of.name == field);
+            if named.is_none_or(|of| of.ty != Type::Bool) {
+                return Err(Error::new(
+                    "ecs.bad_exclusive",
+                    format!(
+                        "`{name}` names `{field}` its exclusive field, but it has no `bool` field \
+                         `{field}`: a component's exclusive field is a `bool` of its own, of a \
+                         struct with named fields"
+                    ),
+                ));
+            }
+        }
         self.infos.push(Info {
             key: hash::type_key(&name),
             name: name.clone(),
             index,
+            exclusive,
             new_column: || Box::new(Vec::<T>::new()),
         });
         self.ids.insert(TypeId::of::<T>(), id);
@@ -121,6 +147,11 @@ impl Components {
     /// Every component type's name, in the order they registered.
     pub fn names(&self) -> impl ExactSizeIterator<Item = &str> {
         self.infos.iter().map(|info| &*info.name)
+    }
+
+    /// The name of its exclusive field, if it has one.
+    pub(super) fn exclusive(&self, id: ComponentId) -> Option<&'static str> {
+        self.infos[id.0 as usize].exclusive
     }
 
     /// An empty column of its type.

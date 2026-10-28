@@ -1,8 +1,9 @@
 //! The inspector: the Entities panel, which lists the world's entities, and the Inspector panel,
 //! which shows the picked entity's components and edits their fields. It reaches the world only
 //! through its by-name calls, its IDs and its hierarchy, as the tool API will, so that an editor
-//! can show it for a game in another process, and names entities by their IDs. Its edits are its
-//! commands: the panels queue them, its next tick makes them, and a recording keeps them.
+//! can show it for a game in another process, and names entities by their names, where they have
+//! one, and their IDs. Its edits are its commands: the panels queue them, its next tick makes
+//! them, and a recording keeps them.
 
 use std::f64::consts::PI;
 use std::mem;
@@ -30,7 +31,8 @@ use crate::{Commands, Context, Entity, EntityId, Layer, Log, Operation, Tick, Ui
 /// and a refusal, and the Edit menu's names, show from the tick.
 #[derive(Default)]
 pub struct Inspector {
-    /// By its ID, which outlives it, so that a pick despawned is still named as it was shown.
+    /// By its ID, which outlives it, so that a pick despawned is still named by its ID: its name
+    /// is gone.
     picked: Option<EntityId>,
     /// The component type the Entities panel lists the entities of; all of them if `None`.
     with: Option<String>,
@@ -348,7 +350,11 @@ impl Inspector {
             for entity in entities.skip(shown.start).take(shown.len()) {
                 let id = world.id(entity).expect("the world lists living entities");
                 let components = world.components_of(entity).into_iter().flatten();
-                let label = format!("{id}  {}", components.collect::<Vec<_>>().join(", "));
+                let components = components.collect::<Vec<_>>().join(", ");
+                let label = match entity_name(world, entity) {
+                    Some(name) => format!("{name}  {id}  {components}"),
+                    None => format!("{id}  {components}"),
+                };
                 if ui
                     .selectable_label(self.picked == Some(id), label)
                     .clicked()
@@ -403,7 +409,11 @@ impl Inspector {
             _ => None,
         });
         let waiting: Vec<&Edit> = queued.collect();
-        ui.label(format!("Entity {id}"));
+        let heading = match entity_name(world, entity) {
+            Some(name) => format!("{name}, entity {id}"),
+            None => format!("Entity {id}"),
+        };
+        ui.label(heading);
         if let Some(children) = children(world, entity) {
             ui.label(children);
         }
@@ -539,9 +549,14 @@ impl Fields<'_> {
             (Type::Named(index), _) => {
                 let info = self.types.info(*index);
                 match (&info.shape, value) {
-                    (Shape::Struct { fields, .. }, Value::Struct(given)) => self
-                        .fields(ui, fields, given, path, whole)
-                        .map(Value::Struct),
+                    (Shape::Struct { fields, tuple }, Value::Struct(given)) => {
+                        let changed = match fields.as_slice() {
+                            // A tuple struct's only field needs no label: it would say `0`.
+                            [field] if *tuple => self.only_field(ui, field, given, path, whole),
+                            _ => self.fields(ui, fields, given, path, whole),
+                        };
+                        changed.map(Value::Struct)
+                    }
                     (Shape::Enum(variants), Value::Variant(name, given)) => {
                         if variants.iter().all(|variant| variant.fields.is_empty()) {
                             let names = variants.iter().map(|variant| &variant.name);
@@ -667,6 +682,35 @@ impl Fields<'_> {
                 }
             });
         changed
+    }
+
+    /// Draws the only field of a tuple struct, `field`, with its value from `given`, as
+    /// [`fields`](Self::fields) draws a field, but without a label, which would only say `0`, and
+    /// in a group of its own, so that a refusal goes under it, not into the row of a grid it's in.
+    fn only_field(
+        &mut self,
+        ui: &mut egui::Ui,
+        field: &Field,
+        given: &[(Name, Value)],
+        path: &str,
+        whole: bool,
+    ) -> Option<Vec<(Name, Value)>> {
+        let [(name, value)] = given else {
+            return None;
+        };
+        let path = reflect::join(path, &field.name);
+        let new = ui.vertical(|ui| {
+            let new = self.value(ui, &field.ty, &field.meta, value, &path, whole);
+            self.refusal(ui, &path);
+            new
+        });
+        let new = new.inner?;
+        if whole {
+            Some(vec![(name.clone(), new)])
+        } else {
+            self.edit(&path, new);
+            None
+        }
     }
 
     /// Draws `items`, the elements at `path` of a list or an array of `ty` with hints `meta`, a
@@ -834,6 +878,20 @@ fn same_rotation(a: Quat, b: Quat) -> bool {
     near(b) || near(-b)
 }
 
+/// `entity`'s name, if it has a [`Name`](crate::Name) holding one. It reads it by name, as the
+/// panels read the world, and lists the entity's components first, so that one without a name
+/// builds no error, as getting the field it hasn't would, each frame it's drawn.
+fn entity_name(world: &World, entity: Entity) -> Option<String> {
+    let mut components = world.components_of(entity).ok()?;
+    if !components.any(|component| component == "Name") {
+        return None;
+    }
+    match world.get_field(entity, "Name", "0") {
+        Ok(Value::String(name)) => Some(name),
+        _ => None,
+    }
+}
+
 /// `entity`'s children, by their IDs, as "Children: 5f3a9c0e12b47d68, 0c41b2e79d6a3f15": the
 /// first 16 of them, then how many more there are; `None` if it has none.
 fn children(world: &World, entity: Entity) -> Option<String> {
@@ -963,7 +1021,7 @@ mod tests {
 
     use super::*;
     use crate::reflect::tests::{Everything, Form, Inner, everything, same_snapshots, snapshot};
-    use crate::{Sprite, Transform};
+    use crate::{Component, Sprite, Transform};
 
     /// `entity`'s ID, which the Inspector picks it by and names it by.
     fn id(world: &World, entity: Entity) -> EntityId {
@@ -1290,6 +1348,165 @@ mod tests {
                 None => assert!(!shown(bad) && !shown(&missing), "{texts:?}"),
             }
         }
+    }
+
+    /// `name` as the component holds it: the `Name` here is reflection's.
+    fn called(name: &str) -> crate::Name {
+        crate::Name(name.to_owned())
+    }
+
+    /// Names in a field and in an option, which a tuple struct of one field shows alone, and sets
+    /// at its own path or whole; and an enum whose variant has a field, which keeps its label.
+    #[derive(Clone, Component)]
+    struct Shaped {
+        name: crate::Name,
+        maybe: Option<crate::Name>,
+        form: Form,
+    }
+
+    fn shaped() -> Shaped {
+        Shaped {
+            name: called("Bob"),
+            maybe: Some(called("Cy")),
+            form: Form::Circle(2.5),
+        }
+    }
+
+    #[test]
+    fn an_entity_with_a_name_shows_by_it_and_its_id() {
+        let mut world = World::default();
+        let named = world.spawn((called("Ada"), Transform::IDENTITY));
+        let plain = world.spawn(Transform::IDENTITY);
+        let [named_id, plain_id] = [named, plain].map(|entity| id(&world, entity));
+        let ctx = crate::egui_context();
+        let mut inspector = Inspector::default();
+        // The name leads a row, and an entity without one keeps the row it had.
+        let texts = frames(&mut inspector, &mut world, &ctx);
+        for row in [
+            format!("Ada  {named_id}  Name, Transform"),
+            format!("{plain_id}  Transform"),
+        ] {
+            assert!(texts.contains(&row), "{row}: {texts:?}");
+        }
+        for (picked, heading) in [
+            (named_id, format!("Ada, entity {named_id}")),
+            (plain_id, format!("Entity {plain_id}")),
+        ] {
+            inspector.pick(picked);
+            let texts = frames(&mut inspector, &mut world, &ctx);
+            assert!(texts.contains(&heading), "{heading}: {texts:?}");
+        }
+        // Despawned, a pick has no name left to show.
+        inspector.pick(named_id);
+        world.despawn(named).expect("alive");
+        let texts = frames(&mut inspector, &mut world, &ctx);
+        let despawned = format!("Entity {named_id} was despawned");
+        assert!(texts.contains(&despawned), "{texts:?}");
+    }
+
+    #[test]
+    fn a_tuple_of_one_field_shows_its_field_without_a_label() {
+        let mut world = World::default();
+        let named = world.spawn(called("Ada"));
+        let shape = world.spawn(shaped());
+        let [parent, child] = [(); 2].map(|()| world.spawn(()));
+        world.set_parent(child, Some(parent)).expect("no cycle");
+        let parent = id(&world, parent).to_string();
+        let ctx = crate::egui_context();
+        let mut inspector = Inspector::default();
+        // A name or a parent shows as its field alone, and so does a name in a field or an option;
+        // the field of an enum's variant keeps its label, `0`.
+        let picks: [(Entity, &[&str], usize); 3] = [
+            (named, &["Name", "Ada"], 0),
+            (child, &["Parent", parent.as_str()], 0),
+            (shape, &["name", "Bob", "maybe", "Some", "Cy", "Circle"], 1),
+        ];
+        for (entity, names, zeros) in picks {
+            inspector.pick(id(&world, entity));
+            let texts = frames(&mut inspector, &mut world, &ctx);
+            for name in names {
+                assert!(texts.iter().any(|text| text == name), "{name}: {texts:?}");
+            }
+            let labels = texts.iter().filter(|text| *text == "0").count();
+            assert_eq!(labels, zeros, "{texts:?}");
+        }
+    }
+
+    /// A name typed into is set at its field's path, `0` as a component and `name.0` in a field,
+    /// and whole in an option.
+    #[test]
+    fn a_tuple_of_one_field_is_set_at_its_own_path_or_whole() {
+        let mut world = World::default();
+        let named = world.spawn(called("Ada"));
+        let shape = world.spawn(shaped());
+        let ctx = crate::egui_context();
+        let mut inspector = Inspector::default();
+        let mut time = 0.0;
+        // A frame given `events`, then two that settle what they did; the last one's texts.
+        let mut run = |inspector: &mut Inspector, world: &mut World, events| {
+            let mut texts = Vec::new();
+            for events in [events, Vec::new(), Vec::new()] {
+                time += 1.0;
+                texts = frame(inspector, world, &ctx, time, events).0;
+            }
+            texts
+        };
+        // An x typed into each name as a person would: clicked left of its text, which puts the
+        // cursor first, and typed.
+        let mut texts = Vec::new();
+        for (entity, after, name) in [
+            (named, "Name", "Ada"),
+            (shape, "Shaped", "Bob"),
+            (shape, "maybe", "Cy"),
+        ] {
+            inspector.pick(id(&world, entity));
+            let shown = run(&mut inspector, &mut world, Vec::new());
+            let rect = find(&shown, after, name);
+            run(
+                &mut inspector,
+                &mut world,
+                click(egui::pos2(rect.min.x - 3.0, rect.center().y)),
+            );
+            let typed = vec![egui::Event::Text("x".to_owned())];
+            texts = run(&mut inspector, &mut world, typed);
+        }
+        assert!(inspector.refusals.is_empty(), "{texts:?}");
+        assert_eq!(world.get::<crate::Name>(named), Some(&called("xAda")));
+        let held = world.get::<Shaped>(shape).expect("shaped");
+        assert_eq!(held.name, called("xBob"));
+        assert_eq!(held.maybe, Some(called("xCy")));
+        // The Entities panel shows the name as it is now.
+        let row = format!("xAda  {}  Name", id(&world, named));
+        assert!(texts.iter().any(|(text, _)| *text == row), "{texts:?}");
+    }
+
+    /// A value refused for the field of a tuple struct shows under it, not in the row of the grid
+    /// it's in.
+    #[test]
+    fn a_value_refused_for_a_tuple_of_one_field_shows_under_it() {
+        let mut world = World::default();
+        let entity = world.spawn(shaped());
+        let ctx = crate::egui_context();
+        let mut inspector = Inspector::default();
+        inspector.pick(id(&world, entity));
+        let refused = Edit {
+            component: "Shaped".to_owned(),
+            path: "name.0".to_owned(),
+            value: Value::UInt(1),
+        };
+        inspector.apply(&mut world, inspector.picked, refused);
+        let says = format!(
+            "can't set `Shaped.name.0` of entity {}: expected String, got UInt",
+            id(&world, entity)
+        );
+        let mut time = 0.0;
+        let mut texts = Vec::new();
+        for _ in 0..3 {
+            time += 1.0;
+            texts = frame(&mut inspector, &mut world, &ctx, time, Vec::new()).0;
+        }
+        let (name, message) = (find(&texts, "name", "Bob"), find(&texts, "Bob", &says));
+        assert!(message.min.y > name.max.y, "{texts:?}");
     }
 
     #[test]

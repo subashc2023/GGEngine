@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use gg_engine::math::{EulerRot, Quat, Vec2, Vec3, libm};
 use gg_engine::{
-    Actions, Binding, Camera, Change, Event, Key, MouseButton, Projection, Scroll, Source, Viewport,
+    Actions, Binding, Change, Event, Key, MouseButton, Projection, Scroll, Source, Viewpoint,
+    Viewport,
 };
 
 /// How much the view spans from its bottom to its top in perspective: 60°.
@@ -278,7 +279,7 @@ impl OrbitCamera {
     /// from bottom to top, as perspective sees at the pivot, and far enough both ways to see any
     /// plane through it; in perspective, from a near plane a ten-thousandth of the distance in
     /// front, which reversed depth keeps precise whatever it is.
-    pub fn camera(&self) -> Camera {
+    pub fn viewpoint(&self) -> Viewpoint {
         let (pivot, rotation, distance) = self.current();
         let projection = if self.perspective {
             Projection::Perspective {
@@ -293,7 +294,7 @@ impl OrbitCamera {
                 far: DEPTH * height,
             }
         };
-        Camera {
+        Viewpoint {
             position: pivot - rotation * Vec3::NEG_Z * distance,
             rotation,
             projection,
@@ -306,7 +307,8 @@ impl OrbitCamera {
     }
 
     /// Feeds the camera an event the layer was sent, which it acts on as `screen` and `tool` say.
-    /// `Break` when it took a press or the wheel, so that the layers below don't act on them too.
+    /// `Break` when it took a press, the wheel or Home, each of which moves it, so that the layers
+    /// below don't act on them too.
     pub fn event(&mut self, event: &Event<'_>, screen: Screen, tool: Tool) -> ControlFlow<()> {
         let mut home = false;
         self.actions.event(event, |change| {
@@ -314,6 +316,7 @@ impl OrbitCamera {
         });
         if home {
             self.home();
+            return ControlFlow::Break(());
         }
         match *event {
             Event::MouseButton {
@@ -672,7 +675,7 @@ mod tests {
     /// Where `point` shows in [`VIEW`], in the window's pixels, as the renderer projects it.
     fn pixel(camera: &OrbitCamera, point: Vec3) -> Vec2 {
         let [width, height] = VIEW.size.map(|side| side as f32);
-        let clip = camera.camera().view_projection(width / height);
+        let clip = camera.viewpoint().view_projection(width / height);
         let ndc = clip.project_point3(point);
         let [x, y] = VIEW.origin.map(|at| at as f32);
         // Vulkan's clip space has y down, as the window does.
@@ -684,7 +687,7 @@ mod tests {
 
     /// Where the camera is.
     fn eye(camera: &OrbitCamera) -> Vec3 {
-        camera.camera().position
+        camera.viewpoint().position
     }
 
     fn assert_near(got: Vec2, want: Vec2, what: &str) {
@@ -699,7 +702,7 @@ mod tests {
 
     #[test]
     fn it_starts_from_the_front_seeing_10_units_about_the_origin_orthographically() {
-        let camera = OrbitCamera::new().camera();
+        let camera = OrbitCamera::new().viewpoint();
         assert_eq!(camera.rotation, Quat::IDENTITY);
         assert!(
             camera
@@ -991,7 +994,7 @@ mod tests {
         let mut camera = turned(false);
         camera.snap(Side::Top);
         eased(&mut camera);
-        let up = camera.camera().rotation * Vec3::Y;
+        let up = camera.viewpoint().rotation * Vec3::Y;
         assert!(up.abs_diff_eq(Vec3::NEG_Z, 1e-6), "{up}");
     }
 

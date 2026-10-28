@@ -38,6 +38,7 @@ mod interpolation;
 mod jobs;
 mod layer;
 mod model;
+mod name;
 mod pads;
 mod perf;
 mod pipeline_cache;
@@ -70,7 +71,9 @@ use tracing::{debug, error, info, warn};
 
 pub use actions::{Actions, Binding, Change, Source, Toward};
 use args::Args;
-pub use camera::{CameraAction, FlyAction, FlyCameraController, OrthographicCameraController};
+pub use camera::{
+    Camera, CameraAction, FlyAction, FlyCameraController, OrthographicCameraController,
+};
 use chrome::Chrome;
 use dock::Dock;
 pub use dock::{Docked, Ui};
@@ -94,10 +97,10 @@ pub use gg_renderer::MeshDraw;
 /// What layers draw, which they add and draw through their [`Context`]: sprites, and the sprite
 /// sheets whose cells they show; meshes; shaders
 /// for their vertex types, each added with how it blends; the textures those shaders and sprites
-/// sample, and the samplers they sample them with; the camera the game's view sees them from, and
-/// where that view is in the window.
+/// sample, and the samplers they sample them with; the viewpoint the game's view sees them from,
+/// and its projection, which a [`Camera`] has too; and where that view is in the window.
 pub use gg_renderer::{
-    Blend, Camera, Mesh, Projection, Sampler, Shader, Sprite, SpriteSheet, Texture, Viewport,
+    Blend, Mesh, Projection, Sampler, Shader, Sprite, SpriteSheet, Texture, Viewpoint, Viewport,
 };
 pub use input::Input;
 pub use inspector::Inspector;
@@ -106,6 +109,7 @@ pub use jobs::{on_threads, start as start_jobs};
 use layer::Stack;
 pub use layer::{Commands, Context, Layer, Tick, Window};
 pub use model::Model;
+pub use name::Name;
 pub use perf::PerfPanel;
 use perf::{Perf, Summary};
 use recording::Recorder;
@@ -1661,6 +1665,85 @@ mod tests {
                 frame.draws.is_empty(),
                 "the context keeps none of a frame's draws for the next"
             );
+        }
+    }
+
+    /// Spawns a camera as it attaches, and sets a viewpoint of its own as it updates while `own`
+    /// says to.
+    struct Overlooker {
+        own: Rc<Cell<bool>>,
+    }
+
+    /// What [`Overlooker`] sets.
+    const OVERLOOKING: Viewpoint = Viewpoint {
+        position: Vec3::new(0.0, 0.0, 5.0),
+        rotation: Quat::IDENTITY,
+        projection: Projection::Orthographic {
+            height: 3.0,
+            near: -1.0,
+            far: 1.0,
+        },
+    };
+
+    /// What [`Overlooker`]'s camera sees from.
+    const ITS_CAMERA: Viewpoint = Viewpoint {
+        position: Vec3::new(1.0, 2.0, 0.0),
+        rotation: Quat::IDENTITY,
+        projection: Projection::Orthographic {
+            height: 6.0,
+            near: -1.0,
+            far: 1.0,
+        },
+    };
+
+    impl Layer for Overlooker {
+        fn attach(&mut self, cx: &mut Context) {
+            let at = Transform {
+                translation: ITS_CAMERA.position,
+                ..Transform::IDENTITY
+            };
+            let camera = Camera {
+                projection: ITS_CAMERA.projection,
+                primary: true,
+            };
+            cx.world_mut().spawn((at, camera));
+        }
+
+        fn update(&mut self, cx: &mut Context, _: Duration) {
+            if self.own.get() {
+                cx.set_viewpoint(OVERLOOKING);
+            }
+        }
+    }
+
+    /// The view sees from the default without a camera; through the world's camera, as it draws
+    /// the world, in frames no layer sets a viewpoint; and from a layer's viewpoint in the frame
+    /// it sets it, that frame alone.
+    #[test]
+    fn the_view_sees_from_a_layers_viewpoint_for_its_frame_and_else_through_the_worlds_camera() {
+        let viewport = Viewport {
+            origin: [0, 0],
+            size: [640, 360],
+        };
+        let mut frame = render_thread::Extracted::default();
+        let own = Rc::new(Cell::new(false));
+        let mut stack = Stack::default();
+        stack.push_layer(Overlooker { own: own.clone() });
+        let mut cx = Context::new(None);
+        cx.extract(&mut frame, viewport);
+        assert_eq!(frame.viewpoint, Viewpoint::default());
+        stack.attach(&mut cx);
+        let mut stepper = Stepper::lockstep();
+        for (set, seen) in [
+            (false, ITS_CAMERA),
+            (true, OVERLOOKING),
+            (false, ITS_CAMERA),
+        ] {
+            own.set(set);
+            let dt = Duration::ZERO;
+            assert!(run_frame(&mut stack, &mut cx, dt, &mut stepper, None).is_none());
+            cx.extract(&mut frame, viewport);
+            assert_eq!(frame.viewpoint, seen, "a viewpoint set: {set}");
         }
     }
 

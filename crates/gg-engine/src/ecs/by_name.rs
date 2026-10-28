@@ -17,7 +17,9 @@ impl World {
     /// type registers the first time an entity has one too, so this is for those that tools should
     /// list before then.
     ///
-    /// Fails with `reflect.name_taken` if another type has its name.
+    /// Fails with `reflect.name_taken` if another type has its name, and with `ecs.bad_exclusive`
+    /// if it names an exclusive field that isn't a `bool` of its own, as
+    /// [`Component::exclusive`] says.
     pub fn register<T: Component>(&mut self) -> Result<()> {
         self.components.register::<T>().map(drop)
     }

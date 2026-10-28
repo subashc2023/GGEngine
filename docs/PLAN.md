@@ -342,6 +342,31 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   left button orbited, the gizmo snapped to Top and flipped to Bottom, its label switched the
   projection, and the View menu closed, reopened, saved, loaded, deleted and reset layouts; File >
   Quit exited cleanly, and the sandbox's arrows still steer its triangle.
+- **Names and cameras in the world** (2026-10-27): an entity can have a `Name`, which the Entities
+  and Inspector panels show it by and scenes save, and a `Camera`, a projection and whether it's
+  primary, which the game's view sees through while it's primary and no layer sets a viewpoint,
+  from where its entity draws between ticks, carried by its parents, its scale aside. `primary` is
+  the camera's exclusive field: a component can name a `bool` field of its own so, and an
+  operation that makes it true on one entity, as the Inspector's checkbox does, makes it false on
+  every other, as one edit that one undo reverses; of several cameras that code or a scene made
+  primary, the view sees through the lowest ID's, with a warning (`engine.camera_tie`).
+  gg-renderer's camera is a `Viewpoint`, which a layer sets for a frame with
+  `Context::set_viewpoint`, as the camera controllers and the editor's camera do; a projection that
+  can't project is refused wherever reflection makes one (`engine.bad_projection`). The Inspector
+  shows a tuple struct of one field without its `0` label. The editor starts with two cameras and
+  three named squares, at three sizes and depths, which its orthographic camera shows as the sizes
+  they are and its perspective one as one size, and its toolbar sees through the world's primary
+  camera until the editor's camera moves. Unit tests check which camera the view sees through, of several primary too, where
+  it sees from between ticks against a sprite of its transform, bit for bit, scale and mirroring,
+  the tie warning, exclusive fields made true by a create, an add and sets, each undone and redone
+  exactly, and their undos refused where the world has moved on, the projection's refusals by
+  value, set, operation, save and load, a named camera's scene, the viewpoints of real frames, the
+  Inspector's names and one-field tuples, and the editor's toggle; the `frames` test sees through
+  a world camera without allocating. By hand on the RTX 4090: the editor's rows named its
+  entities, the Inspector showed "Camera"'s projection and primary, the toggle showed the squares
+  through "Camera" at their sizes, without grid or gizmo, checking "Second camera"'s primary had the
+  view see through it, the squares the same size, and unchecked "Camera"'s, Edit > Undo switched them back, a
+  middle press brought the editor's view back to the pixel, and File > Quit exited cleanly.
 
 ## Now: the editor's next milestone, or Phase 5's first
 
@@ -449,8 +474,11 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Staging and the frame's arena kept within the device's `maxMemoryAllocationSize` and `maxBufferSize`, each at least 1 GiB: both grow by doubling, each staging buffer an allocation of its own, so a frame that adds more than that at once fails, which ends the run | A frame adds that much at once, or Phase 7, with the GPU's memory budget |
 | Images' sizes checked against the device's `maxImageDimension2D` and `maxFramebufferWidth` and `Height` as they're made; a pass checks its viewport against the device's limits, which an image past those exceeds only if it's past `maxViewportDimensions` too | A device's limits fall below a window's size |
 | Host image copy where a transfer queue exists, or where the driver says it costs the GPU in reading the image, as KosmicKrisp's does, turning off Apple's lossless compression, so that macOS uploads through the graphics queue; and meshes written straight into GPU memory the CPU reaches, as ReBAR and unified memory allow, rather than copied | A measurement shows either is faster |
-| More than one camera or view, such as split screen or the editor's scene view | A game or the editor draws several |
-| The camera as a component of an entity, which a scene saves and a parent carries along; layers set the camera through `Context`, and the world doesn't hold it | A scene saves a camera, or a camera follows or rides an entity, with a world matrix for game code |
+| More than one view, such as split screen, or the editor's scene view beside the game's: the view sees through one camera, the world's primary one, or a layer's viewpoint | A game or the editor draws several |
+| A camera's own aspect ratio, kept by letterboxing the view or by a target of its own, as Unreal's cameras can: a camera fits the view's aspect | Cameras render into targets of their own, or a game needs one aspect on every display |
+| The editor drawing the world's cameras in its view, as outlines of what each sees | The editor shows a game's cameras |
+| Moving the world's camera from the editor's view, as Unreal's Pilot and Blender's Lock Camera to View do: a move of the editor's camera goes back to its own | Someone frames a camera's shot from the view |
+| A scene or prefab loaded with a primary camera making the world's other cameras not primary, as an operation's does: a load sets fields as they're written, and of several primary, the view sees through the lowest ID's, warning | A prefab brings a camera of its own, as a player's would |
 | Picking what's under the cursor: layers know where the view is (`Context::view`) and the cursor, in the same pixels, and the editor's camera finds the point under the cursor on a plane itself, but nothing finds what's drawn there; and the orthographic camera controller zooms about the view's center | Something picks with the mouse, or a game zooms toward the cursor |
 | A dockspace's view in a window of its own: it docks and floats over the main window alone, since only the main window's input reaches the layers, and its image is made at the main window's scale | The editor shows the game on a display of its own |
 | Showing which panel has the keys, such as an outline around the view while it has focus | Someone misses it, or Phase 9's editor |
@@ -532,15 +560,17 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Gates on time in CI: hosted runners' times vary too much to gate on | A self-hosted runner, as for the GPU tests |
 | A component type's default as a value, to add one without giving every field; `Create` and `Add` take whole values | The Inspector or the tool API adds components |
 | Moving values to a type that changed: matching fields by name and by alias, defaults for fields added, and fields dropped; a scene with a field its type hasn't, or without one it has, is refused | Phase 5, when `Sprite` gains its texture's name, or with its hot reload |
-| In the Inspector, turning an option on or off, switching to a variant with fields, and adding or removing a list's elements; by path, a value sets them whole | A component needs one edited |
+| In the Inspector, turning an option on or off, switching to a variant with fields, as a camera's projection from orthographic to perspective, and adding or removing a list's elements; by path, a value sets them whole | Someone switches a camera's projection in the Inspector, or another component needs one edited |
 | `Sprite.texture` and `MeshDraw` are opaque: shown, but not set, saved, hashed or carried across a rebuild | Phase 5, which names assets |
 | Flags for fields that saving, the world's hash or replication skip, and fields that are read only; `Parent` is read only as a whole type, which `set_field` refuses | Each with its first user |
 | Generic types deriving `Reflect` or `Component` | A game needs one |
 | Drag speeds as hints; the Inspector picks them from a field's bounds and kind | A field drags too coarsely or too finely |
 | Paths resolved once and kept, for sets made again and again | A profile |
-| Picking an entity for a field, a parent or a child picked by clicking it, the Entities panel as a tree, names in the Inspector, and picking in the view; entities are shown by their IDs, and found by an ID pasted in | Picking in the view, or Phase 9's scene tree |
+| Picking an entity for a field, a parent or a child picked by clicking it, the Entities panel as a tree, and picking in the view; entities are shown by their names, where they have one, and their IDs, and found by an ID pasted in | Picking in the view, or Phase 9's scene tree |
+| Finding an entity by its name: the Find field takes an ID | A world names more entities than the Entities panel shows at once |
+| Entities rows of one line: a row wider than its panel wraps, as one whose name has a line break does, though the list skips the rows out of view as though each were one line tall, as egui's `show_rows` takes them; and an empty name shows as it is | A world of more entities than the panel shows, in a narrow panel, or names from players |
 | World transforms stored and propagated after the ticks, with change detection; drawing computes each child's from its ancestors, every frame, as the latest tick left them, for its z, and blended between ticks, to draw it | Physics, or a profile showing the walks up the hierarchy |
-| A world matrix for game code, and where an entity draws between ticks, for a camera that follows it, which would otherwise judder against it, since layers read the world up to a tick ahead of where it draws; the engine's drawing computes its own | The camera as a component, a camera that follows an entity, or a system that needs a child's place in the world |
+| A world matrix for game code, and where an entity draws between ticks, for a layer's viewpoint that follows it, which would otherwise judder against it, since layers read the world up to a tick ahead of where it draws; the engine's drawing and the world's camera compute their own | A layer's viewpoint that follows an entity, or a system that needs a child's place in the world |
 | Turning interpolation off for an entity or a subtree, so that it draws at its ticks; every entity draws between them | A game wants something drawn at its ticks |
 | Rotations of more than half a turn a tick, which draw the shorter way round, the other way; Hermite easing from velocities would draw them, and curves between ticks | Something spins that fast, or a curve between ticks shows |
 | Drawing an entity despawned in a tick on its way there until the next: it vanishes up to a tick before it reaches where it stopped | A game's despawns show it, as bullets vanishing short of what they hit |

@@ -13,10 +13,10 @@ use gg_engine::egui::{self, ViewportCommand, ViewportId};
 use gg_engine::math::{self, EulerRot, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_engine::reflect::Error;
 use gg_engine::{
-    Actions, App, Binding, Blend, Camera, Change, Commands, Component, Context, Entity, Event,
-    FlyAction, FlyCameraController, Key, Layer, Mesh, MeshDraw, OrthographicCameraController,
-    PadButton, Projection, Reflect, Sampler, Shader, Source, Sprite, SpriteSheet, Stick, Tick,
-    Transform, Ui, World,
+    Actions, App, Binding, Blend, Change, Commands, Component, Context, Entity, Event, FlyAction,
+    FlyCameraController, Key, Layer, Mesh, MeshDraw, OrthographicCameraController, PadButton,
+    Projection, Reflect, Sampler, Shader, Source, Sprite, SpriteSheet, Stick, Tick, Transform, Ui,
+    Viewpoint, World,
 };
 use tracing::{error, info};
 
@@ -180,15 +180,15 @@ fn tile(letter: u8) -> ([u32; 2], Option<([u32; 2], u32)>) {
 }
 
 /// A camera, unturned, over `center`, seeing `height` units from the view's bottom to its top.
-fn overlooking(center: Vec2, height: f32) -> Camera {
-    Camera {
+fn overlooking(center: Vec2, height: f32) -> Viewpoint {
+    Viewpoint {
         position: center.extend(0.0),
         projection: Projection::Orthographic {
             height,
             near: -1.0,
             far: 1.0,
         },
-        ..Camera::default()
+        ..Viewpoint::default()
     }
 }
 
@@ -664,14 +664,14 @@ impl Sandbox {
 
     /// Where the camera starts: over the origin, 3 units from the view's bottom to its top, around
     /// the grid's 2.
-    fn start() -> Camera {
+    fn start() -> Viewpoint {
         overlooking(Vec2::ZERO, 3.0)
     }
 
     /// A camera with perspective, 2.5 in front of the cubes, looking at them, a sixth of a turn
     /// from the view's bottom to its top.
-    fn looking_at_the_cubes() -> Camera {
-        Camera {
+    fn looking_at_the_cubes() -> Viewpoint {
+        Viewpoint {
             position: CUBES + Vec3::Z * 2.5,
             rotation: Quat::IDENTITY,
             projection: Projection::Perspective {
@@ -684,7 +684,7 @@ impl Sandbox {
     /// Has `camera` be the game's view's, steered by the controller for its projection: the fly
     /// camera controller for one with perspective. The controller it leaves lets go of what it
     /// held, since it's sent no more events.
-    fn look_at(&mut self, cx: &mut Context, camera: Camera) {
+    fn look_at(&mut self, cx: &mut Context, camera: Viewpoint) {
         let flying = matches!(camera.projection, Projection::Perspective { .. });
         if flying != self.flying {
             let left = Event::Focused(false);
@@ -696,9 +696,9 @@ impl Sandbox {
         }
         self.flying = flying;
         if flying {
-            self.fly.camera = camera;
+            self.fly.viewpoint = camera;
         } else {
-            self.camera.camera = camera;
+            self.camera.viewpoint = camera;
         }
     }
 
@@ -972,9 +972,9 @@ impl Layer for Sandbox {
         }
         ui.panel("Stats", |ui| {
             let camera = if self.flying {
-                self.fly.camera
+                self.fly.viewpoint
             } else {
-                self.camera.camera
+                self.camera.viewpoint
             };
             let [x, y, z] = camera.position.to_array();
             let degrees = |radians| math::to_degrees(radians).rem_euclid(360.0);

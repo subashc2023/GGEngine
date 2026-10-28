@@ -1,9 +1,9 @@
 //! Steady-state frames of an app whose layers draw no UI allocate nothing, on any thread: frames
 //! of what games draw, sprites flat, textured and of a sprite sheet's cells, games' meshes with
 //! parameters, opaque and blended, a glTF model and a mirrored copy of it, a turning hierarchy and
-//! drifters that wrap, whose ticks despawn and spawn entities, run through the engine's main loop
-//! headless, three fifths of a tick apart, so that they draw between ticks, once its first frames
-//! have run.
+//! drifters that wrap, whose ticks despawn and spawn entities, seen through a camera of the
+//! world's that a pivot the ticks turn carries round, run through the engine's main loop headless,
+//! three fifths of a tick apart, so that they draw between ticks, once its first frames have run.
 //!
 //! It runs in one process with a main of its own, so that no other test's threads run beside it,
 //! and counts every allocation the process makes through Rust's allocator while the frames run,
@@ -42,15 +42,13 @@ use serde_json::json;
 /// What the world's IDs are drawn from, so that every run draws its entities in one order.
 const SEED: u64 = 0x5eed_f2a3;
 /// The frames run before counting, as a run's first frames size what the engine and the app keep:
-/// three periods of what the ticks move, more than three of the camera's turns, and many turns of
-/// every pool.
+/// three periods of what the ticks move, and many turns of every pool.
 const WARM_UP: u64 = 320;
 /// The frames counted: more than a period of every motion.
 const COUNTED: u64 = 160;
-/// The ticks a drifter takes to come back to where it started, and the parent to turn round.
+/// The ticks a drifter takes to come back to where it started, the parent to turn round, and the
+/// camera to go round.
 const PERIOD: u64 = 64;
-/// The frames the camera takes to go round.
-const ORBIT: u64 = 96;
 const DRIFTERS: usize = 2_000;
 /// Where the drifters drift, across and up, around the origin.
 const FIELD: Vec2 = Vec2::new(16.0, 9.0);
@@ -186,6 +184,8 @@ struct Scene {
     dir: PathBuf,
     assets: Option<Assets>,
     turning: Option<Entity>,
+    /// What carries the camera round.
+    pivot: Option<Entity>,
     subtrees: VecDeque<Entity>,
     copies: VecDeque<Entity>,
     /// The drifters that wrapped at a tick, kept for its memory, with its lock: empty between
@@ -297,6 +297,28 @@ impl Layer for Scene {
             world.set_parent(child, Some(parent)).expect("both alive");
         }
         self.turning = Some(parent);
+        // The camera, looking down a little at the origin from 16 away, which a pivot there
+        // carries round, as the ticks turn it.
+        let pivot = world.spawn(Transform::IDENTITY);
+        let tilt = Quat::from_rotation_x(-0.25);
+        let looking = Transform {
+            translation: tilt * Vec3::new(0.0, 0.0, 16.0),
+            rotation: tilt,
+            ..Transform::IDENTITY
+        };
+        let projection = Projection::Perspective {
+            fov: 1.0,
+            near: 0.1,
+        };
+        let camera = world.spawn((
+            looking,
+            Camera {
+                projection,
+                primary: true,
+            },
+        ));
+        world.set_parent(camera, Some(pivot)).expect("both alive");
+        self.pivot = Some(pivot);
         // The pair, and a copy mirrored, which culls the other way.
         pair.spawn(world, at(-4.0, 0.0, 2.0));
         let mirrored = Transform {
@@ -342,6 +364,9 @@ impl Layer for Scene {
         let turning = self.turning.expect("attached");
         let transform = world.get_mut::<Transform>(turning).expect("alive");
         transform.rotation = Quat::from_rotation_z(turn);
+        let pivot = self.pivot.expect("attached");
+        let transform = world.get_mut::<Transform>(pivot).expect("alive");
+        transform.rotation = Quat::from_rotation_y(turn);
         for i in 0..REPLACED {
             let oldest = self.subtrees.pop_front().expect("a full pool");
             world.despawn(oldest).expect("alive");
@@ -354,16 +379,6 @@ impl Layer for Scene {
     }
 
     fn update(&mut self, cx: &mut Context, _: Duration) {
-        let turn = TAU * (self.frames % ORBIT) as f32 / ORBIT as f32;
-        let rotation = Quat::from_rotation_y(turn) * Quat::from_rotation_x(-0.25);
-        cx.set_camera(Camera {
-            position: rotation * Vec3::new(0.0, 0.0, 16.0),
-            rotation,
-            projection: Projection::Perspective {
-                fov: 1.0,
-                near: 0.1,
-            },
-        });
         let assets = self.assets();
         let (quad, opaque) = (assets.quad, assets.opaque);
         let cell = assets.sheet.sprite([1, 0], [1, 1]);

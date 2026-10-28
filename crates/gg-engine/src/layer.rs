@@ -11,11 +11,12 @@ use bytemuck::NoUninit;
 use gg_core::math::{Mat4, Vec2};
 use gg_core::{Error, Result};
 use gg_renderer::{
-    Blend, Camera, Draws, Mesh, Meshes, Mipmaps, Shader, Shaders, Sprite, SpriteSheet, Texture,
-    Textures, Viewport,
+    Blend, Draws, Mesh, Meshes, Mipmaps, Shader, Shaders, Sprite, SpriteSheet, Texture, Textures,
+    Viewpoint, Viewport,
 };
 use tracing::info;
 
+use crate::camera::{self, Camera, Tie};
 use crate::draw::{self, Scratch};
 use crate::gltf;
 use crate::image::{self, Image};
@@ -24,7 +25,7 @@ use crate::perf::Perf;
 use crate::recording::Recorder;
 use crate::reflect::{Reflect, Value};
 use crate::render_thread::Extracted;
-use crate::{Event, Input, MeshDraw, Model, Transform, Ui, World};
+use crate::{Event, Input, MeshDraw, Model, Name, Transform, Ui, World};
 
 /// A part of an app that the main loop drives. Every method has a default that does nothing,
 /// so a layer implements only what it uses; [`ui`](Self::ui)'s also tells the engine that the
@@ -61,8 +62,8 @@ pub trait Layer {
 
     /// Called every frame, after the frame's ticks, with the time since the last frame: zero for
     /// the first, and for the first after the window is restored from being minimized, so that
-    /// the pause doesn't count as one long frame. For what's presented, such as the camera, rather
-    /// than the world, which changes at ticks.
+    /// the pause doesn't count as one long frame. For what's presented, such as the viewpoint the
+    /// view sees from, rather than the world, which changes at ticks.
     fn update(&mut self, _cx: &mut Context, _dt: Duration) {}
 
     /// Called for each event that the layers above didn't handle. `Break` handles it, so the
@@ -166,7 +167,12 @@ pub struct Context {
     window: Option<Window>,
     input: Input,
     clear_color: [f32; 4],
-    camera: Camera,
+    /// What a layer set the view to see from this frame, in place of the world's camera.
+    viewpoint: Option<Viewpoint>,
+    /// Where the world's camera saw from as the world was last drawn, if it has one.
+    seen: Option<Viewpoint>,
+    /// The tie among the world's cameras last warned of, while they've tied since.
+    tie: Option<Tie>,
     meshes: Meshes,
     shaders: Shaders,
     textures: Textures,
@@ -213,14 +219,18 @@ impl Context {
         // entity has one.
         let registered = world.register::<Transform>().and_then(|()| {
             world.register::<Sprite>()?;
-            world.register::<MeshDraw>()
+            world.register::<MeshDraw>()?;
+            world.register::<Camera>()?;
+            world.register::<Name>()
         });
         registered.expect("the engine's components describe themselves");
         Self {
             window,
             input: Input::default(),
             clear_color: [0.02, 0.02, 0.02, 1.0],
-            camera: Camera::default(),
+            viewpoint: None,
+            seen: None,
+            tie: None,
             meshes: Meshes::default(),
             shaders: Shaders::default(),
             textures: Textures::default(),
@@ -254,16 +264,18 @@ impl Context {
         self.clear_color = color;
     }
 
-    /// What the game's view sees the world from; at first, [`Camera::default`].
-    pub fn camera(&self) -> Camera {
-        self.camera
+    /// What a layer set the game's view to see the world from this frame, if one has.
+    pub fn viewpoint(&self) -> Option<Viewpoint> {
+        self.viewpoint
     }
 
-    /// Sets what the game's view sees the world from, for this frame and those after it. A
-    /// projection that can't project panics as the frame renders, as
-    /// [`Projection`](crate::Projection) says.
-    pub fn set_camera(&mut self, camera: Camera) {
-        self.camera = camera;
+    /// Sets what the game's view sees the world from this frame, in place of the world's camera,
+    /// which it sees through in frames no layer sets one: of the entities with a
+    /// [`Camera`](crate::Camera) and a [`Transform`](crate::Transform), the one that's primary;
+    /// without one, [`Viewpoint::default`]. A projection that can't project panics as the frame
+    /// renders, as [`Projection`](crate::Projection) says.
+    pub fn set_viewpoint(&mut self, viewpoint: Viewpoint) {
+        self.viewpoint = Some(viewpoint);
     }
 
     /// Where the game's view was in the main window as the last frame handed it to the renderer:
@@ -472,22 +484,25 @@ impl Context {
     }
 
     /// Draws the world's entities, after what the layers drew this frame, each `alpha` of the way
-    /// from where it was as the latest tick started to where the tick left it.
+    /// from where it was as the latest tick started to where the tick left it; and finds where the
+    /// world's camera sees from, as it draws.
     pub(crate) fn draw_world(&mut self, alpha: f32) {
         self.past.resolve(&self.world);
         let (world, past) = (&self.world, &self.past);
         draw::draw_world(world, past, alpha, &mut self.draws, &mut self.scratch);
+        self.seen = camera::seen(world, past, alpha, &mut self.tie);
     }
 
     /// Fills in `frame` with this frame's render data, with the game's view at `viewport`, which
     /// [`view`](Self::view) gives from then on: its draws, for the last frame's, which it forgets,
-    /// keeping their memory for the next; and what's been added since a frame last took it, after
-    /// what `frame` still holds.
+    /// keeping their memory for the next; the viewpoint a layer set this frame, which it forgets
+    /// too, or else where the world's camera sees from, or else the default; and what's been added
+    /// since a frame last took it, after what `frame` still holds.
     pub(crate) fn extract(&mut self, frame: &mut Extracted, viewport: Viewport) {
         frame.clear_color = self.clear_color;
         frame.viewport = viewport;
         self.view = (viewport.size[0] > 0 && viewport.size[1] > 0).then_some(viewport);
-        frame.camera = self.camera;
+        frame.viewpoint = self.viewpoint.take().or(self.seen).unwrap_or_default();
         mem::swap(&mut frame.draws, &mut self.draws);
         self.draws.clear();
         (frame.uploads).take(&mut self.meshes, &mut self.shaders, &mut self.textures);

@@ -6,7 +6,6 @@
 //! It knows nothing about the scene, ECS or gameplay. It receives plain data, so rendering
 //! can run on its own thread, a frame behind simulation.
 
-mod camera;
 mod mesh;
 mod model;
 mod shader;
@@ -14,6 +13,7 @@ mod sprite;
 mod texture;
 mod ui;
 mod view;
+mod viewpoint;
 
 use std::iter;
 use std::num::NonZeroU64;
@@ -30,7 +30,6 @@ use gg_gpu::{
 };
 use tracing::{info, trace};
 
-pub use camera::{Camera, Projection};
 pub use gg_gpu::{Blend, MAX_TEXTURE_SIZE, Sampler, UploadPath, Validation, Window, Wrap};
 pub use mesh::{Mesh, MeshDraw, Meshes};
 pub use model::{AlphaMode, Material, ModelVertex};
@@ -39,6 +38,7 @@ pub use sprite::{Sprite, SpriteSheet};
 pub use texture::{Mipmaps, Texture, Textures};
 pub use ui::Ui;
 pub use view::ViewCallback;
+pub use viewpoint::{Projection, Viewpoint};
 
 use mesh::MeshPass;
 use ui::UiPass;
@@ -216,7 +216,7 @@ pub struct RenderData<'a> {
     /// paints a [`ViewCallback`], where that is instead.
     pub viewport: Viewport,
     /// What the view sees the world from.
-    pub camera: Camera,
+    pub viewpoint: Viewpoint,
     /// The meshes, shaders and textures added since a frame last took them, which it takes first:
     /// the shaders get their pipelines, and the meshes and textures reach the GPU.
     pub uploads: &'a mut Uploads,
@@ -443,8 +443,8 @@ impl Renderer {
     ///
     /// If `data.uploads` holds meshes, shaders or textures taken from another [`Meshes`],
     /// [`Shaders`] or [`Textures`] than those it held before, which could draw a mesh with a shader
-    /// for another vertex type or parameters of another type; or if its camera's projection can't
-    /// project, as [`Projection`] says.
+    /// for another vertex type or parameters of another type; or if its viewpoint's projection
+    /// can't project, as [`Projection`] says.
     pub fn render(
         &mut self,
         data: RenderData<'_>,
@@ -491,10 +491,11 @@ impl Renderer {
         self.ui.queue(ui.textures);
         // Before the frame begins, which a failure would then present unrendered.
         self.meshes.add_shaders(data.uploads)?;
-        // Every frame, whether it renders or draws anything, so that a camera that can't project
-        // always panics. A view without an area draws nothing, so its aspect ratio doesn't matter.
+        // Every frame, whether it renders or draws anything, so that a viewpoint that can't
+        // project always panics. A view without an area draws nothing, so its aspect ratio doesn't
+        // matter.
         let [width, height] = data.viewport.size;
-        let view_projection = data.camera.view_projection(width as f32 / height as f32);
+        let view_projection = data.viewpoint.view_projection(width as f32 / height as f32);
         // The view renders into an image of its own size, made again in the frame that changes
         // its size, so that it never shows stretched; the old one retires until the frames that
         // use it have finished. A drag that resizes the view makes an image every frame, which

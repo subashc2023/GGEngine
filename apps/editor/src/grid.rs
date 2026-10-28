@@ -7,7 +7,7 @@ use std::path::Path;
 
 use bytemuck::NoUninit;
 use gg_engine::math::{DVec2, DVec3, Mat4, Vec2, Vec3, libm};
-use gg_engine::{Blend, Camera, Context, Mesh, Projection, Shader, Viewport};
+use gg_engine::{Blend, Context, Mesh, Projection, Shader, Viewpoint, Viewport};
 
 /// One of the world's axis planes, which the grid lies in: what the toolbar picks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,7 +107,7 @@ impl Grid {
     /// Draws the grid this frame as `camera` sees it in `view`, in the plane `pick` unless an
     /// orthographic view along an axis faces another, as [`shown`] says: `camera` is the one the
     /// frame renders with, and `view` where [`Context::view`] says the view is.
-    pub fn draw(&self, cx: &mut Context, camera: &Camera, view: Viewport, pick: Plane) {
+    pub fn draw(&self, cx: &mut Context, camera: &Viewpoint, view: Viewport, pick: Plane) {
         if let Some((transform, params)) = quad(camera, view, shown(camera, pick)) {
             cx.draw(self.mesh, self.shader, transform, params);
         }
@@ -117,7 +117,7 @@ impl Grid {
 /// The plane the grid shows while the toolbar picks `pick`: the one an orthographic view along an
 /// axis faces, XY for Front and Back, XZ for Top and Bottom and YZ for Right and Left; otherwise the
 /// pick.
-pub fn shown(camera: &Camera, pick: Plane) -> Plane {
+pub fn shown(camera: &Viewpoint, pick: Plane) -> Plane {
     match camera.projection {
         Projection::Orthographic { .. } => facing(camera).unwrap_or(pick),
         Projection::Perspective { .. } => pick,
@@ -128,7 +128,7 @@ pub fn shown(camera: &Camera, pick: Plane) -> Plane {
 /// along an axis, and its right lies within a quarter of a pixel, across the view, of one of the
 /// facing plane's two axes. Rolling, or a yaw at the poles, turns the image and fails it. An
 /// orthographic camera that's square draws the grid's lines crisp, a pixel each.
-pub fn square(camera: &Camera, view: Viewport) -> bool {
+pub fn square(camera: &Viewpoint, view: Viewport) -> bool {
     let Some(plane) = facing(camera) else {
         return false;
     };
@@ -142,7 +142,7 @@ pub fn square(camera: &Camera, view: Viewport) -> bool {
 }
 
 /// The plane whose normal `camera` looks along, if it looks along an axis.
-fn facing(camera: &Camera) -> Option<Plane> {
+fn facing(camera: &Viewpoint) -> Option<Plane> {
     let forward = camera.rotation.as_dquat() * DVec3::NEG_Z;
     let along = |plane: &Plane| plane.normal().as_dvec3().dot(forward).abs() > 1.0 - ALONG_AXIS;
     [Plane::XY, Plane::XZ, Plane::YZ].into_iter().find(along)
@@ -201,7 +201,7 @@ enum Lines {
 /// parallelogram where the rays through the view's corners meet the plane, stretched across to
 /// `SLACK` times the view's width. `None` while the plane is too near edge-on for any of it to show
 /// through the fade toward grazing angles.
-fn quad(camera: &Camera, view: Viewport, plane: Plane) -> Option<(Mat4, Params)> {
+fn quad(camera: &Viewpoint, view: Viewport, plane: Plane) -> Option<(Mat4, Params)> {
     if view.size.contains(&0) {
         return None;
     }
@@ -333,7 +333,7 @@ mod tests {
         [yaw, pitch, roll]: [f32; 3],
         distance: f32,
         perspective: bool,
-    ) -> Camera {
+    ) -> Viewpoint {
         let [yaw, pitch, roll] = [yaw, pitch, roll].map(radians);
         let rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, roll);
         let projection = if perspective {
@@ -349,7 +349,7 @@ mod tests {
                 far: 1000.0 * height,
             }
         };
-        Camera {
+        Viewpoint {
             position: pivot - rotation * Vec3::NEG_Z * distance,
             rotation,
             projection,
@@ -357,7 +357,7 @@ mod tests {
     }
 
     /// The editor's start view: from the front, over the origin, 10 units tall.
-    fn start() -> Camera {
+    fn start() -> Viewpoint {
         camera(
             Vec3::ZERO,
             [0.0; 3],
@@ -369,7 +369,7 @@ mod tests {
     /// The quad's corners in Vulkan's normalized device coordinates, as the shader places them in
     /// [`VIEW`] made `wider` times as wide: the quad's center and each corner's offset from it
     /// through the camera's matrix apart.
-    fn corners(camera: &Camera, transform: Mat4, wider: f32) -> [Vec2; 4] {
+    fn corners(camera: &Viewpoint, transform: Mat4, wider: f32) -> [Vec2; 4] {
         let clip = camera.view_projection(1600.0 * wider / 827.0);
         let center = clip * transform.w_axis;
         [1, 2, 3, 4].map(|corner| {
@@ -536,7 +536,7 @@ mod tests {
 
     #[test]
     fn lines_go_crisp_only_orthographically_with_a_square_basis() {
-        let lines = |camera: &Camera| {
+        let lines = |camera: &Viewpoint| {
             let quad = quad(camera, VIEW, shown(camera, Plane::XY));
             quad.map(|(_, params)| params.lines)
         };

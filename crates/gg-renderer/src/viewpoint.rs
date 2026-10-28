@@ -1,15 +1,16 @@
-//! Cameras: where the game's view sees the world from, and how what's in front of them is
-//! projected onto it.
+//! Viewpoints: where the game's view sees the world from, and how what's in front of it is
+//! projected onto the view.
 
 use std::f32::consts::PI;
 
 use gg_core::math::camera::rh::proj::vulkan;
 use gg_core::math::{Mat4, Quat, Vec3};
 
-/// Where the game's view sees the world from. World space is right-handed with +Y up, and a
-/// camera without rotation looks down -Z, with +X to its right and +Y up, as glTF's cameras do.
+/// Where the game's view sees the world from, and how. World space is right-handed with +Y up, and
+/// a viewpoint without rotation looks down -Z, with +X to its right and +Y up, as glTF's cameras
+/// do.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Camera {
+pub struct Viewpoint {
     pub position: Vec3,
     /// Which way it faces, as a unit quaternion. A 2D game's camera turns about Z, with
     /// [`Quat::from_rotation_z`]: turning it counterclockwise turns the scene clockwise on screen.
@@ -40,7 +41,25 @@ pub enum Projection {
     Perspective { fov: f32, near: f32 },
 }
 
-impl Default for Camera {
+impl Projection {
+    /// Whether it can project, as its variant says: rendering panics on one that can't.
+    pub fn projects(&self) -> bool {
+        match *self {
+            Self::Orthographic { height, near, far } => {
+                height.is_normal()
+                    && height > 0.0
+                    && near.is_finite()
+                    && far.is_finite()
+                    && near != far
+            }
+            Self::Perspective { fov, near } => {
+                fov > 0.0 && fov < PI && near.is_normal() && near > 0.0
+            }
+        }
+    }
+}
+
+impl Default for Viewpoint {
     /// At the origin, without rotation, seeing the 2 units around it from bottom to top, and from
     /// 1 behind it to 1 in front.
     fn default() -> Self {
@@ -56,7 +75,7 @@ impl Default for Camera {
     }
 }
 
-impl Camera {
+impl Viewpoint {
     /// The matrix from world space to Vulkan's clip space, whose Y points down, for a view
     /// `aspect` times as wide as it's tall.
     ///
@@ -64,18 +83,16 @@ impl Camera {
     ///
     /// If its projection can't project, as [`Projection`] says.
     pub fn view_projection(&self, aspect: f32) -> Mat4 {
+        // glam checks none of it, without its `glam-assert` feature.
+        assert!(
+            self.projection.projects(),
+            "a viewpoint sees a positive height of the world, between a near and a far that \
+             differ, or with perspective, more than nothing and less than a half turn from bottom \
+             to top, from a near plane in front of it; got {:?}",
+            self.projection
+        );
         let projection = match self.projection {
             Projection::Orthographic { height, near, far } => {
-                assert!(
-                    height.is_normal()
-                        && height > 0.0
-                        && near.is_finite()
-                        && far.is_finite()
-                        && near != far,
-                    "a camera sees a positive height of the world, between a near and a far that \
-                     differ; got {:?}",
-                    self.projection
-                );
                 let top = height / 2.0;
                 let right = top * aspect;
                 // The nearer as near, whichever is given as it; then swapped, so that depth runs
@@ -84,13 +101,6 @@ impl Camera {
                 vulkan::orthographic(-right, right, -top, top, far, near)
             }
             Projection::Perspective { fov, near } => {
-                // glam checks neither, without its `glam-assert` feature.
-                assert!(
-                    fov > 0.0 && fov < PI && near.is_normal() && near > 0.0,
-                    "a camera with perspective sees more than nothing and less than a half turn \
-                     from bottom to top, from a near plane in front of it; got {:?}",
-                    self.projection
-                );
                 vulkan::perspective_infinite_reverse(fov, aspect, near)
             }
         };
@@ -109,10 +119,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_camera_sees_its_height_of_the_world_without_stretching_it() {
+    fn a_viewpoint_sees_its_height_of_the_world_without_stretching_it() {
         // A quarter turn counterclockwise, so its up is the world's -X and its right the world's
         // +Y.
-        let camera = Camera {
+        let viewpoint = Viewpoint {
             position: Vec3::new(3.0, -2.0, 5.0),
             rotation: Quat::from_rotation_z(FRAC_PI_2),
             projection: Projection::Orthographic {
@@ -121,7 +131,7 @@ mod tests {
                 far: 11.0,
             },
         };
-        let clip = camera.view_projection(1.5);
+        let clip = viewpoint.view_projection(1.5);
         for (world, expected) in [
             // 1 in front of it: the view's center, as near as it sees, where depth is 1.
             ([3.0, -2.0, 4.0], [0.0, 0.0, 1.0]),
@@ -139,22 +149,22 @@ mod tests {
             );
         }
         // Its near and far given the other way round, it sees the same.
-        let swapped = Camera {
+        let swapped = Viewpoint {
             projection: Projection::Orthographic {
                 height: 4.0,
                 near: 11.0,
                 far: 1.0,
             },
-            ..camera
+            ..viewpoint
         };
         assert_eq!(swapped.view_projection(1.5), clip);
     }
 
     #[test]
-    fn a_perspective_camera_sees_its_field_of_view_to_infinity() {
+    fn a_perspective_viewpoint_sees_its_field_of_view_to_infinity() {
         // A quarter turn counterclockwise, so its up is the world's -X and its right the world's
         // +Y; a quarter turn from bottom to top, so the view spans as far up as it is in front.
-        let camera = Camera {
+        let viewpoint = Viewpoint {
             position: Vec3::new(3.0, -2.0, 5.0),
             rotation: Quat::from_rotation_z(FRAC_PI_2),
             projection: Projection::Perspective {
@@ -162,7 +172,7 @@ mod tests {
                 near: 0.5,
             },
         };
-        let clip = camera.view_projection(1.5);
+        let clip = viewpoint.view_projection(1.5);
         for (world, expected) in [
             // As near as it sees: the view's center, where depth is 1.
             ([3.0, -2.0, 4.5], [0.0, 0.0, 1.0]),
@@ -207,11 +217,13 @@ mod tests {
             perspective(1.0, f32::NAN),
             perspective(1.0, f32::MIN_POSITIVE / 2.0),
         ] {
-            let camera = Camera {
+            assert!(!projection.projects(), "{projection:?} projects");
+            let viewpoint = Viewpoint {
                 projection,
-                ..Camera::default()
+                ..Viewpoint::default()
             };
-            let projected = panic::catch_unwind(AssertUnwindSafe(|| camera.view_projection(1.0)));
+            let projected =
+                panic::catch_unwind(AssertUnwindSafe(|| viewpoint.view_projection(1.0)));
             assert!(projected.is_err(), "{projection:?} projected");
         }
     }

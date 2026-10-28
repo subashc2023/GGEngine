@@ -29,6 +29,10 @@ use crate::reflect::{self, Name, Value};
 /// a whole, as [`MeshDraw`](crate::MeshDraw) is. A create is refused with `ecs.id_taken` for an ID
 /// a living entity has; a remove with `reflect.missing_component`; a set as `set_field` refuses
 /// it; and a reparent as [`World::set_parent`] refuses it.
+///
+/// A create, an add or a set that makes a component's [exclusive](crate::Component::exclusive)
+/// field true on its entity makes it false on every other entity with the component, and its
+/// inverse makes theirs true again.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Operation {
     /// Spawns an entity with `components`, each a type's name and its whole value, made as a
@@ -140,6 +144,22 @@ enum Undo {
         taken: Vec<Taken>,
         created: bool,
     },
+    /// Applies `undo`, then sets the exclusive fields `excluded` names to `to`: true again, to
+    /// undo an operation that made them false as it made another entity's true, and false, to
+    /// redo it.
+    Exclusive {
+        undo: Box<Undo>,
+        excluded: Vec<Excluded>,
+        to: bool,
+    },
+}
+
+/// An entity's exclusive field, `field` of `component`, which an operation made false as it made
+/// another entity's true.
+struct Excluded {
+    entity: EntityId,
+    component: Name,
+    field: &'static str,
 }
 
 /// An entity a delete, or a create undone, took out of the world.
@@ -159,9 +179,10 @@ impl World {
         let _zone = gg_core::zone!();
         let undo = self.applied(operation)?;
         // So that the log holds the ID drawn, which a replay creates the entity with.
-        if let (Operation::Create { entity, .. }, Undo::Uncreate(id)) = (operation, &undo) {
+        if let (Operation::Create { entity, .. }, Undo::Uncreate(id)) = (&mut *operation, &undo) {
             *entity = Some(*id);
         }
+        let undo = self.exclude(operation, undo);
         Ok(Inverse {
             world: self.serial,
             undo,
@@ -176,7 +197,9 @@ impl World {
     /// make; and, as it gives back what a remove or a delete took, with `ecs.no_entity` for an
     /// entity gone since, or a root's parent gone, `reflect.has_component` for a component the
     /// entity has since, and `ecs.id_taken` for an ID a living entity has since, such as one a
-    /// scene loaded.
+    /// scene loaded; and, as it sets an exclusive field of another entity's again, with
+    /// `ecs.no_entity` for the entity gone since, and `reflect.missing_component` for the
+    /// component taken away since.
     pub(super) fn undo(&mut self, inverse: &mut Inverse) -> Result<()> {
         let _zone = gg_core::zone!();
         if inverse.world != self.serial {
@@ -186,7 +209,38 @@ impl World {
                  operation undoes it in the world it was applied to",
             ));
         }
-        let redo = match &inverse.undo {
+        self.revert(&mut inverse.undo)
+    }
+
+    /// Applies `undo`, and leaves in its place what undoes that; refused, as
+    /// [`undo`](Self::undo) says, it changes neither the world nor `undo`.
+    fn revert(&mut self, undo: &mut Undo) -> Result<()> {
+        if let Undo::Exclusive {
+            undo: inner,
+            excluded,
+            to,
+        } = undo
+        {
+            // Checked first, so that a refusal changes nothing.
+            for excluded in &*excluded {
+                self.can_reset(excluded, *to)?;
+            }
+            self.revert(inner)?;
+            for Excluded {
+                entity,
+                component,
+                field,
+            } in &*excluded
+            {
+                let entity = self.entity(*entity).expect("checked alive");
+                let set = self.set_field(entity, component, field, &Value::Bool(*to));
+                set.expect("checked: a `bool` of a component the entity has");
+            }
+            *to = !*to;
+            return Ok(());
+        }
+        let redo = match &*undo {
+            Undo::Exclusive { .. } => unreachable!("reverted above"),
             Undo::Apply(operation) => self.applied(operation)?,
             Undo::Put {
                 entity, component, ..
@@ -216,7 +270,8 @@ impl World {
             }
         };
         // Checked, so that what the inverse kept goes back, which can't fail.
-        match mem::replace(&mut inverse.undo, redo) {
+        match mem::replace(undo, redo) {
+            Undo::Exclusive { .. } => unreachable!("reverted above"),
             Undo::Apply(_) | Undo::Uncreate(_) => {}
             Undo::Put {
                 entity,
@@ -238,12 +293,98 @@ impl World {
         if inverse.world != self.serial {
             return;
         }
-        if let Undo::Restore { taken, .. } = inverse.undo {
-            for taken in taken {
-                self.free_slot(taken.entity.index);
-                self.free_id(taken.id);
+        self.let_go(inverse.undo);
+    }
+
+    /// Frees the slots `undo` keeps, and lets their IDs go.
+    fn let_go(&mut self, undo: Undo) {
+        match undo {
+            Undo::Restore { taken, .. } => {
+                for taken in taken {
+                    self.free_slot(taken.entity.index);
+                    self.free_id(taken.id);
+                }
+            }
+            Undo::Exclusive { undo, .. } => self.let_go(*undo),
+            Undo::Apply(_) | Undo::Put { .. } | Undo::Uncreate(_) => {}
+        }
+    }
+
+    /// What undoes `operation`, applied, given `undo`, which undoes it but for its exclusive
+    /// fields: each it made true on its entity is made false here on every other entity, which
+    /// what's returned makes true again.
+    fn exclude(&mut self, operation: &Operation, undo: Undo) -> Undo {
+        // Each component it gave or set, and the path it set: a set reaches a field at the field's
+        // own path, or whole with what's around it.
+        let written: Vec<(&str, &str)> = match operation {
+            Operation::Create { components, .. } => {
+                components.iter().map(|(name, _)| (&**name, "")).collect()
+            }
+            Operation::Add { component, .. } => vec![(component, "")],
+            Operation::Set {
+                component, path, ..
+            } => vec![(component, path)],
+            Operation::Delete { .. } | Operation::Remove { .. } | Operation::Reparent { .. } => {
+                return undo;
+            }
+        };
+        let id = operation.entity().expect("an applied create has its ID");
+        let entity = self.entity(id).expect("applied: alive");
+        let mut excluded = Vec::new();
+        for (component, path) in written {
+            let of = self.named(component).expect("applied: registered");
+            let Some(field) = self.components.exclusive(of) else {
+                continue;
+            };
+            let true_on = |entity| {
+                let value = self.get_field(entity, component, field);
+                matches!(value.expect("a field of its own"), Value::Bool(true))
+            };
+            if !(path.is_empty() || path == field) || !true_on(entity) {
+                continue;
+            }
+            let others = self.entities(Some(component)).expect("registered");
+            let others: Vec<Entity> = others
+                .filter(|&other| other != entity && true_on(other))
+                .collect();
+            for other in others {
+                let set = self.set_field(other, component, field, &Value::Bool(false));
+                set.expect("a `bool` of a component it has");
+                excluded.push(Excluded {
+                    entity: self.id(other).expect("alive"),
+                    component: component.to_owned().into(),
+                    field,
+                });
             }
         }
+        if excluded.is_empty() {
+            return undo;
+        }
+        Undo::Exclusive {
+            undo: Box::new(undo),
+            excluded,
+            to: true,
+        }
+    }
+
+    /// Whether `excluded`'s field can be set to `to` again: its entity is alive, with the
+    /// component.
+    fn can_reset(&self, excluded: &Excluded, to: bool) -> Result<()> {
+        let Excluded {
+            entity,
+            component,
+            field,
+        } = excluded;
+        let refused = |error: Error| {
+            let at = reflect::join(component, field);
+            let message = format!("can't set `{at}` of {entity} to {to} again: {error}");
+            error.with_message(message)
+        };
+        let handle = self.living(*entity).map_err(refused)?;
+        let at = self.location(handle).expect("alive");
+        let id = self.named(component).map_err(refused)?;
+        self.column(at, id, component).map_err(refused)?;
+        Ok(())
     }
 
     /// Applies `operation`, and returns what undoes it.
@@ -533,10 +674,14 @@ impl World {
 impl Inverse {
     /// How many slots it keeps.
     pub(super) fn kept(&self) -> usize {
-        match &self.undo {
-            Undo::Restore { taken, .. } => taken.len(),
-            Undo::Apply(_) | Undo::Put { .. } | Undo::Uncreate(_) => 0,
+        fn kept(undo: &Undo) -> usize {
+            match undo {
+                Undo::Restore { taken, .. } => taken.len(),
+                Undo::Exclusive { undo, .. } => kept(undo),
+                Undo::Apply(_) | Undo::Put { .. } | Undo::Uncreate(_) => 0,
+            }
         }
+        kept(&self.undo)
     }
 }
 
@@ -1073,5 +1218,157 @@ pub(super) mod tests {
                 .all(|(entity, _)| entity.index != next.index)
         );
         check_ids(&other.world);
+    }
+
+    /// A lamp, of which operations keep one lit at most.
+    #[derive(Clone, Debug, PartialEq, crate::Reflect)]
+    struct Lamp {
+        lit: bool,
+        watts: u32,
+    }
+
+    impl crate::Component for Lamp {
+        fn exclusive() -> Option<&'static str> {
+            Some("lit")
+        }
+    }
+
+    impl crate::Writable for Lamp {}
+
+    /// Three lamps, the first two lit by code, and an entity without one.
+    fn lamps() -> (World, [Entity; 3], Entity) {
+        let mut world = World::seeded(0x1a3b);
+        let lamps = [true, true, false].map(|lit| world.spawn(Lamp { lit, watts: 40 }));
+        let bare = world.spawn(());
+        (world, lamps, bare)
+    }
+
+    /// Whether each of `lamps` is lit.
+    fn lit(world: &World, lamps: [Entity; 3]) -> [bool; 3] {
+        lamps.map(|lamp| world.get::<Lamp>(lamp).expect("a lamp").lit)
+    }
+
+    /// A create, an add or a set that lights a lamp puts every other out, and undoes and redoes
+    /// exactly, as one operation; one that puts a lamp out, or sets another field, puts none out.
+    #[test]
+    fn an_operation_that_makes_an_exclusive_field_true_makes_it_false_on_every_other_entity() {
+        let (mut world, lamps, bare) = lamps();
+        let [a, _, c] = lamps.map(|lamp| world.id(lamp).expect("alive"));
+        let bare = world.id(bare).expect("alive");
+        let lamp = Lamp {
+            lit: true,
+            watts: 75,
+        };
+        let set = |entity, path: &str, value| Operation::Set {
+            entity,
+            component: "Lamp".into(),
+            path: path.to_owned(),
+            value,
+        };
+        for (operation, after) in [
+            (set(c, "lit", Value::Bool(true)), [false, false, true]),
+            (set(c, "", lamp.to_value()), [false, false, true]),
+            (set(a, "lit", Value::Bool(true)), [true, false, false]),
+            (
+                Operation::Create {
+                    entity: None,
+                    parent: None,
+                    components: vec![named("Lamp", lamp.to_value())],
+                },
+                [false, false, false],
+            ),
+            (
+                Operation::Add {
+                    entity: bare,
+                    component: "Lamp".into(),
+                    value: lamp.to_value(),
+                },
+                [false, false, false],
+            ),
+            (set(a, "lit", Value::Bool(false)), [false, true, false]),
+            (set(c, "watts", Value::UInt(60)), [true, true, false]),
+        ] {
+            let said = operation.to_string();
+            let mut redo = round_trip(&mut world, operation);
+            assert_eq!(lit(&world, lamps), [true, true, false], "{said}");
+            world.undo(&mut redo).expect("redone");
+            assert_eq!(lit(&world, lamps), after, "{said}");
+            world.undo(&mut redo).expect("undone");
+            world.release(redo);
+        }
+    }
+
+    /// An undo that would light a lamp again that's gone, or that's no lamp, since is refused,
+    /// changing nothing.
+    #[test]
+    fn an_undo_that_would_set_an_exclusive_field_again_where_it_cant_is_refused_whole() {
+        type Case = (&'static str, fn(&mut World, Entity), &'static str);
+        let cases: [Case; 2] = [
+            (
+                "a despawn",
+                |world, lamp| world.despawn(lamp).expect("alive"),
+                "ecs.no_entity",
+            ),
+            (
+                "a remove",
+                |world, lamp| assert!(world.remove::<Lamp>(lamp).expect("alive").is_some()),
+                "reflect.missing_component",
+            ),
+        ];
+        for (case, change, code) in cases {
+            let (mut world, lamps, _) = lamps();
+            let mut light = Operation::Set {
+                entity: world.id(lamps[2]).expect("alive"),
+                component: "Lamp".into(),
+                path: "lit".to_owned(),
+                value: Value::Bool(true),
+            };
+            let mut inverse = world.apply(&mut light).expect("lit");
+            change(&mut world, lamps[0]);
+            let (before, version) = (sorted(&world), world.version());
+            // Twice, since a refusal leaves the inverse as it was too.
+            for _ in 0..2 {
+                let error = world.undo(&mut inverse).expect_err(case);
+                assert_eq!(error.code(), code, "{case}: {error}");
+                assert!(same_snapshots(&sorted(&world), &before), "{case}");
+                assert_eq!(world.version(), version, "{case}");
+            }
+            world.release(inverse);
+        }
+    }
+
+    /// Naming a field it hasn't its exclusive one.
+    #[derive(Clone, Debug, PartialEq, crate::Reflect)]
+    struct Unlit {
+        watts: u32,
+    }
+
+    impl crate::Component for Unlit {
+        fn exclusive() -> Option<&'static str> {
+            Some("lit")
+        }
+    }
+
+    /// Naming a field that isn't a `bool` its exclusive one.
+    #[derive(Clone, Debug, PartialEq, crate::Reflect)]
+    struct Dimmed {
+        lit: u32,
+    }
+
+    impl crate::Component for Dimmed {
+        fn exclusive() -> Option<&'static str> {
+            Some("lit")
+        }
+    }
+
+    #[test]
+    fn a_components_exclusive_field_is_a_bool_of_its_own() {
+        let mut world = World::default();
+        for registered in [world.register::<Unlit>(), world.register::<Dimmed>()] {
+            let error = registered.expect_err("refused");
+            assert_eq!(error.code(), "ecs.bad_exclusive", "{error}");
+        }
+        assert_eq!(world.component_types().count(), 1, "`Parent` alone");
+        world.register::<Lamp>().expect("registered");
     }
 }

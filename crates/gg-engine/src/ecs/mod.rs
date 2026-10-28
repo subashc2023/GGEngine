@@ -40,7 +40,8 @@ pub use log::Log;
 pub use ops::Operation;
 pub use query::{Query, QueryIter, QueryIterMut, ReadOnlyQuery};
 pub(crate) use scene::{MAX_DEPTH, float, quote};
-use table::{AnyColumn, ComponentId, Components, Row, Table};
+pub(crate) use table::ComponentId;
+use table::{AnyColumn, Components, Row, Table};
 
 use crate::reflect::Reflect;
 
@@ -61,6 +62,16 @@ pub trait Component: Reflect + Clone {
     /// [`from_value`](Reflect::from_value) alone, which fails where it has something opaque, so
     /// that a type with an opaque field implements `Component` by hand to load.
     fn base() -> Option<Self> {
+        None
+    }
+
+    /// The name of its exclusive field, if it has one: a `bool` field of its own, of a struct with
+    /// named fields, which [`Operation`]s keep true on one entity at most. One that makes it true
+    /// on an entity, as a create, an add or a set of it does, makes it false on every other entity
+    /// with the component, and what undoes the operation makes theirs true again, as one edit;
+    /// code, and a scene loaded, make it true on as many as they do. [`Camera`](crate::Camera)'s
+    /// `primary` is one. `None`, the derive's.
+    fn exclusive() -> Option<&'static str> {
         None
     }
 }

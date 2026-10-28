@@ -16,7 +16,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use gg_core::{Error, Result};
-use gg_renderer::{Camera, DrawCounts, Draws, RenderData, Renderer, Uploads, Viewport};
+use gg_renderer::{DrawCounts, Draws, RenderData, Renderer, Uploads, Viewpoint, Viewport};
 
 use crate::viewports::Drawn;
 #[cfg(target_os = "windows")]
@@ -28,7 +28,7 @@ use crate::windows_wait::recv as wait;
 pub(crate) struct Extracted {
     pub(crate) clear_color: [f32; 4],
     pub(crate) viewport: Viewport,
-    pub(crate) camera: Camera,
+    pub(crate) viewpoint: Viewpoint,
     pub(crate) draws: Draws,
     pub(crate) uploads: Uploads,
     /// The main window's UI, tessellated, and its texture changes.
@@ -47,7 +47,7 @@ impl Default for Extracted {
                 origin: [0, 0],
                 size: [0, 0],
             },
-            camera: Camera::default(),
+            viewpoint: Viewpoint::default(),
             draws: Draws::default(),
             uploads: Uploads::default(),
             primitives: Vec::new(),
@@ -95,7 +95,7 @@ impl Render for Renderer {
         let data = RenderData {
             clear_color: frame.clear_color,
             viewport: frame.viewport,
-            camera: frame.camera,
+            viewpoint: frame.viewpoint,
             uploads: &mut frame.uploads,
             draws: &frame.draws,
         };

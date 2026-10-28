@@ -4,9 +4,10 @@
 use std::ops::Range;
 
 use gg_core::Error;
-use gg_core::math::{Mat4, Vec2};
+use gg_core::math::{Mat4, Quat, Vec2, Vec3};
 use gg_renderer::{Draws, MeshDraw, Sampler, Sprite};
 
+use crate::ecs::ComponentId;
 use crate::interpolation::{self, Past};
 use crate::jobs;
 use crate::reflect::{self, Digest, Field, Meta, Reflect, Result, Shape, Show, Type, Types, Value};
@@ -409,41 +410,13 @@ pub(crate) fn draw_world(
     matrices.clear();
     blends.clear();
     blends.resize(world.tables().len(), None);
-    let Some(transform) = world.component::<Transform>() else {
+    let Some(poses) = Poses::new(world, past, alpha) else {
         return;
     };
+    let transform = poses.transform;
     let sprite = world.component::<Sprite>();
     let mesh = world.component::<MeshDraw>();
     let parent = world.component::<Parent>();
-    // What table `table`'s rows draw from, from its first row on, while they draw between ticks.
-    let drawn_from = |table: usize| (alpha < 1.0).then(|| past.from(world, table)).flatten();
-    // A child's matrices from its own space to the world's, as the latest tick left it and as it
-    // draws, from its transform, `drawn` as it draws: its transform's, then each ancestor's in
-    // turn up to its root, an ancestor without a transform carrying its children as though it
-    // were at the origin, unturned, at its own size. The second is `None` while it's the first,
-    // when nothing on the way draws between ticks. It walks up from each child, every frame, so
-    // children of one parent each take the steps they share, and a deep hierarchy costs its depth
-    // for each of them, until world transforms are stored and propagated, as physics or a profile
-    // will need.
-    let carry = |local: &Transform, drawn: Option<Transform>, parent: &Parent| {
-        let start = (local.matrix(), drawn.map(|drawn| drawn.matrix()));
-        world
-            .lineage(*parent)
-            .fold(start, |(at, drawn), (index, table, row)| {
-                let Some(transforms) = table.column::<Transform>(transform) else {
-                    return (at, drawn);
-                };
-                let ancestor = transforms[row].matrix();
-                let drawn = match drawn_from(index) {
-                    Some(from) => {
-                        let pose = interpolation::between(&from[row], &transforms[row], alpha);
-                        Some(pose.matrix() * drawn.unwrap_or(at))
-                    }
-                    None => drawn.map(|drawn| ancestor * drawn),
-                };
-                (ancestor * at, drawn)
-            })
-    };
     // How many of `blended`'s matrices the frame's roots take.
     let mut blending = 0;
     for (index, rows) in world.tables().iter().enumerate() {
@@ -471,7 +444,7 @@ pub(crate) fn draw_world(
                     let batch = |row| batch(kind, row);
                     cut(segments, len, z, batch, kind, table, ROOTS);
                 }
-                if let Some(from) = drawn_from(index) {
+                if let Some(from) = poses.from(index) {
                     let end = blending + len;
                     if blended.len() < end {
                         blended.resize(end, Mat4::IDENTITY);
@@ -483,11 +456,11 @@ pub(crate) fn draw_world(
             }
             Some(parents) => {
                 let start = matrices.len();
-                let from = drawn_from(index);
+                let from = poses.from(index);
                 depths.clear();
                 for (row, (local, parent)) in transforms.iter().zip(parents).enumerate() {
                     let drawn = from.map(|from| interpolation::between(&from[row], local, alpha));
-                    let (at, drawn) = carry(local, drawn, parent);
+                    let (at, drawn) = poses.carry(local, drawn, parent);
                     depths.push(at.w_axis.z);
                     matrices.push(drawn.unwrap_or(at));
                 }
@@ -563,6 +536,102 @@ pub(crate) fn draw_world(
                 }
             }
         }
+    }
+}
+
+/// Where the world's entities draw this frame: each `alpha` of the way from what `past` has it draw
+/// from to where the latest tick left it, while it draws between ticks, and children where their
+/// ancestors carry them as they draw.
+pub(crate) struct Poses<'a> {
+    world: &'a World,
+    past: &'a Past,
+    alpha: f32,
+    /// [`Transform`]'s id among the world's components.
+    transform: ComponentId,
+}
+
+impl<'a> Poses<'a> {
+    /// `None` for a world without transforms, of which nothing draws.
+    pub(crate) fn new(world: &'a World, past: &'a Past, alpha: f32) -> Option<Self> {
+        Some(Self {
+            world,
+            past,
+            alpha,
+            transform: world.component::<Transform>()?,
+        })
+    }
+
+    /// What table `table`'s rows draw from, from its first row on, while they draw between ticks.
+    fn from(&self, table: usize) -> Option<&'a [Transform]> {
+        (self.alpha < 1.0)
+            .then(|| self.past.from(self.world, table))
+            .flatten()
+    }
+
+    /// A child's matrices from its own space to the world's, as the latest tick left it and as it
+    /// draws, from its transform, `drawn` as it draws: its transform's, then each ancestor's in
+    /// turn up to its root, an ancestor without a transform carrying its children as though it
+    /// were at the origin, unturned, at its own size. The second is `None` while it's the first,
+    /// when nothing on the way draws between ticks. It walks up from each child, every frame, so
+    /// children of one parent each take the steps they share, and a deep hierarchy costs its depth
+    /// for each of them, until world transforms are stored and propagated, as physics or a profile
+    /// will need.
+    fn carry(
+        &self,
+        local: &Transform,
+        drawn: Option<Transform>,
+        parent: &Parent,
+    ) -> (Mat4, Option<Mat4>) {
+        let start = (local.matrix(), drawn.map(|drawn| drawn.matrix()));
+        self.world
+            .lineage(*parent)
+            .fold(start, |(at, drawn), (index, table, row)| {
+                let Some(transforms) = table.column::<Transform>(self.transform) else {
+                    return (at, drawn);
+                };
+                let ancestor = transforms[row].matrix();
+                let drawn = match self.from(index) {
+                    Some(from) => {
+                        let pose = interpolation::between(&from[row], &transforms[row], self.alpha);
+                        Some(pose.matrix() * drawn.unwrap_or(at))
+                    }
+                    None => drawn.map(|drawn| ancestor * drawn),
+                };
+                (ancestor * at, drawn)
+            })
+    }
+
+    /// Where row `row` of table `table`, which has transforms, draws this frame, for a viewpoint to
+    /// see from: its position, where a sprite of its transform draws, bit for bit; and its
+    /// rotation, its own turned by each ancestor's in turn as they draw, their scales aside, so
+    /// that a mirrored ancestor mirrors where it is but not which way it faces.
+    pub(crate) fn pose(&self, table: usize, row: usize) -> (Vec3, Quat) {
+        let rows = &self.world.tables()[table];
+        let transforms = rows.column::<Transform>(self.transform);
+        let local = &transforms.expect("it has transforms")[row];
+        let from = self.from(table);
+        let drawn = from.map(|from| interpolation::between(&from[row], local, self.alpha));
+        let parent = self.world.component::<Parent>();
+        let Some(parents) = parent.and_then(|id| rows.column::<Parent>(id)) else {
+            let drawn = drawn.unwrap_or(*local);
+            return (drawn.translation, drawn.rotation);
+        };
+        let (at, carried) = self.carry(local, drawn, &parents[row]);
+        let own = drawn.unwrap_or(*local).rotation;
+        let lineage = self.world.lineage(parents[row]);
+        let rotation = lineage.fold(own, |rotation, (index, table, row)| {
+            let Some(transforms) = table.column::<Transform>(self.transform) else {
+                return rotation;
+            };
+            let ancestor = match self.from(index) {
+                Some(from) => interpolation::between(&from[row], &transforms[row], self.alpha),
+                None => transforms[row],
+            };
+            ancestor.rotation * rotation
+        });
+        // Normalized, since each product of unit quaternions rounds a little off a unit.
+        let position = carried.unwrap_or(at).w_axis.truncate();
+        (position, rotation.normalize())
     }
 }
 
