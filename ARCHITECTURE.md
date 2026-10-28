@@ -67,7 +67,8 @@ sandbox  editor   player       apps/: executables
   either projection; the toolbar has the view see through the world's primary camera instead, as
   the game would, until the editor's camera moves, and meanwhile W, A, S and D drive the world's
   cameras, by a script of theirs, as a game's keys would. A click in the view picks what it shows
-  there, through the Inspector's link; the toolbar's Move, Rotate and Scale, which W, E and R
+  there, through the Inspector's link, and the view's bottom left names what it shows under the
+  cursor, from a pick there every frame; the toolbar's Move, Rotate and Scale, which W, E and R
   choose as Q chooses Select, show handles over what's picked, the same size on screen at any
   distance, whose drags move, turn and scale it along its own axes, each an edit the Inspector's
   log undoes, the command key snapping to half units, 45° and halves. Its File menu starts a new

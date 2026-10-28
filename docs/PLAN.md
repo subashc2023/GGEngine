@@ -473,6 +473,16 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   panel holding the keys, chose Rotate; ring Z turned Blue about 45°, and Edit > Undo took the
   drag back in one step; R and a 60 px drag of Scale's X arrow set 2.96; W with Ctrl held snapped
   a 1.21-unit move to 1; and the editor exited cleanly under validation.
+- **What's under the cursor** (2026-10-28): every frame the cursor is over the editor's view picks
+  the pixel under it, and the view's bottom left names what the latest answer found, by its
+  `Name`, or its ID without one, four frames behind the cursor: Hazel's hovered entity, the last
+  of its mouse picking. The name is painted on the view's own layer, so that the cursor over it is
+  still over the view. Unit tests check that the latest answer to a pick asked since the cursor
+  came over the view says what's there, while an answer that comes back behind a later one's, or
+  to a pick asked before the cursor left, says nothing; and the name, the ID and an entity gone.
+  By hand on the RTX 4090, through a build that held the hover where the last click picked, since
+  posted input can't hover: the corner named Red, nothing over empty space, Green, and Blue
+  through the world's camera, and the editor exited cleanly under validation.
 
 ## Now: the editor's next milestone, or Phase 5's first
 
@@ -605,7 +615,7 @@ Defects left in because fixing them costs more than they do are in [DEFECTS.md](
 | The handles where the picked entity draws between ticks: they show where the latest tick left it, up to a tick ahead of where a moving entity draws | Someone edits something as it moves |
 | The handles along a skewed entity's axes: under a parent that scales unevenly, a turned entity's drawn axes aren't square to each other, and the handles show the nearest square ones, so their drags follow the cursor only roughly there; following the skew takes elliptical rings, and Scale along the drawn axis | Someone edits under a parent scaled unevenly |
 | An entity's own negative scale flipping its handles, as a parent's does: they run along its rotation alone, so a sprite flipped by its scale shows its X arrow away from where its +X draws | A game flips sprites by their scale, and the handles confuse someone |
-| Picking the next entity down where several overlap, by clicking again, and highlighting what a click would pick as the cursor goes over it | Someone picks what's hidden, or misses the highlight |
+| Picking the next entity down where several overlap, by clicking again; and highlighting in the view what a click would pick, which the view's corner only names | Someone picks what's hidden, or misses the highlight |
 | Locking the editor's view against turning, as Unity's padlock does | Someone turns a 2D view by accident |
 | Switching to orthographic on an axis snap, as Blender's and Godot's gizmos do by default: the editor switches projection only when asked | Someone wants it |
 | The wheel setting the editor's fly speed while the right button is held, as Unity's, Unreal's and Godot's do: it dollies then too, and flying goes at the distance a second | Flying wants another speed |

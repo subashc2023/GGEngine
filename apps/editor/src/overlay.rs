@@ -1,12 +1,13 @@
 //! What the editor draws over its view: a toolbar at the view's top left, which picks what the
-//! left button does, the projection and the grid, and a gizmo at its top right, which shows which
-//! way the camera faces, and turns it.
+//! left button does, the projection and the grid; a gizmo at its top right, which shows which way
+//! the camera faces, and turns it; and at its bottom left, the name of what the view shows under
+//! the cursor.
 
 use std::f32::consts::{PI, TAU};
 
 use gg_engine::egui::{
     self, Align2, Atom, Button, Color32, CursorIcon, FontId, Frame, Id, Margin, Painter, Pos2,
-    Rect, Response, Rgba, Sense, Shape, Stroke, vec2,
+    Rect, Response, Rgba, Sense, Shape, Stroke, TextStyle, Visuals, vec2,
 };
 use gg_engine::math::{self, Quat, libm};
 
@@ -25,6 +26,9 @@ const CUBE: f32 = 10.0;
 const GIZMO: f32 = 2.0 * (REACH + BALL) + 4.0;
 /// The height of the label under the gizmo, in points.
 const LABEL: f32 = 18.0;
+/// How far in from the view's edges the name of what's under the cursor shows, in points: as far
+/// as [`Ui::over_view`](gg_engine::Ui::over_view) places the toolbar and the gizmo.
+const INSET: f32 = 8.0;
 
 /// What the toolbar sets: what the left button does over the view, whether the grid shows, and in
 /// which plane, and whether the view sees through the world's camera.
@@ -62,7 +66,7 @@ impl Toolbar {
         } else {
             "Ctrl"
         };
-        panel(ui).show(ui, |ui| {
+        panel(ui.visuals()).show(ui, |ui| {
             ui.horizontal(|ui| {
                 for (tool, icon, tip) in [
                     (
@@ -162,8 +166,7 @@ impl Toolbar {
 }
 
 /// A frame for what floats over the view, as a window's.
-fn panel(ui: &egui::Ui) -> Frame {
-    let visuals = ui.visuals();
+fn panel(visuals: &Visuals) -> Frame {
     Frame::NONE
         .fill(visuals.window_fill)
         .stroke(visuals.window_stroke)
@@ -488,6 +491,23 @@ fn letter(side: Side) -> Option<&'static str> {
         Side::Front => Some("Z"),
         _ => None,
     }
+}
+
+/// Names `name`, what the view shows under the cursor, at the bottom left of `view`, in a frame as
+/// the toolbar's: painted on the view's own layer, over the world it shows and the handles, rather
+/// than shown over the view as the toolbar is, so that the cursor over it is still over the view.
+pub fn name_hovered(egui: &egui::Context, view: &Response, name: String) {
+    let painter = egui.layer_painter(view.layer_id).with_clip_rect(view.rect);
+    let style = egui.global_style();
+    let color = style.visuals.text_color();
+    let galley = painter.layout_no_wrap(name, TextStyle::Body.resolve(&style), color);
+    let frame = panel(&style.visuals);
+    let margin = frame.total_margin();
+    let corner = view.rect.left_bottom() + vec2(INSET, -INSET);
+    let outer = Align2::LEFT_BOTTOM.anchor_size(corner, galley.size() + margin.sum());
+    let inner = outer - margin;
+    painter.add(frame.paint(inner));
+    painter.galley(inner.min, galley, color);
 }
 
 #[cfg(test)]

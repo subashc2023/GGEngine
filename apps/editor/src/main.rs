@@ -5,7 +5,8 @@
 //! then W, A, S and D drive the world's cameras, by a script of theirs, as a game's keys would. The
 //! Inspector edits the world, and undoes and redoes its edits. A click in the view picks what it
 //! shows there for the Inspector, or unpicks where it shows none, but with Pan or Orbit, whose
-//! left button moves the camera. Through the editor's camera, the toolbar's Move, Rotate and
+//! left button moves the camera; and the view's bottom left names what it shows under the cursor,
+//! while the cursor is over it. Through the editor's camera, the toolbar's Move, Rotate and
 //! Scale, which W, E and R pick, as Q picks Select, show handles over what the Inspector has
 //! picked, whose drags move, turn and scale it, each an edit of the Inspector's. The File menu
 //! starts a new scene, emptying the world; opens one, whose entities replace the world's; and
@@ -62,11 +63,12 @@ fn app() -> App {
     app.overlay(PerfPanel).overlay(inspector)
 }
 
-/// The editor's layer: its camera, and the toolbar and gizmo over the view; the handles over what
-/// the Inspector has picked, which pick and edit through its link; the grid; the keys that drive
-/// the world's cameras; and the File menu, which empties the world for a new scene, replaces it
-/// with a scene's and saves it as one, keeping the file it was opened from or saved to last for
-/// Save to write to, and says why when a file can't be read, opened or written.
+/// The editor's layer: its camera, and the toolbar and gizmo over the view, and the name of what
+/// it shows under the cursor; the handles over what the Inspector has picked, which pick and edit
+/// through its link; the grid; the keys that drive the world's cameras; and the File menu, which
+/// empties the world for a new scene, replaces it with a scene's and saves it as one, keeping the
+/// file it was opened from or saved to last for Save to write to, and says why when a file can't
+/// be read, opened or written.
 struct Editor {
     camera: OrbitCamera,
     toolbar: Toolbar,
@@ -83,6 +85,9 @@ struct Editor {
     /// the Inspector pick, as [`answer`] says: a later press's takes its place, and a grab of a
     /// handle drops it, so that it picks nothing else under the drag.
     asked: Option<Pick>,
+    /// What the view shows under the cursor, from the picks asked at the cursor while it's over the
+    /// view, which the view's bottom left names.
+    hover: Hover<Pick>,
     /// The grid, once attached.
     grid: Option<Grid>,
     /// What drives the world's cameras.
@@ -142,6 +147,7 @@ impl Editor {
             shown: None,
             picking: None,
             asked: None,
+            hover: Hover::default(),
             grid: None,
             actions,
             commands: Vec::new(),
@@ -515,6 +521,67 @@ fn answer<T: Copy + PartialEq>(
     Some(found)
 }
 
+/// What the view shows under the cursor, as the answers to the picks asked at the cursor while it's
+/// over the view come back, each pick's ticket a `T`, a [`Pick`] but in tests: every frame the
+/// cursor is over the view asks one, and the view's bottom left names what the latest answer found,
+/// four frames behind the cursor.
+struct Hover<T> {
+    /// The ticket of the first pick asked since the cursor last came over the view, while it's over
+    /// it: the answers to picks asked before it found what was under the cursor before it left.
+    since: Option<T>,
+    /// The latest answer to a pick asked since then: its ticket, and the entity it found under the
+    /// cursor, if any. Answers can come back out of the order their picks were asked in, as one
+    /// outside the view, answered sooner, does before one inside it asked earlier.
+    latest: Option<(T, Option<EntityId>)>,
+}
+
+impl<T> Default for Hover<T> {
+    fn default() -> Self {
+        Self {
+            since: None,
+            latest: None,
+        }
+    }
+}
+
+impl<T: Copy + Ord> Hover<T> {
+    /// Takes `answers`, those that came back with the frame, with the cursor `over` the view or
+    /// not. Over it, an answer to a pick asked since it came over the view, later than the latest,
+    /// becomes the latest: a press's too, since a press off the handles asks at the cursor as well.
+    /// Off it, the picks asked and their answers are forgotten.
+    fn see(&mut self, over: bool, answers: &[(T, Option<EntityId>)]) {
+        let Some(since) = self.since.filter(|_| over) else {
+            *self = Self::default();
+            return;
+        };
+        for &(pick, found) in answers {
+            let later = self.latest.is_none_or(|(latest, _)| pick > latest);
+            if pick >= since && later {
+                self.latest = Some((pick, found));
+            }
+        }
+    }
+
+    /// Keeps `asked`, the ticket of a pick at the cursor over the view, if the frame had a pick left
+    /// to ask, for [`see`](Self::see) to take its answer and those after it.
+    fn ask(&mut self, asked: Option<T>) {
+        self.since = self.since.or(asked);
+    }
+
+    /// The entity the view shows under the cursor, as the latest answer found it.
+    fn under(&self) -> Option<EntityId> {
+        self.latest.and_then(|(_, found)| found)
+    }
+}
+
+/// What the view's bottom left calls `id`, the entity the view shows under the cursor, while it's
+/// alive in `world`: its name, or, without a [`Name`], its ID.
+fn hovered_name(world: &World, id: EntityId) -> Option<String> {
+    let entity = world.entity(id)?;
+    let name = world.get::<Name>(entity);
+    Some(name.map_or_else(|| id.to_string(), |name| name.0.clone()))
+}
+
 /// An item of the File menu, which its shortcut chooses too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FileItem {
@@ -765,6 +832,15 @@ impl Layer for Editor {
             self.choose(cx, item);
         }
         self.show_message(ui.egui());
+        // What the view shows under the cursor, while the cursor's over it: a pick at the cursor
+        // every frame, and the name of what the latest answer found, painted over the handles.
+        let over = ui.view().filter(|view| view.hovered());
+        let at = over.as_ref().and(cx.input().cursor());
+        self.hover.see(at.is_some(), cx.picked());
+        if let Some(at) = at {
+            self.hover.ask(cx.pick(at));
+        }
+        let name = (self.hover.under()).and_then(|id| hovered_name(cx.world(), id));
         let picked = self.picked(cx.world());
         let Self {
             camera,
@@ -791,6 +867,9 @@ impl Layer for Editor {
                 let hover = hover.map(|at| Vec2::new(at.x, at.y) * ppp);
                 handles.paint(&painter, ppp, &sight, toolbar.tool, picked.as_ref(), hover);
             }
+        }
+        if let (Some(view), Some(name)) = (over, name) {
+            overlay::name_hovered(ui.egui(), &view, name);
         }
         let has_camera = has_camera(cx.world());
         ui.over_view("toolbar", Align2::LEFT_TOP, |ui| {
@@ -1099,6 +1178,58 @@ mod tests {
         assert_eq!(answer(&mut asked, &answers), None, "answered");
         let mut asked = Some(3);
         assert_eq!(answer(&mut asked, &[(3, None)]), Some(None), "unpicks");
+    }
+
+    /// What the view shows under the cursor is what the latest answer found, of those to picks
+    /// asked since the cursor came over the view: nothing until one comes back, nor where it found
+    /// nothing, and an answer that comes back after a later one's says nothing. Off the view,
+    /// nothing is, and back over it, the answers to picks asked before say nothing either.
+    #[test]
+    fn the_latest_pick_since_the_cursor_came_over_the_view_finds_whats_under_it() {
+        let [a, b]: [EntityId; 2] =
+            ["0123456789abcdef", "fedcba9876543210"].map(|id| id.parse().expect("an ID"));
+        let mut hover = Hover::default();
+        hover.see(true, &[(1, Some(a))]);
+        assert_eq!(hover.under(), None, "a pick from before it came over");
+        hover.ask(Some(2_u32));
+        hover.see(true, &[]);
+        assert_eq!(hover.under(), None, "until one comes back");
+        hover.ask(Some(3));
+        hover.see(true, &[(1, Some(a)), (2, Some(b))]);
+        assert_eq!(hover.under(), Some(b));
+        hover.see(true, &[]);
+        assert_eq!(hover.under(), Some(b), "until the next");
+        // A pick outside the view, answered sooner, before one inside it asked earlier.
+        hover.see(true, &[(5, None)]);
+        assert_eq!(hover.under(), None, "nothing there");
+        hover.see(true, &[(3, Some(a)), (4, Some(a))]);
+        assert_eq!(hover.under(), None, "after a later one's");
+        hover.see(true, &[(6, Some(a))]);
+        assert_eq!(hover.under(), Some(a));
+        hover.see(false, &[(7, Some(b))]);
+        assert_eq!(hover.under(), None, "off the view");
+        hover.see(true, &[(7, Some(b))]);
+        hover.ask(Some(9));
+        hover.see(true, &[(8, Some(b))]);
+        assert_eq!(hover.under(), None, "asked before it came back over");
+        hover.see(true, &[(9, Some(b))]);
+        assert_eq!(hover.under(), Some(b));
+    }
+
+    /// The view's bottom left names what's under the cursor by its name, or without one by its ID,
+    /// and nothing once it's gone.
+    #[test]
+    fn whats_under_the_cursor_shows_by_its_name_or_else_its_id() {
+        let mut cx = Context::seeded(1);
+        let world = cx.world_mut();
+        let named = world.spawn((Name("Red".to_owned()), Transform::IDENTITY));
+        let unnamed = world.spawn((Transform::IDENTITY,));
+        let [named, unnamed] = [named, unnamed].map(|entity| world.id(entity).expect("alive"));
+        assert_eq!(hovered_name(world, named).as_deref(), Some("Red"));
+        assert_eq!(hovered_name(world, unnamed), Some(unnamed.to_string()));
+        let entity = world.entity(named).expect("alive");
+        world.despawn(entity).expect("alive");
+        assert_eq!(hovered_name(world, named), None, "gone");
     }
 
     /// The view sees through the world's camera while the toolbar says to and the world has a
