@@ -206,9 +206,10 @@ pub struct World {
     kept: HashMap<EntityId, u32>,
     /// Where the next entity's ID comes from.
     stream: IdStream,
-    /// Which world this is among the process's, so that the order drawing keeps for one world, and
-    /// where it draws the world's entities on from, never pass for another's, as when a game
-    /// replaces its world; a world copied takes another, as does a world restored from a copy.
+    /// Which world this is among the process's, so that the order drawing keeps for one world,
+    /// where it draws the world's entities on from, and the entities a pass of scripts listed in it
+    /// never pass for another's, as when a game replaces its world; a world copied takes another,
+    /// as does a world restored from a copy.
     serial: u64,
     /// How many times entities' rows have changed, as entities are spawned, despawned or moved to
     /// other tables: drawing keeps the order it sorted while it and `serial` stay.
@@ -223,6 +224,8 @@ pub struct World {
     scratch: Vec<ComponentId>,
     /// What spawning a model has spawned so far, in memory kept from one spawn to the next.
     spawned: Vec<Entity>,
+    /// The entities a pass of a script runs for, in memory kept from one pass to the next.
+    scripted: Vec<Entity>,
 }
 
 impl Default for World {
@@ -287,6 +290,7 @@ impl World {
             components,
             scratch: Vec::new(),
             spawned: Vec::new(),
+            scripted: Vec::new(),
         }
     }
 
@@ -373,6 +377,21 @@ impl World {
     /// Keeps `spawned`'s memory for the next [`take_spawned`](Self::take_spawned).
     pub(crate) fn keep_spawned(&mut self, spawned: Vec<Entity>) {
         self.spawned = spawned;
+    }
+
+    /// A list, empty, in memory kept from the last, for [`run_scripts`](crate::run_scripts) to
+    /// list the entities it runs a script for in, and give back through
+    /// [`keep_scripted`](Self::keep_scripted), as [`take_spawned`](Self::take_spawned) is for
+    /// models.
+    pub(crate) fn take_scripted(&mut self) -> Vec<Entity> {
+        let mut scripted = mem::take(&mut self.scripted);
+        scripted.clear();
+        scripted
+    }
+
+    /// Keeps `scripted`'s memory for the next [`take_scripted`](Self::take_scripted).
+    pub(crate) fn keep_scripted(&mut self, scripted: Vec<Entity>) {
+        self.scripted = scripted;
     }
 
     /// Puts `entity`, whose slot holds none, with ID `id`, which the world finds it by already,
@@ -564,7 +583,8 @@ impl World {
     }
 
     /// Which world this is, and how many times its entities' rows have changed, for drawing, which
-    /// keeps the order it sorted while both stay.
+    /// keeps the order it sorted while both stay, and for a pass of scripts, which ends once the
+    /// world isn't the one it listed.
     pub(crate) fn version(&self) -> (u64, u64) {
         (self.serial, self.version)
     }

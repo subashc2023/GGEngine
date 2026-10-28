@@ -26,6 +26,7 @@ impl Clone for World {
             components,
             scratch: _,
             spawned: _,
+            scripted: _,
         } = self;
         Self {
             meta: meta.clone(),
@@ -45,6 +46,7 @@ impl Clone for World {
             components: components.clone(),
             scratch: Vec::new(),
             spawned: Vec::new(),
+            scripted: Vec::new(),
         }
     }
 
@@ -70,6 +72,7 @@ impl Clone for World {
             components,
             scratch: _,
             spawned: _,
+            scripted: _,
         } = source;
         if !self.components.same(components) {
             // Its tables' ids would name other types than `source`'s same ids.

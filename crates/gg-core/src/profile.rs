@@ -44,7 +44,8 @@ impl Zone {
     }
 
     /// Shows `text` with the zone, such as the path of the file it loads. Tracy copies it each
-    /// time, so it's for zones that run rarely; without the feature, it isn't even formatted.
+    /// time, so it's for zones that run rarely, or a few times a tick at most; without the feature,
+    /// it isn't even formatted.
     pub fn text(&self, text: impl Display) {
         #[cfg(feature = "tracy")]
         self.span.emit_text(&text.to_string());

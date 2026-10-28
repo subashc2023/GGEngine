@@ -64,7 +64,8 @@ sandbox  editor   player       apps/: executables
   beside it. Its camera is its own, one orbit camera driven alike in 2D and 3D, orthographic or
   with perspective, with a toolbar and an orientation gizmo pinned over the view and a grid in
   either projection; the toolbar has the view see through the world's primary camera instead, as
-  the game would, until the editor's camera moves.
+  the game would, until the editor's camera moves, and meanwhile W, A, S and D drive the world's
+  cameras, by a script of theirs, as a game's keys would.
 - **`player`:** the reference player. It runs a cooked scene without game code and shows how a
   game builds its own player.
 
@@ -144,9 +145,13 @@ from its own repository.
   and headless runs in which agents check their work. The game shows in its own window until
   the editor embeds its view.
 - **Hot reload keeps the world.** `subsecond` patches an edit inside a function body into the
-  running game. Any other change, such as a new field, a new component or an engine edit,
-  rebuilds the game, restarts it and restores the world from a snapshot taken just before,
-  matching each changed component to its new layout by field name.
+  running game, which reaches calls made through its `HotFn` but none through a vtable or a
+  function pointer made before the patch. The engine calls each layer's methods through `HotFn`
+  and applies patches between ticks, so that a patch reaches those methods and the systems and
+  scripts they call; an edit that only a game's own trait object or function pointer reaches
+  waits for the next rebuild. Any other change, such as a new field, a new component or an
+  engine edit, rebuilds the game, restarts it and restores the world from a snapshot taken just
+  before, matching each changed component to its new layout by field name.
 - **Luau comes after v0.1, for mods and quick scripts.** Players can install sandboxed mods,
   and quests, dialogue and level events reload in milliseconds. Scripts reach Rust components
   through reflection, without hand-written bindings, and can declare components of their own.
@@ -233,9 +238,9 @@ A project's state is text that people and agents edit, diff and merge with ordin
 
 The world lives in our own ECS, built for what the tools, hot reload and multiplayer need:
 
-- **Reflection:** every component type, whether Rust or a script declares it, is registered at
-  runtime with a description of its fields. Saving, operations, the inspector, hot reload's
-  snapshots, network replication and script bindings all work from it.
+- **Reflection:** every component type, whether Rust or a Luau script declares it, is registered
+  at runtime with a description of its fields. Saving, operations, the inspector, hot reload's
+  snapshots, network replication and Luau's bindings all work from it.
 - **Snapshots:** the whole world can be saved and restored fast enough to take one every
   frame, for rollback and client-side prediction as well as hot reload.
 - **Commands:** nothing outside the simulation changes its state except a command applied at a
@@ -282,7 +287,21 @@ object, downcast once a table, rather than through raw pointers. Queries borrow 
 to read it and exclusively to change it, so that the borrow checker keeps them apart, and walk
 each table's columns as slices. Systems are plain functions over the world, run at its ticks in a
 fixed order; one can hand a query's rows to the job system's threads with `par_for_each`, as
-[Threads](#threads) describes. The order queries find entities in follows only from the changes
+[Threads](#threads) describes. A native script is a component that acts: a type that implements
+`Script`, whose `tick` gets its entity, the world and the tick, and which a layer's tick runs among
+its systems with `run_scripts`, for each entity that has one as the pass starts, in the order
+queries find them; one that had none as the pass started, given the script during it, starts at the
+next tick, and a script that replaces the world ends the pass. Its state is its component, so that
+scenes save it, the Inspector and operations edit it, the hash reads it and snapshots copy it, and
+adding the component by name, as an agent's operation does, attaches the behavior. It reads its
+own state through the world, as any component's, rather than as `self`, so that what it reads is
+what the world holds. It has no create or destroy: it starts from its component's value, setup
+that needs the world running in its tick behind a field of its own. Since each gets the whole
+world, scripts run one entity at a time on the tick's thread, and what a game has thousands of is
+a system. Each type's pass is a generic function the layer's tick calls, with no table of
+functions, so that subsecond's patches reach scripts as they reach their layer, as
+[Game code](#game-code) describes.
+The order queries find entities in follows only from the changes
 made: tables are kept in the order they were made, despawning an entity or changing its components
 moves its table's last row into its place, the last freed slot is the first taken, and no hash map
 is iterated. So it's the same in every run, as the deterministic mode needs, but means nothing a
@@ -854,7 +873,7 @@ main thread.
 | Area | Choice |
 |---|---|
 | Language | Rust stable, edition 2024 |
-| Game code | Rust; Luau through `mlua` after v0.1, for mods and scripts |
+| Game code | Rust; Luau through `mlua` after v0.1, for mods and quick scripts |
 | Hot patching | `subsecond` |
 | GPU API | Vulkan through `ash`: one backend, no multi-API abstraction layer |
 | GPU memory | VMA through our own binding in `gg-gpu`, for its budgets, aliasing, pools and defragmentation |

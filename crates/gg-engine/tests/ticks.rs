@@ -1,8 +1,9 @@
 //! Steady-state ticks allocate nothing, on any thread: a layer's ticks that apply its commands,
 //! run a system on the job system's threads and another on the ticks' thread alone, and hash the
-//! world, as a recorded run's do, once their first ticks have run; before the job system's threads
-//! start, as in a run on one thread, and after, once each thread has waited for jobs and slept, as
-//! it allocates the first time it does; and ticks that despawn entities and spawn others in their
+//! world, as a recorded run's do, once their first ticks have run, with scripts that despawn their
+//! own entities and spawn others in their place among them; before the job system's threads start,
+//! as in a run on one thread, and after, once each thread has waited for jobs and slept, as it
+//! allocates the first time it does; and ticks that despawn entities and spawn others in their
 //! place, as a game's bullets and particles come and go.
 //!
 //! It runs in one process with a main of its own, so that no other test's threads run beside it,
@@ -20,7 +21,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use gg_engine::math::Vec3;
-use gg_engine::{Component, Context, Entity, Layer, Tick, Transform, World};
+use gg_engine::{Component, Context, Entity, Layer, Script, Tick, Transform, World, run_scripts};
 
 /// The ticks run before counting, on one thread and again on four, as a run's first ticks size
 /// what the world and the layer keep, and the pool's what its threads make as they first wait.
@@ -92,6 +93,34 @@ struct Velocity(Vec3);
 #[derive(Clone, Component)]
 struct Heavy;
 
+/// The scripted entities, of which each tick's scripts replace a `LIFETIME`th.
+const EPHEMERA: u32 = 256;
+const LIFETIME: u32 = 64;
+
+/// A script that drifts its entity, and once its ticks are up despawns it and spawns another in its
+/// place.
+#[derive(Clone, Component)]
+struct Ephemeral {
+    left: u32,
+}
+
+impl Script for Ephemeral {
+    fn tick(entity: Entity, world: &mut World, _: Tick) {
+        let Some(ephemeral) = world.get_mut::<Self>(entity) else {
+            return;
+        };
+        ephemeral.left -= 1;
+        if ephemeral.left > 0 {
+            if let Some(transform) = world.get_mut::<Transform>(entity) {
+                transform.translation.x += 1.0;
+            }
+            return;
+        }
+        world.despawn(entity).expect("alive");
+        world.spawn((Transform::default(), Self { left: LIFETIME }));
+    }
+}
+
 enum Command {
     Speed(f32),
 }
@@ -108,7 +137,8 @@ fn on_a_worker() -> bool {
 }
 
 /// 5,000 movers, in tables of six chunks between them, which each tick moves at its speed on the
-/// job system's threads, and whose heavy ones it turns back on the ticks' thread alone.
+/// job system's threads, and whose heavy ones it turns back on the ticks' thread alone; and
+/// `EPHEMERA` scripted entities, whose scripts it runs.
 struct Movers {
     commands: Vec<Command>,
     speed: f32,
@@ -125,9 +155,13 @@ impl Layer for Movers {
                 world.spawn((Transform::default(), velocity));
             }
         }
+        for i in 0..EPHEMERA {
+            let left = i % LIFETIME + 1;
+            world.spawn((Transform::default(), Ephemeral { left }));
+        }
     }
 
-    fn tick(&mut self, world: &mut World, _: Tick) {
+    fn tick(&mut self, world: &mut World, tick: Tick) {
         for command in self.commands.drain(..) {
             match command {
                 Command::Speed(speed) => self.speed = speed,
@@ -145,6 +179,7 @@ impl Layer for Movers {
         for (_, velocity) in world.query_mut::<(&Heavy, &mut Velocity)>() {
             velocity.0 = -velocity.0;
         }
+        run_scripts::<Ephemeral>(world, tick);
     }
 }
 

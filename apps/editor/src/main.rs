@@ -1,7 +1,8 @@
 //! The editor: the game's view in a panel among the editor's own, in a dock that fills its window.
 //! Until the tool API brings it a game, the view shows a world of the editor's own, three squares
 //! and two cameras, through the editor's camera, orthographic at first, as 2D games see theirs, over a
-//! grid, with a toolbar and a gizmo over it; or through the world's camera, as the game would. The
+//! grid, with a toolbar and a gizmo over it; or through the world's camera, as the game would, and
+//! then W, A, S and D drive the world's cameras, by a script of theirs, as a game's keys would. The
 //! Inspector edits the world, and undoes and redoes its edits.
 
 mod camera;
@@ -14,10 +15,11 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use gg_engine::egui::{Align2, CursorIcon, ViewportCommand, ViewportId};
-use gg_engine::math::{Vec3, Vec4};
+use gg_engine::math::{Vec2, Vec3, Vec4};
 use gg_engine::{
-    App, Camera, Context, Docked, Event, Inspector, Key, Layer, Name, PerfPanel, Projection,
-    Sprite, Transform, Ui, World,
+    Actions, App, Binding, Camera, Change, Commands, Component, Context, Docked, Entity, Event,
+    Inspector, Key, Layer, Name, PerfPanel, Projection, Reflect, Script, Source, Sprite, Tick,
+    Transform, Ui, World, run_scripts,
 };
 
 use camera::{Move, OrbitCamera, Screen, Side, Tool};
@@ -43,14 +45,91 @@ struct Editor {
     toolbar: Toolbar,
     /// The grid, once attached.
     grid: Option<Grid>,
+    /// What drives the world's cameras.
+    actions: Actions<Act>,
+    /// What the actions, and the toolbar's switch, changed since the last tick, which it applies.
+    commands: Vec<Command>,
+    /// Whether the world's cameras take the keys: whether the view saw through the world's camera
+    /// as the commands last heard.
+    gated: bool,
+}
+
+/// What the editor's keys do to its world, beside what its camera's do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Act {
+    /// W, A, S and D: which way the world's cameras go, while the view sees through the world's
+    /// camera.
+    Move,
+}
+
+/// What the editor's keys, and its toolbar's switch, change of its world, queued as they change it
+/// and applied at its next tick: its commands, which a recording keeps.
+#[derive(Reflect)]
+enum Command {
+    /// Has the world's cameras go this way, across and up, until the next.
+    Move(Vec2),
 }
 
 impl Editor {
     fn new() -> Self {
+        let mut actions = Actions::default();
+        let wasd = Binding::Axis2 {
+            x: [Key::KeyA, Key::KeyD].map(Source::Key),
+            y: [Key::KeyS, Key::KeyW].map(Source::Key),
+        };
+        let bound = actions.bind(Act::Move, wasd);
+        bound.expect("W, A, S and D are of one kind");
         Self {
             camera: OrbitCamera::new(),
             toolbar: Toolbar::default(),
             grid: None,
+            actions,
+            commands: Vec::new(),
+            gated: false,
+        }
+    }
+
+    /// Queues what the world's cameras do as the view starts or stops seeing through the world's
+    /// camera, however the toolbar's switch went: go the way the keys held say, or stop, so that
+    /// they move only while the view sees through it, from the next tick.
+    fn gate(&mut self) {
+        let through = self.toolbar.world_camera;
+        if through != self.gated {
+            self.gated = through;
+            let heading = if through {
+                self.actions.axis2(Act::Move)
+            } else {
+                Vec2::ZERO
+            };
+            self.commands.push(Command::Move(heading));
+        }
+    }
+}
+
+/// The script that drives the world's cameras, as a game's would: it moves its entity across and up
+/// at its speed, the way its heading says, which the editor's W, A, S and D set while the view sees
+/// through the world's camera.
+#[derive(Clone, Copy, Component)]
+struct CameraController {
+    /// How fast it goes, in units a second.
+    #[reflect(min = 0.0)]
+    speed: f32,
+    /// Which way it goes, across and up; one longer than 1 goes no faster than 1 does.
+    heading: Vec2,
+}
+
+impl Script for CameraController {
+    fn tick(entity: Entity, world: &mut World, _: Tick) {
+        let Some(&Self { speed, heading }) = world.get(entity) else {
+            return;
+        };
+        // One that isn't going anywhere stays where it is, to a zero's sign.
+        if heading == Vec2::ZERO {
+            return;
+        }
+        if let Some(at) = world.get_mut::<Transform>(entity) {
+            let step = heading.clamp_length_max(1.0) * speed * Tick::DT.as_secs_f32();
+            at.translation += step.extend(0.0);
         }
     }
 }
@@ -60,7 +139,8 @@ impl Editor {
 /// orthographic, 8 units tall, until the Inspector makes "Second camera", with perspective,
 /// primary in its place. Each square is as much bigger as it's farther from "Second camera", so
 /// that through it they look the same size, a unit 3 units in front of it, a quarter of a unit
-/// apart; orthographic, which shows nothing smaller for being farther, shows how big they are.
+/// apart; orthographic, which shows nothing smaller for being farther, shows how big they are. Both
+/// cameras have a [`CameraController`], which goes 5 units a second, as Hazel's does.
 fn spawn_world(world: &mut World) {
     // How far in front of the origin "Second camera" is.
     const SEEN_FROM: f32 = 3.0;
@@ -92,6 +172,10 @@ fn spawn_world(world: &mut World) {
         translation: Vec3::new(0.0, 0.0, z),
         ..Transform::IDENTITY
     };
+    let controller = CameraController {
+        speed: 5.0,
+        heading: Vec2::ZERO,
+    };
     let orthographic = Camera {
         projection: Projection::Orthographic {
             height: 8.0,
@@ -100,7 +184,7 @@ fn spawn_world(world: &mut World) {
         },
         primary: true,
     };
-    world.spawn((named("Camera"), in_front(10.0), orthographic));
+    world.spawn((named("Camera"), in_front(10.0), orthographic, controller));
     let perspective = Camera {
         projection: Projection::Perspective {
             fov: FRAC_PI_3,
@@ -108,7 +192,12 @@ fn spawn_world(world: &mut World) {
         },
         primary: false,
     };
-    world.spawn((named("Second camera"), in_front(SEEN_FROM), perspective));
+    world.spawn((
+        named("Second camera"),
+        in_front(SEEN_FROM),
+        perspective,
+        controller,
+    ));
 }
 
 /// Whether `world` has a camera for the view to see through: an entity with a [`Camera`] that's
@@ -125,6 +214,27 @@ impl Layer for Editor {
         spawn_world(cx.world_mut());
     }
 
+    fn tick(&mut self, world: &mut World, tick: Tick) {
+        for command in self.commands.drain(..) {
+            match command {
+                Command::Move(heading) => {
+                    for controller in world.query_mut::<&mut CameraController>() {
+                        controller.heading = heading;
+                    }
+                }
+            }
+        }
+        // Not once the world's last primary camera has gone, as the frame's later ticks would, until
+        // its update turns the view back to the editor's camera and stops them.
+        if has_camera(world) {
+            run_scripts::<CameraController>(world, tick);
+        }
+    }
+
+    fn commands(&mut self) -> Option<&mut dyn Commands> {
+        Some(&mut self.commands)
+    }
+
     fn update(&mut self, cx: &mut Context, dt: Duration) {
         self.camera.update(dt);
         let plane = grid::shown(&self.camera.viewpoint(), self.toolbar.plane);
@@ -132,6 +242,7 @@ impl Layer for Editor {
         // Off once the world has no primary camera, as its ticks left it, so that no frame shows
         // the default viewpoint as the last one goes.
         self.toolbar.world_camera &= has_camera(cx.world());
+        self.gate();
         if self.toolbar.world_camera {
             return;
         }
@@ -157,6 +268,22 @@ impl Layer for Editor {
         if handled.is_break() {
             self.toolbar.world_camera = false;
         }
+        // Queued now, rather than at the next update, so that the next tick applies them, while
+        // the world's cameras take the keys; the actions see every event, so that none misses
+        // the release of a key it saw pressed.
+        let Self {
+            actions,
+            commands,
+            gated,
+            ..
+        } = self;
+        let gated = *gated;
+        actions.event(event, |change| {
+            if gated && let Change::Axis2(Act::Move, heading) = change {
+                commands.push(Command::Move(heading));
+            }
+        });
+        self.gate();
         handled
     }
 
@@ -203,6 +330,8 @@ impl Layer for Editor {
         if let Some(icon) = icon {
             ui.egui().set_cursor_icon(icon);
         }
+        // As the toolbar's switch went.
+        self.gate();
     }
 }
 
@@ -268,5 +397,128 @@ mod tests {
             let seen = frame(&mut editor, spawn_world);
             assert_eq!(seen, Some(editor.camera.viewpoint()));
         }
+    }
+
+    /// The editor's ticks, from tick `number` on, and where they leave the world's cameras.
+    struct Ticks {
+        number: u64,
+    }
+
+    impl Ticks {
+        /// Where the world's cameras are after `count` more of `editor`'s ticks in `cx`'s world.
+        fn run(&mut self, editor: &mut Editor, cx: &mut Context, count: u64) -> Vec<Vec3> {
+            for number in self.number..self.number + count {
+                editor.tick(cx.world_mut(), Tick { number });
+            }
+            self.number += count;
+            let cameras = cx.world().query::<(&CameraController, &Transform)>();
+            cameras.map(|(_, at)| at.translation).collect()
+        }
+    }
+
+    /// Where the cameras `at` are after moving `by` at each of `ticks` ticks, as their script adds
+    /// it.
+    fn moved(at: &[Vec3], by: Vec3, ticks: u32) -> Vec<Vec3> {
+        let after = |at: Vec3| (0..ticks).fold(at, |at, _| at + by);
+        at.iter().map(|&at| after(at)).collect()
+    }
+
+    /// The way the editor's last command has the world's cameras go, if it queued one.
+    fn last_move(editor: &Editor) -> Option<Vec2> {
+        editor
+            .commands
+            .last()
+            .map(|&Command::Move(heading)| heading)
+    }
+
+    /// W, A, S and D drive the world's cameras, by their script at the editor's ticks, while the
+    /// view sees through the world's camera: at their speed, 5 units a second, a 64th of it a tick;
+    /// a release stops them, and so does the view going back to the editor's camera, whichever way
+    /// it does; while it's on the editor's camera, they queue nothing, and once it sees through the
+    /// world's again, the cameras go the way the keys held say.
+    #[test]
+    fn w_a_s_and_d_drive_the_worlds_cameras_while_the_view_sees_through_them() {
+        let mut editor = Editor::new();
+        let mut cx = Context::seeded(1);
+        spawn_world(cx.world_mut());
+        let mut ticks = Ticks { number: 0 };
+        let start = ticks.run(&mut editor, &mut cx, 0);
+        assert_eq!(start.len(), 2, "both cameras have one");
+        let key = |key, pressed| Event::Key {
+            key,
+            pressed,
+            repeat: false,
+        };
+        // A tick's step, 5 units a second for a 64th of one.
+        let step = 5.0 / 64.0;
+        let [up_a_step, right_a_step] = [Vec3::Y, Vec3::X].map(|way| way * step);
+        // On the editor's camera, W queues nothing.
+        let _ = editor.event(&mut cx, &key(Key::KeyW, true));
+        assert!(editor.commands.is_empty());
+        assert_eq!(ticks.run(&mut editor, &mut cx, 4), start);
+        // Seeing through the world's camera, as the toolbar's switch has it, they go up with W
+        // held, a step a tick.
+        editor.toolbar.world_camera = true;
+        editor.update(&mut cx, Duration::ZERO);
+        assert_eq!(last_move(&editor), Some(Vec2::Y));
+        let up = moved(&start, up_a_step, 8);
+        assert_eq!(ticks.run(&mut editor, &mut cx, 8), up);
+        assert_eq!(up[0].y, 0.625, "exactly 8 of its 64ths of 5 units");
+        let _ = editor.event(&mut cx, &key(Key::KeyW, false));
+        assert_eq!(last_move(&editor), Some(Vec2::ZERO));
+        assert_eq!(ticks.run(&mut editor, &mut cx, 4), up);
+        let _ = editor.event(&mut cx, &key(Key::KeyD, true));
+        let right = moved(&up, right_a_step, 4);
+        assert_eq!(ticks.run(&mut editor, &mut cx, 4), right);
+        // Diagonally, no faster.
+        let _ = editor.event(&mut cx, &key(Key::KeyS, true));
+        let across = ticks.run(&mut editor, &mut cx, 4);
+        let diagonal = Vec3::new(1.0, -1.0, 0.0).normalize() * 4.0 * step;
+        for (at, from) in across.iter().zip(&right) {
+            assert!(
+                (*at - (*from + diagonal)).length() < 1e-5,
+                "{at} from {from}"
+            );
+        }
+        let _ = editor.event(&mut cx, &key(Key::KeyS, false));
+        // Each way the view goes back to the editor's camera stops them: a move of the editor's
+        // camera, the world losing its primary camera, and the toolbar's switch, for which a
+        // test sets the field and runs an update, since it can't run `ui`, which catches a click.
+        let middle = |pressed| Event::MouseButton {
+            button: MouseButton::Middle,
+            pressed,
+        };
+        let held = ticks.run(&mut editor, &mut cx, 0);
+        assert_eq!(editor.event(&mut cx, &middle(true)), ControlFlow::Break(()));
+        let _ = editor.event(&mut cx, &middle(false));
+        assert_eq!(last_move(&editor), Some(Vec2::ZERO));
+        assert_eq!(ticks.run(&mut editor, &mut cx, 4), held);
+        // Back to the world's camera with D still held: they go right again.
+        editor.toolbar.world_camera = true;
+        editor.update(&mut cx, Duration::ZERO);
+        assert_eq!(last_move(&editor), Some(Vec2::X));
+        let held = moved(&held, right_a_step, 2);
+        assert_eq!(ticks.run(&mut editor, &mut cx, 2), held);
+        for camera in cx.world_mut().query_mut::<&mut Camera>() {
+            camera.primary = false;
+        }
+        // The frame's ticks after the last one goes, before its update.
+        assert_eq!(ticks.run(&mut editor, &mut cx, 2), held);
+        editor.update(&mut cx, Duration::ZERO);
+        assert!(!editor.toolbar.world_camera);
+        assert_eq!(last_move(&editor), Some(Vec2::ZERO));
+        assert_eq!(ticks.run(&mut editor, &mut cx, 4), held);
+        let primary = cx.world_mut().query_mut::<&mut Camera>().next();
+        primary.expect("a camera").primary = true;
+        editor.toolbar.world_camera = true;
+        editor.update(&mut cx, Duration::ZERO);
+        let held = moved(&held, right_a_step, 2);
+        assert_eq!(ticks.run(&mut editor, &mut cx, 2), held);
+        editor.toolbar.world_camera = false;
+        editor.update(&mut cx, Duration::ZERO);
+        assert_eq!(last_move(&editor), Some(Vec2::ZERO));
+        assert_eq!(ticks.run(&mut editor, &mut cx, 4), held);
+        let _ = editor.event(&mut cx, &key(Key::KeyW, true));
+        assert!(editor.commands.is_empty());
     }
 }

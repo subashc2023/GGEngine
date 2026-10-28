@@ -4,11 +4,11 @@
 //! it draws between its ticks, handing each frame's render data to `gg-renderer` on a thread of its
 //! own, a frame behind, and the job system, which a tick's systems split a query's rows across;
 //! reflection, which describes the components' types so that tools reach them by name, and the
-//! Inspector, which edits them; scenes and prefabs, the world's
-//! entities as canonical text; operations, the authoring changes made to the world, each with its
-//! inverse, and their log, which undoes and redoes them; recordings of runs, the commands their
-//! ticks applied, which replay without a GPU to the same world, naming where one goes another way;
-//! and measuring each frame, for the log and the Performance panel; loading what layers add,
+//! Inspector, which edits them; scripts, components that act at ticks; scenes and prefabs, the
+//! world's entities as canonical text; operations, the authoring changes made to the world, each
+//! with its inverse, and their log, which undoes and redoes them; recordings of runs, the commands
+//! their ticks applied, which replay without a GPU to the same world, naming where one goes another
+//! way; and measuring each frame, for the log and the Performance panel; loading what layers add,
 //! images as textures and glTF models, whose nodes spawn as entities; the pipeline cache's file,
 //! which windowed runs keep; and in development builds, behind `dev`, compiling games' shaders
 //! again as their files change. A library of assets to come.
@@ -45,6 +45,7 @@ mod pipeline_cache;
 mod recording;
 pub mod reflect;
 mod render_thread;
+mod script;
 mod transform;
 mod viewports;
 mod window;
@@ -117,6 +118,7 @@ use recording::Recorder;
 pub use recording::Replay;
 pub use reflect::Reflect;
 use render_thread::{RenderThread, TextureChanges};
+pub use script::{Script, run_scripts};
 pub use transform::Transform;
 use viewports::Drawn;
 

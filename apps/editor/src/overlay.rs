@@ -113,7 +113,8 @@ impl Toolbar {
                     .inner
                     .on_hover_text(
                         "World camera: the view sees through the world's primary camera, as the \
-                         game does; moving the editor's camera comes back to it",
+                         game does, and W, A, S and D drive the world's cameras; moving the \
+                         editor's camera comes back to it",
                     )
                     .on_disabled_hover_text("World camera: the world has no primary camera");
                 if through.clicked() {

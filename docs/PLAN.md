@@ -367,6 +367,22 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   through "Camera" at their sizes, without grid or gizmo, checking "Second camera"'s primary had the
   view see through it, the squares the same size, and unchecked "Camera"'s, Edit > Undo switched them back, a
   middle press brought the editor's view back to the pixel, and File > Quit exited cleanly.
+- **Native scripts** (2026-10-27): a component can act. A type that implements `Script` has a
+  `tick` that gets its entity, the world and the tick, which a layer's tick runs among its systems
+  with `run_scripts`, for each entity that has one as the pass starts, in the order queries find
+  them, listed in memory the world keeps; its state is its component, which scenes, the Inspector,
+  operations, the hash and snapshots reach as they do any. The editor's world cameras each have a
+  `CameraController`, which W, A, S and D drive, through the editor's commands, at its ticks, while
+  the view sees through the world's camera, stopping as it goes back to the editor's. Unit tests
+  check a pass's order, each entity run once, entities despawned or stripped during a pass passed
+  over, a script given or spawned during one running from the next tick, and one that replaces the
+  world ending it; the editor's keys moving both cameras a 64th of 5 units a tick, stopping on a
+  release and each way the view goes back, and moving them again by the keys held as it comes
+  back; and `ticks` counts no allocation with scripts that replace their own entities. By hand on
+  the RTX 4090: W held through "Camera" for 501 ms took it to y 2.5, 32 ticks of 5/64, and the
+  squares 258 px down the view, 2.499 units; the Inspector showed its heading while held and 0
+  after; a right press mid-hold handed the view back to the editor's camera with "Camera" stopped
+  where it was; and File > Quit exited cleanly.
 
 ## Now: the editor's next milestone, or Phase 5's first
 
@@ -385,12 +401,14 @@ Each phase ends in something you can run and check.
    it through the API. An MCP server with the same reach. Assets named by their paths, which scenes
    save and a restart from a snapshot carries across a rebuild. Scene files edited while the game
    runs apply as operations. `subsecond` patches edits inside function bodies into the running game;
-   it patches only the game's main crate and needs Dioxus's `dx` tool to build patches. Any
-   other change rebuilds the game and restarts it from a snapshot, matching each changed
-   component to its new layout by field name. *Done when* the v0.1 loop works: watching the
-   running game, the user asks Claude Code for a change, Claude Code edits the game's Rust code
-   or applies operations through the API, and the game shows the change with its state intact;
-   and an agent runs a headless check through `tools/gg` and acts on its result.
+   it patches only the game's main crate and needs Dioxus's `dx` tool to build patches. The engine
+   calls each layer's methods through its `HotFn` and applies patches between ticks, as
+   [Game code](../ARCHITECTURE.md#game-code) describes. Any other change rebuilds the game and
+   restarts it from a snapshot, matching each changed component to its new layout by field name.
+   *Done when* the v0.1 loop works: watching the running game, the user asks Claude Code for a
+   change, Claude Code edits the game's Rust code or applies operations through the API, and the
+   game shows the change with its state intact; and an agent runs a headless check through
+   `tools/gg` and acts on its result.
 6. **Render graph and PBR.** Passes declare the resources they read and write; the graph
    places barriers and layout transitions, aliases transient memory and schedules async
    compute. Physically based shading (glTF metallic-roughness), image-based lighting, cascaded
@@ -484,7 +502,7 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Showing which panel has the keys, such as an outline around the view while it has focus | Someone misses it, or Phase 9's editor |
 | Gamepads following a dockspace's view: they reach the layers whichever panel has the keys, as they do in games | The editor binds a pad, or a panel takes a pad's input |
 | Keeping a click that closes a menu from what's under it: it reaches the game's view there too, central or in a panel | It surprises someone, or Phase 9's editor |
-| Hotkeys for the editor's tools: Q, W, E and R stay free for them, since the camera's keys act only while the right button is held | Phase 9's editor, with gizmos that move, turn and scale |
+| Hotkeys for the editor's tools: Q, W, E and R stay free for them while the view sees through the editor's camera, since that camera's keys act only while the right button is held; seeing through the world's camera, W, A, S and D are the world's cameras' | Phase 9's editor, with gizmos that move, turn and scale |
 | The editor's Select tool picking what's under the cursor, and F framing what's picked: Select does nothing yet | Picking |
 | Locking the editor's view against turning, as Unity's padlock does | Someone turns a 2D view by accident |
 | Switching to orthographic on an axis snap, as Blender's and Godot's gizmos do by default: the editor switches projection only when asked | Someone wants it |
@@ -550,6 +568,9 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Changing the world's tables, or resetting an entity's interpolation, while a query runs, through a buffer applied after it: Bevy's `Commands`, to be called `Deferred` here, since commands are the simulation's inputs; from `par_for_each`'s jobs too, each run of rows with a buffer of its own, applied in the order of the rows, never as the jobs finish. The sandbox's drift collects the drifters that wrap under a lock, and resets them after | The first system that spawns or despawns as it iterates |
 | Reductions over a query's rows on the job system's threads, such as a sum, each run of rows giving its own, combined in the order of the rows; `par_for_each` on queries that only read; a size of a run of rows for each call; and splitting tables of fewer rows than a run among the threads, which each run on the calling thread, one table after another | Each with its first user |
 | Two systems at once, on components they don't share: a tick's systems run one after another, each splitting its own rows | A profile shows two heavy systems |
+| A script's create, run once before its first tick: a pending bit for each slot and script type, set wherever a script arrives, as an entity is spawned or loaded, given one, or put back by an undo, and cleared as it's created or leaves, which snapshots, the layout's hash and `--dump` would carry. A script that needs setup does it in its tick, behind a field of its own | A second script type needs setup behind a field of its own |
+| A script's destroy, given its value as it leaves: a despawn drops it, and a delete keeps it for its undo, which would have to destroy it only once the log lets it go | A script needs cleanup as it leaves, beyond what despawning its entity's descendants does |
+| Scripts on the job system's threads: each gets the whole world, so they run one entity at a time on the tick's thread | A profile shows a script type's pass |
 | Query filters: `With`, `Without`, `Option` and `Changed` | Each with its first query |
 | Queries that keep the tables they match, and tables that keep where adding or removing each component leads; a query looks over every table, and a change of components finds its table by its types | Tables number in the hundreds, or changes of components show in a profile |
 | Sparse storage for components added and removed often, which move their entity's row between tables | A profile shows those moves |
@@ -565,6 +586,7 @@ tracing (no macOS driver does today); and the built-in coding agent for v1.
 | Flags for fields that saving, the world's hash or replication skip, and fields that are read only; `Parent` is read only as a whole type, which `set_field` refuses | Each with its first user |
 | Generic types deriving `Reflect` or `Component` | A game needs one |
 | Drag speeds as hints; the Inspector picks them from a field's bounds and kind | A field drags too coarsely or too finely |
+| The Inspector setting only the part of a vector that changed, at its own path, such as `translation.x`: it sets the whole vector, as the panel last read it, after the ticks of the layers below it, so that dragging the x of something that moves, as the editor's driven cameras and the sandbox's triangle do, holds its y where it was, and an undo takes back the moves made since too | Someone edits something as it moves |
 | Paths resolved once and kept, for sets made again and again | A profile |
 | Picking an entity for a field, a parent or a child picked by clicking it, the Entities panel as a tree, and picking in the view; entities are shown by their names, where they have one, and their IDs, and found by an ID pasted in | Picking in the view, or Phase 9's scene tree |
 | Finding an entity by its name: the Find field takes an ID | A world names more entities than the Entities panel shows at once |
