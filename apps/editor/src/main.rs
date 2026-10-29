@@ -1,24 +1,25 @@
 //! The editor: the game's view in a panel among the editor's own, in a dock that fills its window.
 //! Until the tool API brings it a game, the view shows a world of the editor's own, three squares
-//! and two cameras, through the editor's camera, orthographic at first, as 2D games see theirs, over a
-//! grid, with a toolbar and a gizmo over it; or through the world's camera, as the game would. The
-//! toolbar's Play has a copy of the world play in its place, as the game would, its scripts and its
-//! physics running, the view seeing through its camera, where W, A, S and D drive the world's
-//! cameras, by a script of theirs, as a game's keys would; and Stop brings back the world as it was
-//! edited, with its edits' history. The toolbar's Colliders switch outlines the world's 2D
-//! colliders, as physics shapes them, whether the world plays or not. The Inspector edits the
-//! world, and undoes and redoes its edits, and duplicates entities with Ctrl+D. A click in the view
-//! picks what it shows there for the Inspector, or unpicks where it shows none, but with Pan or
-//! Orbit, whose left button moves the camera; and the view's bottom left names what it shows under
-//! the cursor, while the cursor is over it. Through the editor's camera, the toolbar's Move, Rotate
-//! and Scale, which W, E and R pick, as Q picks Select, show handles over what the Inspector has
-//! picked, whose drags move, turn and scale it, each an edit of the Inspector's. The File menu
-//! starts a new scene, emptying the world; opens one, whose entities replace the world's, stopping
-//! it first if it plays; and saves the world as it was edited as one, to the file it was opened
-//! from or saved to last, or as another: through the OS's file dialogs, and with Ctrl+N, Ctrl+O,
-//! Ctrl+S and Ctrl+Shift+S, Cmd for Ctrl on macOS. The Assets panel shows the files in the editor's
-//! assets folder, a folder at a time, and a scene dragged from it onto the view opens as Open opens
-//! one. When a file can't be read, opened or written, it says why, until that's dismissed.
+//! and two cameras, through the editor's camera, orthographic at first, as 2D games see theirs,
+//! over a grid, with a toolbar and a gizmo over it; or through the world's camera, as the game
+//! would. Play, at the middle of the title bar, has a copy of the world play in its place, as the
+//! game would, its scripts and its physics running, the view seeing through its camera, where W, A,
+//! S and D drive the world's cameras, by a script of theirs, as a game's keys would; and Stop
+//! brings back the world as it was edited, with its edits' history. The toolbar's Colliders switch
+//! outlines the world's 2D colliders, as physics shapes them, whether the world plays or not. The
+//! Inspector edits the world, and undoes and redoes its edits, and duplicates entities with Ctrl+D.
+//! A click in the view picks what it shows there for the Inspector, or unpicks where it shows none,
+//! but with Pan or Orbit, whose left button moves the camera; and the view's bottom left names what
+//! it shows under the cursor, while the cursor is over it. Through the editor's camera, the
+//! toolbar's Move, Rotate and Scale, which W, E and R pick, as Q picks Select, show handles over
+//! what the Inspector has picked, whose drags move, turn and scale it, each an edit of the
+//! Inspector's. The File menu, behind the title bar's menu button, starts a new scene, emptying the
+//! world; opens one, whose entities replace the world's, stopping it first if it plays; and saves
+//! the world as it was edited as one, to the file it was opened from or saved to last, or as
+//! another: through the OS's file dialogs, and with Ctrl+N, Ctrl+O, Ctrl+S and Ctrl+Shift+S, Cmd
+//! for Ctrl on macOS. The Assets panel shows the files in the editor's assets folder, a folder at a
+//! time, and a scene dragged from it onto the view opens as Open opens one. When a file can't be
+//! read, opened or written, it says why, until that's dismissed.
 
 mod assets;
 mod camera;
@@ -72,8 +73,8 @@ fn app() -> App {
     app.overlay(PerfPanel).overlay(inspector)
 }
 
-/// The editor's layer: its camera, and the toolbar and gizmo over the view, and the name of what
-/// it shows under the cursor; the handles over what the Inspector has picked, which pick and edit
+/// The editor's layer: its camera, Play in the title bar, the toolbar and gizmo over the view, and
+/// the name of what it shows under the cursor; the handles over what the Inspector has picked, which pick and edit
 /// through its link; the grid; the world playing, a copy of it in its place, and the world as it
 /// was edited aside, which Stop brings back; the keys that drive the world's cameras while it
 /// plays; the File menu, which empties the world for a new scene, replaces it with a scene's and
@@ -996,6 +997,7 @@ impl Layer for Editor {
             overlay::name_hovered(ui.egui(), &view, name);
         }
         let has_camera = has_camera(cx.world());
+        ui.title_bar(|ui| toolbar.show_play(ui));
         ui.over_view("toolbar", Align2::LEFT_TOP, |ui| {
             toolbar.show(ui, camera, has_camera);
         });
@@ -1028,7 +1030,7 @@ impl Layer for Editor {
         if let Some(icon) = icon {
             ui.egui().set_cursor_icon(icon);
         }
-        // As the toolbar's Play and switch went.
+        // As Play and the toolbar's switch went.
         self.play();
         self.gate();
     }

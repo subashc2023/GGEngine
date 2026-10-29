@@ -558,6 +558,40 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   the bodies as they fell and rested, through the world's camera; Stop brought the world back, still
   outlined, and the switch hid them, from 4 draws of 171 instances to 3 of 11; the run exited
   cleanly under validation.
+- **Title bar, menus and the Entities panel's rows** (2026-10-28): the editor's UI polished as other
+  editors have theirs. The Entities panel's rows say an entity's name alone, or, faintly, "Entity"
+  for one without, leaving its ID and components to the Inspector. `Ui::title_bar` puts layers'
+  controls at the middle of the title bar, in place of the window's title, and the editor's Play is
+  there now. The menus are behind a button at the bar's left, in a drawer that slides out from the
+  window's left edge below the bar, over the dock rather than pushing it aside, which would resize
+  the view as it slid; each menu opens beside it as a submenu does, and a click outside, the button,
+  Escape or an item chosen closes it. egui checks for a click that closes a menu as the menu shows,
+  which comes before the drawer's menus, so the drawer makes that check itself once they have. The
+  engine's menus pad their items 8 points across and 4 down, rounded 4 points under the pointer,
+  rather than egui's 2 and 0. Three buttons left of the window's hide and show the panels docked
+  left of, below and right of the view, those beside it across a split on the way to it from the
+  root, which the layout saves hidden; a side shows again as one of its panels opens from the View
+  menu or a group docks there. A component's menu's button shows three dots painted at its middle, where
+  the ellipsis glyph sat on its baseline, 4 points low. Numbers hold still as they change: the
+  regular Inter's cmap maps its digits and minus sign to its tabular glyphs, as Blender's Inter
+  does, since egui shapes without OpenType's optional features; the Inspector's floats, and its
+  integers that may be negative, show a minus sign or a figure space in its place, and a vector's or rotation's axes take
+  equal shares of what shows of their row, as Unity's do, 4 points apart and their numbers padded
+  2, which fits numbers such as −1.875 in the Inspector's first width; and the Performance panel's
+  times pad the digits before their points with figure spaces. Unit tests check which side of the view a panel is docked on,
+  hiding and showing the editor's sides with their panels back where they were, the drawer sliding
+  out and its menus opening beside it, an item, the button and Escape closing it, a click in a
+  submenu's field keeping it open, the controls centered with the free space either side of them
+  the OS's, the sidebars' buttons, rows of names alone, the menu's dots at its button's middle,
+  numbers of other digits and signs alike in width, a vector's numbers holding their places, its
+  axes fitting a panel as narrow as the editor's Inspector, and the Performance panel's times
+  padded. By hand on the RTX 4090: the drawer slid out with File, Edit, Entity and View, File
+  opened beside it, and a click outside closed it; Play lit as Stop as the world played, and Stop
+  brought it back; the left button gave the view the Entities panel's room, the bottom the
+  Assets panel's, the right the Inspector's and Performance's, and each brought them back where
+  they were; the component menus' dots sat at their buttons' middles, the Inspector's axes fitted
+  its first width, and the Performance panel's top line kept its width as its numbers changed;
+  the runs exited cleanly under validation.
 
 ## Now: the editor's next milestone, or Phase 5's first
 
@@ -746,7 +780,8 @@ Defects left in because fixing them costs more than they do are in [DEFECTS.md](
 | On Windows, an inner size asked of winit once a window whose title bar the UI draws is open (egui's `InnerSize`, `MinInnerSize` or `MaxInnerSize`) leaves its inside a frame smaller, since winit sizes it as though it had no frame | Something resizes such a window from code |
 | Leaving a taskbar that hides itself a pixel or two beside a maximized window whose title bar the UI draws, as Windows Terminal and Chromium do; the window covers the whole monitor, which may keep the taskbar from showing | Someone hides their taskbar |
 | Checking Windows' frame on Windows 10, whose DWM may draw no border along the top of a window whose inside reaches it | Someone runs the tools on Windows 10 |
-| Checking the drawn title bars on macOS and X11: the menus' inset clear of the traffic lights (72 points), and moving a torn-off window by its tab bar where the OS moves windows asynchronously | With the sandbox's check by hand on Linux and macOS |
+| Checking the drawn title bars on macOS and X11: the menu button's inset clear of the traffic lights (72 points), and moving a torn-off window by its tab bar where the OS moves windows asynchronously | With the sandbox's check by hand on Linux and macOS |
+| A button in the title bar hiding the panels docked above the view, as those left of, below and right of it hide, and keys for the buttons, as VS Code's Ctrl+B, Ctrl+J and Ctrl+Alt+B | Someone docks a panel above the view and wants it out of the way, or reaches for the buttons often |
 | On macOS, the menus in the system's menu bar, and a double-click on the title bar doing what the user's setting says | A tool ships on macOS |
 | Alt and access keys to reach the menus, and layers adding items to one another's menus | Phase 9, the editor |
 | Windows of their own on Wayland, where groups float over the main window | winit can place windows on Wayland |
@@ -778,8 +813,9 @@ Defects left in because fixing them costs more than they do are in [DEFECTS.md](
 | Drag speeds as hints; the Inspector picks them from a field's bounds and kind | A field drags too coarsely or too finely |
 | The Inspector setting only the part that changed of a rotation, and of a vector inside an option or a variant: it sets them whole, as the panel last read them, after the ticks of the layers below it, so that turning one angle of something that spins, as the sandbox's triangle does, holds the others where they were, and an undo takes back the spin made since too | Someone edits a rotation, or a vector held so, as it moves |
 | Paths resolved once and kept, for sets made again and again | A profile |
-| Picking an entity for a field, a parent or a child picked by clicking it; the Entities panel scrolling to an entity found or picked in the view, or to a root that an add or a remove moved to the end of another table, and so of the tree's roots; entities are shown by their names, where they have one, and their IDs, and found by an ID pasted in | Phase 9's scene tree |
+| Picking an entity for a field, a parent or a child picked by clicking it; the Entities panel scrolling to an entity found or picked in the view, or to a root that an add or a remove moved to the end of another table, and so of the tree's roots; a row shows its entity's name, or "Entity" without one, and an entity is found by an ID pasted in | Phase 9's scene tree |
 | Finding an entity by its name: the Find field takes an ID | A world names more entities than the Entities panel shows at once |
+| An icon on each of the Entities panel's rows saying what its entity is, from its components, such as a camera's, a sprite's or a mesh's: a row says its name alone | Names alone stop telling entities apart at a glance |
 | Entities rows of one line: a row whose name has a line break is as many lines tall, though the list skips the rows out of view as though each were one line tall, as egui's `show_rows` takes them; a row wider than its panel stays one line, cut off at its edge; and an empty name shows as it is | A world of more entities than the panel shows, or names from players |
 | World transforms stored and propagated after the ticks, with change detection; drawing computes each child's from its ancestors, every frame, as the latest tick left them, for its z, and blended between ticks, to draw it | Bodies under a parent, or a profile showing the walks up the hierarchy |
 | Where an entity draws between ticks, for a layer's viewpoint that follows it, which would otherwise judder against it, since layers read the world up to a tick ahead of where it draws: `World::pose` gives where the latest tick left it, and the engine's drawing and the world's camera compute their own | A layer's viewpoint that follows an entity |
@@ -806,10 +842,9 @@ Defects left in because fixing them costs more than they do are in [DEFECTS.md](
 | A version in scene files, a file without one reading as the first | The first change to the format that old files can't be read by |
 | Comments in scene files, which a save drops | People annotate scenes |
 | A prompt before the editor's New, Open or Quit, or a scene dropped on its view, discards edits not saved: they discard them | Someone loses work, or Phase 9's editor |
-| The scene's file named in the editor's title bar, and a list of recent scenes: Save writes to the file opened or saved last, which nothing shows | Someone loses track of which file Save writes |
+| The scene's file named in the editor, whose title bar's middle holds Play, and a list of recent scenes: Save writes to the file opened or saved last, which nothing shows | Someone loses track of which file Save writes |
 | Dragging a scene onto the view from the Assets panel torn off into a window of its own: egui's drag stays in the window it started in, so the view never sees it let go | Someone drags from a torn-off Assets panel |
 | Listing the Assets panel's folder off the main thread, as a thread watching it would: it's listed on the main thread each second it shows, which a folder of many thousands of files would hold up for milliseconds | A game's folder that big, once the tool API brings one |
-| The Play button centered over the view, as Hazel's is, or in the title bar, as Unity's: it's at the end of the editor's toolbar, which spans the view's middle | The title bar takes a layer's UI, or the toolbar moves |
 | Pause, step and Simulate, physics through the editor's camera, as Hazel's later episodes add | Someone steps through a play |
 | Play in a process of its own, through the tool API, so that a crash as the world plays stops only the game | Phase 9's editor |
 | Keeping edits made as the world plays, which go with the copy, as Unity's do; and showing that it plays beyond the lit Stop and the view through the world's camera, such as a tint round the view | Someone loses an edit made while playing, or edits a playing world for the scene |

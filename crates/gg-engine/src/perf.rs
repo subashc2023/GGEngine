@@ -553,9 +553,11 @@ fn row_name(ui: &mut egui::Ui, color: Option<egui::Color32>, name: &str) {
     ui.label(name);
 }
 
-/// `nanos` in milliseconds, to the microsecond, as the panel shows it.
+/// `nanos` in milliseconds, to the microsecond, as the panel shows it: after a figure space for
+/// each of the three digits before the point that it hasn't, each as wide as a digit, so that a
+/// column of times lines up at the point, and holds still as they change.
 fn millis_text(nanos: f64) -> String {
-    format!("{:.3} ms", nanos / 1e6)
+    format!("{:\u{2007}>7.3} ms", nanos / 1e6)
 }
 
 #[cfg(test)]
@@ -828,6 +830,11 @@ mod tests {
         // Not the last frame's 12.00 ms, nor the whole run's 2.01.
         let line = "2.02 ms a frame, 495 fps, 0 draws of 0 instances, 0 triangles";
         assert!(texts.iter().any(|text| text == line), "{texts:?}");
+        // The frames' mean and their most below, each with figure spaces for the digits before
+        // the point it hasn't, which line them up at the point.
+        for time in ["\u{2007}\u{2007}2.020 ms", "\u{2007}12.000 ms"] {
+            assert!(texts.iter().any(|text| text == time), "{time}: {texts:?}");
+        }
     }
 
     /// Finds in `shape` the graph, the one shape filled in `background`, and the texts.

@@ -426,13 +426,14 @@ mod tests {
 
     use super::*;
 
-    /// A title bar 600 pixels wide and 40 high, whose maximize button is 50 pixels from its
-    /// right.
+    /// A title bar 600 pixels wide and 40 high, with controls from 280 to 320 pixels, and whose
+    /// maximize button is 50 pixels from its right.
     fn caption() -> Caption {
         Caption {
             drag: [
                 Rect::from_min_max(pos2(0.0, 0.0), pos2(8.0, 40.0)),
-                Rect::from_min_max(pos2(200.0, 0.0), pos2(450.0, 40.0)),
+                Rect::from_min_max(pos2(200.0, 0.0), pos2(280.0, 40.0)),
+                Rect::from_min_max(pos2(320.0, 0.0), pos2(450.0, 40.0)),
             ],
             maximize: Rect::from_min_max(pos2(500.0, 0.0), pos2(550.0, 40.0)),
         }
@@ -445,13 +446,15 @@ mod tests {
         assert_eq!(hit(300.0, 3.0, 10.0), HTTOP);
         assert_eq!(hit(4.0, 3.0, 10.0), HTTOPLEFT);
         assert_eq!(hit(595.0, 3.0, 10.0), HTTOPRIGHT);
-        assert_eq!(hit(300.0, 20.0, 10.0), HTCAPTION);
+        assert_eq!(hit(250.0, 20.0, 10.0), HTCAPTION);
+        assert_eq!(hit(400.0, 20.0, 10.0), HTCAPTION);
         assert_eq!(hit(4.0, 20.0, 10.0), HTCAPTION);
         assert_eq!(hit(525.0, 20.0, 10.0), HTMAXBUTTON);
         assert_eq!(hit(100.0, 20.0, 10.0), HTCLIENT);
+        assert_eq!(hit(300.0, 20.0, 10.0), HTCLIENT);
         assert_eq!(hit(300.0, 60.0, 10.0), HTCLIENT);
         // Maximized, a window has no band.
-        assert_eq!(hit(300.0, 3.0, 0.0), HTCAPTION);
+        assert_eq!(hit(250.0, 3.0, 0.0), HTCAPTION);
         assert_eq!(hit(525.0, 3.0, 0.0), HTMAXBUTTON);
     }
 

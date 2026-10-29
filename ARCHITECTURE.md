@@ -70,8 +70,8 @@ sandbox  editor   player       apps/: executables
   the view seeing through its camera, where W, A, S and D drive the world's cameras, by a script of
   theirs, as a game's keys would; Stop brings back the world as it was edited, the very one, which
   the Inspector finds its edits' history again by, so that outside play the world changes only by
-  edits, which undo. Play and Stop are commands, which recordings keep; Play is the toolbar's last
-  button, since the toolbar spans the view's middle, where Hazel's is. A click in the view picks
+  edits, which undo. Play and Stop are commands, which recordings keep; Play is at the middle of
+  the title bar, in place of its title, at hand whichever panels show. A click in the view picks
   what it shows there, through the Inspector's link, and the view's bottom left names what it
   shows under the cursor, from a pick there every frame; the toolbar's Move, Rotate and Scale,
   which W, E and R choose as Q chooses Select, show handles over what's picked, the same size on
@@ -410,7 +410,8 @@ entity has a parent or not.
 The Entities panel shows the hierarchy as a tree: the roots, a table at a time, each open row
 followed by its children's, of which it finds only the page in view, so that a frame costs a few
 steps a table, and another for each open root, and one for each row under an open root or in view,
-never one for each root.
+never one for each root. A row says its entity's name alone, or, faintly, "Entity" for one without,
+leaving its ID and its components to the Inspector.
 
 A snapshot is the world copied: `World` is `Clone`, and `clone_from` restores a world from a
 snapshot, or takes a snapshot into one kept from before, in the memory it holds. It copies all of
@@ -563,7 +564,13 @@ take focus with it: without a dockspace, while none of egui's widgets has focus,
 its view says, below; otherwise it reaches egui, to move between its widgets. Its text is Inter,
 regular, and bold where the Inspector's axis buttons name their axes, with egui's own fonts after
 it for what Inter lacks, such as egui's icons, and egui's monospace; its theme is the OS's, light
-or dark, as egui follows it, with collapsing headers framed across their width.
+or dark, as egui follows it, with collapsing headers framed across their width. Numbers that change
+as they show hold still: the regular Inter maps its digits and minus sign to its tabular ones, all
+as wide as a figure space, since egui shapes text without OpenType's optional features; the
+Inspector's floats, and its integers that may be negative, show a minus sign or a figure space in
+its place before them, and a vector's or rotation's axes share what shows of their row equally;
+and the Performance panel's times have figure spaces for the digits before their points that they
+haven't.
 
 Layers draw UI through `Ui`: dockable panels, and egui itself for anything else. The dock is the
 engine's own, since egui's docking crates can't put a panel in a window of its own. Panels sit
@@ -590,17 +597,22 @@ as the cursor's position is.
 
 A panel shows from the frame after its layer starts showing it, since the dock lays out a frame
 before its panels draw, and keeps its place while it isn't shown. One the layout doesn't hold yet
-floats, unless the app docks it with `App::dock`, beside a panel docked in the main window or
-among its tabs, in the order the app gives: so an app makes its first layout, which Reset layout
-goes back to, and places a panel that an older layout lacks. With `App::custom_title_bar`, the
-dock adds a View menu after the layers' menus, and gives tabs a menu that closes their panel, but
-never a dockspace's view: a closed panel shows nowhere and keeps its place until the View menu
-opens it again, and a torn-off window whose panels are all closed closes until then. The View
-menu also saves the layout under a name, loads and deletes those saved, and resets it. The layout
-is saved as RON in the OS's directory for per-user state, never beside the executable, and those
-named in `layouts/` beside it, each a name of 1 to 64 letters, digits, spaces, `-` and `_` that
-Windows doesn't keep for a device, on every OS, since layouts move between machines
-(`engine.bad_layout_name`). Headless runs neither read nor write layouts.
+floats, unless the app docks it with `App::dock`, beside a panel docked in the main window or among
+its tabs, in the order the app gives: so an app makes its first layout, which Reset layout goes back
+to, and places a panel that an older layout lacks. With `App::custom_title_bar`, the dock adds a
+View menu after the layers' menus, and gives tabs a menu that closes their panel, but never a
+dockspace's view: a closed panel shows nowhere and keeps its place until the View menu opens it
+again, and a torn-off window whose panels are all closed closes until then. The View menu also saves
+the layout under a name, loads and deletes those saved, and resets it. And three buttons in the
+title bar hide and show the panels docked left of the central area or a dockspace's view, those
+below it, and those right of it, in that order: those beside it across a split on the way to it
+from the main tree's root, not those above it. Hidden, they show nowhere and keep their places,
+which the layout saves, until their button shows them again, or the View menu opens one of them,
+or a group docks among them. The layout is saved as RON in the OS's directory for per-user
+state, never beside the executable, and those named in `layouts/` beside it, each a name of 1 to
+64 letters, digits, spaces, `-` and `_` that Windows doesn't keep for a device, on every OS, since
+layouts move between machines (`engine.bad_layout_name`). Headless runs neither read nor write
+layouts.
 
 The torn-off windows are egui's immediate viewports: egui runs each one's pass inside the main
 window's, and the main window's frame renders them all. Only the main window's swapchain paces
@@ -609,19 +621,27 @@ events go to egui, never to the layers. On Wayland, where windows can't be place
 rest of a run once one can't open, groups float over the main window instead, and the saved
 layout keeps the places of those that had windows until the user moves or resizes them.
 
-Layers add menus through `Ui` too. The OS draws the windows' frames, and the menus get a bar of
-their own below its title bar, unless the app calls `App::custom_title_bar`, as tools do for the
-room: then the UI draws them. The main window's title bar holds the menus, the title and the
-buttons that minimize, maximize and close it, and a torn-off window's tab bar is its title bar,
-with a close button. Dragging the main window's title bar has the OS move it, so snapping works
-as usual, while a torn-off window moves with the dock's drag, so that it can dock. On Windows the
-rest of the frame stays the OS's, through a window procedure in front of winit's: the border and
-shadow, the bands just outside a window that resize it, and the main window's free space in its
-title bar and its maximize button, which Windows hit-tests as its own, so that Snap Layouts shows
-over the button. Elsewhere the UI's edges have the OS resize a window, and on macOS the OS keeps
-its own buttons and the edges. Games keep the OS's frame. A menu quits by sending egui's `Close`
-to the main window, which, like the OS's close button, gives the layers `CloseRequested` first;
-egui's own Ctrl or Cmd+Q is off, since a game may use those keys.
+Layers add menus through `Ui` too, and controls at the middle of the main window's title bar, in
+place of its title, through `Ui::title_bar`. A button at the bar's left opens the menus in a drawer
+that slides out from the window's left edge, below the bar, over the dock rather than pushing it
+aside, which would resize the game's view as it slid: each menu opens beside it as the pointer comes
+onto it, as a submenu does, and a click outside, the button, Escape, or an item chosen closes it.
+The engine's menus, the drawer's and those its panels open, pad their items 8 points across and 4
+down, with a light under the pointer rounded 4 points, rather than egui's 2 and 0. The OS draws the
+windows' frames, and the menus and controls get a bar of their own below its title bar, unless the
+app calls `App::custom_title_bar`, as tools do for the room: then the UI draws them. The main
+window's title bar holds the menu button, the controls or else the title, the buttons that hide and
+show the panels left of, below and right of the view, and those that minimize, maximize and close
+it, and a torn-off window's tab bar is its title bar, with a close button. Dragging the main
+window's title bar has the OS move it, so snapping works as usual, while a torn-off window moves
+with the dock's drag, so that it can dock. On Windows the rest of the frame stays the OS's, through
+a window procedure in front of winit's: the border and shadow, the bands just outside a window that
+resize it, and the main window's free space in its title bar and its maximize button, which Windows
+hit-tests as its own, so that Snap Layouts shows over the button. Elsewhere the UI's edges have the
+OS resize a window, and on macOS the OS keeps its own buttons and the edges. Games keep the OS's
+frame. A menu quits by sending egui's `Close` to the main window, which, like the OS's close button,
+gives the layers `CloseRequested` first; egui's own Ctrl or Cmd+Q is off, since a game may use those
+keys.
 
 In development builds a layer asks for a file to open or save as through the OS's own dialog,
 `Context::pick_file`: Windows' common item dialog, macOS's panels or the XDG desktop portal, through

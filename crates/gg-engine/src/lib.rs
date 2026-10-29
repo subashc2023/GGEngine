@@ -470,9 +470,11 @@ const MAX_TEXTURE_SIDE: usize = MAX_TEXTURE_SIZE as usize;
 /// Inspector's axis buttons draw in.
 pub(crate) const BOLD: &str = "Bold";
 
-/// egui in the engine's UI font, Inter: its regular weight for proportional text, and its bold
-/// in the family [`BOLD`] names, each followed by egui's own proportional fonts, for the glyphs
-/// Inter lacks, such as egui's icons; monospace text stays in egui's font, and every size egui's.
+/// egui in the engine's UI font, Inter: its regular weight for proportional text, its digits and
+/// minus sign tabular, all as wide as a figure space, so that numbers that change hold still; and
+/// its bold in the family [`BOLD`] names, each followed by egui's own proportional fonts, for the
+/// glyphs Inter lacks, such as egui's icons; monospace text stays in egui's font, and every size
+/// egui's.
 /// Collapsing headers are framed, as wide as their `Ui`, in the light theme and the dark, which
 /// follows the OS's. The fonts are in the binary, and egui parses a family's as it first lays out
 /// text in it. Without egui's shortcut that closes the window, Ctrl or Cmd+Q: a game may use
@@ -483,6 +485,12 @@ fn egui_context() -> egui::Context {
     let mut fonts = egui::FontDefinitions::default();
     let fallbacks = fonts.families[&egui::FontFamily::Proportional].clone();
     let inter: [(egui::FontFamily, &str, &'static [u8]); 2] = [
+        // Inter's Regular, of version 4.001, but for its cmap, which maps 0 to 9 and U+2212 to the
+        // glyphs its `tnum` feature substitutes for them, as Blender's Inter does: egui shapes
+        // text without OpenType's optional features. Made with fontTools, by setting each of
+        // those code points, in each cmap subtable, to the font's tnum lookups' substitute for
+        // it, read from a copy of its own so that its GSUB saves unchanged; the head table's
+        // checksum and date are fontTools' as it saves.
         (
             egui::FontFamily::Proportional,
             "Inter",
@@ -504,6 +512,19 @@ fn egui_context() -> egui::Context {
     egui.set_fonts(fonts);
     egui.all_styles_mut(|style| style.visuals.collapsing_header_frame = true);
     egui
+}
+
+/// How the engine's menus look: as egui's, but with items padded 8 points across and 4 down, as
+/// roomy as Fluent's and JetBrains' menus' are rather than egui's 2 and 0, so that the light under
+/// the pointer frames an item's text, rounded 4 points as theirs are. For each menu the engine
+/// shows, and those its menus open, which take their parent's style.
+pub(crate) fn menu_style(style: &mut egui::Style) {
+    egui::menu::menu_style(style);
+    style.spacing.button_padding = egui::vec2(8.0, 4.0);
+    let widgets = &mut style.visuals.widgets;
+    for state in [&mut widgets.hovered, &mut widgets.active, &mut widgets.open] {
+        state.corner_radius = egui::CornerRadius::same(4);
+    }
 }
 
 /// The first half of a turn of the main loop: starts the frame, `dt` after the last, for Tracy and
@@ -1925,9 +1946,10 @@ mod tests {
         }
     }
 
-    /// The UI draws in Inter: proportional text in its regular weight, and the family [`BOLD`]
-    /// names in its bold, each falling back to egui's own proportional fonts; monospace in egui's.
-    /// Collapsing headers are framed in the light theme and the dark, whichever the OS has.
+    /// The UI draws in Inter: proportional text in its regular weight, its digits and minus sign
+    /// as wide as a figure space, and the family [`BOLD`] names in its bold, each falling back to
+    /// egui's own proportional fonts; monospace in egui's. Collapsing headers are framed in the
+    /// light theme and the dark, whichever the OS has.
     #[test]
     fn the_ui_draws_in_inter_with_its_headers_framed() {
         let egui = egui_context();
@@ -1946,11 +1968,37 @@ mod tests {
                 assert!(chain.iter().any(|name| name == "egui-icons"), "{chain:?}");
                 let in_font = |names: &Vec<String>| names.iter().any(|name| name == font);
                 let characters = fonts.characters(&family);
-                // The axes' letters, and the components' menus' ellipsis.
+                // The axes' letters, and the ellipsis that ends menu items such as Save layout as…
+                // and names cut short.
                 let has = |c| characters.get(&c).is_some_and(in_font);
                 assert!("XYZW…".chars().all(has), "{font} lacks one");
                 let id = egui::FontId::new(14.0, family);
                 assert!(fonts.has_glyphs(&id, &icon), "{font} falls back");
+            }
+            // Tabular: a number's digits, its sign or the figure space that holds its place, and
+            // its kerning, which Inter's proportional digits have, don't change its width.
+            let font = egui::FontId::proportional(13.0);
+            let mut width = |text: &str| {
+                let white = egui::Color32::WHITE;
+                fonts
+                    .layout_no_wrap(text.to_owned(), font.clone(), white)
+                    .size()
+                    .x
+            };
+            for (zeros, numbers) in [
+                (
+                    "\u{2007}0000",
+                    ["\u{2007}1111", "\u{2007}7474", "\u{2212}4170"],
+                ),
+                (
+                    "\u{2007}0.00",
+                    ["\u{2007}1.11", "\u{2007}7.41", "\u{2212}9.17"],
+                ),
+            ] {
+                let figures = width(zeros);
+                for number in numbers {
+                    assert_eq!(width(number), figures, "{number}");
+                }
             }
             let monospace = &fonts.definitions().families[&egui::FontFamily::Monospace];
             assert_eq!(monospace[0], "Hack");

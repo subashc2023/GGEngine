@@ -1,8 +1,9 @@
 //! What the editor draws over its view: a toolbar at the view's top left, which picks what the
-//! left button does, the projection, the grid and the colliders' outlines, and plays the world and
-//! stops it; a gizmo at its top right, which shows which way the camera faces, and turns it; at
-//! its bottom left, the name of what the view shows under the cursor; and round its edges, while a
-//! scene from the Assets panel is held over it, an outline.
+//! left button does, the projection, the grid and the colliders' outlines; a gizmo at its top
+//! right, which shows which way the camera faces, and turns it; at its bottom left, the name of
+//! what the view shows under the cursor; and round its edges, while a scene from the Assets panel
+//! is held over it, an outline. And Play, at the middle of the title bar, which plays the world and
+//! stops it.
 
 use std::f32::consts::{PI, TAU};
 
@@ -32,8 +33,8 @@ const LABEL: f32 = 18.0;
 const INSET: f32 = 8.0;
 
 /// What the toolbar sets: what the left button does over the view, whether the grid shows, and in
-/// which plane, whether the view sees through the world's camera, whether the world's colliders'
-/// outlines show, and whether the world plays.
+/// which plane, whether the view sees through the world's camera, and whether the world's
+/// colliders' outlines show; and whether the world plays, which Play in the title bar sets.
 pub struct Toolbar {
     pub tool: Tool,
     pub grid: bool,
@@ -65,10 +66,9 @@ impl Toolbar {
     /// Draws the toolbar into `ui`: the tools, whose tooltips name the keys that pick them, the
     /// camera's projection, which a click switches, the grid's switch and its plane, the switch
     /// that sees through the world's camera, which is off while the world has no primary camera,
-    /// as `has_camera` says, the colliders' switch, and Play, which plays the world and, lit,
-    /// stops it, each with a tooltip. While the view sees through the world's camera, the
-    /// projection's and the grid's buttons are off, since what they change doesn't show. It opens
-    /// nothing, since a popup would take the view's keys.
+    /// as `has_camera` says, and the colliders' switch, each with a tooltip. While the view sees
+    /// through the world's camera, the projection's and the grid's buttons are off, since what
+    /// they change doesn't show. It opens nothing, since a popup would take the view's keys.
     pub fn show(&mut self, ui: &mut egui::Ui, camera: &mut OrbitCamera, has_camera: bool) {
         // The key that snaps a drag of the handles, which egui's shortcuts take as the command key.
         let snaps = if cfg!(target_os = "macos") {
@@ -179,23 +179,27 @@ impl Toolbar {
                 {
                     self.colliders = !self.colliders;
                 }
-                ui.separator();
-                let tip = if self.play {
-                    "Stop: brings back the world as it was before Play, with its edits' history"
-                } else {
-                    "Play: a copy of the world plays in its place, as the game would, its scripts \
-                     and physics running and the view seeing through its camera, until Stop; \
-                     what's edited meanwhile goes with the copy"
-                };
-                let icon = if self.play { Icon::Stop } else { Icon::Play };
-                if icon_button(ui, icon, self.play)
-                    .on_hover_text(tip)
-                    .clicked()
-                {
-                    self.play = !self.play;
-                }
             });
         });
+    }
+
+    /// Draws Play into `ui`, the title bar's middle: it plays the world, and, lit, shows Stop,
+    /// which stops it, with a tooltip.
+    pub fn show_play(&mut self, ui: &mut egui::Ui) {
+        let tip = if self.play {
+            "Stop: brings back the world as it was before Play, with its edits' history"
+        } else {
+            "Play: a copy of the world plays in its place, as the game would, its scripts and \
+             physics running and the view seeing through its camera, until Stop; what's edited \
+             meanwhile goes with the copy"
+        };
+        let icon = if self.play { Icon::Stop } else { Icon::Play };
+        if icon_button(ui, icon, self.play)
+            .on_hover_text(tip)
+            .clicked()
+        {
+            self.play = !self.play;
+        }
     }
 }
 

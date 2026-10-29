@@ -40,7 +40,7 @@ impl Axis {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Side {
     Left,
     Right,
@@ -150,6 +150,11 @@ pub(crate) struct Layout {
     /// Layouts saved before panels could close have none.
     #[serde(default)]
     pub(crate) closed: Vec<String>,
+    /// The sides of the central area, or of a dockspace's view, whose panels the user hid, as
+    /// [`Layout::side`] finds them: they show nowhere, keeping their places, until the side shows
+    /// again. Layouts saved before sides could hide have none.
+    #[serde(default)]
+    pub(crate) hidden: Vec<Side>,
     /// In a dockspace, the panel that shows the game's view: the dock fills the main window,
     /// without a central area for the game, as the layout's made or loaded for.
     #[serde(skip)]
@@ -208,6 +213,7 @@ impl Layout {
             main: Node::Central,
             floating: Vec::new(),
             closed: Vec::new(),
+            hidden: Vec::new(),
             view,
             next_id: CENTRAL + 1,
         };
@@ -334,6 +340,52 @@ impl Layout {
 
     pub(crate) fn is_closed(&self, panel: &str) -> bool {
         self.closed.iter().any(|closed| closed == panel)
+    }
+
+    /// The side of the central area, or of a dockspace's view, that `panel` is docked on: left of
+    /// it, right of it, above or below it, across a split on the way to it from the root. `None`
+    /// for a panel among its tabs, floating, or not in the layout, and in a dockspace whose view
+    /// isn't docked.
+    pub(crate) fn side(&self, panel: &str) -> Option<Side> {
+        let leads = |node: &Node| match self.view {
+            Some(view) => node.find(view).is_some(),
+            None => node.has_central(),
+        };
+        let mut node = &self.main;
+        while let Node::Split { axis, children, .. } = node {
+            let [first, second] = &**children;
+            // Whether the panels away from it come after it, right of it or below it.
+            let (toward, away, after) = if leads(first) {
+                (first, second, true)
+            } else if leads(second) {
+                (second, first, false)
+            } else {
+                return None;
+            };
+            if away.find(panel).is_some() {
+                return Some(match (axis, after) {
+                    (Axis::Horizontal, false) => Side::Left,
+                    (Axis::Horizontal, true) => Side::Right,
+                    (Axis::Vertical, false) => Side::Top,
+                    (Axis::Vertical, true) => Side::Bottom,
+                });
+            }
+            node = toward;
+        }
+        None
+    }
+
+    /// Whether `panel` is on a side the user hid.
+    pub(crate) fn is_hidden(&self, panel: &str) -> bool {
+        (self.side(panel)).is_some_and(|side| self.hidden.contains(&side))
+    }
+
+    /// Hides the panels on `side` of the central area or the view, or shows them again.
+    pub(crate) fn set_hidden(&mut self, side: Side, hidden: bool) {
+        self.hidden.retain(|&other| other != side);
+        if hidden {
+            self.hidden.push(side);
+        }
     }
 
     /// Adds `panel`, which the layout doesn't hold, where the app's `docked` says: beside the
@@ -860,6 +912,7 @@ mod tests {
             },
             floating: Vec::new(),
             closed: Vec::new(),
+            hidden: Vec::new(),
             view: None,
             next_id: 0,
         };
@@ -1025,6 +1078,7 @@ mod tests {
             ),
             floating: Vec::new(),
             closed: Vec::new(),
+            hidden: Vec::new(),
             view: None,
             next_id: 0,
         };
@@ -1116,6 +1170,7 @@ mod tests {
             },
             floating: Vec::new(),
             closed: Vec::new(),
+            hidden: Vec::new(),
             view: Some(VIEW),
             next_id: 0,
         };
@@ -1251,5 +1306,61 @@ mod tests {
         let group = layout.group(layout.find(VIEW).unwrap()).unwrap();
         assert_eq!(group.panels, [VIEW, "Log"]);
         assert_eq!(group.showing(&all), Some(VIEW));
+    }
+
+    /// In the editor's layout, with Assets below the view, Entities is left of the view, the
+    /// Inspector and Performance right of it, below the Inspector, and Assets below it, but
+    /// neither the view, nor a group floating; hiding a side hides its panels alone. Around a
+    /// game's central area, each strip is on the side it's docked on; and a dockspace whose view
+    /// floats has no sides.
+    #[test]
+    fn a_panel_docked_beside_the_view_on_the_way_to_it_is_on_that_side() {
+        let mut layout = Layout::new(Some(VIEW));
+        let docked = [&EDITOR[..], &[("Assets", Docked::Below(VIEW))]].concat();
+        for &(panel, _) in &docked {
+            layout.add(panel.to_owned(), AT, &docked);
+        }
+        layout.float("Log".to_owned(), AT);
+        let panels = [
+            "Entities",
+            "Inspector",
+            "Performance",
+            "Assets",
+            VIEW,
+            "Log",
+            "None",
+        ];
+        let (left, right) = (Some(Side::Left), Some(Side::Right));
+        let (top, bottom) = (Some(Side::Top), Some(Side::Bottom));
+        let sides = panels.map(|panel| layout.side(panel));
+        assert_eq!(sides, [left, right, right, bottom, None, None, None]);
+        layout.set_hidden(Side::Right, true);
+        layout.set_hidden(Side::Right, true);
+        assert_eq!(layout.hidden, [Side::Right]);
+        let hidden = panels.map(|panel| layout.is_hidden(panel));
+        assert_eq!(hidden, [false, true, true, false, false, false, false]);
+        layout.set_hidden(Side::Right, false);
+        layout.set_hidden(Side::Bottom, true);
+        let hidden = panels.map(|panel| layout.is_hidden(panel));
+        assert_eq!(hidden, [false, false, false, true, false, false, false]);
+        layout.set_hidden(Side::Bottom, false);
+        assert!(layout.hidden.is_empty());
+
+        let mut game = Layout::new(None);
+        let strips = [
+            ("A", Side::Left),
+            ("B", Side::Bottom),
+            ("C", Side::Right),
+            ("D", Side::Top),
+        ];
+        for (panel, side) in strips {
+            strip(&mut game, panel, side);
+        }
+        let sides = ["A", "B", "C", "D"].map(|panel| game.side(panel));
+        assert_eq!(sides, [left, bottom, right, top]);
+
+        layout.detach(VIEW, AT);
+        layout.prune();
+        assert_eq!(layout.side("Entities"), None);
     }
 }
