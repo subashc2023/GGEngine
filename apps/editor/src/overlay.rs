@@ -2,8 +2,8 @@
 //! left button does, the projection, the grid and the colliders' outlines; a gizmo at its top
 //! right, which shows which way the camera faces, and turns it; at its bottom left, the name of
 //! what the view shows under the cursor; and round its edges, while a scene from the Assets panel
-//! is held over it, an outline. And Play, at the middle of the title bar, which plays the world and
-//! stops it.
+//! is held over it, an outline. And Play and Simulate, at the middle of the title bar, which run
+//! the world and stop it.
 
 use std::f32::consts::{PI, TAU};
 
@@ -34,7 +34,7 @@ const INSET: f32 = 8.0;
 
 /// What the toolbar sets: what the left button does over the view, whether the grid shows, and in
 /// which plane, whether the view sees through the world's camera, and whether the world's
-/// colliders' outlines show; and whether the world plays, which Play in the title bar sets.
+/// colliders' outlines show; and how the world runs, which Play and Simulate in the title bar set.
 pub struct Toolbar {
     pub tool: Tool,
     pub grid: bool,
@@ -45,8 +45,9 @@ pub struct Toolbar {
     /// Whether the world's 2D colliders' outlines show, over the rest of the view, through either
     /// camera.
     pub colliders: bool,
-    /// Whether the world plays, as the game would: a copy of it, in its place until it stops.
-    pub play: bool,
+    /// How the world runs: as it's edited, or a copy of it in its place until it stops, playing
+    /// or simulating.
+    pub mode: Mode,
 }
 
 impl Default for Toolbar {
@@ -57,9 +58,22 @@ impl Default for Toolbar {
             plane: Plane::XY,
             world_camera: false,
             colliders: false,
-            play: false,
+            mode: Mode::Edit,
         }
     }
+}
+
+/// How the world runs, as Hazel's scene states have it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// As it's edited: only edits change it.
+    Edit,
+    /// A copy plays in its place, as the game would, its scripts and physics running, the view
+    /// seeing through its camera.
+    Play,
+    /// A copy simulates in its place, its physics running but not its scripts, the view staying on
+    /// the editor's camera, to watch what physics does from anywhere.
+    Simulate,
 }
 
 impl Toolbar {
@@ -183,22 +197,38 @@ impl Toolbar {
         });
     }
 
-    /// Draws Play into `ui`, the title bar's middle: it plays the world, and, lit, shows Stop,
-    /// which stops it, with a tooltip.
-    pub fn show_play(&mut self, ui: &mut egui::Ui) {
-        let tip = if self.play {
-            "Stop: brings back the world as it was before Play, with its edits' history"
-        } else {
-            "Play: a copy of the world plays in its place, as the game would, its scripts and \
-             physics running and the view seeing through its camera, until Stop; what's edited \
-             meanwhile goes with the copy"
-        };
-        let icon = if self.play { Icon::Stop } else { Icon::Play };
-        if icon_button(ui, icon, self.play)
-            .on_hover_text(tip)
-            .clicked()
-        {
-            self.play = !self.play;
+    /// Draws Play and Simulate into `ui`, the title bar's middle, each with a tooltip: each runs a
+    /// copy of the world as it was edited its way, in place of one the other runs, and, lit, shows
+    /// Stop, which brings back the world as it was edited.
+    pub fn show_run(&mut self, ui: &mut egui::Ui) {
+        for (mode, icon, tip) in [
+            (
+                Mode::Play,
+                Icon::Play,
+                "Play: a copy of the world as it was edited plays in its place, as the game would, \
+                 its scripts and physics running and the view seeing through its camera, until \
+                 Stop; what's edited meanwhile goes with the copy",
+            ),
+            (
+                Mode::Simulate,
+                Icon::Simulate,
+                "Simulate: a copy of the world as it was edited simulates in its place, its \
+                 physics running but not its scripts, the view staying on the editor's camera, \
+                 until Stop; what's edited meanwhile goes with the copy",
+            ),
+        ] {
+            let lit = self.mode == mode;
+            let (icon, tip) = if lit {
+                (
+                    Icon::Stop,
+                    "Stop: brings back the world as it was edited, with its edits' history",
+                )
+            } else {
+                (icon, tip)
+            };
+            if icon_button(ui, icon, lit).on_hover_text(tip).clicked() {
+                self.mode = if lit { Mode::Edit } else { mode };
+            }
         }
     }
 }
@@ -244,6 +274,8 @@ enum Icon {
     Colliders,
     /// A triangle pointing right, as a player's.
     Play,
+    /// A ball falling onto the ground, smaller where it was.
+    Simulate,
     /// A square, as a player's.
     Stop,
 }
@@ -332,6 +364,12 @@ impl Icon {
                 painter.circle_stroke(at(10.5, 10.5), 4.5 * scale, line);
             }
             Self::Play => triangle([at(3.5, 2.0), at(3.5, 14.0), at(14.0, 8.0)]),
+            Self::Simulate => {
+                painter.line_segment([at(1.0, 14.5), at(15.0, 14.5)], line);
+                painter.circle_filled(at(10.5, 9.5), 3.5 * scale, color);
+                painter.circle_filled(at(6.0, 4.5), 1.75 * scale, color);
+                painter.circle_filled(at(3.0, 2.0), 1.0 * scale, color);
+            }
             Self::Stop => {
                 let square = Rect::from_min_max(at(3.0, 3.0), at(13.0, 13.0));
                 painter.rect_filled(square, 1.0, color);

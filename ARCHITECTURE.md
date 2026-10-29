@@ -68,22 +68,26 @@ sandbox  editor   player       apps/: executables
   instead, as the game would, until the editor's camera moves. Its Play has a copy of the world
   play in the world's place, as the game would, its scripts and physics running at its ticks and
   the view seeing through its camera, where W, A, S and D drive the world's cameras, by a script of
-  theirs, as a game's keys would; Stop brings back the world as it was edited, the very one, which
-  the Inspector finds its edits' history again by, so that outside play the world changes only by
-  edits, which undo. Play and Stop are commands, which recordings keep; Play is at the middle of
-  the title bar, in place of its title, at hand whichever panels show. A click in the view picks
-  what it shows there, through the Inspector's link, and the view's bottom left names what it
-  shows under the cursor, from a pick there every frame; the toolbar's Move, Rotate and Scale,
-  which W, E and R choose as Q chooses Select, show handles over what's picked, the same size on
-  screen at any distance, whose drags move, turn and scale it along its own axes, each an edit the
+  theirs, as a game's keys would; its Simulate has a copy simulate, its physics running but not its
+  scripts, the view staying on the editor's camera, to watch what physics does from anywhere; and
+  Stop brings back the world as it was edited, the very one, which the Inspector finds its edits'
+  history again by, so that outside play and simulation the world changes only by edits, which
+  undo. Play from Simulate, or Simulate from Play, stops first and runs the world as it was edited
+  afresh. Play, Simulate and Stop are commands, which recordings keep; Play and Simulate are at the
+  middle of the title bar, in place of its title, at hand whichever panels show. A click in the
+  view picks what it shows there, through the Inspector's link, which the view outlines, through
+  either camera, whether the world runs or not, and the view's bottom left names what it shows
+  under the cursor, from a pick there every frame; the toolbar's Move, Rotate and Scale, which W, E
+  and R choose as Q chooses Select, show handles over what's picked, the same size on screen at
+  any distance, whose drags move, turn and scale it along its own axes, each an edit the
   Inspector's log undoes, the command key snapping to half units, 45° and halves. Its File menu
-  starts a new scene, opens one, whose entities replace the world's, stopping it first if it
-  plays, and saves the world's entities as one, as they were edited while it plays, through the
-  OS's file dialogs, with Ctrl+N, Ctrl+O, Ctrl+S and Ctrl+Shift+S. Its Assets panel, a content
-  browser, shows the files in its assets folder, beside its source, until the tool API brings a
-  game's, a folder at a time; a scene dragged from it onto the view opens as Open opens one. Its
-  toolbar's Colliders switch has the engine outline the world's 2D colliders, through either camera,
-  whether the world plays or not.
+  starts a new scene, opens one, whose entities replace the world's, stopping it first if it runs,
+  and saves the world's entities as one, as they were edited while it runs, through the OS's file
+  dialogs, with Ctrl+N, Ctrl+O, Ctrl+S and Ctrl+Shift+S. Its Assets panel, a content browser,
+  shows the files in its assets folder, beside its source, until the tool API brings a game's, a
+  folder at a time; a scene dragged from it onto the view opens as Open opens one. Its toolbar's
+  Colliders switch has the engine outline the world's 2D colliders, through either camera, whether
+  the world runs or not.
 - **`player`:** the reference player. It runs a cooked scene without game code and shows how a
   game builds its own player.
 
@@ -449,7 +453,9 @@ before, which is what makes freeing the slots a log kept safe. The Inspector, fi
 serial at its tick, drops the commands it queued for the world before, and puts its log, its pick
 and its open rows aside, dropping those of the world it left before: so they come back only with
 the very world they're of, as when the editor's Stop brings back the world a copy played in place
-of, and a world cleared, replaced or restored, which never comes back, leaves them behind.
+of, and a world cleared, replaced or restored, which never comes back, leaves them behind. So a
+layer that puts one copy in place of another brings back the world they're of at a tick between
+them, as the editor's switch between Play and Simulate does.
 
 A world's hash has two parts. Its content is what it holds: a term for each component of each
 entity, from the entity's ID, the type's name and the words the type's derive writes, its fields in
@@ -771,6 +777,16 @@ after its pick, about 67 ms at 60 Hz, and one outside the view sooner, as none. 
 its IDs every frame, picks or not: a pipeline is made for the targets its pass has, so leaving them
 out of frames that pick nothing would take a second pipeline for each shader, or
 `VK_EXT_dynamic_rendering_unused_attachments`.
+
+`Context::outline` outlines what the view shows of an entity for a frame, as the editor outlines
+what's picked, from the same IDs: once the frame has read its picks back, a pass samples the
+image of IDs, which has a slot in the bindless set, and draws over the view where the frame shows
+it, under the UI, covering each pixel within the outline's width of the entity's pixels, as far as
+it's within, so that the outline's outer edge is smooth. So it follows whatever shape the entity
+shows, a circle's, a model's or a sprite's with holes, wherever drawing put it between ticks, and
+goes across what's in front of it rather than round what's hidden; and a collider's outline, of
+its entity's ID, is the entity's. Each pixel reads the IDs within the
+width of it, so that the cost grows with the width's square, which is kept to 8 pixels.
 
 Frames draw the world between ticks, so that it moves as smoothly at any frame rate. As each tick
 starts, the engine copies where the world's entities are, outside the world, so that no hash,

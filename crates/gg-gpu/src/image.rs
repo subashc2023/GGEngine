@@ -1,7 +1,7 @@
 //! Offscreen images: color images, which headless runs render into, tests read back, and later
 //! passes of a frame sample, such as the game's view; ID images, which passes render their draws'
-//! IDs into beside their targets, for frames to read pixels of back; and depth images, which
-//! passes test their draws against.
+//! IDs into beside their targets, for frames to read pixels of back and their later passes to
+//! sample; and depth images, which passes test their draws against.
 
 use std::sync::Arc;
 
@@ -197,10 +197,12 @@ impl Drop for ColorImage {
 /// An image of IDs in GPU memory, which a pass renders beside its target, cleared to 0 as the pass
 /// starts, each draw writing its own where it shows: the low and high halves of a 64-bit number,
 /// such as an entity's. A frame whose pass rendered it reads pixels of it back, a few at a time,
-/// with [`Frame::read_ids`]. No shader samples it, so it takes no slot of the bindless set.
-/// Dropping it retires it until the GPU is done with it.
+/// with [`Frame::read_ids`], and then its later passes may sample it through its slot in the
+/// bindless set, as [`Frame::begin_sampling_ids`] says. Dropping it retires it, and its slot,
+/// until the GPU is done with it.
 ///
 /// [`Frame::read_ids`]: crate::Frame::read_ids
+/// [`Frame::begin_sampling_ids`]: crate::Frame::begin_sampling_ids
 pub struct IdImage {
     device: Arc<Device>,
     raw: vk::Image,
@@ -212,20 +214,25 @@ pub struct IdImage {
     layout: vk::ImageLayout,
     /// The number of the frame whose pass last rendered into it; 0 for none.
     rendered: u64,
+    /// Its slot in the bindless set, past the placed ones.
+    index: u32,
 }
 
 impl IdImage {
     /// The format of every ID image: two 32-bit unsigned integers, the low and high halves of an
-    /// ID. Vulkan requires every device to render into it and copy from it.
+    /// ID. Vulkan requires every device to render into it, copy from it and sample it.
     pub(crate) const FORMAT: vk::Format = vk::Format::R32G32_UINT;
 
-    /// An ID image of `width` by `height` pixels, with `name` as its debug name.
+    /// An ID image of `width` by `height` pixels, in a free slot of the bindless set past the
+    /// placed ones, with `name` as its debug name.
     ///
     /// # Panics
     ///
     /// If a side is 0.
     pub fn new(device: &Arc<Device>, width: u32, height: u32, name: &str) -> Result<Self> {
-        let usage = vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC;
+        let usage = vk::ImageUsageFlags::COLOR_ATTACHMENT
+            | vk::ImageUsageFlags::SAMPLED
+            | vk::ImageUsageFlags::TRANSFER_SRC;
         let (raw, view, allocation, extent) = allocate(
             device,
             [width, height],
@@ -234,6 +241,16 @@ impl IdImage {
             COLOR_RANGE,
             name,
         )?;
+        // SAFETY: the view is of a live sampled image, which shaders sample only through the index
+        // `Frame::begin_sampling_ids` returns, once it has put the image in the shader-read-only
+        // layout, and only as unsigned integers, as its format holds them.
+        let index = match unsafe { device.bindless().add(device.raw(), view, None, name) } {
+            Ok(index) => index,
+            Err(error) => {
+                device.retire(Retired::Image(raw, view, allocation));
+                return Err(error);
+            }
+        };
         // SAFETY: the image and view are live.
         unsafe {
             device.set_name(raw, name);
@@ -247,6 +264,7 @@ impl IdImage {
             extent,
             layout: vk::ImageLayout::UNDEFINED,
             rendered: 0,
+            index,
         })
     }
 
@@ -285,12 +303,18 @@ impl IdImage {
         self.rendered = frame;
         self.layout = vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL;
     }
+
+    /// Its slot in the bindless set, which shaders may sample only as
+    /// `Frame::begin_sampling_ids` says.
+    pub(crate) fn index(&self) -> u32 {
+        self.index
+    }
 }
 
 impl Drop for IdImage {
     fn drop(&mut self) {
         if let Some(allocation) = self.allocation.take() {
-            let retired = Retired::Image(self.raw, self.view, allocation);
+            let retired = Retired::Texture(self.raw, self.view, allocation, self.index);
             self.device.retire(retired);
         }
     }

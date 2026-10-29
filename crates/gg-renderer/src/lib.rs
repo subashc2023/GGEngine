@@ -1,8 +1,8 @@
 //! Turns the render data the engine hands it each frame into images, built on `gg-gpu`: meshes,
 //! sprites, circles and lines drawn in the game's view, as its camera sees them, with games' shaders
 //! and textures and the engine's own, models' unlit materials among them, and the UI over them;
-//! picks, which read back the ID of the draw the view shows at a pixel; and the render graph,
-//! lighting, PBR materials and post-processing to come.
+//! picks, which read back the ID of the draw the view shows at a pixel; an outline round what the
+//! view shows of an ID; and the render graph, lighting, PBR materials and post-processing to come.
 //!
 //! It knows nothing about the scene, ECS or gameplay. It receives plain data, so rendering
 //! can run on its own thread, a frame behind simulation.
@@ -44,13 +44,13 @@ pub use shader::{Compiled, Shader, ShaderSource, Shaders};
 pub use sprite::{Sprite, SpriteSheet};
 pub use texture::{Mipmaps, Texture, Textures};
 pub use ui::Ui;
-pub use view::ViewCallback;
+pub use view::{Outline, ViewCallback};
 pub use viewpoint::{Projection, Viewpoint};
 
 use mesh::MeshPass;
 use pick::Picks;
 use ui::UiPass;
-use view::ViewPass;
+use view::{Shown, ViewPass};
 
 /// The `size` pixels of a frame whose top left is at `origin`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -360,6 +360,8 @@ pub struct RenderData<'a> {
     /// the view, after those a frame with nothing to render into left, up to [`MAX_PICKS`] in all,
     /// and the frames after it the rest.
     pub picks: &'a [Pick],
+    /// What the frame outlines in the view, after reading the picks back, if anything.
+    pub outline: Option<Outline>,
 }
 
 /// How to set up a renderer.
@@ -566,7 +568,8 @@ impl Renderer {
     /// was.
     ///
     /// It reads back the IDs at the pixels `data.picks` asks for, and answers, in
-    /// [`Renderer::picked`], those that the frame two before it read.
+    /// [`Renderer::picked`], those that the frame two before it read; then outlines in the view
+    /// what `data.outline` says, from the view's IDs this frame.
     ///
     /// Returns `false` when there was nothing to render into, as when the window is minimized;
     /// the meshes and textures stay in `data.uploads`, and the UIs' texture changes and the picks
@@ -694,7 +697,10 @@ impl Renderer {
                 drop(pass);
                 let pixels = self.picks.take(frame.number(), Some(ids.size()));
                 frame.read_ids(ids, pixels)?;
-                (counts, Some(frame.begin_sampling(view_target)))
+                let outline = (data.outline.filter(Outline::shows))
+                    .map(|outline| (frame.begin_sampling_ids(ids), outline));
+                let image = frame.begin_sampling(view_target);
+                (counts, Some(Shown { image, outline }))
             }
             None => {
                 self.picks.take(frame.number(), None);
@@ -705,14 +711,14 @@ impl Renderer {
             .begin_pass(0, c"frame", data.clear_color, None, None)
             .expect("a frame's first target has an image");
         // Under the whole UI, unless it paints the view among its own shapes.
-        if let Some(image) = view
+        if let Some(shown) = view
             && !ui::draws_view(ui.primitives)
         {
-            self.view.draw(&mut pass, data.viewport, image, None);
+            self.view.draw(&mut pass, data.viewport, shown, None);
         }
-        let view = view.map(|image| ui::View {
+        let view = view.map(|shown| ui::View {
             pass: &self.view,
-            image,
+            shown,
             size: data.viewport.size,
         });
         self.ui

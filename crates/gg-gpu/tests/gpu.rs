@@ -262,9 +262,12 @@ fn depth_clears_in_every_pass() {
 /// two in the fifth; in the sixth, sixty, then after another pass the four of ten more that the
 /// most a frame reads leaves, then none; and none in the last two. Each frame finds what the one two
 /// before it read, by its number, and none after a frame that read none, as the first two find of
-/// frame 0. Synchronization validation sees each copy wait for the pass before it, a pass for the
-/// copies before it, and the host for the copies. A pixel outside the IDs, and IDs no pass of the
-/// frame rendered, are refused before anything is recorded.
+/// frame 0. Each frame then begins sampling them, from the layout its reads left them in, or its
+/// pass where it read none, and the sixth between its reads too, before its second pass.
+/// Synchronization validation sees each copy wait for the pass before it, a pass for the copies
+/// and the sampling before it, and the host for the copies. A pixel outside the IDs, IDs no pass of
+/// the frame rendered, and a read once the frame samples them, are refused before anything is
+/// recorded.
 fn ids_read_back_two_frames_later() {
     let instance = instance();
     let validation = instance.validation();
@@ -295,6 +298,10 @@ fn ids_read_back_two_frames_later() {
                 let _ = frame.read_ids(&mut ids, &pixels[..1]);
             });
             assert!(message.contains("no pass of frame 2"), "{message}");
+            let message = panics(|| {
+                let _ = frame.begin_sampling_ids(&mut ids);
+            });
+            assert!(message.contains("no pass of frame 2"), "{message}");
         }
         drop(frame.begin_pass(0, c"ids", black, None, Some(&mut ids)));
         if number == 3 {
@@ -311,9 +318,21 @@ fn ids_read_back_two_frames_later() {
                 frame.read_ids(ids, pixels).expect("a read")
             };
             assert_eq!(read(&mut frame, &mut ids, &pixels[..60]), 60);
+            frame.begin_sampling_ids(&mut ids);
             drop(frame.begin_pass(0, c"ids again", black, None, Some(&mut ids)));
             assert_eq!(read(&mut frame, &mut ids, &pixels[60..]), 4);
             assert_eq!(read(&mut frame, &mut ids, &pixels[..1]), 0);
+        }
+        let index = frame.begin_sampling_ids(&mut ids);
+        assert_eq!(frame.begin_sampling_ids(&mut ids), index, "sampled already");
+        if number == 3 {
+            let message = panics(|| {
+                let _ = frame.read_ids(&mut ids, &pixels[..1]);
+            });
+            assert!(
+                message.contains("before the frame samples them"),
+                "{message}"
+            );
         }
         frame.submit().expect("the frame's submission");
     }
@@ -439,8 +458,8 @@ fn forgotten_frames_and_passes_are_caught() {
 }
 
 /// Opens two devices, and gives a frame of the one objects the other made: a target, textures, a
-/// buffer, a depth image, an ID image and an upload's indices. Each is refused before anything is
-/// recorded, so the frame goes on to submit.
+/// buffer, a depth image, an ID image to render into and to sample, and an upload's indices. Each
+/// is refused before anything is recorded, so the frame goes on to submit.
 fn another_devices_objects_are_refused() {
     let instance = instance();
     let validation = instance.validation();
@@ -482,6 +501,9 @@ fn another_devices_objects_are_refused() {
     }));
     refused(panics(|| {
         drop(frame.begin_pass(0, c"ids", black, None, Some(&mut others_ids)));
+    }));
+    refused(panics(|| {
+        let _ = frame.begin_sampling_ids(&mut others_ids);
     }));
     let mut others_frame = others_frames
         .begin([Target::Image(&mut others_image)])

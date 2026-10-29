@@ -19,9 +19,9 @@ use bytemuck::NoUninit;
 use gg_core::math::{self, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{
     AlphaMode, Blend, Circle, DrawCounts, Draws, Line, Material, MeshDraw, Meshes, Mipmaps,
-    ModelVertex, Pick, Projection, RenderData, Renderer, Sampler, Settings, Shaders, Sprite,
-    SpriteSheet, Texture, Textures, Ui, UploadPath, Uploads, ViewCallback, Viewpoint, Viewport,
-    Wrap,
+    ModelVertex, Outline, Pick, Projection, RenderData, Renderer, Sampler, Settings, Shaders,
+    Sprite, SpriteSheet, Texture, Textures, Ui, UploadPath, Uploads, ViewCallback, Viewpoint,
+    Viewport, Wrap,
 };
 
 fn main() {
@@ -56,6 +56,10 @@ fn main() {
     run(
         "circles_match_their_reference",
         circles_match_their_reference,
+    );
+    run(
+        "outlines_match_their_reference",
+        outlines_match_their_reference,
     );
     run("lines_match_their_reference", lines_match_their_reference);
     run("views_match_their_reference", views_match_their_reference);
@@ -217,6 +221,7 @@ fn ui_matches_its_reference() {
             uploads: &mut uploads,
             draws: &draws,
             picks: &[],
+            outline: None,
         };
         assert!(
             renderer.render(data, ui, &mut []).expect("a frame"),
@@ -314,6 +319,7 @@ fn meshes_match_their_reference(path: UploadPath) {
             uploads: &mut uploads,
             draws: &draws,
             picks: &[],
+            outline: None,
         };
         render_without_ui(&mut renderer, data);
     }
@@ -429,6 +435,7 @@ fn textures_match_their_reference(path: UploadPath) {
             uploads: &mut uploads,
             draws: &draws,
             picks: &[],
+            outline: None,
         };
         render_without_ui(&mut renderer, data);
     }
@@ -527,6 +534,7 @@ fn sprites_match_their_reference() {
             uploads: &mut uploads,
             draws: &draws,
             picks: &[],
+            outline: None,
         };
         render_without_ui(&mut renderer, data);
     }
@@ -605,10 +613,127 @@ fn circles_match_their_reference() {
             uploads: &mut uploads,
             draws: &draws,
             picks: &[],
+            outline: None,
         };
         render_without_ui(&mut renderer, data);
     }
     check(renderer, "circles", WIDTH, HEIGHT);
+}
+
+/// Outlines what the view shows of one ID, 3 pixels wide, and compares it with its reference image:
+/// a disc and a square of ID 7, which it goes round alike; the square's corner under a square of ID
+/// 3, along whose edges it goes across the square, and its bottom past the view's, where it stops;
+/// and beside them a square of no entity and one of ID 5, which it leaves alone. First, an outline
+/// of ID 0, and outlines 0 and NaN pixels wide, change no pixel of a frame without one; and the
+/// frames that outline read picks back first, which synchronization validation sees the outline's
+/// reads of the IDs wait for.
+fn outlines_match_their_reference() {
+    const WIDTH: u32 = 240;
+    const HEIGHT: u32 = 160;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut meshes = Meshes::default();
+    let mut shaders = Shaders::default();
+    let mut textures = Textures::default();
+    let mut uploads = Uploads::default();
+    // 4 units from the view's bottom to its top, 40 pixels a unit, and 6 across, around the origin.
+    let viewpoint = Viewpoint {
+        projection: Projection::Orthographic {
+            height: 4.0,
+            near: -1.0,
+            far: 1.0,
+        },
+        ..Viewpoint::default()
+    };
+    // `width` by `height` units, centered at (`x`, `y`).
+    let place = |[x, y]: [f32; 2], [width, height]: [f32; 2]| {
+        Mat4::from_translation(Vec3::new(x, y, 0.0))
+            * Mat4::from_scale(Vec3::new(width, height, 1.0))
+    };
+    let colored = |[r, g, b]: [f32; 3]| Sprite {
+        color: Vec4::new(r, g, b, 1.0),
+        ..Sprite::default()
+    };
+    let mut draws = Draws::default();
+    let disc = Circle {
+        color: Vec4::new(0.2, 0.6, 0.9, 1.0),
+        ..Circle::default()
+    };
+    // 30 pixels across the middle at (60, 50).
+    let disc = (place([-1.5, 0.75], [1.5, 1.5]), disc, 7);
+    draws.extend_circles(&mut shaders, [disc].into_iter());
+    draws.extend_sprites(
+        [
+            // From (120, 110) to (180, 170), past the view's bottom.
+            (place([0.75, -1.5], [1.5, 1.5]), colored([0.3, 0.7, 0.3]), 7),
+            // From (160, 98) to (192, 130), over the square's corner.
+            (place([1.4, -0.85], [0.8, 0.8]), colored([0.8, 0.3, 0.3]), 3),
+            (
+                place([-1.5, -1.25], [0.8, 0.8]),
+                colored([0.6, 0.6, 0.6]),
+                0,
+            ),
+            (place([2.3, 1.0], [0.8, 0.8]), colored([0.8, 0.8, 0.2]), 5),
+        ]
+        .into_iter(),
+    );
+    let orange = Vec4::new(1.0, 0.35, 0.02, 1.0);
+    let outline = |id, width| Outline {
+        id,
+        color: orange,
+        width,
+    };
+    // Each pixel as a frame without an outline has it: an outline of ID 0 would go round every
+    // draw's, inside its edges, and one wider than 0 round the disc and the square.
+    let mut plain = None;
+    let nothing = [outline(0, 3.0), outline(7, 0.0), outline(7, f32::NAN)];
+    for outlined in [None].into_iter().chain(nothing.map(Some)) {
+        uploads.take(&mut meshes, &mut shaders, &mut textures);
+        let data = RenderData {
+            clear_color: CLEAR,
+            viewport: Viewport {
+                origin: [0, 0],
+                size: [WIDTH, HEIGHT],
+            },
+            viewpoint,
+            uploads: &mut uploads,
+            draws: &draws,
+            picks: &[],
+            outline: outlined,
+        };
+        render_without_ui(&mut renderer, data);
+        let pixels = (renderer.read_back())
+            .expect("the frame's pixels")
+            .expect("a headless renderer's frame can be read back");
+        let Some(plain) = &plain else {
+            plain = Some(pixels);
+            continue;
+        };
+        let differing = (pixels.iter().zip(plain))
+            .filter(|&(&a, &b)| a.abs_diff(b) > 1)
+            .count();
+        assert_eq!(differing, 0, "{outlined:?} outlined something");
+    }
+    // More frames than are in flight, each picking the disc's middle first.
+    let picks = [Pick {
+        tag: 1,
+        pixel: [60, 50],
+    }];
+    for _ in 0..3 {
+        let data = RenderData {
+            clear_color: CLEAR,
+            viewport: Viewport {
+                origin: [0, 0],
+                size: [WIDTH, HEIGHT],
+            },
+            viewpoint,
+            uploads: &mut uploads,
+            draws: &draws,
+            picks: &picks,
+            outline: Some(outline(7, 3.0)),
+        };
+        render_without_ui(&mut renderer, data);
+    }
+    check(renderer, "outlines", WIDTH, HEIGHT);
 }
 
 /// Draws lines into an offscreen image, as a camera with perspective sees them, and compares it with
@@ -736,6 +861,7 @@ fn lines_match_their_reference() {
             uploads: &mut uploads,
             draws: &draws,
             picks: &[],
+            outline: None,
         };
         render_without_ui(&mut renderer, data);
     }
@@ -880,6 +1006,7 @@ fn batches_match_their_reference() {
             uploads: &mut uploads,
             draws: &draws,
             picks: &[],
+            outline: None,
         };
         render_without_ui(&mut renderer, data);
     }
@@ -1056,6 +1183,7 @@ fn sheets_match_their_reference(path: UploadPath) {
             uploads: &mut uploads,
             draws: &draws,
             picks: &[],
+            outline: None,
         };
         render_without_ui(&mut renderer, data);
     }
@@ -1181,6 +1309,7 @@ fn views_match_their_reference() {
             uploads: &mut uploads,
             draws: &draws,
             picks: &[],
+            outline: None,
         };
         render_without_ui(&mut renderer, data);
         match frame {
@@ -1310,6 +1439,7 @@ fn depth_matches_its_reference() {
             uploads: &mut uploads,
             draws: &draws,
             picks: &[],
+            outline: None,
         };
         render_without_ui(&mut renderer, data);
     }
@@ -1372,6 +1502,7 @@ fn a_large_texture_draws_in_the_frame_that_adds_it(path: UploadPath) {
         uploads: &mut uploads,
         draws: &draws,
         picks: &[],
+        outline: None,
     };
     render_without_ui(&mut renderer, data);
     let validation = renderer.validation();
@@ -1520,6 +1651,7 @@ fn models_match_their_reference() {
             uploads: &mut uploads,
             draws: &draws,
             picks: &[],
+            outline: None,
         };
         render_without_ui(&mut renderer, data);
     }
@@ -1649,6 +1781,7 @@ fn mixed_textures_match_their_reference() {
         uploads: &mut uploads,
         draws: &draws,
         picks: &[],
+        outline: None,
     };
     render_without_ui(&mut renderer, data);
     let instances = (columns * rows) as usize;
@@ -1854,6 +1987,7 @@ fn picks_answer_what_their_frame_drew() {
             uploads: &mut uploads,
             draws: &draws,
             picks: &picks,
+            outline: None,
         };
         render_without_ui(&mut renderer, data);
         answered.push(renderer.picked().to_vec());
@@ -1978,6 +2112,7 @@ fn mipmaps_match_their_reference(path: UploadPath) {
         uploads: &mut uploads,
         draws: &draws,
         picks: &[],
+        outline: None,
     };
     render_without_ui(&mut renderer, data);
     check(renderer, "mipmaps", WIDTH, HEIGHT);
@@ -1986,10 +2121,12 @@ fn mipmaps_match_their_reference(path: UploadPath) {
 /// Draws a view where the UI paints a `ViewCallback`, among the UI's shapes rather than under them
 /// all, and compares the frame with its reference image: a red rect under the view, which shows
 /// where the callback's clip rect cuts the view's edges, and a green one over it. The view is a
-/// blue square that fills it, under a triangle in red, green and blue. The callback is off
+/// blue square that fills it, under a triangle in red, green and blue, and a yellow square of ID 7
+/// across the clip's right edge, outlined, its outline cut there too. The callback is off
 /// `data.viewport`'s origin, the frame's corner, where the frame shows the view without one, so
-/// that the view shown there too, unclipped, or over the green rect, changes thousands of pixels. A
-/// frame whose view has no area draws the UI alone.
+/// that the view shown there too, unclipped, or over the green rect, changes thousands of pixels,
+/// and an outline that read the IDs from the frame's corner rather than the view's would go round
+/// another place. A frame whose view has no area draws the UI alone.
 fn a_view_in_the_ui_matches_its_reference() {
     const WIDTH: u32 = 320;
     const HEIGHT: u32 = 200;
@@ -2035,6 +2172,18 @@ fn a_view_in_the_ui_matches_its_reference() {
     let blue = Vec4::new(0.2, 0.3, 0.8, 1.0);
     draws.push(square, flat, Mat4::from_scale(Vec3::splat(10.0)), blue);
     draws.push(triangle, colored, Mat4::from_scale(Vec3::splat(3.0)), ());
+    // From (220, 60) to (260, 100) in the frame, across the clip's right edge.
+    let yellow = Sprite {
+        color: Vec4::new(0.9, 0.8, 0.2, 1.0),
+        ..Sprite::default()
+    };
+    let across = Mat4::from_translation(Vec3::new(2.0, 0.5, 0.0));
+    draws.extend_sprites([(across, yellow, 7)].into_iter());
+    let outline = Outline {
+        id: 7,
+        color: Vec4::new(1.0, 0.35, 0.02, 1.0),
+        width: 3.0,
+    };
 
     let egui = egui::Context::default();
     let rect = |[x0, y0]: [f32; 2], [x1, y1]: [f32; 2]| {
@@ -2075,6 +2224,7 @@ fn a_view_in_the_ui_matches_its_reference() {
             uploads: &mut uploads,
             draws: &draws,
             picks: &[],
+            outline: Some(outline),
         };
         assert!(
             renderer.render(data, ui, &mut []).expect("a frame"),
@@ -2218,6 +2368,7 @@ fn replaced_shaders_draw_from_the_next_frame() {
             uploads: &mut uploads,
             draws: &draws,
             picks: &[],
+            outline: None,
         };
         render_without_ui(&mut renderer, data);
         // Reading back waits for the GPU, so not between the first frame and the replacement.
@@ -2276,6 +2427,7 @@ fn pipelines_go_through_the_cache() {
             uploads: &mut uploads,
             draws: &draws,
             picks: &[],
+            outline: None,
         };
         render_without_ui(renderer, data);
         (renderer.read_back())

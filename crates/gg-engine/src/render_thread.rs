@@ -16,7 +16,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use gg_core::{Error, Result};
-use gg_renderer::{DrawCounts, Draws, Pick, RenderData, Renderer, Uploads, Viewpoint, Viewport};
+use gg_renderer::{
+    DrawCounts, Draws, Outline, Pick, RenderData, Renderer, Uploads, Viewpoint, Viewport,
+};
 
 use crate::viewports::Drawn;
 #[cfg(target_os = "windows")]
@@ -33,6 +35,8 @@ pub(crate) struct Extracted {
     pub(crate) uploads: Uploads,
     /// What the frame asks of the view, each pick's tag the number of the context's ticket.
     pub(crate) picks: Vec<Pick>,
+    /// What the frame outlines in the view, if anything.
+    pub(crate) outline: Option<Outline>,
     /// The answers to picks that came in as the frame rendered, as
     /// [`Renderer::picked`] gives them.
     pub(crate) picked: Vec<(u64, u64)>,
@@ -56,6 +60,7 @@ impl Default for Extracted {
             draws: Draws::default(),
             uploads: Uploads::default(),
             picks: Vec::new(),
+            outline: None,
             picked: Vec::new(),
             primitives: Vec::new(),
             textures: TextureChanges::default(),
@@ -107,6 +112,7 @@ impl Render for Renderer {
             uploads: &mut frame.uploads,
             draws: &frame.draws,
             picks: &frame.picks,
+            outline: frame.outline,
         };
         let ui = gg_renderer::Ui {
             primitives: &frame.primitives,

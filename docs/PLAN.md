@@ -592,6 +592,33 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   they were; the component menus' dots sat at their buttons' middles, the Inspector's axes fitted
   its first width, and the Performance panel's top line kept its width as its numbers changed;
   the runs exited cleanly under validation.
+- **Simulate and the pick's outline** (2026-10-28): Hazel's last two episodes before scripting,
+  made the engine's way. The editor's Simulate, beside Play at the title bar's middle, has a copy
+  of the world simulate in its place, its physics running but not its scripts, the view staying on
+  the editor's camera, until Stop brings back the world as it was edited; Play from it, or it from
+  Play, stops first and runs the world as it was edited afresh, a tick after the Stop, so that the
+  Inspector finds the edited world's history in between. `Context::outline` outlines what the view
+  shows of an entity for a frame, from the image of IDs, which a pass samples once the frame has
+  read its picks, round whatever shape the entity shows, and the editor outlines what's picked in
+  orange, through either camera, whether the world runs or not. The rest of Hazel's two episodes
+  was here already, or waits: picks see through what's fully transparent, key events say whether
+  they repeat, a scene that can't be read says why, collider outlines turn their offsets with their
+  entities, and apps find their assets from where they were built; sprites' textures saved in
+  scenes wait for Phase 5, which names assets. Unit tests check Simulate running physics without
+  scripts through the editor's camera, its switches with Play a tick apart, afresh from the world
+  as edited, Stop bringing back the very world, New stopping it, a New or an Open waiting for its
+  tick stopping the world before Play or Simulate starts, an empty world simulating and playing,
+  the commands as values, and an outline the frame's it's set in alone; GPU tests check sampling
+  the IDs after their reads, or without any, and the refusals, and outlines against a new
+  reference: round a disc and a square of one ID, across a square of another in front of it, cut
+  at the view's edge, beside squares of other IDs, and none, to the pixel, for ID 0 or widths of 0
+  and NaN; and an outline where the UI paints the view, off the frame's corner and cut by its
+  clip, against the view-in-the-UI reference, on the RTX 4090 and the AMD iGPU. By hand on the
+  RTX 4090, through a build that opened `physics.ron` as it started: a click outlined Crate 3;
+  Simulate dropped the pile through the editor's camera, the outline following the crate; Play
+  from it ran it afresh through the world's camera; Simulate from Play ran it afresh again; an
+  Empty Entity created before Simulate, Play and Stop came back with the world, the Edit menu
+  offering to undo its create; the runs exited cleanly under validation.
 
 ## Now: the editor's next milestone, or Phase 5's first
 
@@ -727,7 +754,10 @@ Defects left in because fixing them costs more than they do are in [DEFECTS.md](
 | The handles where the picked entity draws between ticks: they show where the latest tick left it, up to a tick ahead of where a moving entity draws | Someone edits something as it moves |
 | The handles along a skewed entity's axes: under a parent that scales unevenly, a turned entity's drawn axes aren't square to each other, and the handles show the nearest square ones, so their drags follow the cursor only roughly there; following the skew takes elliptical rings, and Scale along the drawn axis | Someone edits under a parent scaled unevenly |
 | An entity's own negative scale flipping its handles, as a parent's does: they run along its rotation alone, so a sprite flipped by its scale shows its X arrow away from where its +X draws | A game flips sprites by their scale, and the handles confuse someone |
-| Picking the next entity down where several overlap, by clicking again; and highlighting in the view what a click would pick, which the view's corner only names | Someone picks what's hidden, or misses the highlight |
+| Picking the next entity down where several overlap, by clicking again; and highlighting in the view what a click would pick, which the view's corner only names, as a second outline, fainter than the pick's, which needs `Context::outline` to take more than one entity a frame | Someone picks what's hidden, or misses the highlight |
+| Outlining several entities a frame, such as several picked, or what's picked with its children, lighter: `Context::outline` takes one, whose pass reads the IDs for it alone | Picking several entities, or someone misses the children's outlines |
+| Outlining what's hidden of the picked entity, through what's in front of it: the outline goes round what the view shows of it, from the IDs, so one wholly behind another shows none | Someone loses track of what's picked behind something |
+| An outline whose cost doesn't grow with its width: each pixel of the view reads up to 49 of the IDs around it for the editor's 2 points at 1.25 or 1.5 pixels a point, and the width is kept to 8 pixels; jump flooding, a pass for each power of two up to the width, would read 9 a pass | A wide outline, or a profile showing it |
 | Locking the editor's view against turning, as Unity's padlock does | Someone turns a 2D view by accident |
 | Switching to orthographic on an axis snap, as Blender's and Godot's gizmos do by default: the editor switches projection only when asked | Someone wants it |
 | The wheel setting the editor's fly speed while the right button is held, as Unity's, Unreal's and Godot's do: it dollies then too, and flying goes at the distance a second | Flying wants another speed |
@@ -845,9 +875,9 @@ Defects left in because fixing them costs more than they do are in [DEFECTS.md](
 | The scene's file named in the editor, whose title bar's middle holds Play, and a list of recent scenes: Save writes to the file opened or saved last, which nothing shows | Someone loses track of which file Save writes |
 | Dragging a scene onto the view from the Assets panel torn off into a window of its own: egui's drag stays in the window it started in, so the view never sees it let go | Someone drags from a torn-off Assets panel |
 | Listing the Assets panel's folder off the main thread, as a thread watching it would: it's listed on the main thread each second it shows, which a folder of many thousands of files would hold up for milliseconds | A game's folder that big, once the tool API brings one |
-| Pause, step and Simulate, physics through the editor's camera, as Hazel's later episodes add | Someone steps through a play |
+| Pause and step, as Hazel's later episodes add | Someone steps through a play or a simulation |
 | Play in a process of its own, through the tool API, so that a crash as the world plays stops only the game | Phase 9's editor |
-| Keeping edits made as the world plays, which go with the copy, as Unity's do; and showing that it plays beyond the lit Stop and the view through the world's camera, such as a tint round the view | Someone loses an edit made while playing, or edits a playing world for the scene |
+| Keeping edits made as the world plays or simulates, which go with the copy, as Unity's do; and showing that it runs beyond the lit Stop and, as it plays, the view through the world's camera, such as a tint round the view | Someone loses an edit made while the world runs, or edits a running world for the scene |
 | Bodies under a parent, moved in the world's space as their ancestors carry them, and colliders on a body's children; a body under a parent isn't moved (`physics.child_body`) | A game builds a body of parts, or nests one |
 | Colliders other than boxes and circles, such as capsules and polygons; joints; sensors; and contacts and queries, such as raycasts, for scripts | Each with its first game use |
 | A restitution threshold, the speed under which a contact doesn't bounce, as Box2D's and Hazel's: rapier has none | rapier gains one, or a game's bouncy bodies won't settle |

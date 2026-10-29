@@ -979,7 +979,8 @@ impl<'a> Frame<'a> {
             .image(image)
             .subresource_range(COLOR_RANGE);
         // The IDs' old contents are discarded too, once whatever used them before is done with
-        // them, as for an offscreen image: the copies that read them back among it.
+        // them, as for an offscreen image: the copies that read them back and the passes that
+        // sampled them among it.
         let ids_barrier = id_parts.map(|(image, _)| {
             vk::ImageMemoryBarrier2::default()
                 .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
@@ -1142,6 +1143,63 @@ impl<'a> Frame<'a> {
         image.index()
     }
 
+    /// Lets the frame's later passes sample `ids`, as this frame's pass left them, from their
+    /// fragment shaders, as unsigned integers, through the index this returns in the bindless set:
+    /// once the frame has read back what it reads of them ([`Frame::read_ids`]). Shaders may sample
+    /// through the index only until the image's next pass, which renders into it and so takes it
+    /// out of the layout the bindless set declares: after that pass, call this again.
+    ///
+    /// # Panics
+    ///
+    /// If a forgotten pass is still open, another device made `ids`, or no pass of this frame has
+    /// rendered into it.
+    pub fn begin_sampling_ids(&mut self, ids: &mut IdImage) -> u32 {
+        self.outside_pass();
+        let number = self.number();
+        let device = &self.frames.device;
+        device.check_made("the ID image sampled", ids.device());
+        assert!(
+            ids.rendered() == number,
+            "IDs are sampled in the frame whose pass rendered them, and no pass of frame {number} \
+             has"
+        );
+        let (src_stage, src_access) = match ids.layout() {
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => return ids.index(),
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL => (
+                vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+            ),
+            // Read back, by copies that wrote nothing of it.
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL => {
+                (vk::PipelineStageFlags2::COPY, vk::AccessFlags2::NONE)
+            }
+            layout => unreachable!("a frame's pass leaves its IDs in no layout such as {layout:?}"),
+        };
+        let (image, _, _) = ids.parts();
+        let barrier = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(src_stage)
+            .src_access_mask(src_access)
+            .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+            .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
+            .old_layout(ids.layout())
+            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .image(image)
+            .subresource_range(COLOR_RANGE);
+        let commands = self.frames.slots[self.slot].commands;
+        // SAFETY: the commands are recording outside a pass, as checked, and the image lives until
+        // the frame has finished: it retires until then.
+        unsafe {
+            device.begin_label(commands, c"begin sampling ids");
+            device.raw().cmd_pipeline_barrier2(
+                commands,
+                &vk::DependencyInfo::default().image_memory_barriers(slice::from_ref(&barrier)),
+            );
+            device.end_label(commands);
+        }
+        ids.set_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+        ids.index()
+    }
+
     /// Reads back the IDs at `pixels` of `ids`, each a pixel's column and row from its top left,
     /// as this frame's last pass into it left them: the first of them, in order, up to
     /// [`MAX_READS`] a frame, less those this frame has read already. Returns how many it read.
@@ -1152,7 +1210,8 @@ impl<'a> Frame<'a> {
     /// # Panics
     ///
     /// If a forgotten pass is still open, another device made `ids`, no pass of this frame has
-    /// rendered into it, or a pixel is outside it.
+    /// rendered into it, the frame samples it already ([`Frame::begin_sampling_ids`]), or a pixel
+    /// is outside it.
     pub fn read_ids(&mut self, ids: &mut IdImage, pixels: &[[u32; 2]]) -> Result<usize> {
         self.outside_pass();
         let number = self.number();
@@ -1162,6 +1221,10 @@ impl<'a> Frame<'a> {
             ids.rendered() == number,
             "IDs are read back in the frame whose pass rendered them, and no pass of frame \
              {number} has"
+        );
+        assert!(
+            ids.layout() != vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            "IDs are read back before the frame samples them"
         );
         let [width, height] = ids.size();
         if let Some(pixel) = pixels.iter().find(|&&[x, y]| x >= width || y >= height) {

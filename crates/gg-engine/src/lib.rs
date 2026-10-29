@@ -937,7 +937,7 @@ mod tests {
     use std::rc::Rc;
 
     use gg_core::math::{Mat4, Quat, Vec3, Vec4};
-    use gg_renderer::Draws;
+    use gg_renderer::{Draws, Outline};
 
     use super::*;
 
@@ -1836,6 +1836,34 @@ mod tests {
             cx.extract(&mut frame, viewport);
             assert_eq!(frame.viewpoint, seen, "a viewpoint set: {set}");
         }
+    }
+
+    /// What a layer outlines is the frame's it's set in alone, as `outlined` says until the frame
+    /// takes it; a later call in the frame replaces an earlier one's.
+    #[test]
+    fn an_outline_is_its_frames_alone() {
+        let viewport = Viewport {
+            origin: [0, 0],
+            size: [640, 360],
+        };
+        let mut frame = render_thread::Extracted::default();
+        let mut cx = Context::seeded(1);
+        let [first, later]: [EntityId; 2] =
+            ["0123456789abcdef", "fedcba9876543210"].map(|id| id.parse().expect("an ID"));
+        let orange = Vec4::new(1.0, 0.35, 0.02, 1.0);
+        cx.outline(first, Vec4::ONE, 2.0);
+        cx.outline(later, orange, 3.0);
+        assert_eq!(cx.outlined(), Some((later, orange, 3.0)));
+        cx.extract(&mut frame, viewport);
+        let taken = Outline {
+            id: later.get(),
+            color: orange,
+            width: 3.0,
+        };
+        assert_eq!(frame.outline, Some(taken));
+        assert_eq!(cx.outlined(), None);
+        cx.extract(&mut frame, viewport);
+        assert_eq!(frame.outline, None, "the next frame outlines nothing");
     }
 
     /// Frames between ticks draw the world on its way between them, from where the latest tick

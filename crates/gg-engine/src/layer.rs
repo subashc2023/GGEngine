@@ -11,7 +11,7 @@ use bytemuck::NoUninit;
 use gg_core::math::{Mat4, Vec2, Vec3, Vec4};
 use gg_core::{Error, Result};
 use gg_renderer::{
-    Blend, Circle, Draws, Line, MAX_PICKS, Mesh, Meshes, Mipmaps, Shader, Shaders, Sprite,
+    Blend, Circle, Draws, Line, MAX_PICKS, Mesh, Meshes, Mipmaps, Outline, Shader, Shaders, Sprite,
     SpriteSheet, Texture, Textures, Viewpoint, Viewport,
 };
 use tracing::info;
@@ -191,6 +191,8 @@ pub struct Context {
     over: Draws,
     /// Whether the world's colliders' outlines draw, over the rest.
     colliders: bool,
+    /// What to outline in the view this frame, if anything.
+    outline: Option<Outline>,
     /// Where the game's view was as the last frame handed it off, while it had an area.
     view: Option<Viewport>,
     /// The number of the next pick's ticket.
@@ -268,6 +270,7 @@ impl Context {
             draws: Draws::default(),
             over: Draws::default(),
             colliders: false,
+            outline: None,
             view: None,
             tickets: 0,
             picks: Vec::new(),
@@ -552,6 +555,24 @@ impl Context {
             .push_rect(&mut self.shaders, transform, color, width, 0);
     }
 
+    /// Outlines what the game's view shows of entity `id` this frame, as the editor outlines what's
+    /// picked: round whatever shape the pixels make where its draws are on top, its colliders'
+    /// outlines among them, even across something in front of it, but not round what's hidden;
+    /// over what the view shows and under the UI, in `color`, linear RGBA with alpha not
+    /// multiplied in, `width` pixels of the view wide, at most 8, its outer edge smoothed. One
+    /// entity a frame: a later call replaces an earlier one's.
+    pub fn outline(&mut self, id: EntityId, color: Vec4, width: f32) {
+        let id = id.get();
+        self.outline = Some(Outline { id, color, width });
+    }
+
+    /// What a layer has [outlined](Self::outline) this frame, if anything: the entity, the color
+    /// and the width.
+    pub fn outlined(&self) -> Option<(EntityId, Vec4, f32)> {
+        let Outline { id, color, width } = self.outline?;
+        Some((EntityId::new(id)?, color, width))
+    }
+
     /// Whether the world's colliders' outlines draw, as
     /// [`set_colliders_shown`](Self::set_colliders_shown) says: not at first.
     pub fn colliders_shown(&self) -> bool {
@@ -650,16 +671,17 @@ impl Context {
     /// Fills in `frame` with this frame's render data, with the game's view at `viewport`, which
     /// [`view`](Self::view) gives from then on: its draws, those over the rest last, for the last
     /// frame's, which it forgets, keeping their memory for the next; the viewpoint a layer set this
-    /// frame, which it forgets
-    /// too, or else where the world's camera sees from, or else the default; what's been added
-    /// since a frame last took it, after what `frame` still holds; and the picks asked this frame,
-    /// each at the pixel of the view under it, the floor of where it was asked less the view's
-    /// origin, but those outside the view, which the next answers to come back answer `None`.
+    /// frame, which it forgets too, or else where the world's camera sees from, or else the
+    /// default; what a layer outlined this frame, which it forgets too; what's been added since a
+    /// frame last took it, after what `frame` still holds; and the picks asked this frame, each at
+    /// the pixel of the view under it, the floor of where it was asked less the view's origin, but
+    /// those outside the view, which the next answers to come back answer `None`.
     pub(crate) fn extract(&mut self, frame: &mut Extracted, viewport: Viewport) {
         frame.clear_color = self.clear_color;
         frame.viewport = viewport;
         self.view = (viewport.size[0] > 0 && viewport.size[1] > 0).then_some(viewport);
         frame.viewpoint = self.viewpoint.take().or(self.seen).unwrap_or_default();
+        frame.outline = self.outline.take();
         self.draws.append(&mut self.over);
         mem::swap(&mut frame.draws, &mut self.draws);
         self.draws.clear();
