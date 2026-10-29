@@ -71,6 +71,32 @@ pub enum Blend {
     PremultipliedAlpha,
 }
 
+impl Blend {
+    /// The color target's blend state, which combines the output with it this way.
+    fn attachment(self) -> vk::PipelineColorBlendAttachmentState {
+        match self {
+            Self::Opaque => vk::PipelineColorBlendAttachmentState::default(),
+            Self::Alpha => vk::PipelineColorBlendAttachmentState::default()
+                .blend_enable(true)
+                .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+                .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+                .color_blend_op(vk::BlendOp::ADD)
+                .src_alpha_blend_factor(vk::BlendFactor::ONE)
+                .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+                .alpha_blend_op(vk::BlendOp::ADD),
+            Self::PremultipliedAlpha => vk::PipelineColorBlendAttachmentState::default()
+                .blend_enable(true)
+                .src_color_blend_factor(vk::BlendFactor::ONE)
+                .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+                .color_blend_op(vk::BlendOp::ADD)
+                .src_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_DST_ALPHA)
+                .dst_alpha_blend_factor(vk::BlendFactor::ONE)
+                .alpha_blend_op(vk::BlendOp::ADD),
+        }
+        .color_write_mask(vk::ColorComponentFlags::RGBA)
+    }
+}
+
 /// Which of a mesh's triangles draw, by the way their corners wind as they show on screen.
 /// Vulkan tells it in framebuffer coordinates, whose Y points down, and flips the sign of the
 /// area it measures there, so its counterclockwise is as seen; the renderer's cameras show the
@@ -100,9 +126,8 @@ impl Faces {
 
 /// What a graphics pipeline is made from. It draws triangle lists, and its viewport, scissor and
 /// which [`Faces`] draw are set as it draws, a pass starting with both. Where its targets have
-/// depth, it tests it, drawing
-/// only where it's as near as what was drawn there before or nearer: depth runs from 1 at the near
-/// plane to 0 far away, as the renderer's cameras project it.
+/// depth, it tests it, drawing only where it's as near as what was drawn there before or nearer:
+/// depth runs from 1 at the near plane to 0 far away, as the renderer's cameras project it.
 pub struct GraphicsDesc<'a> {
     /// The debug name.
     pub name: &'a str,
@@ -131,6 +156,10 @@ pub struct Pipeline {
 }
 
 impl Pipeline {
+    /// Makes a pipeline from `desc`, through the device's pipeline cache if it has one. Fails
+    /// with `gpu.bad_shader` if `desc.spirv` isn't SPIR-V, and `gpu.vulkan` or `gpu.out_of_memory`
+    /// if Vulkan can't make it.
+    ///
     /// # Panics
     ///
     /// If it writes depth into targets without it.
@@ -182,26 +211,7 @@ impl Pipeline {
             .line_width(1.0);
         let multisample = vk::PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
-        let attachment = match desc.blend {
-            Blend::Opaque => vk::PipelineColorBlendAttachmentState::default(),
-            Blend::Alpha => vk::PipelineColorBlendAttachmentState::default()
-                .blend_enable(true)
-                .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
-                .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
-                .color_blend_op(vk::BlendOp::ADD)
-                .src_alpha_blend_factor(vk::BlendFactor::ONE)
-                .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
-                .alpha_blend_op(vk::BlendOp::ADD),
-            Blend::PremultipliedAlpha => vk::PipelineColorBlendAttachmentState::default()
-                .blend_enable(true)
-                .src_color_blend_factor(vk::BlendFactor::ONE)
-                .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
-                .color_blend_op(vk::BlendOp::ADD)
-                .src_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_DST_ALPHA)
-                .dst_alpha_blend_factor(vk::BlendFactor::ONE)
-                .alpha_blend_op(vk::BlendOp::ADD),
-        }
-        .color_write_mask(vk::ColorComponentFlags::RGBA);
+        let attachment = desc.blend.attachment();
         // Integers don't blend (VUID-VkGraphicsPipelineCreateInfo-renderPass-06062), so the IDs'
         // state differs from a blended color's, which takes independent blending.
         let ids = vk::PipelineColorBlendAttachmentState::default()

@@ -5,8 +5,8 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-# derive, for the texture handle that shaders' parameters carry, and the sprite quad's vertices
-# and the sprite shader's parameters.
+# derive, for the plain data that shaders read: vertices, parameters and the texture handles in
+# them, and push constants.
 bytemuck = { workspace = true, features = ["derive"] }
 epaint.workspace = true
 gg-core.workspace = true

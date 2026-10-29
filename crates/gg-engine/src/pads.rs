@@ -162,7 +162,7 @@ fn pad_button(button: Button) -> Option<PadButton> {
 }
 
 /// A stick's axis, 0 across and 1 up. A D-pad left as a hat, and the Z axes some Linux drivers
-/// report the triggers as, have none.
+/// report the triggers as (gilrs #200), have none.
 fn stick_axis(axis: Axis) -> Option<(Stick, usize)> {
     Some(match axis {
         Axis::LeftStickX => (Stick::Left, 0),
@@ -186,7 +186,8 @@ enum Reading {
 
 /// What the layers see of the pads: each reading through its dead zone, a stick's and a trigger's
 /// moves at their last reading, once a poll and before each of its pad's button events, so that a
-/// press sees the moves that came before it; and nothing out of focus.
+/// press sees the moves that came before it; and nothing out of focus, on every platform, as
+/// Windows gives pads to the focused window alone where Linux and macOS give them to any.
 #[derive(Debug, Default)]
 struct Pads {
     /// From when what the pads do counts: `SETTLE` after the main window gained focus, or `None`

@@ -763,8 +763,7 @@ impl Sight {
         if !shows || !(scale.is_finite() && scale > 0.0) {
             return None;
         }
-        // As the renderer works it out.
-        let aspect = width as f32 / height as f32;
+        let aspect = view.aspect();
         Some(Self {
             viewpoint,
             view,
@@ -1194,13 +1193,7 @@ mod tests {
     use gg_engine::math::EulerRot;
 
     use super::*;
-
-    /// A view whose top left isn't the window's, at 1.5 pixels a point, as the camera's tests have.
-    const VIEW: Viewport = Viewport {
-        origin: [100, 50],
-        size: [800, 600],
-    };
-    const SCALE: f32 = 1.5;
+    use crate::tests::{SCALE, VIEW, reading};
 
     /// A camera `distance` from `target`, turned by `yaw`, `pitch` and `roll`, as the editor's
     /// turns, seeing 10 units from the bottom of the view to its top at the target either way.
@@ -1298,19 +1291,6 @@ mod tests {
         Mat3::from_mat4(parent.matrix) * Mat3::from_quat(rotation)
     }
 
-    /// What the window reads with the cursor at `at`, and the command key held if `command`.
-    fn reading(at: Vec2, command: bool) -> Reading {
-        Reading {
-            screen: Screen {
-                view: Some(VIEW),
-                scale: SCALE,
-                alt: false,
-            },
-            command,
-            cursor: Some([f64::from(at.x), f64::from(at.y)]),
-        }
-    }
-
     fn aim(tool: Tool, viewpoint: Viewpoint, picked: Picked) -> Aim {
         Aim {
             tool,
@@ -1345,14 +1325,18 @@ mod tests {
         to: &[Vec2],
         command: bool,
     ) -> Vec<Reply> {
-        let mut replies = vec![handles.event(&moved(from), &reading(from, command), aim)];
-        replies.push(handles.event(&left(true), &reading(from, command), aim));
+        let read = |at: Vec2| Reading {
+            command,
+            ..reading(at)
+        };
+        let mut replies = vec![handles.event(&moved(from), &read(from), aim)];
+        replies.push(handles.event(&left(true), &read(from), aim));
         let mut at = from;
         for &next in to {
             at = next;
-            replies.push(handles.event(&moved(at), &reading(at, command), aim));
+            replies.push(handles.event(&moved(at), &read(at), aim));
         }
-        replies.push(handles.event(&left(false), &reading(at, command), aim));
+        replies.push(handles.event(&left(false), &read(at), aim));
         replies
     }
 
@@ -1825,16 +1809,20 @@ mod tests {
         }
         // Ctrl pressed as the move goes on, then let go.
         let mut handles = Handles::default();
-        handles.event(&moved(from), &reading(from, false), &moving);
-        handles.event(&left(true), &reading(from, false), &moving);
-        let unsnapped = handles.event(&moved(to), &reading(to, false), &moving);
+        handles.event(&moved(from), &reading(from), &moving);
+        handles.event(&left(true), &reading(from), &moving);
+        let unsnapped = handles.event(&moved(to), &reading(to), &moving);
         let ctrl = |pressed| Event::Key {
             key: Key::ControlLeft,
             pressed,
             repeat: false,
         };
-        let snapped = handles.event(&ctrl(true), &reading(to, true), &moving);
-        let again = handles.event(&ctrl(false), &reading(to, false), &moving);
+        let held = Reading {
+            command: true,
+            ..reading(to)
+        };
+        let snapped = handles.event(&ctrl(true), &held, &moving);
+        let again = handles.event(&ctrl(false), &reading(to), &moving);
         let (Reply::Set(_, Field::Translation(first)), Reply::Set(_, Field::Translation(snap))) =
             (unsnapped, snapped)
         else {
@@ -2147,12 +2135,12 @@ mod tests {
         let from = from.expect("in view");
         let to = from + Vec2::new(30.0, 0.0);
         let start = |handles: &mut Handles| {
-            handles.event(&moved(from), &reading(from, false), &aim);
+            handles.event(&moved(from), &reading(from), &aim);
             assert_eq!(
-                handles.event(&left(true), &reading(from, false), &aim),
+                handles.event(&left(true), &reading(from), &aim),
                 Reply::Take
             );
-            let set = handles.event(&moved(to), &reading(to, false), &aim);
+            let set = handles.event(&moved(to), &reading(to), &aim);
             assert!(matches!(set, Reply::Set(..)), "{set:?}");
         };
         let other = Picked {
@@ -2184,10 +2172,7 @@ mod tests {
         start(&mut handles);
         let dragged = handles.shown(&picked);
         assert_ne!(dragged.translation, local.translation);
-        assert_eq!(
-            handles.event(&left(false), &reading(to, false), &aim),
-            Reply::Seal
-        );
+        assert_eq!(handles.event(&left(false), &reading(to), &aim), Reply::Seal);
         let waiting = Picked {
             waiting: true,
             ..picked
@@ -2216,10 +2201,10 @@ mod tests {
             (on.expect("in view"), Reply::Take),
             (Vec2::new(110.0, 60.0), Reply::Pick([110.0, 60.0])),
         ] {
-            handles.event(&moved(at), &reading(at, false), &aim);
-            assert_eq!(handles.event(&left(true), &reading(at, false), &aim), reply);
+            handles.event(&moved(at), &reading(at), &aim);
+            assert_eq!(handles.event(&left(true), &reading(at), &aim), reply);
             assert!(!handles.dragging());
-            handles.event(&left(false), &reading(at, false), &aim);
+            handles.event(&left(false), &reading(at), &aim);
         }
     }
 }

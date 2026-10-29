@@ -217,7 +217,7 @@ impl Writer<'_> {
     fn saved_parts<'v>(
         &self,
         fields: &'v [Field],
-        given: &'v [(reflect::Name, Value)],
+        given: &'v [(reflect::Ident, Value)],
     ) -> Result<Vec<(&'v Field, &'v Value)>> {
         let saved = fields
             .iter()

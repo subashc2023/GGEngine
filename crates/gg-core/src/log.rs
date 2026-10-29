@@ -107,14 +107,23 @@ fn filter(rust_log: Option<&str>) -> (Targets, Option<&str>) {
     let default = Targets::new()
         .with_default(LevelFilter::INFO)
         .with_targets(ENGINE_CRATES.map(|target| (target, engine)));
-    let (filter, bad) = match rust_log {
-        Some(value) if !value.trim().is_empty() => match value.parse::<Targets>() {
+    // `Targets` parses each directive as it's written, so ` gg_gpu=trace` would name a target
+    // ` gg_gpu`, and an empty one, as a stray comma leaves, would set every target the value
+    // doesn't name to errors.
+    let value = rust_log.map(|value| {
+        let directives: Vec<&str> = (value.split(',').map(str::trim))
+            .filter(|directive| !directive.is_empty())
+            .collect();
+        (value, directives.join(","))
+    });
+    let (filter, bad) = match value {
+        Some((value, trimmed)) if !trimmed.is_empty() => match trimmed.parse::<Targets>() {
             Ok(filter) if filter.default_level().is_some() => (filter, None),
             // Parsing adds directives in turn, each replacing any before it for the same target,
             // so the value's go after the default's, which `Targets` writes in the syntax it
             // parses.
             Ok(_) => {
-                let merged = format!("{default},{value}").parse();
+                let merged = format!("{default},{trimmed}").parse();
                 let merged = merged.expect("the default and the value each parse, so both do");
                 (merged, None)
             }
@@ -222,14 +231,26 @@ mod tests {
         assert!(targets.would_enable("gg_engine", &ENGINE));
         assert!(targets.would_enable("sandbox", &Level::INFO));
         assert!(!targets.would_enable("sandbox", &Level::DEBUG));
+        // A stray comma is no directive.
+        for value in ["gg_gpu=trace,", ",gg_gpu=trace"] {
+            let (targets, bad) = filter(Some(value));
+            assert_eq!(bad, None, "{value}");
+            assert!(targets.would_enable("gg_gpu", &Level::TRACE), "{value}");
+            assert!(targets.would_enable("gg_engine", &ENGINE), "{value}");
+            assert!(targets.would_enable("sandbox", &Level::INFO), "{value}");
+        }
     }
 
     #[test]
     fn a_level_for_every_target_replaces_the_default() {
-        let (targets, _) = filter(Some("info,gg_gpu=debug"));
-        assert!(targets.would_enable("gg_gpu", &Level::DEBUG));
-        assert!(!targets.would_enable("gg_engine", &Level::DEBUG));
-        assert!(targets.would_enable("sandbox", &Level::INFO));
+        // Spaces around a directive are no part of it.
+        for value in ["info,gg_gpu=debug", "info, gg_gpu=trace"] {
+            let (targets, bad) = filter(Some(value));
+            assert_eq!(bad, None, "{value}");
+            assert!(targets.would_enable("gg_gpu", &Level::DEBUG), "{value}");
+            assert!(!targets.would_enable("gg_engine", &Level::DEBUG), "{value}");
+            assert!(targets.would_enable("sandbox", &Level::INFO), "{value}");
+        }
         let (targets, _) = filter(Some("off"));
         assert!(!targets.would_enable("gg_engine", &Level::ERROR));
         assert!(!targets.would_enable("sandbox", &Level::ERROR));

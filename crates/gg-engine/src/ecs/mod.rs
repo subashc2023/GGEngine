@@ -52,9 +52,10 @@ use crate::reflect::Reflect;
 /// Data an entity can have: a struct or an enum that derives it, with `#[derive(Clone,
 /// Component)]`, which describes it to reflection too, as [`Reflect`] says, so that tools reach it
 /// by name. Clone, so that the world can be copied whole, as a snapshot is; and, through
-/// `Reflect`, `Send` and `Sync`, so that it can move to the threads that will run the simulation.
-/// A type registers the first time an entity has one, or with [`World::register`]. The derive makes
-/// it [`Writable`] too, a component that code changes.
+/// `Reflect`, `Send` and `Sync`, so that it can go to the job system's threads, in the rows
+/// [`par_for_each`](QueryIterMut::par_for_each) hands them. A type registers the first time an
+/// entity has one, or with [`World::register`]. The derive makes it [`Writable`] too, a component
+/// that code changes.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` isn't a component",
     note = "a type becomes one with `#[derive(Clone, gg_engine::Component)]`"
@@ -160,15 +161,15 @@ impl fmt::Debug for Entity {
 /// children, and when its interpolation was last reset; the tables in the order they were made,
 /// those made since a snapshot cut away as it's restored; the stream the IDs come from; the
 /// component types; and its [`Resource`]s. So a world restored goes on as the world the snapshot
-/// was taken from did:
-/// given the same changes, it spawns the same handles with the same IDs, and its queries find the
-/// same order, as it gives out again the handles and IDs given out since the snapshot. But it's
-/// another world: drawing sorts its rows again, and doesn't interpolate into it from the world
-/// before, and it refuses what undoes an operation applied before, as another world's, so that the
-/// slots kept when the snapshot was taken are never used again. Taken again, or restored, a
-/// snapshot is copied into the memory the world holds, which allocates nothing while the tables,
-/// the component types and the world's size stay as they were, for components and resources whose
-/// `Clone` allocates nothing.
+/// was taken from did: given the same changes, it spawns the same handles with the same IDs, and
+/// its queries find the same order, as it gives out again the handles and IDs given out since the
+/// snapshot. But it's another world: drawing sorts its rows again, and doesn't interpolate into it
+/// from the world before, and it refuses what undoes an operation applied before, as another
+/// world's, so that the slots kept when the snapshot was taken stay vacant, with their IDs, until
+/// [`clear`](Self::clear) or [`replace_scene`](Self::replace_scene) frees them. Taken again, or
+/// restored, a snapshot is copied into the memory the world holds, which allocates nothing while
+/// the tables, the component types and the world's size stay as they were, for components and
+/// resources whose `Clone` allocates nothing.
 ///
 /// ```
 /// use gg_engine::{Transform, World};
@@ -180,7 +181,7 @@ impl fmt::Debug for Entity {
 /// world.despawn(entity)?;
 /// world.clone_from(&snapshot);
 /// assert_eq!(world.id(entity), id);
-/// # Ok::<(), gg_engine::reflect::Error>(())
+/// # Ok::<(), gg_engine::Error>(())
 /// ```
 pub struct World {
     /// Each slot's generation, and where its entity is if it's alive.
@@ -188,10 +189,10 @@ pub struct World {
     /// The slots free for new entities, the last freed taken first.
     free: Vec<u32>,
     /// Each slot's entity's persistent ID, beside its `Meta` rather than in it, since every lookup
-    /// of a handle reads `Meta`, and only drawing, as it sorts the rows of each batch and each z,
-    /// and diagnostics, tools and files read IDs: written as an entity is spawned into the slot and removed from it,
-    /// and read through [`World::id`], which checks the handle first. `None` while the slot is
-    /// free, vacant or retired.
+    /// of a handle reads `Meta`, which stays the smaller for it, and IDs are read far less often:
+    /// written as an entity is spawned into the slot and removed from it, and read through
+    /// [`World::id`], which checks the handle first. `None` while the slot is free, vacant or
+    /// retired.
     entity_ids: Vec<Option<EntityId>>,
     /// Each slot's entity's last [`reset_interpolation`](World::reset_interpolation), as the count
     /// of resets it made; 0 if none. Beside `Meta`, as the IDs are, since only drawing reads it,
@@ -228,10 +229,10 @@ pub struct World {
     components: Components,
     /// The component types of the table an entity moves to.
     scratch: Vec<ComponentId>,
-    /// What spawning a model has spawned so far, in memory kept from one spawn to the next.
-    spawned: Vec<Entity>,
-    /// The entities a pass of a script runs for, in memory kept from one pass to the next.
-    scripted: Vec<Entity>,
+    /// Lists of entities, kept for their memory, for what lists entities as it changes the world,
+    /// such as a model spawning or a pass of scripts: as many as were ever taken at once, as a
+    /// pass of scripts run within another takes one of its own.
+    lists: Vec<Vec<Entity>>,
     /// What it holds beside its entities.
     resources: Resources,
 }
@@ -297,8 +298,7 @@ impl World {
             by_signature: HashMap::new(),
             components,
             scratch: Vec::new(),
-            spawned: Vec::new(),
-            scripted: Vec::new(),
+            lists: Vec::new(),
             resources: Resources::default(),
         }
     }
@@ -374,33 +374,19 @@ impl World {
         self.place(entity, id, row);
     }
 
-    /// A list, empty, in memory kept from the last, for [`Model::spawn`](crate::Model::spawn) to
-    /// note what it spawns in, and give back through [`keep_spawned`](Self::keep_spawned), so that
-    /// a model spawned as a game runs allocates nothing once the world has room for it.
-    pub(crate) fn take_spawned(&mut self) -> Vec<Entity> {
-        let mut spawned = mem::take(&mut self.spawned);
-        spawned.clear();
-        spawned
+    /// A list of entities, empty, in memory kept from one given back through
+    /// [`keep_list`](Self::keep_list), for what lists entities as it changes the world, as
+    /// [`Model::spawn`](crate::Model::spawn) and [`run_scripts`](crate::run_scripts) do: so that
+    /// it allocates nothing once the world has listed as many, in as many lists at once.
+    pub(crate) fn take_list(&mut self) -> Vec<Entity> {
+        let mut list = self.lists.pop().unwrap_or_default();
+        list.clear();
+        list
     }
 
-    /// Keeps `spawned`'s memory for the next [`take_spawned`](Self::take_spawned).
-    pub(crate) fn keep_spawned(&mut self, spawned: Vec<Entity>) {
-        self.spawned = spawned;
-    }
-
-    /// A list, empty, in memory kept from the last, for [`run_scripts`](crate::run_scripts) to
-    /// list the entities it runs a script for in, and give back through
-    /// [`keep_scripted`](Self::keep_scripted), as [`take_spawned`](Self::take_spawned) is for
-    /// models.
-    pub(crate) fn take_scripted(&mut self) -> Vec<Entity> {
-        let mut scripted = mem::take(&mut self.scripted);
-        scripted.clear();
-        scripted
-    }
-
-    /// Keeps `scripted`'s memory for the next [`take_scripted`](Self::take_scripted).
-    pub(crate) fn keep_scripted(&mut self, scripted: Vec<Entity>) {
-        self.scripted = scripted;
+    /// Keeps `list`'s memory for a [`take_list`](Self::take_list) after.
+    pub(crate) fn keep_list(&mut self, list: Vec<Entity>) {
+        self.lists.push(list);
     }
 
     /// Puts `entity`, whose slot holds none, with ID `id`, which the world finds it by already,
@@ -531,6 +517,7 @@ impl World {
             .get(at.row as usize)
     }
 
+    /// `entity`'s component of type `T`, to change; `None` if it has none, or isn't alive.
     pub fn get_mut<T: Writable>(&mut self, entity: Entity) -> Option<&mut T> {
         let at = self.location(entity)?;
         let id = self.components.get(TypeId::of::<T>())?;
@@ -598,7 +585,8 @@ impl World {
         &self.tables
     }
 
-    /// `T`'s id, which its tables' columns are found by, if any entity has had one.
+    /// `T`'s id, which its tables' columns are found by, if it has registered, as [`Parent`] has in
+    /// every world.
     pub(crate) fn component<T: Component>(&self) -> Option<ComponentId> {
         self.components.get(TypeId::of::<T>())
     }
@@ -800,8 +788,7 @@ impl World {
             by_signature: HashMap::new(),
             components: self.components.clone(),
             scratch: Vec::new(),
-            spawned: Vec::new(),
-            scripted: Vec::new(),
+            lists: Vec::new(),
             resources: Resources::default(),
         };
         // Alive, vacant or retired; a retired slot stays so.

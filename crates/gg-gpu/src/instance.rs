@@ -35,7 +35,7 @@ pub struct Instance {
     debug_utils: Option<ext::debug_utils::Instance>,
     messenger: vk::DebugUtilsMessengerEXT,
     validation: Validation,
-    /// Done once a device has named the instance, as [`Instance::name_through`] says.
+    /// Done once a device has named the instance and its GPU, as [`Instance::name_through`] says.
     named: Once,
 }
 
@@ -70,6 +70,11 @@ impl Validation {
 }
 
 impl Instance {
+    /// Loads the Vulkan loader and makes an instance that can present to `desc.window`'s
+    /// display, if given, under the validation layer if `desc.validation` asks for it and it's
+    /// installed, as [`Instance::validation`] tells. Fails with `gpu.no_loader` without a loader,
+    /// `gpu.window` if the window can't give its display, and `gpu.vulkan` or `gpu.out_of_memory`
+    /// if a Vulkan call fails.
     pub fn new(desc: &InstanceDesc<'_>) -> Result<Arc<Self>> {
         let _zone = gg_core::zone!();
         // SAFETY: the library ash loads, vulkan-1.dll or libvulkan, is the Khronos loader, whose
@@ -168,7 +173,10 @@ impl Instance {
             .api_version(vk::API_VERSION_1_3);
         let validation_layers = [VALIDATION_LAYER.as_ptr()];
         // ash's `LayerSettingEXT::values` sets the count in bytes rather than values, so the
-        // setting is filled in by hand.
+        // setting is filled in by hand (ash #985). ash's next release, which fixes it and has 1.4's
+        // headers, lets the setting go through `values`, the instance and VMA ask for 1.4, and a
+        // frame wait for its uploads' ownership transfers in fewer stages, through maintenance8,
+        // as `Frame::send` says.
         let on = vk::TRUE;
         let settings = [vk::LayerSettingEXT {
             p_layer_name: VALIDATION_LAYER.as_ptr(),
@@ -288,12 +296,17 @@ impl Instance {
         self.debug_utils.is_some()
     }
 
-    /// Names the instance `instance` through `device`, made from it, unless a device has: naming
-    /// an object must be externally synchronized, and devices may be made on several threads.
+    /// Names the instance `instance`, and `device`'s GPU by its name, through `device`, made from
+    /// them, unless a device has: naming an object must be externally synchronized, and devices
+    /// may be made on several threads. A device names no GPU but its own, so a GPU that only later
+    /// devices are made from keeps no name.
     pub(crate) fn name_through(&self, device: &Device) {
-        // SAFETY: the instance is live, and the device was made from it.
-        self.named
-            .call_once(|| unsafe { device.set_name(self.raw.handle(), "instance") });
+        // SAFETY: the instance is live, and the device was made from it and from its GPU, the one
+        // physical device it may name (VUID-vkSetDebugUtilsObjectNameEXT-pNameInfo-07873).
+        self.named.call_once(|| unsafe {
+            device.set_name(self.raw.handle(), "instance");
+            device.set_name(device.physical(), device.name());
+        });
     }
 }
 
@@ -326,13 +339,15 @@ fn names<'a>(names: impl IntoIterator<Item = &'a CStr>) -> String {
 }
 
 /// The messenger reports warnings and errors, and also the loader's and layers' informational
-/// messages when trace logging is on.
+/// messages when trace logging is on for either of [`on_message`]'s targets.
 fn messenger_info(validation: &Validation) -> vk::DebugUtilsMessengerCreateInfoEXT<'static> {
     use vk::DebugUtilsMessageSeverityFlagsEXT as Severity;
     use vk::DebugUtilsMessageTypeFlagsEXT as Type;
 
     let mut severity = Severity::WARNING | Severity::ERROR;
-    if tracing::enabled!(target: "gg_gpu::vulkan", tracing::Level::TRACE) {
+    if tracing::enabled!(target: "gg_gpu::vulkan", tracing::Level::TRACE)
+        || tracing::enabled!(target: "gg_gpu::vulkan::general", tracing::Level::TRACE)
+    {
         severity |= Severity::INFO | Severity::VERBOSE;
     }
     vk::DebugUtilsMessengerCreateInfoEXT::default()
@@ -388,16 +403,23 @@ unsafe extern "system" fn on_message(
     let objects = (!objects.0.is_empty()).then(|| tracing::field::display(&objects));
     let labels = (!labels.0.is_empty()).then(|| tracing::field::display(&labels));
     macro_rules! log {
-        ($level:ident) => {
-            tracing::$level!(target: "gg_gpu::vulkan", code, vuid, objects, labels, "{message}")
+        ($target:literal) => {
+            if severity.contains(Severity::ERROR) {
+                tracing::error!(target: $target, code, vuid, objects, labels, "{message}");
+            } else if severity.contains(Severity::WARNING) {
+                tracing::warn!(target: $target, code, vuid, objects, labels, "{message}");
+            } else {
+                tracing::trace!(target: $target, code, vuid, objects, labels, "{message}");
+            }
         };
     }
-    if severity.contains(Severity::ERROR) {
-        log!(error);
-    } else if severity.contains(Severity::WARNING) {
-        log!(warn);
+    // The loader's and other layers' messages under a target of their own, which a filter can
+    // quiet without quieting validation, as the GPU tests quiet the loader's warning for each
+    // implicit layer it leaves out.
+    if code == "gpu.general" {
+        log!("gg_gpu::vulkan::general");
     } else {
-        log!(trace);
+        log!("gg_gpu::vulkan");
     }
     vk::FALSE
 }

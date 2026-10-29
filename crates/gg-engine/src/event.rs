@@ -14,13 +14,11 @@ pub enum Event<'a> {
     CloseRequested,
     /// The window's drawable area changed size. A minimized window gets [`Event::Minimized`]
     /// instead of a size of zero.
-    Resized {
-        width: u32,
-        height: u32,
-    },
+    Resized { width: u32, height: u32 },
     /// The window was minimized, or otherwise left without an area to draw into. Rendering
     /// pauses until [`Event::Restored`].
     Minimized,
+    /// The window has an area to draw into again, after [`Event::Minimized`]: rendering resumes.
     Restored,
     /// The window gained or lost keyboard focus.
     Focused(bool),
@@ -38,17 +36,13 @@ pub enum Event<'a> {
     /// Enter and Tab type none.
     Text(&'a str),
     /// The cursor moved within the window, to `x` and `y` from its top left.
-    CursorMoved {
-        x: f64,
-        y: f64,
-    },
+    CursorMoved { x: f64, y: f64 },
+    /// The cursor came into the window.
     CursorEntered,
+    /// The cursor went out of the window.
     CursorLeft,
     /// A mouse button went down or up. As with keys, a release can come without its press.
-    MouseButton {
-        button: MouseButton,
-        pressed: bool,
-    },
+    MouseButton { button: MouseButton, pressed: bool },
     /// The mouse wheel or a touchpad scrolled.
     Scroll(Scroll),
     /// A gamepad's button went down or up. A trigger is a button too, pressed at 0.75 of its travel
@@ -62,11 +56,7 @@ pub enum Event<'a> {
     },
     /// A gamepad's stick moved: right and up are positive, it's no longer than 1, and it's exactly
     /// zero within its dead zone.
-    PadStick {
-        pad: Pad,
-        stick: Stick,
-        value: Vec2,
-    },
+    PadStick { pad: Pad, stick: Stick, value: Vec2 },
     /// A gamepad's trigger moved: from 0, at rest and within its dead zone, to 1 all the way.
     PadTrigger {
         pad: Pad,
@@ -81,8 +71,9 @@ pub enum Event<'a> {
 pub struct Pad(pub usize);
 
 /// A gamepad's button, by its position, as keys are: `South` is A on an Xbox pad and Cross on a
-/// PlayStation one. The shoulders are the bumpers above the triggers, and the thumbs are the sticks
-/// pressed in.
+/// PlayStation one, `Select` View and Create, and `Start` Menu and Options. The shoulders are the
+/// bumpers above the triggers, and the thumbs are the sticks pressed in. Windows doesn't report
+/// `Mode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PadButton {
     South,
@@ -127,18 +118,23 @@ impl PadButton {
     ];
 }
 
+/// A gamepad's stick, which [`Event::PadStick`] says has moved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Stick {
     Left,
     Right,
 }
 
+/// A gamepad's trigger, which [`Event::PadTrigger`] says has moved; as a button, it's
+/// [`PadButton::LeftTrigger`] or [`PadButton::RightTrigger`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Trigger {
     Left,
     Right,
 }
 
+/// A mouse button: `Back` and `Forward` are the side buttons, and `Other` one beyond them, by
+/// winit's number for it, which differs from one platform to another.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MouseButton {
     Left,
@@ -155,6 +151,21 @@ pub enum MouseButton {
 pub enum Scroll {
     Lines { x: f32, y: f32 },
     Pixels { x: f64, y: f64 },
+}
+
+impl Scroll {
+    /// What a line of the wheel is in points, for scrolls that a touchpad reports in pixels: 40, as
+    /// egui counts it on the desktop (`InputOptions::line_scroll_speed`).
+    pub const POINTS_PER_LINE: f64 = 40.0;
+
+    /// How many lines it scrolled up, a touchpad's pixels counted in a window of `scale` pixels a
+    /// point, as [`POINTS_PER_LINE`](Self::POINTS_PER_LINE) says.
+    pub fn lines(self, scale: f64) -> f32 {
+        match self {
+            Self::Lines { y, .. } => y,
+            Self::Pixels { y, .. } => (y / scale / Self::POINTS_PER_LINE) as f32,
+        }
+    }
 }
 
 /// Turns one of winit's events into the engine's, calling `emit` for each; a key press that

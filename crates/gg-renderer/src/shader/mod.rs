@@ -132,11 +132,12 @@ impl Types {
 impl Shaders {
     /// Compiles the Slang shader at `path`, which draws meshes of vertex type `V` and takes
     /// parameters of type `P` with each draw, such as a color: `()` for none. `blend` says how its
-    /// color goes over what's drawn before it: [`Blend::Alpha`] blends by the alpha it returns,
-    /// not multiplied into the color. Every shader tests the view's depth, drawing only where it's
-    /// as near as what's drawn there or nearer; one that's [`Blend::Opaque`] writes its depth too,
-    /// so that what's behind it doesn't show over it, while one that blends doesn't, so that what's
-    /// behind it still shows through it. `name` names it in errors and GPU captures.
+    /// color goes over what's drawn before it: [`Blend::Alpha`] blends by the alpha it returns, not
+    /// multiplied into the color, and [`Blend::PremultipliedAlpha`] by the alpha it returns,
+    /// multiplied into the color already. Every shader tests the view's depth, drawing only where
+    /// it's as near as what's drawn there or nearer; one that's [`Blend::Opaque`] writes its depth
+    /// too, so that what's behind it doesn't show over it, while one that blends doesn't, so that
+    /// what's behind it still shows through it. `name` names it in errors and GPU captures.
     ///
     /// Vulkan checks nothing about a shader, so the engine checks, in the SPIR-V slangc writes,
     /// that it keeps to this contract:
@@ -856,7 +857,7 @@ mod tests {
     fn a_shader_compiled_again_lists_its_files_and_replaces_itself() {
         let dir = Scratch::new("compiled-again");
         let shaders_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("shaders");
-        for file in ["model_opaque.slang", "model.slang"] {
+        for file in ["model_opaque.slang", "model.slang", "mesh.slang"] {
             fs::copy(shaders_dir.join(file), dir.0.join(file)).expect("a copy");
         }
         let path = dir.0.join("model_opaque.slang");
@@ -867,7 +868,11 @@ mod tests {
             panic!("one source");
         };
         assert_eq!((source.name(), source.path()), ("copy", path.as_path()));
-        let read = [Some("model_opaque.slang"), Some("model.slang")];
+        let read = [
+            Some("model_opaque.slang"),
+            Some("model.slang"),
+            Some("mesh.slang"),
+        ];
         assert_eq!(names(source.files()), read, "as it was added");
 
         // A change to the file it includes.

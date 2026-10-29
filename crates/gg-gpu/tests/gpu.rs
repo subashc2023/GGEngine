@@ -1,7 +1,8 @@
 //! GPU tests. They run on whatever GPU the loader offers, which in Linux CI is lavapipe.
 //!
 //! They run in one process with a main of their own, which turns off the Vulkan loader's
-//! implicit layers before any thread exists, then runs the tests one after another.
+//! implicit layers before any thread exists, then runs the tests one after another: those whose
+//! names contain an argument that isn't a flag, as libtest picks them, or all of them without one.
 
 // For setting the environment, and for breaking a Vulkan rule on purpose; see the SAFETY
 // comments.
@@ -10,15 +11,24 @@
 use std::mem;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
+use std::process::ExitCode;
 use std::sync::Arc;
 
 use ash::vk;
 use gg_gpu::{
     ColorImage, DepthImage, Device, Frames, GpuBuffer, IdImage, Instance, InstanceDesc, MAX_READS,
-    PLACED_TEXTURES, Target, Texture, TextureFormat, UploadPath,
+    PLACED_TEXTURES, Target, Texture, TextureFormat, UploadPath, Validation,
 };
 
-fn main() {
+/// Runs each test through `tests`, by the name it's written with, given the arguments written
+/// after it, if any.
+macro_rules! run {
+    ($tests:ident $(, $test:ident $(($($arg:expr),*))?)+ $(,)?) => {
+        $($tests.run(stringify!($test), || $test($($($arg),*)?));)+
+    };
+}
+
+fn main() -> ExitCode {
     if gg_core::profile::ENABLED {
         panic!(
             "the GPU tests set the environment before any other thread exists, and Tracy's start \
@@ -29,67 +39,118 @@ fn main() {
     // the tests on lavapipe instead.
     if std::env::var_os("GG_SKIP_GPU_TESTS").is_some_and(|value| !value.is_empty()) {
         println!("GPU tests skipped: GG_SKIP_GPU_TESTS is set");
-        return;
+        return ExitCode::SUCCESS;
     }
     // Overlays such as Steam's and OBS's load into every instance as implicit layers, and can
     // add validation errors of their own. Apps keep implicit layers, since RenderDoc's capture
-    // layer is one; the loader warns about each one it leaves out here.
+    // layer is one; the loader warns about each one it leaves out here. Unless `RUST_LOG` is set,
+    // only warnings and errors are logged, and of the loader's and other layers' messages only
+    // errors, so that a passing run's output is its tests' results rather than what each
+    // instance, device and pipeline logs as it's made.
     // SAFETY: no other thread exists yet to read the environment.
-    unsafe { std::env::set_var("VK_LOADER_LAYERS_DISABLE", "~implicit~") };
+    unsafe {
+        std::env::set_var("VK_LOADER_LAYERS_DISABLE", "~implicit~");
+        if std::env::var_os("RUST_LOG").is_none() {
+            std::env::set_var("RUST_LOG", "warn,gg_gpu::vulkan::general=error");
+        }
+    }
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("logs");
     let log = gg_core::log::init("gpu-tests", &dir).expect("the tests read the JSON log");
 
-    run("clear_reads_back", clear_reads_back);
-    run(
-        "sampled_images_keep_their_layout",
+    let mut tests = Tests::new();
+    run!(
+        tests,
+        clear_reads_back,
         sampled_images_keep_their_layout,
-    );
-    run(
-        "dropped_images_free_their_slots",
         dropped_images_free_their_slots,
-    );
-    run("depth_clears_in_every_pass", depth_clears_in_every_pass);
-    run(
-        "ids_read_back_two_frames_later",
+        depth_clears_in_every_pass,
         ids_read_back_two_frames_later,
-    );
-    run(
-        "filled_textures_can_be_written_over_on_every_path",
         filled_textures_can_be_written_over_on_every_path,
-    );
-    run(
-        "forgotten_frames_and_passes_are_caught",
-        forgotten_frames_and_passes_are_caught,
-    );
-    run(
-        "another_devices_objects_are_refused",
+        forgotten_frames_and_passes_are_caught(&log),
         another_devices_objects_are_refused,
-    );
-    run(
-        "refused_texture_slots_leak_nothing",
         refused_texture_slots_leak_nothing,
-    );
-    run(
-        "passes_refuse_what_the_device_cant_draw",
         passes_refuse_what_the_device_cant_draw,
-    );
-    run(
-        "pipeline_caches_load_what_this_gpu_saved_whole",
         pipeline_caches_load_what_this_gpu_saved_whole,
+        captures_are_refused_without_renderdoc,
+        validation_errors_reach_the_json_log(&log),
     );
-    run("validation_errors_reach_the_json_log", || {
-        validation_errors_reach_the_json_log(&log);
-    });
+    tests.finish()
 }
 
-fn run(name: &str, test: impl FnOnce()) {
-    test();
-    println!("test {name} ... ok");
+/// Runs the tests the arguments pick, one after another, and counts how they go.
+struct Tests {
+    /// The arguments that aren't libtest's flags, nor the values they take: a test runs if its
+    /// name contains one of them, or if there are none.
+    filters: Vec<String>,
+    passed: usize,
+    failed: usize,
 }
 
-/// Runs `broken`, which must panic, and gives its message.
+impl Tests {
+    fn new() -> Self {
+        let mut filters = Vec::new();
+        let mut args = std::env::args().skip(1);
+        while let Some(arg) = args.next() {
+            let takes_value = matches!(
+                arg.as_str(),
+                "--test-threads"
+                    | "--skip"
+                    | "--logfile"
+                    | "--format"
+                    | "--color"
+                    | "--shuffle-seed"
+                    | "-Z"
+            );
+            if takes_value {
+                args.next();
+            } else if !arg.starts_with('-') {
+                filters.push(arg);
+            }
+        }
+        Self {
+            filters,
+            passed: 0,
+            failed: 0,
+        }
+    }
+
+    /// Runs `test` if the filters pick it, and prints whether it passed. A test that fails goes
+    /// no further, and the log shows its panic, but the tests after it still run.
+    fn run(&mut self, name: &str, test: impl FnOnce()) {
+        let picked = self.filters.is_empty()
+            || (self.filters.iter()).any(|filter| name.contains(filter.as_str()));
+        if !picked {
+            return;
+        }
+        if panic::catch_unwind(AssertUnwindSafe(test)).is_ok() {
+            self.passed += 1;
+            println!("test {name} ... ok");
+        } else {
+            self.failed += 1;
+            println!("test {name} ... FAILED");
+        }
+    }
+
+    /// Prints how many tests passed and failed, and fails the run if any failed.
+    fn finish(self) -> ExitCode {
+        let Self { passed, failed, .. } = self;
+        println!("test result: {passed} passed; {failed} failed");
+        if failed == 0 {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Runs `broken`, which must panic, and gives its message. Its panic isn't logged, as a failing
+/// test's is: the panic hook is set aside while it runs.
 fn panics(broken: impl FnOnce()) -> String {
-    let payload = panic::catch_unwind(AssertUnwindSafe(broken)).expect_err("a panic");
+    let hook = panic::take_hook();
+    panic::set_hook(Box::new(|_| {}));
+    let caught = panic::catch_unwind(AssertUnwindSafe(broken));
+    panic::set_hook(hook);
+    let payload = caught.expect_err("a panic");
     payload
         .downcast_ref::<String>()
         .cloned()
@@ -118,6 +179,15 @@ fn instance() -> Arc<Instance> {
          validation layer takes VK_EXT_layer_settings"
     );
     instance
+}
+
+/// Checks that validation reported nothing, once what it validated has been dropped.
+fn check(validation: &Validation) {
+    assert_eq!(
+        validation.messages(),
+        0,
+        "validation reported problems; the log above says what"
+    );
 }
 
 /// Clears two offscreen images in the same frames, each to a color of its own, over more frames
@@ -169,11 +239,7 @@ fn clear_reads_back() {
     }
 
     drop((frames, images, device, instance));
-    assert_eq!(
-        validation.messages(),
-        0,
-        "validation reported problems; the log above says what"
-    );
+    check(&validation);
 }
 
 /// Clears an image, then lets the frame's later passes sample it, in more frames than are in
@@ -201,11 +267,7 @@ fn sampled_images_keep_their_layout() {
     }
 
     drop((frames, image, device, instance));
-    assert_eq!(
-        validation.messages(),
-        0,
-        "validation reported problems; the log above says what"
-    );
+    check(&validation);
 }
 
 /// Makes and drops more images, one at a time, than the bindless set has slots to give out past
@@ -220,11 +282,7 @@ fn dropped_images_free_their_slots() {
     }
 
     drop((device, instance));
-    assert_eq!(
-        validation.messages(),
-        0,
-        "validation reported problems; the log above says what"
-    );
+    check(&validation);
 }
 
 /// Clears an image and a depth image in two passes each frame, over more frames than are in
@@ -250,11 +308,7 @@ fn depth_clears_in_every_pass() {
     }
 
     drop((frames, image, depth, device, instance));
-    assert_eq!(
-        validation.messages(),
-        0,
-        "validation reported problems; the log above says what"
-    );
+    check(&validation);
 }
 
 /// Renders IDs beside an image in eight frames, each pass clearing them to 0, and reads pixels of
@@ -338,11 +392,7 @@ fn ids_read_back_two_frames_later() {
     }
 
     drop((frames, image, ids, device, instance));
-    assert_eq!(
-        validation.messages(),
-        0,
-        "validation reported problems; the log above says what"
-    );
+    check(&validation);
 }
 
 /// Fills a texture and a buffer in a frame, then writes over a pixel of the texture in each of the
@@ -393,17 +443,14 @@ fn filled_textures_can_be_written_over_on_every_path() {
     }
 
     drop(instance);
-    assert_eq!(
-        validation.messages(),
-        0,
-        "validation reported problems; the log above says what"
-    );
+    check(&validation);
 }
 
 /// Forgets a frame, which the next frame catches, and a pass, which the frame's next call catches,
-/// its submission among them, after which no frame begins again. Nothing forgotten reaches the
-/// GPU, so validation has nothing to say.
-fn forgotten_frames_and_passes_are_caught() {
+/// its submission among them, after which no frame begins again. Each reaches the JSON log as an
+/// error with its code: the frame's as the frames drop, the pass's as the frame does. Nothing
+/// forgotten reaches the GPU, so validation has nothing to say.
+fn forgotten_frames_and_passes_are_caught(log: &Path) {
     let instance = instance();
     let validation = instance.validation();
     let black = [0.0, 0.0, 0.0, 1.0];
@@ -450,11 +497,15 @@ fn forgotten_frames_and_passes_are_caught() {
     }
 
     drop(instance);
-    assert_eq!(
-        validation.messages(),
-        0,
-        "validation reported problems; the log above says what"
-    );
+    check(&validation);
+    let log = std::fs::read_to_string(log).expect("the JSON log");
+    for code in ["gpu.frame_forgotten", "gpu.pass_forgotten"] {
+        let logged = log
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .any(|event| event["code"] == code && event["level"] == "ERROR");
+        assert!(logged, "the JSON log has no {code} error");
+    }
 }
 
 /// Opens two devices, and gives a frame of the one objects the other made: a target, textures, a
@@ -521,11 +572,7 @@ fn another_devices_objects_are_refused() {
     drop((frames, others_frames, image, others_image, others_depth));
     drop((others_ids, others_texture, others_buffer));
     drop((device, other, instance));
-    assert_eq!(
-        validation.messages(),
-        0,
-        "validation reported problems; the log above says what"
-    );
+    check(&validation);
 }
 
 /// Makes a texture in a placed slot, then asks for its slot again, and for a slot that isn't
@@ -549,11 +596,7 @@ fn refused_texture_slots_leak_nothing() {
     assert!(message.contains("isn't one of the"), "{message}");
 
     drop((placed, device, instance));
-    assert_eq!(
-        validation.messages(),
-        0,
-        "validation reported problems; the log above says what"
-    );
+    check(&validation);
 }
 
 /// Asks a pass for viewports no device draws, one wider than its limit and one reaching past its
@@ -583,11 +626,7 @@ fn passes_refuse_what_the_device_cant_draw() {
     frame.submit().expect("the frame's submission");
 
     drop((frames, buffer, image, device, instance));
-    assert_eq!(
-        validation.messages(),
-        0,
-        "validation reported problems; the log above says what"
-    );
+    check(&validation);
 }
 
 /// Saves a device's pipeline cache, and loads it into other devices of the same GPU: whole, it
@@ -618,11 +657,23 @@ fn pipeline_caches_load_what_this_gpu_saved_whole() {
     assert!(!loads(&saved[..saved.len() - 1]), "cut short");
 
     drop(instance);
-    assert_eq!(
-        validation.messages(),
-        0,
-        "validation reported problems; the log above says what"
-    );
+    check(&validation);
+}
+
+/// Asks a device to capture its work, which only RenderDoc's layer does: the tests turn it off
+/// with the other implicit layers, so the device refuses.
+fn captures_are_refused_without_renderdoc() {
+    let instance = instance();
+    let validation = instance.validation();
+    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let error = device
+        .start_capture()
+        .err()
+        .expect("no capture without RenderDoc");
+    assert_eq!(error.code(), "gpu.no_renderdoc", "{error:#}");
+
+    drop((device, instance));
+    check(&validation);
 }
 
 /// Breaks a Vulkan rule on purpose, and checks that validation's error reaches the JSON log

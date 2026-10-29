@@ -2,25 +2,30 @@
 //! Until the tool API brings it a game, the view shows a world of the editor's own, three squares
 //! and two cameras, through the editor's camera, orthographic at first, as 2D games see theirs,
 //! over a grid, with a toolbar and a gizmo over it; or through the world's camera, as the game
-//! would. Play, at the middle of the title bar, has a copy of the world play in its place, as the
-//! game would, its scripts and its physics running, the view seeing through its camera, where W, A,
-//! S and D drive the world's cameras, by a script of theirs, as a game's keys would; Simulate,
-//! beside it, has a copy simulate its physics alone, through the editor's camera; and Stop brings
-//! back the world as it was edited, with its edits' history. The toolbar's Colliders switch
-//! outlines the world's 2D colliders, as physics shapes them, whether the world runs or not. The
-//! Inspector edits the world, and undoes and redoes its edits, and duplicates entities with Ctrl+D.
-//! A click in the view picks what it shows there for the Inspector, or unpicks where it shows none,
-//! but with Pan or Orbit, whose left button moves the camera; the view outlines what's picked; and
-//! its bottom left names what it shows under the cursor, while the cursor is over it. Through the
-//! editor's camera, the toolbar's Move, Rotate and Scale, which W, E and R pick, as Q picks
-//! Select, show handles over what the Inspector has picked, whose drags move, turn and scale it,
-//! each an edit of the Inspector's. The File menu, behind the title bar's menu button, starts a new
-//! scene, emptying the world; opens one, whose entities replace the world's, stopping it first if
-//! it runs; and saves the world as it was edited as one, to the file it was opened from or saved to
-//! last, or as another: through the OS's file dialogs, and with Ctrl+N, Ctrl+O, Ctrl+S and
-//! Ctrl+Shift+S, Cmd for Ctrl on macOS. The Assets panel shows the files in the editor's assets
-//! folder, a folder at a time, and a scene dragged from it onto the view opens as Open opens one.
-//! When a file can't be read, opened or written, it says why, until that's dismissed.
+//! would, until the editor's camera moves. Play, at the middle of the title bar, at hand whichever
+//! panels show, has a copy of the world play in its place, as the game would, its scripts and its
+//! physics running, the view seeing through its camera, where W, A, S and D drive the world's
+//! cameras, by a script of theirs, as a game's keys would; Simulate, beside it, has a copy simulate
+//! its physics alone, through the editor's camera; and Stop brings back the world as it was
+//! edited, with its edits' history. Play from Simulate, or Simulate from Play, stops first and
+//! runs the world as it was edited afresh. The toolbar's Colliders switch outlines the world's 2D
+//! colliders, as physics shapes them, whether the world runs or not. The engine's Entities and
+//! Inspector panels create, duplicate, with Ctrl+D too, and delete entities, and add, remove and
+//! edit their components, each an edit the Inspector undoes and redoes. A click in the view picks
+//! what it shows there for the Inspector, through either camera, whether the world runs or not, or
+//! unpicks where it shows none, but with Pan or Orbit, whose left button moves the camera; the
+//! view outlines what's picked; and its bottom left names what it shows under the cursor, while
+//! the cursor is over it. Through the editor's camera, the toolbar's Move, Rotate and Scale, which
+//! W, E and R pick, as Q picks Select, show handles over what the Inspector has picked, as big on
+//! screen however far it is, whose drags move, turn and scale it, each an edit of the Inspector's,
+//! with Ctrl held, or Cmd on macOS, snapping to half units, 45° and halves. The File menu, behind
+//! the title bar's menu button, starts a new scene, emptying the world; opens one, whose entities
+//! replace the world's, stopping it first if it runs; and saves the world as it was edited as one,
+//! to the file it was opened from or saved to last, or as another: through the OS's file dialogs,
+//! and with Ctrl+N, Ctrl+O, Ctrl+S and Ctrl+Shift+S, Cmd for Ctrl on macOS. The Assets panel shows
+//! the files in the editor's assets folder, a folder at a time, and a scene dragged from it onto
+//! the view opens as Open opens one. When a file can't be read, opened or written, it says why,
+//! until that's dismissed.
 
 mod assets;
 mod camera;
@@ -42,12 +47,11 @@ use gg_engine::egui::{
     ViewportCommand, ViewportId,
 };
 use gg_engine::math::{Vec2, Vec3, Vec4};
-use gg_engine::reflect::Error;
 use gg_engine::{
     Actions, App, Binding, Camera, Change, Commands, Component, Context, Docked, Entity, EntityId,
-    Event, FileDialog, Inspector, InspectorLink, Key, Layer, Name, PerfPanel, Pick, Pose,
-    Projection, Reflect, Script, Source, Sprite, Tick, Transform, Ui, Viewpoint, World,
-    run_scripts, step_physics,
+    Error, Event, FileDialog, Input, Inspector, InspectorLink, Key, Layer, Name, PerfPanel, Pick,
+    Pose, Projection, Reflect, Script, Sprite, Tick, Transform, Ui, Viewpoint, World, run_scripts,
+    step_physics,
 };
 use tracing::warn;
 
@@ -74,15 +78,10 @@ fn app() -> App {
     app.overlay(PerfPanel).overlay(inspector)
 }
 
-/// The editor's layer: its camera, Play and Simulate in the title bar, the toolbar and gizmo over
-/// the view, and the name of what it shows under the cursor; the outline and the handles over what
-/// the Inspector has picked, which pick and edit through its link; the grid; the world playing or
-/// simulating, a copy of it in its place, and the world as it was edited aside, which Stop brings
-/// back; the keys that drive the world's cameras while it plays; the File menu, which empties the
-/// world for a new scene, replaces it with a scene's and
-/// saves it as one, keeping the file it was opened from or saved to last for Save to write to; and
-/// the Assets panel, whose scenes open as they're dropped on the view, as Open opens one. It says
-/// why when a file can't be read, opened or written.
+/// The editor's layer: its camera, the toolbar, the handles, which pick and edit through the
+/// Inspector's link, and the grid; the picks it asks for, and what the view shows under the
+/// cursor; the commands it queues and how the world runs, with the world as it was edited aside
+/// while a copy runs in its place; the scene's file; the Assets panel; and the message it shows.
 struct Editor {
     camera: OrbitCamera,
     toolbar: Toolbar,
@@ -106,8 +105,7 @@ struct Editor {
     grid: Option<Grid>,
     /// What drives the world's cameras.
     actions: Actions<Act>,
-    /// What the actions, the toolbar and the File menu changed since the last tick, which it
-    /// applies.
+    /// What changed since the last tick, as the [`Command`]s it applies.
     commands: Vec<Command>,
     /// Whether the world's cameras take the keys: whether the world played and the view saw
     /// through its camera as the commands last heard; false once an Open has stopped them.
@@ -139,13 +137,14 @@ struct Editor {
 /// What the editor's keys do to its world, beside what its camera's do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Act {
-    /// W, A, S and D: which way the world's cameras go, while the view sees through the world's
-    /// camera.
+    /// W, A, S and D: which way the world's cameras go, while the world plays and the view sees
+    /// through the world's camera.
     Move,
 }
 
-/// What the editor's keys, its toolbar and its File menu change of its world, queued as they change
-/// it and applied at its next tick: its commands, which a recording keeps.
+/// What the editor's keys, the title bar's Play and Simulate, the toolbar's world-camera switch,
+/// the Assets panel's drop and the File menu change of its world, queued as they change it and
+/// applied at its next tick: its commands, which a recording keeps.
 #[derive(Reflect)]
 enum Command {
     /// Has the world's cameras go this way, across and up, until the next.
@@ -171,11 +170,7 @@ impl Editor {
     /// The editor, whose handles pick and edit through `link`, the Inspector's.
     fn new(link: InspectorLink) -> Self {
         let mut actions = Actions::default();
-        let wasd = Binding::Axis2 {
-            x: [Key::KeyA, Key::KeyD].map(Source::Key),
-            y: [Key::KeyS, Key::KeyW].map(Source::Key),
-        };
-        let bound = actions.bind(Act::Move, wasd);
+        let bound = actions.bind(Act::Move, Binding::WASD);
         bound.expect("W, A, S and D are of one kind");
         Self {
             camera: OrbitCamera::new(),
@@ -361,9 +356,8 @@ impl Editor {
 
     /// Has Q, W, E or R pick its tool, Select, Move, Rotate or Scale, for `event`, a press of it,
     /// not a repeat; but not one with `command` held, Ctrl, or Cmd on macOS, which is a
-    /// shortcut's; nor while the view sees through the world's camera, whose W, A, S and D drive
-    /// the world's cameras; nor while the editor's camera flies, as its keys steer it; nor during a
-    /// drag of the handles.
+    /// shortcut's; nor while the view sees through the world's camera, which shows no handles; nor
+    /// while the editor's camera flies, as its keys steer it; nor during a drag of the handles.
     fn choose_tool(&mut self, event: &Event<'_>, command: bool) {
         let Event::Key {
             key,
@@ -497,8 +491,8 @@ impl Editor {
 }
 
 /// The script that drives the world's cameras, as a game's would: it moves its entity across and up
-/// at its speed, the way its heading says, which the editor's W, A, S and D set while the view sees
-/// through the world's camera.
+/// at its speed, the way its heading says, which the editor's W, A, S and D set while the world
+/// plays and the view sees through the world's camera.
 #[derive(Clone, Copy, Component)]
 struct CameraController {
     /// How fast it goes, in units a second.
@@ -811,6 +805,11 @@ impl Message {
     }
 }
 
+/// Whether `input` has Alt held, by either of its keys.
+fn alt_down(input: &Input) -> bool {
+    input.key_down(Key::AltLeft) || input.key_down(Key::AltRight)
+}
+
 impl Layer for Editor {
     fn attach(&mut self, cx: &mut Context) {
         cx.set_clear_color([0.02, 0.02, 0.025, 1.0]);
@@ -929,7 +928,7 @@ impl Layer for Editor {
         // Through either camera, whether the world runs or not.
         cx.set_colliders_shown(self.toolbar.colliders);
         if let Some(id) = self.link.picked() {
-            let scale = cx.window().map_or(1.0, |window| window.scale() as f32);
+            let scale = cx.scale() as f32;
             cx.outline(id, OUTLINE, OUTLINE_WIDTH * scale);
         }
         if self.toolbar.world_camera {
@@ -951,8 +950,8 @@ impl Layer for Editor {
         let input = cx.input();
         let screen = Screen {
             view: cx.view(),
-            scale: cx.window().map_or(1.0, |window| window.scale() as f32),
-            alt: input.key_down(Key::AltLeft) || input.key_down(Key::AltRight),
+            scale: cx.scale() as f32,
+            alt: alt_down(input),
         };
         // The key egui's shortcuts take as the command key.
         let command = if cfg!(target_os = "macos") {
@@ -1025,15 +1024,14 @@ impl Layer for Editor {
         if let (Some(view), Some(pixels), Some(viewpoint)) =
             (ui.view(), ui.viewport(), cx.viewpoint())
         {
-            let scale = cx.window().map_or(1.0, |window| window.scale() as f32);
+            let scale = cx.scale() as f32;
             if let Some(sight) = Sight::new(viewpoint, pixels, scale) {
                 let egui = ui.egui();
                 let ppp = egui.pixels_per_point();
                 let painter = egui.layer_painter(view.layer_id).with_clip_rect(view.rect);
                 // The one a press would grab: none while the camera drags or eases, nor with Alt
                 // held, which orbits.
-                let input = cx.input();
-                let alt = input.key_down(Key::AltLeft) || input.key_down(Key::AltRight);
+                let alt = alt_down(cx.input());
                 let hover = view.hover_pos().filter(|_| view.hovered());
                 let hover = hover.filter(|_| camera.moving().is_none() && !camera.eases() && !alt);
                 let hover = hover.map(|at| Vec2::new(at.x, at.y) * ppp);
@@ -1087,6 +1085,7 @@ impl Layer for Editor {
 mod tests {
     use std::fs;
 
+    use gg_engine::math::DVec2;
     use gg_engine::reflect::Value;
     use gg_engine::{BoxCollider2D, MouseButton, RigidBody2D, Scroll, Viewport};
 
@@ -1097,28 +1096,30 @@ mod tests {
         Editor::new(Inspector::default().link())
     }
 
-    /// A view whose top left isn't the window's, at 1.5 pixels a point, as the camera's tests have:
-    /// through the editor's camera as it starts, 10 units tall, the origin at its middle, (500,
-    /// 350), and a unit 60 pixels across.
-    const VIEW: Viewport = Viewport {
+    /// A view whose top left isn't the window's, at [`SCALE`] pixels a point: through the editor's
+    /// camera as it starts, 10 units tall, the origin at its middle, (500, 350), and a unit 60
+    /// pixels across.
+    pub(crate) const VIEW: Viewport = Viewport {
         origin: [100, 50],
         size: [800, 600],
     };
+    pub(crate) const SCALE: f32 = 1.5;
 
     /// On Move's X arrow, as the editor's camera starts, for an entity at the origin: 105 of its
     /// 150 pixels, 70 points, right of the middle.
     const ON_X: [f64; 2] = [605.0, 350.0];
 
-    /// What the editor reads of the window with the cursor at `at`, Alt held if `alt`.
-    fn reading(at: [f64; 2], alt: bool) -> Reading {
+    /// What the editor reads of the window, [`VIEW`] at [`SCALE`] pixels a point, with the cursor
+    /// at `at`, in its pixels, and neither Alt nor the command key held.
+    pub(crate) fn reading(at: impl Into<DVec2>) -> Reading {
         Reading {
             screen: Screen {
                 view: Some(VIEW),
-                scale: 1.5,
-                alt,
+                scale: SCALE,
+                alt: false,
             },
             command: false,
-            cursor: Some(at),
+            cursor: Some(at.into().to_array()),
         }
     }
 
@@ -1144,9 +1145,9 @@ mod tests {
         pressed: bool,
     ) -> ControlFlow<()> {
         let moved = Event::CursorMoved { x: at[0], y: at[1] };
-        let _ = editor.take(&moved, &reading(at, false), picked);
+        let _ = editor.take(&moved, &reading(at), picked);
         let event = Event::MouseButton { button, pressed };
-        editor.take(&event, &reading(at, false), picked)
+        editor.take(&event, &reading(at), picked)
     }
 
     /// An editor dragging Move's X arrow of `at_the_origin`, through its camera as it starts.
@@ -1169,7 +1170,7 @@ mod tests {
         let picked = at_the_origin();
         for x in [620.0, 650.0, 680.0] {
             let moved = Event::CursorMoved { x, y: 360.0 };
-            let handled = editor.take(&moved, &reading([x, 360.0], false), picked);
+            let handled = editor.take(&moved, &reading([x, 360.0]), picked);
             assert_eq!(handled, ControlFlow::Continue(()));
         }
         let at = [680.0, 360.0];
@@ -1216,7 +1217,7 @@ mod tests {
             wheel,
             home,
         ] {
-            let handled = editor.take(&event, &reading(ON_X, false), picked);
+            let handled = editor.take(&event, &reading(ON_X), picked);
             assert_eq!(handled, ControlFlow::Break(()), "{event:?}");
         }
         editor.camera.update(Duration::from_secs(1));
@@ -1267,24 +1268,16 @@ mod tests {
             button: MouseButton::Right,
             pressed,
         };
-        let screen = reading(ON_X, false).screen;
+        let screen = reading(ON_X).screen;
         let _ = editor.camera.event(&right(true), screen, Tool::Select);
         assert!(editor.camera.flies());
         editor.choose_tool(&key(Key::KeyE, false), false);
         assert_eq!(editor.toolbar.tool, Tool::Select, "flying");
         let mut editor = dragging();
-        let _ = editor.take(
-            &key(Key::KeyR, false),
-            &reading(ON_X, false),
-            at_the_origin(),
-        );
+        let _ = editor.take(&key(Key::KeyR, false), &reading(ON_X), at_the_origin());
         assert_eq!(editor.toolbar.tool, Tool::Move, "dragging");
         let _ = press_at(&mut editor, at_the_origin(), ON_X, MouseButton::Left, false);
-        let _ = editor.take(
-            &key(Key::KeyR, false),
-            &reading(ON_X, false),
-            at_the_origin(),
-        );
+        let _ = editor.take(&key(Key::KeyR, false), &reading(ON_X), at_the_origin());
         assert_eq!(editor.toolbar.tool, Tool::Scale, "let go");
     }
 
@@ -1321,7 +1314,9 @@ mod tests {
             button: MouseButton::Left,
             pressed: true,
         };
-        let _ = editor.take(&alt, &reading(off, true), at_the_origin());
+        let mut held = reading(off);
+        held.screen.alt = true;
+        let _ = editor.take(&alt, &held, at_the_origin());
         assert_eq!(editor.picking, None, "with Alt");
         let editor = dragging();
         assert_eq!(editor.picking, None, "on a handle");
@@ -1937,7 +1932,7 @@ mod tests {
     /// again, through the editor's queue, Open with the scene's text; and a move, as recordings
     /// from before them hold it, still reads as one.
     #[test]
-    fn the_file_menus_commands_are_values_a_recording_keeps() {
+    fn its_commands_are_values_a_recording_keeps() {
         let mut editor = fresh();
         let text = "(\n    entities: {},\n)\n";
         editor.commands.push(Command::Play);

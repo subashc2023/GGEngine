@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde::de::{self, Deserializer};
 
 use crate::ecs::{MAX_DEPTH, float, quote};
-use crate::reflect::{Name, Value};
+use crate::reflect::{Ident, Value};
 use crate::{Entity, EntityId, World};
 
 /// Writes `value` on one line, each part tagged with its kind: such as `Variant("Swarm", [("0",
@@ -24,8 +24,8 @@ pub(crate) fn write(out: &mut String, value: &Value, world: &World) {
     put(out, value, world, false);
 }
 
-/// As [`write`], but with every NaN as one, as the world's hash takes them, so that the same world
-/// writes the same text on every platform.
+/// As [`write()`], but with every NaN as one, as the world's hash takes them, so that the same
+/// world writes the same text on every platform.
 pub(crate) fn write_folded(out: &mut String, value: &Value, world: &World) {
     put(out, value, world, true);
 }
@@ -46,7 +46,7 @@ fn put(out: &mut String, value: &Value, world: &World, fold: bool) {
         }
         out.push(')');
     };
-    let fields = |out: &mut String, fields: &[(Name, Value)]| {
+    let fields = |out: &mut String, fields: &[(Ident, Value)]| {
         out.push('[');
         for (i, (name, value)) in fields.iter().enumerate() {
             if i > 0 {
@@ -195,7 +195,7 @@ impl Text {
         let fields = |given: &[(String, Text)]| {
             let given = given.iter();
             given
-                .map(|(name, text)| (Name::Owned(name.clone()), text.value(world)))
+                .map(|(name, text)| (Ident::Owned(name.clone()), text.value(world)))
                 .collect()
         };
         match self {
@@ -215,7 +215,7 @@ impl Text {
             Self::Some(text) => Value::Option(Some(Box::new(text.value(world)))),
             Self::List(items) => Value::List(items.iter().map(|item| item.value(world)).collect()),
             Self::Struct(given) => Value::Struct(fields(given)),
-            Self::Variant(name, given) => Value::Variant(Name::Owned(name.clone()), fields(given)),
+            Self::Variant(name, given) => Value::Variant(Ident::Owned(name.clone()), fields(given)),
             Self::Opaque => Value::Opaque,
         }
     }
@@ -250,7 +250,7 @@ mod tests {
             -1.0e-30,
         ];
         let f64s = [-0.0, f64::from_bits(1), f64::MAX, 0.1, f64::NEG_INFINITY];
-        let named = |name: &str, value| (Name::Owned(name.to_owned()), value);
+        let named = |name: &str, value| (Ident::Owned(name.to_owned()), value);
         let mut values: Vec<Value> = f32s.iter().map(|&x| Value::F32(x)).collect();
         values.extend(f64s.iter().map(|&x| Value::F64(x)));
         values.extend([
@@ -353,8 +353,8 @@ mod tests {
         let nested = |levels: usize| {
             let mut value = Value::Opaque;
             for _ in 1..levels {
-                let field = (Name::Borrowed("0"), value);
-                value = Value::Variant(Name::Borrowed("Deeper"), vec![field]);
+                let field = (Ident::Borrowed("0"), value);
+                value = Value::Variant(Ident::Borrowed("Deeper"), vec![field]);
             }
             value
         };

@@ -43,12 +43,10 @@ const OP_ATOMIC_STORE: u32 = 228;
 const OP_ATOMIC_FLAG_CLEAR: u32 = 319;
 
 /// The instructions that make a value of a type, a pointer among them, which the check follows to
-/// see what a store writes through: `OpUndef`, `OpFunctionParameter`, `OpFunctionCall`,
-/// `OpVariable`, `OpLoad`, the access chains, `OpCompositeExtract`, `OpCopyObject`,
-/// `OpConvertUToPtr`, `OpBitcast`, `OpSelect` and `OpPhi`.
-const MAKES_VALUES: [u32; 15] = [
-    1, 55, 57, 59, 61, 65, 66, 67, 70, 81, 83, 120, 124, 169, 245,
-];
+/// see what a store writes through: `OpUndef`, `OpFunctionParameter`, `OpFunctionCall`, `OpLoad`,
+/// the access chains, `OpCompositeExtract`, `OpCopyObject`, `OpConvertUToPtr`, `OpBitcast`,
+/// `OpSelect` and `OpPhi`.
+const MAKES_VALUES: [u32; 14] = [1, 55, 57, 61, 65, 66, 67, 70, 81, 83, 120, 124, 169, 245];
 
 /// Whether `opcode` is an atomic operation's other than `OpAtomicStore` and `OpAtomicFlagClear`,
 /// whose pointer comes after their result's type and ID.
@@ -268,7 +266,7 @@ struct EntryPoint {
     interface: Vec<u32>,
 }
 
-/// A global variable: its type, a pointer, and its storage class.
+/// A variable: its type, a pointer, and its storage class.
 struct Variable {
     id: u32,
     ty: u32,
@@ -292,7 +290,7 @@ struct Module {
     variables: Vec<Variable>,
     /// The type of each value that can be a pointer.
     value_types: HashMap<u32, u32>,
-    /// What stores, copies and atomic operations write through.
+    /// What stores, copies and atomic operations reach through.
     written: Vec<u32>,
     /// Whether it samples with a depth comparison.
     compares_depth: bool,

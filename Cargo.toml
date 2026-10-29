@@ -19,7 +19,12 @@ ash-window = "0.13.0"
 bytemuck = "1.25.2"
 cc = "1.9.0"
 egui = { version = "0.37.0", features = ["default_fonts"] }
-egui-winit = "0.37.0"
+# Without its default `links`, which opens a clicked link in the browser: no UI shows one.
+egui-winit = { version = "0.37.0", default-features = false, features = [
+    "clipboard",
+    "wayland",
+    "x11",
+] }
 epaint = { version = "0.37.0", features = ["bytemuck"] }
 # Gamepads. On Windows its default backend, Windows.Gaming.Input, delivers input only to a
 # focused window of the process; on Linux it builds against libudev through pkg-config, so a
@@ -66,7 +71,8 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
 # serde_derive's version, so that the two build once.
 syn = "3.0.9"
-tracing = "0.1.44"
+# Without its default `attributes`, the `#[instrument]` macro, which nothing uses.
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3.23", features = ["json"] }
 # Tracy's client, for gg-core's zones. Its defaults open a profiler to the network and add
 # sampling, system tracing and a crash handler; these keep its listener on loopback, where the
@@ -89,7 +95,7 @@ winit = "0.30.13"
 zune-jpeg = "0.5.15"
 
 [workspace.lints.rust]
-# A crate opts in to unsafe code with `#![allow(unsafe_code)]` and a stated reason.
+# A crate or one of its modules opts in to unsafe code with a stated reason, as AGENTS.md says.
 unsafe_code = "deny"
 
 [workspace.lints.clippy]

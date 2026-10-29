@@ -16,8 +16,8 @@ pub struct Swapchain {
     raw: vk::SwapchainKHR,
     format: vk::SurfaceFormatKHR,
     present_mode: vk::PresentModeKHR,
-    /// Signaled by each acquire once the display has let go of the image, and reset after the
-    /// wait on it.
+    /// Signaled by each paced acquire once the display has let go of the image, and reset after
+    /// the wait on it.
     available: vk::Fence,
     extent: vk::Extent2D,
     /// The window's size, for surfaces that take their size from the swapchain.
@@ -39,7 +39,8 @@ impl Swapchain {
     /// doesn't set its own size. The device's graphics queue must be able to present to the
     /// surface, as it can to the one the device was opened for. With `vsync`, it presents at
     /// the display's refresh rate; otherwise as fast as frames are rendered, where the device
-    /// can do that without tearing.
+    /// can do that without tearing. Its objects are named after the surface's window, as
+    /// [`Surface::new`] says.
     ///
     /// # Panics
     ///
@@ -60,8 +61,9 @@ impl Swapchain {
                 format!("device {gpu:?} was opened without a surface, so it can't present"),
             ));
         }
+        let name = surface.name();
         // The surface, by the debug name it's given below.
-        let surface_named = format_args!("surface \"window surface\" on device {gpu:?}");
+        let surface_named = format_args!("surface \"{name} surface\" on device {gpu:?}");
         // SAFETY: the physical device and the surface are live, and the family is the device's.
         let presents = unsafe {
             surface.surface_fn().get_physical_device_surface_support(
@@ -114,11 +116,14 @@ impl Swapchain {
                 .raw()
                 .create_fence(&vk::FenceCreateInfo::default(), None)
         }
-        .map_err(|e| vk_error("vkCreateFence", "fence \"swapchain image available\"", e))?;
+        .map_err(|e| {
+            let fence = format_args!("fence \"{name} swapchain image available\"");
+            vk_error("vkCreateFence", fence, e)
+        })?;
         // SAFETY: the fence is live, and the surface is of the device's instance.
         unsafe {
-            device.set_name(available, "swapchain image available");
-            device.set_name(surface.raw(), "window surface");
+            device.set_name(available, &format!("{name} swapchain image available"));
+            device.set_name(surface.raw(), &format!("{name} surface"));
         }
         // From here on, dropping `swapchain` destroys the fence.
         let mut swapchain = Self {
@@ -201,7 +206,9 @@ impl Swapchain {
                             .and_then(|()| raw.reset_fences(&fences))
                     }
                     .map_err(|e| {
-                        vk_error("vkWaitForFences", "fence \"swapchain image available\"", e)
+                        let name = self.surface.name();
+                        let fence = format_args!("fence \"{name} swapchain image available\"");
+                        vk_error("vkWaitForFences", fence, e)
                     })?;
                 }
                 Some(image)
@@ -213,8 +220,9 @@ impl Swapchain {
             }
             Err(vk::Result::NOT_READY | vk::Result::TIMEOUT) if !pace => None,
             Err(e) => {
-                let vk::Extent2D { width, height } = self.extent;
-                let subject = format_args!("swapchain \"swapchain\" of {width}x{height} pixels");
+                let (name, vk::Extent2D { width, height }) = (self.surface.name(), self.extent);
+                let subject =
+                    format_args!("swapchain \"{name} swapchain\" of {width}x{height} pixels");
                 return Err(vk_error("vkAcquireNextImageKHR", subject, e));
             }
         };
@@ -236,8 +244,9 @@ impl Swapchain {
                 Ok(())
             }
             e => {
-                let vk::Extent2D { width, height } = self.extent;
-                let subject = format_args!("swapchain \"swapchain\" of {width}x{height} pixels");
+                let (name, vk::Extent2D { width, height }) = (self.surface.name(), self.extent);
+                let subject =
+                    format_args!("swapchain \"{name} swapchain\" of {width}x{height} pixels");
                 Err(vk_error("vkQueuePresentKHR", subject, e))
             }
         }
@@ -274,6 +283,7 @@ impl Swapchain {
     fn rebuild(&mut self) -> Result<bool> {
         let _zone = gg_core::zone!();
         let device = self.device.clone();
+        let name = self.surface.name().to_owned();
         // SAFETY: the physical device and the surface are live.
         let capabilities = unsafe {
             self.surface
@@ -281,7 +291,8 @@ impl Swapchain {
                 .get_physical_device_surface_capabilities(device.physical(), self.surface.raw())
         }
         .map_err(|e| {
-            let subject = format_args!("surface \"window surface\" on device {:?}", device.name());
+            let gpu = device.name();
+            let subject = format_args!("surface \"{name} surface\" on device {gpu:?}");
             vk_error("vkGetPhysicalDeviceSurfaceCapabilitiesKHR", subject, e)
         })?;
         // The window can resize between this query and the swapchain's creation below, which then
@@ -343,7 +354,7 @@ impl Swapchain {
         unsafe {
             let raw = swapchain_fn.create_swapchain(&info, None).map_err(|e| {
                 let subject = format_args!(
-                    "swapchain \"swapchain\" of {}x{} {:?} pixels, presenting by {:?}",
+                    "swapchain \"{name} swapchain\" of {}x{} {:?} pixels, presenting by {:?}",
                     extent.width, extent.height, self.format.format, self.present_mode
                 );
                 vk_error("vkCreateSwapchainKHR", subject, e)
@@ -351,14 +362,11 @@ impl Swapchain {
             self.destroy_views_and_semaphores();
             swapchain_fn.destroy_swapchain(self.raw, None);
             self.raw = raw;
-            device.set_name(raw, "swapchain");
+            device.set_name(raw, &format!("{name} swapchain"));
             self.extent = extent;
             self.images = swapchain_fn.get_swapchain_images(raw).map_err(|e| {
-                vk_error(
-                    "vkGetSwapchainImagesKHR",
-                    "swapchain \"swapchain\"'s images",
-                    e,
-                )
+                let subject = format_args!("swapchain \"{name} swapchain\"'s images");
+                vk_error("vkGetSwapchainImagesKHR", subject, e)
             })?;
             for (i, &image) in self.images.iter().enumerate() {
                 let view_info = vk::ImageViewCreateInfo::default()
@@ -370,7 +378,7 @@ impl Swapchain {
                     .raw()
                     .create_image_view(&view_info, None)
                     .map_err(|e| {
-                        let subject = format_args!("image \"swapchain image {i}\"'s view");
+                        let subject = format_args!("image \"{name} swapchain image {i}\"'s view");
                         vk_error("vkCreateImageView", subject, e)
                     })?;
                 self.views.push(view);
@@ -378,13 +386,15 @@ impl Swapchain {
                     .raw()
                     .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
                     .map_err(|e| {
-                        let subject = format_args!("semaphore \"swapchain image {i} rendered\"");
+                        let subject =
+                            format_args!("semaphore \"{name} swapchain image {i} rendered\"");
                         vk_error("vkCreateSemaphore", subject, e)
                     })?;
                 self.rendered.push(rendered);
-                device.set_name(image, &format!("swapchain image {i}"));
-                device.set_name(view, &format!("swapchain image {i}"));
-                device.set_name(rendered, &format!("swapchain image {i} rendered"));
+                let image_name = format!("{name} swapchain image {i}");
+                device.set_name(image, &image_name);
+                device.set_name(view, &image_name);
+                device.set_name(rendered, &format!("{image_name} rendered"));
             }
         }
         self.stale = false;

@@ -162,7 +162,7 @@ impl World {
     /// world.despawn(entity)?;
     /// assert_eq!(world.id(entity), None);
     /// assert_eq!(world.entity(id), None);
-    /// # Ok::<(), gg_engine::reflect::Error>(())
+    /// # Ok::<(), gg_engine::Error>(())
     /// ```
     pub fn entity(&self, id: EntityId) -> Option<Entity> {
         self.by_id.get(&id).copied()
@@ -271,7 +271,7 @@ pub(super) mod tests {
     }
 
     /// SplitMix64's numbers from a seed of 0, as Vigna's C gives them, so that every platform draws
-    /// the same IDs from a seed, as replays will need.
+    /// the same IDs from a seed, as replays need.
     #[test]
     fn a_stream_draws_splitmix64s_numbers() {
         let mut stream = IdStream::new(0);

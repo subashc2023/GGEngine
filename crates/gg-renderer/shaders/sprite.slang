@@ -2,19 +2,13 @@
 // the sprite's rectangle, showing that rectangle of a texture, tinted by the sprite's color, and
 // drawn by its alpha over what's behind it. Each instance is a sprite, with its own transform, ID
 // and parameters, writing its ID where it shows but where it's fully transparent, so that a pick
-// there finds what's behind it. `Corner` in src/sprite.rs, which `Corner` here matches field for
-// field, and `Params`, which `Sprite` here matches byte for byte, its `rect` being `top_left` then
-// `bottom_right`. A sprite samples only the texels its rectangle covers, so that the cells of a
-// sprite sheet packed edge to edge show nothing of one another: Godot's region filter clip, which
-// Godot makes optional and always insets by half a texel.
+// there finds what's behind it. `Params` in src/sprite.rs, which `Sprite` here matches byte for
+// byte, its `rect` being `top_left` then `bottom_right`. A sprite samples only the texels its
+// rectangle covers, so that the cells of a sprite sheet packed edge to edge show nothing of one
+// another: Godot's region filter clip, which Godot makes optional and always insets by half a
+// texel.
 
-[[vk::binding(0, 0)]] Texture2D textures[];
-[[vk::binding(1, 0)]] SamplerState samplers[];
-
-struct Corner {
-    float3 position;
-    float2 uv;
-};
+#include "mesh.slang"
 
 struct Sprite {
     // Linear RGBA, alpha not multiplied in.
@@ -26,16 +20,7 @@ struct Sprite {
     uint sampler;
 };
 
-struct Push {
-    float4x4 clip_from_world;
-    Corner* corners;
-    // Each instance's, from the quad's space to the world's.
-    float4x4* transforms;
-    // Each instance's: its entity's, or 0.
-    uint2* ids;
-    Sprite* sprites;
-};
-[[vk::push_constant]] ConstantBuffer<Push> push;
+[[vk::push_constant]] ConstantBuffer<Push<Corner, Sprite>> push;
 
 struct Varyings {
     float4 position : SV_Position;
@@ -55,8 +40,8 @@ static const float ROUNDING = 1.0 / 256.0;
 
 [shader("vertex")]
 Varyings vertex_main(uint index: SV_VulkanVertexID, uint instance: SV_VulkanInstanceID) {
-    Corner corner = push.corners[index];
-    Sprite sprite = push.sprites[instance];
+    Corner corner = push.vertices[index];
+    Sprite sprite = push.params[instance];
     float4 world = mul(push.transforms[instance], float4(corner.position, 1.0));
     Varyings out;
     out.position = mul(push.clip_from_world, world);
@@ -78,14 +63,9 @@ Varyings vertex_main(uint index: SV_VulkanVertexID, uint instance: SV_VulkanInst
     return out;
 }
 
-struct Targets {
-    float4 color : SV_Target0;
-    uint2 id : SV_Target1;
-};
-
 [shader("fragment")]
 Targets fragment_main(Varyings input) {
-    Sprite sprite = push.sprites[input.instance];
+    Sprite sprite = push.params[input.instance];
     // The sprites of one draw sample textures of their own, so the index can differ across it.
     // Decoded from sRGB to linear as it's sampled, and the sRGB target encodes it again.
     Texture2D texture = textures[NonUniformResourceIndex(sprite.texture)];

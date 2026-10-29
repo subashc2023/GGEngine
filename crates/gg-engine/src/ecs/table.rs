@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use gg_core::{Error, Result};
 
 use super::{Component, Entity, World, hash};
-use crate::reflect::{Name, Reflect, Shape, Type, TypeIndex, Types, Value};
+use crate::reflect::{Ident, Reflect, Shape, Type, TypeIndex, Types, Value};
 
 /// A component type's index among those a world has seen, in the order it first saw them: the
 /// world's own, which never leaves it.
@@ -26,14 +26,14 @@ pub struct Components {
     /// By id.
     infos: Vec<Info>,
     /// By name; looked up, never iterated.
-    by_name: HashMap<Name, ComponentId>,
+    by_name: HashMap<Ident, ComponentId>,
     types: Types,
 }
 
 #[derive(Clone)]
 struct Info {
     /// Its name in its description.
-    name: Name,
+    name: Ident,
     /// What the world's hash takes it as, from its name.
     key: u64,
     index: TypeIndex,
@@ -46,9 +46,10 @@ struct Info {
 impl Components {
     /// `T`'s id, which it gets once it's described, the first time it's asked for.
     ///
-    /// Fails as describing it does, such as with `reflect.name_taken` or `reflect.bad_default`; and
-    /// with `ecs.bad_exclusive` if it names an exclusive field that isn't a `bool` of its own, as
-    /// [`Component::exclusive`] says.
+    /// Fails as describing it does, such as with `reflect.name_taken` or `reflect.bad_default`;
+    /// with `reflect.unnamed` if it describes itself as something other than a struct or an enum;
+    /// and with `ecs.bad_exclusive` if it names an exclusive field that isn't a `bool` of its own,
+    /// as [`Component::exclusive`] says.
     pub fn register<T: Component>(&mut self) -> Result<ComponentId> {
         if let Some(&id) = self.ids.get(&TypeId::of::<T>()) {
             return Ok(id);

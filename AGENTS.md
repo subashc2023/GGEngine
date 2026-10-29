@@ -14,23 +14,24 @@ crate, or adding or removing a dependency.
 ```text
 Cargo.toml        the workspace: members, shared package settings, lints, internal crates
 crates/           libraries
-  gg-core/        math, handles, logging, profiling, errors
+  gg-core/        math, logging, profiling, errors
   gg-gpu/         Vulkan through ash: the only crate that touches Vulkan
-  gg-renderer/    render graph, passes, materials; gets plain render data, never the scene
-  gg-engine/      main loop, window, input, scene, assets, hot reload, tool API: what games use
+  gg-renderer/    passes, materials, render graph (to come); gets plain render data, never the scene
+  gg-engine/      what games use: main loop, window, input, scene, image and glTF loading,
+                  hot reload, tool API (to come)
   gg-macros/      the derives gg-engine re-exports
 apps/             executables
   sandbox/        development playground
   editor/         the editor: the game's view in a panel among dockable panels
-  player/         reference player: runs cooked scenes without game code
+  player/         reference player, with no layers; runs cooked scenes without game code (to come)
 docs/PLAN.md      the roadmap (see Workflow)
-docs/DEFECTS.md   known defects, left in because a fix costs more than they do (see Workflow)
+docs/DEFECTS.md   known defects of the code that exists (see Workflow)
 ```
 
 Dependencies point down: apps → `gg-engine` → `gg-renderer` → `gg-gpu` → `gg-core`, and any
 crate may use `gg-core`. Cargo catches only some breaches of the layering rules in
 ARCHITECTURE.md, and `cargo deny check bans` (from [deny.toml](deny.toml)) catches skip-level
-edges and the wrong crate using `ash`, `winit`, `gilrs`, `rfd`, `rayon-core` or Tracy's client:
+edges and a crate using a library another crate owns, such as `ash`, `winit` or `rapier2d`:
 check a change against the rest yourself.
 
 ## Commands
@@ -41,16 +42,17 @@ cargo run -p sandbox
 cargo run -p editor
 cargo run -p sandbox -- --help    # the flags every app shares
 cargo run -p sandbox -- --headless --frames 60   # does the engine run? 0 means cleanly
-cargo run -p sandbox -- --record run.recording   # a run's seed, commands and hashes
-cargo run -p sandbox -- --replay run.recording   # without a GPU: 0 means every hash matched
+cargo run -p sandbox -- --record target/run.recording   # a run's seed, commands and hashes
+cargo run -p sandbox -- --replay target/run.recording   # without a GPU: 0 means every hash matched
 cargo run -p sandbox --release --features tracy   # with zones for Tracy
 cargo build -p player --release   # shipping: the player alone
+cargo test -p gg-renderer --test gpu -- picks   # the GPU tests whose names contain picks
 ```
 
 Building needs a C++ compiler, for the Vulkan Memory Allocator, and `slangc` for the shaders: the
-Vulkan SDK's, or the one `SLANGC` names. Games' shaders compile with that slangc as they run, so
-it stays where the build found it. On Linux, gamepads need pkg-config and libudev's headers too:
-`pkgconf` and `libudev-dev` on Debian or Ubuntu.
+one `SLANGC` names, else the Vulkan SDK's, else the first on the `PATH`. Games' shaders compile
+with that slangc as they run, so it stays where the build found it. On Linux, gamepads need
+pkg-config and libudev's headers too: `pkgconf` and `libudev-dev` on Debian or Ubuntu.
 
 Each run writes a JSON log and logs its path as it starts; filter it on `level`, `code` or
 `vuid`. `RUST_LOG` sets what's logged: `RUST_LOG=gg_gpu=trace` adds gg-gpu's trace events to the
@@ -66,9 +68,9 @@ way, they're the same.
 
 The `tracy` feature sends the engine's zones to Tracy: run the Tracy viewer of the release the
 root Cargo.toml names, and connect it to the running app. To capture a headless run instead,
-start `tracy-capture -o run.tracy` first and give the run `TRACY_NO_EXIT=1`; then
-`tracy-csvexport run.tracy` lists its zones' times, and with `-u` each time a zone ran, when, and
-on which thread, such as the render thread's `render_frame` beside the main thread's ticks.
+start `tracy-capture -o target/run.tracy` first and give the run `TRACY_NO_EXIT=1`; then
+`tracy-csvexport target/run.tracy` lists its zones' times, and with `-u` each time a zone ran, when,
+and on which thread, such as the render thread's `render_frame` beside the main thread's ticks.
 
 RenderDoc captures a frame of a run it starts: `renderdoccmd capture -w -d . -c
 target/captures/sandbox target/debug/gg-sandbox --headless --frames 60 --capture 60` captures
@@ -76,9 +78,7 @@ frame 60 and logs `Frame captured` with the file's path. On Windows the executab
 `target\debug\gg-sandbox.exe`: renderdoccmd launches nothing from a path with forward slashes
 there. renderdoccmd exits 0 whatever the run does, so read the run's log. `renderdoccmd convert -f
 <capture> -c xml -o <capture>.xml` writes the capture as XML, every object's name
-(`vkSetDebugUtilsObjectNameEXT`) and pass's label (`vkCmdBeginDebugUtilsLabelEXT`) among it. Under
-RenderDoc synchronization isn't validated, and a GPU without `bufferDeviceAddressCaptureReplay`
-is refused: RenderDoc reports Vulkan 1.2 for it.
+(`vkSetDebugUtilsObjectNameEXT`) and pass's label (`vkCmdBeginDebugUtilsLabelEXT`) among it.
 
 Build and check shipping configurations with `-p player` alone, since a wider build merges the
 sandbox's features into the player ([Builds](ARCHITECTURE.md#builds)).
@@ -107,7 +107,9 @@ references, which you look at before committing them. The sandbox's world hashes
 a seeded run, are a reference too, which CI checks on every platform: a change to its simulation,
 to what the hash reads, or to glam or libm changes them, and `GG_UPDATE_REFERENCES=1 cargo test -p
 sandbox` rewrites them alone, with those of its live recording,
-`apps/sandbox/tests/references/live.recording`. A difference on some platforms only is a bug, not
+`apps/sandbox/tests/references/live.recording`. gg-engine's `physics.rs` holds another, the hash
+of a pile of bodies, which a change to rapier2d, to the physics code or to what the hash reads
+changes, and which is edited by hand. A difference on some platforms only is a bug, not
 a reference to rewrite. Some changes need a new recording, since rewriting the hashes would keep
 what they break: a change to the sandbox's layers, to a command's type that its lines no longer
 read as, or to what its commands name, the grid scene's types and the field the Inspector sets,
@@ -117,11 +119,9 @@ Inspector, undoing and redoing an edit, and closes; not File > Save, since the a
 grid's scene.
 
 CI ([ci.yml](.github/workflows/ci.yml)) runs the gates on every push, on Windows and Linux, x86-64
-and ARM64, and on macOS, on ARM64 alone, the shipping gate on Linux x86-64 alone, and the layering
-check. Its Linux jobs run the GPU
-tests and the sandbox headless on lavapipe, with and without Tracy, check that the run logged
-`engine.perf` and ticked and rendered once a frame, record a run on four threads and replay it, on
-the default and on one, and run the editor headless; Windows' and macOS's runners have no GPU, so
+and ARM64, and on macOS ARM64, the shipping gate on Linux x86-64 alone, and the layering check.
+Only its Linux jobs run the GPU tests, on lavapipe, and the apps headless, as its steps say,
+grepping the sandbox's log for `engine.perf`'s fields; Windows' and macOS's runners have no GPU, so
 there `GG_SKIP_GPU_TESTS` skips the GPU tests. lavapipe has no queue for transfers alone, so CI
 never uploads through one: after changing uploads, run the GPU tests on a GPU that has one, as
 NVIDIA's do. Its minutes are billed, a macOS minute at ten times a Linux one, so push a branch to
@@ -153,19 +153,19 @@ probe CI only for a change another platform could break.
   `VK_EXT_layer_settings`.
 - GPU tests run headless: they render offscreen and compare against reference images within a
   tolerance, so lavapipe can run them without a GPU.
-- Name and time everything: every Vulkan object gets a debug name, and every render-graph pass
-  a debug label and a GPU timestamp, so captures and Tracy timelines read clearly. Work that
-  takes about 10 µs or more gets a zone (`gg_core::zone!`), and nothing gets one for each draw,
-  sprite or other item of a loop over a frame's content.
+- Name and time everything: every Vulkan object gets a debug name and every pass a debug label,
+  so captures and Tracy timelines read clearly. Work that takes about 10 µs or more gets a zone
+  (`gg_core::zone!`), and nothing gets one for each draw, sprite or other item of a loop over a
+  frame's content.
 - Diagnostics are data: log through `tracing` with fields rather than printing, and give every
   error and warning a stable code and the thing it is about, as
   [ARCHITECTURE.md](ARCHITECTURE.md#diagnostics) describes.
 - Steady-state frames don't allocate: per-frame data lives in frame arenas and ring buffers.
-  gg-engine's `ticks` test checks ticks on every thread, entities coming and going among them,
-  and its `frames` test, a GPU test, headless frames of an app without UI; egui allocates, so
-  frames that draw UI do. After changing the windowed loop, run `cargo test -p gg-engine --test
-  frames -- --windowed`, without `dev`, with the mouse over its window: winit allocates for each
-  key on Windows. Tracy's client allocates as it records, so check allocations without `tracy`.
+  gg-engine's `ticks` test checks ticks on every thread, entities coming and going, but no physics,
+  which allocates as contacts come and go; its GPU test `frames`, headless frames of an app without
+  UI, as egui allocates. After changing the windowed loop, run `cargo test -p gg-engine --test
+  frames -- --windowed` without `dev`, `tracy` or a gamepad, with the mouse over its window: gilrs
+  allocates as it reads a pad, winit for each key on Windows, and Tracy's client as it records.
 
 ## Workflow
 
@@ -173,9 +173,10 @@ probe CI only for a change another platform could break.
   deferred and how it was verified: git history is the work log.
 - `docs/PLAN.md` holds the current milestone, the phases after it, deferred work and open
   questions; read it before roadmap work, and update it in the same commit as the work it
-  tracks. When a milestone is done, replace its section with one line under Done and move what
-  was skipped to Deferred. A defect left in because its fix costs more than it's worth goes in
-  `docs/DEFECTS.md` instead, by area: what it costs, the fix, and when the fix would be worth it.
+  tracks. When a milestone is done, replace its section with a line under Done, the title its
+  commit's subject begins with, or a phase and its name, and the date, and move what was skipped to
+  Deferred. A defect left in goes in `docs/DEFECTS.md`, by area: what it costs, the fix, and when
+  the fix would be worth it.
 - Open questions are the user's to decide: bring a recommendation instead of settling one
   yourself. Once one is decided, the answer goes in ARCHITECTURE.md and the question leaves
   docs/PLAN.md.

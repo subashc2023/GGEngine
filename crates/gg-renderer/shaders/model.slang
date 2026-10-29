@@ -12,8 +12,7 @@
 // Of those, only the masked one discards, since a shader that can discard while it writes depth
 // loses early depth testing on some GPUs.
 
-[[vk::binding(0, 0)]] Texture2D textures[];
-[[vk::binding(1, 0)]] SamplerState samplers[];
+#include "mesh.slang"
 
 struct Vertex {
     float3 position;
@@ -30,16 +29,7 @@ struct Material {
     float cutoff;
 };
 
-struct Push {
-    float4x4 clip_from_world;
-    Vertex* vertices;
-    // Each instance's, from the mesh's space to the world's.
-    float4x4* transforms;
-    // Each instance's: its entity's, or 0.
-    uint2* ids;
-    Material* materials;
-};
-[[vk::push_constant]] ConstantBuffer<Push> push;
+[[vk::push_constant]] ConstantBuffer<Push<Vertex, Material>> push;
 
 struct Varyings {
     float4 position : SV_Position;
@@ -62,14 +52,9 @@ Varyings vertex_main(uint index: SV_VulkanVertexID, uint instance: SV_VulkanInst
     return out;
 }
 
-struct Targets {
-    float4 color : SV_Target0;
-    uint2 id : SV_Target1;
-};
-
 [shader("fragment")]
 Targets fragment_main(Varyings input) {
-    Material material = push.materials[input.instance];
+    Material material = push.params[input.instance];
     // The instances of one draw can carry different textures and samplers. Decoded from sRGB to
     // linear as it's sampled, and the sRGB target encodes it again.
     Texture2D texture = textures[NonUniformResourceIndex(material.texture)];

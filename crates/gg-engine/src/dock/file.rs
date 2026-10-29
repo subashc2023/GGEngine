@@ -49,12 +49,13 @@ pub(crate) fn load_named(path: &Path, name: &str, view: Option<&'static str>) ->
 /// shows the game.
 fn read(path: &Path, view: Option<&'static str>) -> Result<Option<Layout>> {
     let message = format!("can't read the dock's layout from {}", path.display());
-    let text = match fs::read_to_string(path) {
-        Ok(text) => text,
+    let bytes = match dirs::read_file(path, u64::MAX) {
+        Ok(bytes) => bytes,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(Error::new("engine.dock_layout", message).with_source(e)),
     };
     let error = |problem: String| Error::new("engine.dock_layout", format!("{message}: {problem}"));
+    let text = String::from_utf8(bytes).map_err(|e| error(e.to_string()))?;
     let mut layout: Layout = ron::from_str(&text).map_err(|e| error(e.to_string()))?;
     layout.view = view;
     layout.check().map_err(error)?;
@@ -212,7 +213,6 @@ mod tests {
         layout.renumber();
         loaded.renumber();
         assert_eq!(loaded, layout);
-        assert!(!file.with_extension("ron.new").exists());
     }
 
     #[test]

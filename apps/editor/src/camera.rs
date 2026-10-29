@@ -28,9 +28,6 @@ const LOOK: f32 = 0.003;
 const ORBIT: f32 = 0.005;
 /// How much a line of the wheel dollies it.
 const ZOOM: f32 = 1.1;
-/// What a line of the wheel is in points, for scrolls that a touchpad reports in pixels, and how
-/// far Alt and the right button drag for a line's dolly: 40, as egui counts a line on the desktop.
-const POINTS_PER_LINE: f32 = 40.0;
 /// How fast Q and E roll it, in radians a second: a quarter turn.
 const ROLL_SPEED: f32 = FRAC_PI_2;
 /// How much faster it flies with Shift held.
@@ -252,13 +249,7 @@ impl OrbitCamera {
         let key = Source::Key;
         let mut actions = Actions::default();
         let bound = [
-            (
-                Action::Fly,
-                Binding::Axis2 {
-                    x: [key(Key::KeyA), key(Key::KeyD)],
-                    y: [key(Key::KeyS), key(Key::KeyW)],
-                },
-            ),
+            (Action::Fly, Binding::WASD),
             // Q counterclockwise, as the 2D camera controller turns.
             (
                 Action::Roll,
@@ -406,12 +397,7 @@ impl OrbitCamera {
                 ControlFlow::Continue(())
             }
             Event::Scroll(scroll) => {
-                let lines = match scroll {
-                    Scroll::Lines { y, .. } => y,
-                    Scroll::Pixels { y, .. } => {
-                        (y / f64::from(screen.scale) / f64::from(POINTS_PER_LINE)) as f32
-                    }
-                };
+                let lines = scroll.lines(f64::from(screen.scale));
                 let Some(view) = screen.view.filter(|_| lines.is_finite() && lines != 0.0) else {
                     return ControlFlow::Continue(());
                 };
@@ -546,9 +532,10 @@ impl OrbitCamera {
             Move::Pan => self.pan(pixels, view),
             Move::Look => self.turn(points * LOOK, false),
             Move::Orbit => self.turn(points * ORBIT, true),
-            // Right or up dollies in.
+            // Right or up dollies in: as a line of the wheel does for each
+            // `Scroll::POINTS_PER_LINE` points dragged.
             Move::Dolly => {
-                let lines = (points.x - points.y) / POINTS_PER_LINE;
+                let lines = (points.x - points.y) / Scroll::POINTS_PER_LINE as f32;
                 self.dolly(libm::powf(ZOOM, -lines), drag.toward);
             }
         }
@@ -623,13 +610,7 @@ fn wrap(angle: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A view whose top left isn't the window's, at 1.5 pixels a point.
-    const VIEW: Viewport = Viewport {
-        origin: [100, 50],
-        size: [800, 600],
-    };
-    const SCALE: f32 = 1.5;
+    use crate::tests::{SCALE, VIEW};
 
     fn screen(alt: bool) -> Screen {
         Screen {
@@ -696,7 +677,7 @@ mod tests {
     /// Where `point` shows in [`VIEW`], in the window's pixels, as the renderer projects it.
     fn pixel(camera: &OrbitCamera, point: Vec3) -> Vec2 {
         let [width, height] = VIEW.size.map(|side| side as f32);
-        let clip = camera.viewpoint().view_projection(width / height);
+        let clip = camera.viewpoint().view_projection(VIEW.aspect());
         let ndc = clip.project_point3(point);
         let [x, y] = VIEW.origin.map(|at| at as f32);
         // Vulkan's clip space has y down, as the window does.

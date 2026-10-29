@@ -36,7 +36,7 @@ pub enum Sampler {
 
 impl Sampler {
     /// Every sampler, in the order of their indices.
-    pub(crate) const ALL: [Self; 6] = [
+    pub const ALL: [Self; 6] = [
         Self::LinearClamp,
         Self::NearestClamp,
         Self::LinearRepeat,

@@ -1,8 +1,7 @@
 //! Images that layers load from disk as textures, and models' images: PNGs and JPEGs, decoded to
 //! the RGBA8 that the renderer takes.
 
-use std::fs::{self, File};
-use std::io::{self, Cursor, Read};
+use std::io::Cursor;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 
@@ -13,6 +12,8 @@ use zune_jpeg::errors::DecodeErrors;
 use zune_jpeg::zune_core::bytestream::ZCursor;
 use zune_jpeg::zune_core::colorspace::ColorSpace;
 use zune_jpeg::zune_core::options::DecoderOptions;
+
+use crate::dirs;
 
 /// The most bytes an image's file may hold: more than a PNG or a JPEG of a texture's size needs, as
 /// 8,192 pixels square of 16-bit RGBA, stored uncompressed, are 512 MiB.
@@ -40,23 +41,9 @@ pub(crate) fn load_image(name: &str, path: &Path) -> Result<Image> {
         )
     };
     // A byte past the most an image's file holds, so that a longer one fails to decode.
-    let bytes = read_file(path, MAX_FILE + 1)
+    let bytes = dirs::read_file(path, MAX_FILE + 1)
         .map_err(|error| bad("can't be read".to_owned()).with_source(error))?;
     decode(&bytes).map_err(|problem| bad(format!("doesn't decode as a PNG or a JPEG: {problem}")))
-}
-
-/// Reads the file at `path`, as far as its first `most` bytes: a regular file alone, so that a FIFO
-/// or a device, such as /dev/zero, can neither hang the read nor fill memory.
-pub(crate) fn read_file(path: &Path, most: u64) -> io::Result<Vec<u8>> {
-    // Before it's opened, since opening a FIFO waits for a writer.
-    let metadata = fs::metadata(path)?;
-    if !metadata.is_file() {
-        let not_regular = "it isn't a regular file";
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, not_regular));
-    }
-    let mut bytes = Vec::with_capacity(metadata.len().min(most).try_into().unwrap_or(0));
-    File::open(path)?.take(most).read_to_end(&mut bytes)?;
-    Ok(bytes)
 }
 
 /// Decodes a PNG or a JPEG, which it tells apart by their first bytes, whatever a file's name or a
@@ -140,7 +127,9 @@ fn decode_jpeg(bytes: &[u8]) -> Result<Image, String> {
             .jpeg_set_out_colorspace(colorspace)
             // So that it refuses a larger image as it reads the header, before it allocates.
             .set_max_width(MAX_TEXTURE_SIZE as usize)
-            .set_max_height(MAX_TEXTURE_SIZE as usize);
+            .set_max_height(MAX_TEXTURE_SIZE as usize)
+            // So that a scan cut short or corrupt fails rather than ending in gray.
+            .set_strict_mode(true);
         JpegDecoder::new_with_options(ZCursor::new(bytes), options)
     };
     let mut jpeg = decoder(ColorSpace::RGBA);
@@ -157,15 +146,21 @@ fn decode_jpeg(bytes: &[u8]) -> Result<Image, String> {
         jpeg = decoder(ColorSpace::RGB);
     }
     let decoded = jpeg.decode().map_err(jpeg_error)?;
+    // Strict mode can miss a sequential scan cut in its last row of MCUs, whose blocks the zeros
+    // zune-jpeg reads past the end finish. A file that ends in an end-of-image marker wasn't cut
+    // in a scan, whose data holds none; a file that doesn't is walked to its marker, if it has one.
+    if !bytes.ends_with(&[0xff, 0xd9]) && !reaches_its_end(bytes) {
+        return Err("it ends before its end-of-image marker".to_owned());
+    }
     let (Some(info), Some(colorspace)) = (jpeg.info(), jpeg.input_colorspace()) else {
         unreachable!("a JPEG that decodes has had its header read");
     };
     // zune-jpeg settles some color spaces only as it decodes, such as RGB from an Adobe marker's
-    // CMYK of three components, and decodes components that don't make the one it settles on, such
-    // as two, which it takes as multiband, to scrambled pixels rather than failing.
-    if matches!(colorspace, ColorSpace::MultiBand(_))
-        || colorspace.num_components() != usize::from(info.components)
-    {
+    // CMYK of three components. Strict mode refuses fewer components than the one it settles on
+    // takes, but takes too few for YCCK as YCbCr, rightly for three; fewer than that, and more
+    // than it takes, such as four that a later Adobe marker calls YCbCr, it decodes to the wrong
+    // pixels rather than failing.
+    if colorspace.num_components() != usize::from(info.components) {
         return Err(format!(
             "its {} components don't make the gray, YCbCr, RGB, CMYK or YCCK that its markers say \
              it holds",
@@ -185,13 +180,38 @@ fn decode_jpeg(bytes: &[u8]) -> Result<Image, String> {
     })
 }
 
+/// Whether a JPEG's segments, each as long as it says, and its scans' data, which holds no marker
+/// but restarts, run from its start to its end-of-image marker, which a file cut short has lost.
+/// What follows that marker, such as a motion photo's video, isn't read.
+fn reaches_its_end(bytes: &[u8]) -> bool {
+    // A marker, not a scan's 0xff, which has a 0 stuffed after it, a restart or a fill byte.
+    let marker = |pair: &[u8]| pair[0] == 0xff && !matches!(pair[1], 0 | 0xd0..=0xd7 | 0xff);
+    // Past its start-of-image marker.
+    let mut at = 2;
+    while let Some(found) = bytes
+        .get(at..)
+        .and_then(|rest| rest.windows(2).position(marker))
+    {
+        at += found + 2;
+        if bytes[at - 1] == 0xd9 {
+            return true;
+        }
+        // Past the segment, whose length counts its own two bytes.
+        let Some(&[high, low]) = bytes.get(at..at + 2) else {
+            return false;
+        };
+        at += usize::from(u16::from_be_bytes([high, low]));
+    }
+    false
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// A PNG one row of `pixels` high, of `width` pixels in `color` and `depth`, with the palette
     /// and transparency chunks given.
-    fn png(
+    pub(crate) fn png(
         color: png::ColorType,
         depth: png::BitDepth,
         width: u32,
@@ -264,21 +284,6 @@ mod tests {
             assert_eq!(image.size, [2, 1], "{kind}");
             assert_eq!(image.pixels, rgba, "{kind}");
         }
-    }
-
-    #[test]
-    fn a_regular_file_is_read_as_far_as_asked_and_a_device_not_at_all() {
-        let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
-        let whole = fs::read(&manifest).expect("the manifest");
-        assert_eq!(read_file(&manifest, 10).expect("its start"), whole[..10]);
-        assert_eq!(read_file(&manifest, u64::MAX).expect("all of it"), whole);
-        // A device, which would read as far as it's asked: zeros, or on Windows nothing.
-        let device = if cfg!(windows) {
-            "models/NUL"
-        } else {
-            "/dev/zero"
-        };
-        read_file(Path::new(device), 1 << 20).expect_err("a device");
     }
 
     #[test]
@@ -370,8 +375,10 @@ mod tests {
     fn a_jpeg_decodes_to_rgba8() {
         // The JPEG, and the JPEG with its components named R, G and B, as some encoders name those
         // of a JPEG that holds RGB, so that its YCbCr decodes as RGB, as it is; and the JPEG with
-        // an Adobe marker of transform 0 instead, which says the same of three components.
+        // an Adobe marker of transform 0 instead, which says the same of three components. And the
+        // JPEG followed by what looks like a scan's header, as a motion photo's video can hold.
         let jpeg = jpeg();
+        let followed = [&jpeg[..], b"\xff\xda"].concat();
         let mut rgb = jpeg.clone();
         let frame = (rgb.windows(2).position(|marker| marker == [0xff, 0xc0]))
             .expect("a baseline JPEG's frame header");
@@ -385,6 +392,7 @@ mod tests {
         let adobe = [&jpeg[..2], adobe, &jpeg[2..]].concat();
         for (kind, file, colors) in [
             ("YCbCr", jpeg, QUADRANTS),
+            ("YCbCr followed by more", followed, QUADRANTS),
             ("RGB", rgb, QUADRANTS.map(ycbcr)),
             ("RGB by its Adobe marker", adobe, QUADRANTS.map(ycbcr)),
             ("CMYK", cmyk(), INKED),
@@ -410,9 +418,11 @@ mod tests {
 
     #[test]
     fn a_jpeg_whose_components_make_no_color_space_is_refused() {
-        // `cmyk` with its frame and its scan cut to their first two components, which zune-jpeg
-        // decodes as a multiband image, to scrambled pixels.
-        let mut two = cmyk();
+        // `cmyk` with its frame and its scan cut to their first two components, too few for its
+        // CMYK, which zune-jpeg refuses; and `cmyk` with its Adobe marker moved after its frame
+        // header and saying YCbCr, which zune-jpeg decodes its four components as.
+        let cmyk = cmyk();
+        let mut two = cmyk.clone();
         let frame = (two.windows(2).position(|marker| marker == [0xff, 0xc0]))
             .expect("a baseline JPEG's frame header");
         (two[frame + 3], two[frame + 9]) = (8 + 2 * 3, 2);
@@ -421,8 +431,19 @@ mod tests {
             (two.windows(2).position(|marker| marker == [0xff, 0xda])).expect("a scan header");
         (two[scan + 3], two[scan + 4]) = (6 + 2 * 2, 2);
         two.drain(scan + 9..scan + 13);
-        let problem = decode(&two).expect_err("two components");
-        assert!(problem.contains("2 components"), "{problem}");
+        // Its Adobe marker is its first, whose last byte, its transform, says what its components
+        // are; and its frame header ends where its Huffman tables start.
+        let tables =
+            (cmyk.windows(2).position(|marker| marker == [0xff, 0xc4])).expect("Huffman tables");
+        let adobe = [&cmyk[2..17], &[1]].concat();
+        let ycbcr = [&cmyk[..2], &cmyk[18..tables], &adobe, &cmyk[tables..]].concat();
+        for (kind, file, problem) in [
+            ("two components", two, "components but found 2"),
+            ("YCbCr of four", ycbcr, "its 4 components"),
+        ] {
+            let refused = decode(&file).expect_err(kind);
+            assert!(refused.contains(problem), "{kind}: {refused}");
+        }
     }
 
     #[test]
@@ -446,7 +467,7 @@ mod tests {
 
     #[test]
     fn bytes_that_arent_a_whole_png_or_jpeg_are_refused() {
-        let jpeg = jpeg();
+        let (jpeg, cmyk) = (jpeg(), cmyk());
         let png = png(
             png::ColorType::Rgb,
             png::BitDepth::Eight,
@@ -454,13 +475,17 @@ mod tests {
             &[1, 2, 3],
             None,
         );
-        let cases: [(&str, &[u8]); 6] = [
+        let cases: [(&str, &[u8]); 8] = [
             ("nothing", &[]),
             ("a GIF", b"GIF89a\x01\x00\x01\x00"),
             ("a PNG's signature cut short", &png[..4]),
             ("a PNG cut short", &png[..png.len() - 20]),
             ("a JPEG's signature cut short", &jpeg[..2]),
             ("a JPEG cut short", &jpeg[..300]),
+            // `cmyk`'s scan cut in the first of two rows of MCUs, which zune-jpeg sees ran short as
+            // the second starts; and `jpeg`'s in its only row, which only its lost end shows.
+            ("a JPEG's scan cut short", &cmyk[..cmyk.len() - 20]),
+            ("a JPEG's last row cut short", &jpeg[..jpeg.len() - 20]),
         ];
         for (kind, bytes) in cases {
             assert!(decode(bytes).is_err(), "{kind}");

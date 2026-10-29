@@ -7,12 +7,14 @@
 //! place, as a game's bullets and particles come and go.
 //!
 //! It runs in one process with a main of its own, so that no other test's threads run beside it,
-//! and counts every allocation the process makes while the ticks run, whichever thread makes it.
+//! and counts every allocation the process makes while the ticks run, whichever thread makes it,
+//! keeping where the first was made.
 
-// For the allocator that counts; see the SAFETY comments.
+// For the allocator that counts, in `common`; see its SAFETY comments.
 #![allow(unsafe_code)]
 
-use std::alloc::{GlobalAlloc, Layout, System};
+mod common;
+
 use std::collections::VecDeque;
 use std::hint::black_box;
 use std::num::NonZeroUsize;
@@ -22,6 +24,8 @@ use std::time::{Duration, Instant};
 
 use gg_engine::math::Vec3;
 use gg_engine::{Component, Context, Entity, Layer, Script, Tick, Transform, World, run_scripts};
+
+use crate::common::Counted;
 
 /// The ticks run before counting, on one thread and again on four, as a run's first ticks size
 /// what the world and the layer keep, and the pool's what its threads make as they first wait.
@@ -35,55 +39,11 @@ const REPLACED: usize = 20;
 /// to run out of room, so that one that grew at a time its keys pick would grow among them.
 const CHURNED: u64 = 20_000;
 
-/// System's allocator, which counts the allocations made while `COUNTING` is set.
-struct Counting;
-
-static COUNTING: AtomicBool = AtomicBool::new(false);
-static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
-
-fn count() {
-    if COUNTING.load(Ordering::Relaxed) {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-// SAFETY: each method passes what it's given to System's, so it keeps System's contract; counting
-// touches only atomics, which don't allocate.
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        count();
-        // SAFETY: the caller keeps `alloc`'s contract, which is System's.
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        count();
-        // SAFETY: the caller keeps `alloc_zeroed`'s contract, which is System's.
-        unsafe { System.alloc_zeroed(layout) }
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        count();
-        // SAFETY: the caller keeps `realloc`'s contract: `ptr` is System's, from `layout`.
-        unsafe { System.realloc(ptr, layout, new_size) }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: the caller keeps `dealloc`'s contract: `ptr` is System's, from `layout`.
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
-
-#[global_allocator]
-static ALLOCATOR: Counting = Counting;
-
-/// The allocations the process makes while `f` runs, on every thread.
-fn allocations(f: impl FnOnce()) -> u64 {
-    ALLOCATIONS.store(0, Ordering::SeqCst);
-    COUNTING.store(true, Ordering::SeqCst);
+/// The allocations the process makes while `f` runs, on every thread, and where the first was made.
+fn allocations(f: impl FnOnce()) -> Counted {
+    common::start();
     f();
-    COUNTING.store(false, Ordering::SeqCst);
-    ALLOCATIONS.load(Ordering::SeqCst)
+    common::stop()
 }
 
 #[derive(Clone, Component)]
@@ -272,7 +232,8 @@ fn workers_are_counted(world: &mut World) {
                 }
             }
         });
-    });
+    })
+    .allocations;
     let elsewhere = elsewhere.into_inner();
     assert!(
         elsewhere > 0,
@@ -314,8 +275,8 @@ fn main() {
         ON_WORKERS.store(0, Ordering::Relaxed);
         let counted = allocations(|| ticks(&mut movers, &mut cx, &mut number, COUNTED));
         assert_eq!(
-            counted, 0,
-            "{COUNTED} ticks on {on} allocated {counted} times"
+            counted.allocations, 0,
+            "{COUNTED} ticks on {on} allocated {counted}"
         );
         let on_workers = ON_WORKERS.load(Ordering::Relaxed);
         if threads > 1 {
@@ -344,9 +305,9 @@ fn main() {
         }
     });
     assert_eq!(
-        counted, 0,
+        counted.allocations, 0,
         "{CHURNED} ticks that each replaced {REPLACED} of {SUBTREES} parents and their children \
-         allocated {counted} times"
+         allocated {counted}"
     );
     println!(
         "{CHURNED} ticks that each replaced {REPLACED} of {SUBTREES} parents and their children \

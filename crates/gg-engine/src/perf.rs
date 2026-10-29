@@ -43,8 +43,8 @@ pub(crate) struct Sample {
 }
 
 impl Sample {
-    /// The rest of the frame: what happens between frames, such as the windows of their own
-    /// opening and drawing their UI, and the OS's events.
+    /// The rest of the frame: what happens between frames, such as making the swapchains of
+    /// torn-off windows and tessellating their UI, polling the gamepads, and the OS's events.
     pub(crate) fn other(&self) -> u64 {
         (self.frame).saturating_sub(self.ticks + self.update + self.ui + self.handoff)
     }
@@ -799,9 +799,7 @@ mod tests {
             let mut output = ctx.run_ui(input, |ui| show(&perf, ui));
             output.textures_delta.clear();
             texts.clear();
-            for clipped in &output.shapes {
-                find(&clipped.shape, background, &mut graph, &mut texts);
-            }
+            find(&output.shapes, background, &mut graph, &mut texts);
         }
         assert!(graph.is_some());
         let drew = "42 draws of 4200 instances, 8400 triangles";
@@ -824,9 +822,7 @@ mod tests {
         output.textures_delta.clear();
         let mut graph: Option<egui::Rect> = None;
         let mut texts = Vec::new();
-        for clipped in &output.shapes {
-            find(&clipped.shape, background, &mut graph, &mut texts);
-        }
+        find(&output.shapes, background, &mut graph, &mut texts);
         // Not the last frame's 12.00 ms, nor the whole run's 2.01.
         let line = "2.02 ms a frame, 495 fps, 0 draws of 0 instances, 0 triangles";
         assert!(texts.iter().any(|text| text == line), "{texts:?}");
@@ -837,22 +833,20 @@ mod tests {
         }
     }
 
-    /// Finds in `shape` the graph, the one shape filled in `background`, and the texts.
+    /// Finds in `shapes`, a pass's output, the graph, the one shape filled in `background`, and the
+    /// texts.
     fn find(
-        shape: &egui::Shape,
+        shapes: &[egui::epaint::ClippedShape],
         background: egui::Color32,
         graph: &mut Option<egui::Rect>,
         texts: &mut Vec<String>,
     ) {
-        match shape {
-            egui::Shape::Vec(shapes) => {
-                for shape in shapes {
-                    find(shape, background, graph, texts);
-                }
+        for shape in crate::testing::painted(shapes) {
+            match shape {
+                egui::Shape::Rect(rect) if rect.fill == background => *graph = Some(rect.rect),
+                egui::Shape::Text(text) => texts.push(text.galley.text().to_owned()),
+                _ => {}
             }
-            egui::Shape::Rect(rect) if rect.fill == background => *graph = Some(rect.rect),
-            egui::Shape::Text(text) => texts.push(text.galley.text().to_owned()),
-            _ => {}
         }
     }
 }

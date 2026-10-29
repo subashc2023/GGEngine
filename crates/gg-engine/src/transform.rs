@@ -16,9 +16,11 @@ use crate::Component;
 /// calls [`World::reset_interpolation`](crate::World::reset_interpolation) for it.
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
 pub struct Transform {
+    /// Where its origin is, from its parent's, or the world's.
     pub translation: Vec3,
     /// As a unit quaternion.
     pub rotation: Quat,
+    /// How big it is along each of its own axes, as a multiple of its own size.
     #[reflect(default = Vec3::ONE)]
     pub scale: Vec3,
 }

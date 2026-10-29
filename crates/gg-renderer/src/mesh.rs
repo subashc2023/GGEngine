@@ -422,10 +422,12 @@ impl MeshPass {
 }
 
 /// What the mesh pass pushes before each draw, which a mesh shader's push constants read the
-/// start of, as [`Shaders::add`](crate::Shaders::add) describes. The matrix goes first, so that
-/// every offset is the same under every layout Slang gives push constants; the IDs before the
-/// parameters, so that a shader that takes none still ends its struct after the last member it
-/// reads; and the view's size last, since it came last.
+/// start of, as [`Shaders::add`](crate::Shaders::add) describes, and which the engine's mesh
+/// shaders declare as `Push` in `shaders/mesh.slang`. The matrix goes first, so that every offset
+/// is the same under every layout Slang gives push constants; the IDs before the parameters, so
+/// that a shader that takes none still ends its struct after the last member it reads; and the
+/// view's size last, so that it moves none of the offsets games' shaders declare before it,
+/// though a shader that takes no parameters can't read it.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 pub(crate) struct Push {

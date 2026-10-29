@@ -206,8 +206,7 @@ fn quad(camera: &Viewpoint, view: Viewport, plane: Plane) -> Option<(Mat4, Param
         return None;
     }
     let [width, height] = view.size.map(f64::from);
-    // As the renderer works it out.
-    let aspect = f64::from(view.size[0] as f32 / view.size[1] as f32);
+    let aspect = f64::from(view.aspect());
     let rotation = camera.rotation.as_dquat();
     let forward = rotation * DVec3::NEG_Z;
     let eye = camera.position.as_dvec3();

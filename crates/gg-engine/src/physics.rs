@@ -38,6 +38,9 @@ pub enum BodyType {
 /// space (`physics.child_body`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Component)]
 pub struct RigidBody2D {
+    /// How it moves: dynamic, by its velocity, which gravity and what it hits change; kinematic, by
+    /// its velocity alone, pushing what's dynamic aside, as a moving platform does; or static, not
+    /// at all, as a floor or a wall.
     pub body_type: BodyType,
     /// Whether it never turns, as a character that stays upright.
     pub fixed_rotation: bool,
@@ -639,7 +642,7 @@ fn vector(v: Vec2) -> Vector {
 
 #[cfg(test)]
 mod tests {
-    use gg_renderer::{Sprite, Viewport};
+    use gg_renderer::{Circle, Sprite, Viewport};
 
     use super::*;
     use crate::Context;
@@ -927,9 +930,11 @@ mod tests {
         assert!((reach - 0.75).abs() < 1e-5, "{reach}");
     }
 
-    /// Lines a layer draws go over the world's entities, though it draws them before the world, and
-    /// the colliders' outlines over them while they're shown, 2 points wide in a window at a scale
-    /// of 1, with their entities' IDs; and not while they're hidden.
+    /// Lines and squares' outlines a layer draws go over the world's entities, though it draws them
+    /// before the world, with no entity's ID, and the colliders' outlines over them while they're
+    /// shown, 2 points wide in a window at a scale of 1, with their entities' IDs; and not while
+    /// they're hidden. A circle a layer draws goes before the world's entities, as its sprites do,
+    /// with no entity's ID either.
     #[test]
     fn lines_and_outlines_draw_over_the_world() {
         let mut cx = Context::seeded(3);
@@ -946,6 +951,7 @@ mod tests {
             color: Vec4::ONE,
             width: 3.0,
         };
+        let square = Mat4::from_translation(Vec3::Y);
         let viewport = Viewport {
             origin: [0, 0],
             size: [64, 64],
@@ -954,14 +960,20 @@ mod tests {
         assert!(!cx.colliders_shown(), "hidden at first");
         for shown in [false, true] {
             cx.set_colliders_shown(shown);
+            // The circle first on both sides, since the engine's shaders take their indices in the
+            // order they're first asked for.
+            cx.draw_circle(Mat4::IDENTITY, Circle::default());
             cx.draw_line(line.from, line.to, line.color, line.width);
+            cx.draw_rect(square, line.color, 1.0);
             cx.draw_world(1.0);
             cx.extract(&mut frame, viewport);
             let mut shaders = Shaders::default();
             let mut want = Draws::default();
+            want.push_circle(&mut shaders, Mat4::IDENTITY, Circle::default());
             let drawn = (Mat4::IDENTITY, Sprite::default(), id);
             want.extend_sprites(std::iter::once(drawn));
             want.push_line(&mut shaders, Mat4::IDENTITY, line, 0);
+            want.push_rect(&mut shaders, square, line.color, 1.0, 0);
             if shown {
                 want.push_rect(&mut shaders, Mat4::IDENTITY, OUTLINE, 2.0, id);
             }

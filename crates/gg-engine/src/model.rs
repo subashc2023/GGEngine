@@ -61,12 +61,12 @@ impl Model {
             ));
         }
         let images: Vec<Texture> = images
-            .iter()
+            .into_iter()
             .enumerate()
             .map(|(i, image)| {
                 let name = format!("{name} image {i}");
                 let mipmaps = mipmaps(&primitives, i);
-                let added = textures.add(&name, image.size, &image.pixels, mipmaps);
+                let added = textures.add(&name, image.size, image.pixels, mipmaps);
                 added.expect("a decoded image fits a texture, and there's room for it")
             })
             .collect();
@@ -117,7 +117,7 @@ impl Model {
     /// file's order, so that a world seeded alike spawns the model alike.
     pub fn spawn(&self, world: &mut World, at: Transform) -> Entity {
         let root = world.spawn(at);
-        let mut spawned = world.take_spawned();
+        let mut spawned = world.take_list();
         for part in &self.parts {
             let entity = match part.draw {
                 Some(draw) => world.spawn((part.transform, draw)),
@@ -128,7 +128,7 @@ impl Model {
             set.expect("a new entity takes an earlier one as its parent");
             spawned.push(entity);
         }
-        world.keep_spawned(spawned);
+        world.keep_list(spawned);
         root
     }
 }

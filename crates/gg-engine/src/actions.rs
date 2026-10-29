@@ -70,6 +70,12 @@ impl Kind {
 }
 
 impl Binding {
+    /// W, A, S and D, by their positions, as a pair of axes: A and D across, S and W up.
+    pub const WASD: Self = Self::Axis2 {
+        x: [Source::Key(Key::KeyA), Source::Key(Key::KeyD)],
+        y: [Source::Key(Key::KeyS), Source::Key(Key::KeyW)],
+    };
+
     /// A stick, as a pair of axes of its four ways.
     pub const fn stick(stick: Stick) -> Self {
         Self::Axis2 {

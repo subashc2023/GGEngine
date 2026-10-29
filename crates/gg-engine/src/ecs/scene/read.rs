@@ -23,7 +23,7 @@ use crate::ecs::by_name::about;
 use crate::ecs::id::Named;
 use crate::ecs::table::{AnyColumn, ComponentId, Row};
 use crate::ecs::{Entity, EntityId, Parent, World};
-use crate::reflect::{self, Field, Meta, Name, Shape, Type, Types, Value, Variant};
+use crate::reflect::{self, Field, Ident, Meta, Shape, Type, Types, Value, Variant};
 
 /// A scene's entity, as the parse reads it.
 pub(super) struct Loaded {
@@ -496,7 +496,7 @@ impl<'de> Visitor<'de> for Components<'_, '_> {
             let about = |error| about(error, "load", Named::Id(id), name, "");
             if row.iter().any(|&(other, _)| other == component) {
                 let error = Error::new(
-                    "scene.duplicate_component",
+                    "reflect.duplicate_component",
                     "it's given twice, but an entity has one of each component",
                 );
                 return Err(self.load.refuse(item, about(error)));
@@ -728,7 +728,7 @@ fn assemble<E: de::Error>(
     item: u32,
     fields: &[Field],
     given: Vec<Option<Value>>,
-) -> Result<Vec<(Name, Value)>, E> {
+) -> Result<Vec<(Ident, Value)>, E> {
     let mut parts = Vec::with_capacity(fields.len());
     for (field, value) in fields.iter().zip(given) {
         let value = match value {
@@ -875,7 +875,7 @@ impl<'de> Visitor<'de> for Vector<'_, '_> {
                 meta: self.meta,
                 depth: self.depth,
             };
-            let step = ["x", "y", "z", "w"][i];
+            let step = reflect::COMPONENTS[i];
             match seq
                 .next_element_seed(read)
                 .inspect_err(within!(self.load, step))?
@@ -1000,7 +1000,7 @@ struct Fields<'a, 'w> {
 }
 
 impl<'de> Visitor<'de> for Fields<'_, '_> {
-    type Value = Vec<(Name, Value)>;
+    type Value = Vec<(Ident, Value)>;
 
     fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("fields by name, `(name: value)`")
@@ -1085,7 +1085,7 @@ struct Parts<'a, 'w> {
 }
 
 impl<'de> Visitor<'de> for Parts<'_, '_> {
-    type Value = Vec<(Name, Value)>;
+    type Value = Vec<(Ident, Value)>;
 
     fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("fields by position, `(value, value)`")

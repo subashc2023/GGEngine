@@ -14,9 +14,11 @@ pub struct Error {
     source: Option<Source>,
 }
 
+/// What the engine's crates return: `T`, or an [`Error`] unless it names another error type.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 impl Error {
+    /// An error of `code`, saying `message`.
     pub fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
@@ -40,6 +42,7 @@ impl Error {
         self
     }
 
+    /// Its code, which tools and agents match on.
     pub fn code(&self) -> &'static str {
         self.code
     }

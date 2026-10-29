@@ -1,12 +1,15 @@
 //! Steady-state frames of an app whose layers draw no UI allocate nothing, on any thread: frames
-//! of what games draw, sprites flat, textured and of a sprite sheet's cells, games' meshes with
-//! parameters, opaque and blended, a glTF model and a mirrored copy of it, a turning hierarchy and
-//! drifters that wrap, whose ticks despawn and spawn entities, seen through a camera of the
-//! world's that a pivot the ticks turn carries round, run through the engine's main loop headless,
-//! three fifths of a tick apart, so that they draw between ticks, once its first frames have run.
-//! Every frame picks what the view shows at its middle, as the frame before had it, and outside it,
-//! from the first on, and headless, each answer comes back in the frame it's due: four frames after
-//! the one that asked, and two for the pick outside the view, which finds nothing.
+//! of what games draw, sprites flat, textured and of a sprite sheet's cells, circles filled and
+//! rings, games' meshes with parameters, opaque and blended, a glTF model and a mirrored copy of
+//! it, a turning hierarchy and drifters that wrap, whose ticks despawn and spawn entities, with
+//! colliders, whose outlines draw over the rest, as a layer's own lines and square's outline do,
+//! and an outline round the turning parent, as the editor outlines what's picked, seen through a
+//! camera of the world's that a pivot the ticks turn carries round, run through the engine's main
+//! loop headless, three fifths of a tick apart, so that they draw between ticks, once its first
+//! frames have run. Every frame picks what the view shows at its middle, as the frame before had
+//! it, and outside it, from the first on, and headless, each answer comes back in the frame it's
+//! due: four frames after the one that asked, and two for the pick outside the view, which finds
+//! nothing.
 //!
 //! It runs in one process with a main of its own, so that no other test's threads run beside it,
 //! and counts every allocation the process makes through Rust's allocator while the frames run,
@@ -14,14 +17,15 @@
 //! the engine, go uncounted. It needs a GPU, as the GPU tests do, and `GG_SKIP_GPU_TESTS` skips
 //! it. With `--windowed`, it runs the app in a window instead, for checks by hand of frames that
 //! the mouse moves and clicks over: without `dev`, whose shader watcher allocates as it looks at
-//! files, as `cargo test -p gg-engine --test frames -- --windowed`.
+//! files, as `cargo test -p gg-engine --test frames -- --windowed`, and with no gamepad connected,
+//! since gilrs allocates as it reads one.
 
-// For the allocator that counts; see the SAFETY comments.
+// For the allocator that counts, in `common`, and for setting the environment; see the SAFETY
+// comments.
 #![allow(unsafe_code)]
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::backtrace::Backtrace;
-use std::cell::Cell;
+mod common;
+
 use std::collections::VecDeque;
 use std::f32::consts::TAU;
 use std::fs;
@@ -30,17 +34,18 @@ use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::thread;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use gg_engine::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_engine::{
-    Actions, App, Binding, Blend, Camera, Change, Component, Context, Entity, Event, Key, Layer,
-    Mesh, MeshDraw, Model, MouseButton, Pick, Projection, Shader, Source, Sprite, SpriteSheet,
-    Texture, Tick, Transform, World,
+    Actions, App, Binding, Blend, BoxCollider2D, Camera, Change, Circle, CircleCollider2D,
+    Component, Context, Entity, Event, Key, Layer, Mesh, MeshDraw, Model, MouseButton, Pick,
+    Projection, Shader, Source, Sprite, SpriteSheet, Texture, Tick, Transform, World,
 };
 use serde_json::json;
+
+use crate::common::Counted;
 
 /// What the world's IDs are drawn from, so that every run draws its entities in one order.
 const SEED: u64 = 0x5eed_f2a3;
@@ -55,8 +60,9 @@ const PERIOD: u64 = 64;
 const DRIFTERS: usize = 2_000;
 /// Where the drifters drift, across and up, around the origin.
 const FIELD: Vec2 = Vec2::new(16.0, 9.0);
-/// The pool of sprites' parents and children, of which each tick replaces the oldest `REPLACED`,
-/// as a game's bullets and particles come and go.
+/// The pool of sprites' parents, with colliders, and their children, sprites, or circles with
+/// colliders of their own, of which each tick replaces the oldest `REPLACED`, as a game's bullets
+/// and particles come and go.
 const SUBTREES: usize = 256;
 const REPLACED: usize = 16;
 /// The pool of copies of a model, of which each tick replaces the oldest.
@@ -72,68 +78,8 @@ static MISSED: AtomicU64 = AtomicU64::new(0);
 static OUTSIDE: AtomicU64 = AtomicU64::new(0);
 static ASTRAY: AtomicU64 = AtomicU64::new(0);
 
-/// System's allocator, which counts the allocations made while `COUNTING` is set, and keeps where
-/// the first was made.
-struct Counting;
-
-static COUNTING: AtomicBool = AtomicBool::new(false);
-static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
-/// The backtrace of the first allocation counted, whose frames say which thread made it.
-static FIRST: Mutex<Option<Backtrace>> = Mutex::new(None);
-/// Set once the app has run all of its counted frames.
-static COUNTED_ALL: AtomicBool = AtomicBool::new(false);
-
-thread_local! {
-    /// Set while the thread counts an allocation, since capturing a backtrace allocates too.
-    static IN_COUNT: Cell<bool> = const { Cell::new(false) };
-}
-
-fn count() {
-    if !COUNTING.load(Ordering::Relaxed) || IN_COUNT.with(|in_count| in_count.replace(true)) {
-        return;
-    }
-    // Neither while panicking, since the panic hook captures a backtrace too, nor through
-    // `thread::current`, which std aborts for as it runs inside itself, as it would if its own
-    // first allocation came here: the backtrace's frames say which thread.
-    if ALLOCATIONS.fetch_add(1, Ordering::Relaxed) == 0 && !thread::panicking() {
-        let first = Backtrace::force_capture();
-        if let Ok(mut kept) = FIRST.lock() {
-            kept.get_or_insert(first);
-        }
-    }
-    IN_COUNT.with(|in_count| in_count.set(false));
-}
-
-// SAFETY: each method passes what it's given to System's, so it keeps System's contract; counting
-// touches atomics and a thread-local flag, and allocates only through this allocator again, which
-// the flag keeps from counting.
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        count();
-        // SAFETY: the caller keeps `alloc`'s contract, which is System's.
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        count();
-        // SAFETY: the caller keeps `alloc_zeroed`'s contract, which is System's.
-        unsafe { System.alloc_zeroed(layout) }
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        count();
-        // SAFETY: the caller keeps `realloc`'s contract: `ptr` is System's, from `layout`.
-        unsafe { System.realloc(ptr, layout, new_size) }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: the caller keeps `dealloc`'s contract: `ptr` is System's, from `layout`.
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
-
-#[global_allocator]
-static ALLOCATOR: Counting = Counting;
+/// What the counted frames allocated, once the app has run them all.
+static ALLOCATED: Mutex<Option<Counted>> = Mutex::new(None);
 
 /// A drifter: where it starts, and how far it goes a tick, a whole number of fields across and up
 /// in `PERIOD` ticks, so that it's back where it started each period; and its z.
@@ -219,24 +165,36 @@ impl Scene {
         self.assets.as_ref().expect("attached")
     }
 
-    /// Spawns a sprite whose child is another, at `x`, the newest of the pool.
-    fn spawn_subtree(&mut self, world: &mut World, x: f32) {
+    /// Spawns the subtree of slot `slot` of the pool, the newest: a sprite with a box collider,
+    /// whose child is another sprite, or in every eighth slot a circle with a circle collider, a
+    /// disc and a ring by turns.
+    fn spawn_subtree(&mut self, world: &mut World, slot: usize) {
         let assets = self.assets.as_ref().expect("attached");
         let at = Transform {
-            translation: Vec3::new(x, -3.0, 0.5),
+            translation: Vec3::new(slot as f32 * 0.05, -3.0, 0.5),
             scale: Vec3::splat(0.3),
             ..Transform::IDENTITY
         };
-        let root = world.spawn((at, assets.sheet.sprite([1, 1], [1, 1])));
+        let sprite = assets.sheet.sprite([1, 1], [1, 1]);
+        let root = world.spawn((at, sprite, BoxCollider2D::default()));
         let below = Transform {
             translation: Vec3::new(0.0, -1.0, 0.0),
             ..Transform::IDENTITY
         };
-        let textured = Sprite {
-            texture: assets.texture,
-            ..Sprite::default()
+        let child = if slot.is_multiple_of(8) {
+            let thickness = if slot.is_multiple_of(16) { 1.0 } else { 0.25 };
+            let circle = Circle {
+                thickness,
+                ..Circle::default()
+            };
+            world.spawn((below, circle, CircleCollider2D::default()))
+        } else {
+            let textured = Sprite {
+                texture: assets.texture,
+                ..Sprite::default()
+            };
+            world.spawn((below, textured))
         };
-        let child = world.spawn((below, textured));
         world.set_parent(child, Some(root)).expect("both alive");
         self.subtrees.push_back(root);
     }
@@ -343,14 +301,15 @@ impl Layer for Scene {
         };
         pair.spawn(world, mirrored);
         self.assets = Some(assets);
-        for i in 0..SUBTREES {
-            self.spawn_subtree(world, i as f32 * 0.05);
+        for slot in 0..SUBTREES {
+            self.spawn_subtree(world, slot);
         }
         for i in 0..COPIES {
             self.spawn_copy(world, i as f32);
         }
         // Room for every drifter to wrap at once, so that the list never grows at a tick.
         self.wrapped.get_mut().expect("unshared").reserve(DRIFTERS);
+        cx.set_colliders_shown(true);
         let click = Binding::Button(Source::Button(MouseButton::Left));
         self.actions.bind(Act::Spin, click).expect("a button");
         let space = Binding::Button(Source::Key(Key::Space));
@@ -386,8 +345,8 @@ impl Layer for Scene {
         for i in 0..REPLACED {
             let oldest = self.subtrees.pop_front().expect("a full pool");
             world.despawn(oldest).expect("alive");
-            let x = ((tick.number as usize * REPLACED + i) % SUBTREES) as f32 * 0.05;
-            self.spawn_subtree(world, x);
+            let slot = (tick.number as usize * REPLACED + i) % SUBTREES;
+            self.spawn_subtree(world, slot);
         }
         let oldest = self.copies.pop_front().expect("a full pool");
         world.despawn(oldest).expect("alive");
@@ -398,9 +357,22 @@ impl Layer for Scene {
         let assets = self.assets();
         let (quad, opaque) = (assets.quad, assets.opaque);
         let cell = assets.sheet.sprite([1, 0], [1, 1]);
+        // Away from the view's middle, where these, of no entity, would hide what the picks find.
         let below = Mat4::from_translation(Vec3::new(0.0, -5.0, 0.0));
         cx.draw(quad, opaque, below, Vec4::new(0.5, 0.5, 0.5, 1.0));
-        cx.draw_sprite(Mat4::from_translation(Vec3::new(0.0, 5.0, 0.0)), cell);
+        let (left, right) = (Vec3::new(-2.0, -5.0, 0.0), Vec3::new(2.0, -5.0, 0.0));
+        cx.draw_line(left, right, Vec4::new(0.9, 0.9, 0.2, 1.0), 2.0);
+        let above = Mat4::from_translation(Vec3::new(0.0, 5.0, 0.0));
+        cx.draw_sprite(above, cell);
+        cx.draw_rect(above, Vec4::new(0.2, 0.9, 0.9, 1.0), 1.0);
+        let ring = Circle {
+            thickness: 0.25,
+            ..Circle::default()
+        };
+        cx.draw_circle(Mat4::from_translation(Vec3::new(1.5, 5.0, 0.0)), ring);
+        let turning = self.turning.expect("attached");
+        let turning = cx.world().id(turning).expect("alive");
+        cx.outline(turning, Vec4::new(1.0, 0.6, 0.1, 1.0), 1.0);
         self.frames += 1;
         let frame = self.frames;
         // The picks of the frame `back` before this one.
@@ -429,10 +401,10 @@ impl Layer for Scene {
         let picks = [middle, [-1.0, middle[1]]].map(|at| cx.pick(at).expect("two a frame"));
         self.asked[frame as usize % ASKED] = Some(picks);
         if self.frames == WARM_UP {
-            COUNTING.store(true, Ordering::SeqCst);
+            common::start();
         } else if self.frames == WARM_UP + COUNTED {
-            COUNTING.store(false, Ordering::SeqCst);
-            COUNTED_ALL.store(true, Ordering::SeqCst);
+            let counted = common::stop();
+            *ALLOCATED.lock().expect("no thread panicked holding it") = Some(counted);
         }
     }
 
@@ -548,12 +520,14 @@ fn main() {
         return;
     }
     // Overlays such as Steam's and OBS's load into every instance as implicit layers, and can
-    // add validation errors of their own; and a `RUST_LOG` of the environment's could log, and
-    // so allocate, as the frames run, as one at trace level would for every event.
+    // add validation errors of their own. The loader warns of each layer it disables as each
+    // instance starts, a general message, which `RUST_LOG` quiets by naming that target alone, so
+    // that the rest keeps the default filter: one of the environment's could log, and so allocate,
+    // as the frames run, as one at trace level would for every event.
     // SAFETY: no other thread exists yet to read the environment.
     unsafe {
         std::env::set_var("VK_LOADER_LAYERS_DISABLE", "~implicit~");
-        std::env::remove_var("RUST_LOG");
+        std::env::set_var("RUST_LOG", "gg_gpu::vulkan::general=error");
     }
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("frames");
     write_assets(&dir);
@@ -576,15 +550,15 @@ fn main() {
         ExitCode::SUCCESS,
         "the run failed, as its log says"
     );
-    assert!(
-        COUNTED_ALL.load(Ordering::SeqCst),
-        "the run ended before its {COUNTED} counted frames"
-    );
-    let counted = ALLOCATIONS.load(Ordering::SeqCst);
-    if counted > 0 {
-        let first = FIRST.lock().expect("no thread panicked holding it").take();
-        let first = first.map_or_else(|| "none kept".to_owned(), |trace| trace.to_string());
-        panic!("{COUNTED} frames allocated {counted} times; the first, from\n{first}");
+    let Some(counted) = ALLOCATED
+        .lock()
+        .expect("no thread panicked holding it")
+        .take()
+    else {
+        panic!("the run ended before its {COUNTED} counted frames");
+    };
+    if counted.allocations > 0 {
+        panic!("{COUNTED} frames allocated {counted}");
     }
     let how = if windowed { "in a window" } else { "headless" };
     println!("{COUNTED} frames {how} allocated nothing");

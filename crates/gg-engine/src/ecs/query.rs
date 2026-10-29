@@ -144,9 +144,9 @@ impl<'w, Q: Query> QueryIterMut<'w, Q> {
     /// does; each table's rows finish before the next table's start.
     ///
     /// `f` gets its own row's terms and no world, so that what each row becomes can't depend on how
-    /// many threads there are or which takes which rows, as the deterministic mode needs; unless `f`
-    /// writes through what it captures, such as a `Mutex` or an atomic, whose writes follow the
-    /// threads' order. In the pool, a thread that waits for rows another took runs other rows
+    /// many threads there are or which takes which rows, as determinism needs; unless `f` writes
+    /// through what it captures, such as a `Mutex` or an atomic, whose writes follow the threads'
+    /// order. In the pool, a thread that waits for rows another took runs other rows
     /// meanwhile, so `f` mustn't hold a lock that `f` takes, or a `RefCell` it borrows, while it
     /// calls `par_for_each` or anything else that joins: the thread could run another row's `f`,
     /// which would wait for the lock the thread holds, or find the `RefCell` borrowed. If `f`

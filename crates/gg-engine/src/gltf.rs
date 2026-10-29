@@ -100,10 +100,10 @@ impl Default for Material {
 pub(crate) const MAX_MEMORY: u64 = 4 << 30;
 
 /// Reads model `name`'s file at `path`, and the files it names, through `read_file`, which reads a
-/// regular file as far as the bytes it's given ([`image::read_file`], or tests' files from memory),
-/// taking no more than `memory` bytes of what [`MAX_MEMORY`] counts, and taking, ignoring and
-/// refusing what [`Context::add_model`](crate::Context::add_model) says. Each check it makes fails
-/// with the element it's about, such as "accessor 7 reads past buffer view 2".
+/// regular file as far as the bytes it's given ([`dirs::read_file`](crate::dirs::read_file), or
+/// tests' files from memory), taking no more than `memory` bytes of what [`MAX_MEMORY`] counts, and
+/// taking, ignoring and refusing what [`Context::add_model`](crate::Context::add_model) says. Each
+/// check it makes fails with the element it's about, such as "accessor 7 reads past buffer view 2".
 pub(crate) fn read(
     name: &str,
     path: &Path,
@@ -1244,13 +1244,7 @@ mod tests {
 
     /// A PNG of `PIXELS`, two pixels in a row.
     fn png() -> Vec<u8> {
-        let mut file = Vec::new();
-        let mut encoder = png::Encoder::new(&mut file, 2, 1);
-        encoder.set_color(png::ColorType::Rgba);
-        let mut writer = encoder.write_header().expect("a header");
-        writer.write_image_data(&PIXELS).expect("the pixels");
-        writer.finish().expect("a whole PNG");
-        file
+        image::tests::png(png::ColorType::Rgba, png::BitDepth::Eight, 2, &PIXELS, None)
     }
 
     /// `bytes` in base64, padded.
@@ -1300,7 +1294,7 @@ mod tests {
     }
 
     /// Reads `file` as model "m" at `path` in folder "models", with `files` beside it there, each
-    /// as far as it's asked, as `image::read_file` reads.
+    /// as far as it's asked, as `dirs::read_file` reads.
     fn read_files(path: &str, file: &[u8], files: &[(&str, &[u8])]) -> Result<Imported> {
         let folder = Path::new("models");
         let read_file = |asked: &Path, most: u64| {
@@ -1477,7 +1471,7 @@ mod tests {
                     name: "pair/0".to_owned(),
                     positions: triangle.clone(),
                     uvs: uvs.clone(),
-                    colors: white.clone(),
+                    colors: white,
                     indices: vec![0, 1, 2],
                     material: Material {
                         color: [1.0, 0.5, 0.25, 1.0],

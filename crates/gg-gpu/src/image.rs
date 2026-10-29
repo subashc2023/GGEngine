@@ -11,7 +11,7 @@ use gg_core::Result;
 use crate::buffer::Buffer;
 use crate::device::Retired;
 use crate::vma::{Allocation, Memory};
-use crate::{COLOR_RANGE, DEPTH_RANGE, Device, Format, vk_error};
+use crate::{COLOR_RANGE, DEPTH_RANGE, Device, Format, copy_region, vk_error};
 
 /// A color image in GPU memory, which frames render into, their later passes sample through its
 /// slot in the bindless set, and the CPU can read back. Dropping it retires it, and its slot,
@@ -44,32 +44,10 @@ impl ColorImage {
     ///
     /// If a side is 0.
     pub fn new(device: &Arc<Device>, width: u32, height: u32, name: &str) -> Result<Self> {
-        let usage = vk::ImageUsageFlags::COLOR_ATTACHMENT
-            | vk::ImageUsageFlags::SAMPLED
-            | vk::ImageUsageFlags::TRANSFER_SRC;
-        let (raw, view, allocation, extent) = allocate(
-            device,
-            [width, height],
-            Self::FORMAT.color,
-            usage,
-            COLOR_RANGE,
-            name,
-        )?;
-        // SAFETY: the view is of a live sampled image, which shaders sample only through the index
-        // `Frame::begin_sampling` returns, once it has put the image in the shader-read-only
-        // layout.
-        let index = match unsafe { device.bindless().add(device.raw(), view, None, name) } {
-            Ok(index) => index,
-            Err(error) => {
-                device.retire(Retired::Image(raw, view, allocation));
-                return Err(error);
-            }
-        };
-        // SAFETY: the image and view are live.
-        unsafe {
-            device.set_name(raw, name);
-            device.set_name(view, name);
-        }
+        // SAFETY: shaders sample the image only through the index `Frame::begin_sampling`
+        // returns, once it has put the image in the shader-read-only layout.
+        let (raw, view, allocation, extent, index) =
+            unsafe { allocate_sampled(device, [width, height], Self::FORMAT.color, name) }?;
         Ok(Self {
             device: device.clone(),
             raw,
@@ -105,14 +83,7 @@ impl ColorImage {
             .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
             .image(self.raw)
             .subresource_range(COLOR_RANGE);
-        let region = vk::BufferImageCopy::default()
-            .image_subresource(vk::ImageSubresourceLayers {
-                aspect_mask: vk::ImageAspectFlags::COLOR,
-                mip_level: 0,
-                base_array_layer: 0,
-                layer_count: 1,
-            })
-            .image_extent(self.extent.into());
+        let region = copy_region(0, [0, 0], self.size(), 0);
         let to_host = vk::BufferMemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::COPY)
             .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
@@ -230,32 +201,11 @@ impl IdImage {
     ///
     /// If a side is 0.
     pub fn new(device: &Arc<Device>, width: u32, height: u32, name: &str) -> Result<Self> {
-        let usage = vk::ImageUsageFlags::COLOR_ATTACHMENT
-            | vk::ImageUsageFlags::SAMPLED
-            | vk::ImageUsageFlags::TRANSFER_SRC;
-        let (raw, view, allocation, extent) = allocate(
-            device,
-            [width, height],
-            Self::FORMAT,
-            usage,
-            COLOR_RANGE,
-            name,
-        )?;
-        // SAFETY: the view is of a live sampled image, which shaders sample only through the index
-        // `Frame::begin_sampling_ids` returns, once it has put the image in the shader-read-only
-        // layout, and only as unsigned integers, as its format holds them.
-        let index = match unsafe { device.bindless().add(device.raw(), view, None, name) } {
-            Ok(index) => index,
-            Err(error) => {
-                device.retire(Retired::Image(raw, view, allocation));
-                return Err(error);
-            }
-        };
-        // SAFETY: the image and view are live.
-        unsafe {
-            device.set_name(raw, name);
-            device.set_name(view, name);
-        }
+        // SAFETY: shaders sample the image only through the index `Frame::begin_sampling_ids`
+        // returns, once it has put the image in the shader-read-only layout, and only as unsigned
+        // integers, as its format holds them.
+        let (raw, view, allocation, extent, index) =
+            unsafe { allocate_sampled(device, [width, height], Self::FORMAT, name) }?;
         Ok(Self {
             device: device.clone(),
             raw,
@@ -353,11 +303,6 @@ impl DepthImage {
             DEPTH_RANGE,
             name,
         )?;
-        // SAFETY: the image and view are live.
-        unsafe {
-            device.set_name(raw, name);
-            device.set_name(view, name);
-        }
         Ok(Self {
             device: device.clone(),
             raw,
@@ -365,11 +310,6 @@ impl DepthImage {
             allocation: Some(allocation),
             extent,
         })
-    }
-
-    /// The width and height in pixels.
-    pub fn size(&self) -> [u32; 2] {
-        [self.extent.width, self.extent.height]
     }
 
     /// The image, its view and its size, for recording commands that use it.
@@ -392,8 +332,40 @@ impl Drop for DepthImage {
     }
 }
 
+/// A color image of `size` pixels in GPU memory, of `format`, that passes render into, frames
+/// copy from and shaders sample, with its view in a free slot of the bindless set past the placed
+/// ones, all named `name`. It returns what [`allocate`] does, and the slot's index.
+///
+/// # Safety
+///
+/// Shaders must sample the image only in the shader-read-only layout, as for `Bindless::write`.
+///
+/// # Panics
+///
+/// If a side is 0.
+unsafe fn allocate_sampled(
+    device: &Device,
+    size: [u32; 2],
+    format: vk::Format,
+    name: &str,
+) -> Result<(vk::Image, vk::ImageView, Allocation, vk::Extent2D, u32)> {
+    let usage = vk::ImageUsageFlags::COLOR_ATTACHMENT
+        | vk::ImageUsageFlags::SAMPLED
+        | vk::ImageUsageFlags::TRANSFER_SRC;
+    let (raw, view, allocation, extent) = allocate(device, size, format, usage, COLOR_RANGE, name)?;
+    // SAFETY: the view is of a live sampled image of the device, and the caller guarantees how
+    // shaders sample it.
+    match unsafe { device.bindless().add(device.raw(), view, None, name) } {
+        Ok(index) => Ok((raw, view, allocation, extent, index)),
+        Err(error) => {
+            device.retire(Retired::Image(raw, view, allocation));
+            Err(error)
+        }
+    }
+}
+
 /// An image of `size` pixels in GPU memory, of `format`, for `usage`, and a view of its `range`,
-/// for the image named `name`.
+/// both named `name`.
 ///
 /// # Panics
 ///
@@ -429,7 +401,14 @@ fn allocate(
         .subresource_range(range);
     // SAFETY: the image is live and bound to memory.
     match unsafe { device.raw().create_image_view(&view_info, None) } {
-        Ok(view) => Ok((raw, view, allocation, extent)),
+        Ok(view) => {
+            // SAFETY: the image and view are live.
+            unsafe {
+                device.set_name(raw, name);
+                device.set_name(view, name);
+            }
+            Ok((raw, view, allocation, extent))
+        }
         Err(error) => {
             device.retire(Retired::Image(raw, vk::ImageView::null(), allocation));
             let view = format_args!("image {name:?}'s view");

@@ -6,8 +6,9 @@ use crate::{Event, Key, MouseButton};
 ///
 /// It follows those events, so a press the UI kept doesn't count, and a key pressed and released
 /// between two frames never shows as held: layers that need every press take them from events.
-/// Losing focus lets go of everything, since not every platform reports the releases that
-/// happen while the window is out of focus.
+/// Losing focus lets go of everything, since not every platform reports the releases that happen
+/// while the window is out of focus; a key already down as the window regains focus counts from its
+/// next press, or from its first repeat.
 #[derive(Debug, Default)]
 pub struct Input {
     /// Lists rather than sets, since few keys and buttons are held at once.
@@ -17,10 +18,12 @@ pub struct Input {
 }
 
 impl Input {
+    /// Whether `key` is held.
     pub fn key_down(&self, key: Key) -> bool {
         self.keys.contains(&key)
     }
 
+    /// Whether `button` is held.
     pub fn button_down(&self, button: MouseButton) -> bool {
         self.buttons.contains(&button)
     }

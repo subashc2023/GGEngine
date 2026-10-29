@@ -16,10 +16,10 @@ use super::{Component, Entity, World};
 use crate::Transform;
 use crate::reflect::Reflect;
 
-/// The entity this one is a child of, which carries it along: its
-/// [`Transform`](crate::Transform) is relative to its parent's. The world keeps it, so that the
-/// hierarchy stays whole: a scene's entities are spawned with theirs, [`World::set_parent`] gives
-/// it, changes it and takes it away, and code reads it but can't change it, nor can tools by name.
+/// The entity this one is a child of, which carries it along: its [`Transform`] is relative to its
+/// parent's. The world keeps it, so that the hierarchy stays whole: a scene's entities are spawned
+/// with theirs, [`World::set_parent`] gives it, changes it and takes it away, and code reads it but
+/// can't change it, nor can tools by name.
 ///
 /// ```
 /// use gg_engine::{Parent, Transform, World};
@@ -29,7 +29,7 @@ use crate::reflect::Reflect;
 /// let child = world.spawn(Transform::IDENTITY);
 /// world.set_parent(child, Some(parent))?;
 /// assert_eq!(world.get::<Parent>(child), Some(&Parent(parent)));
-/// # Ok::<(), gg_engine::reflect::Error>(())
+/// # Ok::<(), gg_engine::Error>(())
 /// ```
 ///
 /// It isn't [`Writable`](crate::Writable), so code that would change it doesn't compile:
@@ -138,10 +138,10 @@ fn some(slot: u32) -> Option<u32> {
 impl World {
     /// Makes `child` a child of `parent`, the last of its children, or a root if `parent` is
     /// `None`, and returns its old parent, which sets it back, as that parent's last child. It
-    /// keeps its [`Transform`](crate::Transform), which is relative to its parent's, so that it
-    /// moves in the world as its new parent is placed. Making it a child of the parent it has
-    /// changes nothing, not even its place among its siblings. Spawning a child from code is
-    /// spawning it, then setting its parent, which moves it to another table.
+    /// keeps its [`Transform`], which is relative to its parent's, so that it moves in the world as
+    /// its new parent is placed. Making it a child of the parent it has changes nothing, not even
+    /// its place among its siblings. Spawning a child from code is spawning it, then setting its
+    /// parent, which moves it to another table.
     ///
     /// Fails with `ecs.no_entity` if `child` or `parent` isn't alive, and with `ecs.parent_cycle`
     /// if `parent` is `child` or one of its descendants. A refusal changes nothing.
@@ -282,6 +282,21 @@ impl World {
             }
             at = up;
         }
+    }
+
+    /// `root`, which is alive, and its descendants, breadth first: each parent before its
+    /// children, each parent's children in order, each beside its parent's index here. It's the
+    /// order a [`Duplicate`](super::Operation::Duplicate)'s copies take their IDs in, which logs
+    /// keep.
+    pub(super) fn subtree(&self, root: Entity) -> Vec<(Entity, Option<usize>)> {
+        let mut subtree = vec![(root, None)];
+        let mut at = 0;
+        while let Some(&(parent, _)) = subtree.get(at) {
+            let children = self.children(parent).expect("alive");
+            subtree.extend(children.map(|child| (child, Some(at))));
+            at += 1;
+        }
+        subtree
     }
 
     /// The table, by its index too, and row of `parent`, and of each of its ancestors in turn up to

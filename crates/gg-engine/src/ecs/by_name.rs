@@ -17,7 +17,8 @@ impl World {
     /// type registers the first time an entity has one too, so this is for those that tools should
     /// list before then.
     ///
-    /// Fails with `reflect.name_taken` if another type has its name; with `reflect.bad_default` if
+    /// Fails with `reflect.name_taken` if another type has its name; with `reflect.unnamed` if it
+    /// describes itself as something other than a struct or an enum; with `reflect.bad_default` if
     /// a field's default is outside its bounds, or opaque; and with `ecs.bad_exclusive` if it
     /// names an exclusive field that isn't a `bool` of its own, as [`Component::exclusive`] says.
     pub fn register<T: Component>(&mut self) -> Result<()> {
@@ -341,7 +342,7 @@ mod tests {
     };
     use crate::{MeshDraw, Reflect, Sampler, Sprite, Transform};
 
-    fn named(name: &str, value: Value) -> (reflect::Name, Value) {
+    fn named(name: &str, value: Value) -> (reflect::Ident, Value) {
         (name.to_owned().into(), value)
     }
 
@@ -906,7 +907,7 @@ mod tests {
     }
 
     #[test]
-    fn a_type_named_as_another_is_refused() {
+    fn a_type_without_a_name_of_its_own_is_refused() {
         let mut world = World::default();
         world.register::<first::Health>().expect("registered");
         let error = world
@@ -929,28 +930,35 @@ mod tests {
         // first.
         for _ in 0..2 {
             let error = world
-                .register::<Posing>()
+                .register::<Posing<Transform>>()
                 .expect_err("another's description");
             assert_eq!(error.code(), "reflect.name_taken");
             let message = error.to_string();
+            // Posing's own name holds Transform's path, but only the owner's ends at a backtick.
             assert!(
                 message.contains("by_name::tests::Posing")
-                    && message.contains("transform::Transform"),
+                    && message.contains("transform::Transform`"),
                 "{message}"
             );
             world.register::<Transform>().expect("registered");
         }
+        // Nor does a type describe itself as something other than a struct or an enum, which
+        // reflection names.
+        let error = world
+            .register::<Posing<u32>>()
+            .expect_err("a description without a name");
+        assert_eq!(error.code(), "reflect.unnamed", "{error}");
         let names: Vec<&str> = world.component_types().collect();
         assert_eq!(names, ["Parent", "Health", "Armor", "Transform"]);
     }
 
-    /// Describes itself as a transform, as a type that passes everything to its field might.
+    /// Describes itself as what it holds, as a type that passes everything to its field might.
     #[derive(Clone)]
-    struct Posing(Transform);
+    struct Posing<T>(T);
 
-    impl Reflect for Posing {
+    impl<T: Reflect> Reflect for Posing<T> {
         fn describe(types: &mut Types) -> Result<reflect::Type> {
-            Transform::describe(types)
+            T::describe(types)
         }
 
         fn to_value(&self) -> Value {
@@ -958,7 +966,7 @@ mod tests {
         }
 
         fn from_value(value: &Value) -> Result<Self> {
-            Transform::from_value(value).map(Self)
+            T::from_value(value).map(Self)
         }
 
         fn with_value(&self, value: &Value) -> Result<Self> {
@@ -982,8 +990,8 @@ mod tests {
         }
     }
 
-    impl Component for Posing {}
-    impl crate::Writable for Posing {}
+    impl<T: Reflect + Clone> Component for Posing<T> {}
+    impl<T: Reflect + Clone> crate::Writable for Posing<T> {}
 
     /// Tools read a child's parent by name, but only the world sets it, whether the entity has one
     /// or not.

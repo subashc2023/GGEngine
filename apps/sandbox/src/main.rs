@@ -9,9 +9,9 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use bytemuck::NoUninit;
+use gg_engine::Error;
 use gg_engine::egui::{self, ViewportCommand, ViewportId};
 use gg_engine::math::{self, EulerRot, Mat4, Quat, Vec2, Vec3, Vec4};
-use gg_engine::reflect::Error;
 use gg_engine::{
     Actions, App, Binding, Blend, Change, Commands, Component, Context, Entity, Event, FlyAction,
     FlyCameraController, Key, Layer, Mesh, MeshDraw, OrthographicCameraController, PadButton,
@@ -194,7 +194,7 @@ fn overlooking(center: Vec2, height: f32) -> Viewpoint {
 
 /// What the sandbox set up as it attached, which its ticks go by: the swarm's sprites, one for each
 /// cell of a sheet of 4 by 4 shapes with transparent margins, row by row.
-struct Scene {
+struct SwarmShapes {
     shapes: [Sprite; 16],
 }
 
@@ -415,6 +415,28 @@ fn color_grid(world: &mut World, colors: [[f32; 3]; 2]) {
     }
 }
 
+/// Has the map's sprites and the checkerboard's as `settings` say, as the sandbox attaches and at
+/// the tick after the panels change them: between, the Inspector may set them otherwise.
+fn apply_settings(world: &mut World, settings: Settings) {
+    let sampler = if settings.smooth_map {
+        Sampler::LinearClamp
+    } else {
+        Sampler::NearestClamp
+    };
+    for (_, sprite) in world.query_mut::<(&MapTile, &mut Sprite)>() {
+        sprite.sampler = sampler;
+    }
+    for (_, checkerboard) in world.query_mut::<(&Checkerboard, &mut Sprite)>() {
+        checkerboard.color = Vec4::from(settings.tint);
+        checkerboard.rect = [Vec2::ZERO, Vec2::splat(settings.tiles)];
+        checkerboard.sampler = if settings.smooth {
+            Sampler::LinearRepeat
+        } else {
+            Sampler::NearestRepeat
+        };
+    }
+}
+
 /// Turns each entity that spins as far as it does in `dt`.
 fn spin(world: &mut World, dt: Duration) {
     for (spin, transform) in world.query_mut::<(&Spin, &mut Transform)>() {
@@ -489,42 +511,29 @@ fn pick(index: u32, salt: u32) -> f32 {
 /// that shows them through it, which only depth sorts out; beside them, a milk truck, a textured
 /// glTF model, whose nodes are entities under a root. Below the swarm, out of its way, a map
 /// of tiles from a tile set's cells packed edge to edge, which tests that none shows any of the
-/// cells beside it. All but the cubes and the pane are entities, spawned as the sandbox attaches
-/// but for the swarm, at its first tick, the grid loaded from a scene and the moons placed from a
-/// prefab, under a pivot that the triangle carries, which the engine draws back to front by their
-/// z's in the world, but for the opaque triangle and truck, drawn first; the world holds all of the
+/// cells beside it. All but the cubes and the pane are entities: the world holds all of the
 /// simulation, so that a snapshot of it restores it, and a recording of the commands replays it.
-/// At each tick, 64 a second whatever the frame rate, the sandbox's systems move the swarm by its
-/// drifters, turn the triangle, its moons and the moonlet by their spins, and move the triangle
-/// along its heading, after the commands its panels, File menu and actions queued since the last:
-/// they steer the triangle and reverse its spin, resize the swarm, color the grid by its cells,
-/// filter the map and set the checkerboard's sprite, so that what the Inspector sets stays until a
-/// panel changes it, and load the grid again. The triangle and the cubes are meshes with a vertex
-/// type and an opaque shader of the sandbox's own, the truck's meshes the engine's model shader's,
-/// and the rest the engine's sprites; the sandbox draws the cubes and the pane itself, each frame,
-/// before the world, so the cubes are one instanced draw, the pane another, the triangle a third,
-/// the truck four more, one of them its two wheels, and every other sprite one more.
-/// They're drawn over a color that drifts slowly, so that a running sandbox visibly animates, as
-/// the cubes turn. The engine's orthographic camera controller steers the camera: W, A, S and D,
-/// or a gamepad's right stick, move it along its own axes, Q and E, or the triggers, turn it left
-/// and right, at the same speed whatever the frame rate, and the mouse wheel zooms it. Looking at
-/// the cubes, the engine's fly camera controller steers it instead, with perspective: W, A, S and
-/// D move it where it looks, E and Q, or the triggers, raise and lower it, and the right stick, or
-/// the mouse moved with its right button held, looks about. The arrows, the left stick and the
-/// D-pad steer the triangle, a unit a second at most, and R or the pad's South button, A on an Xbox
-/// pad, reverses its spin: the sandbox's actions, whose changes it queues as commands as they come,
-/// so that its ticks move the triangle for as long as an arrow is held, and reverse it once for
-/// each press, however short. Shows six panels to dock, beside the engine's Performance panel,
-/// which counts the draws, and its Entities and Inspector panels, which list the entities and edit
-/// the picked one's components: the camera; how many sprites the swarm has; the map's filtering,
-/// smooth or sharp, and buttons that look at the map, back at the swarm, or at the cubes; the
-/// grid's colors, which can be picked; the checkerboard's filtering, how many times it repeats, and
-/// its tint; and the clear color, which can be held or picked. Logs the key, mouse and gamepad
-/// presses that reach it, which those on the panels don't. It polls input too: holding Space
-/// pauses the drift and the cubes, and a panel shows where the cursor is. The title bar's File menu
-/// saves the grid to its scene, loads it again from the scene, which a refusal of leaves it as it
-/// was, and quits.
+/// The triangle and the cubes are meshes with a vertex type and an opaque shader of the sandbox's
+/// own, the truck's meshes the engine's model shader's, and the rest the engine's sprites; the
+/// sandbox draws the cubes and the pane itself, each frame, before the world, so the cubes are one
+/// instanced draw, the pane another, the triangle a third, the truck four more, one of them its two
+/// wheels, and every other sprite one more. They're drawn over a color that drifts slowly, so that
+/// a running sandbox visibly animates, as the cubes turn. The engine's orthographic camera
+/// controller steers the camera, turning it too, and looking at the cubes, the engine's fly camera
+/// controller does, with perspective, but for the left stick, which steers the triangle:
+/// [`OrthographicCameraController`] and [`FlyCameraController`] give their keys, as [`Act`] gives
+/// the sandbox's own, which steer the triangle and reverse its spin. Shows six panels to dock,
+/// beside the engine's Performance panel, which counts the draws, and its Entities and Inspector
+/// panels, which list the entities and edit the picked one's components: the camera; how many
+/// sprites the swarm has; the map's filtering, smooth or sharp, and buttons that look at the map,
+/// back at the swarm, or at the cubes; the grid's colors, which can be picked; the checkerboard's
+/// filtering, how many times it repeats, and its tint; and the clear color, which can be held or
+/// picked. Logs the key, mouse and gamepad presses that reach it, which those on the panels don't.
+/// It polls input too: holding Space pauses the drift and the cubes, and a panel shows where the
+/// cursor is. The title bar's File menu saves the grid to its scene, loads it again from the
+/// scene, which a refusal of leaves it as it was, and quits.
 struct Sandbox {
+    /// How long the clear color has drifted.
     time: Duration,
     drift: bool,
     /// The clear color, in linear RGB.
@@ -538,11 +547,14 @@ struct Sandbox {
     flying: bool,
     /// The cubes' mesh and shader, once the sandbox attaches.
     cubes: Option<(Mesh<Colored>, Shader<Colored>)>,
+    /// How long the cubes have turned: every frame but those Space is held through, whether the
+    /// clear color drifts or not.
+    turned: Duration,
     actions: Actions<Act>,
     /// How many sprites the swarm has, as its panel says.
     swarm: u32,
-    /// Spawned once the sandbox attaches.
-    scene: Option<Scene>,
+    /// The swarm's shapes, set up as the sandbox attaches.
+    scene: Option<SwarmShapes>,
     /// What the panels, the File menu and the actions changed since the last tick.
     commands: Vec<Command>,
     /// The drifters that wrapped at a tick, kept for its memory, with its lock: empty between
@@ -600,11 +612,7 @@ impl Sandbox {
         let mut fly = FlyCameraController::new(Self::looking_at_the_cubes());
         // W, A, S and D alone, since the left stick steers the triangle.
         fly.actions.unbind(FlyAction::Move);
-        let wasd = Binding::Axis2 {
-            x: [Key::KeyA, Key::KeyD].map(Source::Key),
-            y: [Key::KeyS, Key::KeyW].map(Source::Key),
-        };
-        let bound = fly.actions.bind(FlyAction::Move, wasd);
+        let bound = fly.actions.bind(FlyAction::Move, Binding::WASD);
         bound.expect("W, A, S and D are free once moving is unbound");
         let mut actions = Actions::default();
         let arrows = Binding::Axis2 {
@@ -645,6 +653,7 @@ impl Sandbox {
             fly,
             flying: false,
             cubes: None,
+            turned: Duration::ZERO,
             actions,
             swarm: SWARM_START,
             scene: None,
@@ -700,7 +709,7 @@ impl Sandbox {
         let Some((mesh, shader)) = self.cubes else {
             return;
         };
-        let turned = self.time.as_secs_f32();
+        let turned = self.turned.as_secs_f32();
         for way in [-1.0, 1.0] {
             let axis = Vec3::new(1.0, way, 0.5).normalize();
             let at = Mat4::from_scale_rotation_translation(
@@ -744,28 +753,6 @@ impl Sandbox {
         for index in kept..swarm {
             let (drifter, shape) = Drifter::new(index);
             world.spawn((drifter.transform(t), scene.shapes[shape], drifter));
-        }
-    }
-
-    /// Has the map's sprites and the checkerboard's as `settings` say, as the sandbox attaches and
-    /// at the tick after the panels change them: between, the Inspector may set them otherwise.
-    fn apply_settings(&self, world: &mut World, settings: Settings) {
-        let sampler = if settings.smooth_map {
-            Sampler::LinearClamp
-        } else {
-            Sampler::NearestClamp
-        };
-        for (_, sprite) in world.query_mut::<(&MapTile, &mut Sprite)>() {
-            sprite.sampler = sampler;
-        }
-        for (_, checkerboard) in world.query_mut::<(&Checkerboard, &mut Sprite)>() {
-            checkerboard.color = Vec4::from(settings.tint);
-            checkerboard.rect = [Vec2::ZERO, Vec2::splat(settings.tiles)];
-            checkerboard.sampler = if settings.smooth {
-                Sampler::LinearRepeat
-            } else {
-                Sampler::NearestRepeat
-            };
         }
     }
 }
@@ -841,10 +828,10 @@ impl Layer for Sandbox {
             scale: Vec3::splat(0.25),
         };
         truck.expect("the truck loads").spawn(world, at);
-        self.scene = Some(Scene {
+        self.scene = Some(SwarmShapes {
             shapes: std::array::from_fn(|i| shapes.sprite([i as u32 % 4, i as u32 / 4], [1, 1])),
         });
-        self.apply_settings(world, self.settings);
+        apply_settings(world, self.settings);
         color_grid(world, self.grid_colors);
         // At the first tick, so that a recording holds the swarm's size, which a build's own
         // differs from another's.
@@ -871,7 +858,7 @@ impl Layer for Sandbox {
                 }
                 Command::Swarm(count) => swarm = Some(count),
                 Command::GridColors(colors) => color_grid(world, colors),
-                Command::Settings(settings) => self.apply_settings(world, settings),
+                Command::Settings(settings) => apply_settings(world, settings),
                 Command::ReloadGrid { text, colors } => reload_grid(world, &text, colors),
             }
         }
@@ -897,11 +884,14 @@ impl Layer for Sandbox {
         } else {
             self.camera.update(cx, dt);
         }
-        if self.drift && !cx.input().key_down(Key::Space) {
-            self.time += dt;
-            let t = self.time.as_secs_f32() * 0.4;
-            let wave = |phase: f32| 0.02 + 0.06 * (0.5 + 0.5 * math::libm::sinf(t + phase));
-            self.color = [wave(0.0), wave(2.1), wave(4.2)];
+        if !cx.input().key_down(Key::Space) {
+            self.turned += dt;
+            if self.drift {
+                self.time += dt;
+                let t = self.time.as_secs_f32() * 0.4;
+                let wave = |phase: f32| 0.02 + 0.06 * (0.5 + 0.5 * math::libm::sinf(t + phase));
+                self.color = [wave(0.0), wave(2.1), wave(4.2)];
+            }
         }
         self.draw_cubes(cx);
     }
@@ -1171,7 +1161,7 @@ mod tests {
         world.load_scene(&read_scene("grid.ron").0).expect("loaded");
         world.spawn((Transform::IDENTITY, Sprite::default(), Checkerboard));
         let mut sandbox = Sandbox::new();
-        sandbox.scene = Some(Scene {
+        sandbox.scene = Some(SwarmShapes {
             shapes: std::array::from_fn(|_| Sprite::default()),
         });
         let colors = [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]];
@@ -1292,8 +1282,8 @@ mod tests {
     }
 
     /// The live recording, `tests/references/live.recording`, of a windowed run whose panels and
-    /// Inspector were used, replays without a GPU to the hashes it recorded, as the deterministic
-    /// mode needs, in a debug build as in a release one and on every platform.
+    /// Inspector were used, replays without a GPU to the hashes it recorded, as determinism needs,
+    /// in a debug build as in a release one and on every platform.
     /// `GG_UPDATE_REFERENCES=1` writes its hashes again, after a change meant to change the
     /// simulation or what the hash reads; a change to a command's type that its lines no longer
     /// read as needs a new recording.
@@ -1425,8 +1415,8 @@ mod tests {
     /// The sandbox's simulation, run without a GPU from a seed through the commands of a script,
     /// hashes at its attach and at each tick as its reference says: the same in one run as in the
     /// next, on four threads as on one, in a debug build as in a release one, and on every
-    /// platform, as the deterministic mode needs. `GG_UPDATE_REFERENCES=1` writes the reference
-    /// again, after a change meant to change the simulation or what the hash reads.
+    /// platform, as determinism needs. `GG_UPDATE_REFERENCES=1` writes the reference again, after a
+    /// change meant to change the simulation or what the hash reads.
     #[test]
     fn the_simulation_gives_its_reference_hashes() {
         let run = simulate();
@@ -1470,10 +1460,7 @@ mod tests {
             ..Sandbox::new()
         };
         sandbox.attach(&mut cx);
-        let hashed = |at: &dyn std::fmt::Display, world: &World| {
-            let hash = world.hash();
-            format!("{at} {:016x} {:016x}", hash.content, hash.layout)
-        };
+        let hashed = |at: &dyn std::fmt::Display, world: &World| format!("{at} {}", world.hash());
         let mut lines = vec![hashed(&"attach", cx.world())];
         for number in 0..256 {
             let world = cx.world_mut();

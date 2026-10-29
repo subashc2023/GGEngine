@@ -1,8 +1,9 @@
 //! The pipeline cache's file, which windowed runs give the renderer as it starts and save as it
 //! ends, in the OS's per-user directory for caches: pipelines the GPU's driver made in an earlier
-//! run are made again in a fraction of the time. Headless runs, replays and tests keep none, as
-//! they keep no layout, so that their startup times compare from run to run. One file per app,
-//! so a run on another GPU starts empty and saves its own.
+//! run are made again in a fraction of the time, where the driver keeps no cache of its own.
+//! Headless runs, replays and tests keep none, as they keep no layout, so that their startup times
+//! compare from run to run. One file per app, so a run on another GPU starts empty and saves its
+//! own.
 
 use std::ffi::OsString;
 use std::io;
@@ -13,7 +14,6 @@ use gg_renderer::Renderer;
 use tracing::{debug, warn};
 
 use crate::dirs::{self, Kind};
-use crate::image;
 
 /// The most a cache file may hold, which is read whole before the renderer checks it: far past
 /// the size at which the cache, which keeps every pipeline it's given, would need pruning.
@@ -32,7 +32,7 @@ pub(crate) fn path(app: &str, os: &str, var: impl Fn(&str) -> Option<OsString>) 
 pub(crate) fn load(path: &Path) -> Vec<u8> {
     let _zone = gg_core::zone!();
     // A byte past the most it may hold, so that a longer one shows.
-    let problem = match image::read_file(path, MAX_FILE + 1) {
+    let problem = match dirs::read_file(path, MAX_FILE + 1) {
         Ok(data) if data.len() as u64 <= MAX_FILE => return data,
         Ok(_) => format!("it holds more than {} MiB", MAX_FILE >> 20),
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Vec::new(),
@@ -89,7 +89,6 @@ mod tests {
         assert!(load(&file).is_empty(), "there's no file yet");
         dirs::write(&file, b"cached").expect("the cache is written");
         assert_eq!(load(&file), b"cached");
-        assert!(!file.with_extension("bin.new").exists());
         // What isn't a regular file holds nothing.
         assert!(load(&dir.0).is_empty());
     }

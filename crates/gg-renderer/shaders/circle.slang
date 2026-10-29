@@ -2,14 +2,10 @@
 // filled with its color and drawn by its alpha over what's behind it. Each instance is a circle,
 // with its own transform, ID and parameters, writing its ID where it shows but where it's fully
 // transparent, as past its edge, so that a pick there finds what's behind it. Its edges are smoothed
-// over a pixel however big it shows, and faded further inward by its fade. `Corner` in
-// src/sprite.rs, which `Corner` here matches field for field, and `Params` in src/circle.rs, which
-// `Circle` here matches byte for byte.
+// over a pixel however big it shows, and faded further inward by its fade. `Params` in
+// src/circle.rs, which `Circle` here matches byte for byte.
 
-struct Corner {
-    float3 position;
-    float2 uv;
-};
+#include "mesh.slang"
 
 struct Circle {
     // Linear RGBA, alpha not multiplied in.
@@ -20,16 +16,7 @@ struct Circle {
     float fade;
 };
 
-struct Push {
-    float4x4 clip_from_world;
-    Corner* corners;
-    // Each instance's, from the quad's space to the world's.
-    float4x4* transforms;
-    // Each instance's: its entity's, or 0.
-    uint2* ids;
-    Circle* circles;
-};
-[[vk::push_constant]] ConstantBuffer<Push> push;
+[[vk::push_constant]] ConstantBuffer<Push<Corner, Circle>> push;
 
 struct Varyings {
     float4 position : SV_Position;
@@ -42,7 +29,7 @@ struct Varyings {
 
 [shader("vertex")]
 Varyings vertex_main(uint index: SV_VulkanVertexID, uint instance: SV_VulkanInstanceID) {
-    Corner corner = push.corners[index];
+    Corner corner = push.vertices[index];
     float4 world = mul(push.transforms[instance], float4(corner.position, 1.0));
     Varyings out;
     out.position = mul(push.clip_from_world, world);
@@ -52,14 +39,9 @@ Varyings vertex_main(uint index: SV_VulkanVertexID, uint instance: SV_VulkanInst
     return out;
 }
 
-struct Targets {
-    float4 color : SV_Target0;
-    uint2 id : SV_Target1;
-};
-
 [shader("fragment")]
 Targets fragment_main(Varyings input) {
-    Circle circle = push.circles[input.instance];
+    Circle circle = push.params[input.instance];
     // How far in from its edge, as a fraction of its radius: 0 on the edge, 1 in the middle.
     float inside = 1.0 - length(input.local);
     // How far that goes from one pixel to the next, which the edges are smoothed over, so that

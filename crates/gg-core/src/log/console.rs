@@ -110,7 +110,7 @@ where
     }
 }
 
-/// Writes where an event came from, padded: target `gg_gpu::device::pick` becomes
+/// Writes where an event came from, padded: target `gg_gpu::device::candidate::pick` becomes
 /// `gpu::device`, with the engine's crates in one color and every other crate in another.
 fn write_source(w: &mut Writer<'_>, target: &str, s: &Styles) -> fmt::Result {
     let mut path = target.split("::");

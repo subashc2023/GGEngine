@@ -205,10 +205,11 @@ impl Viewports {
             if !child.presented {
                 let size = child.window.inner_size();
                 let window = child.window.clone();
+                let title = child.window.title();
                 if let Err(error) =
-                    renderer.open_window(key(child.id), window, size.width, size.height)
+                    renderer.open_window(key(child.id), window, &title, size.width, size.height)
                 {
-                    embed(egui, &error, &child.window.title());
+                    embed(egui, &error, &title);
                     return false;
                 }
                 child.presented = true;
@@ -294,7 +295,7 @@ fn run(shared: &RefCell<Shared>, egui: &egui::Context, viewport: ImmediateViewpo
             None => RawInput {
                 viewport_id: ids.this,
                 screen_rect: (builder.inner_size).map(|size| Rect::from_min_size(Pos2::ZERO, size)),
-                max_texture_side: Some(crate::MAX_TEXTURE_SIDE),
+                max_texture_side: Some(crate::main_loop::MAX_TEXTURE_SIDE),
                 ..RawInput::default()
             },
         };
@@ -481,7 +482,7 @@ impl WindowInput {
                 window,
                 scale,
                 window.theme(),
-                Some(crate::MAX_TEXTURE_SIDE),
+                Some(crate::main_loop::MAX_TEXTURE_SIDE),
             ),
             viewport,
             cursor: Pos2::ZERO,

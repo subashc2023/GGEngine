@@ -348,9 +348,15 @@ impl Files {
 mod tests {
     use std::cell::RefCell;
     use std::collections::HashMap;
+    use std::fmt;
     use std::thread::JoinHandle;
 
     use gg_renderer::Blend;
+    use tracing::field::{Field, Visit};
+    use tracing::{Event, Level, Subscriber};
+    use tracing_subscriber::Layer;
+    use tracing_subscriber::filter::Targets;
+    use tracing_subscriber::layer::{self, SubscriberExt};
 
     use super::*;
     use crate::dirs::tests::Scratch;
@@ -579,16 +585,54 @@ mod tests {
         (file.and_then(|file| file.set_modified(an_hour_ago))).expect("its time");
     }
 
+    /// Sends the code of each event that reaches it.
+    struct Codes(Sender<String>);
+
+    impl<S: Subscriber> Layer<S> for Codes {
+        fn on_event(&self, event: &Event<'_>, _: layer::Context<'_, S>) {
+            let mut code = Code::default();
+            event.record(&mut code);
+            let _ = self.0.send(code.0);
+        }
+    }
+
+    /// An event's `code` field, empty if it has none.
+    #[derive(Default)]
+    struct Code(String);
+
+    impl Visit for Code {
+        fn record_str(&mut self, field: &Field, value: &str) {
+            if field.name() == "code" {
+                value.clone_into(&mut self.0);
+            }
+        }
+
+        fn record_debug(&mut self, _: &Field, _: &dyn fmt::Debug) {}
+    }
+
     /// The thread, watching `shaders`' sources: its side, which ends it as it drops; what it sends
+    /// back; the codes of the warnings it logs, as for a compile that fails, which sends nothing
     /// back; and the thread.
-    fn started(shaders: &Shaders) -> (Sender<ShaderSource>, Receiver<Compiled>, JoinHandle<()>) {
+    fn started(
+        shaders: &Shaders,
+    ) -> (
+        Sender<ShaderSource>,
+        Receiver<Compiled>,
+        Receiver<String>,
+        JoinHandle<()>,
+    ) {
         let (sources, to_watch) = mpsc::channel();
         let (back, compiled) = mpsc::channel();
-        let thread = thread::spawn(move || watch(&to_watch, &back));
+        let (codes, warned) = mpsc::channel();
+        let warnings = Targets::new().with_target("gg_engine::hot_reload", Level::WARN);
+        let subscriber = tracing_subscriber::registry().with(Codes(codes).with_filter(warnings));
+        let thread = thread::spawn(move || {
+            tracing::subscriber::with_default(subscriber, || watch(&to_watch, &back));
+        });
         for source in shaders.sources() {
             sources.send(source.clone()).expect("the thread");
         }
-        (sources, compiled, thread)
+        (sources, compiled, warned, thread)
     }
 
     #[test]
@@ -610,7 +654,7 @@ mod tests {
         // b, edited once it's added but before the thread first looks at its file.
         edit(&paths[1], 1);
 
-        let (sources, compiled, thread) = started(&shaders);
+        let (sources, compiled, _, thread) = started(&shaders);
         let a_while = Duration::from_secs(30);
         let came_back = |what: &str| compiled.recv_timeout(a_while).expect(what);
         let b = came_back("b comes back compiled");
@@ -647,15 +691,19 @@ mod tests {
         let added = shaders.add::<[f32; 3], Vec4>("shader", &path, Blend::Opaque);
         added.expect("a shader");
 
-        let (sources, compiled, thread) = started(&shaders);
+        let (sources, compiled, warned, thread) = started(&shaders);
         let a_while = Duration::from_secs(30);
         let came_back = |what: &str| compiled.recv_timeout(a_while).expect(what);
-        // Long enough for a compile that fails to have failed, which sends nothing back.
-        let fails = || compiled.recv_timeout(LOOK * 15).is_err();
+        // A compile that fails warns, and sends nothing back.
+        let failed = |what: &str| {
+            let warning = warned.recv_timeout(a_while);
+            assert_eq!(warning.as_deref(), Ok("renderer.bad_shader"), "{what}");
+            assert!(compiled.try_recv().is_err(), "{what}");
+        };
 
         // An include it names that isn't there yet, made once the compile has failed.
         fs::write(&path, format!("#include \"extra.slang\"\n{text}")).expect("an edit");
-        assert!(fails(), "it doesn't compile without its include");
+        failed("it doesn't compile without its include");
         fs::write(dir.join("extra.slang"), "static const float EXTRA = 1.0;\n").expect("one");
         let extra = came_back("it compiles with its include made");
         assert_eq!(names(&extra), ["shader.slang", "extra.slang"]);
@@ -663,7 +711,7 @@ mod tests {
         // An include that's there but broken, fixed where it is once the compile has failed.
         fs::write(dir.join("fix.slang"), "static const float FIX = ;\n").expect("one");
         fs::write(&path, format!("#include \"fix.slang\"\n{text}")).expect("an edit");
-        assert!(fails(), "it doesn't compile with its include broken");
+        failed("it doesn't compile with its include broken");
         fs::write(dir.join("fix.slang"), "static const float FIX = 1.0;\n").expect("the fix");
         let fixed = came_back("it compiles with its include fixed");
         assert_eq!(names(&fixed), ["shader.slang", "fix.slang"]);

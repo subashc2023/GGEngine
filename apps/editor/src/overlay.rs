@@ -1,9 +1,8 @@
-//! What the editor draws over its view: a toolbar at the view's top left, which picks what the
-//! left button does, the projection, the grid and the colliders' outlines; a gizmo at its top
-//! right, which shows which way the camera faces, and turns it; at its bottom left, the name of
-//! what the view shows under the cursor; and round its edges, while a scene from the Assets panel
-//! is held over it, an outline. And Play and Simulate, at the middle of the title bar, which run
-//! the world and stop it.
+//! What the editor draws over its view: a toolbar at the view's top left, whose controls
+//! [`Toolbar::show`] lists; a gizmo at its top right, which shows which way the camera faces, and
+//! turns it; at its bottom left, the name of what the view shows under the cursor; and round its
+//! edges, while a scene from the Assets panel is held over it, an outline. And Play and Simulate,
+//! at the middle of the title bar, which run the world and stop it.
 
 use std::f32::consts::{PI, TAU};
 
@@ -42,8 +41,8 @@ pub struct Toolbar {
     /// Whether the view sees through the world's camera, as the game would, rather than the
     /// editor's, and shows neither the grid nor the gizmo.
     pub world_camera: bool,
-    /// Whether the world's 2D colliders' outlines show, over the rest of the view, through either
-    /// camera.
+    /// Whether the world's 2D colliders' outlines show, over the rest of the view but a nearer
+    /// opaque mesh, through either camera.
     pub colliders: bool,
     /// How the world runs: as it's edited, or a copy of it in its place until it stops, playing
     /// or simulating.
@@ -145,11 +144,7 @@ impl Toolbar {
                 }
                 ui.separator();
                 ui.add_enabled_ui(!self.world_camera, |ui| {
-                    let (label, tip) = if camera.perspective {
-                        ("Persp", "Perspective: click for orthographic")
-                    } else {
-                        ("Ortho", "Orthographic: click for perspective")
-                    };
+                    let (label, tip) = projection(camera);
                     if ui.button(label).on_hover_text(tip).clicked() {
                         camera.perspective = !camera.perspective;
                     }
@@ -453,15 +448,10 @@ pub fn gizmo(ui: &mut egui::Ui, camera: &mut OrbitCamera, aligned: Option<Side>)
         ui.ctx().set_cursor_icon(CursorIcon::Grab);
     }
 
-    let projection = if camera.perspective { "Persp" } else { "Ortho" };
+    let (name, tip) = projection(camera);
     let text = match aligned {
-        Some(side) => format!("{side:?} · {projection}"),
-        None => projection.to_owned(),
-    };
-    let tip = if camera.perspective {
-        "Perspective: click for orthographic"
-    } else {
-        "Orthographic: click for perspective"
+        Some(side) => format!("{side:?} · {name}"),
+        None => name.to_owned(),
     };
     let switch = ui.interact(label, Id::unique("gg editor gizmo label"), Sense::click());
     let color = if switch.hovered() {
@@ -482,6 +472,16 @@ pub fn gizmo(ui: &mut egui::Ui, camera: &mut OrbitCamera, aligned: Option<Side>)
         .clicked()
     {
         camera.perspective = !camera.perspective;
+    }
+}
+
+/// The short name of `camera`'s projection, and the tip of a switch to the other: what the
+/// toolbar's button and the gizmo's label say.
+fn projection(camera: &OrbitCamera) -> (&'static str, &'static str) {
+    if camera.perspective {
+        ("Persp", "Perspective: click for orthographic")
+    } else {
+        ("Ortho", "Orthographic: click for perspective")
     }
 }
 

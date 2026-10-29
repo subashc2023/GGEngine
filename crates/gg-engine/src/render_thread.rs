@@ -1,12 +1,10 @@
-//! The render thread, `gg-render`, which renders each frame while the main thread runs the next.
-//! The renderer goes there and back: the main thread hands it over with a frame's render data once
-//! the frame's UI is drawn and tessellated, and takes it back once the next frame's is, waiting for
-//! it if need be, so that the main thread is at most a frame ahead. While it's back, the main
-//! thread tells it the windows' sizes, opens and closes windows' swapchains, and at the end drops
-//! it: Windows and macOS give out a window's handle only on its own thread, and macOS closes a
-//! window there, so the render thread never makes a surface or holds the last reference to a
-//! window. It rebuilds a swapchain whose window changed size as it acquires the swapchain's next
-//! image. One thread at a time calls the renderer.
+//! The render thread, `gg-render`, which renders each frame while the main thread runs the next, as
+//! ARCHITECTURE.md's Threads describes. The main thread hands the renderer over with a frame's
+//! render data once the frame's UI is drawn and tessellated, and takes it back once the next
+//! frame's is, waiting for it if need be; while it's back, the main thread tells it the windows'
+//! sizes, opens and closes windows' swapchains, and at the end drops it. The render thread rebuilds
+//! a swapchain whose window changed size as it acquires the swapchain's next image. One thread at a
+//! time calls the renderer.
 
 use std::any::Any;
 use std::mem;
@@ -318,7 +316,8 @@ mod tests {
     use gg_renderer::MAX_PICKS;
 
     use super::*;
-    use crate::{Context, EntityId, MainUi, hand_off, take_back};
+    use crate::main_loop::{MainUi, hand_off, take_back};
+    use crate::{Context, EntityId};
 
     /// The longest the stand-in waits to be told to go on, and a test waits for it to start, past
     /// which the test fails rather than hangs.

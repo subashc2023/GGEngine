@@ -50,7 +50,7 @@ const COLOR_RANGE: vk::ImageSubresourceRange = vk::ImageSubresourceRange {
     layer_count: 1,
 };
 
-/// Mip level `level` of a color image, in its one layer: what a copy writes.
+/// Mip level `level` of a color image, in its one layer: what a copy writes or reads.
 const fn color_layers(level: u32) -> vk::ImageSubresourceLayers {
     vk::ImageSubresourceLayers {
         aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -58,6 +58,24 @@ const fn color_layers(level: u32) -> vk::ImageSubresourceLayers {
         base_array_layer: 0,
         layer_count: 1,
     }
+}
+
+/// The region of a copy of `size` pixels between `offset` in a buffer and mip level `level` of a
+/// color image, at `origin` in it.
+fn copy_region(offset: u64, origin: [u32; 2], size: [u32; 2], level: u32) -> vk::BufferImageCopy {
+    vk::BufferImageCopy::default()
+        .buffer_offset(offset)
+        .image_subresource(color_layers(level))
+        .image_offset(vk::Offset3D {
+            x: origin[0] as i32,
+            y: origin[1] as i32,
+            z: 0,
+        })
+        .image_extent(vk::Extent3D {
+            width: size[0],
+            height: size[1],
+            depth: 1,
+        })
 }
 
 /// The whole of a depth image, as [`COLOR_RANGE`] is of a color one.

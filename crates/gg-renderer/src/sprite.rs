@@ -106,9 +106,9 @@ impl Sprite {
     }
 }
 
-/// A corner of the quad, which `shaders/sprite.slang` reads: its position in the quad's own space,
-/// and where it is in the sprite's rectangle, from (0, 0) at its top left to (1, 1) at its bottom
-/// right.
+/// A corner of the quad, which the sprite, circle and line shaders read as `Corner` in
+/// `shaders/mesh.slang`: its position in the quad's own space, and where it is in the sprite's
+/// rectangle, from (0, 0) at its top left to (1, 1) at its bottom right.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 pub(crate) struct Corner {

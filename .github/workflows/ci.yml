@@ -20,6 +20,9 @@ jobs:
     name: ${{ matrix.name }}
     # A pull request from a branch of this repository was already checked when it was pushed.
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    # About twice a run that compiles every crate afresh: a job that hangs holds its billed runner
+    # that long, rather than GitHub's 360 minutes.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -27,7 +30,7 @@ jobs:
           # Hosted runners have no GPU. On Linux the GPU tests run on lavapipe, Mesa's CPU
           # Vulkan driver, from Debian trixie: Mesa 25.0, the first with Vulkan 1.4, and the
           # validation layer 1.4.309. Elsewhere they're skipped.
-          - { name: Linux x86-64, runner: ubuntu-24.04, container: "debian:trixie" }
+          - { name: Linux x86-64, runner: ubuntu-24.04, container: "debian:trixie", shipping: true }
           - { name: Linux ARM64, runner: ubuntu-24.04-arm, container: "debian:trixie" }
           - { name: Windows x86-64, runner: windows-2025, skip-gpu-tests: "1" }
           - { name: Windows ARM64, runner: windows-11-arm, skip-gpu-tests: "1" }
@@ -60,8 +63,6 @@ jobs:
               digest=7b9bb838b105de0bb86390196ac5bcb02efc610c0542517204105cf87ec98399 ;;
             Windows-ARM64) asset=windows-aarch64
               digest=b5802a24e810b2b82e18cc796166692b4431431b66a65b108d111b668a920e7c ;;
-            macOS-X64) asset=macos-x86_64
-              digest=b4f01f615dc625f60c593d7d0a4bbd38e05dfa2a34bfd3973017c309d866feaa ;;
             macOS-ARM64) asset=macos-aarch64
               digest=07fa8833fdbb343c3674c84fdd885910f495f3daaaa0c732b32980151e8b58c4 ;;
             *) echo "no Slang release is listed for $RUNNER_OS-$RUNNER_ARCH"; exit 1 ;;
@@ -96,7 +97,7 @@ jobs:
       # The shipping configuration, the player alone, whose gg-engine leaves out `dev`: on one
       # runner, as what `dev` leaves out is alike on every platform.
       - name: Check the shipping configuration
-        if: matrix.name == 'Linux x86-64'
+        if: matrix.shipping
         run: cargo clippy -p player --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       # Whether the engine runs: rendering offscreen on lavapipe, under validation, it exits 0.
@@ -139,6 +140,7 @@ jobs:
   layering:
     name: Layering rules
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    timeout-minutes: 10
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

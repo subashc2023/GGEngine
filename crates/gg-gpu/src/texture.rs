@@ -53,8 +53,8 @@ pub enum TextureFormat {
 
 /// An RGBA image with 8-bit channels, with one mip level or a full chain of them, that shaders
 /// sample through its index in the bindless set. Frames fill its pixels, and may write over those
-/// of one with one level, and they're undefined until then.
-/// Dropping it retires it until the GPU is done with it.
+/// of one with one level, and they're undefined until then. Dropping it retires it until the GPU
+/// is done with it.
 pub struct Texture {
     device: Arc<Device>,
     raw: vk::Image,
@@ -210,7 +210,7 @@ impl Texture {
     }
 
     /// The width and height in pixels, of its first and largest level.
-    pub(crate) fn size(&self) -> [u32; 2] {
+    pub fn size(&self) -> [u32; 2] {
         [self.extent.width, self.extent.height]
     }
 

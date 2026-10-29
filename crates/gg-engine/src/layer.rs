@@ -79,10 +79,11 @@ pub trait Layer {
         ControlFlow::Continue(())
     }
 
-    /// Called every frame, after the updates, to draw UI: dockable panels, and anything else
-    /// egui draws. A layer that keeps this default draws none, and an app none of whose layers
-    /// draw UI, and whose windows the OS frames, runs without egui from its second frame, so that
-    /// its frames neither collect egui's input nor lay out and tessellate an empty UI.
+    /// Called every frame, after the updates, to draw UI: dockable panels, and anything else egui
+    /// draws. A layer that keeps this default draws none, and an app none of whose layers draw UI,
+    /// whose windows the OS frames, and which has no [view panel](crate::App::view_panel), runs
+    /// without egui from its second frame, so that its frames neither collect egui's input nor lay
+    /// out and tessellate an empty UI.
     fn ui(&mut self, _cx: &mut Context, ui: &mut Ui<'_>) {
         ui.default_ui(type_name::<Self>());
     }
@@ -290,6 +291,12 @@ impl Context {
         self.window.as_ref()
     }
 
+    /// The app's window's physical pixels per logical pixel, as [`Window::scale`] says; 1 in a
+    /// headless run.
+    pub fn scale(&self) -> f64 {
+        self.window.as_ref().map_or(1.0, Window::scale)
+    }
+
     /// What's held down and where the cursor is, for layers that poll input rather than
     /// follow events.
     pub fn input(&self) -> &Input {
@@ -301,6 +308,7 @@ impl Context {
         self.clear_color
     }
 
+    /// Sets the color each frame clears to, in linear RGBA.
     pub fn set_clear_color(&mut self, color: [f32; 4]) {
         self.clear_color = color;
     }
@@ -311,10 +319,9 @@ impl Context {
     }
 
     /// Sets what the game's view sees the world from this frame, in place of the world's camera,
-    /// which it sees through in frames no layer sets one: of the entities with a
-    /// [`Camera`](crate::Camera) and a [`Transform`](crate::Transform), the one that's primary;
-    /// without one, [`Viewpoint::default`]. A projection that can't project panics as the frame
-    /// renders, as [`Projection`](crate::Projection) says.
+    /// which it sees through in frames no layer sets one: of the entities with a [`Camera`] and a
+    /// [`Transform`], the one that's primary; without one, [`Viewpoint::default`]. A projection
+    /// that can't project panics as the frame renders, as [`Projection`](crate::Projection) says.
     pub fn set_viewpoint(&mut self, viewpoint: Viewpoint) {
         self.viewpoint = Some(viewpoint);
     }
@@ -332,18 +339,21 @@ impl Context {
 
     /// Asks which of the world's entities the game's view shows at `at`, in the main window's
     /// physical pixels from its top left, as [`Input::cursor`] places the cursor, in the frame
-    /// being made: the one whose sprite or mesh draws on top at that pixel; and returns the ticket
-    /// its answer comes back with in [`picked`](Self::picked), or `None` once the frame has asked
-    /// 64, as many as a frame reads back. The answer comes four frames after the frame that asks,
-    /// about 67 ms at 60 Hz: the main thread runs a frame ahead of the render thread, which reads
-    /// the pixel back with a frame that the GPU finishes two frames later. It's `None` where the
-    /// view shows no entity: where a layer's own draw is on top, as [`draw`](Self::draw) and
-    /// [`draw_sprite`](Self::draw_sprite) draw, where the view shows its clear color, and outside
-    /// the view, which is answered sooner, with the next answers to come back. Where a sprite or a
-    /// blended model is fully transparent, which their shaders discard, the pick finds what's
-    /// behind it. A frame whose rendering had nothing to render into, as when the window's
-    /// swapchain had no image to give, leaves its picks to the next that renders, which reads them
-    /// by what it shows. Replays, which render nothing, answer none.
+    /// being made: the one whose sprite, circle or mesh draws on top at that pixel, or whose
+    /// collider's outline does, as [`set_colliders_shown`](Self::set_colliders_shown) shows them;
+    /// and returns the ticket its answer comes back with in [`picked`](Self::picked), or `None`
+    /// once the frame has asked 64, as many as a frame reads back. The answer comes four frames
+    /// after the frame that asks, about 67 ms at 60 Hz: the main thread runs a frame ahead of the
+    /// render thread, which reads the pixel back with a frame that the GPU finishes two frames
+    /// later. It's `None` where the view shows no entity: where a layer's own draw is on top, as
+    /// [`draw`](Self::draw), [`draw_sprite`](Self::draw_sprite),
+    /// [`draw_circle`](Self::draw_circle), [`draw_line`](Self::draw_line) and
+    /// [`draw_rect`](Self::draw_rect) draw, where the view shows its clear color, and outside the
+    /// view, which is answered sooner, with the next answers to come back. Where a sprite, a
+    /// circle, a line or a blended model is fully transparent, which their shaders discard, the
+    /// pick finds what's behind it. A frame whose rendering had nothing to render into, as when the
+    /// window's swapchain had no image to give, leaves its picks to the next that renders, which
+    /// reads them by what it shows. Replays, which render nothing, answer none.
     pub fn pick(&mut self, at: [f64; 2]) -> Option<Pick> {
         if self.picks.len() == MAX_PICKS {
             return None;
@@ -405,7 +415,7 @@ impl Context {
     pub fn add_texture(&mut self, name: &str, path: impl AsRef<Path>) -> Result<Texture> {
         let image = image::load_image(name, path.as_ref())?;
         self.textures
-            .add(name, image.size, &image.pixels, Mipmaps::None)
+            .add(name, image.size, image.pixels, Mipmaps::None)
     }
 
     /// Loads the PNG or JPEG file at `path` as a sprite sheet: a texture, as
@@ -484,7 +494,7 @@ impl Context {
         let zone = gg_core::zone!();
         let path = path.as_ref();
         zone.text(path.display());
-        let imported = gltf::read(name, path, image::read_file, gltf::MAX_MEMORY)?;
+        let imported = gltf::read(name, path, crate::dirs::read_file, gltf::MAX_MEMORY)?;
         if !imported.ignored.is_empty() {
             info!(
                 code = "engine.model_ignored",
@@ -532,10 +542,11 @@ impl Context {
     }
 
     /// Draws a line from `from` to `to` in the world this frame, `width` pixels of the view wide
-    /// however near or far it is, in `color`, linear RGBA with alpha not multiplied in, as
-    /// [`Line`] says: over everything else the view draws, the world's entities as well as what
-    /// layers draw, but where an opaque mesh is nearer, so that it shows as debugging wants. It's
-    /// of no entity, so a [pick](Self::pick) where it's on top finds none.
+    /// however near or far it is, or, thinner than a pixel, a pixel wide and as much fainter as
+    /// it's thinner, its ends squared off half its width past its points, in `color`, linear RGBA
+    /// with alpha not multiplied in: over everything else the view draws, the world's entities as
+    /// well as what layers draw, but where an opaque mesh is nearer, so that it shows as debugging
+    /// wants. It's of no entity, so a [pick](Self::pick) where it's on top finds none.
     pub fn draw_line(&mut self, from: Vec3, to: Vec3, color: Vec4, width: f32) {
         let line = Line {
             from,
@@ -580,24 +591,23 @@ impl Context {
     }
 
     /// Has the world's colliders' outlines draw each frame from then on, or not: each
-    /// [`BoxCollider2D`] and [`CircleCollider2D`] whose entity has a
-    /// [`Transform`](crate::Transform), as physics shapes it, 2 points wide in light green, where
-    /// its entity draws, over everything else the view draws, as lines are; with its entity's ID,
-    /// so that a [pick](Self::pick) of an outline finds its entity. A collider's outline draws
-    /// whether physics moves its entity or not, as it doesn't without a
-    /// [`RigidBody2D`](crate::RigidBody2D) or under a parent.
+    /// [`BoxCollider2D`] and [`CircleCollider2D`] whose entity has a [`Transform`], as physics
+    /// shapes it, 2 points wide in light green, where its entity draws, over everything else the
+    /// view draws but a nearer opaque mesh, as lines are; with its entity's ID, so that a
+    /// [pick](Self::pick) of an outline finds its entity. A collider's outline draws whether
+    /// physics moves its entity or not, as it doesn't without a [`RigidBody2D`] or under a parent.
     pub fn set_colliders_shown(&mut self, shown: bool) {
         self.colliders = shown;
     }
 
     /// The world: its entities and their components, as the frame's ticks left it. After the
-    /// layers' updates each frame, the engine draws those with a [`Transform`](crate::Transform)
-    /// and a [`Sprite`], a [`Circle`] or a [`MeshDraw`](crate::MeshDraw), after what the layers
-    /// drew themselves: the meshes whose shaders are opaque first, whatever their z's, by shader,
-    /// then mesh, then the rest back to front by their z's in the world, at one z sprites, then
-    /// circles, under meshes, each in the order of their IDs, children where their parents carry
-    /// them; each on its way from where it was as the latest tick started to where the tick left
-    /// it, so up to a tick behind the world here.
+    /// layers' updates each frame, the engine draws those with a [`Transform`] and a [`Sprite`], a
+    /// [`Circle`] or a [`MeshDraw`], after what the layers drew themselves: the meshes whose
+    /// shaders are opaque first, whatever their z's, by shader, then mesh, then the rest back to
+    /// front by their z's in the world, at one z sprites, then circles, under meshes, each in the
+    /// order of their IDs, children where their parents carry them; each on its way from where it
+    /// was as the latest tick started to where the tick left it, so up to a tick behind the world
+    /// here.
     pub fn world(&self) -> &World {
         &self.world
     }
@@ -660,11 +670,8 @@ impl Context {
         if self.colliders
             && let Some(poses) = Poses::new(world, past, alpha)
         {
-            let scale = self
-                .window
-                .as_ref()
-                .map_or(1.0, |window| window.scale() as f32);
-            physics::draw_colliders(world, &poses, scale, &mut self.over, shaders);
+            let scale = self.scale() as f32;
+            physics::draw_colliders(world, &poses, scale, &mut self.over, &mut self.shaders);
         }
     }
 
@@ -743,7 +750,7 @@ fn add_sheet(
             ),
         ));
     }
-    let texture = textures.add(name, image.size, &image.pixels, Mipmaps::None)?;
+    let texture = textures.add(name, image.size, image.pixels, Mipmaps::None)?;
     Ok(SpriteSheet {
         texture,
         size: image.size,
@@ -951,7 +958,7 @@ mod tests {
     use std::rc::Rc;
 
     use super::*;
-    use crate::{Key, Transform};
+    use crate::{Key, Transform, render_thread};
 
     /// Records each call it gets, by layer name, and handles events if `handles` is set.
     struct Probe {
@@ -1069,6 +1076,30 @@ mod tests {
         stack.update(&mut cx, Duration::ZERO);
         stack.detach(&mut cx);
         assert_eq!(cx.world().query::<&Transform>().count(), 3);
+    }
+
+    /// Each component type the engine registers has a doc, and so does each of its named fields,
+    /// which the Inspector shows on hover.
+    #[test]
+    fn the_engines_components_and_their_named_fields_have_docs() {
+        let cx = Context::new(None);
+        let types = cx.world().types();
+        let mut undocumented = Vec::new();
+        for name in cx.world().component_types() {
+            let info = types.info(types.find(name).expect("described"));
+            if info.doc.is_empty() {
+                undocumented.push(name.to_owned());
+            }
+            if let crate::reflect::Shape::Struct {
+                fields,
+                tuple: false,
+            } = &info.shape
+            {
+                let bare = fields.iter().filter(|field| field.meta.doc.is_empty());
+                undocumented.extend(bare.map(|field| format!("{name}.{}", field.name)));
+            }
+        }
+        assert!(undocumented.is_empty(), "undocumented: {undocumented:?}");
     }
 
     #[test]
@@ -1260,6 +1291,51 @@ mod tests {
             message.contains("\"truck\"") && message.contains(&path.display().to_string()),
             "{message}"
         );
+    }
+
+    /// What a layer outlines is the frame's it's set in alone, as `outlined` says until the frame
+    /// takes it; a later call in the frame replaces an earlier one's.
+    #[test]
+    fn an_outline_is_its_frames_alone() {
+        let viewport = Viewport {
+            origin: [0, 0],
+            size: [640, 360],
+        };
+        let mut frame = render_thread::Extracted::default();
+        let mut cx = Context::seeded(1);
+        let [first, later]: [EntityId; 2] =
+            ["0123456789abcdef", "fedcba9876543210"].map(|id| id.parse().expect("an ID"));
+        let orange = Vec4::new(1.0, 0.35, 0.02, 1.0);
+        cx.outline(first, Vec4::ONE, 2.0);
+        cx.outline(later, orange, 3.0);
+        assert_eq!(cx.outlined(), Some((later, orange, 3.0)));
+        cx.extract(&mut frame, viewport);
+        let taken = Outline {
+            id: later.get(),
+            color: orange,
+            width: 3.0,
+        };
+        assert_eq!(frame.outline, Some(taken));
+        assert_eq!(cx.outlined(), None);
+        cx.extract(&mut frame, viewport);
+        assert_eq!(frame.outline, None, "the next frame outlines nothing");
+    }
+
+    #[test]
+    fn layers_know_where_the_view_was_handed_off_while_it_had_an_area() {
+        let mut cx = Context::new(None);
+        assert_eq!(cx.view(), None);
+        let mut frame = render_thread::Extracted::default();
+        let shown = egui::Rect::from_min_max(egui::pos2(10.0, 40.0), egui::pos2(410.0, 340.0));
+        cx.extract(&mut frame, Viewport::from_points(shown, 1.5));
+        let view = Viewport {
+            origin: [15, 60],
+            size: [600, 450],
+        };
+        assert_eq!(cx.view(), Some(view));
+        // As while a tab shows over a dockspace's view, whose dock then has it nowhere.
+        cx.extract(&mut frame, Viewport::from_points(egui::Rect::NOTHING, 1.5));
+        assert_eq!(cx.view(), None);
     }
 
     /// Without a window, as in headless runs and tests, a file dialog shows nothing, so it picks

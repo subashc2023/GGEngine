@@ -2,6 +2,8 @@
 //! its content, the entities' components keyed by their IDs, which undoing a log gives back; and
 //! its layout, how the world holds them, which the order queries find entities in follows from.
 
+use std::fmt;
+
 use super::id::mix64;
 use super::{Entity, EntityId, World};
 use crate::reflect::Reflect;
@@ -35,6 +37,14 @@ pub struct WorldHash {
     /// needn't give it back: what an undo puts back goes last in its table, and the IDs a create
     /// drew stay drawn.
     pub layout: u64,
+}
+
+/// The hash as recordings and the sandbox's `hashes.txt` write it: its content, then its layout,
+/// 16 hex digits each, such as `8c35cd01914c7df5 fb695ce29daa8479`.
+impl fmt::Display for WorldHash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:016x} {:016x}", self.content, self.layout)
+    }
 }
 
 /// What a value is written into for the world's hash, by [`Reflect::digest`]: word by word, each

@@ -15,12 +15,15 @@ use tracing::error;
 
 use crate::vk_error;
 
+// bindgen's output keeps VMA's C names, and the engine calls only part of its API. Clippy's
+// pedantic and nursery groups aren't for generated code: allowed rather than expected, since the
+// gates run neither.
 #[allow(
     non_camel_case_types,
     non_snake_case,
-    non_upper_case_globals,
     dead_code,
-    unsafe_op_in_unsafe_fn
+    clippy::pedantic,
+    clippy::nursery
 )]
 mod bindings;
 
@@ -86,7 +89,7 @@ mod vulkan {
 
 /// Who reads and writes a resource's memory, which decides where it lives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Memory {
+pub(crate) enum Memory {
     /// Only the GPU: render targets, textures, and buffers the GPU fills.
     Gpu,
     /// The CPU writes it, in order, and the GPU reads it: per-frame data. It stays mapped, and

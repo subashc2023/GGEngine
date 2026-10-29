@@ -124,8 +124,7 @@ fn first(
     path: String,
 ) -> Option<(String, Value, Value)> {
     let floats = |a: &[f32], b: &[f32]| {
-        let names = ["x", "y", "z", "w"];
-        let mut parts = names.into_iter().zip(a.iter().zip(b));
+        let mut parts = reflect::COMPONENTS.into_iter().zip(a.iter().zip(b));
         let (name, (&x, &y)) = parts.find(|(_, (x, y))| !same_f32(**x, **y))?;
         Some((reflect::join(&path, name), Value::F32(x), Value::F32(y)))
     };
@@ -151,7 +150,7 @@ fn first(
 /// apart.
 fn same(a: &Value, ours: &World, b: &Value, theirs: &World) -> bool {
     let floats = |a: &[f32], b: &[f32]| a.iter().zip(b).all(|(&x, &y)| same_f32(x, y));
-    let fields = |x: &[(reflect::Name, Value)], y: &[(reflect::Name, Value)]| {
+    let fields = |x: &[(reflect::Ident, Value)], y: &[(reflect::Ident, Value)]| {
         let mut both = x.iter().zip(y);
         same_names(x, y) && both.all(|((_, x), (_, y))| same(x, ours, y, theirs))
     };
@@ -183,14 +182,14 @@ fn same_f32(x: f32, y: f32) -> bool {
 }
 
 /// Whether two structs' or variants' fields are the same fields, in the same order.
-fn same_names(x: &[(reflect::Name, Value)], y: &[(reflect::Name, Value)]) -> bool {
+fn same_names(x: &[(reflect::Ident, Value)], y: &[(reflect::Ident, Value)]) -> bool {
     x.len() == y.len() && x.iter().zip(y).all(|((m, _), (n, _))| m == n)
 }
 
 /// Writes a line to `out` for each field of `value`, at `at`, as [`World::dump`] does.
 fn leaves(out: &mut String, world: &World, at: &str, value: &Value) {
     let floats = |out: &mut String, xs: &[f32]| {
-        for (name, &x) in ["x", "y", "z", "w"].into_iter().zip(xs) {
+        for (name, &x) in reflect::COMPONENTS.into_iter().zip(xs) {
             leaves(out, world, &reflect::join(at, name), &Value::F32(x));
         }
     };

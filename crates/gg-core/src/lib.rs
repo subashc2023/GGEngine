@@ -1,5 +1,5 @@
-//! Foundation for every other `gg-*` crate: its math, logging, profiling and error types, and the
-//! handles to come.
+//! Foundation for the other `gg-*` crates but `gg-macros`: their math, logging, profiling and error
+//! types.
 //!
 //! It depends on no other `gg-*` crate and on nothing GPU- or window-specific, so any crate
 //! can depend on it.

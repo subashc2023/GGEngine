@@ -96,6 +96,7 @@ impl World {
         resource.downcast_ref()
     }
 
+    /// The world's `T`, to change, if it has one.
     pub fn resource_mut<T: Resource>(&mut self) -> Option<&mut T> {
         let slot = self.resources.slot_mut::<T>()?;
         let resource: &mut dyn Any = &mut **slot.resource.as_mut()?;

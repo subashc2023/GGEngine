@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use bytemuck::NoUninit;
 use gg_core::Result;
 use gg_core::math::Vec4;
 use gg_gpu::{Blend, Device, Format, GraphicsDesc, Pass, Pipeline};
@@ -113,32 +114,52 @@ impl ViewPass {
             pass.set_scissor(clip.origin, clip.size);
         }
         pass.set_pipeline(&self.pipeline);
-        // The shader's `Push`: the view's origin in the target, then the image's index.
-        let [x, y] = viewport.origin;
-        let mut push = [0u8; 12];
-        push[0..4].copy_from_slice(&x.to_ne_bytes());
-        push[4..8].copy_from_slice(&y.to_ne_bytes());
-        push[8..12].copy_from_slice(&shown.image.to_ne_bytes());
-        pass.push_constants(&push);
+        let push = ViewPush {
+            origin: viewport.origin,
+            image: shown.image,
+        };
+        pass.push_constants(bytemuck::bytes_of(&push));
         pass.draw(3, 1);
         let Some((ids, outline)) = shown.outline else {
             return;
         };
         pass.set_pipeline(&self.outline);
-        // The shader's `Push`: the color, the view's origin in the target, the ID's halves, the
-        // IDs' index, then the width.
-        let mut push = [0u8; 40];
-        for (i, channel) in outline.color.to_array().into_iter().enumerate() {
-            push[4 * i..4 * i + 4].copy_from_slice(&channel.to_ne_bytes());
-        }
-        push[16..20].copy_from_slice(&x.to_ne_bytes());
-        push[20..24].copy_from_slice(&y.to_ne_bytes());
-        let [low, high] = halves(outline.id);
-        push[24..28].copy_from_slice(&low.to_ne_bytes());
-        push[28..32].copy_from_slice(&high.to_ne_bytes());
-        push[32..36].copy_from_slice(&ids.to_ne_bytes());
-        push[36..40].copy_from_slice(&outline.width.min(MAX_OUTLINE).to_ne_bytes());
-        pass.push_constants(&push);
+        let push = OutlinePush {
+            color: outline.color.to_array(),
+            origin: viewport.origin,
+            id: halves(outline.id),
+            image: ids,
+            width: outline.width.min(MAX_OUTLINE),
+        };
+        pass.push_constants(bytemuck::bytes_of(&push));
         pass.draw(3, 1);
     }
+}
+
+/// What the view pass pushes before it draws the view's image: `Push` in `shaders/view.slang`,
+/// field for field.
+#[repr(C)]
+#[derive(Clone, Copy, NoUninit)]
+struct ViewPush {
+    /// Where the view's top left is in the target, in pixels.
+    origin: [u32; 2],
+    /// The index of the view's image in the bindless set.
+    image: u32,
+}
+
+/// What the view pass pushes before it draws an outline: `Push` in `shaders/outline.slang`, field
+/// for field.
+#[repr(C)]
+#[derive(Clone, Copy, NoUninit)]
+struct OutlinePush {
+    /// Linear RGBA, alpha not multiplied in.
+    color: [f32; 4],
+    /// Where the view's top left is in the target, in pixels.
+    origin: [u32; 2],
+    /// The ID's low and high halves.
+    id: [u32; 2],
+    /// The index of the view's IDs in the bindless set.
+    image: u32,
+    /// How far out it reaches from the ID's pixels, in pixels.
+    width: f32,
 }

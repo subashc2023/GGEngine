@@ -24,6 +24,10 @@ tracing.workspace = true
 winit.workspace = true
 zune-jpeg.workspace = true
 
+# Hot reload's tests wait for the warnings its thread logs.
+[dev-dependencies]
+tracing-subscriber.workspace = true
+
 [features]
 # The engine's zones for Tracy, through gg-core's profile module.
 tracy = ["gg-core/tracy"]
@@ -41,7 +45,7 @@ windows-sys = { workspace = true, features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
-# The window frame's tests make a window of their own, which needs the module's handle.
+# The Windows modules' tests make windows of their own, which need the process's module handle.
 [target.'cfg(target_os = "windows")'.dev-dependencies]
 windows-sys = { workspace = true, features = ["Win32_System_LibraryLoader"] }
 

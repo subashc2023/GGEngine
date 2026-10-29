@@ -26,13 +26,13 @@ pub trait Script: Writable {
 /// as the pass started, given one during it, starts at the next tick. A script that replaces the
 /// world, or restores it from a copy, ends the pass, since the entities it listed are another
 /// world's: that world's scripts start at the next tick. The entities are listed in memory the
-/// world keeps, so that a pass allocates nothing once the world has listed as many; but a pass run
-/// within another, by a script's tick, lists them in memory of its own.
+/// world keeps, so that a pass, and one run within it by a script's tick, allocates nothing once
+/// the world has listed as many.
 pub fn run_scripts<S: Script>(world: &mut World, tick: Tick) {
     let zone = gg_core::zone!();
     // A zone made in a generic function is one for every `S`, which its text tells apart.
     zone.text(std::any::type_name::<S>());
-    let mut scripted = world.take_scripted();
+    let mut scripted = world.take_list();
     scripted.extend(world.query::<(Entity, &S)>().map(|(entity, _)| entity));
     let (listed, _) = world.version();
     for &entity in &scripted {
@@ -43,7 +43,7 @@ pub fn run_scripts<S: Script>(world: &mut World, tick: Tick) {
             S::tick(entity, world, tick);
         }
     }
-    world.keep_scripted(scripted);
+    world.keep_list(scripted);
 }
 
 #[cfg(test)]

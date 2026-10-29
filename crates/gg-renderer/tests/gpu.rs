@@ -2,7 +2,8 @@
 //! which in Linux CI is lavapipe.
 //!
 //! They run in one process with a main of their own, which turns off the Vulkan loader's
-//! implicit layers before any thread exists, then runs the tests one after another.
+//! implicit layers before any thread exists, then runs the tests one after another: those whose
+//! names contain an argument that isn't a flag, as libtest picks them, or all of them without one.
 //! `GG_UPDATE_REFERENCES=1` writes each test's output as its new reference instead of comparing.
 
 // For setting the environment; see the SAFETY comment.
@@ -12,19 +13,32 @@ use std::f32::consts::{FRAC_PI_2, PI};
 use std::fs::{self, File};
 use std::io::BufWriter;
 use std::num::NonZeroU64;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::sync::Arc;
 
 use bytemuck::NoUninit;
 use gg_core::math::{self, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{
-    AlphaMode, Blend, Circle, DrawCounts, Draws, Line, Material, MeshDraw, Meshes, Mipmaps,
+    AlphaMode, Blend, Circle, DrawCounts, Draws, Line, Material, Mesh, MeshDraw, Meshes, Mipmaps,
     ModelVertex, Outline, Pick, Projection, RenderData, Renderer, Sampler, Settings, Shaders,
     Sprite, SpriteSheet, Texture, Textures, Ui, UploadPath, Uploads, ViewCallback, Viewpoint,
     Viewport, Wrap,
 };
 
-fn main() {
+/// Runs each test through `tests`, by the name it's written with; after `uploading by`, giving
+/// each the way of uploading named, as its name says.
+macro_rules! run {
+    ($tests:ident $(, $test:ident)+ $(,)?) => {
+        $($tests.run(stringify!($test), $test);)+
+    };
+    ($tests:ident uploading by $path:ident $(, $test:ident)+ $(,)?) => {
+        $($tests.run(&format!("{} uploading by {}", stringify!($test), $path), || $test($path));)+
+    };
+}
+
+fn main() -> ExitCode {
     if gg_core::profile::ENABLED {
         panic!(
             "the GPU tests set the environment before any other thread exists, and Tracy's start \
@@ -35,55 +49,40 @@ fn main() {
     // the tests on lavapipe instead.
     if std::env::var_os("GG_SKIP_GPU_TESTS").is_some_and(|value| !value.is_empty()) {
         println!("GPU tests skipped: GG_SKIP_GPU_TESTS is set");
-        return;
+        return ExitCode::SUCCESS;
     }
     // Overlays such as Steam's and OBS's load into every instance as implicit layers, and can
-    // add validation errors of their own.
+    // add validation errors of their own. Unless `RUST_LOG` is set, only warnings and errors are
+    // logged, and of the loader's and other layers' messages, such as its warning for each
+    // implicit layer it leaves out, only errors, so that a passing run's output is its tests'
+    // results rather than what each instance, device and pipeline logs as it's made.
     // SAFETY: no other thread exists yet to read the environment.
-    unsafe { std::env::set_var("VK_LOADER_LAYERS_DISABLE", "~implicit~") };
+    unsafe {
+        std::env::set_var("VK_LOADER_LAYERS_DISABLE", "~implicit~");
+        if std::env::var_os("RUST_LOG").is_none() {
+            std::env::set_var("RUST_LOG", "warn,gg_gpu::vulkan::general=error");
+        }
+    }
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("logs");
     gg_core::log::init("renderer-gpu-tests", &dir);
 
-    run("ui_matches_its_reference", ui_matches_its_reference);
-    run(
-        "sprites_match_their_reference",
+    let mut tests = Tests::new();
+    run!(
+        tests,
+        ui_matches_its_reference,
         sprites_match_their_reference,
-    );
-    run(
-        "batches_match_their_reference",
         batches_match_their_reference,
-    );
-    run(
-        "circles_match_their_reference",
         circles_match_their_reference,
-    );
-    run(
-        "outlines_match_their_reference",
         outlines_match_their_reference,
-    );
-    run("lines_match_their_reference", lines_match_their_reference);
-    run("views_match_their_reference", views_match_their_reference);
-    run(
-        "a_view_in_the_ui_matches_its_reference",
+        lines_match_their_reference,
+        views_match_their_reference,
         a_view_in_the_ui_matches_its_reference,
-    );
-    run(
-        "replaced_shaders_draw_from_the_next_frame",
         replaced_shaders_draw_from_the_next_frame,
-    );
-    run(
-        "pipelines_go_through_the_cache",
         pipelines_go_through_the_cache,
-    );
-    run("capturing_needs_renderdoc", capturing_needs_renderdoc);
-    run("depth_matches_its_reference", depth_matches_its_reference);
-    run("models_match_their_reference", models_match_their_reference);
-    run(
-        "mixed_textures_match_their_reference",
+        capturing_needs_renderdoc,
+        depth_matches_its_reference,
+        models_match_their_reference,
         mixed_textures_match_their_reference,
-    );
-    run(
-        "picks_answer_what_their_frame_drew",
         picks_answer_what_their_frame_drew,
     );
     // Once for each way of uploading that the GPU has.
@@ -93,29 +92,82 @@ fn main() {
             println!("tests uploading by {path} skipped: {error}");
             continue;
         }
-        let each = |name: &str, test: fn(UploadPath)| {
-            run(&format!("{name} uploading by {path}"), || test(path));
-        };
-        each("meshes_match_their_reference", meshes_match_their_reference);
-        each(
-            "textures_match_their_reference",
+        run!(
+            tests uploading by path,
+            meshes_match_their_reference,
             textures_match_their_reference,
-        );
-        each("sheets_match_their_reference", sheets_match_their_reference);
-        each(
-            "a_large_texture_draws_in_the_frame_that_adds_it",
+            sheets_match_their_reference,
             a_large_texture_draws_in_the_frame_that_adds_it,
-        );
-        each(
-            "mipmaps_match_their_reference",
             mipmaps_match_their_reference,
         );
     }
+    tests.finish()
 }
 
-fn run(name: &str, test: impl FnOnce()) {
-    test();
-    println!("test {name} ... ok");
+/// Runs the tests the arguments pick, one after another, and counts how they go.
+struct Tests {
+    /// The arguments that aren't libtest's flags, nor the values they take: a test runs if its
+    /// name contains one of them, or if there are none.
+    filters: Vec<String>,
+    passed: usize,
+    failed: usize,
+}
+
+impl Tests {
+    fn new() -> Self {
+        let mut filters = Vec::new();
+        let mut args = std::env::args().skip(1);
+        while let Some(arg) = args.next() {
+            let takes_value = matches!(
+                arg.as_str(),
+                "--test-threads"
+                    | "--skip"
+                    | "--logfile"
+                    | "--format"
+                    | "--color"
+                    | "--shuffle-seed"
+                    | "-Z"
+            );
+            if takes_value {
+                args.next();
+            } else if !arg.starts_with('-') {
+                filters.push(arg);
+            }
+        }
+        Self {
+            filters,
+            passed: 0,
+            failed: 0,
+        }
+    }
+
+    /// Runs `test` if the filters pick it, and prints whether it passed. A test that fails goes
+    /// no further, and the log shows its panic, but the tests after it still run.
+    fn run(&mut self, name: &str, test: impl FnOnce()) {
+        let picked = self.filters.is_empty()
+            || (self.filters.iter()).any(|filter| name.contains(filter.as_str()));
+        if !picked {
+            return;
+        }
+        if panic::catch_unwind(AssertUnwindSafe(test)).is_ok() {
+            self.passed += 1;
+            println!("test {name} ... ok");
+        } else {
+            self.failed += 1;
+            println!("test {name} ... FAILED");
+        }
+    }
+
+    /// Prints how many tests passed and failed, and fails the run if any failed.
+    fn finish(self) -> ExitCode {
+        let Self { passed, failed, .. } = self;
+        println!("test result: {passed} passed; {failed} failed");
+        if failed == 0 {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// What the tests clear to, in linear RGBA.
@@ -169,15 +221,71 @@ fn shader(file: &str) -> PathBuf {
         .join(file)
 }
 
+/// What a test adds meshes, shaders and textures to, and the uploads that take them to its
+/// renderer.
+#[derive(Default)]
+struct Stores {
+    meshes: Meshes,
+    shaders: Shaders,
+    textures: Textures,
+    uploads: Uploads,
+}
+
+impl Stores {
+    /// A frame of `draws` into `viewport`, as `viewpoint` sees them, cleared to [`CLEAR`], that
+    /// picks and outlines nothing, with the uploads of what's been added since the last frame's.
+    fn data<'a>(
+        &'a mut self,
+        viewport: Viewport,
+        viewpoint: Viewpoint,
+        draws: &'a Draws,
+    ) -> RenderData<'a> {
+        let Self {
+            meshes,
+            shaders,
+            textures,
+            uploads,
+        } = self;
+        uploads.take(meshes, shaders, textures);
+        RenderData {
+            clear_color: CLEAR,
+            viewport,
+            viewpoint,
+            uploads,
+            draws,
+            picks: &[],
+            outline: None,
+        }
+    }
+}
+
+/// A view that fills a frame of `size` pixels.
+fn filling(size: [u32; 2]) -> Viewport {
+    Viewport {
+        origin: [0, 0],
+        size,
+    }
+}
+
+/// A unit square around the origin, of positions alone, as `flat_color.slang` takes them.
+fn square(meshes: &mut Meshes) -> Mesh<[f32; 3]> {
+    let corners = [
+        [-0.5, -0.5, 0.0],
+        [0.5, -0.5, 0.0],
+        [0.5, 0.5, 0.0],
+        [-0.5, 0.5, 0.0],
+    ];
+    meshes
+        .add("square", &corners, &[0, 1, 2, 2, 3, 0])
+        .expect("a mesh")
+}
+
 /// Draws a window of egui widgets offscreen, and compares it with its reference image.
 fn ui_matches_its_reference() {
     const WIDTH: u32 = 320;
     const HEIGHT: u32 = 200;
     let mut renderer = renderer(WIDTH, HEIGHT);
-    let mut meshes = Meshes::default();
-    let mut shaders = Shaders::default();
-    let mut textures = Textures::default();
-    let mut uploads = Uploads::default();
+    let mut stores = Stores::default();
     let draws = Draws::default();
 
     let egui = egui::Context::default();
@@ -210,19 +318,7 @@ fn ui_matches_its_reference() {
             textures: &mut output.textures_delta,
             pixels_per_point: output.pixels_per_point,
         };
-        uploads.take(&mut meshes, &mut shaders, &mut textures);
-        let data = RenderData {
-            clear_color: CLEAR,
-            viewport: Viewport {
-                origin: [0, 0],
-                size: [WIDTH, HEIGHT],
-            },
-            viewpoint: Viewpoint::default(),
-            uploads: &mut uploads,
-            draws: &draws,
-            picks: &[],
-            outline: None,
-        };
+        let data = stores.data(filling([WIDTH, HEIGHT]), Viewpoint::default(), &draws);
         assert!(
             renderer.render(data, ui, &mut []).expect("a frame"),
             "an offscreen image can always be rendered into"
@@ -248,10 +344,7 @@ fn meshes_match_their_reference(path: UploadPath) {
     const WIDTH: u32 = 320;
     const HEIGHT: u32 = 200;
     let mut renderer = renderer_uploading(WIDTH, HEIGHT, Some(path));
-    let mut meshes = Meshes::default();
-    let mut shaders = Shaders::default();
-    let mut textures = Textures::default();
-    let mut uploads = Uploads::default();
+    let mut stores = Stores::default();
     // 4 units from the view's bottom to its top, which is 160 pixels, so 40 pixels a unit both
     // ways; the view's center is (1, 0.5).
     let viewpoint = Viewpoint {
@@ -271,28 +364,25 @@ fn meshes_match_their_reference(path: UploadPath) {
         )
     };
     // Positions, and a color for each draw.
-    let flat = shaders
+    let flat = (stores.shaders)
         .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
         .expect("a shader");
-    let corners = [
-        [-0.5, -0.5, 0.0],
-        [0.5, -0.5, 0.0],
-        [0.5, 0.5, 0.0],
-        [-0.5, 0.5, 0.0],
-    ];
-    let square = meshes
-        .add("square", &corners, &[0, 1, 2, 2, 3, 0])
-        .expect("a mesh");
+    let square = square(&mut stores.meshes);
     let mut draws = Draws::default();
     let blue = Vec4::new(0.2, 0.3, 0.8, 1.0);
     draws.push(square, flat, transform(2.5, 30.0, [0.5, 0.5]), blue);
     let orange = Vec4::new(0.9, 0.4, 0.1, 1.0);
     let second = MeshDraw::new(square, flat, orange);
     draws.push_draw(transform(0.8, 0.0, [3.2, 1.8]), &second, 0);
+    // Off the image's corner, so that the image shows where the view is.
+    let viewport = Viewport {
+        origin: [40, 20],
+        size: [240, 160],
+    };
     for frame in 0..3 {
         if frame == 2 {
             // Positions, then colors; no parameters.
-            let colored = shaders
+            let colored = (stores.shaders)
                 .add::<[f32; 7], ()>("vertex color", &shader("vertex_color.slang"), Blend::Opaque)
                 .expect("a shader");
             let corner = |[x, y, z]: [f32; 3], [r, g, b, a]: [f32; 4]| [x, y, z, r, g, b, a];
@@ -302,25 +392,12 @@ fn meshes_match_their_reference(path: UploadPath) {
                 corner([0.5, -0.5, 0.0], [0.0, 1.0, 0.0, 1.0]),
                 corner([-0.5, -0.5, 0.0], [0.0, 0.0, 1.0, 1.0]),
             ];
-            let triangle = meshes
+            let triangle = (stores.meshes)
                 .add("triangle", &vertices, &[0, 1, 2])
                 .expect("a mesh");
             draws.push(triangle, colored, transform(2.0, 0.0, [1.0, 0.5]), ());
         }
-        uploads.take(&mut meshes, &mut shaders, &mut textures);
-        let data = RenderData {
-            clear_color: CLEAR,
-            // Off the image's corner, so that the image shows where the view is.
-            viewport: Viewport {
-                origin: [40, 20],
-                size: [240, 160],
-            },
-            viewpoint,
-            uploads: &mut uploads,
-            draws: &draws,
-            picks: &[],
-            outline: None,
-        };
+        let data = stores.data(viewport, viewpoint, &draws);
         render_without_ui(&mut renderer, data);
     }
     check(renderer, "meshes", WIDTH, HEIGHT);
@@ -349,10 +426,7 @@ fn textures_match_their_reference(path: UploadPath) {
     const WIDTH: u32 = 240;
     const HEIGHT: u32 = 160;
     let mut renderer = renderer_uploading(WIDTH, HEIGHT, Some(path));
-    let mut meshes = Meshes::default();
-    let mut shaders = Shaders::default();
-    let mut textures = Textures::default();
-    let mut uploads = Uploads::default();
+    let mut stores = Stores::default();
     // 4 units from the view's bottom to its top, 40 pixels a unit, and 6 across, around the origin.
     let viewpoint = Viewpoint {
         projection: Projection::Orthographic {
@@ -363,7 +437,7 @@ fn textures_match_their_reference(path: UploadPath) {
         ..Viewpoint::default()
     };
     // Positions, then texture coordinates.
-    let textured = shaders
+    let textured = (stores.shaders)
         .add::<[f32; 5], Sampling>("textured", &shader("textured.slang"), Blend::Alpha)
         .expect("a shader");
     // A unit square, its texture's top left at its top left, over texture coordinates 0 to
@@ -375,7 +449,7 @@ fn textures_match_their_reference(path: UploadPath) {
             [0.5, 0.5, 0.0, extent, 0.0],
             [-0.5, 0.5, 0.0, 0.0, 0.0],
         ];
-        meshes
+        (stores.meshes)
             .add(name, &corners, &[0, 1, 2, 2, 3, 0])
             .expect("a mesh")
     };
@@ -393,7 +467,7 @@ fn textures_match_their_reference(path: UploadPath) {
             _ => [40, 90, 200, 255],
         })
         .collect();
-    let checkerboard = textures
+    let checkerboard = (stores.textures)
         .add("checkerboard", [4, 4], &checkerboard, Mipmaps::None)
         .expect("a texture");
     let mut draws = Draws::default();
@@ -413,7 +487,7 @@ fn textures_match_their_reference(path: UploadPath) {
                 [255, 0, 0, 64],
                 [0, 0, 0, 0],
             ];
-            let translucent = textures
+            let translucent = (stores.textures)
                 .add("translucent", [2, 2], pixels.as_flattened(), Mipmaps::None)
                 .expect("a texture");
             // x from -1 to 1, over the checkerboard's right half and the clear color, each texel
@@ -424,19 +498,7 @@ fn textures_match_their_reference(path: UploadPath) {
             };
             draws.push(plain, textured, place(0.0), sampling);
         }
-        uploads.take(&mut meshes, &mut shaders, &mut textures);
-        let data = RenderData {
-            clear_color: CLEAR,
-            viewport: Viewport {
-                origin: [0, 0],
-                size: [WIDTH, HEIGHT],
-            },
-            viewpoint,
-            uploads: &mut uploads,
-            draws: &draws,
-            picks: &[],
-            outline: None,
-        };
+        let data = stores.data(filling([WIDTH, HEIGHT]), viewpoint, &draws);
         render_without_ui(&mut renderer, data);
     }
     check(renderer, "textures", WIDTH, HEIGHT);
@@ -455,10 +517,7 @@ fn sprites_match_their_reference() {
     const WIDTH: u32 = 240;
     const HEIGHT: u32 = 160;
     let mut renderer = renderer(WIDTH, HEIGHT);
-    let mut meshes = Meshes::default();
-    let mut shaders = Shaders::default();
-    let mut textures = Textures::default();
-    let mut uploads = Uploads::default();
+    let mut stores = Stores::default();
     // 4 units from the view's bottom to its top, 40 pixels a unit, and 6 across, around the origin.
     let viewpoint = Viewpoint {
         projection: Projection::Orthographic {
@@ -477,7 +536,7 @@ fn sprites_match_their_reference() {
             [40 + 60 * x, 40 + 60 * y, 120, alpha]
         })
         .collect();
-    let sheet = textures.add("sheet", [4, 4], &sheet, Mipmaps::None);
+    let sheet = stores.textures.add("sheet", [4, 4], &sheet, Mipmaps::None);
     let sheet = sheet.expect("a texture");
     // `width` by `height` units, centered at (`x`, `y`). Every sprite's edges fall between pixels.
     let place = |[x, y]: [f32; 2], [width, height]: [f32; 2]| {
@@ -523,19 +582,7 @@ fn sprites_match_their_reference() {
     draws.push_sprite(place([1.5, -1.0], [1.5, 1.5]), tinted);
     // More frames than are in flight.
     for _ in 0..3 {
-        uploads.take(&mut meshes, &mut shaders, &mut textures);
-        let data = RenderData {
-            clear_color: CLEAR,
-            viewport: Viewport {
-                origin: [0, 0],
-                size: [WIDTH, HEIGHT],
-            },
-            viewpoint,
-            uploads: &mut uploads,
-            draws: &draws,
-            picks: &[],
-            outline: None,
-        };
+        let data = stores.data(filling([WIDTH, HEIGHT]), viewpoint, &draws);
         render_without_ui(&mut renderer, data);
     }
     check(renderer, "sprites", WIDTH, HEIGHT);
@@ -552,10 +599,7 @@ fn circles_match_their_reference() {
     const WIDTH: u32 = 240;
     const HEIGHT: u32 = 160;
     let mut renderer = renderer(WIDTH, HEIGHT);
-    let mut meshes = Meshes::default();
-    let mut shaders = Shaders::default();
-    let mut textures = Textures::default();
-    let mut uploads = Uploads::default();
+    let mut stores = Stores::default();
     // 4 units from the view's bottom to its top, 40 pixels a unit, and 6 across, around the origin.
     let viewpoint = Viewpoint {
         projection: Projection::Orthographic {
@@ -598,23 +642,11 @@ fn circles_match_their_reference() {
         ([2.0, -1.0], [0.2, 0.2], Circle::default()),
         ([2.5, -1.0], [0.075, 0.075], Circle::default()),
     ] {
-        draws.push_circle(&mut shaders, place(at, size), circle);
+        draws.push_circle(&mut stores.shaders, place(at, size), circle);
     }
     // More frames than are in flight.
     for _ in 0..3 {
-        uploads.take(&mut meshes, &mut shaders, &mut textures);
-        let data = RenderData {
-            clear_color: CLEAR,
-            viewport: Viewport {
-                origin: [0, 0],
-                size: [WIDTH, HEIGHT],
-            },
-            viewpoint,
-            uploads: &mut uploads,
-            draws: &draws,
-            picks: &[],
-            outline: None,
-        };
+        let data = stores.data(filling([WIDTH, HEIGHT]), viewpoint, &draws);
         render_without_ui(&mut renderer, data);
     }
     check(renderer, "circles", WIDTH, HEIGHT);
@@ -631,10 +663,7 @@ fn outlines_match_their_reference() {
     const WIDTH: u32 = 240;
     const HEIGHT: u32 = 160;
     let mut renderer = renderer(WIDTH, HEIGHT);
-    let mut meshes = Meshes::default();
-    let mut shaders = Shaders::default();
-    let mut textures = Textures::default();
-    let mut uploads = Uploads::default();
+    let mut stores = Stores::default();
     // 4 units from the view's bottom to its top, 40 pixels a unit, and 6 across, around the origin.
     let viewpoint = Viewpoint {
         projection: Projection::Orthographic {
@@ -658,9 +687,9 @@ fn outlines_match_their_reference() {
         color: Vec4::new(0.2, 0.6, 0.9, 1.0),
         ..Circle::default()
     };
-    // 30 pixels across the middle at (60, 50).
+    // 60 pixels across, its middle at (60, 50).
     let disc = (place([-1.5, 0.75], [1.5, 1.5]), disc, 7);
-    draws.extend_circles(&mut shaders, [disc].into_iter());
+    draws.extend_circles(&mut stores.shaders, [disc].into_iter());
     draws.extend_sprites(
         [
             // From (120, 110) to (180, 170), past the view's bottom.
@@ -687,18 +716,9 @@ fn outlines_match_their_reference() {
     let mut plain = None;
     let nothing = [outline(0, 3.0), outline(7, 0.0), outline(7, f32::NAN)];
     for outlined in [None].into_iter().chain(nothing.map(Some)) {
-        uploads.take(&mut meshes, &mut shaders, &mut textures);
         let data = RenderData {
-            clear_color: CLEAR,
-            viewport: Viewport {
-                origin: [0, 0],
-                size: [WIDTH, HEIGHT],
-            },
-            viewpoint,
-            uploads: &mut uploads,
-            draws: &draws,
-            picks: &[],
             outline: outlined,
+            ..stores.data(filling([WIDTH, HEIGHT]), viewpoint, &draws)
         };
         render_without_ui(&mut renderer, data);
         let pixels = (renderer.read_back())
@@ -720,16 +740,9 @@ fn outlines_match_their_reference() {
     }];
     for _ in 0..3 {
         let data = RenderData {
-            clear_color: CLEAR,
-            viewport: Viewport {
-                origin: [0, 0],
-                size: [WIDTH, HEIGHT],
-            },
-            viewpoint,
-            uploads: &mut uploads,
-            draws: &draws,
             picks: &picks,
             outline: Some(outline(7, 3.0)),
+            ..stores.data(filling([WIDTH, HEIGHT]), viewpoint, &draws)
         };
         render_without_ui(&mut renderer, data);
     }
@@ -747,10 +760,7 @@ fn lines_match_their_reference() {
     const WIDTH: u32 = 240;
     const HEIGHT: u32 = 160;
     let mut renderer = renderer(WIDTH, HEIGHT);
-    let mut meshes = Meshes::default();
-    let mut shaders = Shaders::default();
-    let mut textures = Textures::default();
-    let mut uploads = Uploads::default();
+    let mut stores = Stores::default();
     // 4 in front of the origin, seeing a sixth of a turn from the view's bottom to its top: at z =
     // 0, about 4.6 units, 34.6 pixels a unit.
     let viewpoint = Viewpoint {
@@ -761,18 +771,10 @@ fn lines_match_their_reference() {
         },
         ..Viewpoint::default()
     };
-    let flat = shaders
+    let flat = (stores.shaders)
         .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
         .expect("a shader");
-    let corners = [
-        [-0.5, -0.5, 0.0],
-        [0.5, -0.5, 0.0],
-        [0.5, 0.5, 0.0],
-        [-0.5, 0.5, 0.0],
-    ];
-    let square = meshes
-        .add("square", &corners, &[0, 1, 2, 2, 3, 0])
-        .expect("a mesh");
+    let square = square(&mut stores.meshes);
     let mut draws = Draws::default();
     let mut line = |draws: &mut Draws,
                     transform: Mat4,
@@ -785,7 +787,7 @@ fn lines_match_their_reference() {
             color: Vec4::from(color),
             width,
         };
-        draws.push_line(&mut shaders, transform, drawn, 0);
+        draws.push_line(&mut stores.shaders, transform, drawn, 0);
     };
     for (y, color, width) in [
         (2.0, [0.9, 0.9, 0.9, 1.0], 1.0),
@@ -847,22 +849,10 @@ fn lines_match_their_reference() {
         Vec3::new(1.8, 1.3, 0.0),
     );
     let yellow = Vec4::new(0.9, 0.8, 0.1, 1.0);
-    draws.push_rect(&mut shaders, turned, yellow, 3.0, 0);
+    draws.push_rect(&mut stores.shaders, turned, yellow, 3.0, 0);
     // More frames than are in flight.
     for _ in 0..3 {
-        uploads.take(&mut meshes, &mut shaders, &mut textures);
-        let data = RenderData {
-            clear_color: CLEAR,
-            viewport: Viewport {
-                origin: [0, 0],
-                size: [WIDTH, HEIGHT],
-            },
-            viewpoint,
-            uploads: &mut uploads,
-            draws: &draws,
-            picks: &[],
-            outline: None,
-        };
+        let data = stores.data(filling([WIDTH, HEIGHT]), viewpoint, &draws);
         render_without_ui(&mut renderer, data);
     }
     check(renderer, "lines", WIDTH, HEIGHT);
@@ -887,10 +877,7 @@ fn batches_match_their_reference() {
     /// The last run's sprites.
     const BIG: usize = 20_000;
     let mut renderer = renderer(WIDTH, HEIGHT);
-    let mut meshes = Meshes::default();
-    let mut shaders = Shaders::default();
-    let mut textures = Textures::default();
-    let mut uploads = Uploads::default();
+    let mut stores = Stores::default();
     // 4 units from the view's bottom to its top, 40 pixels a unit, and 6 across, around the origin.
     let viewpoint = Viewpoint {
         projection: Projection::Orthographic {
@@ -908,12 +895,12 @@ fn batches_match_their_reference() {
         [40, 170, 70, 255],
         [40, 80, 220, 255],
     ];
-    let quadrants = textures
+    let quadrants = (stores.textures)
         .add("quadrants", [2, 2], quadrants.as_flattened(), Mipmaps::None)
         .expect("a texture");
     let (light, dark) = ([240, 240, 240, 255], [20, 20, 20, 255]);
     let checker = [light, dark, dark, light];
-    let checker = textures
+    let checker = (stores.textures)
         .add("checker", [2, 2], checker.as_flattened(), Mipmaps::None)
         .expect("a texture");
     let white = Sprite::default().texture;
@@ -950,18 +937,10 @@ fn batches_match_their_reference() {
         (transform, sprite)
     };
     // Positions, and a color for each draw.
-    let flat = shaders
+    let flat = (stores.shaders)
         .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
         .expect("a shader");
-    let corners = [
-        [-0.5, -0.5, 0.0],
-        [0.5, -0.5, 0.0],
-        [0.5, 0.5, 0.0],
-        [-0.5, 0.5, 0.0],
-    ];
-    let square = meshes
-        .add("square", &corners, &[0, 1, 2, 2, 3, 0])
-        .expect("a mesh");
+    let square = square(&mut stores.meshes);
     // Across the middle, from y = -0.45 to 0.45, in slate.
     let band = Mat4::from_scale(Vec3::new(5.8, 0.9, 1.0));
     let slate = Vec4::new(0.25, 0.3, 0.4, 1.0);
@@ -995,19 +974,7 @@ fn batches_match_their_reference() {
                 draws.push_sprite(transform, sprite);
             }
         }
-        uploads.take(&mut meshes, &mut shaders, &mut textures);
-        let data = RenderData {
-            clear_color: CLEAR,
-            viewport: Viewport {
-                origin: [0, 0],
-                size: [WIDTH, HEIGHT],
-            },
-            viewpoint,
-            uploads: &mut uploads,
-            draws: &draws,
-            picks: &[],
-            outline: None,
-        };
+        let data = stores.data(filling([WIDTH, HEIGHT]), viewpoint, &draws);
         render_without_ui(&mut renderer, data);
     }
     let drew = DrawCounts {
@@ -1037,10 +1004,7 @@ fn sheets_match_their_reference(path: UploadPath) {
     const WIDTH: u32 = 240;
     const HEIGHT: u32 = 200;
     let mut renderer = renderer_uploading(WIDTH, HEIGHT, Some(path));
-    let mut meshes = Meshes::default();
-    let mut shaders = Shaders::default();
-    let mut textures = Textures::default();
-    let mut uploads = Uploads::default();
+    let mut stores = Stores::default();
     // 5 units from the view's bottom to its top, 40 pixels a unit, and 6 across, around the origin.
     let viewpoint = Viewpoint {
         projection: Projection::Orthographic {
@@ -1071,7 +1035,7 @@ fn sheets_match_their_reference(path: UploadPath) {
         })
         .collect();
     let sheet = SpriteSheet {
-        texture: (textures.add("sheet", [8, 4], &pixels, Mipmaps::None)).expect("a texture"),
+        texture: (stores.textures.add("sheet", [8, 4], &pixels, Mipmaps::None)).expect("a texture"),
         size: [8, 4],
         cell: [2, 2],
     };
@@ -1087,7 +1051,7 @@ fn sheets_match_their_reference(path: UploadPath) {
         })
         .collect();
     let strip = SpriteSheet {
-        texture: (textures.add("strip", [46, 2], &strip, Mipmaps::None)).expect("a texture"),
+        texture: (stores.textures.add("strip", [46, 2], &strip, Mipmaps::None)).expect("a texture"),
         size: [46, 2],
         cell: [2, 2],
     };
@@ -1172,19 +1136,7 @@ fn sheets_match_their_reference(path: UploadPath) {
     draws.push_sprite(place([0.8, -1.8], [0.4, 0.8], 0.0), line);
     // More frames than are in flight.
     for _ in 0..3 {
-        uploads.take(&mut meshes, &mut shaders, &mut textures);
-        let data = RenderData {
-            clear_color: CLEAR,
-            viewport: Viewport {
-                origin: [0, 0],
-                size: [WIDTH, HEIGHT],
-            },
-            viewpoint,
-            uploads: &mut uploads,
-            draws: &draws,
-            picks: &[],
-            outline: None,
-        };
+        let data = stores.data(filling([WIDTH, HEIGHT]), viewpoint, &draws);
         render_without_ui(&mut renderer, data);
     }
     check(renderer, "sheets", WIDTH, HEIGHT);
@@ -1208,10 +1160,7 @@ fn views_match_their_reference() {
     const WIDTH: u32 = 320;
     const HEIGHT: u32 = 200;
     let mut renderer = renderer(WIDTH, HEIGHT);
-    let mut meshes = Meshes::default();
-    let mut shaders = Shaders::default();
-    let mut textures = Textures::default();
-    let mut uploads = Uploads::default();
+    let mut stores = Stores::default();
     // 4 units from the view's bottom to its top; the view's center is (1, 0.5).
     let viewpoint = Viewpoint {
         position: Vec3::new(1.0, 0.5, 0.0),
@@ -1229,28 +1178,20 @@ fn views_match_their_reference() {
             Vec3::new(x, y, 0.0),
         )
     };
-    let flat = shaders
+    let flat = (stores.shaders)
         .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
         .expect("a shader");
-    let colored = shaders
+    let colored = (stores.shaders)
         .add::<[f32; 7], ()>("vertex color", &shader("vertex_color.slang"), Blend::Opaque)
         .expect("a shader");
-    let corners = [
-        [-0.5, -0.5, 0.0],
-        [0.5, -0.5, 0.0],
-        [0.5, 0.5, 0.0],
-        [-0.5, 0.5, 0.0],
-    ];
-    let square = meshes
-        .add("square", &corners, &[0, 1, 2, 2, 3, 0])
-        .expect("a mesh");
+    let square = square(&mut stores.meshes);
     let corner = |[x, y, z]: [f32; 3], [r, g, b, a]: [f32; 4]| [x, y, z, r, g, b, a];
     let vertices = [
         corner([0.0, 0.5, 0.0], [1.0, 0.0, 0.0, 1.0]),
         corner([0.5, -0.5, 0.0], [0.0, 1.0, 0.0, 1.0]),
         corner([-0.5, -0.5, 0.0], [0.0, 0.0, 1.0, 1.0]),
     ];
-    let triangle = meshes
+    let triangle = (stores.meshes)
         .add("triangle", &vertices, &[0, 1, 2])
         .expect("a mesh");
     // White, red, blue and black, each unlike the others, so that a texel shifted to its neighbor's
@@ -1261,7 +1202,7 @@ fn views_match_their_reference() {
         [0, 0, 255, 255],
         [0, 0, 0, 255],
     ];
-    let tile = textures
+    let tile = (stores.textures)
         .add("tile", [2, 2], tile.as_flattened(), Mipmaps::None)
         .expect("a texture");
     let mut draws = Draws::default();
@@ -1301,16 +1242,7 @@ fn views_match_their_reference() {
     };
     let mut shown = None;
     for (frame, viewport) in views.into_iter().enumerate() {
-        uploads.take(&mut meshes, &mut shaders, &mut textures);
-        let data = RenderData {
-            clear_color: CLEAR,
-            viewport,
-            viewpoint,
-            uploads: &mut uploads,
-            draws: &draws,
-            picks: &[],
-            outline: None,
-        };
+        let data = stores.data(viewport, viewpoint, &draws);
         render_without_ui(&mut renderer, data);
         match frame {
             1 => {
@@ -1359,10 +1291,7 @@ fn depth_matches_its_reference() {
     const WIDTH: u32 = 240;
     const HEIGHT: u32 = 160;
     let mut renderer = renderer(WIDTH, HEIGHT);
-    let mut meshes = Meshes::default();
-    let mut shaders = Shaders::default();
-    let mut textures = Textures::default();
-    let mut uploads = Uploads::default();
+    let mut stores = Stores::default();
     // 4 in front of the origin, seeing a sixth of a turn from the view's bottom to its top: at z =
     // 0, about 4.6 units.
     let viewpoint = Viewpoint {
@@ -1373,18 +1302,10 @@ fn depth_matches_its_reference() {
         },
         ..Viewpoint::default()
     };
-    let flat = shaders
+    let flat = (stores.shaders)
         .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
         .expect("a shader");
-    let corners = [
-        [-0.5, -0.5, 0.0],
-        [0.5, -0.5, 0.0],
-        [0.5, 0.5, 0.0],
-        [-0.5, 0.5, 0.0],
-    ];
-    let square = meshes
-        .add("square", &corners, &[0, 1, 2, 2, 3, 0])
-        .expect("a mesh");
+    let square = square(&mut stores.meshes);
     // `size` across at `at`, turned `turn` degrees about Y.
     let placed = |size: f32, turn: f32, at: [f32; 3]| {
         Mat4::from_scale_rotation_translation(
@@ -1428,19 +1349,7 @@ fn depth_matches_its_reference() {
     };
     for frame in 0..3 {
         let draws = scene(frame == 0);
-        uploads.take(&mut meshes, &mut shaders, &mut textures);
-        let data = RenderData {
-            clear_color: CLEAR,
-            viewport: Viewport {
-                origin: [0, 0],
-                size: [WIDTH, HEIGHT],
-            },
-            viewpoint,
-            uploads: &mut uploads,
-            draws: &draws,
-            picks: &[],
-            outline: None,
-        };
+        let data = stores.data(filling([WIDTH, HEIGHT]), viewpoint, &draws);
         render_without_ui(&mut renderer, data);
     }
     check(renderer, "depth", WIDTH, HEIGHT);
@@ -1456,12 +1365,9 @@ fn a_large_texture_draws_in_the_frame_that_adds_it(path: UploadPath) {
     // sRGB-encoded.
     const COLOR: [u8; 4] = [200, 80, 40, 255];
     let mut renderer = renderer_uploading(SIDE, SIDE, Some(path));
-    let mut meshes = Meshes::default();
-    let mut shaders = Shaders::default();
-    let mut textures = Textures::default();
-    let mut uploads = Uploads::default();
+    let mut stores = Stores::default();
     // Positions, then texture coordinates.
-    let textured = shaders
+    let textured = (stores.shaders)
         .add::<[f32; 5], Sampling>("textured", &shader("textured.slang"), Blend::Opaque)
         .expect("a shader");
     // The whole view, which is 2 units high and as wide.
@@ -1471,11 +1377,11 @@ fn a_large_texture_draws_in_the_frame_that_adds_it(path: UploadPath) {
         [1.0, 1.0, 0.0, 1.0, 0.0],
         [-1.0, 1.0, 0.0, 0.0, 0.0],
     ];
-    let square = meshes
+    let square = (stores.meshes)
         .add("square", &corners, &[0, 1, 2, 2, 3, 0])
         .expect("a mesh");
     let pixels = COLOR.repeat((TEXELS * TEXELS) as usize);
-    let large = textures
+    let large = (stores.textures)
         .add("large", [TEXELS, TEXELS], &pixels, Mipmaps::None)
         .expect("a texture");
     let mut draws = Draws::default();
@@ -1484,38 +1390,21 @@ fn a_large_texture_draws_in_the_frame_that_adds_it(path: UploadPath) {
         sampler: Sampler::NearestClamp.index(),
     };
     draws.push(square, textured, Mat4::IDENTITY, sampling);
-    uploads.take(&mut meshes, &mut shaders, &mut textures);
-    let data = RenderData {
-        clear_color: CLEAR,
-        viewport: Viewport {
-            origin: [0, 0],
-            size: [SIDE, SIDE],
+    let viewpoint = Viewpoint {
+        projection: Projection::Orthographic {
+            height: 2.0,
+            near: -1.0,
+            far: 1.0,
         },
-        viewpoint: Viewpoint {
-            projection: Projection::Orthographic {
-                height: 2.0,
-                near: -1.0,
-                far: 1.0,
-            },
-            ..Viewpoint::default()
-        },
-        uploads: &mut uploads,
-        draws: &draws,
-        picks: &[],
-        outline: None,
+        ..Viewpoint::default()
     };
+    let data = stores.data(filling([SIDE, SIDE]), viewpoint, &draws);
     render_without_ui(&mut renderer, data);
-    let validation = renderer.validation();
     let pixels = renderer
         .read_back()
         .expect("the frame's pixels")
         .expect("a headless renderer's frame can be read back");
-    drop(renderer);
-    assert_eq!(
-        validation.messages(),
-        0,
-        "validation reported problems; the log above says what"
-    );
+    shut_down(renderer);
     for pixel in pixels.as_chunks::<4>().0 {
         let close = pixel
             .iter()
@@ -1539,10 +1428,7 @@ fn models_match_their_reference() {
     const WIDTH: u32 = 240;
     const HEIGHT: u32 = 160;
     let mut renderer = renderer(WIDTH, HEIGHT);
-    let mut meshes = Meshes::default();
-    let mut shaders = Shaders::default();
-    let mut textures = Textures::default();
-    let mut uploads = Uploads::default();
+    let mut stores = Stores::default();
     // 4 in front of the origin, seeing a sixth of a turn from the view's bottom to its top: at z =
     // 0, about 4.6 units.
     let viewpoint = Viewpoint {
@@ -1567,7 +1453,7 @@ fn models_match_their_reference() {
             corner([0.5, 0.5], [1.0, 0.0], colors[2]),
             corner([-0.5, 0.5], [0.0, 0.0], colors[3]),
         ];
-        meshes
+        (stores.meshes)
             .add(name, &corners, &[0, 1, 2, 2, 3, 0])
             .expect("a mesh")
     };
@@ -1583,7 +1469,7 @@ fn models_match_their_reference() {
         [64, 64, 255, 200],
         [255, 255, 64, 100],
     ];
-    let cutout = textures
+    let cutout = (stores.textures)
         .add("cutout", [2, 2], cutout.as_flattened(), Mipmaps::None)
         .expect("a texture");
     let material = |color: [f32; 4], alpha, double_sided| Material {
@@ -1617,7 +1503,7 @@ fn models_match_their_reference() {
     let blended = material([0.9, 0.1, 0.8, 0.5], AlphaMode::Blend, false);
     let tinted = opaque([1.0, 0.5, 1.0, 1.0], false);
     let mut draw =
-        |mesh, material: &Material| MeshDraw::with_material(mesh, material, &mut shaders);
+        |mesh, material: &Material| MeshDraw::with_material(mesh, material, &mut stores.shaders);
     let scene = [
         (draw(plain, &red), placed([-2.0, 0.9, 0.0], false, false)),
         (draw(plain, &green), placed([-1.0, 0.9, 0.0], true, false)),
@@ -1640,19 +1526,7 @@ fn models_match_their_reference() {
         draws.push_draw(*transform, draw, 0);
     }
     for _ in 0..2 {
-        uploads.take(&mut meshes, &mut shaders, &mut textures);
-        let data = RenderData {
-            clear_color: CLEAR,
-            viewport: Viewport {
-                origin: [0, 0],
-                size: [WIDTH, HEIGHT],
-            },
-            viewpoint,
-            uploads: &mut uploads,
-            draws: &draws,
-            picks: &[],
-            outline: None,
-        };
+        let data = stores.data(filling([WIDTH, HEIGHT]), viewpoint, &draws);
         render_without_ui(&mut renderer, data);
     }
     // Red and green facing one way, blue and yellow mirrored, then one each.
@@ -1680,10 +1554,7 @@ fn mixed_textures_match_their_reference() {
     /// A sprite's and a square's side, in pixels.
     const SIDE: u32 = 4;
     let mut renderer = renderer(WIDTH, HEIGHT);
-    let mut meshes = Meshes::default();
-    let mut shaders = Shaders::default();
-    let mut textures = Textures::default();
-    let mut uploads = Uploads::default();
+    let mut stores = Stores::default();
     // A unit a pixel, around the origin.
     let viewpoint = Viewpoint {
         projection: Projection::Orthographic {
@@ -1701,12 +1572,12 @@ fn mixed_textures_match_their_reference() {
         [40, 170, 70, 255],
         [40, 80, 220, 255],
     ];
-    let quadrants = textures
+    let quadrants = (stores.textures)
         .add("quadrants", [2, 2], quadrants.as_flattened(), Mipmaps::None)
         .expect("a texture");
     let (light, dark) = ([240, 240, 240, 255], [20, 20, 20, 255]);
     let checker = [light, dark, dark, light];
-    let checker = textures
+    let checker = (stores.textures)
         .add("checker", [2, 2], checker.as_flattened(), Mipmaps::None)
         .expect("a texture");
     let sprites = [
@@ -1733,7 +1604,7 @@ fn mixed_textures_match_their_reference() {
         corner([0.5, 0.5], [1.0, 0.0]),
         corner([-0.5, 0.5], [0.0, 0.0]),
     ];
-    let square = meshes
+    let square = (stores.meshes)
         .add("square", &corners, &[0, 1, 2, 2, 3, 0])
         .expect("a mesh");
     let nearest = Material {
@@ -1747,8 +1618,8 @@ fn mixed_textures_match_their_reference() {
         wrap: Wrap::Clamp,
         ..Material::default()
     };
-    let squares =
-        [nearest, linear].map(|material| MeshDraw::with_material(square, &material, &mut shaders));
+    let squares = [nearest, linear]
+        .map(|material| MeshDraw::with_material(square, &material, &mut stores.shaders));
     let (columns, rows) = (WIDTH / SIDE, HEIGHT / 2 / SIDE);
     // At `column` and `row` of the half whose top edge is at `top`, from the half's top left.
     let place = |column: u32, row: u32, top: f32| {
@@ -1770,19 +1641,7 @@ fn mixed_textures_match_their_reference() {
             draws.push_draw(place(column, row, 0.0), square, 0);
         }
     }
-    uploads.take(&mut meshes, &mut shaders, &mut textures);
-    let data = RenderData {
-        clear_color: CLEAR,
-        viewport: Viewport {
-            origin: [0, 0],
-            size: [WIDTH, HEIGHT],
-        },
-        viewpoint,
-        uploads: &mut uploads,
-        draws: &draws,
-        picks: &[],
-        outline: None,
-    };
+    let data = stores.data(filling([WIDTH, HEIGHT]), viewpoint, &draws);
     render_without_ui(&mut renderer, data);
     let instances = (columns * rows) as usize;
     let drawn = DrawCounts {
@@ -1820,10 +1679,7 @@ fn picks_answer_what_their_frame_drew() {
     const CIRCLE: u64 = 9;
     const LINE: u64 = 10;
     let mut renderer = renderer(WIDTH, HEIGHT);
-    let mut meshes = Meshes::default();
-    let mut shaders = Shaders::default();
-    let mut textures = Textures::default();
-    let mut uploads = Uploads::default();
+    let mut stores = Stores::default();
     // A unit a pixel, around the origin, of the view's 64 by 48 pixels.
     let viewport = Viewport {
         origin: [16, 8],
@@ -1842,19 +1698,14 @@ fn picks_answer_what_their_frame_drew() {
         let center = Vec3::new((x0 + x1) / 2.0 - 32.0, 24.0 - (y0 + y1) / 2.0, 0.0);
         Mat4::from_translation(center) * Mat4::from_scale(Vec3::new(x1 - x0, y1 - y0, 1.0))
     };
-    let flat = shaders
+    let flat = (stores.shaders)
         .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
         .expect("a shader");
-    let corners = [
-        [-0.5, -0.5, 0.0],
-        [0.5, -0.5, 0.0],
-        [0.5, 0.5, 0.0],
-        [-0.5, 0.5, 0.0],
-    ];
-    let square = meshes
-        .add("square", &corners, &[0, 1, 2, 2, 3, 0])
-        .expect("a mesh");
-    let mesh = MeshDraw::new(square, flat, Vec4::new(0.2, 0.3, 0.8, 1.0));
+    let mesh = MeshDraw::new(
+        square(&mut stores.meshes),
+        flat,
+        Vec4::new(0.2, 0.3, 0.8, 1.0),
+    );
     // Counterclockwise seen from +Z, its texture's top left at its top left.
     let corner = |[x, y]: [f32; 2], uv: [f32; 2]| ModelVertex {
         position: Vec3::new(x, y, 0.0),
@@ -1867,13 +1718,13 @@ fn picks_answer_what_their_frame_drew() {
         corner([0.5, 0.5], [1.0, 0.0]),
         corner([-0.5, 0.5], [0.0, 0.0]),
     ];
-    let model_square = meshes
+    let model_square = (stores.meshes)
         .add("model square", &model_corners, &[0, 1, 2, 2, 3, 0])
         .expect("a mesh");
-    let model = MeshDraw::with_material(model_square, &Material::default(), &mut shaders);
+    let model = MeshDraw::with_material(model_square, &Material::default(), &mut stores.shaders);
     // Opaque on the left, wholly transparent on the right.
     let half = [[200, 40, 40, 255], [0, 0, 0, 0]];
-    let half = textures
+    let half = (stores.textures)
         .add("half", [2, 1], half.as_flattened(), Mipmaps::None)
         .expect("a texture");
     let halved = Sprite {
@@ -1969,7 +1820,7 @@ fn picks_answer_what_their_frame_drew() {
     };
     let mut answered = Vec::new();
     for frame in 1..=6 {
-        let draws = scene(frame, &mut shaders);
+        let draws = scene(frame, &mut stores.shaders);
         let picks: Vec<Pick> = if [1, 2, 4].contains(&frame) {
             let pick = |(i, &(pixel, _)): (usize, &([u32; 2], u64))| Pick {
                 tag: tag(frame, i),
@@ -1979,15 +1830,9 @@ fn picks_answer_what_their_frame_drew() {
         } else {
             Vec::new()
         };
-        uploads.take(&mut meshes, &mut shaders, &mut textures);
         let data = RenderData {
-            clear_color: CLEAR,
-            viewport,
-            viewpoint,
-            uploads: &mut uploads,
-            draws: &draws,
             picks: &picks,
-            outline: None,
+            ..stores.data(viewport, viewpoint, &draws)
         };
         render_without_ui(&mut renderer, data);
         answered.push(renderer.picked().to_vec());
@@ -2003,13 +1848,7 @@ fn picks_answer_what_their_frame_drew() {
     for (frame, (answered, expected)) in (1..).zip(answered.iter().zip(&expected)) {
         assert_eq!(answered, expected, "frame {frame}'s answers");
     }
-    let validation = renderer.validation();
-    drop(renderer);
-    assert_eq!(
-        validation.messages(),
-        0,
-        "validation reported problems; the log above says what"
-    );
+    shut_down(renderer);
 }
 
 /// What `level.slang` takes with each draw.
@@ -2034,10 +1873,7 @@ fn mipmaps_match_their_reference(path: UploadPath) {
     const WIDTH: u32 = 640;
     const HEIGHT: u32 = 64;
     let mut renderer = renderer_uploading(WIDTH, HEIGHT, Some(path));
-    let mut meshes = Meshes::default();
-    let mut shaders = Shaders::default();
-    let mut textures = Textures::default();
-    let mut uploads = Uploads::default();
+    let mut stores = Stores::default();
     // A unit a pixel, around the origin.
     let viewpoint = Viewpoint {
         projection: Projection::Orthographic {
@@ -2047,7 +1883,7 @@ fn mipmaps_match_their_reference(path: UploadPath) {
         },
         ..Viewpoint::default()
     };
-    let leveled = shaders
+    let leveled = (stores.shaders)
         .add::<[f32; 5], Level>("level", &shader("level.slang"), Blend::Alpha)
         .expect("a shader");
     let corners = [
@@ -2056,7 +1892,7 @@ fn mipmaps_match_their_reference(path: UploadPath) {
         [32.0, 32.0, 0.0, 1.0, 0.0],
         [-32.0, 32.0, 0.0, 0.0, 0.0],
     ];
-    let square = meshes
+    let square = (stores.meshes)
         .add("square", &corners, &[0, 1, 2, 2, 3, 0])
         .expect("a mesh");
     // Checkered in squares 1 texel across at the top left, 2 at the top right, 4 at the bottom
@@ -2073,14 +1909,14 @@ fn mipmaps_match_their_reference(path: UploadPath) {
             colors[(x / cell + y / cell) % 2]
         })
         .collect();
-    let checkers = textures
+    let checkers = (stores.textures)
         .add("checkers", [64, 64], &checkers, Mipmaps::AlphaWeighted)
         .expect("a texture");
     // A color for each texel.
     let odd: Vec<u8> = (0..15u32)
         .flat_map(|i| [i * 17, 255 - i * 13, i * 71 % 256, 255].map(|c| c as u8))
         .collect();
-    let odd = textures
+    let odd = (stores.textures)
         .add("odd", [5, 3], &odd, Mipmaps::Averaged)
         .expect("a texture");
     let mut draws = Draws::default();
@@ -2101,19 +1937,7 @@ fn mipmaps_match_their_reference(path: UploadPath) {
             level,
         );
     }
-    uploads.take(&mut meshes, &mut shaders, &mut textures);
-    let data = RenderData {
-        clear_color: CLEAR,
-        viewport: Viewport {
-            origin: [0, 0],
-            size: [WIDTH, HEIGHT],
-        },
-        viewpoint,
-        uploads: &mut uploads,
-        draws: &draws,
-        picks: &[],
-        outline: None,
-    };
+    let data = stores.data(filling([WIDTH, HEIGHT]), viewpoint, &draws);
     render_without_ui(&mut renderer, data);
     check(renderer, "mipmaps", WIDTH, HEIGHT);
 }
@@ -2131,10 +1955,7 @@ fn a_view_in_the_ui_matches_its_reference() {
     const WIDTH: u32 = 320;
     const HEIGHT: u32 = 200;
     let mut renderer = renderer(WIDTH, HEIGHT);
-    let mut meshes = Meshes::default();
-    let mut shaders = Shaders::default();
-    let mut textures = Textures::default();
-    let mut uploads = Uploads::default();
+    let mut stores = Stores::default();
     // 4 units from the view's bottom to its top, which is 160 pixels: 40 pixels a unit.
     let viewpoint = Viewpoint {
         projection: Projection::Orthographic {
@@ -2144,28 +1965,20 @@ fn a_view_in_the_ui_matches_its_reference() {
         },
         ..Viewpoint::default()
     };
-    let flat = shaders
+    let flat = (stores.shaders)
         .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
         .expect("a shader");
-    let colored = shaders
+    let colored = (stores.shaders)
         .add::<[f32; 7], ()>("vertex color", &shader("vertex_color.slang"), Blend::Opaque)
         .expect("a shader");
-    let corners = [
-        [-0.5, -0.5, 0.0],
-        [0.5, -0.5, 0.0],
-        [0.5, 0.5, 0.0],
-        [-0.5, 0.5, 0.0],
-    ];
-    let square = meshes
-        .add("square", &corners, &[0, 1, 2, 2, 3, 0])
-        .expect("a mesh");
+    let square = square(&mut stores.meshes);
     let corner = |[x, y, z]: [f32; 3], [r, g, b, a]: [f32; 4]| [x, y, z, r, g, b, a];
     let vertices = [
         corner([0.0, 0.5, 0.0], [1.0, 0.0, 0.0, 1.0]),
         corner([0.5, -0.5, 0.0], [0.0, 1.0, 0.0, 1.0]),
         corner([-0.5, -0.5, 0.0], [0.0, 0.0, 1.0, 1.0]),
     ];
-    let triangle = meshes
+    let triangle = (stores.meshes)
         .add("triangle", &vertices, &[0, 1, 2])
         .expect("a mesh");
     let mut draws = Draws::default();
@@ -2208,23 +2021,14 @@ fn a_view_in_the_ui_matches_its_reference() {
     });
     let primitives = egui.tessellate(output.shapes, output.pixels_per_point);
     for size in [[240, 160], [0, 0]] {
-        uploads.take(&mut meshes, &mut shaders, &mut textures);
         let ui = Ui {
             primitives: &primitives,
             textures: &mut output.textures_delta,
             pixels_per_point: output.pixels_per_point,
         };
         let data = RenderData {
-            clear_color: CLEAR,
-            viewport: Viewport {
-                origin: [0, 0],
-                size,
-            },
-            viewpoint,
-            uploads: &mut uploads,
-            draws: &draws,
-            picks: &[],
             outline: Some(outline),
+            ..stores.data(filling(size), viewpoint, &draws)
         };
         assert!(
             renderer.render(data, ui, &mut []).expect("a frame"),
@@ -2249,13 +2053,7 @@ fn a_view_in_the_ui_matches_its_reference() {
             compare("view_in_ui", WIDTH, HEIGHT, &pixels);
         }
     }
-    let validation = renderer.validation();
-    drop(renderer);
-    assert_eq!(
-        validation.messages(),
-        0,
-        "validation reported problems; the log above says what"
-    );
+    shut_down(renderer);
 }
 
 /// Renders a frame of `data`, without UI.
@@ -2315,14 +2113,11 @@ Targets fragment_main() {
 fn replaced_shaders_draw_from_the_next_frame() {
     const SIZE: u32 = 16;
     let mut renderer = renderer(SIZE, SIZE);
-    let mut meshes = Meshes::default();
-    let mut shaders = Shaders::default();
-    let mut textures = Textures::default();
-    let mut uploads = Uploads::default();
+    let mut stores = Stores::default();
     let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join("replaced.slang");
     let write = |color: &str| fs::write(&path, REPLACED.replace("COLOR", color));
     write("float4(1.0, 0.0, 0.0, 1.0)").expect("the shader's file");
-    let shader = shaders
+    let shader = (stores.shaders)
         .add::<[f32; 3], ()>("replaced", &path, Blend::Opaque)
         .expect("a shader");
     let corners = [
@@ -2331,7 +2126,7 @@ fn replaced_shaders_draw_from_the_next_frame() {
         [1.0, 1.0, 0.0],
         [-1.0, 1.0, 0.0],
     ];
-    let square = meshes
+    let square = (stores.meshes)
         .add("square", &corners, &[0, 1, 2, 2, 3, 0])
         .expect("a mesh");
     let mut draws = Draws::default();
@@ -2354,22 +2149,10 @@ fn replaced_shaders_draw_from_the_next_frame() {
     for frame in 0..6 {
         if frame == 3 {
             write("float4(0.0, 1.0, 0.0, 1.0)").expect("the shader's file");
-            let compiled = shaders.sources()[0].compile();
-            shaders.replace(compiled.expect("the shader compiles again"));
+            let compiled = stores.shaders.sources()[0].compile();
+            (stores.shaders).replace(compiled.expect("the shader compiles again"));
         }
-        uploads.take(&mut meshes, &mut shaders, &mut textures);
-        let data = RenderData {
-            clear_color: CLEAR,
-            viewport: Viewport {
-                origin: [0, 0],
-                size: [SIZE, SIZE],
-            },
-            viewpoint,
-            uploads: &mut uploads,
-            draws: &draws,
-            picks: &[],
-            outline: None,
-        };
+        let data = stores.data(filling([SIZE, SIZE]), viewpoint, &draws);
         render_without_ui(&mut renderer, data);
         // Reading back waits for the GPU, so not between the first frame and the replacement.
         match frame {
@@ -2378,13 +2161,7 @@ fn replaced_shaders_draw_from_the_next_frame() {
             _ => {}
         }
     }
-    let validation = renderer.validation();
-    drop(renderer);
-    assert_eq!(
-        validation.messages(),
-        0,
-        "validation reported problems; the log above says what"
-    );
+    shut_down(renderer);
 }
 
 /// Renders a frame with a pipeline cache, which the driver fills as the renderer makes the
@@ -2402,33 +2179,18 @@ fn pipelines_go_through_the_cache() {
     };
     // A triangle in the color its draw gives, which takes a pipeline of its own.
     let frame = |renderer: &mut Renderer| {
-        let mut meshes = Meshes::default();
-        let mut shaders = Shaders::default();
-        let mut textures = Textures::default();
-        let mut uploads = Uploads::default();
-        let flat = shaders
+        let mut stores = Stores::default();
+        let flat = (stores.shaders)
             .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
             .expect("a shader");
         let corners = [[-0.5, -0.5, 0.0], [0.5, -0.5, 0.0], [0.0, 0.5, 0.0]];
-        let triangle = meshes
+        let triangle = (stores.meshes)
             .add("triangle", &corners, &[0, 1, 2])
             .expect("a mesh");
         let mut draws = Draws::default();
         let orange = Vec4::new(0.9, 0.4, 0.1, 1.0);
         draws.push(triangle, flat, Mat4::IDENTITY, orange);
-        uploads.take(&mut meshes, &mut shaders, &mut textures);
-        let data = RenderData {
-            clear_color: CLEAR,
-            viewport: Viewport {
-                origin: [0, 0],
-                size: [SIZE, SIZE],
-            },
-            viewpoint: Viewpoint::default(),
-            uploads: &mut uploads,
-            draws: &draws,
-            picks: &[],
-            outline: None,
-        };
+        let data = stores.data(filling([SIZE, SIZE]), Viewpoint::default(), &draws);
         render_without_ui(renderer, data);
         (renderer.read_back())
             .expect("the frame's pixels")
@@ -2449,15 +2211,8 @@ fn pipelines_go_through_the_cache() {
     }
     let mut second = cached(&filled);
     assert_eq!(frame(&mut second), pixels);
-    let validation = [first.validation(), second.validation()];
-    drop((first, second));
-    for validation in validation {
-        assert_eq!(
-            validation.messages(),
-            0,
-            "validation reported problems; the log above says what"
-        );
-    }
+    shut_down(first);
+    shut_down(second);
 }
 
 /// A renderer asked to capture a frame doesn't start on a GPU that RenderDoc's layer isn't active
@@ -2473,21 +2228,26 @@ fn capturing_needs_renderdoc() {
     assert_eq!(error.code(), "renderer.no_renderdoc", "{error:#}");
 }
 
-/// Reads back the last frame `renderer` rendered, shuts it down, checks that validation reported
-/// nothing, and compares the frame with reference image `name`.
+/// Reads back the last frame `renderer` rendered, shuts it down as [`shut_down`] does, and
+/// compares the frame with reference image `name`.
 fn check(mut renderer: Renderer, name: &str, width: u32, height: u32) {
-    let validation = renderer.validation();
     let pixels = renderer
         .read_back()
         .expect("the frame's pixels")
         .expect("a headless renderer's frame can be read back");
+    shut_down(renderer);
+    compare(name, width, height, &pixels);
+}
+
+/// Drops `renderer`, and checks that validation reported nothing.
+fn shut_down(renderer: Renderer) {
+    let validation = renderer.validation();
     drop(renderer);
     assert_eq!(
         validation.messages(),
         0,
         "validation reported problems; the log above says what"
     );
-    compare(name, width, height, &pixels);
 }
 
 /// Compares RGBA8 `pixels` with the reference image `name`, allowing for how GPUs differ in

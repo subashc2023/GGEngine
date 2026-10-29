@@ -1,429 +1,14 @@
-//! The engine's own system, drawing the world's entities; and its components that `gg-renderer`
-//! defines, described to reflection here, since they can't derive it there.
+//! The engine's own system, drawing the world's entities.
 
 use std::ops::Range;
 
-use gg_core::Error;
-use gg_core::math::{Mat4, Quat, Vec2, Vec3, Vec4};
-use gg_renderer::{Circle, Draws, MeshDraw, Sampler, Shaders, Sprite};
+use gg_core::math::{Mat4, Quat, Vec3};
+use gg_renderer::{Circle, Draws, MeshDraw, Shaders, Sprite};
 
 use crate::ecs::ComponentId;
 use crate::interpolation::{self, Past};
 use crate::jobs;
-use crate::reflect::{
-    self, Bound, Digest, Field, Meta, Reflect, Result, Shape, Show, Type, Types, Value,
-};
-use crate::{Component, EntityId, Parent, Transform, World, Writable};
-
-/// Built on the default sprite, so that a scene's sprite, which leaves its texture out, shows the
-/// white texture until code sets another.
-impl Component for Sprite {
-    fn base() -> Option<Self> {
-        Some(Self::default())
-    }
-}
-
-impl Writable for Sprite {}
-
-/// Taken apart whole, so that a field `gg-renderer` adds fails to compile here until it's
-/// described. Its texture is opaque, so that no value makes the index of a texture, which shaders
-/// sample unchecked. Its fields' defaults are the default sprite's.
-impl Reflect for Sprite {
-    fn describe(types: &mut Types) -> Result<Type> {
-        let field = |name: &'static str, ty, show, default, doc: &'static str| Field {
-            name: name.into(),
-            ty,
-            meta: Meta {
-                show,
-                doc: doc.into(),
-                ..Meta::default()
-            },
-            default,
-        };
-        let base = Sprite::default();
-        let doc =
-            "What a sprite shows: a rectangle of a texture, tinted, on a square a unit across.";
-        types.add::<Self>("Sprite".into(), doc.into(), |types| {
-            let fields = vec![
-                field(
-                    "color",
-                    Type::Vec4,
-                    Show::Color,
-                    Some(base.color.to_value()),
-                    "In linear RGBA, alpha not multiplied in, which multiplies the texture's \
-                     colors and alpha.",
-                ),
-                field(
-                    "texture",
-                    Type::Opaque,
-                    Show::Plain,
-                    None,
-                    "The texture it shows, which code sets.",
-                ),
-                field(
-                    "rect",
-                    <[Vec2; 2]>::describe(types)?,
-                    Show::Plain,
-                    Some(base.rect.to_value()),
-                    "The part of the texture it shows, its top left then its bottom right, from \
-                     (0, 0) at the texture's top left to (1, 1) at its bottom right.",
-                ),
-                field(
-                    "sampler",
-                    Sampler::describe(types)?,
-                    Show::Plain,
-                    Some(base.sampler.to_value()),
-                    "How the texture is sampled.",
-                ),
-            ];
-            Ok(Shape::Struct {
-                fields,
-                tuple: false,
-            })
-        })
-    }
-
-    fn to_value(&self) -> Value {
-        let Sprite {
-            color,
-            texture: _,
-            rect,
-            sampler,
-        } = self;
-        Value::Struct(vec![
-            ("color".into(), color.to_value()),
-            ("texture".into(), Value::Opaque),
-            ("rect".into(), rect.to_value()),
-            ("sampler".into(), sampler.to_value()),
-        ])
-    }
-
-    fn from_value(value: &Value) -> Result<Self> {
-        let [_, texture, ..] = reflect::fields(value, SPRITE_FIELDS)?;
-        reflect::make_opaque(texture).map_err(|error| reflect::within(error, "texture"))
-    }
-
-    fn with_value(&self, value: &Value) -> Result<Self> {
-        let Sprite {
-            color,
-            texture,
-            rect,
-            sampler,
-        } = self;
-        let [new_color, new_texture, new_rect, new_sampler] =
-            reflect::fields(value, SPRITE_FIELDS)?;
-        let at = |name| move |error: Error| reflect::within(error, name);
-        Ok(Sprite {
-            color: color.with_value(new_color).map_err(at("color"))?,
-            texture: reflect::keep(texture, new_texture).map_err(at("texture"))?,
-            rect: rect.with_value(new_rect).map_err(at("rect"))?,
-            sampler: sampler.with_value(new_sampler).map_err(at("sampler"))?,
-        })
-    }
-
-    fn set_value(&mut self, value: &Value) -> Result<()> {
-        *self = self.with_value(value)?;
-        Ok(())
-    }
-
-    fn part(&self, index: u32) -> Option<&dyn Reflect> {
-        let Sprite {
-            color,
-            texture: _,
-            rect,
-            sampler,
-        } = self;
-        match index {
-            0 => Some(color),
-            2 => Some(rect),
-            3 => Some(sampler),
-            _ => None,
-        }
-    }
-
-    fn part_mut(&mut self, index: u32) -> Option<&mut dyn Reflect> {
-        let Sprite {
-            color,
-            texture: _,
-            rect,
-            sampler,
-        } = self;
-        match index {
-            0 => Some(color),
-            2 => Some(rect),
-            3 => Some(sampler),
-            _ => None,
-        }
-    }
-
-    fn digest(&self, to: &mut Digest<'_>) {
-        let Sprite {
-            color,
-            texture: _,
-            rect,
-            sampler,
-        } = self;
-        color.digest(to);
-        rect.digest(to);
-        sampler.digest(to);
-    }
-}
-
-/// A sprite's fields, in the order its description gives them.
-const SPRITE_FIELDS: [&str; 4] = ["color", "texture", "rect", "sampler"];
-
-impl Component for Circle {}
-impl Writable for Circle {}
-
-/// Taken apart whole, as a sprite is, so that a field `gg-renderer` adds fails to compile here until
-/// it's described. Its fields' defaults are the default circle's, and its thickness and its fade
-/// run from 0 to 1, a whole radius.
-impl Reflect for Circle {
-    fn describe(types: &mut Types) -> Result<Type> {
-        let field = |name: &'static str, ty, show, unit: bool, default, doc: &'static str| Field {
-            name: name.into(),
-            ty,
-            meta: Meta {
-                min: unit.then_some(Bound::Float(0.0)),
-                max: unit.then_some(Bound::Float(1.0)),
-                show,
-                doc: doc.into(),
-            },
-            default: Some(default),
-        };
-        let base = Circle::default();
-        let doc = "A disc or a ring of a color, as large as fits on a square a unit across.";
-        types.add::<Self>("Circle".into(), doc.into(), |_| {
-            let fields = vec![
-                field(
-                    "color",
-                    Type::Vec4,
-                    Show::Color,
-                    false,
-                    base.color.to_value(),
-                    "In linear RGBA, alpha not multiplied in.",
-                ),
-                field(
-                    "thickness",
-                    Type::F32,
-                    Show::Plain,
-                    true,
-                    base.thickness.to_value(),
-                    "How far in from its edge it's filled, as a fraction of its radius: 1 fills it \
-                     all, a disc, and less draws a ring that thick.",
-                ),
-                field(
-                    "fade",
-                    Type::F32,
-                    Show::Plain,
-                    true,
-                    base.fade.to_value(),
-                    "How far in from each of its edges it fades, as a fraction of its radius, \
-                     beyond the pixel its edges are smoothed over.",
-                ),
-            ];
-            Ok(Shape::Struct {
-                fields,
-                tuple: false,
-            })
-        })
-    }
-
-    fn to_value(&self) -> Value {
-        let Circle {
-            color,
-            thickness,
-            fade,
-        } = self;
-        Value::Struct(vec![
-            ("color".into(), color.to_value()),
-            ("thickness".into(), thickness.to_value()),
-            ("fade".into(), fade.to_value()),
-        ])
-    }
-
-    fn from_value(value: &Value) -> Result<Self> {
-        let [color, thickness, fade] = reflect::fields(value, CIRCLE_FIELDS)?;
-        let at = |name| move |error: Error| reflect::within(error, name);
-        Ok(Circle {
-            color: Vec4::from_value(color).map_err(at("color"))?,
-            thickness: f32::from_value(thickness).map_err(at("thickness"))?,
-            fade: f32::from_value(fade).map_err(at("fade"))?,
-        })
-    }
-
-    fn with_value(&self, value: &Value) -> Result<Self> {
-        let Circle {
-            color,
-            thickness,
-            fade,
-        } = self;
-        let [new_color, new_thickness, new_fade] = reflect::fields(value, CIRCLE_FIELDS)?;
-        let at = |name| move |error: Error| reflect::within(error, name);
-        Ok(Circle {
-            color: color.with_value(new_color).map_err(at("color"))?,
-            thickness: (thickness.with_value(new_thickness)).map_err(at("thickness"))?,
-            fade: fade.with_value(new_fade).map_err(at("fade"))?,
-        })
-    }
-
-    fn set_value(&mut self, value: &Value) -> Result<()> {
-        *self = self.with_value(value)?;
-        Ok(())
-    }
-
-    fn part(&self, index: u32) -> Option<&dyn Reflect> {
-        let Circle {
-            color,
-            thickness,
-            fade,
-        } = self;
-        match index {
-            0 => Some(color),
-            1 => Some(thickness),
-            2 => Some(fade),
-            _ => None,
-        }
-    }
-
-    fn part_mut(&mut self, index: u32) -> Option<&mut dyn Reflect> {
-        let Circle {
-            color,
-            thickness,
-            fade,
-        } = self;
-        match index {
-            0 => Some(color),
-            1 => Some(thickness),
-            2 => Some(fade),
-            _ => None,
-        }
-    }
-
-    fn digest(&self, to: &mut Digest<'_>) {
-        let Circle {
-            color,
-            thickness,
-            fade,
-        } = self;
-        color.digest(to);
-        thickness.digest(to);
-        fade.digest(to);
-    }
-}
-
-/// A circle's fields, in the order its description gives them.
-const CIRCLE_FIELDS: [&str; 3] = ["color", "thickness", "fade"];
-
-/// Every sampler, in the order of their indices. A sampler `gg-renderer` adds fails to compile in
-/// [`sampler_name`], and goes here too.
-pub(crate) const SAMPLERS: [Sampler; 6] = [
-    Sampler::LinearClamp,
-    Sampler::NearestClamp,
-    Sampler::LinearRepeat,
-    Sampler::NearestRepeat,
-    Sampler::LinearMirror,
-    Sampler::NearestMirror,
-];
-
-fn sampler_name(sampler: Sampler) -> &'static str {
-    match sampler {
-        Sampler::LinearClamp => "LinearClamp",
-        Sampler::NearestClamp => "NearestClamp",
-        Sampler::LinearRepeat => "LinearRepeat",
-        Sampler::NearestRepeat => "NearestRepeat",
-        Sampler::LinearMirror => "LinearMirror",
-        Sampler::NearestMirror => "NearestMirror",
-    }
-}
-
-/// An enum of unit variants, one for each sampler.
-impl Reflect for Sampler {
-    fn describe(types: &mut Types) -> Result<Type> {
-        let variants = SAMPLERS.map(|sampler| reflect::Variant {
-            name: sampler_name(sampler).into(),
-            fields: Vec::new(),
-            tuple: false,
-        });
-        let doc = "How a texture is sampled: its filter, and what lies past its edges.";
-        types.add::<Self>("Sampler".into(), doc.into(), |_| {
-            Ok(Shape::Enum(variants.into()))
-        })
-    }
-
-    fn to_value(&self) -> Value {
-        Value::Variant(sampler_name(*self).into(), Vec::new())
-    }
-
-    fn from_value(value: &Value) -> Result<Self> {
-        let (name, given) = reflect::variant(value)?;
-        let Some(sampler) = SAMPLERS.into_iter().find(|&s| sampler_name(s) == name) else {
-            return Err(reflect::no_variant(name, &SAMPLERS.map(sampler_name)));
-        };
-        reflect::pick(given, [])?;
-        Ok(sampler)
-    }
-
-    fn with_value(&self, value: &Value) -> Result<Self> {
-        Self::from_value(value)
-    }
-
-    fn set_value(&mut self, value: &Value) -> Result<()> {
-        *self = self.with_value(value)?;
-        Ok(())
-    }
-
-    fn part(&self, _: u32) -> Option<&dyn Reflect> {
-        None
-    }
-
-    fn part_mut(&mut self, _: u32) -> Option<&mut dyn Reflect> {
-        None
-    }
-
-    /// By its index, which is its variant's in its description.
-    fn digest(&self, to: &mut Digest<'_>) {
-        self.index().digest(to);
-    }
-}
-
-impl Component for MeshDraw {}
-impl Writable for MeshDraw {}
-
-/// Opaque: its mesh and its shader are indices private to `gg-renderer`, which no value may make.
-impl Reflect for MeshDraw {
-    fn describe(types: &mut Types) -> Result<Type> {
-        let doc = "A mesh drawn with a shader and its parameters, which code sets.";
-        types.add::<Self>("MeshDraw".into(), doc.into(), |_| Ok(Shape::Opaque))
-    }
-
-    fn to_value(&self) -> Value {
-        Value::Opaque
-    }
-
-    fn from_value(value: &Value) -> Result<Self> {
-        reflect::make_opaque(value)
-    }
-
-    fn with_value(&self, value: &Value) -> Result<Self> {
-        reflect::keep(self, value)
-    }
-
-    fn set_value(&mut self, value: &Value) -> Result<()> {
-        *self = self.with_value(value)?;
-        Ok(())
-    }
-
-    fn part(&self, _: u32) -> Option<&dyn Reflect> {
-        None
-    }
-
-    fn part_mut(&mut self, _: u32) -> Option<&mut dyn Reflect> {
-        None
-    }
-
-    fn digest(&self, _: &mut Digest<'_>) {}
-}
+use crate::{EntityId, Parent, Transform, World};
 
 /// What drawing the world sorts and computes, kept from frame to frame so that it allocates nothing
 /// once it's grown, and so that a frame that changes no entity's row, no z and no batch draws in
@@ -526,11 +111,11 @@ struct Group {
 /// as others come and go. Circles draw with the engine's circle shader, which `shaders` adds the
 /// first time any do. Each draws `alpha` of the way from what `past` has it draw from to where the
 /// tick left it, while it draws between ticks; at 1, where the tick left it. Each draw's ID is its
-/// entity's, which picks read back where it shows.
-/// A child draws where its ancestors carry it, by its world matrix, its transform's and each of
-/// theirs drawn so, which it computes into `scratch` for each child once a frame; roots, in tables
-/// without a [`Parent`], draw by their transforms alone, which those that draw between ticks blend
-/// first, in their tables' order, in runs of rows that the job system's threads take.
+/// entity's, which picks read back where it shows. A child draws where its ancestors carry it, by
+/// its world matrix, its transform's and each of theirs drawn so, which it computes into `scratch`
+/// for each child once a frame; roots, in tables without a [`Parent`], draw by their transforms
+/// alone, which those that draw between ticks blend first, in their tables' order, in runs of rows
+/// that the job system's threads take.
 ///
 /// It sorts runs of consecutive rows of one batch or at one z every frame, so it's quick while each
 /// table's rows at one z stay together, as opaque meshes do whatever their z's. Spawning entities
@@ -751,8 +336,8 @@ impl<'a> Poses<'a> {
     /// were at the origin, unturned, at its own size. The second is `None` while it's the first,
     /// when nothing on the way draws between ticks. It walks up from each child, every frame, so
     /// children of one parent each take the steps they share, and a deep hierarchy costs its depth
-    /// for each of them, until world transforms are stored and propagated, as physics or a profile
-    /// will need.
+    /// for each of them, until world transforms are stored and propagated, once bodies go under a
+    /// parent or a profile shows these walks.
     fn carry(
         &self,
         local: &Transform,
@@ -778,20 +363,32 @@ impl<'a> Poses<'a> {
             })
     }
 
-    /// The matrix row `row` of table `table`, which has transforms, draws by this frame, as
-    /// [`draw_world`] draws it, bit for bit: its transform's, drawn between ticks while it is, and
-    /// carried by its ancestors as they draw.
-    pub(crate) fn matrix(&self, table: usize, row: usize) -> Mat4 {
+    /// Row `row` of table `table`, which has transforms: its transform, as the latest tick left it
+    /// and drawn between ticks while it is, and its parent, if it has one.
+    fn row(
+        &self,
+        table: usize,
+        row: usize,
+    ) -> (&'a Transform, Option<Transform>, Option<&'a Parent>) {
         let rows = &self.world.tables()[table];
         let transforms = rows.column::<Transform>(self.transform);
         let local = &transforms.expect("it has transforms")[row];
         let from = self.from(table);
         let drawn = from.map(|from| interpolation::between(&from[row], local, self.alpha));
         let parent = self.world.component::<Parent>();
-        match parent.and_then(|id| rows.column::<Parent>(id)) {
+        let parents = parent.and_then(|id| rows.column::<Parent>(id));
+        (local, drawn, parents.map(|parents| &parents[row]))
+    }
+
+    /// The matrix row `row` of table `table`, which has transforms, draws by this frame, as
+    /// [`draw_world`] draws it, bit for bit: its transform's, drawn between ticks while it is, and
+    /// carried by its ancestors as they draw.
+    pub(crate) fn matrix(&self, table: usize, row: usize) -> Mat4 {
+        let (local, drawn, parent) = self.row(table, row);
+        match parent {
             None => drawn.unwrap_or(*local).matrix(),
-            Some(parents) => {
-                let (at, drawn) = self.carry(local, drawn, &parents[row]);
+            Some(parent) => {
+                let (at, drawn) = self.carry(local, drawn, parent);
                 drawn.unwrap_or(at)
             }
         }
@@ -802,19 +399,14 @@ impl<'a> Poses<'a> {
     /// rotation, its own turned by each ancestor's in turn as they draw, their scales aside, so
     /// that a mirrored ancestor mirrors where it is but not which way it faces.
     pub(crate) fn pose(&self, table: usize, row: usize) -> (Vec3, Quat) {
-        let rows = &self.world.tables()[table];
-        let transforms = rows.column::<Transform>(self.transform);
-        let local = &transforms.expect("it has transforms")[row];
-        let from = self.from(table);
-        let drawn = from.map(|from| interpolation::between(&from[row], local, self.alpha));
-        let parent = self.world.component::<Parent>();
-        let Some(parents) = parent.and_then(|id| rows.column::<Parent>(id)) else {
+        let (local, drawn, parent) = self.row(table, row);
+        let Some(parent) = parent else {
             let drawn = drawn.unwrap_or(*local);
             return (drawn.translation, drawn.rotation);
         };
-        let (at, carried) = self.carry(local, drawn, &parents[row]);
+        let (at, carried) = self.carry(local, drawn, parent);
         let own = drawn.unwrap_or(*local).rotation;
-        let lineage = self.world.lineage(parents[row]);
+        let lineage = self.world.lineage(*parent);
         let rotation = lineage.fold(own, |rotation, (index, table, row)| {
             let Some(transforms) = table.column::<Transform>(self.transform) else {
                 return rotation;
@@ -967,7 +559,7 @@ mod tests {
     use gg_renderer::{Blend, Mesh, Meshes, Shader, Shaders};
 
     use super::*;
-    use crate::Entity;
+    use crate::{Component, Entity};
 
     #[derive(Clone, Copy, Component)]
     struct Marked;

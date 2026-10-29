@@ -16,8 +16,8 @@ use crate::draw::Poses;
 use crate::interpolation::Past;
 use crate::reflect::{self, Digest, Field, Meta, Reflect, Result, Shape, Show, Type, Types, Value};
 use crate::{
-    Actions, Binding, Component, Context, EntityId, Event, Key, MouseButton, Scroll, Source, Stick,
-    Transform, Trigger, Window, World, Writable,
+    Actions, Binding, Component, Context, EntityId, Event, Key, MouseButton, Source, Stick,
+    Transform, Trigger, World, Writable,
 };
 
 /// What the game's view sees the world through, from where its entity is, which has a
@@ -296,9 +296,6 @@ const SPEED: f32 = 0.5;
 const TURN_SPEED: f32 = FRAC_PI_2;
 /// How much a line of the mouse wheel zooms.
 const ZOOM: f32 = 1.1;
-/// What a line of the wheel is in points, for scrolls that a touchpad reports in pixels: 40, as
-/// egui counts it on the desktop (`InputOptions::line_scroll_speed`).
-const POINTS_PER_LINE: f64 = 40.0;
 /// How fast the fly camera moves at first, in world units a second.
 const FLY_SPEED: f32 = 2.0;
 /// How fast it looks about from a stick at full tilt, in radians a second: half a turn.
@@ -343,6 +340,9 @@ pub struct OrthographicCameraController {
 }
 
 impl OrthographicCameraController {
+    /// A controller that steers `viewpoint`, zooming between a hundredth and a hundred times the
+    /// height it sees now.
+    ///
     /// # Panics
     ///
     /// If the viewpoint isn't orthographic, or its height isn't a positive normal number, as
@@ -357,10 +357,6 @@ impl OrthographicCameraController {
         );
         let key = Source::Key;
         let mut actions = Actions::default();
-        let move_ = Binding::Axis2 {
-            x: [key(Key::KeyA), key(Key::KeyD)],
-            y: [key(Key::KeyS), key(Key::KeyW)],
-        };
         let turn = Binding::Axis {
             negative: key(Key::KeyE),
             positive: key(Key::KeyQ),
@@ -371,7 +367,7 @@ impl OrthographicCameraController {
             positive: Source::PadTrigger(Trigger::Left),
         };
         let bound = [
-            (CameraAction::Move, move_),
+            (CameraAction::Move, Binding::WASD),
             (CameraAction::Move, Binding::stick(Stick::Right)),
             (CameraAction::Turn, turn),
             (CameraAction::Turn, triggers),
@@ -425,14 +421,10 @@ impl OrthographicCameraController {
     pub fn event(&mut self, cx: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
         // Polled as it updates.
         self.actions.event(event, |_| {});
-        let lines = match *event {
-            Event::Scroll(Scroll::Lines { y, .. }) => y,
-            Event::Scroll(Scroll::Pixels { y, .. }) => {
-                let scale = cx.window().map_or(1.0, Window::scale);
-                (y / scale / POINTS_PER_LINE) as f32
-            }
-            _ => return ControlFlow::Continue(()),
+        let Event::Scroll(scroll) = *event else {
+            return ControlFlow::Continue(());
         };
+        let lines = scroll.lines(cx.scale());
         // Nor does a scroll of NaN zoom, which would leave a height that can't project.
         if lines == 0.0 || lines.is_nan() {
             return ControlFlow::Continue(());
@@ -499,13 +491,10 @@ pub struct FlyCameraController {
 }
 
 impl FlyCameraController {
+    /// A controller that steers `viewpoint`, at 2 units a second, with the bindings the type names.
     pub fn new(viewpoint: Viewpoint) -> Self {
         let key = Source::Key;
         let mut actions = Actions::default();
-        let move_ = Binding::Axis2 {
-            x: [key(Key::KeyA), key(Key::KeyD)],
-            y: [key(Key::KeyS), key(Key::KeyW)],
-        };
         let rise = Binding::Axis {
             negative: key(Key::KeyQ),
             positive: key(Key::KeyE),
@@ -515,7 +504,7 @@ impl FlyCameraController {
             positive: Source::PadTrigger(Trigger::Right),
         };
         let bound = [
-            (FlyAction::Move, move_),
+            (FlyAction::Move, Binding::WASD),
             (FlyAction::Move, Binding::stick(Stick::Left)),
             (FlyAction::Rise, rise),
             (FlyAction::Rise, triggers),
@@ -563,7 +552,7 @@ impl FlyCameraController {
                 if let Some([from_x, from_y]) = self.cursor
                     && self.actions.held(FlyAction::Drag)
                 {
-                    let scale = cx.window().map_or(1.0, Window::scale);
+                    let scale = cx.scale();
                     let points = |to: f64, from: f64| ((to - from) / scale) as f32;
                     // The window's y goes down: dragging down looks down.
                     let by = Vec2::new(points(x, from_x), -points(y, from_y));
@@ -599,7 +588,7 @@ mod tests {
 
     use super::*;
     use crate::draw::{Scratch, draw_world};
-    use crate::{Entity, Log, Name, Operation};
+    use crate::{Entity, Log, Name, Operation, Scroll};
 
     /// Without perspective, `height` tall, from 1 behind it to 1 in front.
     fn orthographic(height: f32) -> Projection {

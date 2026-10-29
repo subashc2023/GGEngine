@@ -5,13 +5,9 @@
 // line thinner than a pixel draws a pixel wide, as much fainter. A line is cut where it crosses the
 // near plane, since what's behind the camera would show mirrored through it. Each instance is a
 // line, with its own transform, ID and parameters, drawn by its alpha over what's behind it.
-// `Corner` in src/sprite.rs, which `Corner` here matches field for field, and `Params` in
-// src/line.rs, which `Line` here matches byte for byte.
+// `Params` in src/line.rs, which `Line` here matches byte for byte.
 
-struct Corner {
-    float3 position;
-    float2 uv;
-};
+#include "mesh.slang"
 
 struct Line {
     float3 from;
@@ -22,18 +18,7 @@ struct Line {
     float width;
 };
 
-struct Push {
-    float4x4 clip_from_world;
-    Corner* corners;
-    // Each instance's, from the space its points are in to the world's.
-    float4x4* transforms;
-    // Each instance's: its entity's, or 0.
-    uint2* ids;
-    Line* lines;
-    // The view's size in pixels.
-    float2 view;
-};
-[[vk::push_constant]] ConstantBuffer<Push> push;
+[[vk::push_constant]] ConstantBuffer<Push<Corner, Line>> push;
 
 struct Varyings {
     float4 position : SV_Position;
@@ -53,8 +38,8 @@ static const float MARGIN = 1.0;
 
 [shader("vertex")]
 Varyings vertex_main(uint index: SV_VulkanVertexID, uint instance: SV_VulkanInstanceID) {
-    Corner corner = push.corners[index];
-    Line line = push.lines[instance];
+    Corner corner = push.vertices[index];
+    Line line = push.params[instance];
     float4x4 placed = mul(push.clip_from_world, push.transforms[instance]);
     float4 from = mul(placed, float4(line.from, 1.0));
     float4 to = mul(placed, float4(line.to, 1.0));
@@ -98,14 +83,9 @@ Varyings vertex_main(uint index: SV_VulkanVertexID, uint instance: SV_VulkanInst
     return out;
 }
 
-struct Targets {
-    float4 color : SV_Target0;
-    uint2 id : SV_Target1;
-};
-
 [shader("fragment")]
 Targets fragment_main(Varyings input) {
-    Line line = push.lines[input.instance];
+    Line line = push.params[input.instance];
     // How much of the pixel the line covers, along it and across it: all of it inside its reach
     // less half a pixel, none outside it plus half a pixel. A line thinner than a pixel draws a
     // pixel wide, as much fainter as it's thinner.

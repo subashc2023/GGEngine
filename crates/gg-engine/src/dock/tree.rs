@@ -1235,7 +1235,7 @@ mod tests {
         );
     }
 
-    /// Where the editor docks its panels.
+    /// Where the editor docks three of its panels.
     const EDITOR: [(&str, Docked); 3] = [
         ("Inspector", Docked::RightOf(VIEW)),
         ("Entities", Docked::LeftOf(VIEW)),
@@ -1267,7 +1267,7 @@ mod tests {
 
     #[test]
     fn a_target_the_layout_doesnt_hold_stands_for_its_own_and_one_floating_or_none_floats() {
-        // Performance, below the Inspector, which isn't there yet: below the view, for now.
+        // Performance, below the Inspector, which isn't there yet: below the view, where it stays.
         let mut layout = Layout::new(Some(VIEW));
         layout.add("Performance".to_owned(), AT, &EDITOR);
         let Node::Split {

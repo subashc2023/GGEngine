@@ -103,7 +103,11 @@ impl Assets {
                 Ok(entries) if entries.is_empty() => {
                     ui.weak("Empty");
                 }
-                Ok(entries) => chosen = chosen.or(cells(ui, &self.folder, entries)),
+                Ok(entries) => {
+                    // Drawn whether or not Back chose a folder.
+                    let opened = cells(ui, &self.folder, entries);
+                    chosen = chosen.or(opened);
+                }
             }
         }
         if let Some(folder) = chosen {
@@ -414,6 +418,8 @@ mod tests {
         let drew = |shown: &[(String, Rect)], text: &str| shown.iter().any(|(t, _)| t == text);
         assert!(drew(&frame(&ctx, &mut assets, Vec::new()), "Empty"));
         fs::write(scratch.0.join("level.ron"), "").expect("written");
+        // As though it was listed just now, however long the first frame took.
+        assets.listed.as_mut().expect("listed").at = Instant::now();
         let shown = frame(&ctx, &mut assets, Vec::new());
         assert!(!drew(&shown, "level.ron"), "not yet a second on");
         age(&mut assets);

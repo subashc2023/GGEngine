@@ -33,11 +33,15 @@ pub fn derive_component(input: proc_macro::TokenStream) -> proc_macro::TokenStre
         .into()
 }
 
-/// Where everything the derives write is.
+/// The path of gg-engine's reflection module, which most of the derives' code names its items
+/// through.
 fn reflect() -> TokenStream {
     quote!(::gg_engine::reflect)
 }
 
+/// The code `#[derive(Reflect)]`, or `#[derive(Component)]` if `component`, writes for `input`.
+/// Each name it binds starts with `__`, as its fields' bindings do: a const of the name where the
+/// type is would make the binding a pattern of the const, which doesn't compile.
 fn expand(input: &DeriveInput, component: bool) -> syn::Result<TokenStream> {
     let derive = if component { "Component" } else { "Reflect" };
     if let Some(param) = input.generics.params.first() {
@@ -89,8 +93,8 @@ fn expand(input: &DeriveInput, component: bool) -> syn::Result<TokenStream> {
         impl #r::Reflect for #ident {
             #methods
 
-            fn set_value(&mut self, value: &#r::Value) -> #r::Result<()> {
-                *self = <Self as #r::Reflect>::with_value(self, value)?;
+            fn set_value(&mut self, __value: &#r::Value) -> #r::Result<()> {
+                *self = <Self as #r::Reflect>::with_value(self, __value)?;
                 ::std::result::Result::Ok(())
             }
         }
@@ -127,10 +131,10 @@ fn opaque(name: &str, doc: &str, hint: Span) -> TokenStream {
     let r = reflect();
     // At the hint, so that a type that isn't `Clone` is reported there.
     let at = Span::call_site().located_at(hint);
-    let keep = quote_spanned!(at=> ::gg_engine::reflect::keep(self, value));
+    let keep = quote_spanned!(at=> ::gg_engine::reflect::keep(self, __value));
     quote! {
-        fn describe(types: &mut #r::Types) -> #r::Result<#r::Type> {
-            types.add::<Self>(
+        fn describe(__types: &mut #r::Types) -> #r::Result<#r::Type> {
+            __types.add::<Self>(
                 ::std::borrow::Cow::Borrowed(#name),
                 ::std::borrow::Cow::Borrowed(#doc),
                 |_| ::std::result::Result::Ok(#r::Shape::Opaque),
@@ -141,11 +145,11 @@ fn opaque(name: &str, doc: &str, hint: Span) -> TokenStream {
             #r::Value::Opaque
         }
 
-        fn from_value(value: &#r::Value) -> #r::Result<Self> {
-            #r::make_opaque(value)
+        fn from_value(__value: &#r::Value) -> #r::Result<Self> {
+            #r::make_opaque(__value)
         }
 
-        fn with_value(&self, value: &#r::Value) -> #r::Result<Self> {
+        fn with_value(&self, __value: &#r::Value) -> #r::Result<Self> {
             #keep
         }
 
@@ -174,7 +178,6 @@ fn structure(
     let r = reflect();
     let tuple = matches!(fields, Fields::Unnamed(_));
     let fields = Field::all(fields, checks)?;
-    let types = types_binding(&fields);
     let described = fields.iter().map(Field::describe);
     let values = fields.iter().map(|field| {
         let member = &field.member;
@@ -208,19 +211,14 @@ fn structure(
     });
     let digested = read.iter().map(|(_, field)| {
         let Field { member, ty, .. } = field;
-        quote_spanned!(at_type(ty)=> <#ty as #r::Reflect>::digest(&self.#member, to))
+        quote_spanned!(at_type(ty)=> <#ty as #r::Reflect>::digest(&self.#member, __to))
     });
-    let to = if read.is_empty() {
-        quote!(_)
-    } else {
-        quote!(to)
-    };
     Ok(quote! {
-        fn describe(types: &mut #r::Types) -> #r::Result<#r::Type> {
-            types.add::<Self>(
+        fn describe(__types: &mut #r::Types) -> #r::Result<#r::Type> {
+            __types.add::<Self>(
                 ::std::borrow::Cow::Borrowed(#name),
                 ::std::borrow::Cow::Borrowed(#doc),
-                |#types| ::std::result::Result::Ok(#r::Shape::Struct {
+                |__types| ::std::result::Result::Ok(#r::Shape::Struct {
                     fields: ::std::vec![#(#described),*],
                     tuple: #tuple,
                 }),
@@ -231,21 +229,21 @@ fn structure(
             #r::Value::Struct(::std::vec![#(#values),*])
         }
 
-        fn from_value(value: &#r::Value) -> #r::Result<Self> {
-            let [#(#bindings),*] = #r::fields(value, [#(#names),*])?;
+        fn from_value(__value: &#r::Value) -> #r::Result<Self> {
+            let [#(#bindings),*] = #r::fields(__value, [#(#names),*])?;
             ::std::result::Result::Ok(Self { #(#members: #made),* })
         }
 
-        fn with_value(&self, value: &#r::Value) -> #r::Result<Self> {
-            let [#(#bindings),*] = #r::fields(value, [#(#names),*])?;
+        fn with_value(&self, __value: &#r::Value) -> #r::Result<Self> {
+            let [#(#bindings),*] = #r::fields(__value, [#(#names),*])?;
             ::std::result::Result::Ok(Self { #(#members: #kept),* })
         }
 
         fn part(
             &self,
-            index: ::core::primitive::u32,
+            __index: ::core::primitive::u32,
         ) -> ::std::option::Option<&dyn #r::Reflect> {
-            match index {
+            match __index {
                 #(#indices => ::std::option::Option::Some(#parts),)*
                 _ => ::std::option::Option::None,
             }
@@ -253,15 +251,15 @@ fn structure(
 
         fn part_mut(
             &mut self,
-            index: ::core::primitive::u32,
+            __index: ::core::primitive::u32,
         ) -> ::std::option::Option<&mut dyn #r::Reflect> {
-            match index {
+            match __index {
                 #(#indices => ::std::option::Option::Some(#parts_mut),)*
                 _ => ::std::option::Option::None,
             }
         }
 
-        fn digest(&self, #to: &mut #r::Digest<'_>) {
+        fn digest(&self, __to: &mut #r::Digest<'_>) {
             #(#digested;)*
         }
     })
@@ -281,7 +279,6 @@ fn enumeration(
     let mut made = Vec::new();
     let mut kept = Vec::new();
     let mut names = Vec::new();
-    let mut described_fields = Vec::new();
     let mut digested = Vec::new();
     for (index, variant) in (0u32..).zip(variants) {
         no_hints(
@@ -328,10 +325,10 @@ fn enumeration(
         let fields_digested = fields
             .iter()
             .filter(|field| field.hints.opaque.is_none())
-            .map(|Field { ty, binding, .. }| quote!(<#ty as #r::Reflect>::digest(#binding, to)));
+            .map(|Field { ty, binding, .. }| quote!(<#ty as #r::Reflect>::digest(#binding, __to)));
         digested.push(quote! {
             Self::#ident { #(#members: #patterns),* } => {
-                <::core::primitive::u32 as #r::Reflect>::digest(&#index, to);
+                <::core::primitive::u32 as #r::Reflect>::digest(&#index, __to);
                 #(#fields_digested;)*
             }
         });
@@ -339,7 +336,7 @@ fn enumeration(
         let making = fields.iter().map(Field::make);
         made.push(quote! {
             #name => {
-                let [#(#bindings),*] = #r::pick(given, [#(#field_names),*])?;
+                let [#(#bindings),*] = #r::pick(__given, [#(#field_names),*])?;
                 ::std::result::Result::Ok(Self::#ident { #(#members: #making),* })
             }
         });
@@ -354,37 +351,30 @@ fn enumeration(
                 .map(|(field, current)| field.keep(&current.to_token_stream()));
             kept.push(quote! {
                 (Self::#ident { #(#members: #current),* }, #name) => {
-                    let [#(#bindings),*] = #r::pick(given, [#(#field_names),*])?;
+                    let [#(#bindings),*] = #r::pick(__given, [#(#field_names),*])?;
                     ::std::result::Result::Ok(Self::#ident { #(#members: #keeping),* })
                 }
             });
         }
         names.push(name);
-        described_fields.extend(fields);
     }
-    let types = types_binding(&described_fields);
-    let to = if digested.is_empty() {
-        quote!(_)
-    } else {
-        quote!(to)
-    };
     let with_value = if kept.is_empty() {
-        quote!(<Self as #r::Reflect>::from_value(value))
+        quote!(<Self as #r::Reflect>::from_value(__value))
     } else {
         quote! {
-            let (name, given) = #r::variant(value)?;
-            match (self, name) {
+            let (__name, __given) = #r::variant(__value)?;
+            match (self, __name) {
                 #(#kept)*
-                _ => <Self as #r::Reflect>::from_value(value),
+                _ => <Self as #r::Reflect>::from_value(__value),
             }
         }
     };
     Ok(quote! {
-        fn describe(types: &mut #r::Types) -> #r::Result<#r::Type> {
-            types.add::<Self>(
+        fn describe(__types: &mut #r::Types) -> #r::Result<#r::Type> {
+            __types.add::<Self>(
                 ::std::borrow::Cow::Borrowed(#name),
                 ::std::borrow::Cow::Borrowed(#doc),
-                |#types| ::std::result::Result::Ok(#r::Shape::Enum(::std::vec![#(#described),*])),
+                |__types| ::std::result::Result::Ok(#r::Shape::Enum(::std::vec![#(#described),*])),
             )
         }
 
@@ -394,15 +384,15 @@ fn enumeration(
             }
         }
 
-        fn from_value(value: &#r::Value) -> #r::Result<Self> {
-            let (name, given) = #r::variant(value)?;
-            match name {
+        fn from_value(__value: &#r::Value) -> #r::Result<Self> {
+            let (__name, __given) = #r::variant(__value)?;
+            match __name {
                 #(#made)*
-                _ => ::std::result::Result::Err(#r::no_variant(name, &[#(#names),*])),
+                _ => ::std::result::Result::Err(#r::no_variant(__name, &[#(#names),*])),
             }
         }
 
-        fn with_value(&self, value: &#r::Value) -> #r::Result<Self> {
+        fn with_value(&self, __value: &#r::Value) -> #r::Result<Self> {
             #with_value
         }
 
@@ -417,7 +407,7 @@ fn enumeration(
             ::std::option::Option::None
         }
 
-        fn digest(&self, #to: &mut #r::Digest<'_>) {
+        fn digest(&self, __to: &mut #r::Digest<'_>) {
             match *self {
                 #(#digested)*
             }
@@ -430,16 +420,6 @@ fn enumeration(
 /// wrote.
 fn at_type(ty: &syn::Type) -> Span {
     Span::call_site().located_at(ty.span())
-}
-
-/// What `describe`'s closure calls the types it's given: `types` if a field describes its own
-/// type with them, and `_` otherwise, so that the closure has no unused variable.
-fn types_binding(fields: &[Field]) -> TokenStream {
-    if fields.iter().any(|field| field.hints.opaque.is_none()) {
-        quote!(types)
-    } else {
-        quote!(_)
-    }
 }
 
 /// A field of a struct or a variant, as the derives write about it.
@@ -493,15 +473,15 @@ impl<'a> Field<'a> {
             // mismatch.
             Some(expr) => quote! {
                 ::std::option::Option::Some({
-                    let default: #ty = #expr;
-                    <#ty as #r::Reflect>::to_value(&default)
+                    let __default: #ty = #expr;
+                    <#ty as #r::Reflect>::to_value(&__default)
                 })
             },
             None => quote!(::std::option::Option::None),
         };
         let ty = match self.hints.opaque {
             Some(_) => quote!(#r::Type::Opaque),
-            None => quote!(<#ty as #r::Reflect>::describe(types)?),
+            None => quote!(<#ty as #r::Reflect>::describe(__types)?),
         };
         let bound = |bound: &Option<Bound>| match bound {
             Some(bound) => {
@@ -554,7 +534,7 @@ impl<'a> Field<'a> {
             Some(_) => quote!(#r::make_opaque(#binding)),
             None => quote!(<#ty as #r::Reflect>::from_value(#binding)),
         };
-        quote!(#made.map_err(|error| #r::within(error, #name))?)
+        quote!(#made.map_err(|__error| #r::within(__error, #name))?)
     }
 
     /// It, as `place`, a reference to it, is with its value, which `binding` holds.
@@ -571,7 +551,7 @@ impl<'a> Field<'a> {
             }
             None => quote!(<#ty as #r::Reflect>::with_value(#place, #binding)),
         };
-        quote!(#kept.map_err(|error| #r::within(error, #name))?)
+        quote!(#kept.map_err(|__error| #r::within(__error, #name))?)
     }
 }
 
@@ -849,4 +829,68 @@ fn doc(attrs: &[Attribute]) -> String {
         }
     }
     text
+}
+
+#[cfg(test)]
+mod tests {
+    use syn::parse_quote;
+
+    use super::*;
+
+    /// The derive refuses, saying why, a generic type, a union, a hint it doesn't know, one given
+    /// twice or beside `opaque`, and one on a variant or inside an opaque type.
+    #[test]
+    fn the_derive_refuses_what_reflection_cant_describe() {
+        let cases: [(DeriveInput, &str); 7] = [
+            (
+                parse_quote!(
+                    struct Pair<T>(T, T);
+                ),
+                "`#[derive(Component)]` doesn't take generic types",
+            ),
+            (
+                parse_quote!(union Bits { float: f32, int: u32 }),
+                "`#[derive(Component)]` doesn't take unions",
+            ),
+            (
+                parse_quote!(
+                    struct Speed(#[reflect(fast)] f32);
+                ),
+                "unknown hint: a field takes",
+            ),
+            (
+                parse_quote!(
+                    struct Bounded(#[reflect(min = 0, min = 1)] f32);
+                ),
+                "`min` is given twice",
+            ),
+            (
+                parse_quote!(
+                    struct Held(#[reflect(opaque, default = 0)] u32);
+                ),
+                "an opaque field isn't read, so it takes no other hint",
+            ),
+            (
+                parse_quote!(
+                    enum Shape {
+                        #[reflect(opaque)]
+                        Held(u32),
+                    }
+                ),
+                "a variant takes no hints",
+            ),
+            (
+                parse_quote!(
+                    #[reflect(opaque)]
+                    struct Sealed(#[reflect(min = 0)] u32);
+                ),
+                "an opaque type isn't read, so its fields and variants take no hints",
+            ),
+        ];
+        for (input, says) in cases {
+            let name = input.ident.to_string();
+            let error = expand(&input, true).expect_err(&name);
+            assert!(error.to_string().starts_with(says), "{name}: {error}");
+        }
+    }
 }

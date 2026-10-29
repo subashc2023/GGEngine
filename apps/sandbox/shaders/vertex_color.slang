@@ -10,7 +10,8 @@ struct Vertex {
 // What the engine pushes for each instanced draw: the matrix from the world to clip space, which
 // is the camera's view and projection, then the addresses of the mesh's vertices, of the
 // instances' transforms, each from the mesh's space to the world's, and of their IDs, each its
-// entity's or 0. It takes no parameters, so it leaves out their address, which comes last.
+// entity's or 0. It reads neither parameters nor the view's size, which come after them, so its
+// struct ends after the IDs' address, as the shader contract allows.
 struct Push {
     float4x4 clip_from_world;
     Vertex* vertices;

@@ -265,10 +265,10 @@ impl TitleBar {
         sidebars + window
     }
 
-    /// Shows the menus' drawer while it's open, against the window's left edge below the bar,
-    /// `out` of the way out as it slides from that edge, and returns the Ui the menus go in. It
-    /// closes on its button, Escape, and, as [`TitleBar::end`] says, clicks; its menus, as egui's
-    /// do.
+    /// Shows the menus' drawer while it's open, against the window's left edge below the bar, `out`
+    /// of the way out as it slides from that edge, over the dock rather than pushing it aside,
+    /// which would resize the game's view as it slid; and returns the Ui the menus go in. It closes
+    /// on its button, Escape, and, as [`TitleBar::end`] says, clicks; its menus, as egui's do.
     fn show_drawer(&self, ui: &egui::Ui, out: f32) -> Option<egui::Ui> {
         let ctx = ui.ctx();
         // Square against the edges it comes from.
@@ -968,24 +968,14 @@ mod tests {
 
         /// Where the last pass drew `text`, topmost first.
         fn texts(&self, text: &str) -> Vec<Rect> {
-            fn find(shape: &Shape, text: &str, found: &mut Vec<Rect>) {
-                match shape {
-                    Shape::Vec(shapes) => {
-                        for shape in shapes {
-                            find(shape, text, found);
-                        }
-                    }
-                    Shape::Text(shape) if shape.galley.text() == text => {
-                        found.push(shape.galley.rect.translate(shape.pos.to_vec2()));
-                    }
-                    _ => {}
+            let painted = crate::testing::painted(&self.shapes).into_iter();
+            let found = painted.filter_map(|shape| match shape {
+                Shape::Text(shape) if shape.galley.text() == text => {
+                    Some(shape.galley.rect.translate(shape.pos.to_vec2()))
                 }
-            }
-            let mut found = Vec::new();
-            for clipped in &self.shapes {
-                find(&clipped.shape, text, &mut found);
-            }
-            found
+                _ => None,
+            });
+            found.collect()
         }
 
         /// The middle of `text`, which the last pass drew.

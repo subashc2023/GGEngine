@@ -31,11 +31,10 @@ fn main() {
         );
     };
     println!("cargo::rustc-env=GG_SLANGC={name}");
+    // The whole directory, so that a change to a file the shaders include compiles them again too.
+    println!("cargo::rerun-if-changed=shaders");
     for shader in SHADERS {
-        // model.slang, which the other model shaders include, is one of them, so a change to it
-        // compiles them again too.
         let source = format!("shaders/{shader}.slang");
-        println!("cargo::rerun-if-changed={source}");
         let output = Command::new(&slangc)
             .arg(&source)
             // As `compile` in src/shader/mod.rs compiles games' shaders, which says why.

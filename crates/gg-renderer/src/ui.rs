@@ -3,8 +3,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use bytemuck::NoUninit;
 use epaint::textures::{TextureFilter, TextureWrapMode, TexturesDelta};
-use epaint::{ClippedPrimitive, ImageData, ImageDelta, Primitive, TextureId};
+use epaint::{ClippedPrimitive, ColorImage, ImageData, ImageDelta, Primitive, TextureId};
 use gg_core::Result;
 use gg_gpu::{
     Blend, Device, Format, Frame, GraphicsDesc, MAX_TEXTURE_SIZE, Pass, Pipeline, Sampler, Texture,
@@ -110,12 +111,20 @@ impl UiPass {
             let pixels: &[u8] = bytemuck::cast_slice(&image.pixels);
             let sampler = sampler(delta.options.magnification, delta.options.wrap_mode);
             let origin = match delta.pos {
-                Some([x, y]) => [x as u32, y as u32],
+                Some(pos) => {
+                    // A patch that doesn't fit its texture changes nothing, not even its sampler.
+                    if let Some((texture, _)) = self.textures.get(&id)
+                        && !patches_texture(id, pos, image, texture.size())
+                    {
+                        continue;
+                    }
+                    pos.map(|at| at as u32)
+                }
                 // A whole image replaces the texture, whose size may change with it.
                 None => {
                     // One that makes none takes its place all the same, so that what samples it
                     // draws nothing.
-                    if !makes_texture(id, image.size) {
+                    if !makes_texture(id, image.size, image.pixels.len()) {
                         self.textures.remove(&id);
                         continue;
                     }
@@ -195,11 +204,9 @@ impl UiPass {
                     {
                         // From the callback's top left, rounded as the engine rounds the view's
                         // rect to size its image.
-                        let min = callback.rect.min.to_vec2() * ppp;
-                        let origin = [min.x.round() as u32, min.y.round() as u32];
                         let viewport = Viewport {
-                            origin,
                             size: view.size,
+                            ..Viewport::from_points(callback.rect, ppp)
                         };
                         view.pass.draw(pass, viewport, view.shown, Some(clip));
                         pass.set_viewport([0, 0], [width, height]);
@@ -217,15 +224,13 @@ impl UiPass {
             pass.set_scissor(clip.origin, clip.size);
             let vertices = pass.upload(bytemuck::cast_slice(&mesh.vertices))?;
             let indices = pass.upload(bytemuck::cast_slice(&mesh.indices))?;
-            // The shader's `Push`: the vertices' address, the screen's size in points, then the
-            // texture's and sampler's indices.
-            let mut push = [0u8; 24];
-            push[0..8].copy_from_slice(&vertices.address().to_ne_bytes());
-            push[8..12].copy_from_slice(&screen[0].to_ne_bytes());
-            push[12..16].copy_from_slice(&screen[1].to_ne_bytes());
-            push[16..20].copy_from_slice(&texture.index().to_ne_bytes());
-            push[20..24].copy_from_slice(&sampler.index().to_ne_bytes());
-            pass.push_constants(&push);
+            let push = Push {
+                vertices: vertices.address(),
+                screen_size: screen,
+                texture: texture.index(),
+                sampler: sampler.index(),
+            };
+            pass.push_constants(bytemuck::bytes_of(&push));
             pass.draw_indexed(indices, 0, mesh.indices.len() as u32, 0, 1);
         }
         Ok(())
@@ -240,24 +245,77 @@ impl UiPass {
     }
 }
 
-/// Whether a whole image of `size` pixels across and down makes egui's texture `id`: not if it has
-/// no pixels, which show nothing, nor if a side is past [`MAX_TEXTURE_SIZE`], as no texture's is,
-/// which egui checks only in debug builds, and which this warns of.
-fn makes_texture(id: TextureId, size: [usize; 2]) -> bool {
+/// What the UI pass pushes before each of egui's meshes: `Push` in `shaders/egui.slang`, field for
+/// field.
+#[repr(C)]
+#[derive(Clone, Copy, NoUninit)]
+struct Push {
+    /// The address of the mesh's vertices.
+    vertices: u64,
+    /// The target's size in points.
+    screen_size: [f32; 2],
+    /// The index of the mesh's texture in the bindless set.
+    texture: u32,
+    /// The index of its sampler in the bindless set.
+    sampler: u32,
+}
+
+/// Whether a whole image of `size` pixels across and down, holding `pixels` of them, makes egui's
+/// texture `id`: not if it has no pixels, which show nothing, nor if a side is past
+/// [`MAX_TEXTURE_SIZE`], as no texture's is, which egui checks only in debug builds, nor if its
+/// pixels don't fill it, as a `ColorImage` built by hand can have; this warns of the last two.
+fn makes_texture(id: TextureId, size: [usize; 2], pixels: usize) -> bool {
     let sides = 1..=MAX_TEXTURE_SIZE as usize;
-    if size.iter().all(|side| sides.contains(side)) {
-        return true;
+    if !size.iter().all(|side| sides.contains(side)) {
+        if !size.contains(&0) {
+            warn!(
+                code = "renderer.bad_texture",
+                texture = ?id,
+                "egui texture {id:?} is {}x{} pixels, but textures are 1 to {MAX_TEXTURE_SIZE} \
+                 pixels a side, so it draws nothing",
+                size[0],
+                size[1]
+            );
+        }
+        return false;
     }
-    if !size.contains(&0) {
+    // Sides of at most `MAX_TEXTURE_SIZE`, whose product fits.
+    if pixels != size[0] * size[1] {
         warn!(
             code = "renderer.bad_texture",
             texture = ?id,
-            "egui texture {id:?} is {}x{} pixels, but textures are 1 to {MAX_TEXTURE_SIZE} pixels \
-             a side, so it draws nothing",
+            "egui texture {id:?} is {}x{} pixels, but has {pixels}, so it draws nothing",
             size[0],
             size[1]
         );
+        return false;
     }
+    true
+}
+
+/// Whether `image`, a patch at `pos`, patches egui's texture `id`, which is `texture` pixels across
+/// and down: not if it reaches past the texture, nor if its pixels don't fill it, which egui checks
+/// only in debug builds, and which this warns of.
+fn patches_texture(id: TextureId, pos: [usize; 2], image: &ColorImage, texture: [u32; 2]) -> bool {
+    let size = image.size;
+    let within = |axis: usize| {
+        (pos[axis].checked_add(size[axis])).is_some_and(|end| end <= texture[axis] as usize)
+    };
+    // A patch within its texture has sides of at most `MAX_TEXTURE_SIZE`, whose product fits.
+    let problem = if !within(0) || !within(1) {
+        format!("reaches past its {}x{} pixels", texture[0], texture[1])
+    } else if image.pixels.len() != size[0] * size[1] {
+        format!("has {} pixels", image.pixels.len())
+    } else {
+        return true;
+    };
+    warn!(
+        code = "renderer.bad_texture",
+        texture = ?id,
+        "a {}x{} patch of egui texture {id:?} at {pos:?} {problem}, so it changes nothing",
+        size[0],
+        size[1]
+    );
     false
 }
 
@@ -281,11 +339,12 @@ fn sampler(magnification: TextureFilter, wrap: TextureWrapMode) -> Sampler {
 mod tests {
     use super::*;
 
-    /// An image without pixels, or with a side past the most a texture has, which egui hands on in
-    /// release builds, makes no texture, so that it never reaches `gg-gpu`'s, which would panic the
-    /// render thread; every size between does.
+    /// An image without pixels, with a side past the most a texture has, or whose pixels don't fill
+    /// it, which egui hands on in release builds, makes no texture, so that it never reaches
+    /// `gg-gpu`'s, which would panic the render thread; every size between that its pixels fill
+    /// does.
     #[test]
-    fn an_image_of_no_pixels_or_too_many_makes_no_texture() {
+    fn an_image_of_no_pixels_or_too_many_or_not_filled_by_its_pixels_makes_no_texture() {
         let id = TextureId::Managed(1);
         let most = MAX_TEXTURE_SIZE as usize;
         for size in [
@@ -296,10 +355,47 @@ mod tests {
             [1, most + 1],
             [0, most + 1],
         ] {
-            assert!(!makes_texture(id, size), "{size:?}");
+            assert!(!makes_texture(id, size, size[0] * size[1]), "{size:?}");
+        }
+        for pixels in [3, 5] {
+            assert!(!makes_texture(id, [2, 2], pixels), "{pixels}");
         }
         for size in [[1, 1], [3, 1], [most, most]] {
-            assert!(makes_texture(id, size), "{size:?}");
+            assert!(makes_texture(id, size, size[0] * size[1]), "{size:?}");
+        }
+    }
+
+    /// A patch that reaches past its texture, or whose pixels don't fill it, which egui hands on
+    /// in release builds, patches nothing, so that it never reaches `gg-gpu`'s write, which would
+    /// panic the render thread; every patch inside the texture that its pixels fill does, one of
+    /// no pixels on its edge among them.
+    #[test]
+    fn a_patch_past_its_texture_or_not_filled_by_its_pixels_patches_nothing() {
+        let id = TextureId::Managed(1);
+        let texture = [8, 4];
+        let patch = |size: [usize; 2], pixels| ColorImage {
+            size,
+            source_size: epaint::Vec2::ZERO,
+            pixels: vec![epaint::Color32::WHITE; pixels],
+        };
+        for (pos, image) in [
+            ([7, 0], patch([2, 1], 2)),
+            ([0, 3], patch([1, 2], 2)),
+            ([usize::MAX, 0], patch([1, 1], 1)),
+            ([0, 0], patch([9, 1], 9)),
+            ([0, 0], patch([2, 2], 3)),
+            ([0, 0], patch([2, 2], 5)),
+        ] {
+            let patches = patches_texture(id, pos, &image, texture);
+            assert!(!patches, "{pos:?}, {:?}", image.size);
+        }
+        for (pos, image) in [
+            ([0, 0], patch([8, 4], 32)),
+            ([6, 3], patch([2, 1], 2)),
+            ([8, 4], patch([0, 0], 0)),
+        ] {
+            let patches = patches_texture(id, pos, &image, texture);
+            assert!(patches, "{pos:?}, {:?}", image.size);
         }
     }
 }

@@ -2,6 +2,7 @@
 //! places in the bindless set, so that a shader's parameters carry them as they are.
 
 use std::array;
+use std::borrow::Cow;
 
 use bytemuck::NoUninit;
 use gg_core::math::libm;
@@ -60,22 +61,23 @@ pub(crate) struct Added {
 impl Textures {
     /// Adds a texture `size` pixels across and down. `pixels` holds its rows of RGBA8, tightly
     /// packed, top row first, as images store them: colors sRGB-encoded, and alpha not multiplied
-    /// into them. Shaders sample its colors decoded to linear, with texture coordinates from (0, 0)
-    /// at its top left to (1, 1) at its bottom right. `mipmaps` says whether it has smaller levels
-    /// too, made from it as a frame copies it to the GPU, and how. `name` names it in errors and
-    /// GPU captures.
+    /// into them. It keeps a `Vec` of pixels as it is, and copies borrowed ones. Shaders sample its
+    /// colors decoded to linear, with texture coordinates from (0, 0) at its top left to (1, 1) at
+    /// its bottom right. `mipmaps` says whether it has smaller levels too, made from it as a frame
+    /// copies it to the GPU, and how. `name` names it in errors and GPU captures.
     ///
     /// Fails with `renderer.bad_texture` if a side is 0 or more than 8,192 pixels, the most every
     /// Vulkan 1.4 device takes, or `pixels` doesn't fill it exactly; and with
     /// `renderer.too_many_textures` past the 61,440 textures a renderer holds, the engine's white
     /// one among them, which [`room`](Self::room) counts down.
-    pub fn add(
+    pub fn add<'a>(
         &mut self,
         name: &str,
         size: [u32; 2],
-        pixels: &[u8],
+        pixels: impl Into<Cow<'a, [u8]>>,
         mipmaps: Mipmaps,
     ) -> Result<Texture> {
+        let pixels = pixels.into();
         let bad = |problem: String| {
             Error::new(
                 "renderer.bad_texture",
@@ -112,7 +114,7 @@ impl Textures {
             index,
             name: name.to_owned(),
             size,
-            pixels: pixels.to_vec(),
+            pixels: pixels.into_owned(),
             mipmaps,
         });
         Ok(Texture { index })
@@ -291,7 +293,7 @@ mod tests {
         ];
         for (size, bytes) in bad {
             let error = textures
-                .add("broken", size, &vec![0; bytes], Mipmaps::None)
+                .add("broken", size, vec![0; bytes], Mipmaps::None)
                 .expect_err("a broken texture");
             assert_eq!(
                 error.code(),

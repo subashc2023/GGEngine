@@ -12,7 +12,7 @@ use gg_core::{Error, Result};
 use super::scene::NO_HINTS;
 use super::table::{AnyColumn, ComponentId, Row};
 use super::{Entity, EntityId, Parent, World};
-use crate::reflect::{self, Name, Value};
+use crate::reflect::{self, Ident, Value};
 
 /// An authoring change to a world, by a person or an agent, which a [`Log`](super::Log) applies,
 /// and undoes. It names entities by their IDs, and carries values as reflection's, whose entities
@@ -22,9 +22,9 @@ use crate::reflect::{self, Name, Value};
 /// Each is refused with `ecs.no_entity` for an entity it changes, or a parent it gives, that no
 /// living entity has. A create, an add and a remove are refused with `reflect.unknown_type` for a
 /// component type that isn't registered, and with `reflect.read_only` for [`Parent`], which a
-/// create's parent and a reparent give. A create and an add are refused with
-/// `reflect.has_component` for a component the entity has, or a create gives twice; as `set_field`
-/// refuses a value; and as making the component from it on its type's
+/// create's parent and a reparent give. A create is refused with `reflect.duplicate_component` for
+/// a component it gives twice, and an add with `reflect.has_component` for one the entity has;
+/// both as `set_field` refuses a value, and as making the component from it on its type's
 /// [`base`](crate::Component::base) is, such as with `reflect.opaque` for a type that's opaque as
 /// a whole, as [`MeshDraw`](crate::MeshDraw) is. A create is refused with `ecs.id_taken` for an ID
 /// a living entity has, and a duplicate for one of its copies' IDs that a living entity has, or a
@@ -43,7 +43,7 @@ pub enum Operation {
     Create {
         entity: Option<EntityId>,
         parent: Option<EntityId>,
-        components: Vec<(Name, Value)>,
+        components: Vec<(Ident, Value)>,
     },
     /// Spawns a copy of `entity` and of each of its descendants, with their components as they are,
     /// typed, so that what's opaque comes too, but each exclusive field false, and each reference
@@ -60,15 +60,15 @@ pub enum Operation {
     /// Gives `entity` `component`, which it hasn't, made from `value` as a scene's is.
     Add {
         entity: EntityId,
-        component: Name,
+        component: Ident,
         value: Value,
     },
     /// Takes `entity`'s `component` away.
-    Remove { entity: EntityId, component: Name },
+    Remove { entity: EntityId, component: Ident },
     /// Sets the field at `path` of `entity`'s `component` to `value`, as `set_field` does.
     Set {
         entity: EntityId,
-        component: Name,
+        component: Ident,
         path: String,
         value: Value,
     },
@@ -174,7 +174,7 @@ enum Undo {
 /// another entity's true.
 struct Excluded {
     entity: EntityId,
-    component: Name,
+    component: Ident,
     field: &'static str,
 }
 
@@ -194,7 +194,8 @@ impl World {
     pub(super) fn apply(&mut self, operation: &mut Operation) -> Result<Inverse> {
         let _zone = gg_core::zone!();
         let undo = self.applied(operation)?;
-        // So that the log holds the IDs drawn, which a replay creates the entities with.
+        // So that the IDs drawn name what a create or a duplicate made: `exclude` finds it by
+        // them, as the Inspector's pick does, and the log's and menus' names give them.
         match (&mut *operation, &undo) {
             (Operation::Create { entity, .. }, Undo::Uncreate(made)) => {
                 *entity = made.first().copied()
@@ -507,7 +508,7 @@ impl World {
         &mut self,
         id: Option<EntityId>,
         parent: Option<EntityId>,
-        components: &[(Name, Value)],
+        components: &[(Ident, Value)],
     ) -> Result<EntityId> {
         if let Some(id) = id
             && self.by_id.contains_key(&id)
@@ -523,7 +524,7 @@ impl World {
             let component = self.writable_type(name)?;
             if row.iter().any(|&(other, _)| other == component) {
                 return Err(Error::new(
-                    "reflect.has_component",
+                    "reflect.duplicate_component",
                     format!("it's given `{name}` twice, but an entity has one of each component"),
                 ));
             }
@@ -575,20 +576,13 @@ impl World {
     /// them, without what the create or the duplicate didn't make.
     fn can_uncreate(&self, made: &[EntityId]) -> Result<Entity> {
         let root = self.living(made[0])?;
-        let mut under = Vec::new();
-        let mut at = 0;
-        let mut parent = root;
-        loop {
-            under.extend(self.children(parent).expect("alive"));
-            let Some(&next) = under.get(at) else {
-                break;
-            };
-            parent = next;
-            at += 1;
-        }
+        let subtree = self.subtree(root);
+        let under = &subtree[1..];
         let mut ours = made[1..].to_vec();
         ours.sort_unstable();
-        let theirs = under.iter().map(|&entity| self.id(entity).expect("alive"));
+        let theirs = under
+            .iter()
+            .map(|&(entity, _)| self.id(entity).expect("alive"));
         if let Some(other) = theirs.clone().find(|id| ours.binary_search(id).is_err()) {
             let child = self.living(other).and_then(|other| self.parent(other));
             let place = if child.is_ok_and(|parent| parent == Some(root)) {
@@ -621,14 +615,7 @@ impl World {
     /// or drawn if it's empty; and returns the copies' IDs, `entity`'s copy's first.
     fn duplicate(&mut self, entity: EntityId, ids: &[EntityId]) -> Result<Vec<EntityId>> {
         let root = self.living(entity)?;
-        // The subtree, each parent before its children, each beside its parent's place here.
-        let mut originals = vec![(root, None)];
-        let mut at = 0;
-        while let Some(&(parent, _)) = originals.get(at) {
-            let children = self.children(parent).expect("alive");
-            originals.extend(children.map(|child| (child, Some(at))));
-            at += 1;
-        }
+        let originals = self.subtree(root);
         if !ids.is_empty() {
             if ids.len() != originals.len() {
                 return Err(Error::new(
@@ -982,7 +969,7 @@ pub(super) mod tests {
         world.children(entity).expect("alive").collect()
     }
 
-    fn named(name: &'static str, value: Value) -> (Name, Value) {
+    fn named(name: &'static str, value: Value) -> (Ident, Value) {
         (name.into(), value)
     }
 
@@ -1293,7 +1280,7 @@ pub(super) mod tests {
             ),
             (
                 create(vec![transform(), transform()]),
-                "reflect.has_component",
+                "reflect.duplicate_component",
             ),
             (
                 create(vec![transform(), named("Everything", too_many.to_value())]),

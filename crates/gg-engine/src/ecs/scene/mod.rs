@@ -10,7 +10,6 @@ pub(super) mod tests;
 mod write;
 
 use std::borrow::Cow;
-use std::fs;
 use std::mem;
 use std::path::Path;
 
@@ -52,13 +51,16 @@ pub fn write_scene(path: &Path, text: &str) -> Result<()> {
 
 /// The text of the scene file at `path`, whole, for [`World::load_scene`].
 ///
-/// Fails with `scene.file`, naming the path, if it can't be read or isn't UTF-8.
+/// Fails with `scene.file`, naming the path, if it can't be read, isn't a regular file or isn't
+/// UTF-8.
 pub fn read_scene(path: &Path) -> Result<String> {
     let _zone = gg_core::zone!();
-    fs::read_to_string(path).map_err(|e| {
+    let error = || {
         let message = format!("can't read the scene from {}", path.display());
-        Error::new("scene.file", message).with_source(e)
-    })
+        Error::new("scene.file", message)
+    };
+    let bytes = crate::dirs::read_file(path, u64::MAX).map_err(|e| error().with_source(e))?;
+    String::from_utf8(bytes).map_err(|e| error().with_source(e))
 }
 
 impl World {
@@ -90,7 +92,7 @@ impl World {
     /// Fails, changing nothing, with an error that begins with the line and column where the text
     /// is refused: `scene.syntax` for text that isn't a scene's RON, or enables RON's extensions;
     /// `reflect.unknown_type` for a component type that isn't registered; `ecs.bad_id` for an ID
-    /// that isn't one; `scene.duplicate_id` and `scene.duplicate_component` for an entity, or an
+    /// that isn't one; `scene.duplicate_id` for an entity, and `reflect.duplicate_component` for an
     /// entity's component, given twice; `ecs.id_taken` for an ID a living entity has;
     /// `scene.unknown_id` for a reference to an entity the scene doesn't give; `ecs.parent_cycle`
     /// for entities that would be their own ancestors; `scene.too_deep` for a value nested more

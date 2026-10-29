@@ -19,12 +19,16 @@ impl<T: HasWindowHandle + HasDisplayHandle + Send + Sync + ?Sized> Window for T 
 pub struct Surface {
     instance: Arc<Instance>,
     raw: vk::SurfaceKHR,
+    /// What the surface's and its swapchain's debug names and errors call the window.
+    name: String,
     _window: Arc<dyn Window>,
 }
 
 impl Surface {
-    /// A surface for `window`, which must be on the display `instance` was created for.
-    pub fn new(instance: &Arc<Instance>, window: Arc<dyn Window>) -> Result<Self> {
+    /// A surface for `window`, which must be on the display `instance` was created for. `name`
+    /// tells the window apart in the debug names and errors of the surface, `{name} surface`, and
+    /// of its swapchain, such as `{name} swapchain image 0`.
+    pub fn new(instance: &Arc<Instance>, window: Arc<dyn Window>, name: &str) -> Result<Self> {
         if instance.surface_fn().is_none() {
             return Err(Error::new(
                 "gpu.no_surface",
@@ -41,21 +45,24 @@ impl Surface {
             ash_window::create_surface(instance.entry(), instance.raw(), display, handle, None)
         }
         .map_err(|e| {
-            vk_error(
-                "ash_window::create_surface",
-                "surface \"window surface\"",
-                e,
-            )
+            let subject = format_args!("surface \"{name} surface\"");
+            vk_error("ash_window::create_surface", subject, e)
         })?;
         Ok(Self {
             instance: instance.clone(),
             raw,
+            name: name.to_owned(),
             _window: window,
         })
     }
 
     pub(crate) fn raw(&self) -> vk::SurfaceKHR {
         self.raw
+    }
+
+    /// What its window is called, as [`Surface::new`] says.
+    pub(crate) fn name(&self) -> &str {
+        &self.name
     }
 
     /// Checks that the surface is `instance`'s: Vulkan lets a surface be used only with the

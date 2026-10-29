@@ -6,7 +6,8 @@ struct Vertex {
     float4 color;
 };
 
-// It takes no parameters, so it leaves out their address, which comes last.
+// It reads neither parameters nor the view's size, so its struct ends after the IDs' address, as
+// the shader contract allows.
 struct Push {
     float4x4 clip_from_world;
     Vertex* vertices;

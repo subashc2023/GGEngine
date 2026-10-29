@@ -1,5 +1,5 @@
 //! The log of the operations applied to a world, in order, each with its inverse: what undo and
-//! redo step through, and what a review reads and a replay applies.
+//! redo step through.
 
 use gg_core::Result;
 use tracing::field::display;
@@ -122,8 +122,8 @@ impl Log {
         self.undone.last().map(|entry| &entry.operation)
     }
 
-    /// The operations applied and not undone, the first applied first: what a review reads, and
-    /// a replay applies.
+    /// The operations applied and not undone, the first applied first: for tests, and for the
+    /// tool API to come.
     pub fn operations(&self) -> impl ExactSizeIterator<Item = &Operation> {
         self.done.iter().map(|entry| &entry.operation)
     }
@@ -198,7 +198,7 @@ pub(super) mod tests {
     use crate::ecs::ops::tests::{Sealed, fixture, sorted};
     use crate::ecs::tests::Rng;
     use crate::reflect::tests::{Everything, Handle, everything, same_snapshots};
-    use crate::reflect::{Name, Value};
+    use crate::reflect::{Ident, Value};
     use crate::{Entity, EntityId, Parent, Reflect, Sprite, Transform};
 
     /// A set of `entity`'s `Everything` field at `path`.
@@ -529,9 +529,10 @@ pub(super) mod tests {
     }
 
     /// What a random operation may be refused with.
-    const REFUSED: [&str; 7] = [
+    const REFUSED: [&str; 8] = [
         "ecs.id_taken",
         "ecs.parent_cycle",
+        "reflect.duplicate_component",
         "reflect.has_component",
         "reflect.missing_component",
         "reflect.opaque",
@@ -550,7 +551,7 @@ pub(super) mod tests {
         rng: &mut Rng,
         living: &[Entity],
         step: usize,
-    ) -> (Name, Value) {
+    ) -> (Ident, Value) {
         let value = match name {
             "Transform" => Transform {
                 translation: Vec3::new(step as f32, -0.0, 1.0),
@@ -592,17 +593,6 @@ pub(super) mod tests {
         let mut all = world.query::<(Entity, &Everything)>();
         let found = all.find(|(_, all)| all.target.is_some_and(&gone));
         found.map(|(entity, _)| entity)
-    }
-
-    /// `entity` and its descendants.
-    fn subtree(world: &World, entity: Entity) -> Vec<Entity> {
-        let mut all = vec![entity];
-        let mut next = 0;
-        while let Some(&at) = all.get(next) {
-            all.extend(world.children(at).expect("alive"));
-            next += 1;
-        }
-        all
     }
 
     /// A random operation on `world`'s living entities, mostly one that applies. A reference left
@@ -655,8 +645,8 @@ pub(super) mod tests {
         let entity = id(subject);
         match rng.below(7) {
             0 => {
-                let taken = subtree(world, subject);
-                let into = |target| taken.contains(&target);
+                let taken = world.subtree(subject);
+                let into = |target: Entity| taken.iter().any(|&(entity, _)| entity == target);
                 let referrer = referring(world, into).filter(|outside| !into(*outside));
                 match referrer {
                     Some(referrer) if rng.below(5) != 0 => unset(referrer),

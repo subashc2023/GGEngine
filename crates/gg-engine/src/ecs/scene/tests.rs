@@ -37,8 +37,7 @@ enum Mode {
     Bounce(u8),
 }
 
-/// The scene the plan gives, byte for byte: its first entity's sprite has a texture, which isn't
-/// saved.
+/// The golden scene, byte for byte: its first entity's sprite has a texture, which isn't saved.
 const GOLDEN: &str = r#"(
     entities: {
         "2b7e151628aed2a6": (
@@ -149,7 +148,7 @@ fn replace_last(text: &str, from: &str, to: &str) -> String {
 #[test]
 fn a_scene_loads_and_saves_as_its_canonical_text() {
     let mut world = golden_world(1);
-    let free: Vec<u32> = world.next_slots().take(3).map(|e| e.index).collect();
+    let free: Vec<u32> = world.next_slots().take(2).map(|e| e.index).collect();
     let version = world.version();
     let roots = world
         .load_scene(GOLDEN)
@@ -158,8 +157,8 @@ fn a_scene_loads_and_saves_as_its_canonical_text() {
     assert_ne!(world.version(), version);
     let cell = world.entity(id("2b7e151628aed2a6")).expect("loaded");
     let mover = world.entity(id("9f86d081884c7d65")).expect("loaded");
-    // In the slots freed, the last freed first, and then a new one.
-    assert_eq!([cell.index, mover.index], free[..2]);
+    // In the two slots freed, the last freed first.
+    assert_eq!([cell.index, mover.index], free[..]);
     assert_eq!(roots, [cell]);
     assert_eq!(world.get::<GridCell>(cell), Some(&GridCell { color: 1 }));
     let sprite = world.get::<Sprite>(cell).expect("a sprite");
@@ -210,7 +209,7 @@ fn a_scene_file_is_written_whole() {
     let dir = Scratch::new("scene-file");
     fs::create_dir_all(&dir.0).expect("a directory");
     let path = dir.0.join("grid.ron");
-    // A draft of the user's, named as a scene's temporary file once was.
+    // A draft of the user's, named as a scene's temporary file might be.
     let draft = dir.0.join("grid.ron.new");
     fs::write(&draft, "a draft").expect("a draft");
     let listed = || {
@@ -408,7 +407,7 @@ fn a_refused_scene_changes_nothing_and_says_where() {
         (
             "            ),\n        ),\n    },\n)",
             "            ),\n            Transform: (),\n        ),\n    },\n)".to_owned(),
-            "scene.duplicate_component",
+            "reflect.duplicate_component",
             "Transform: ()",
             about("Transform") + "it's given twice, but an entity has one of each component",
         ),
@@ -776,8 +775,8 @@ fn floats_and_strings_are_written_as_they_read_back() {
         "é e\u{301} \u{a0}😀",
     ];
     let numbers = Numbers {
-        singles: singles.clone(),
-        doubles: doubles.clone(),
+        singles,
+        doubles,
         texts: texts.map(str::to_owned).to_vec(),
     };
     let mut world = World::seeded(7);

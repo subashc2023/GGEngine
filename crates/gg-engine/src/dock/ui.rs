@@ -90,11 +90,10 @@ impl<'a> Ui<'a> {
     /// menu; and hides the panels docked left of the game's area or view, those below it, or
     /// those right of it, with a button in the title bar each, which shows them again: those
     /// docked beside it across a split on the way to it from the dock's root. Those above it
-    /// have no button. A closed or hidden panel shows
-    /// nowhere and keeps its place, between runs too, while its layer goes on showing it, and
-    /// `add_contents` doesn't run; a hidden one shows again as it's opened from the View menu,
-    /// or another panel docks on its side. A torn-off window whose panels are all closed closes,
-    /// and opens again where it was.
+    /// have no button. A closed or hidden panel shows nowhere and keeps its place, between runs
+    /// too, while its layer goes on showing it, and `add_contents` doesn't run; a hidden one shows
+    /// again as it's opened from the View menu, or another panel docks on its side. A torn-off
+    /// window whose panels are all closed closes, and opens again where it was.
     pub fn panel(&mut self, name: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
         self.dock.panel(self.root, name, add_contents);
     }
@@ -180,7 +179,7 @@ impl<'a> Ui<'a> {
     /// has no area.
     pub fn viewport(&self) -> Option<Viewport> {
         let ppp = self.root.ctx().pixels_per_point();
-        let viewport = crate::viewport(self.dock.view(), ppp);
+        let viewport = Viewport::from_points(self.dock.view(), ppp);
         (viewport.size[0] > 0 && viewport.size[1] > 0).then_some(viewport)
     }
 
@@ -195,7 +194,7 @@ pub(crate) struct Dock {
     layout: Layout,
     /// Where the layout is saved; `None` keeps it in memory only, as headless runs do.
     file: Option<PathBuf>,
-    /// The main window's menu bar, which is its title bar when the UI draws the frame.
+    /// The main window's title bar, or the bar below the OS's.
     bar: TitleBar,
     /// Who draws the frames of the windows of their own.
     chrome: Chrome,
@@ -1972,24 +1971,14 @@ mod tests {
         /// Where the main window's last pass drew the texts `matches` picks, in the order it
         /// painted them, those over others last.
         fn drawn_where(&self, matches: impl Fn(&str) -> bool) -> Vec<Rect> {
-            fn find(shape: &Shape, matches: &impl Fn(&str) -> bool, found: &mut Vec<Rect>) {
-                match shape {
-                    Shape::Vec(shapes) => {
-                        for shape in shapes {
-                            find(shape, matches, found);
-                        }
-                    }
-                    Shape::Text(text) if matches(text.galley.text()) => {
-                        found.push(text.galley.rect.translate(text.pos.to_vec2()));
-                    }
-                    _ => {}
+            let painted = crate::testing::painted(&self.shapes).into_iter();
+            let found = painted.filter_map(|shape| match shape {
+                Shape::Text(text) if matches(text.galley.text()) => {
+                    Some(text.galley.rect.translate(text.pos.to_vec2()))
                 }
-            }
-            let mut found = Vec::new();
-            for clipped in &self.shapes {
-                find(&clipped.shape, &matches, &mut found);
-            }
-            found
+                _ => None,
+            });
+            found.collect()
         }
 
         /// The middle of `text` as a menu shows it, over everything else: the last painted of
@@ -2579,7 +2568,7 @@ mod tests {
         let view = run.view.clone().expect("the view shows");
         assert_eq!(view.rect, run.dock.view());
         // In pixels, as the frame renders it.
-        assert_eq!(run.viewport, Some(crate::viewport(view.rect, 1.0)));
+        assert_eq!(run.viewport, Some(Viewport::from_points(view.rect, 1.0)));
         // Hovered on it, clear of A and B, and not on the toolbar over it.
         run.move_to(pos2(600.0, 450.0));
         assert!(run.view.as_ref().unwrap().hovered());
@@ -2596,7 +2585,7 @@ mod tests {
         run.toolbar = true;
         run.frames(2);
         assert!(run.shown.is_none() && run.view.is_none());
-        let central = crate::viewport(run.dock.view(), 1.0);
+        let central = Viewport::from_points(run.dock.view(), 1.0);
         assert!(central.size[0] > 0 && run.viewport == Some(central));
     }
 
@@ -3011,7 +3000,7 @@ mod tests {
         assert!(run.layout().closed.is_empty());
     }
 
-    /// Where the editor docks its panels, around the view.
+    /// Where the editor docks three of its panels, around the view.
     const EDITOR: [(&str, Docked); 3] = [
         ("Inspector", Docked::RightOf(VIEW)),
         ("Entities", Docked::LeftOf(VIEW)),

@@ -1,6 +1,7 @@
-//! Snapshots: the world copied whole, which restores it, for rollback, client-side prediction and
-//! hot reload; taken again into a copy kept from before, in its memory, which allocates as little
-//! as [`World`] says.
+//! Snapshots: the world copied whole, which restores it: the editor's Play and Simulate run a
+//! copy, and Stop goes back to the world they copied, as rollback, client-side prediction and hot
+//! reload will restore one. Taken again into a copy kept from before, a snapshot is copied in that
+//! copy's memory, which allocates as little as [`World`] says.
 
 use super::{World, next_serial};
 
@@ -25,8 +26,7 @@ impl Clone for World {
             by_signature,
             components,
             scratch: _,
-            spawned: _,
-            scripted: _,
+            lists: _,
             resources,
         } = self;
         Self {
@@ -46,8 +46,7 @@ impl Clone for World {
             by_signature: by_signature.clone(),
             components: components.clone(),
             scratch: Vec::new(),
-            spawned: Vec::new(),
-            scripted: Vec::new(),
+            lists: Vec::new(),
             resources: resources.clone(),
         }
     }
@@ -73,8 +72,7 @@ impl Clone for World {
             by_signature,
             components,
             scratch: _,
-            spawned: _,
-            scripted: _,
+            lists: _,
             resources,
         } = source;
         if !self.components.same(components) {

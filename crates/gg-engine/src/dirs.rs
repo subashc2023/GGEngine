@@ -1,10 +1,11 @@
 //! The OS's directories where an app keeps its files for the user, never beside the executable:
 //! one for what it keeps from run to run, such as the dock's layout, and one for what it can make
-//! again, such as its pipeline cache; and writing a file whole, there or, as a scene's, anywhere.
+//! again, such as its pipeline cache; and reading a file, a regular one alone, and writing one
+//! whole, there or, as a scene's, anywhere.
 
 use std::ffi::OsString;
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -51,6 +52,22 @@ pub(crate) fn dir(
         }
     };
     Some(dir.join(app))
+}
+
+/// Reads the file at `path`, as far as its first `most` bytes: a regular file alone, so that a FIFO
+/// or a device, such as /dev/zero, can neither hang the read nor fill memory.
+pub(crate) fn read_file(path: &Path, most: u64) -> io::Result<Vec<u8>> {
+    // Before it's opened, since opening a FIFO waits for a writer.
+    let metadata = fs::metadata(path)?;
+    if !metadata.is_file() {
+        let not_regular = "it isn't a regular file";
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, not_regular));
+    }
+    let mut bytes = Vec::new();
+    // An error rather than an abort, as `fs::read` gives, if there's no memory for it.
+    bytes.try_reserve_exact(metadata.len().min(most).try_into().unwrap_or(0))?;
+    File::open(path)?.take(most).read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 /// Writes `data` to the file at `path` whole, as [`write_whole`] does, making the directories it's
@@ -197,5 +214,20 @@ pub(crate) mod tests {
             );
         }
         assert_eq!(dir("Sandbox", Kind::State, "windows", env(&[])), None);
+    }
+
+    #[test]
+    fn a_regular_file_is_read_as_far_as_asked_and_a_device_not_at_all() {
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let whole = fs::read(&manifest).expect("the manifest");
+        assert_eq!(read_file(&manifest, 10).expect("its start"), whole[..10]);
+        assert_eq!(read_file(&manifest, u64::MAX).expect("all of it"), whole);
+        // A device, which would read as far as it's asked: zeros, or on Windows nothing.
+        let device = if cfg!(windows) {
+            "models/NUL"
+        } else {
+            "/dev/zero"
+        };
+        read_file(Path::new(device), 1 << 20).expect_err("a device");
     }
 }
