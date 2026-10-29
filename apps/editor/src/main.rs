@@ -5,19 +5,20 @@
 //! toolbar's Play has a copy of the world play in its place, as the game would, its scripts and its
 //! physics running, the view seeing through its camera, where W, A, S and D drive the world's
 //! cameras, by a script of theirs, as a game's keys would; and Stop brings back the world as it was
-//! edited, with its edits' history. The Inspector edits the world, and undoes and redoes its edits,
-//! and duplicates entities with Ctrl+D. A click in the view picks what it shows there for the
-//! Inspector, or unpicks where it shows none, but with Pan or Orbit, whose left button moves the
-//! camera; and the view's bottom left names what it shows under the cursor, while the cursor is
-//! over it. Through the editor's camera, the toolbar's Move, Rotate and Scale, which W, E and R
-//! pick, as Q picks Select, show handles over what the Inspector has picked, whose drags move, turn
-//! and scale it, each an edit of the Inspector's. The File menu starts a new scene, emptying the
-//! world; opens one, whose entities replace the world's, stopping it first if it plays; and saves
-//! the world as it was edited as one, to the file it was opened from or saved to last, or as
-//! another: through the OS's file dialogs, and with Ctrl+N, Ctrl+O, Ctrl+S and Ctrl+Shift+S, Cmd
-//! for Ctrl on macOS. The Assets panel shows the files in the editor's assets folder, a folder at a
-//! time, and a scene dragged from it onto the view opens as Open opens one. When a file can't be
-//! read, opened or written, it says why, until that's dismissed.
+//! edited, with its edits' history. The toolbar's Colliders switch outlines the world's 2D
+//! colliders, as physics shapes them, whether the world plays or not. The Inspector edits the
+//! world, and undoes and redoes its edits, and duplicates entities with Ctrl+D. A click in the view
+//! picks what it shows there for the Inspector, or unpicks where it shows none, but with Pan or
+//! Orbit, whose left button moves the camera; and the view's bottom left names what it shows under
+//! the cursor, while the cursor is over it. Through the editor's camera, the toolbar's Move, Rotate
+//! and Scale, which W, E and R pick, as Q picks Select, show handles over what the Inspector has
+//! picked, whose drags move, turn and scale it, each an edit of the Inspector's. The File menu
+//! starts a new scene, emptying the world; opens one, whose entities replace the world's, stopping
+//! it first if it plays; and saves the world as it was edited as one, to the file it was opened
+//! from or saved to last, or as another: through the OS's file dialogs, and with Ctrl+N, Ctrl+O,
+//! Ctrl+S and Ctrl+Shift+S, Cmd for Ctrl on macOS. The Assets panel shows the files in the editor's
+//! assets folder, a folder at a time, and a scene dragged from it onto the view opens as Open opens
+//! one. When a file can't be read, opened or written, it says why, until that's dismissed.
 
 mod assets;
 mod camera;
@@ -881,6 +882,8 @@ impl Layer for Editor {
         if ended || left {
             self.link.seal();
         }
+        // Through either camera, whether the world plays or not.
+        cx.set_colliders_shown(self.toolbar.colliders);
         if self.toolbar.world_camera {
             self.shown = None;
             return;
@@ -1409,6 +1412,28 @@ mod tests {
             }
             let seen = frame(&mut editor, spawn_world);
             assert_eq!(seen, Some(editor.camera.viewpoint()));
+        }
+    }
+
+    /// The toolbar's Colliders switch has the engine outline the world's colliders, through the
+    /// world's camera as through the editor's.
+    #[test]
+    fn the_colliders_switch_outlines_them_through_either_camera() {
+        let mut editor = fresh();
+        let mut cx = Context::seeded(1);
+        spawn_world(cx.world_mut());
+        for world_camera in [true, false] {
+            for colliders in [true, false] {
+                editor.toolbar.world_camera = world_camera;
+                editor.toolbar.colliders = colliders;
+                editor.update(&mut cx, Duration::ZERO);
+                assert_eq!(editor.toolbar.world_camera, world_camera);
+                assert_eq!(
+                    cx.colliders_shown(),
+                    colliders,
+                    "world camera {world_camera}"
+                );
+            }
         }
     }
 

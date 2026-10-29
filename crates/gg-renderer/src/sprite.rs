@@ -112,7 +112,7 @@ impl Sprite {
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 pub(crate) struct Corner {
-    position: Vec3,
+    pub(crate) position: Vec3,
     uv: Vec2,
 }
 

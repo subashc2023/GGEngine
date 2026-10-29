@@ -668,7 +668,7 @@ pub(super) mod tests {
     #[test]
     fn a_pose_is_where_drawing_draws_an_entity() {
         use gg_core::math::Vec3;
-        use gg_renderer::{Draws, Sprite};
+        use gg_renderer::{Draws, Shaders, Sprite};
 
         use crate::draw::{self, Poses, Scratch};
         use crate::interpolation::Past;
@@ -692,7 +692,15 @@ pub(super) mod tests {
         let pose = world.pose(child).expect("alive");
         let mut draws = Draws::default();
         let past = Past::default();
-        draw::draw_world(&world, &past, 1.0, &mut draws, &mut Scratch::default());
+        let shaders = &mut Shaders::default();
+        draw::draw_world(
+            &world,
+            &past,
+            1.0,
+            &mut draws,
+            shaders,
+            &mut Scratch::default(),
+        );
         // Its one sprite's transform, which `Debug` shows to the bit, a zero's sign too.
         let drawn = format!("{draws:?}");
         let matrix = format!("transforms: [{:?}]", pose.matrix);

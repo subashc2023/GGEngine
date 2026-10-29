@@ -98,7 +98,7 @@ const DRAW_INDEX: u32 = 4426;
 const DIM_2D: u32 = 1;
 
 /// What the engine pushes before each draw, a [`Push`]: each member at its offset, in order.
-const PUSHED: [(u32, &str, Pushed); 5] = [
+const PUSHED: [(u32, &str, Pushed); 6] = [
     (
         offset_of!(Push, clip_from_world) as u32,
         "the matrix from the world to clip space",
@@ -124,6 +124,11 @@ const PUSHED: [(u32, &str, Pushed); 5] = [
         "the instances' parameters' address",
         Pushed::Params,
     ),
+    (
+        offset_of!(Push, view) as u32,
+        "the view's size in pixels",
+        Pushed::View,
+    ),
 ];
 
 /// What a member of a [`Push`] is.
@@ -139,6 +144,8 @@ enum Pushed {
     Ids,
     /// The address of the instances' parameters, a `P` each.
     Params,
+    /// A float2.
+    View,
 }
 
 /// The capabilities that games' shaders may reach for that need what the engine doesn't enable,
@@ -654,6 +661,16 @@ impl Module {
                     types.params(),
                     breaches,
                 ),
+                Pushed::View => {
+                    let float2 = matches!(self.types.get(&ty), Some(&Type::Vector { component, count: 2 })
+                        if self.is_float(component));
+                    if !float2 {
+                        breaches.push(format!(
+                            "its push constants' {name} isn't a float2, where the engine pushes \
+                             {pushed}"
+                        ));
+                    }
+                }
             }
         }
     }

@@ -1,8 +1,11 @@
 //! 2D physics: bodies that rapier moves at the world's ticks, in the XY plane, as their entities'
-//! components describe them, and the world's resource that holds rapier's bodies and contacts,
-//! which snapshots copy.
+//! components describe them; the world's resource that holds rapier's bodies and contacts, which
+//! snapshots copy; and the colliders' outlines, drawn where their entities draw.
 
-use gg_core::math::{Quat, Vec2, Vec3, libm};
+use std::f32::consts::TAU;
+
+use gg_core::math::{Mat4, Quat, Vec2, Vec3, Vec4, libm};
+use gg_renderer::{Draws, Line, Shaders};
 use rapier2d::prelude::{
     BroadPhaseBvh, CCDSolver, Collider, ColliderBuilder, ColliderHandle, ColliderSet,
     ImpulseJointSet, IntegrationParameters, IslandManager, MultibodyJointSet, NarrowPhase,
@@ -11,6 +14,7 @@ use rapier2d::prelude::{
 };
 use tracing::warn;
 
+use crate::draw::Poses;
 use crate::{Component, Entity, Reflect, Tick, Transform, World};
 
 /// How a [`RigidBody2D`] moves.
@@ -28,9 +32,10 @@ pub enum BodyType {
 
 /// A body that 2D physics moves, at each tick a layer runs [`step_physics`] in: in the XY plane,
 /// its entity's [`Transform`] across and up and turned about Z, and the velocities here, which
-/// each step reads and writes back. It collides as its entity's [`BoxCollider2D`], if it has one,
-/// which gives a dynamic body its mass too. A body under a parent isn't moved, since its transform
-/// is in its parent's space (`physics.child_body`).
+/// each step reads and writes back. It collides as its entity's [`BoxCollider2D`] and
+/// [`CircleCollider2D`], whichever it has, which give a dynamic body its mass too, both together
+/// where it has both. A body under a parent isn't moved, since its transform is in its parent's
+/// space (`physics.child_body`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Component)]
 pub struct RigidBody2D {
     pub body_type: BodyType,
@@ -72,6 +77,69 @@ impl Default for BoxCollider2D {
             friction: 0.5,
             restitution: 0.0,
         }
+    }
+}
+
+impl BoxCollider2D {
+    /// The collider it makes for an entity of `scale`: its size and its offset scaled across and
+    /// up, a mirrored entity's box the same.
+    fn collider(&self, scale: Vec3) -> Collider {
+        let scale = scale.truncate();
+        let half = (self.size * scale).abs() * 0.5;
+        ColliderBuilder::cuboid(half.x, half.y)
+            .translation(vector(self.offset * scale))
+            .density(self.density)
+            .friction(self.friction)
+            .restitution(self.restitution)
+            .build()
+    }
+}
+
+/// The circle a [`RigidBody2D`] on the same entity collides as, in the entity's space: around its
+/// offset, which turns and scales with the entity, its radius scaled by the larger of the entity's
+/// scales across and up, since a circle stays one however its entity stretches. By default half a
+/// unit, so that it's a unit across, as a circle drawn on a sprite's square is.
+#[derive(Clone, Copy, Debug, PartialEq, Component)]
+pub struct CircleCollider2D {
+    /// Where its middle is, from its entity's origin.
+    pub offset: Vec2,
+    /// How far its edge is from its middle.
+    #[reflect(min = 0.0, default = 0.5)]
+    pub radius: f32,
+    /// Its mass a square unit, which a dynamic body's mass comes from.
+    #[reflect(min = 0.0, default = 1.0)]
+    pub density: f32,
+    /// How much it holds back what slides along it: 0 not at all, as ice.
+    #[reflect(min = 0.0, default = 0.5)]
+    pub friction: f32,
+    /// How much of the speed it hits something with it bounces back with: 0 none, 1 all.
+    #[reflect(min = 0.0, max = 1.0)]
+    pub restitution: f32,
+}
+
+impl Default for CircleCollider2D {
+    fn default() -> Self {
+        Self {
+            offset: Vec2::ZERO,
+            radius: 0.5,
+            density: 1.0,
+            friction: 0.5,
+            restitution: 0.0,
+        }
+    }
+}
+
+impl CircleCollider2D {
+    /// The collider it makes for an entity of `scale`: its offset scaled across and up, and its
+    /// radius by the larger of the two scales.
+    fn collider(&self, scale: Vec3) -> Collider {
+        let scale = scale.truncate();
+        ColliderBuilder::ball(self.radius * scale.abs().max_element())
+            .translation(vector(self.offset * scale))
+            .density(self.density)
+            .friction(self.friction)
+            .restitution(self.restitution)
+            .build()
     }
 }
 
@@ -123,10 +191,13 @@ struct Rapier {
 struct Linked {
     entity: Entity,
     body: RigidBodyHandle,
-    collider: Option<ColliderHandle>,
+    /// The colliders of its entity's `BoxCollider2D` and `CircleCollider2D`, in that order, of
+    /// those it has.
+    colliders: [Option<ColliderHandle>; 2],
     rigid_body: RigidBody2D,
     transform: Transform,
     box_collider: Option<BoxCollider2D>,
+    circle_collider: Option<CircleCollider2D>,
     /// How far the body was turned, as rapier gives it, from which the next step's turn is
     /// written into the transform.
     angle: f32,
@@ -307,6 +378,7 @@ impl Physics2D {
         let rigid_body = *world.get::<RigidBody2D>(entity).expect("found with one");
         let transform = *world.get::<Transform>(entity).expect("found with one");
         let box_collider = world.get::<BoxCollider2D>(entity).copied();
+        let circle_collider = world.get::<CircleCollider2D>(entity).copied();
         let mut built = RigidBodyBuilder::new(body_type(rigid_body.body_type))
             .translation(vector(transform.translation.truncate()))
             .rotation(angle(transform.rotation))
@@ -319,12 +391,14 @@ impl Physics2D {
         let body = rapier.bodies.insert(built);
         // As rapier gives it back, which may be another float than the one it was given.
         let angle = rapier.bodies[body].rotation().angle();
-        let collider = box_collider.map(|box_collider| {
-            let made = collider(&box_collider, transform.scale);
-            rapier
-                .colliders
-                .insert_with_parent(made, body, &mut rapier.bodies)
-        });
+        let mut colliders = [None; 2];
+        let made = [
+            box_collider.map(|made| made.collider(transform.scale)),
+            circle_collider.map(|made| made.collider(transform.scale)),
+        ];
+        for (handle, made) in colliders.iter_mut().zip(made) {
+            replace(rapier, handle, made, body);
+        }
         let index = u32::try_from(self.linked.len()).expect("fewer than 2^32 bodies");
         if self.by_slot.len() <= entity.slot() {
             self.by_slot.resize(entity.slot() + 1, NONE);
@@ -333,10 +407,11 @@ impl Physics2D {
         self.linked.push(Linked {
             entity,
             body,
-            collider,
+            colliders,
             rigid_body,
             transform,
             box_collider,
+            circle_collider,
             angle,
         });
     }
@@ -348,6 +423,7 @@ impl Physics2D {
         let rigid_body = *world.get::<RigidBody2D>(entity).expect("found with one");
         let transform = *world.get::<Transform>(entity).expect("found with one");
         let box_collider = world.get::<BoxCollider2D>(entity).copied();
+        let circle_collider = world.get::<CircleCollider2D>(entity).copied();
         let body = &mut rapier.bodies[linked.body];
         let was = linked.rigid_body;
         if rigid_body.body_type != was.body_type {
@@ -371,26 +447,19 @@ impl Physics2D {
             linked.angle = body.rotation().angle();
         }
         let rescaled = transform.scale.truncate() != linked.transform.scale.truncate();
+        let [boxed, round] = &mut linked.colliders;
         if box_collider != linked.box_collider || rescaled {
-            if let Some(collider) = linked.collider.take() {
-                rapier.colliders.remove(
-                    collider,
-                    &mut rapier.islands,
-                    &mut rapier.bodies,
-                    &mut rapier.soft_bodies,
-                    true,
-                );
-            }
-            linked.collider = box_collider.map(|box_collider| {
-                let made = collider(&box_collider, transform.scale);
-                rapier
-                    .colliders
-                    .insert_with_parent(made, linked.body, &mut rapier.bodies)
-            });
+            let made = box_collider.map(|made| made.collider(transform.scale));
+            replace(rapier, boxed, made, linked.body);
+        }
+        if circle_collider != linked.circle_collider || rescaled {
+            let made = circle_collider.map(|made| made.collider(transform.scale));
+            replace(rapier, round, made, linked.body);
         }
         linked.rigid_body = rigid_body;
         linked.transform = transform;
         linked.box_collider = box_collider;
+        linked.circle_collider = circle_collider;
     }
 
     /// Writes where each body that moves went, and how fast it goes, into its entity's components.
@@ -431,17 +500,129 @@ fn body_type(body_type: BodyType) -> RigidBodyType {
     }
 }
 
-/// The collider `box_collider` makes, for an entity of `scale`: its size and its offset scaled
-/// across and up, a mirrored entity's box the same.
-fn collider(box_collider: &BoxCollider2D, scale: Vec3) -> Collider {
-    let scale = scale.truncate();
-    let half = (box_collider.size * scale).abs() * 0.5;
-    ColliderBuilder::cuboid(half.x, half.y)
-        .translation(vector(box_collider.offset * scale))
-        .density(box_collider.density)
-        .friction(box_collider.friction)
-        .restitution(box_collider.restitution)
-        .build()
+/// Takes the collider `handle` holds out of `rapier`, if it holds one, and puts `made` on `body` in
+/// its place, if it's given, as `handle`'s.
+fn replace(
+    rapier: &mut Rapier,
+    handle: &mut Option<ColliderHandle>,
+    made: Option<Collider>,
+    body: RigidBodyHandle,
+) {
+    if let Some(collider) = handle.take() {
+        rapier.colliders.remove(
+            collider,
+            &mut rapier.islands,
+            &mut rapier.bodies,
+            &mut rapier.soft_bodies,
+            true,
+        );
+    }
+    *handle = made.map(|made| {
+        rapier
+            .colliders
+            .insert_with_parent(made, body, &mut rapier.bodies)
+    });
+}
+
+/// The color colliders' outlines draw in, linear: a light green, as physics debuggers draw them,
+/// apart from the grid's darker green axis.
+const OUTLINE: Vec4 = Vec4::new(0.3, 1.0, 0.3, 1.0);
+
+/// How wide colliders' outlines draw, in points: pixels of a window at a scale of 1.
+const OUTLINE_WIDTH: f32 = 2.0;
+
+/// How many lines a circle's outline draws with: round to within a pixel up to some 800 pixels
+/// across.
+const SEGMENTS: usize = 64;
+
+/// Draws into `draws` the outline of each [`BoxCollider2D`] and [`CircleCollider2D`] in `world`
+/// whose entity has a [`Transform`], 2 points wide in a window of `scale` pixels a point, where
+/// [`outlines`] has it, with the entity's ID, so that a pick of an outline finds its entity. Lines
+/// draw with the engine's line shader, which `shaders` adds the first time any do.
+pub(crate) fn draw_colliders(
+    world: &World,
+    poses: &Poses<'_>,
+    scale: f32,
+    draws: &mut Draws,
+    shaders: &mut Shaders,
+) {
+    let _zone = gg_core::zone!();
+    let width = OUTLINE_WIDTH * scale;
+    // A circle a unit in radius, around the origin, from +X counterclockwise and back.
+    let ring: [Vec3; SEGMENTS + 1] = std::array::from_fn(|i| {
+        let (sin, cos) = libm::sincosf(TAU * i as f32 / SEGMENTS as f32);
+        Vec3::new(cos, sin, 0.0)
+    });
+    outlines(world, poses, |outline, id| match outline {
+        Outline::Box(placed) => draws.push_rect(shaders, placed, OUTLINE, width, id),
+        Outline::Circle(placed) => {
+            for ends in ring.windows(2) {
+                let line = Line {
+                    from: ends[0],
+                    to: ends[1],
+                    color: OUTLINE,
+                    width,
+                };
+                draws.push_line(shaders, placed, line, id);
+            }
+        }
+    });
+}
+
+/// A collider's outline, as the matrix its shape draws by.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Outline {
+    /// The square a unit across around the origin, in its XY plane.
+    Box(Mat4),
+    /// The circle a unit in radius around the origin, in its XY plane.
+    Circle(Mat4),
+}
+
+/// Gives `each` the outline of each [`BoxCollider2D`] and [`CircleCollider2D`] in `world` whose
+/// entity has a [`Transform`], with the entity's ID, by table, then row: where its entity draws
+/// this frame as `poses` has it, between ticks and carried by its ancestors, as physics shapes it,
+/// a box sized and offset across and up as its entity scales, and a circle around its offset so
+/// scaled, as large as its radius scaled by the larger of those scales. It outlines a collider
+/// whether physics moves its entity or not, as it doesn't without a [`RigidBody2D`] or under a
+/// parent, so that what's being made shows as it's made.
+fn outlines(world: &World, poses: &Poses<'_>, mut each: impl FnMut(Outline, u64)) {
+    let (Some(transform), boxed, round) = (
+        world.component::<Transform>(),
+        world.component::<BoxCollider2D>(),
+        world.component::<CircleCollider2D>(),
+    ) else {
+        return;
+    };
+    for (index, table) in world.tables().iter().enumerate() {
+        let boxes = boxed.and_then(|id| table.column::<BoxCollider2D>(id));
+        let circles = round.and_then(|id| table.column::<CircleCollider2D>(id));
+        if boxes.is_none() && circles.is_none() || !table.has(transform) {
+            continue;
+        }
+        for (row, &entity) in table.entities().iter().enumerate() {
+            let matrix = poses.matrix(index, row);
+            let id = world.id(entity).expect("a table's rows are alive").get();
+            if let Some(boxes) = boxes {
+                let BoxCollider2D { offset, size, .. } = boxes[row];
+                let placed = matrix
+                    * Mat4::from_translation(offset.extend(0.0))
+                    * Mat4::from_scale(size.extend(1.0));
+                each(Outline::Box(placed), id);
+            }
+            if let Some(circles) = circles {
+                let CircleCollider2D { offset, radius, .. } = circles[row];
+                let (scales, rotation, _) = matrix.to_scale_rotation_translation();
+                let middle = matrix.transform_point3(offset.extend(0.0));
+                let radius = radius * scales.truncate().abs().max_element();
+                let placed = Mat4::from_scale_rotation_translation(
+                    Vec3::new(radius, radius, 1.0),
+                    rotation,
+                    middle,
+                );
+                each(Outline::Circle(placed), id);
+            }
+        }
+    }
 }
 
 /// How far `rotation` turns +X about Z, counterclockwise as seen from +Z: how an entity is turned
@@ -458,7 +639,12 @@ fn vector(v: Vec2) -> Vector {
 
 #[cfg(test)]
 mod tests {
+    use gg_renderer::{Sprite, Viewport};
+
     use super::*;
+    use crate::Context;
+    use crate::interpolation::Past;
+    use crate::render_thread::Extracted;
 
     /// A floor 10 units wide and a unit tall, its top at y 0.5, static.
     fn floor(world: &mut World) -> Entity {
@@ -525,17 +711,23 @@ mod tests {
         );
     }
 
-    /// A pile of boxes, turned and overlapping as they start, over a floor.
+    /// A pile of boxes and balls, every third a ball, turned and overlapping as they start, over a
+    /// floor.
     fn pile(world: &mut World) -> Vec<Entity> {
         floor(world);
-        let mut boxes = Vec::new();
+        let mut bodies = Vec::new();
         for i in 0..12u8 {
             let i = f32::from(i);
             let x = (i % 4.0) * 0.8 - 1.2;
             let y = 1.5 + i * 0.7;
-            boxes.push(crate_at(world, x, y, i * 0.3));
+            let body = crate_at(world, x, y, i * 0.3);
+            if i % 3.0 == 2.0 {
+                world.remove::<BoxCollider2D>(body).expect("alive");
+                (world.insert(body, CircleCollider2D::default())).expect("alive");
+            }
+            bodies.push(body);
         }
-        boxes
+        bodies
     }
 
     /// A snapshot of a world whose bodies are moving and touching, restored, steps as the world it
@@ -562,16 +754,16 @@ mod tests {
         assert_ne!(remade.hash(), went, "its bodies made again");
     }
 
-    /// The world's hash after physics has stepped a pile of boxes for four seconds, which CI checks
-    /// on every platform: a difference on some platforms only is a bug in determinism, not a value
-    /// to change here.
+    /// The world's hash after physics has stepped a pile of boxes and balls for four seconds, which
+    /// CI checks on every platform: a difference on some platforms only is a bug in determinism,
+    /// not a value to change here.
     #[test]
     fn a_pile_hashes_as_its_reference_says() {
         let mut world = World::seeded(7);
         pile(&mut world);
         step(&mut world, 256);
         let content = world.hash().content;
-        assert_eq!(content, 0x7adc_67d3_cc48_b6b7, "{content:#018x}");
+        assert_eq!(content, 0xc3f0_063b_d774_0cbc, "{content:#018x}");
     }
 
     /// What a game or an edit changes of a body's components between steps, the next step takes:
@@ -613,6 +805,168 @@ mod tests {
         step(&mut world, 1);
         let rotation = transform(&world, moved).rotation;
         assert!(rotation.angle_between(turned) < 0.05, "{rotation:?}");
+    }
+
+    /// A ball is as large as its radius scaled by the larger of its entity's scales across and up:
+    /// half a unit, scaled 2 across and 1 up, rests with its middle a unit over the floor's top.
+    #[test]
+    fn a_ball_is_as_large_as_its_larger_scale() {
+        let mut world = World::default();
+        floor(&mut world);
+        let at = Transform {
+            translation: Vec3::new(0.0, 3.0, 0.0),
+            scale: Vec3::new(2.0, 1.0, 1.0),
+            ..Transform::IDENTITY
+        };
+        let ball = (at, RigidBody2D::default(), CircleCollider2D::default());
+        let ball = world.spawn(ball);
+        step(&mut world, 240);
+        let rested = transform(&world, ball);
+        assert!(
+            (rested.translation.y - 1.5).abs() < 0.02,
+            "a unit over the floor's top: {rested:?}"
+        );
+    }
+
+    /// A body collides as its box and its circle both, and as each of them changes between steps:
+    /// a box kept upright on a circle under it, as a foot, rests on the circle, then on its box once
+    /// the circle's taken away.
+    #[test]
+    fn a_body_collides_as_its_box_and_its_circle() {
+        let mut world = World::default();
+        floor(&mut world);
+        let at = Transform {
+            translation: Vec3::new(0.0, 4.0, 0.0),
+            ..Transform::IDENTITY
+        };
+        let upright = RigidBody2D {
+            fixed_rotation: true,
+            ..RigidBody2D::default()
+        };
+        let foot = CircleCollider2D {
+            offset: Vec2::new(0.0, -1.0),
+            ..CircleCollider2D::default()
+        };
+        let body = world.spawn((at, upright, BoxCollider2D::default(), foot));
+        step(&mut world, 240);
+        // The floor's top, the circle's radius, then its offset.
+        let on_foot = transform(&world, body).translation.y;
+        assert!((on_foot - 2.0).abs() < 0.02, "on its foot: {on_foot}");
+        world.remove::<CircleCollider2D>(body).expect("alive");
+        step(&mut world, 240);
+        let on_box = transform(&world, body).translation.y;
+        assert!((on_box - 1.0).abs() < 0.02, "on its box: {on_box}");
+    }
+
+    /// Each collider's outline goes where its entity draws, with its entity's ID: a box sized and
+    /// offset across and up as its entity scales; a circle around its offset so scaled, as large as
+    /// its radius scaled by the larger of the scales, and round; both of an entity with both, the
+    /// box's first; one under a parent, carried by it, though physics doesn't move it; and none of
+    /// an entity without a transform.
+    #[test]
+    fn colliders_outline_where_their_entities_draw() {
+        let mut world = World::default();
+        let stretched = Transform {
+            translation: Vec3::new(1.0, 2.0, 0.5),
+            rotation: Quat::from_rotation_z(0.4),
+            scale: Vec3::new(2.0, 0.5, 1.0),
+        };
+        let boxed = BoxCollider2D {
+            offset: Vec2::new(0.25, -0.5),
+            size: Vec2::new(1.5, 2.0),
+            ..BoxCollider2D::default()
+        };
+        let round = CircleCollider2D {
+            offset: Vec2::new(0.5, 1.0),
+            radius: 0.75,
+            ..CircleCollider2D::default()
+        };
+        let both = world.spawn((stretched, boxed, round));
+        let parent = world.spawn(Transform {
+            translation: Vec3::new(-3.0, 0.0, 0.0),
+            ..Transform::IDENTITY
+        });
+        let child = world.spawn((Transform::IDENTITY, round));
+        world.set_parent(child, Some(parent)).expect("no cycle");
+        world.spawn(boxed);
+        let past = Past::default();
+        let poses = Poses::new(&world, &past, 1.0).expect("transforms");
+        let mut found = Vec::new();
+        outlines(&world, &poses, |outline, id| found.push((outline, id)));
+        let id = |entity| world.id(entity).expect("alive").get();
+        let [
+            (Outline::Box(boxy), first),
+            (Outline::Circle(ring), second),
+            (Outline::Circle(carried), third),
+        ] = found[..]
+        else {
+            panic!("{found:?}");
+        };
+        assert_eq!([first, second, third], [id(both), id(both), id(child)]);
+        let near = |a: Vec3, b: Vec3| a.abs_diff_eq(b, 1e-5);
+        // The box's corner on its top right: its offset and half its size, in its entity's space.
+        let corner = boxy.transform_point3(Vec3::new(0.5, 0.5, 0.0));
+        let entitys = stretched.matrix();
+        assert!(near(
+            corner,
+            entitys.transform_point3(Vec3::new(1.0, 0.5, 0.0))
+        ));
+        // The circle's middle, and its edge 0.75 times 2 from it, across and up.
+        let middle = ring.transform_point3(Vec3::ZERO);
+        assert!(near(
+            middle,
+            entitys.transform_point3(Vec3::new(0.5, 1.0, 0.0))
+        ));
+        for axis in [Vec3::X, Vec3::Y] {
+            let reach = ring.transform_point3(axis).distance(middle);
+            assert!((reach - 1.5).abs() < 1e-5, "{reach}");
+        }
+        let middle = carried.transform_point3(Vec3::ZERO);
+        assert!(near(middle, Vec3::new(-2.5, 1.0, 0.0)), "{middle}");
+        let reach = carried.transform_point3(Vec3::X).distance(middle);
+        assert!((reach - 0.75).abs() < 1e-5, "{reach}");
+    }
+
+    /// Lines a layer draws go over the world's entities, though it draws them before the world, and
+    /// the colliders' outlines over them while they're shown, 2 points wide in a window at a scale
+    /// of 1, with their entities' IDs; and not while they're hidden.
+    #[test]
+    fn lines_and_outlines_draw_over_the_world() {
+        let mut cx = Context::seeded(3);
+        let sprite = (
+            Transform::IDENTITY,
+            Sprite::default(),
+            BoxCollider2D::default(),
+        );
+        let entity = cx.world_mut().spawn(sprite);
+        let id = cx.world().id(entity).expect("alive").get();
+        let line = Line {
+            from: Vec3::ZERO,
+            to: Vec3::X,
+            color: Vec4::ONE,
+            width: 3.0,
+        };
+        let viewport = Viewport {
+            origin: [0, 0],
+            size: [64, 64],
+        };
+        let mut frame = Extracted::default();
+        assert!(!cx.colliders_shown(), "hidden at first");
+        for shown in [false, true] {
+            cx.set_colliders_shown(shown);
+            cx.draw_line(line.from, line.to, line.color, line.width);
+            cx.draw_world(1.0);
+            cx.extract(&mut frame, viewport);
+            let mut shaders = Shaders::default();
+            let mut want = Draws::default();
+            let drawn = (Mat4::IDENTITY, Sprite::default(), id);
+            want.extend_sprites(std::iter::once(drawn));
+            want.push_line(&mut shaders, Mat4::IDENTITY, line, 0);
+            if shown {
+                want.push_rect(&mut shaders, Mat4::IDENTITY, OUTLINE, 2.0, id);
+            }
+            assert_eq!(frame.draws, want, "shown: {shown}");
+        }
     }
 
     /// A body goes as its entity does, or as it loses its `RigidBody2D`: what rested on it falls,

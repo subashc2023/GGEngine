@@ -246,7 +246,7 @@ pub(crate) fn between(from: &Transform, to: &Transform, alpha: f32) -> Transform
 #[cfg(test)]
 mod tests {
     use gg_core::math::Vec4;
-    use gg_renderer::{Draws, Sprite};
+    use gg_renderer::{Draws, Shaders, Sprite};
 
     use super::*;
     use crate::draw::{Scratch, draw_world};
@@ -275,7 +275,15 @@ mod tests {
     fn halfway(world: &World, past: &mut Past) -> Draws {
         past.resolve(world);
         let mut draws = Draws::default();
-        draw_world(world, past, 0.5, &mut draws, &mut Scratch::default());
+        let shaders = &mut Shaders::default();
+        draw_world(
+            world,
+            past,
+            0.5,
+            &mut draws,
+            shaders,
+            &mut Scratch::default(),
+        );
         draws
     }
 

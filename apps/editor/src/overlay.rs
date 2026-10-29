@@ -1,8 +1,8 @@
 //! What the editor draws over its view: a toolbar at the view's top left, which picks what the
-//! left button does, the projection and the grid, and plays the world and stops it; a gizmo at its
-//! top right, which shows which way
-//! the camera faces, and turns it; at its bottom left, the name of what the view shows under the
-//! cursor; and round its edges, while a scene from the Assets panel is held over it, an outline.
+//! left button does, the projection, the grid and the colliders' outlines, and plays the world and
+//! stops it; a gizmo at its top right, which shows which way the camera faces, and turns it; at
+//! its bottom left, the name of what the view shows under the cursor; and round its edges, while a
+//! scene from the Assets panel is held over it, an outline.
 
 use std::f32::consts::{PI, TAU};
 
@@ -32,7 +32,8 @@ const LABEL: f32 = 18.0;
 const INSET: f32 = 8.0;
 
 /// What the toolbar sets: what the left button does over the view, whether the grid shows, and in
-/// which plane, whether the view sees through the world's camera, and whether the world plays.
+/// which plane, whether the view sees through the world's camera, whether the world's colliders'
+/// outlines show, and whether the world plays.
 pub struct Toolbar {
     pub tool: Tool,
     pub grid: bool,
@@ -40,6 +41,9 @@ pub struct Toolbar {
     /// Whether the view sees through the world's camera, as the game would, rather than the
     /// editor's, and shows neither the grid nor the gizmo.
     pub world_camera: bool,
+    /// Whether the world's 2D colliders' outlines show, over the rest of the view, through either
+    /// camera.
+    pub colliders: bool,
     /// Whether the world plays, as the game would: a copy of it, in its place until it stops.
     pub play: bool,
 }
@@ -51,6 +55,7 @@ impl Default for Toolbar {
             grid: true,
             plane: Plane::XY,
             world_camera: false,
+            colliders: false,
             play: false,
         }
     }
@@ -60,10 +65,10 @@ impl Toolbar {
     /// Draws the toolbar into `ui`: the tools, whose tooltips name the keys that pick them, the
     /// camera's projection, which a click switches, the grid's switch and its plane, the switch
     /// that sees through the world's camera, which is off while the world has no primary camera,
-    /// as `has_camera` says, and Play, which plays the world and, lit, stops it, each with a
-    /// tooltip. While the view sees through the world's camera, the projection's and the grid's
-    /// buttons are off, since what they change doesn't show. It opens nothing, since a popup would
-    /// take the view's keys.
+    /// as `has_camera` says, the colliders' switch, and Play, which plays the world and, lit,
+    /// stops it, each with a tooltip. While the view sees through the world's camera, the
+    /// projection's and the grid's buttons are off, since what they change doesn't show. It opens
+    /// nothing, since a popup would take the view's keys.
     pub fn show(&mut self, ui: &mut egui::Ui, camera: &mut OrbitCamera, has_camera: bool) {
         // The key that snaps a drag of the handles, which egui's shortcuts take as the command key.
         let snaps = if cfg!(target_os = "macos") {
@@ -165,6 +170,15 @@ impl Toolbar {
                 if through.clicked() {
                     self.world_camera = !self.world_camera;
                 }
+                if icon_button(ui, Icon::Colliders, self.colliders)
+                    .on_hover_text(
+                        "Colliders: outlines each 2D collider where its entity draws, as physics \
+                         shapes it, whether the world plays or not",
+                    )
+                    .clicked()
+                {
+                    self.colliders = !self.colliders;
+                }
                 ui.separator();
                 let tip = if self.play {
                     "Stop: brings back the world as it was before Play, with its edits' history"
@@ -222,6 +236,8 @@ enum Icon {
     Grid,
     /// A film camera: its body, and its lens.
     Camera,
+    /// A square's outline and a circle's across its corner, as colliders' outlines.
+    Colliders,
     /// A triangle pointing right, as a player's.
     Play,
     /// A square, as a player's.
@@ -305,6 +321,11 @@ impl Icon {
                 let body = [at(1.5, 4.5), at(10.0, 4.5), at(10.0, 11.5), at(1.5, 11.5)];
                 painter.add(Shape::closed_line(body.to_vec(), line));
                 triangle([at(10.5, 8.0), at(15.0, 4.5), at(15.0, 11.5)]);
+            }
+            Self::Colliders => {
+                let square = Rect::from_min_max(at(1.5, 1.5), at(10.5, 10.5));
+                painter.rect_stroke(square, 0.0, line, StrokeKind::Middle);
+                painter.circle_stroke(at(10.5, 10.5), 4.5 * scale, line);
             }
             Self::Play => triangle([at(3.5, 2.0), at(3.5, 14.0), at(14.0, 8.0)]),
             Self::Stop => {

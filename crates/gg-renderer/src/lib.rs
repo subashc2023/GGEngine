@@ -1,12 +1,14 @@
-//! Turns the render data the engine hands it each frame into images, built on `gg-gpu`: meshes
-//! and sprites drawn in the game's view, as its camera sees them, with games' shaders and textures
-//! and the engine's own, models' unlit materials among them, and the UI over them; picks, which
-//! read back the ID of the draw the view shows at a pixel; and the render graph, lighting, PBR
-//! materials and post-processing to come.
+//! Turns the render data the engine hands it each frame into images, built on `gg-gpu`: meshes,
+//! sprites, circles and lines drawn in the game's view, as its camera sees them, with games' shaders
+//! and textures and the engine's own, models' unlit materials among them, and the UI over them;
+//! picks, which read back the ID of the draw the view shows at a pixel; and the render graph,
+//! lighting, PBR materials and post-processing to come.
 //!
 //! It knows nothing about the scene, ECS or gameplay. It receives plain data, so rendering
 //! can run on its own thread, a frame behind simulation.
 
+mod circle;
+mod line;
 mod mesh;
 mod model;
 mod pick;
@@ -24,7 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytemuck::NoUninit;
-use gg_core::math::{Mat3, Mat4};
+use gg_core::math::{Mat3, Mat4, Vec4};
 use gg_core::{Error, Result};
 use gg_gpu::{
     ColorImage, DepthImage, Device, Faces, Frames, IdImage, Instance, InstanceDesc, Surface,
@@ -32,7 +34,9 @@ use gg_gpu::{
 };
 use tracing::{info, trace};
 
+pub use circle::Circle;
 pub use gg_gpu::{Blend, MAX_TEXTURE_SIZE, Sampler, UploadPath, Validation, Window, Wrap};
+pub use line::Line;
 pub use mesh::{Mesh, MeshDraw, Meshes};
 pub use model::{AlphaMode, Material, ModelVertex};
 pub use pick::{MAX_PICKS, Pick};
@@ -62,9 +66,9 @@ pub struct Viewport {
 /// parameters, a texture among them: every draw draws both faces of its mesh's triangles but a
 /// material's that isn't double-sided. Each draw has an ID, a 64-bit number that the view writes
 /// where it shows, which [picks](Pick) read back: what the engine gives it, an entity's ID for a
-/// draw of the world's; 0 for a draw of no entity, as [`push`](Self::push) and
-/// [`push_sprite`](Self::push_sprite) give. Clearing it keeps its memory, so that a frame that
-/// draws no more than the last allocates nothing.
+/// draw of the world's; 0 for a draw of no entity, as [`push`](Self::push),
+/// [`push_sprite`](Self::push_sprite) and [`push_circle`](Self::push_circle) give. Clearing it
+/// keeps its memory, so that a frame that draws no more than the last allocates nothing.
 #[derive(Debug, Default, PartialEq)]
 pub struct Draws {
     /// The runs, in order.
@@ -106,9 +110,21 @@ impl Draws {
         transform: Mat4,
         params: P,
     ) {
+        self.push_with_id(mesh, shader, transform, params, 0);
+    }
+
+    /// Draws as [`push`](Self::push) does, with the ID `id`.
+    fn push_with_id<V, P: NoUninit>(
+        &mut self,
+        mesh: Mesh<V>,
+        shader: Shader<V, P>,
+        transform: Mat4,
+        params: P,
+        id: u64,
+    ) {
         let (instance, start) = (self.transforms.len(), self.params.len());
         self.transforms.push(transform);
-        self.ids.push([0; 2]);
+        self.ids.push(halves(id));
         self.params.extend_from_slice(bytemuck::bytes_of(&params));
         self.extend_run(mesh.index, shader.index, Faces::Both, instance, start);
     }
@@ -144,20 +160,116 @@ impl Draws {
     /// [`push_sprite`](Self::push_sprite) does, but with its ID, making room for them and joining a
     /// run once for them all.
     pub fn extend_sprites(&mut self, sprites: impl ExactSizeIterator<Item = (Mat4, Sprite, u64)>) {
+        let sprites = sprites.map(|(transform, sprite, id)| (transform, sprite.params(), id));
+        self.extend_quads(sprite::SHADER, sprites);
+    }
+
+    /// Draws `circle` over the meshes drawn before it but where an opaque one is nearer, as
+    /// [`Circle`] describes, with the engine's circle shader, which `shaders` adds the first time
+    /// it's asked for. `transform` takes the circle's own space, where it's as large as fits a unit
+    /// square around the origin, to the world's. Its ID is 0, of no entity.
+    pub fn push_circle(&mut self, shaders: &mut Shaders, transform: Mat4, circle: Circle) {
+        self.push(sprite::QUAD, shaders.circle(), transform, circle.params());
+    }
+
+    /// Draws each of `circles`, a transform, a circle and its ID, in turn, as
+    /// [`push_circle`](Self::push_circle) does, but with its ID, making room for them and joining a
+    /// run once for them all.
+    pub fn extend_circles(
+        &mut self,
+        shaders: &mut Shaders,
+        circles: impl ExactSizeIterator<Item = (Mat4, Circle, u64)>,
+    ) {
+        // No circles ask for no shader, which would have a renderer make its pipeline.
+        if circles.len() == 0 {
+            return;
+        }
+        let circles = circles.map(|(transform, circle, id)| (transform, circle.params(), id));
+        self.extend_quads(shaders.circle(), circles);
+    }
+
+    /// Draws `line` over the meshes drawn before it but where an opaque one is nearer, as [`Line`]
+    /// describes, with the engine's line shader, which `shaders` adds the first time it's asked
+    /// for, and with the ID `id`: an entity's, or 0 for none. `transform` takes the space its
+    /// points are in to the world's, and leaves its width as it is, in the view's pixels.
+    pub fn push_line(&mut self, shaders: &mut Shaders, transform: Mat4, line: Line, id: u64) {
+        self.push_with_id(sprite::QUAD, shaders.line(), transform, line.params(), id);
+    }
+
+    /// Draws the outline of the square a unit across around the origin, in its XY plane, as a
+    /// sprite is, that `transform` places in the world: its four sides, each a line in `color`,
+    /// `width` pixels wide, as [`push_line`](Self::push_line) draws them with the ID `id`, which
+    /// meet at its corners.
+    pub fn push_rect(
+        &mut self,
+        shaders: &mut Shaders,
+        transform: Mat4,
+        color: Vec4,
+        width: f32,
+        id: u64,
+    ) {
+        let corners = sprite::CORNERS.map(|corner| corner.position);
+        for (i, &from) in corners.iter().enumerate() {
+            let to = corners[(i + 1) % corners.len()];
+            let line = Line {
+                from,
+                to,
+                color,
+                width,
+            };
+            self.push_line(shaders, transform, line, id);
+        }
+    }
+
+    /// Draws each of `quads`, a transform, parameters and an ID, on the engine's quad with
+    /// `shader`, making room for them and joining a run once for them all.
+    fn extend_quads<P: NoUninit>(
+        &mut self,
+        shader: Shader<sprite::Corner, P>,
+        quads: impl ExactSizeIterator<Item = (Mat4, P, u64)>,
+    ) {
         let (instance, start) = (self.transforms.len(), self.params.len());
-        self.params
-            .reserve(sprites.len() * size_of::<sprite::Params>());
-        self.ids.reserve(sprites.len());
+        self.params.reserve(quads.len() * size_of::<P>());
+        self.ids.reserve(quads.len());
         let (ids, params) = (&mut self.ids, &mut self.params);
-        let transforms = sprites.map(|(transform, sprite, id)| {
+        let transforms = quads.map(|(transform, quad, id)| {
             ids.push(halves(id));
-            params.extend_from_slice(bytemuck::bytes_of(&sprite.params()));
+            params.extend_from_slice(bytemuck::bytes_of(&quad));
             transform
         });
         self.transforms.extend(transforms);
         if self.transforms.len() > instance {
-            let (quad, shader) = (sprite::QUAD.index, sprite::SHADER.index);
-            self.extend_run(quad, shader, Faces::Both, instance, start);
+            let quad = sprite::QUAD.index;
+            self.extend_run(quad, shader.index, Faces::Both, instance, start);
+        }
+    }
+
+    /// Moves `other`'s draws after these, in their order, leaving it empty but with its memory, as
+    /// though they'd been drawn here.
+    pub fn append(&mut self, other: &mut Draws) {
+        let (instance, start) = (self.transforms.len(), self.params.len());
+        self.transforms.append(&mut other.transforms);
+        self.ids.append(&mut other.ids);
+        self.params.append(&mut other.params);
+        for run in other.runs.drain(..) {
+            let instances = instance + run.instances.start..instance + run.instances.end;
+            let params = start + run.params.start..start + run.params.end;
+            match self.runs.last_mut() {
+                // Its first run goes on from these' last, if it's of the same mesh, shader and
+                // faces: the last ends where it begins.
+                Some(last)
+                    if (last.mesh, last.shader, last.faces)
+                        == (run.mesh, run.shader, run.faces) =>
+                {
+                    last.instances.end = instances.end;
+                    last.params.end = params.end;
+                }
+                _ => self.runs.push(Run {
+                    instances,
+                    params,
+                    ..run
+                }),
+            }
         }
     }
 
@@ -575,7 +687,10 @@ impl Renderer {
                 let mut pass = frame
                     .begin_pass(view_target, c"view", clear, depth, Some(&mut *ids))
                     .expect("an offscreen image is always there");
-                let counts = self.meshes.draw(&mut pass, view_projection, data.draws)?;
+                let size = data.viewport.size;
+                let counts = self
+                    .meshes
+                    .draw(&mut pass, view_projection, size, data.draws)?;
                 drop(pass);
                 let pixels = self.picks.take(frame.number(), Some(ids.size()));
                 frame.read_ids(ids, pixels)?;
@@ -768,6 +883,48 @@ mod tests {
         assert_eq!(runs(&draws), [(1, 1, 0..1)]);
         assert_eq!(draws.params.len(), size_of::<Vec4>());
         assert_eq!(draws.ids, [[0; 2]]);
+    }
+
+    /// Circles and lines are runs of the engine's quad with shaders of their own, which `Shaders`
+    /// adds as each is first asked for, and no circles ask for none. Draws appended after others go
+    /// on in their order, with their IDs, the first joining the last run, of the same mesh, shader
+    /// and faces; those appended keep their memory alone.
+    #[test]
+    fn appended_draws_go_on_after_the_rest() {
+        let mut shaders = Shaders::default();
+        let at = |x: f32| Mat4::from_translation(Vec3::new(x, 0.0, 0.0));
+        let line = Line {
+            from: Vec3::ZERO,
+            to: Vec3::X,
+            color: Vec4::ONE,
+            width: 2.0,
+        };
+        let mut draws = Draws::default();
+        draws.extend_circles(&mut shaders, iter::empty());
+        assert_eq!(shaders.added.len(), 1, "the sprite shader alone");
+        draws.push_sprite(at(0.0), Sprite::default());
+        draws.push_circle(&mut shaders, at(1.0), Circle::default());
+        let mut over = Draws::default();
+        over.push_circle(&mut shaders, at(2.0), Circle::default());
+        over.push_line(&mut shaders, at(3.0), line, 7);
+        over.push_line(&mut shaders, at(4.0), line, 8 | 1 << 32);
+        let held = [over.transforms.capacity(), over.ids.capacity()];
+        draws.append(&mut over);
+        // The circle shader after the sprite's, then the line's.
+        assert_eq!(runs(&draws), [(0, 0, 0..1), (0, 1, 1..3), (0, 2, 3..5)]);
+        assert_eq!(draws.transforms, [0.0, 1.0, 2.0, 3.0, 4.0].map(at));
+        assert_eq!(draws.ids, [[0, 0], [0, 0], [0, 0], [7, 0], [8, 1]]);
+        let sizes = [
+            size_of::<sprite::Params>(),
+            size_of::<circle::Params>(),
+            size_of::<line::Params>(),
+        ];
+        let ends = [sizes[0], sizes[0] + 2 * sizes[1], draws.params.len()];
+        let params: Vec<_> = draws.runs.iter().map(|run| run.params.end).collect();
+        assert_eq!(params, ends);
+        assert_eq!(ends[2] - ends[1], 2 * sizes[2]);
+        assert!(over.is_empty());
+        assert_eq!([over.transforms.capacity(), over.ids.capacity()], held);
     }
 
     #[test]

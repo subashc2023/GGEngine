@@ -103,12 +103,13 @@ pub use gg_core::{plot, profile, zone};
 /// have one, which the engine draws as it draws the world.
 pub use gg_renderer::MeshDraw;
 /// What layers draw, which they add and draw through their [`Context`]: sprites, and the sprite
-/// sheets whose cells they show; meshes; shaders
+/// sheets whose cells they show; circles; lines; meshes; shaders
 /// for their vertex types, each added with how it blends; the textures those shaders and sprites
 /// sample, and the samplers they sample them with; the viewpoint the game's view sees them from,
 /// and its projection, which a [`Camera`] has too; and where that view is in the window.
 pub use gg_renderer::{
-    Blend, Mesh, Projection, Sampler, Shader, Sprite, SpriteSheet, Texture, Viewpoint, Viewport,
+    Blend, Circle, Line, Mesh, Projection, Sampler, Shader, Sprite, SpriteSheet, Texture,
+    Viewpoint, Viewport,
 };
 pub use input::Input;
 pub use inspector::{Inspector, InspectorLink};
@@ -120,7 +121,9 @@ pub use model::Model;
 pub use name::Name;
 pub use perf::PerfPanel;
 use perf::{Perf, Summary};
-pub use physics::{BodyType, BoxCollider2D, Physics2D, RigidBody2D, step_physics};
+pub use physics::{
+    BodyType, BoxCollider2D, CircleCollider2D, Physics2D, RigidBody2D, step_physics,
+};
 use recording::Recorder;
 #[doc(hidden)]
 pub use recording::Replay;

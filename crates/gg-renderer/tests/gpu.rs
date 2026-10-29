@@ -18,9 +18,10 @@ use std::sync::Arc;
 use bytemuck::NoUninit;
 use gg_core::math::{self, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{
-    AlphaMode, Blend, DrawCounts, Draws, Material, MeshDraw, Meshes, Mipmaps, ModelVertex, Pick,
-    Projection, RenderData, Renderer, Sampler, Settings, Shaders, Sprite, SpriteSheet, Texture,
-    Textures, Ui, UploadPath, Uploads, ViewCallback, Viewpoint, Viewport, Wrap,
+    AlphaMode, Blend, Circle, DrawCounts, Draws, Line, Material, MeshDraw, Meshes, Mipmaps,
+    ModelVertex, Pick, Projection, RenderData, Renderer, Sampler, Settings, Shaders, Sprite,
+    SpriteSheet, Texture, Textures, Ui, UploadPath, Uploads, ViewCallback, Viewpoint, Viewport,
+    Wrap,
 };
 
 fn main() {
@@ -52,6 +53,11 @@ fn main() {
         "batches_match_their_reference",
         batches_match_their_reference,
     );
+    run(
+        "circles_match_their_reference",
+        circles_match_their_reference,
+    );
+    run("lines_match_their_reference", lines_match_their_reference);
     run("views_match_their_reference", views_match_their_reference);
     run(
         "a_view_in_the_ui_matches_its_reference",
@@ -525,6 +531,215 @@ fn sprites_match_their_reference() {
         render_without_ui(&mut renderer, data);
     }
     check(renderer, "sprites", WIDTH, HEIGHT);
+}
+
+/// Draws circles into an offscreen image and compares it with its reference image: along the top,
+/// a white disc, an orange ring a fifth of its radius thick and a cyan disc faded over half its
+/// radius; along the bottom, a green ellipse, scaled unevenly, a purple disc half transparent over
+/// an orange sprite's corner and the clear color, and white discs 8 and 3 pixels across, their
+/// edges smoothed as much as the rest's. Each circle's quad shows what's behind it outside the
+/// circle, so that a shader that draws its whole quad, or drops its alpha, changes hundreds of
+/// pixels.
+fn circles_match_their_reference() {
+    const WIDTH: u32 = 240;
+    const HEIGHT: u32 = 160;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut meshes = Meshes::default();
+    let mut shaders = Shaders::default();
+    let mut textures = Textures::default();
+    let mut uploads = Uploads::default();
+    // 4 units from the view's bottom to its top, 40 pixels a unit, and 6 across, around the origin.
+    let viewpoint = Viewpoint {
+        projection: Projection::Orthographic {
+            height: 4.0,
+            near: -1.0,
+            far: 1.0,
+        },
+        ..Viewpoint::default()
+    };
+    // `width` by `height` units, centered at (`x`, `y`).
+    let place = |[x, y]: [f32; 2], [width, height]: [f32; 2]| {
+        Mat4::from_translation(Vec3::new(x, y, 0.0))
+            * Mat4::from_scale(Vec3::new(width, height, 1.0))
+    };
+    let colored = |color: [f32; 4]| Circle {
+        color: Vec4::from(color),
+        ..Circle::default()
+    };
+    let mut draws = Draws::default();
+    // First, for the purple disc to go over.
+    let orange = Sprite {
+        color: Vec4::new(0.9, 0.4, 0.1, 1.0),
+        ..Sprite::default()
+    };
+    draws.push_sprite(place([0.25, -1.25], [1.0, 1.0]), orange);
+    let ring = Circle {
+        thickness: 0.2,
+        ..colored([0.9, 0.5, 0.1, 1.0])
+    };
+    let faded = Circle {
+        fade: 0.5,
+        ..colored([0.1, 0.8, 0.9, 1.0])
+    };
+    for (at, size, circle) in [
+        ([-2.0, 1.0], [1.5, 1.5], Circle::default()),
+        ([0.0, 1.0], [1.5, 1.5], ring),
+        ([2.0, 1.0], [1.5, 1.5], faded),
+        ([-1.75, -1.0], [2.2, 1.2], colored([0.2, 0.8, 0.3, 1.0])),
+        ([0.75, -0.75], [1.2, 1.2], colored([0.6, 0.2, 0.9, 0.5])),
+        ([2.0, -1.0], [0.2, 0.2], Circle::default()),
+        ([2.5, -1.0], [0.075, 0.075], Circle::default()),
+    ] {
+        draws.push_circle(&mut shaders, place(at, size), circle);
+    }
+    // More frames than are in flight.
+    for _ in 0..3 {
+        uploads.take(&mut meshes, &mut shaders, &mut textures);
+        let data = RenderData {
+            clear_color: CLEAR,
+            viewport: Viewport {
+                origin: [0, 0],
+                size: [WIDTH, HEIGHT],
+            },
+            viewpoint,
+            uploads: &mut uploads,
+            draws: &draws,
+            picks: &[],
+        };
+        render_without_ui(&mut renderer, data);
+    }
+    check(renderer, "circles", WIDTH, HEIGHT);
+}
+
+/// Draws lines into an offscreen image, as a camera with perspective sees them, and compares it with
+/// its reference image: across the top, lines 1, 2, 4 and 8 pixels wide, and one half a pixel wide,
+/// which draws a pixel wide and half as bright; a square's outline, turned, whose sides meet at its
+/// corners; a line from near the camera to far away, as wide all along it; a line on to behind the
+/// camera, cut where it crosses the near plane, without which it would show mirrored through the
+/// view's middle; a line behind an opaque square, which hides its middle, and another in front of
+/// the square; and a line 10 pixels wide, half transparent, over a sprite.
+fn lines_match_their_reference() {
+    const WIDTH: u32 = 240;
+    const HEIGHT: u32 = 160;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut meshes = Meshes::default();
+    let mut shaders = Shaders::default();
+    let mut textures = Textures::default();
+    let mut uploads = Uploads::default();
+    // 4 in front of the origin, seeing a sixth of a turn from the view's bottom to its top: at z =
+    // 0, about 4.6 units, 34.6 pixels a unit.
+    let viewpoint = Viewpoint {
+        position: Vec3::new(0.0, 0.0, 4.0),
+        projection: Projection::Perspective {
+            fov: PI / 3.0,
+            near: 0.5,
+        },
+        ..Viewpoint::default()
+    };
+    let flat = shaders
+        .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+        .expect("a shader");
+    let corners = [
+        [-0.5, -0.5, 0.0],
+        [0.5, -0.5, 0.0],
+        [0.5, 0.5, 0.0],
+        [-0.5, 0.5, 0.0],
+    ];
+    let square = meshes
+        .add("square", &corners, &[0, 1, 2, 2, 3, 0])
+        .expect("a mesh");
+    let mut draws = Draws::default();
+    let mut line = |draws: &mut Draws,
+                    transform: Mat4,
+                    [from, to]: [[f32; 3]; 2],
+                    color: [f32; 4],
+                    width: f32| {
+        let drawn = Line {
+            from: Vec3::from(from),
+            to: Vec3::from(to),
+            color: Vec4::from(color),
+            width,
+        };
+        draws.push_line(&mut shaders, transform, drawn, 0);
+    };
+    for (y, color, width) in [
+        (2.0, [0.9, 0.9, 0.9, 1.0], 1.0),
+        (1.75, [0.9, 0.3, 0.3, 1.0], 2.0),
+        (1.5, [0.3, 0.9, 0.3, 1.0], 4.0),
+        (1.2, [0.3, 0.5, 0.9, 1.0], 8.0),
+        (0.9, [0.9, 0.9, 0.9, 1.0], 0.5),
+    ] {
+        let ends = [[-3.2, y, 0.0], [-0.8, y, 0.0]];
+        line(&mut draws, Mat4::IDENTITY, ends, color, width);
+    }
+    let receding = [[-1.0, -0.8, 2.5], [-1.0, -0.8, -40.0]];
+    line(
+        &mut draws,
+        Mat4::IDENTITY,
+        receding,
+        [0.1, 0.8, 0.9, 1.0],
+        3.0,
+    );
+    let behind = [[1.0, -1.0, 0.0], [1.0, -1.0, 8.0]];
+    line(
+        &mut draws,
+        Mat4::IDENTITY,
+        behind,
+        [0.9, 0.2, 0.8, 1.0],
+        4.0,
+    );
+    let gray = Vec4::new(0.5, 0.5, 0.5, 1.0);
+    let hiding =
+        Mat4::from_translation(Vec3::new(2.2, -1.4, 0.5)) * Mat4::from_scale(Vec3::splat(0.8));
+    draws.push(square, flat, hiding, gray);
+    let hidden = [[1.5, -1.4, 0.0], [2.9, -1.4, 0.0]];
+    line(
+        &mut draws,
+        Mat4::IDENTITY,
+        hidden,
+        [0.9, 0.5, 0.1, 1.0],
+        4.0,
+    );
+    let shown = [[1.8, -1.0, 1.0], [2.5, -1.7, 1.0]];
+    line(&mut draws, Mat4::IDENTITY, shown, [0.9, 0.5, 0.1, 1.0], 4.0);
+    let orange = Sprite {
+        color: Vec4::new(0.9, 0.4, 0.1, 1.0),
+        ..Sprite::default()
+    };
+    draws.push_sprite(Mat4::from_translation(Vec3::new(0.2, 0.2, 0.0)), orange);
+    let across = [[-0.6, -0.4, 0.0], [1.0, 0.8, 0.0]];
+    line(
+        &mut draws,
+        Mat4::IDENTITY,
+        across,
+        [0.2, 0.4, 1.0, 0.5],
+        10.0,
+    );
+    // A square 1.2 across, turned 30°.
+    let turned = Mat4::from_scale_rotation_translation(
+        Vec3::splat(1.2),
+        Quat::from_rotation_z(PI / 6.0),
+        Vec3::new(1.8, 1.3, 0.0),
+    );
+    let yellow = Vec4::new(0.9, 0.8, 0.1, 1.0);
+    draws.push_rect(&mut shaders, turned, yellow, 3.0, 0);
+    // More frames than are in flight.
+    for _ in 0..3 {
+        uploads.take(&mut meshes, &mut shaders, &mut textures);
+        let data = RenderData {
+            clear_color: CLEAR,
+            viewport: Viewport {
+                origin: [0, 0],
+                size: [WIDTH, HEIGHT],
+            },
+            viewpoint,
+            uploads: &mut uploads,
+            draws: &draws,
+            picks: &[],
+        };
+        render_without_ui(&mut renderer, data);
+    }
+    check(renderer, "lines", WIDTH, HEIGHT);
 }
 
 /// Draws three runs into an offscreen image, each one instanced draw, which `Renderer::drawn`
@@ -1452,9 +1667,10 @@ fn mixed_textures_match_their_reference() {
 /// pixels, and each pick is answered as the frame two after the one that asked it begins, with
 /// what drew on top there in its own frame: the later sprite where they overlap, and the other
 /// alone; a game's mesh; the mesh through a sprite's wholly transparent texel, and the sprite
-/// through its opaque one; a half transparent sprite over the mesh; a model; 0 for a layer's sprite
-/// over the mesh, and for the clear, where a sprite of the odd frames alone drew in the frame
-/// before. Picks outside the view are answered 0 in the frame that asks them. Frame 3 picks
+/// through its opaque one; a half transparent sprite over the mesh; a model; a circle in its middle,
+/// and the clear at its quad's corner, outside it; a line of its own ID; 0 for a layer's sprite over
+/// the mesh, beside the line, and for the clear, where a sprite of the odd frames alone drew in the
+/// frame before. Picks outside the view are answered 0 in the frame that asks them. Frame 3 picks
 /// nothing, so frame 5 answers nothing.
 fn picks_answer_what_their_frame_drew() {
     const WIDTH: u32 = 96;
@@ -1468,6 +1684,8 @@ fn picks_answer_what_their_frame_drew() {
     const BLENDED: u64 = 6;
     const TOP: u64 = 7;
     const ODD: u64 = 8;
+    const CIRCLE: u64 = 9;
+    const LINE: u64 = 10;
     let mut renderer = renderer(WIDTH, HEIGHT);
     let mut meshes = Meshes::default();
     let mut shaders = Shaders::default();
@@ -1535,8 +1753,22 @@ fn picks_answer_what_their_frame_drew() {
         ..Sprite::default()
     };
     let id = |kind: u64, frame: u64| kind << 32 | frame;
-    let scene = |frame: u64| {
+    let scene = |frame: u64, shaders: &mut Shaders| {
         let mut draws = Draws::default();
+        let circle = Circle {
+            color: Vec4::new(0.8, 0.8, 0.2, 1.0),
+            ..Circle::default()
+        };
+        let circle = (over([2.0, 28.0], [18.0, 44.0]), circle, id(CIRCLE, frame));
+        draws.extend_circles(shaders, [circle].into_iter());
+        // In view pixels from (42, 30) to (62, 30), 3 wide.
+        let line = Line {
+            from: Vec3::new(10.0, -6.0, 0.0),
+            to: Vec3::new(30.0, -6.0, 0.0),
+            color: Vec4::new(0.9, 0.3, 0.9, 1.0),
+            width: 3.0,
+        };
+        draws.push_line(shaders, Mat4::IDENTITY, line, id(LINE, frame));
         draws.push_draw(over([20.0, 2.0], [40.0, 22.0]), &mesh, id(MESH, frame));
         draws.push_draw(over([44.0, 2.0], [56.0, 14.0]), &model, id(MODEL, frame));
         let first = (over([2.0, 2.0], [12.0, 12.0]), tinted([0.9, 0.4, 0.1, 1.0]));
@@ -1577,6 +1809,10 @@ fn picks_answer_what_their_frame_drew() {
         ([24, 16], 0),
         ([50, 8], MODEL),
         ([60, 40], ODD),
+        ([10, 36], CIRCLE),
+        ([3, 29], 0),
+        ([50, 30], LINE),
+        ([50, 33], 0),
         ([64, 10], 0),
         ([10, 48], 0),
     ];
@@ -1600,7 +1836,7 @@ fn picks_answer_what_their_frame_drew() {
     };
     let mut answered = Vec::new();
     for frame in 1..=6 {
-        let draws = scene(frame);
+        let draws = scene(frame, &mut shaders);
         let picks: Vec<Pick> = if [1, 2, 4].contains(&frame) {
             let pick = |(i, &(pixel, _)): (usize, &([u32; 2], u64))| Pick {
                 tag: tag(frame, i),

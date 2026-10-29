@@ -21,6 +21,7 @@ use tracing::{debug, warn};
 
 use crate::model::{self, AlphaMode, ModelVertex};
 use crate::sprite::{self, Corner, Params};
+use crate::{circle, line};
 
 /// The slangc that compiled the renderer's own shaders, as the build found it.
 const SLANGC: &str = env!("GG_SLANGC");
@@ -77,9 +78,10 @@ pub struct Shaders {
     pub(crate) added: Vec<Added>,
     /// How many have been added.
     count: u32,
-    /// The handles of the engine's model shaders, for opaque, masked and blended materials, once
-    /// each has been asked for.
-    models: [Option<u32>; 3],
+    /// The handles of the engine's shaders that are added the first time they're asked for, once
+    /// each has been: its model shaders, for opaque, masked and blended materials, then its circle
+    /// shader and its line shader.
+    lazy: [Option<u32>; 5],
     /// The games' shaders, in the order they were added.
     sources: Vec<ShaderSource>,
 }
@@ -149,14 +151,16 @@ impl Shaders {
     ///   pixel, but its ID would hide what's behind it from picks.
     /// - Each run of consecutive draws of one mesh with it is one instanced draw, whose instances
     ///   are the draws. Its push constants are `struct { float4x4 clip_from_world; V* vertices;
-    ///   float4x4* transforms; uint2* ids; P* params; }`, the only 96 bytes set. The first is the
-    ///   camera's view and projection, from the world to Vulkan's clip space; the second, the
-    ///   address of the mesh's vertices; the third, of the instances' transforms, each from the
-    ///   mesh's own space to the world's, for `mul(clip_from_world, mul(transforms[instance],
-    ///   float4(position, 1.0)))`; the fourth, of the instances' IDs, each the low and high halves
-    ///   of a 64-bit number; the fifth, of the instances' parameters, one `P` each, back to back,
-    ///   which a shader that takes none leaves out. A shader may end the struct after the last of
-    ///   them it reads, and one that reads none has none.
+    ///   float4x4* transforms; uint2* ids; P* params; float2 view; }`, the only 104 bytes set. The
+    ///   first is the camera's view and projection, from the world to Vulkan's clip space; the
+    ///   second, the address of the mesh's vertices; the third, of the instances' transforms, each
+    ///   from the mesh's own space to the world's, for `mul(clip_from_world,
+    ///   mul(transforms[instance], float4(position, 1.0)))`; the fourth, of the instances' IDs,
+    ///   each the low and high halves of a 64-bit number; the fifth, of the instances' parameters,
+    ///   one `P` each, back to back; the sixth, the view's size in pixels, across then down, for
+    ///   what's sized on screen, as the engine's lines are. A shader that takes no parameters leaves
+    ///   out the fifth, and so the sixth. A shader may end the struct after the last of them it
+    ///   reads, and one that reads none has none.
     /// - It reads only the vertex at `SV_VulkanVertexID` and the instance at
     ///   `SV_VulkanInstanceID`, not `SV_VertexID` or `SV_InstanceID`, which need a feature the
     ///   engine doesn't enable, nor vertex attributes. A fragment shader that reads its instance's
@@ -283,12 +287,32 @@ impl Shaders {
             AlphaMode::Mask { .. } => (1, "model masked", model::MASKED_SPIRV, Blend::Opaque),
             AlphaMode::Blend => (2, "model blended", model::BLENDED_SPIRV, Blend::Alpha),
         };
-        if let Some(index) = self.models[slot] {
-            return Shader::new(index, writes_depth(blend));
-        }
-        let types = Types::of::<ModelVertex, model::Params>();
-        let index = self.push(name, spirv.to_vec(), blend, types);
-        self.models[slot] = Some(index);
+        self.lazy(slot, name, spirv, blend)
+    }
+
+    /// The engine's circle shader, which the build compiled, added as the model shaders are the
+    /// first time it's asked for.
+    pub(crate) fn circle(&mut self) -> Shader<Corner, circle::Params> {
+        self.lazy(3, "circle", circle::SPIRV, Blend::Alpha)
+    }
+
+    /// The engine's line shader, which the build compiled, added as the model shaders are the
+    /// first time it's asked for.
+    pub(crate) fn line(&mut self) -> Shader<Corner, line::Params> {
+        self.lazy(4, "line", line::SPIRV, Blend::Alpha)
+    }
+
+    /// The engine's shader in slot `slot` of `lazy`, `name`, compiled to `spirv`, which draws
+    /// meshes of `V` with parameters `P` and blends as `blend` says: added the first time it's
+    /// asked for, and then the same.
+    fn lazy<V, P>(&mut self, slot: usize, name: &str, spirv: &[u8], blend: Blend) -> Shader<V, P> {
+        let index = match self.lazy[slot] {
+            Some(index) => index,
+            None => {
+                let index = self.push(name, spirv.to_vec(), blend, Types::of::<V, P>());
+                *self.lazy[slot].insert(index)
+            }
+        };
         Shader::new(index, writes_depth(blend))
     }
 }
@@ -298,7 +322,7 @@ impl Default for Shaders {
         let mut shaders = Self {
             added: Vec::new(),
             count: 0,
-            models: [None; 3],
+            lazy: [None; 5],
             sources: Vec::new(),
         };
         let types = Types::of::<Corner, Params>();
@@ -686,6 +710,8 @@ mod tests {
         let models = Types::of::<ModelVertex, model::Params>();
         let engines = [
             (sprite::SPIRV, Types::of::<Corner, Params>()),
+            (circle::SPIRV, Types::of::<Corner, circle::Params>()),
+            (line::SPIRV, Types::of::<Corner, line::Params>()),
             (model::OPAQUE_SPIRV, models),
             (model::MASKED_SPIRV, models),
             (model::BLENDED_SPIRV, models),
@@ -734,7 +760,10 @@ mod tests {
         );
         says(
             refusal::<Vertex, Color>("push_extra.slang"),
-            &["it reads brightness from its push constants, past the 96 bytes"],
+            &[
+                "its push constants' view isn't a float2",
+                "it reads brightness from its push constants, past the 104 bytes",
+            ],
         );
         says(
             refusal::<Vertex, Color>("float_ids.slang"),

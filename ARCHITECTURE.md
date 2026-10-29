@@ -81,7 +81,9 @@ sandbox  editor   player       apps/: executables
   plays, and saves the world's entities as one, as they were edited while it plays, through the
   OS's file dialogs, with Ctrl+N, Ctrl+O, Ctrl+S and Ctrl+Shift+S. Its Assets panel, a content
   browser, shows the files in its assets folder, beside its source, until the tool API brings a
-  game's, a folder at a time; a scene dragged from it onto the view opens as Open opens one.
+  game's, a folder at a time; a scene dragged from it onto the view opens as Open opens one. Its
+  toolbar's Colliders switch has the engine outline the world's 2D colliders, through either camera,
+  whether the world plays or not.
 - **`player`:** the reference player. It runs a cooked scene without game code and shows how a
   game builds its own player.
 
@@ -673,20 +675,30 @@ and scenes, physics and the editor share these axes.
 
 2D physics is rapier's, in gg-engine's `physics` module, and games reach it through components: an
 entity with a `Transform` and a `RigidBody2D` is a body, dynamic, kinematic or static, moving in the
-XY plane, its velocities in the component; and a `BoxCollider2D` beside it is the box it collides
-as, in its entity's space, so that it turns and scales with it. `step_physics` is a system a
-layer's tick runs, after what sets velocities, such as scripts: it takes in the bodies that came
-and went, and the changes to their components that its last step didn't make, a game's or an
-edit's; steps rapier a tick; and writes each body's translation across and up and its velocities
-back, and turns its rotation about Z as far as the body turned, so that its z and any tilt stay.
-rapier's state, its bodies, colliders and contacts and what sleeps, is the world's `Physics2D`
-resource, which the first step makes, with Earth's gravity as though a unit were a meter: so
-snapshots copy it, and a restored world steps as the one it was taken from did, which bodies made
-again from their components alone wouldn't. Its workspace isn't state, and a copy makes its own.
-rapier2d is built with `enhanced-determinism`, so that a step gives the same bits on every platform,
-which a test of a pile of boxes' hash checks in CI; its glam is another version than the engine's,
+XY plane, its velocities in the component; and a `BoxCollider2D` or a `CircleCollider2D` beside it,
+or both, is the shape it collides as, in its entity's space, so that it turns and scales with it: a
+box's size and offset scale across and up as its entity does, and a circle, which can't stretch, has
+its offset so scaled and its radius scaled by the larger of the two. `step_physics` is a system a
+layer's tick runs, after what sets velocities, such as scripts: it takes in the bodies that came and
+went, and the changes to their components that its last step didn't make, a game's or an edit's;
+steps rapier a tick; and writes each body's translation across and up and its velocities back, and
+turns its rotation about Z as far as the body turned, so that its z and any tilt stay. rapier's
+state, its bodies, colliders and contacts and what sleeps, is the world's `Physics2D` resource,
+which the first step makes, with Earth's gravity as though a unit were a meter: so snapshots copy
+it, and a restored world steps as the one it was taken from did, which bodies made again from their
+components alone wouldn't. Its workspace isn't state, and a copy makes its own. rapier2d is built
+with `enhanced-determinism`, so that a step gives the same bits on every platform, which a test of
+the hash of a pile of boxes and balls checks in CI; its glam is another version than the engine's,
 so vectors cross between them as numbers. A body under a parent isn't moved, since its transform is
 in its parent's space, and is warned of once (`physics.child_body`).
+
+`Context::set_colliders_shown` has every frame outline each collider whose entity has a `Transform`,
+as physics shapes it, where its entity draws, between ticks too: in lines 2 points wide, which draw
+over everything else (see [Rendering](#rendering)), with its entity's ID, so that a pick of an
+outline finds its entity. It outlines a collider whether physics moves its entity or not, as it
+doesn't without a `RigidBody2D` or under a parent, so that what's being made shows as it's made.
+Outlines draw over the rest rather than nudged toward the camera, so that they show from behind a
+sprite as from in front of it, and sprites, which test depth without writing it, never hide them.
 
 ## Rendering
 
@@ -710,13 +722,13 @@ draws at one z stack.
 Layers add shaders, meshes and textures and draw them through their `Context`, and the renderer's `Shaders`, `Meshes` and `Textures` hand out their handles at once, on the main
 thread; each frame's render data carries what's been added to them since, in order. After the
 frame's ticks and the layers' updates, the engine draws the world's entities that have a
-`Transform` and a sprite or a `MeshDraw`, a mesh with its shader and parameters held without
+`Transform` and a sprite, a circle or a `MeshDraw`, a mesh with its shader and parameters held without
 their types, after what the layers drew, children where their ancestors carry them: first the
 meshes whose shaders are opaque, whose depth hides what's behind them whatever order they draw
 in, by shader, then mesh, so that each mesh with each shader is one instanced draw, split only where
 a culling mesh's draws change between mirrored and not, and their z's never sort them; then what
-blends, back to front by their z's in the world, -0.0 as 0.0, those at one z drawing sprites under
-meshes; each batch and each z in the order of their IDs, which overlapping entities keep as others
+blends, back to front by their z's in the world, -0.0 as 0.0, those at one z drawing sprites, then
+circles, under meshes; each batch and each z in the order of their IDs, which overlapping entities keep as others
 come and go.
 World z orders what blends rightly as seen from in front of layers parallel to XY, as 2D cameras see
 them; from behind or the side, what blends draws in the wrong order among itself, though rightly
@@ -729,7 +741,7 @@ Every draw into the view writes its ID beside its color, into an image of IDs th
 64-bit number as two 32-bit halves, which each frame clears to 0: the world's draws their
 entities' IDs, and a layer's own draws 0. IDs don't blend: a draw's replaces what's under it
 wherever it shows, so a shader that blends discards what's fully transparent, as the engine's
-sprite and model shaders do, for what's behind it to show through to picks too. `Context::pick`
+sprite, circle, line and model shaders do, for what's behind it to show through to picks too. `Context::pick`
 asks which entity the view shows at a pixel of the main window, and gives a ticket, or none past
 the 64 a frame reads back; `Context::picked` gives the answers that came back with the last frame,
 for a frame. The frame that renders the view reads its picks' pixels back after its pass, into
@@ -870,7 +882,8 @@ projection that can't project, which rendering would panic on, is refused wherev
 makes one (`engine.bad_projection`), so that no scene, operation or Inspector edit panics the
 render thread. A camera keeps no aspect ratio of its own until cameras render into targets of
 their own. Each frame the renderer pushes the view's matrices, column-major as glam's are, with
-the addresses of the vertices and of the draws' transforms, IDs and parameters: a shader places
+the addresses of the vertices and of the draws' transforms, IDs and parameters, and the view's size
+in pixels: a shader places
 each vertex by its draw's transform, into the world, then by the view's.
 
 A layer sets the view's viewpoint for a frame in place of the world's camera, a position, a
@@ -901,6 +914,24 @@ beside it, and sheets need no space between their cells. So a tiled sprite's out
 don't blend with those they'd wrap to either, nor, filtered linearly, sprites side by side with
 each other; games' own shaders sample as they choose. It holds for the textures layers add, which
 have one level and are sampled without anisotropy, either of which reads past those texels.
+
+Circles and lines are draws on the same quad. A `Circle` is a color, how far in from its edge it's
+filled, as a fraction of its radius, 1 a disc and less a ring, and how far in from each edge it
+fades; `Context::draw_circle` draws one with the engine's circle shader, filling the unit square a
+transform places, as a sprite does. Its edges are smoothed over a pixel by the shader's derivatives,
+however large it shows, and the world draws an entity's `Circle` as it does a sprite.
+`Context::draw_line` draws a line between two points in the world, a number of the view's pixels
+wide however near or far it is, its ends squared off half its width past its points, so that
+`Context::draw_rect`'s four sides meet at a square's corners. The line shader lays the quad along
+the line as the view shows it, which the view's size in pixels is pushed for; cuts it where it
+crosses the near plane; smooths its edges over a pixel; and draws a line thinner than a pixel a
+pixel wide, as much fainter. Lines are quads rather than Vulkan's lines, since a draw's lines are
+all one width, widths past a pixel are an optional feature, and so is smoothing them: as quads, a
+run of lines of any widths is one instanced draw, as sprites are, and draws the same on every
+device. Lines go in a list of draws of their own, which the frame draws after everything else, the
+world's draws too, so that they show over all of it but where an opaque mesh is nearer, as debugging
+wants. Both shaders discard what's fully transparent, as the sprite shader does, and each is added
+the first time something draws with it, as the model shader's forms are.
 
 3D games draw models: `Context::add_model` reads a glTF 2.0 file and adds its meshes and its
 images, as textures, once, and `Model::spawn` places its default scene in a world as entities, as

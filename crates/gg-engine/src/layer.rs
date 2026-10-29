@@ -8,20 +8,21 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytemuck::NoUninit;
-use gg_core::math::{Mat4, Vec2};
+use gg_core::math::{Mat4, Vec2, Vec3, Vec4};
 use gg_core::{Error, Result};
 use gg_renderer::{
-    Blend, Draws, MAX_PICKS, Mesh, Meshes, Mipmaps, Shader, Shaders, Sprite, SpriteSheet, Texture,
-    Textures, Viewpoint, Viewport,
+    Blend, Circle, Draws, Line, MAX_PICKS, Mesh, Meshes, Mipmaps, Shader, Shaders, Sprite,
+    SpriteSheet, Texture, Textures, Viewpoint, Viewport,
 };
 use tracing::info;
 
 use crate::camera::{self, Camera, Tie};
-use crate::draw::{self, Scratch};
+use crate::draw::{self, Poses, Scratch};
 use crate::gltf;
 use crate::image::{self, Image};
 use crate::interpolation::Past;
 use crate::perf::Perf;
+use crate::physics::{self, CircleCollider2D};
 use crate::recording::Recorder;
 use crate::reflect::{Reflect, Value};
 use crate::render_thread::Extracted;
@@ -186,6 +187,10 @@ pub struct Context {
     textures: Textures,
     /// What to draw this frame.
     draws: Draws,
+    /// What to draw this frame over the rest, after the world: lines.
+    over: Draws,
+    /// Whether the world's colliders' outlines draw, over the rest.
+    colliders: bool,
     /// Where the game's view was as the last frame handed it off, while it had an area.
     view: Option<Viewport>,
     /// The number of the next pick's ticket.
@@ -245,7 +250,9 @@ impl Context {
             world.register::<Camera>()?;
             world.register::<Name>()?;
             world.register::<RigidBody2D>()?;
-            world.register::<BoxCollider2D>()
+            world.register::<BoxCollider2D>()?;
+            world.register::<Circle>()?;
+            world.register::<CircleCollider2D>()
         });
         registered.expect("the engine's components describe themselves");
         Self {
@@ -259,6 +266,8 @@ impl Context {
             shaders: Shaders::default(),
             textures: Textures::default(),
             draws: Draws::default(),
+            over: Draws::default(),
+            colliders: false,
             view: None,
             tickets: 0,
             picks: Vec::new(),
@@ -511,14 +520,63 @@ impl Context {
         self.draws.push_sprite(transform, sprite);
     }
 
+    /// Draws `circle` this frame, where `transform` places it in the world, over the meshes drawn
+    /// before it but where an opaque one is nearer, in the game's view as the camera sees it.
+    /// Unscaled, a circle is a unit across, around the transform's translation, as [`Circle`]
+    /// says. It's of no entity, so a [pick](Self::pick) where it's on top finds none.
+    pub fn draw_circle(&mut self, transform: Mat4, circle: Circle) {
+        self.draws.push_circle(&mut self.shaders, transform, circle);
+    }
+
+    /// Draws a line from `from` to `to` in the world this frame, `width` pixels of the view wide
+    /// however near or far it is, in `color`, linear RGBA with alpha not multiplied in, as
+    /// [`Line`] says: over everything else the view draws, the world's entities as well as what
+    /// layers draw, but where an opaque mesh is nearer, so that it shows as debugging wants. It's
+    /// of no entity, so a [pick](Self::pick) where it's on top finds none.
+    pub fn draw_line(&mut self, from: Vec3, to: Vec3, color: Vec4, width: f32) {
+        let line = Line {
+            from,
+            to,
+            color,
+            width,
+        };
+        self.over
+            .push_line(&mut self.shaders, Mat4::IDENTITY, line, 0);
+    }
+
+    /// Draws the outline of the square that `transform` places in the world this frame, a unit
+    /// across around its translation unscaled, as a sprite is: its four sides, as
+    /// [`draw_line`](Self::draw_line) draws lines, which meet at its corners.
+    pub fn draw_rect(&mut self, transform: Mat4, color: Vec4, width: f32) {
+        self.over
+            .push_rect(&mut self.shaders, transform, color, width, 0);
+    }
+
+    /// Whether the world's colliders' outlines draw, as
+    /// [`set_colliders_shown`](Self::set_colliders_shown) says: not at first.
+    pub fn colliders_shown(&self) -> bool {
+        self.colliders
+    }
+
+    /// Has the world's colliders' outlines draw each frame from then on, or not: each
+    /// [`BoxCollider2D`] and [`CircleCollider2D`] whose entity has a
+    /// [`Transform`](crate::Transform), as physics shapes it, 2 points wide in light green, where
+    /// its entity draws, over everything else the view draws, as lines are; with its entity's ID,
+    /// so that a [pick](Self::pick) of an outline finds its entity. A collider's outline draws
+    /// whether physics moves its entity or not, as it doesn't without a
+    /// [`RigidBody2D`](crate::RigidBody2D) or under a parent.
+    pub fn set_colliders_shown(&mut self, shown: bool) {
+        self.colliders = shown;
+    }
+
     /// The world: its entities and their components, as the frame's ticks left it. After the
     /// layers' updates each frame, the engine draws those with a [`Transform`](crate::Transform)
-    /// and a [`Sprite`] or a [`MeshDraw`](crate::MeshDraw), after what the layers drew themselves:
-    /// the meshes whose shaders are opaque first, whatever their z's, by shader, then mesh, then
-    /// the rest back to front by their z's in the world, at one z sprites under meshes, each in the
-    /// order of their IDs, children where their parents carry them; each on its way from where
-    /// it was as the latest tick started to where the tick left it, so up to a tick behind the
-    /// world here.
+    /// and a [`Sprite`], a [`Circle`] or a [`MeshDraw`](crate::MeshDraw), after what the layers
+    /// drew themselves: the meshes whose shaders are opaque first, whatever their z's, by shader,
+    /// then mesh, then the rest back to front by their z's in the world, at one z sprites, then
+    /// circles, under meshes, each in the order of their IDs, children where their parents carry
+    /// them; each on its way from where it was as the latest tick started to where the tick left
+    /// it, so up to a tick behind the world here.
     pub fn world(&self) -> &World {
         &self.world
     }
@@ -569,18 +627,30 @@ impl Context {
     }
 
     /// Draws the world's entities, after what the layers drew this frame, each `alpha` of the way
-    /// from where it was as the latest tick started to where the tick left it; and finds where the
-    /// world's camera sees from, as it draws.
+    /// from where it was as the latest tick started to where the tick left it, and their colliders'
+    /// outlines, over the rest, while they're shown; and finds where the world's camera sees from,
+    /// as it draws.
     pub(crate) fn draw_world(&mut self, alpha: f32) {
         self.past.resolve(&self.world);
         let (world, past) = (&self.world, &self.past);
-        draw::draw_world(world, past, alpha, &mut self.draws, &mut self.scratch);
+        let (draws, shaders) = (&mut self.draws, &mut self.shaders);
+        draw::draw_world(world, past, alpha, draws, shaders, &mut self.scratch);
         self.seen = camera::seen(world, past, alpha, &mut self.tie);
+        if self.colliders
+            && let Some(poses) = Poses::new(world, past, alpha)
+        {
+            let scale = self
+                .window
+                .as_ref()
+                .map_or(1.0, |window| window.scale() as f32);
+            physics::draw_colliders(world, &poses, scale, &mut self.over, shaders);
+        }
     }
 
     /// Fills in `frame` with this frame's render data, with the game's view at `viewport`, which
-    /// [`view`](Self::view) gives from then on: its draws, for the last frame's, which it forgets,
-    /// keeping their memory for the next; the viewpoint a layer set this frame, which it forgets
+    /// [`view`](Self::view) gives from then on: its draws, those over the rest last, for the last
+    /// frame's, which it forgets, keeping their memory for the next; the viewpoint a layer set this
+    /// frame, which it forgets
     /// too, or else where the world's camera sees from, or else the default; what's been added
     /// since a frame last took it, after what `frame` still holds; and the picks asked this frame,
     /// each at the pixel of the view under it, the floor of where it was asked less the view's
@@ -590,6 +660,7 @@ impl Context {
         frame.viewport = viewport;
         self.view = (viewport.size[0] > 0 && viewport.size[1] > 0).then_some(viewport);
         frame.viewpoint = self.viewpoint.take().or(self.seen).unwrap_or_default();
+        self.draws.append(&mut self.over);
         mem::swap(&mut frame.draws, &mut self.draws);
         self.draws.clear();
         (frame.uploads).take(&mut self.meshes, &mut self.shaders, &mut self.textures);

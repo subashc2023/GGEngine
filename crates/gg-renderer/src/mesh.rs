@@ -342,9 +342,10 @@ impl MeshPass {
         Ok(())
     }
 
-    /// Draws `draws` over the whole of the pass's target, where `view_projection` takes the world
-    /// to clip space, each run of them as one instanced draw, and copies each run's transforms, IDs
-    /// and parameters into the frame for its shader. Returns what it drew.
+    /// Draws `draws` over the whole of the pass's target, `view` pixels across and down, where
+    /// `view_projection` takes the world to clip space, each run of them as one instanced draw, and
+    /// copies each run's transforms, IDs and parameters into the frame for its shader. Returns what
+    /// it drew.
     ///
     /// # Panics
     ///
@@ -356,6 +357,7 @@ impl MeshPass {
         &self,
         pass: &mut Pass<'_, '_>,
         view_projection: Mat4,
+        view: [u32; 2],
         draws: &Draws,
     ) -> Result<DrawCounts> {
         let _zone = gg_core::zone!();
@@ -407,6 +409,7 @@ impl MeshPass {
                 transforms,
                 ids,
                 params,
+                view: view.map(|side| side as f32),
             };
             pass.push_constants(bytemuck::bytes_of(&push));
             pass.draw_indexed(&mesh.indices, 0, mesh.count, 0, instances);
@@ -422,7 +425,7 @@ impl MeshPass {
 /// start of, as [`Shaders::add`](crate::Shaders::add) describes. The matrix goes first, so that
 /// every offset is the same under every layout Slang gives push constants; the IDs before the
 /// parameters, so that a shader that takes none still ends its struct after the last member it
-/// reads.
+/// reads; and the view's size last, since it came last.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 pub(crate) struct Push {
@@ -436,6 +439,8 @@ pub(crate) struct Push {
     pub(crate) ids: u64,
     /// The address of the instances' parameters, or 0 for a shader that takes none.
     pub(crate) params: u64,
+    /// The size of the view the pass draws into, in pixels, across then down.
+    pub(crate) view: [f32; 2],
 }
 
 #[cfg(test)]

@@ -1,5 +1,6 @@
-// flat_color.slang reading a push constant past the 96 bytes the engine pushes, which the
-// contract refuses: nothing sets it.
+// flat_color.slang reading the view's size as two integers, where the engine pushes two floats,
+// and a push constant past the 104 bytes the engine pushes, which the contract refuses: nothing sets
+// it.
 
 struct Vertex {
     float3 position;
@@ -15,6 +16,7 @@ struct Push {
     float4x4* transforms;
     uint2* ids;
     Params* params;
+    uint2 view;
     float brightness;
 };
 [[vk::push_constant]] ConstantBuffer<Push> push;
@@ -43,7 +45,8 @@ struct Targets {
 [shader("fragment")]
 Targets fragment_main(Varyings input) {
     Targets out;
-    out.color = push.params[input.instance].color * push.brightness;
+    float wide = float(push.view.x);
+    out.color = push.params[input.instance].color * push.brightness * wide;
     out.id = input.id;
     return out;
 }

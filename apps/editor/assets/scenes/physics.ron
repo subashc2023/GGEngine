@@ -78,6 +78,32 @@
                 scale: (1.0, 1.0, 1.0),
             ),
         ),
+        "931883141f5358d9": (
+            Circle: (
+                color: (0.9, 0.35, 0.55, 1.0),
+                thickness: 1.0,
+                fade: 0.0,
+            ),
+            CircleCollider2D: (
+                offset: (0.0, 0.0),
+                radius: 0.5,
+                density: 1.0,
+                friction: 0.5,
+                restitution: 0.3,
+            ),
+            Name: ("Ball"),
+            RigidBody2D: (
+                body_type: Dynamic,
+                fixed_rotation: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
+            Transform: (
+                translation: (-2.0, 4.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
         "975835de1c9756ce": (
             BoxCollider2D: (
                 offset: (0.0, 0.0),
@@ -250,6 +276,32 @@
                 translation: (-3.8, 4.5, 0.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "f4de114c9b65b67c": (
+            Circle: (
+                color: (0.4, 0.75, 0.95, 1.0),
+                thickness: 0.3,
+                fade: 0.0,
+            ),
+            CircleCollider2D: (
+                offset: (0.0, 0.0),
+                radius: 0.5,
+                density: 1.0,
+                friction: 0.5,
+                restitution: 0.5,
+            ),
+            Name: ("Ring"),
+            RigidBody2D: (
+                body_type: Dynamic,
+                fixed_rotation: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
+            Transform: (
+                translation: (3.2, 2.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.2, 1.2, 1.0),
             ),
         ),
     },

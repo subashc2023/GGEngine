@@ -4,13 +4,15 @@
 use std::ops::Range;
 
 use gg_core::Error;
-use gg_core::math::{Mat4, Quat, Vec2, Vec3};
-use gg_renderer::{Draws, MeshDraw, Sampler, Sprite};
+use gg_core::math::{Mat4, Quat, Vec2, Vec3, Vec4};
+use gg_renderer::{Circle, Draws, MeshDraw, Sampler, Shaders, Sprite};
 
 use crate::ecs::ComponentId;
 use crate::interpolation::{self, Past};
 use crate::jobs;
-use crate::reflect::{self, Digest, Field, Meta, Reflect, Result, Shape, Show, Type, Types, Value};
+use crate::reflect::{
+    self, Bound, Digest, Field, Meta, Reflect, Result, Shape, Show, Type, Types, Value,
+};
 use crate::{Component, EntityId, Parent, Transform, World, Writable};
 
 /// Built on the default sprite, so that a scene's sprite, which leaves its texture out, shows the
@@ -170,6 +172,149 @@ impl Reflect for Sprite {
 /// A sprite's fields, in the order its description gives them.
 const SPRITE_FIELDS: [&str; 4] = ["color", "texture", "rect", "sampler"];
 
+impl Component for Circle {}
+impl Writable for Circle {}
+
+/// Taken apart whole, as a sprite is, so that a field `gg-renderer` adds fails to compile here until
+/// it's described. Its fields' defaults are the default circle's, and its thickness and its fade
+/// run from 0 to 1, a whole radius.
+impl Reflect for Circle {
+    fn describe(types: &mut Types) -> Result<Type> {
+        let field = |name: &'static str, ty, show, unit: bool, default, doc: &'static str| Field {
+            name: name.into(),
+            ty,
+            meta: Meta {
+                min: unit.then_some(Bound::Float(0.0)),
+                max: unit.then_some(Bound::Float(1.0)),
+                show,
+                doc: doc.into(),
+            },
+            default: Some(default),
+        };
+        let base = Circle::default();
+        let doc = "A disc or a ring of a color, as large as fits on a square a unit across.";
+        types.add::<Self>("Circle".into(), doc.into(), |_| {
+            let fields = vec![
+                field(
+                    "color",
+                    Type::Vec4,
+                    Show::Color,
+                    false,
+                    base.color.to_value(),
+                    "In linear RGBA, alpha not multiplied in.",
+                ),
+                field(
+                    "thickness",
+                    Type::F32,
+                    Show::Plain,
+                    true,
+                    base.thickness.to_value(),
+                    "How far in from its edge it's filled, as a fraction of its radius: 1 fills it \
+                     all, a disc, and less draws a ring that thick.",
+                ),
+                field(
+                    "fade",
+                    Type::F32,
+                    Show::Plain,
+                    true,
+                    base.fade.to_value(),
+                    "How far in from each of its edges it fades, as a fraction of its radius, \
+                     beyond the pixel its edges are smoothed over.",
+                ),
+            ];
+            Ok(Shape::Struct {
+                fields,
+                tuple: false,
+            })
+        })
+    }
+
+    fn to_value(&self) -> Value {
+        let Circle {
+            color,
+            thickness,
+            fade,
+        } = self;
+        Value::Struct(vec![
+            ("color".into(), color.to_value()),
+            ("thickness".into(), thickness.to_value()),
+            ("fade".into(), fade.to_value()),
+        ])
+    }
+
+    fn from_value(value: &Value) -> Result<Self> {
+        let [color, thickness, fade] = reflect::fields(value, CIRCLE_FIELDS)?;
+        let at = |name| move |error: Error| reflect::within(error, name);
+        Ok(Circle {
+            color: Vec4::from_value(color).map_err(at("color"))?,
+            thickness: f32::from_value(thickness).map_err(at("thickness"))?,
+            fade: f32::from_value(fade).map_err(at("fade"))?,
+        })
+    }
+
+    fn with_value(&self, value: &Value) -> Result<Self> {
+        let Circle {
+            color,
+            thickness,
+            fade,
+        } = self;
+        let [new_color, new_thickness, new_fade] = reflect::fields(value, CIRCLE_FIELDS)?;
+        let at = |name| move |error: Error| reflect::within(error, name);
+        Ok(Circle {
+            color: color.with_value(new_color).map_err(at("color"))?,
+            thickness: (thickness.with_value(new_thickness)).map_err(at("thickness"))?,
+            fade: fade.with_value(new_fade).map_err(at("fade"))?,
+        })
+    }
+
+    fn set_value(&mut self, value: &Value) -> Result<()> {
+        *self = self.with_value(value)?;
+        Ok(())
+    }
+
+    fn part(&self, index: u32) -> Option<&dyn Reflect> {
+        let Circle {
+            color,
+            thickness,
+            fade,
+        } = self;
+        match index {
+            0 => Some(color),
+            1 => Some(thickness),
+            2 => Some(fade),
+            _ => None,
+        }
+    }
+
+    fn part_mut(&mut self, index: u32) -> Option<&mut dyn Reflect> {
+        let Circle {
+            color,
+            thickness,
+            fade,
+        } = self;
+        match index {
+            0 => Some(color),
+            1 => Some(thickness),
+            2 => Some(fade),
+            _ => None,
+        }
+    }
+
+    fn digest(&self, to: &mut Digest<'_>) {
+        let Circle {
+            color,
+            thickness,
+            fade,
+        } = self;
+        color.digest(to);
+        thickness.digest(to);
+        fade.digest(to);
+    }
+}
+
+/// A circle's fields, in the order its description gives them.
+const CIRCLE_FIELDS: [&str; 3] = ["color", "thickness", "fade"];
+
 /// Every sampler, in the order of their indices. A sampler `gg-renderer` adds fails to compile in
 /// [`sampler_name`], and goes here too.
 pub(crate) const SAMPLERS: [Sampler; 6] = [
@@ -316,8 +461,8 @@ struct Segment {
     z: f32,
     /// Its rows' [`MeshDraw::batch`], for opaque meshes, or 0.
     batch: u64,
-    /// Which segment it was found as: tables in the order they were made, then a table's sprites
-    /// before its meshes, then its rows in order.
+    /// Which segment it was found as: tables in the order they were made, then a table's sprites,
+    /// circles and meshes, then its rows in order.
     order: u32,
     kind: Kind,
     table: u32,
@@ -345,12 +490,13 @@ impl PartialEq for Segment {
 /// A [`Segment`] of roots.
 const ROOTS: u32 = u32::MAX;
 
-/// What a row draws: opaque meshes first, whatever their z, then, at one z, sprites under the meshes
-/// that blend.
+/// What a row draws: opaque meshes first, whatever their z, then, at one z, sprites, then circles,
+/// under the meshes that blend.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Kind {
     Opaque,
     Sprite,
+    Circle,
     Mesh,
 }
 
@@ -370,16 +516,17 @@ struct Group {
     items: Range<u32>,
 }
 
-/// Draws into `draws` every entity of `world` with a [`Transform`] and a [`Sprite`] or a
-/// [`MeshDraw`]: first the meshes whose shaders are opaque, whose depth hides what's behind them
-/// whatever order they draw in, by their [`MeshDraw::batch`], so that each mesh with each shader is
-/// one instanced draw, split only where a culling mesh's draws change between mirrored and not;
-/// then the rest, which blend, back to front by z in the world, as the latest tick left them, -0.0
-/// and 0.0 one z, at one z sprites under meshes; each batch and each z in the order of their
-/// entities' IDs, so that entities that overlap at one depth keep how they stack as others come and
-/// go. Each draws `alpha` of the way from what `past` has it draw from to where the tick left it,
-/// while it draws between ticks; at 1, where the tick left it. Each draw's ID is its entity's, which
-/// picks read back where it shows.
+/// Draws into `draws` every entity of `world` with a [`Transform`] and a [`Sprite`], a [`Circle`]
+/// or a [`MeshDraw`]: first the meshes whose shaders are opaque, whose depth hides what's behind
+/// them whatever order they draw in, by their [`MeshDraw::batch`], so that each mesh with each
+/// shader is one instanced draw, split only where a culling mesh's draws change between mirrored
+/// and not; then the rest, which blend, back to front by z in the world, as the latest tick left
+/// them, -0.0 and 0.0 one z, at one z sprites, then circles, under meshes; each batch and each z in
+/// the order of their entities' IDs, so that entities that overlap at one depth keep how they stack
+/// as others come and go. Circles draw with the engine's circle shader, which `shaders` adds the
+/// first time any do. Each draws `alpha` of the way from what `past` has it draw from to where the
+/// tick left it, while it draws between ticks; at 1, where the tick left it. Each draw's ID is its
+/// entity's, which picks read back where it shows.
 /// A child draws where its ancestors carry it, by its world matrix, its transform's and each of
 /// theirs drawn so, which it computes into `scratch` for each child once a frame; roots, in tables
 /// without a [`Parent`], draw by their transforms alone, which those that draw between ticks blend
@@ -399,6 +546,7 @@ pub(crate) fn draw_world(
     past: &Past,
     alpha: f32,
     draws: &mut Draws,
+    shaders: &mut Shaders,
     scratch: &mut Scratch,
 ) {
     let _zone = gg_core::zone!();
@@ -422,6 +570,7 @@ pub(crate) fn draw_world(
     };
     let transform = poses.transform;
     let sprite = world.component::<Sprite>();
+    let circle = world.component::<Circle>();
     let mesh = world.component::<MeshDraw>();
     let parent = world.component::<Parent>();
     // How many of `blended`'s matrices the frame's roots take.
@@ -430,8 +579,12 @@ pub(crate) fn draw_world(
         let Some(transforms) = rows.column::<Transform>(transform) else {
             continue;
         };
-        let drawn = [(Kind::Sprite, sprite), (Kind::Mesh, mesh)]
-            .map(|(kind, id)| (kind, id.is_some_and(|id| rows.has(id))));
+        let drawn = [
+            (Kind::Sprite, sprite),
+            (Kind::Circle, circle),
+            (Kind::Mesh, mesh),
+        ]
+        .map(|(kind, id)| (kind, id.is_some_and(|id| rows.has(id))));
         if drawn.iter().all(|&(_, drawn)| !drawn) {
             continue;
         }
@@ -510,7 +663,8 @@ pub(crate) fn draw_world(
         drawn.map_or_else(|| transforms[row].matrix(), |drawn| drawn[row])
     };
     // Kept across groups, whose segments' indices differ.
-    let (mut sprites_at, mut meshes_at) = ([None; AT_HAND], [None; AT_HAND]);
+    let mut sprites_at = [None; AT_HAND];
+    let (mut circles_at, mut meshes_at) = ([None; AT_HAND], [None; AT_HAND]);
     for group in groups.iter() {
         let items = &items[group.items.start as usize..group.items.end as usize];
         match group.kind {
@@ -527,6 +681,21 @@ pub(crate) fn draw_world(
                     let row = item.row as usize;
                     (matrix(transforms, drawn, row), sprites[row], item.id.get())
                 }));
+            }
+            Kind::Circle => {
+                let circle = circle.expect("a table has circles");
+                let columns = |index: u32| {
+                    let (table, transforms, drawn) = placed(index);
+                    let circles = table.column::<Circle>(circle).expect("it has circles");
+                    (transforms, circles, drawn)
+                };
+                let circles = items.iter().map(|item| {
+                    let found = found(&mut circles_at, item.segment, columns);
+                    let (transforms, circles, drawn) = found;
+                    let row = item.row as usize;
+                    (matrix(transforms, drawn, row), circles[row], item.id.get())
+                });
+                draws.extend_circles(shaders, circles);
             }
             Kind::Opaque | Kind::Mesh => {
                 let mesh = mesh.expect("a table has meshes");
@@ -607,6 +776,25 @@ impl<'a> Poses<'a> {
                 };
                 (ancestor * at, drawn)
             })
+    }
+
+    /// The matrix row `row` of table `table`, which has transforms, draws by this frame, as
+    /// [`draw_world`] draws it, bit for bit: its transform's, drawn between ticks while it is, and
+    /// carried by its ancestors as they draw.
+    pub(crate) fn matrix(&self, table: usize, row: usize) -> Mat4 {
+        let rows = &self.world.tables()[table];
+        let transforms = rows.column::<Transform>(self.transform);
+        let local = &transforms.expect("it has transforms")[row];
+        let from = self.from(table);
+        let drawn = from.map(|from| interpolation::between(&from[row], local, self.alpha));
+        let parent = self.world.component::<Parent>();
+        match parent.and_then(|id| rows.column::<Parent>(id)) {
+            None => drawn.unwrap_or(*local).matrix(),
+            Some(parents) => {
+                let (at, drawn) = self.carry(local, drawn, &parents[row]);
+                drawn.unwrap_or(at)
+            }
+        }
     }
 
     /// Where row `row` of table `table`, which has transforms, draws this frame, for a viewpoint to
@@ -920,6 +1108,7 @@ mod tests {
             &Past::default(),
             1.0,
             &mut draws,
+            &mut Shaders::default(),
             &mut Scratch::default(),
         );
         assert_eq!(draws, want);
@@ -957,7 +1146,8 @@ mod tests {
         }
         let drawn = |world: &World, scratch: &mut Scratch| {
             let mut draws = Draws::default();
-            draw_world(world, &Past::default(), 1.0, &mut draws, scratch);
+            let shaders = &mut Shaders::default();
+            draw_world(world, &Past::default(), 1.0, &mut draws, shaders, scratch);
             draws
         };
         let mut kept = Scratch::default();
@@ -1048,11 +1238,26 @@ mod tests {
         sprite_of(&mut want, high.matrix(), sprite(2.0), highest);
         let mut scratch = Scratch::default();
         let mut draws = Draws::default();
-        draw_world(&world, &Past::default(), 1.0, &mut draws, &mut scratch);
+        let shaders = &mut Shaders::default();
+        draw_world(
+            &world,
+            &Past::default(),
+            1.0,
+            &mut draws,
+            shaders,
+            &mut scratch,
+        );
         assert_eq!(draws, want);
         let before = held(&scratch);
         let mut again = Draws::default();
-        draw_world(&world, &Past::default(), 1.0, &mut again, &mut scratch);
+        draw_world(
+            &world,
+            &Past::default(),
+            1.0,
+            &mut again,
+            shaders,
+            &mut scratch,
+        );
         assert_eq!(again, want);
         assert_eq!(held(&scratch), before, "drawing again takes no more memory");
     }
@@ -1098,13 +1303,15 @@ mod tests {
         populate(&mut world);
         let step = |world: &World, kept: &mut Scratch, what: &str| {
             let mut draws = Draws::default();
-            draw_world(world, &Past::default(), 1.0, &mut draws, kept);
+            let shaders = &mut Shaders::default();
+            draw_world(world, &Past::default(), 1.0, &mut draws, shaders, kept);
             let mut fresh = Draws::default();
             draw_world(
                 world,
                 &Past::default(),
                 1.0,
                 &mut fresh,
+                &mut Shaders::default(),
                 &mut Scratch::default(),
             );
             assert_eq!(draws, fresh, "after {what}");
@@ -1208,7 +1415,8 @@ mod tests {
         world.insert(smaller, Marked).expect("alive");
         let drawn = |world: &World, scratch: &mut Scratch| {
             let mut draws = Draws::default();
-            draw_world(world, &Past::default(), 1.0, &mut draws, scratch);
+            let shaders = &mut Shaders::default();
+            draw_world(world, &Past::default(), 1.0, &mut draws, shaders, scratch);
             draws
         };
         let mut kept = Scratch::default();
@@ -1281,9 +1489,63 @@ mod tests {
             &Past::default(),
             1.0,
             &mut draws,
+            &mut Shaders::default(),
             &mut Scratch::default(),
         );
         assert_eq!(draws, expected);
+    }
+
+    /// Circles draw among the rest back to front by z, at one z over the sprites and under the
+    /// meshes that blend, each in the order of their IDs, with their entities' IDs, and children
+    /// where their ancestors carry them.
+    #[test]
+    fn circles_draw_over_sprites_and_under_meshes() {
+        let (triangle, flat) = flat_triangle();
+        let circle = |n: f32| Circle {
+            color: Vec4::splat(n),
+            ..Circle::default()
+        };
+        let sprite = |n: f32| Sprite {
+            color: Vec4::splat(n),
+            ..Sprite::default()
+        };
+        let mesh = MeshDraw::new(triangle, flat, Vec4::ONE);
+        let mut world = World::default();
+        let far = world.spawn((at_x(1.0, 0.2), circle(1.0)));
+        let all = world.spawn((at_x(2.0, 0.5), sprite(2.0), circle(2.0), mesh));
+        let near = world.spawn((at_x(3.0, 0.5), circle(3.0)));
+        let parent = world.spawn(at_x(10.0, 0.0));
+        let child = world.spawn((at_x(4.0, 0.3), circle(4.0)));
+        world.set_parent(child, Some(parent)).expect("no cycle");
+
+        // At 0.2, 0.3 and 0.5 in the world; at 0.5, the sprite, both circles by ID, then the mesh.
+        let id = |entity: Entity| world.id(entity).expect("alive");
+        let mut pair = [(all, 2.0), (near, 3.0)].map(|(entity, x)| (id(entity), x));
+        pair.sort_by_key(|&(id, _)| id);
+        let mut shaders = Shaders::default();
+        let mut want = Draws::default();
+        let carried = at_x(10.0, 0.0).matrix() * at_x(4.0, 0.3).matrix();
+        let circles = [
+            (at_x(1.0, 0.2).matrix(), 1.0, id(far)),
+            (carried, 4.0, id(child)),
+        ];
+        for (matrix, n, id) in circles {
+            want.extend_circles(&mut shaders, iter::once((matrix, circle(n), id.get())));
+        }
+        sprite_of(&mut want, at_x(2.0, 0.5).matrix(), sprite(2.0), id(all));
+        let pair = pair.map(|(id, x)| (at_x(x, 0.5).matrix(), circle(x), id.get()));
+        want.extend_circles(&mut shaders, pair.into_iter());
+        want.push_draw(at_x(2.0, 0.5).matrix(), &mesh, id(all).get());
+        let mut draws = Draws::default();
+        draw_world(
+            &world,
+            &Past::default(),
+            1.0,
+            &mut draws,
+            &mut Shaders::default(),
+            &mut Scratch::default(),
+        );
+        assert_eq!(draws, want);
     }
 
     /// A transform at `x` and `z`.
@@ -1298,7 +1560,14 @@ mod tests {
     fn between_ticks(world: &World, past: &mut Past, alpha: f32, scratch: &mut Scratch) -> Draws {
         past.resolve(world);
         let mut draws = Draws::default();
-        draw_world(world, past, alpha, &mut draws, scratch);
+        draw_world(
+            world,
+            past,
+            alpha,
+            &mut draws,
+            &mut Shaders::default(),
+            scratch,
+        );
         draws
     }
 

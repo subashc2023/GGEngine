@@ -532,6 +532,32 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
   the copy out; through a build that opened `physics.ron` as it started, Play stacked the crates on
   the floor, one resting on the ramp, and Stop left the view as it started, pixel for pixel; both
   runs exited cleanly under validation.
+- **Circles, lines and colliders' outlines** (2026-10-28): Hazel's next four episodes, made the
+  engine's way. `Circle`, a component the world draws as it draws sprites, at one z over them, and
+  `Context::draw_circle` draw discs and rings with the engine's circle shader, their edges smoothed
+  by its derivatives at any size. `Context::draw_line` and `draw_rect` draw lines a number of the
+  view's pixels wide, as quads the line shader lays out on screen from the view's size, which the
+  push constants now end with, cut at the near plane, over everything else but nearer opaque meshes;
+  not Vulkan's lines, whose widths past a pixel and smoothing are optional, and whose width is a
+  whole draw's. `CircleCollider2D` collides as a circle, its radius scaled by the larger of its
+  entity's scales, beside a box or instead of one. `Context::set_colliders_shown`, which the
+  editor's toolbar's Colliders switch flips, outlines every collider where its entity draws, playing
+  or not, with its entity's ID, over the rest: so no sprite hides an outline, from in front or
+  behind, which Hazel's z offset didn't manage from behind. `physics.ron` gained a ball and a ring.
+  Hazel's restitution threshold is left out, since rapier has none. GPU tests check against new
+  references circles: a disc, a ring, a faded disc, an ellipse, a translucent disc over a sprite and
+  discs 8 and 3 pixels across; and lines: 1 to 8 pixels wide and half a pixel, a turned square's
+  outline, a line receding, one running behind the camera, one behind an opaque square and one in
+  front of it, and a translucent one over a sprite; and picks of a circle and through its quad's
+  corner, and of a line and beside it. Unit tests check the push constants' view, appended draws,
+  circles between sprites and meshes, balls resting by their larger scale, a body colliding as its
+  box and its circle, outlines where their entities draw, lines and outlines drawn last, and the
+  editor's switch through either camera; the pile's hash, now with balls, is the same in debug and
+  release. By hand on the RTX 4090, through a build that opened `physics.ron` as it started: the
+  switch outlined the floor, the ramp, the crates, the ball and the ring; Play's outlines followed
+  the bodies as they fell and rested, through the world's camera; Stop brought the world back, still
+  outlined, and the switch hid them, from 4 draws of 171 instances to 3 of 11; the run exited
+  cleanly under validation.
 
 ## Now: the editor's next milestone, or Phase 5's first
 
@@ -622,6 +648,9 @@ Defects left in because fixing them costs more than they do are in [DEFECTS.md](
 | Mirrored and unmirrored instances of one culling mesh, interleaved in the order of their IDs, draw a run each, since a run culls one way; sorting a run's instances by how they wind would keep it to two | A model instanced many times, some mirrored |
 | Depth other than what a shader's blend implies: draws that ignore it, as gizmos and overlays do, a skybox that tests it without writing it, decals, and sprites cut out by their alpha that write it | Each with its first user |
 | Depth bias, whose sign flips with depth reversed | Phase 6, with shadow maps |
+| Depth bias for lines, so that one lying on an opaque mesh's face shows whole: across its width, a line's quad keeps the line's depth, so where the face slopes across the line in the view, it hides half of it | Lines drawn on 3D surfaces, as debug drawing in 3D |
+| Joins where lines meet: lines end squared off, so a rectangle's sides overlap at its corners, which a translucent one shows darker, and a thick polyline's segments overlap at each bend | A game draws translucent outlines or thick polylines |
+| Circles' outlines of as many lines as their size on screen needs: each is 64, round to within a pixel up to some 800 pixels across, so a larger one shows its sides and a smaller one draws more lines than it needs | A game outlines many circles, or a large one shows its sides |
 | A far plane for perspective, as glTF's `zfar` gives; it sees out to infinity | A glTF camera with one, or Phase 8's culling |
 | Keeping the view's depth past its pass, to sample: each frame clears it and doesn't store it | Post-processing, finding the point under the cursor, or the tool API's captures |
 | Rendering the view's IDs only in frames that pick: every frame renders them, since a pass without them takes pipelines made without them, a second for each shader, or `VK_EXT_dynamic_rendering_unused_attachments` | A profile shows them |
@@ -785,7 +814,9 @@ Defects left in because fixing them costs more than they do are in [DEFECTS.md](
 | Play in a process of its own, through the tool API, so that a crash as the world plays stops only the game | Phase 9's editor |
 | Keeping edits made as the world plays, which go with the copy, as Unity's do; and showing that it plays beyond the lit Stop and the view through the world's camera, such as a tint round the view | Someone loses an edit made while playing, or edits a playing world for the scene |
 | Bodies under a parent, moved in the world's space as their ancestors carry them, and colliders on a body's children; a body under a parent isn't moved (`physics.child_body`) | A game builds a body of parts, or nests one |
-| Colliders other than boxes, such as circles, capsules and polygons; joints; sensors; and contacts and queries, such as raycasts, for scripts | Each with its first game use |
+| Colliders other than boxes and circles, such as capsules and polygons; joints; sensors; and contacts and queries, such as raycasts, for scripts | Each with its first game use |
+| A restitution threshold, the speed under which a contact doesn't bounce, as Box2D's and Hazel's: rapier has none | rapier gains one, or a game's bouncy bodies won't settle |
+| Telling the colliders physics doesn't simulate from those it does: one without a `RigidBody2D`, or under a parent, outlines as the rest do | Someone wonders why an outlined collider doesn't collide |
 | 3D physics | A 3D game |
 | Gravity from a scene or a setting: `Physics2D::gravity` is code's, Earth's by default | A game sets its own |
 | Physics steps that allocate nothing: rapier allocates as contacts come and go, and the `ticks` test steps no physics | A game's ticks must allocate nothing with physics |

@@ -595,7 +595,7 @@ impl FlyCameraController {
 mod tests {
     use std::panic;
 
-    use gg_renderer::{Draws, Sprite};
+    use gg_renderer::{Draws, Shaders, Sprite};
 
     use super::*;
     use crate::draw::{Scratch, draw_world};
@@ -770,7 +770,15 @@ mod tests {
         let id = world.id(children[1]).expect("alive").get();
         want.extend_sprites(std::iter::once((carried(1.0), Sprite::default(), id)));
         let mut draws = Draws::default();
-        draw_world(&world, &past, 0.5, &mut draws, &mut Scratch::default());
+        let shaders = &mut Shaders::default();
+        draw_world(
+            &world,
+            &past,
+            0.5,
+            &mut draws,
+            shaders,
+            &mut Scratch::default(),
+        );
         assert_eq!(draws, want);
         let halfway = seen(&world, &past, 0.5, &mut None).expect("a camera");
         assert_eq!(halfway.position, carried(1.0).w_axis.truncate());
