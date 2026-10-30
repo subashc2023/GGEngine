@@ -1067,7 +1067,8 @@ mod tests {
     #[cfg(feature = "dev")]
     /// Edits from outside the layers, applied between ticks, are recorded as they were asked for,
     /// before the commands of the tick after, and replay to the hashes recorded: a create, which
-    /// draws its ID as the run did, a set of what it made, an edit refused, and an undo.
+    /// draws its ID as the run did, two sets of what it made in one gesture, an edit refused, and
+    /// an undo, which undoes the gesture whole.
     #[test]
     fn edits_between_ticks_replay() {
         let ms = Duration::from_millis;
@@ -1089,14 +1090,15 @@ mod tests {
                         components: vec![("Transform".into(), Transform::IDENTITY.to_value())],
                     }],
                 },
-                (5, Some(made)) => Edit::Apply {
+                (5 | 6, Some(made)) => Edit::Amend {
                     author: author(),
-                    operations: vec![crate::Operation::Set {
+                    gesture: 7,
+                    operation: crate::Operation::Set {
                         entity: made,
                         component: "Transform".into(),
                         path: "translation.y".to_owned(),
-                        value: crate::reflect::Value::F32(3.0),
-                    }],
+                        value: crate::reflect::Value::F32(frame as f32),
+                    },
                 },
                 (7, _) => Edit::Apply {
                     author: author(),
@@ -1110,15 +1112,21 @@ mod tests {
             let _ = stack.edit(cx, edit);
         });
         let edits: Vec<&str> = text.lines().filter(|line| line.starts_with("@ ")).collect();
-        assert_eq!(edits.len(), 4, "{text}");
+        assert_eq!(edits.len(), 5, "{text}");
         assert!(edits[0].starts_with("@ Variant(\"Apply\""), "{text}");
+        assert!(edits[1].starts_with("@ Variant(\"Amend\""), "{text}");
         let (_, _, unedited) = recorded_with(two_layers(), &frames, |_, _, _| {});
         let transforms = |world: &World| world.query::<&Transform>().count();
         assert_eq!(
             transforms(&ended),
             transforms(&unedited) + 1,
-            "created, set, and the set undone"
+            "created, set, and the sets undone"
         );
+        // The sets set 5 and 6, a frame each.
+        let set = ended
+            .query::<&Transform>()
+            .any(|t| [5.0, 6.0].contains(&t.translation.y));
+        assert!(!set, "the undo undid both sets of the gesture");
         let replayed = replay_all(two_layers(), &text).map_err(|(_, error)| error.to_string());
         assert_eq!(replayed, Ok((ticks, ended.hash())));
         // An edit that goes another way goes another way at its tick.

@@ -1,14 +1,21 @@
 //! A panic reaches the console and the JSON log under each filter tried, `off` among them; a
-//! filter that names targets alone keeps the default for the rest; and a value that isn't a filter
-//! keeps the default, warning with `log.filter`. Logging and the panic hook are the process's, so
-//! for each filter the test runs itself again, as a run that logs and then panics, and reads what
-//! that run printed and wrote.
+//! filter that names targets alone keeps the default for the rest; a value that isn't a filter
+//! keeps the default, warning with `log.filter`; the events kept in memory are the JSON log's
+//! lines, as written; and without the console, nothing logged reaches stderr. Logging and the panic
+//! hook are the process's, so for each filter the test runs itself again, as a run that logs and
+//! then panics, and reads what that run printed and wrote.
 
 use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
+
+use tracing::Level;
 
 /// Set in the runs the test makes of itself: where they log.
 const RUN: &str = "GG_LOGGING_TEST_DIR";
+
+/// Set in a run the test makes of itself that logs without the console.
+const QUIET: &str = "GG_LOGGING_TEST_QUIET";
 
 /// The events a run logs before it panics: a game's at info, and one of gg-gpu's at trace.
 const EVENTS: [&str; 2] = ["a game's event", "a gg-gpu trace event"];
@@ -18,28 +25,36 @@ fn main() {
         log_and_panic(Path::new(&dir));
     }
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("logs");
-    // Each filter, the events that pass it, and whether it warns that it isn't a filter.
-    let filters: [(&str, &[&str], bool); 4] = [
-        ("gg_gpu=trace", &EVENTS, false),
-        ("info,gg_gpu=debug", &EVENTS[..1], false),
-        ("off", &[], false),
+    // Each filter, the events that pass it, whether it warns that it isn't a filter, and whether
+    // the run logs on the console.
+    let filters: [(&str, &[&str], bool, bool); 5] = [
+        ("gg_gpu=trace", &EVENTS, false, true),
+        ("info,gg_gpu=debug", &EVENTS[..1], false, true),
+        ("off", &[], false, true),
         // `loud` is no level, so the default applies.
-        ("gg_gpu=loud", &EVENTS[..1], true),
+        ("gg_gpu=loud", &EVENTS[..1], true, true),
+        ("gg_gpu=trace", &EVENTS, false, false),
     ];
-    for (filter, shown, warns) in filters {
-        let run = Command::new(std::env::current_exe().expect("the test's path"))
-            .env(RUN, &dir)
+    for (filter, shown, warns, console) in filters {
+        let mut run = Command::new(std::env::current_exe().expect("the test's path"));
+        run.env(RUN, &dir)
             .env("RUST_LOG", filter)
             .env("NO_COLOR", "1")
-            .output()
-            .expect("a run of the test");
-        let console = String::from_utf8_lossy(&run.stderr);
-        assert_eq!(run.status.code(), Some(101), "{filter}: {console}");
-        assert!(
-            console.contains("[log.panic] the run panics"),
-            "{filter}: the console has no panic:\n{console}"
+            .env_remove(QUIET);
+        if !console {
+            run.env(QUIET, "1");
+        }
+        let run = run.output().expect("a run of the test");
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        assert_eq!(run.status.code(), Some(101), "{filter}: {stderr}");
+        assert_eq!(
+            stderr.contains("[log.panic] the run panics"),
+            console,
+            "{filter}: the panic on the console:\n{stderr}"
         );
-        let path = String::from_utf8(run.stdout).expect("the JSON log's path");
+        let stdout = String::from_utf8(run.stdout).expect("what the run printed");
+        let mut printed = stdout.lines();
+        let path = printed.next().expect("the JSON log's path");
         let json = std::fs::read_to_string(path.trim()).expect("the JSON log");
         let panic = json
             .lines()
@@ -48,6 +63,12 @@ fn main() {
             panic.is_some_and(|line| line.contains("the run panics")),
             "{filter}: the JSON log has no panic:\n{json}"
         );
+        // The run printed the events kept before it panicked.
+        let kept: Vec<&str> = printed.collect();
+        let written: Vec<&str> = (json.lines())
+            .filter(|line| !line.contains(r#""code":"log.panic""#))
+            .collect();
+        assert_eq!(kept, written, "{filter}: the events kept");
         let warning = json
             .lines()
             .find(|line| line.contains(r#""code":"log.filter""#));
@@ -60,28 +81,35 @@ fn main() {
             "{filter}: log.filter in the JSON log:\n{json}"
         );
         assert_eq!(
-            console.contains("[log.filter] "),
-            warns,
-            "{filter}: log.filter on the console:\n{console}"
+            stderr.contains("[log.filter] "),
+            warns && console,
+            "{filter}: log.filter on the console:\n{stderr}"
         );
         for event in EVENTS {
             let expected = shown.contains(&event);
             assert_eq!(
-                console.contains(event),
-                expected,
-                "{filter}: {event}\n{console}"
+                stderr.contains(event),
+                expected && console,
+                "{filter}: {event}\n{stderr}"
             );
             assert_eq!(json.contains(event), expected, "{filter}: {event}\n{json}");
         }
-        println!("test a panic is logged under RUST_LOG={filter} ... ok");
+        let without = if console { "" } else { " without the console" };
+        println!("test a panic is logged under RUST_LOG={filter}{without} ... ok");
     }
 }
 
-/// Starts logging, prints the JSON log's path, logs [`EVENTS`] and panics.
+/// Starts logging, on the console unless [`QUIET`] is set, prints the JSON log's path, logs
+/// [`EVENTS`], prints the lines of the events kept, and panics.
 fn log_and_panic(dir: &Path) -> ! {
-    let log = gg_core::log::init("logging test", dir).expect("the JSON log");
+    let console = std::env::var_os(QUIET).is_none();
+    let log = gg_core::log::init("logging test", dir, console).expect("the JSON log");
     println!("{}", log.display());
     tracing::info!(target: "game", "{}", EVENTS[0]);
     tracing::trace!(target: "gg_gpu::test", "{}", EVENTS[1]);
+    let kept = gg_core::log::EVENTS.read(None, None, Level::TRACE, Duration::ZERO, usize::MAX);
+    for line in kept.lines {
+        println!("{line}");
+    }
     panic!("the run panics");
 }

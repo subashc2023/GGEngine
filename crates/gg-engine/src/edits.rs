@@ -23,6 +23,14 @@ pub(crate) enum Edit {
         author: String,
         operations: Vec<Operation>,
     },
+    /// Applies `operation`, a set, as part of `author`'s gesture `gesture`, such as a drag: as
+    /// [`Log::amend`] does, joining `author`'s last edit if that's a set of the same field in the
+    /// same gesture, so that the gesture undoes whole.
+    Amend {
+        author: String,
+        gesture: u64,
+        operation: Operation,
+    },
     /// Undoes `author`'s last edit.
     Undo { author: String },
     /// Redoes the last edit `author` undid.
@@ -42,32 +50,61 @@ pub(crate) enum Done {
 /// their entries are refused there.
 #[derive(Default)]
 pub(crate) struct Authors {
-    logs: Vec<(String, Log)>,
+    logs: Vec<Author>,
     world: Option<u64>,
+}
+
+/// An author's log, and the gesture its last edit is part of, if that's an amend's.
+struct Author {
+    name: String,
+    log: Log,
+    gesture: Option<u64>,
 }
 
 impl Authors {
     /// Applies `edit` to `world`, and says what it did.
     ///
-    /// Fails as [`Log::apply_all`], [`Log::undo`] and [`Log::redo`] do.
+    /// Fails as [`Log::apply_all`], [`Log::amend`], [`Log::undo`] and [`Log::redo`] do.
     pub(crate) fn edit(&mut self, world: &mut World, edit: Edit) -> Result<Done> {
         if self.world != Some(world.serial()) {
             // Their entries are another world's, which keeps what they kept, if it's still about.
             self.logs.clear();
             self.world = Some(world.serial());
         }
+        // Any other edit of the author's ends its gesture, refused or not, as the log's own end
+        // its, but for a refused apply. One the API refuses as it reads it never comes here, nor
+        // to a recording, and leaves it going on.
+        if !matches!(edit, Edit::Amend { .. })
+            && let Some(author) = self.logs.iter_mut().find(|a| a.name == edit.author())
+        {
+            author.log.seal();
+            author.gesture = None;
+        }
         match edit {
+            Edit::Amend {
+                author,
+                gesture,
+                operation,
+            } => {
+                let author = self.author(author);
+                if author.gesture != Some(gesture) {
+                    author.log.seal();
+                    author.gesture = Some(gesture);
+                }
+                author.log.amend(world, operation)?;
+                Ok(Done::Applied(Vec::new()))
+            }
             // Nothing to log, nor any author to list.
             Edit::Apply { operations, .. } if operations.is_empty() => {
                 Ok(Done::Applied(Vec::new()))
             }
             Edit::Apply { author, operations } => {
-                let log = self.log(author);
+                let log = &mut self.author(author).log;
                 log.apply_all(world, operations)?;
                 Ok(Done::Applied(made(log)))
             }
             Edit::Append { author, operations } => {
-                let log = self.log(author);
+                let log = &mut self.author(author).log;
                 log.append(world, operations)?;
                 Ok(Done::Applied(made(log)))
             }
@@ -75,14 +112,14 @@ impl Authors {
                 Ok(Done::Stepped(None))
             }
             Edit::Undo { author } => {
-                let log = self.log(author);
+                let log = &mut self.author(author).log;
                 let undoable = log.undoable().map(<[Operation]>::to_vec);
                 Ok(Done::Stepped(
                     log.undo(world)?.then_some(undoable).flatten(),
                 ))
             }
             Edit::Redo { author } => {
-                let log = self.log(author);
+                let log = &mut self.author(author).log;
                 let redoable = log.redoable().map(<[Operation]>::to_vec);
                 Ok(Done::Stepped(
                     log.redo(world)?.then_some(redoable).flatten(),
@@ -97,31 +134,35 @@ impl Authors {
     pub(crate) fn logs(&self, world: &World) -> impl Iterator<Item = (&str, &Log)> {
         let current = self.world == Some(world.serial());
         let logs = self.logs.iter().filter(move |_| current);
-        logs.map(|(author, log)| (author.as_str(), log))
+        logs.map(|author| (author.name.as_str(), &author.log))
     }
 
     /// Whether `author` has edited the world.
     fn has(&self, author: &str) -> bool {
-        self.logs.iter().any(|(name, _)| name == author)
+        self.logs.iter().any(|logged| logged.name == author)
     }
 
-    /// `author`'s log, which starts empty.
-    fn log(&mut self, author: String) -> &mut Log {
-        let at = match self.logs.iter().position(|(name, _)| *name == author) {
+    /// `author`'s log and gesture, which start empty.
+    fn author(&mut self, author: String) -> &mut Author {
+        let at = match self.logs.iter().position(|logged| logged.name == author) {
             Some(at) => at,
             None => {
-                self.logs.push((author, Log::default()));
+                self.logs.push(Author {
+                    name: author,
+                    log: Log::default(),
+                    gesture: None,
+                });
                 self.logs.len() - 1
             }
         };
-        &mut self.logs[at].1
+        &mut self.logs[at]
     }
 
     /// Drops every log, and what they kept, from `world`, if they're its.
     pub(crate) fn clear(&mut self, world: &mut World) {
         if self.world == Some(world.serial()) {
-            for (_, log) in &mut self.logs {
-                log.clear(world);
+            for author in &mut self.logs {
+                author.log.clear(world);
             }
         }
         self.logs.clear();
@@ -140,13 +181,37 @@ fn made(log: &Log) -> Vec<EntityId> {
 }
 
 impl Edit {
+    /// Its author's name.
+    fn author(&self) -> &str {
+        match self {
+            Self::Apply { author, .. }
+            | Self::Append { author, .. }
+            | Self::Amend { author, .. }
+            | Self::Undo { author }
+            | Self::Redo { author } => author,
+        }
+    }
+
     /// The edit as a value, which a recording keeps: variants `Apply` and `Append`, with its author
-    /// and its operations, `Undo` and `Redo`, with their author; each operation a variant named as
-    /// its [`Operation`]'s, with its entities' IDs as text.
+    /// and its operations, `Amend`, with its author, its gesture and its operation, `Undo` and
+    /// `Redo`, with their author; each operation a variant named as its [`Operation`]'s, with its
+    /// entities' IDs as text.
     pub(crate) fn to_value(&self) -> Value {
         let text = |text: &str| Value::String(text.to_owned());
         let author = |author: &str| ("author".into(), text(author));
         match self {
+            Self::Amend {
+                author: by,
+                gesture,
+                operation,
+            } => Value::Variant(
+                "Amend".into(),
+                vec![
+                    author(by),
+                    ("gesture".into(), Value::UInt(*gesture)),
+                    ("operation".into(), operation_value(operation)),
+                ],
+            ),
             Self::Apply {
                 author: by,
                 operations,
@@ -197,6 +262,20 @@ impl Edit {
                     Self::Append { author, operations }
                 })
             }
+            "Amend" => {
+                let [author, gesture, operation] =
+                    reflect::pick(fields, ["author", "gesture", "operation"])?;
+                let &Value::UInt(gesture) = gesture else {
+                    let error = reflect::wrong_kind("UInt", gesture);
+                    return Err(reflect::within(error, "gesture"));
+                };
+                Ok(Self::Amend {
+                    author: text(author, "author")?,
+                    gesture,
+                    operation: self::operation(operation)
+                        .map_err(|error| reflect::within(error, "operation"))?,
+                })
+            }
             "Undo" | "Redo" => {
                 let [author] = reflect::pick(fields, ["author"])?;
                 let author = text(author, "author")?;
@@ -208,7 +287,7 @@ impl Edit {
             }
             other => Err(reflect::no_variant(
                 other,
-                &["Apply", "Append", "Undo", "Redo"],
+                &["Apply", "Append", "Amend", "Undo", "Redo"],
             )),
         }
     }
@@ -393,4 +472,101 @@ fn text(value: &Value, field: &str) -> Result<String> {
 fn parse_id(value: &Value, field: &str) -> Result<EntityId> {
     let id: Result<EntityId> = text(value, field)?.parse();
     id.map_err(|error: Error| reflect::within(error, field))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Transform;
+
+    /// A world of one entity with a transform, and its ID.
+    fn world() -> (World, EntityId) {
+        let mut world = World::seeded(1);
+        world.register::<Transform>().expect("registered");
+        let entity = world.spawn(Transform::IDENTITY);
+        let id = world.id(entity).expect("alive");
+        (world, id)
+    }
+
+    fn set(id: EntityId, y: f32) -> Operation {
+        Operation::Set {
+            entity: id,
+            component: "Transform".into(),
+            path: "translation.y".to_owned(),
+            value: Value::F32(y),
+        }
+    }
+
+    fn amend(gesture: u64, operation: Operation) -> Edit {
+        Edit::Amend {
+            author: "editor".to_owned(),
+            gesture,
+            operation,
+        }
+    }
+
+    /// An author's sets of one field in one gesture undo whole; another gesture, or any other edit
+    /// of the author's between them, refused or not, starts another edit; and another author's
+    /// edits leave the gesture going on.
+    #[test]
+    fn a_gestures_sets_undo_whole() {
+        let (mut world, id) = world();
+        let mut authors = Authors::default();
+        let edit = |authors: &mut Authors, world: &mut World, edit| {
+            authors.edit(world, edit).expect("applied");
+        };
+        let y = |world: &World| {
+            let entity = world.entity(id).expect("alive");
+            world
+                .get::<Transform>(entity)
+                .expect("a transform")
+                .translation
+                .y
+        };
+        let undo = || Edit::Undo {
+            author: "editor".to_owned(),
+        };
+        for y in [1.0, 2.0, 3.0] {
+            edit(&mut authors, &mut world, amend(1, set(id, y)));
+        }
+        let other = Edit::Apply {
+            author: "agent".to_owned(),
+            operations: vec![set(id, 9.0)],
+        };
+        edit(&mut authors, &mut world, other);
+        edit(&mut authors, &mut world, amend(1, set(id, 4.0)));
+        edit(&mut authors, &mut world, undo());
+        assert_eq!(y(&world), 0.0, "the gesture undone whole");
+        edit(&mut authors, &mut world, amend(2, set(id, 5.0)));
+        edit(&mut authors, &mut world, amend(3, set(id, 6.0)));
+        edit(&mut authors, &mut world, undo());
+        assert_eq!(y(&world), 5.0, "another gesture, another edit");
+        // A gesture going on, which the log's own refusal would leave open.
+        edit(&mut authors, &mut world, amend(4, set(id, 7.0)));
+        let refused = Edit::Apply {
+            author: "editor".to_owned(),
+            operations: vec![Operation::Delete {
+                entity: "0000000000000001".parse().expect("an ID"),
+            }],
+        };
+        assert!(authors.edit(&mut world, refused).is_err());
+        edit(&mut authors, &mut world, amend(4, set(id, 8.0)));
+        edit(&mut authors, &mut world, undo());
+        assert_eq!(y(&world), 7.0, "a refused edit between ends the gesture");
+    }
+
+    /// An amend is kept as a value, as a recording keeps it, and read back as itself.
+    #[test]
+    fn an_amend_reads_back_as_it_was_written() {
+        let (_, id) = world();
+        let amend = amend(u64::MAX, set(id, 2.5));
+        let value = amend.to_value();
+        assert_eq!(Edit::from_value(&value).expect("an edit"), amend);
+        let Value::Variant(name, mut fields) = value else {
+            panic!("a variant");
+        };
+        fields[1].1 = Value::Int(3);
+        let error = Edit::from_value(&Value::Variant(name, fields)).expect_err("refused");
+        assert_eq!(error.code(), "reflect.wrong_kind", "{error}");
+    }
 }

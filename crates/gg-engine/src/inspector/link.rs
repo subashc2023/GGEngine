@@ -6,8 +6,8 @@ use std::rc::Rc;
 
 use super::Edit;
 use super::fields::AXES;
-use crate::reflect::{Shape, Type, Value};
-use crate::{EntityId, World};
+use crate::EntityId;
+use crate::reflect::{Shape, Type, Types, Value};
 
 /// A link to an [`Inspector`], which [`Inspector::link`] gives, through which another layer picks
 /// and edits as the Inspector's panels do, such as with a tool's handles in the game's view: its
@@ -36,6 +36,9 @@ pub(super) struct Linked {
     pub(super) picked: Option<EntityId>,
     /// How many undos and redos the Inspector's passes have asked for.
     pub(super) stepped: u64,
+    /// The game a remote Inspector is to show from its next pass, which `Some(None)` leaves.
+    #[cfg(feature = "dev")]
+    pub(super) reach: Option<Option<gg_api::Session>>,
 }
 
 /// A set or a seal made through a link.
@@ -57,7 +60,7 @@ impl InspectorLink {
     /// panels, whether or not they show, opening the rows above its own, as its Find field does;
     /// or unpick, for `None`, or for an ID no living entity has then. A pick asked for later in the
     /// frame takes its place. A world cleared, replaced or restored before then, as
-    /// [`World::serial`] says, drops it.
+    /// [`World::serial`](crate::World::serial) says, drops it.
     pub fn pick(&self, id: Option<EntityId>) {
         self.0.borrow_mut().pick = Some(id);
     }
@@ -113,6 +116,16 @@ impl InspectorLink {
         }
     }
 
+    #[cfg(feature = "dev")]
+    /// Has a remote Inspector, which [`Inspector::remote`](super::Inspector::remote) makes, show
+    /// the world of the game `session` names from its next pass, connecting to it, as it serves; or
+    /// none, for `None`, as the game goes. Its pick and its open rows stay, since entities' IDs
+    /// outlive a game's restarts, and what it knew of the game before goes. Another Inspector
+    /// ignores it.
+    pub fn reach(&self, session: Option<gg_api::Session>) {
+        self.0.borrow_mut().reach = Some(session);
+    }
+
     /// Ends the link's gesture, as the drag that made its sets ends: its next set begins another
     /// edit.
     pub fn seal(&self) {
@@ -164,11 +177,10 @@ fn own_field(path: &str) -> bool {
     named && AXES.iter().any(|&(name, ..)| name == axis)
 }
 
-/// Whether `edit`, a link's, sets what a link may, as `world`'s types describe its component: a
-/// field of the component's own that holds nothing the panels set at a path of its own, as a
-/// struct, a list or an array does; or a component of a vector that's one.
-pub(super) fn links_field(world: &World, edit: &Edit) -> bool {
-    let types = world.types();
+/// Whether `edit`, a link's, sets what a link may, as `types` describe its component: a field of
+/// the component's own that holds nothing the panels set at a path of its own, as a struct, a list
+/// or an array does; or a component of a vector that's one.
+pub(super) fn links_field(types: &Types, edit: &Edit) -> bool {
     let Some(index) = types.find(&edit.component) else {
         return false;
     };

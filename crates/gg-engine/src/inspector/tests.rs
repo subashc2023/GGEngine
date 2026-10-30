@@ -12,7 +12,7 @@ use super::entities::{Tree, row_label};
 use super::*;
 use crate::reflect::tests::{Everything, Form, Inner, everything, same_snapshots, snapshot};
 use crate::reflect::{self, Ident};
-use crate::{Camera, Component, Projection, Sprite};
+use crate::{Camera, Component, Entity, Projection, Sprite};
 
 /// `entity`'s ID, which the Inspector picks it by and names it by.
 fn id(world: &World, entity: Entity) -> EntityId {
@@ -37,7 +37,8 @@ fn panels(inspector: &mut Inspector, world: &World, ui: &mut egui::Ui, pass: &mu
     let entities = egui::UiBuilder::new().id_salt("Entities").max_rect(left);
     ui.scope_builder(entities, |ui| inspector.entities(world, ui, pass));
     let inspect = egui::UiBuilder::new().id_salt("Inspector").max_rect(right);
-    ui.scope_builder(inspect, |ui| inspector.inspect(world, ui, pass));
+    let pending = inspector.pending();
+    ui.scope_builder(inspect, |ui| inspector.inspect(world, ui, pass, &pending));
 }
 
 /// A frame of the two panels' contents, on a screen big enough for all of them, given
@@ -269,7 +270,8 @@ fn drawing_the_panels_changes_nothing() {
 fn a_parent_lists_its_first_16_children() {
     let mut world = World::default();
     let parent = world.spawn(Transform::IDENTITY);
-    assert_eq!(children(&world, parent), None);
+    let parent_id = id(&world, parent);
+    assert_eq!(children(&world, parent_id), None);
     let kids: Vec<Entity> = (0..18).map(|_| world.spawn(Transform::IDENTITY)).collect();
     for &kid in &kids {
         world.set_parent(kid, Some(parent)).expect("no cycle");
@@ -277,12 +279,12 @@ fn a_parent_lists_its_first_16_children() {
     let shown = kids[..16].iter().map(|&kid| id(&world, kid).to_string());
     let shown: Vec<String> = shown.collect();
     let shown = format!("Children: {}", shown.join(", "));
-    let listed = children(&world, parent);
+    let listed = children(&world, parent_id);
     assert_eq!(listed, Some(format!("{shown} and 2 more")));
     for &kid in &kids[16..] {
         world.set_parent(kid, None).expect("a root");
     }
-    assert_eq!(children(&world, parent), Some(shown));
+    assert_eq!(children(&world, parent_id), Some(shown));
 }
 
 /// A click of `button` at `at`: the pointer there, pressed and released in one frame, as egui
@@ -411,7 +413,7 @@ fn called(name: &str) -> Name {
 
 /// What `entity`'s row in the Entities panel says.
 fn row_text(world: &World, entity: Entity) -> String {
-    row_label(world, entity).text().to_owned()
+    row_label(world, id(world, entity)).text().to_owned()
 }
 
 /// Names in a field and in an option, which a tuple struct of one field shows alone, and sets
@@ -1495,7 +1497,7 @@ fn menu(
     };
     let mut output = ctx.run_ui(input, |ui| {
         let mut pass = Pass {
-            chosen: inspector.edit_menu(ui),
+            chosen: inspector.edit_menu(ui, &inspector.pending()),
             ..Pass::default()
         };
         inspector.entity_menu(world, ui, &mut pass.operations);
@@ -1714,14 +1716,14 @@ fn the_world_left_coming_back_finds_its_edits_pick_and_rows() {
 
 /// Every row of the tree, the naive way: each root in turn, each followed, if its row is open,
 /// by the rows of each of its children in turn.
-fn flatten(world: &World, expanded: &HashSet<EntityId>) -> Vec<(Entity, usize)> {
+fn flatten(world: &World, expanded: &HashSet<EntityId>) -> Vec<(EntityId, usize)> {
     fn rows(
         world: &World,
         expanded: &HashSet<EntityId>,
         (entity, depth): (Entity, usize),
-        out: &mut Vec<(Entity, usize)>,
+        out: &mut Vec<(EntityId, usize)>,
     ) {
-        out.push((entity, depth));
+        out.push((id(world, entity), depth));
         if expanded.contains(&id(world, entity)) {
             for child in world.children(entity).expect("alive") {
                 rows(world, expanded, (child, depth + 1), out);
@@ -1781,7 +1783,7 @@ fn the_tree_finds_a_page_as_a_listing_of_every_row_does() {
     let tree = Tree::new(&world, &expanded);
     let flat = flatten(&world, &expanded);
     assert!(flat.len() > 50_000, "{}", flat.len());
-    assert!(flat.contains(&(bottom[1], 3)));
+    assert!(flat.contains(&(id(&world, bottom[1]), 3)));
     assert_eq!(tree.spans.len(), 4, "the roots open");
     assert_eq!(tree.len, flat.len());
     assert_eq!(tree.page(&world, 0..flat.len()), flat);
@@ -1818,7 +1820,7 @@ fn a_frame_scrolled_over_thousands_of_roots_draws_the_rows_in_view() {
     let rows: HashMap<String, usize> = flat
         .iter()
         .enumerate()
-        .map(|(row, &(entity, _))| (row_text(&world, entity), row))
+        .map(|(row, &(id, _))| (row_label(&world, id).text().to_owned(), row))
         .collect();
     let mut time = 0.0;
     let mut run = |inspector: &mut Inspector, world: &mut World, events| {
@@ -2470,7 +2472,8 @@ fn a_components_menu_opens_in_a_panel_smaller_than_its_contents() {
                 ui.scope_builder(inspect, |ui| {
                     ui.set_clip_rect(panel);
                     let scroll = egui::ScrollArea::vertical();
-                    scroll.show(ui, |ui| inspector.inspect(&world, ui, &mut pass));
+                    let pending = inspector.pending();
+                    scroll.show(ui, |ui| inspector.inspect(&world, ui, &mut pass, &pending));
                 });
                 inspector.queue(pass);
             });
@@ -2894,7 +2897,8 @@ fn a_vectors_axes_fit_a_panel_as_narrow_as_the_editors() {
                 ui.scope_builder(inspect, |ui| {
                     ui.set_clip_rect(panel);
                     let scroll = egui::ScrollArea::vertical();
-                    scroll.show(ui, |ui| inspector.inspect(&world, ui, &mut pass));
+                    let pending = inspector.pending();
+                    scroll.show(ui, |ui| inspector.inspect(&world, ui, &mut pass, &pending));
                 });
                 inspector.queue(pass);
             });
@@ -3299,4 +3303,262 @@ fn the_links_latest_set_of_a_field_comes_after_those_made_since() {
         set("translation", whole(2.0)),
     ];
     assert_eq!(link.pending(), expected);
+}
+
+#[cfg(feature = "dev")]
+mod remote {
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use gg_api::Session;
+
+    use super::*;
+    use crate::api::Api;
+    use crate::layer::Stack;
+    use crate::main_loop::Stepper;
+
+    /// How long a test waits for what should come in a few frames, past which it fails rather than
+    /// hangs.
+    const DEADLINE: Duration = Duration::from_secs(20);
+
+    /// A game whose world its API serves on this thread, as its frames would.
+    struct Game {
+        api: Api,
+        cx: Context,
+        stack: Stack,
+        stepper: Stepper,
+    }
+
+    impl Game {
+        fn frame(&mut self) {
+            self.api
+                .serve(&mut self.cx, &mut self.stack, &mut self.stepper);
+            self.stepper.step(Tick::DT, |_| true, || Duration::ZERO);
+        }
+    }
+
+    /// A frame of a remote Inspector's panels, side by side as [`panels`] draws them, as its `ui`
+    /// takes in the game's answers before them and sends the pass after them; `give` adds to the
+    /// pass before it's sent. Returns the frame's texts.
+    fn frame(
+        inspector: &mut Inspector,
+        ctx: &egui::Context,
+        time: f64,
+        give: impl FnOnce(&mut Pass),
+    ) -> Vec<String> {
+        let mut remote = inspector.remote.take().expect("a remote Inspector");
+        remote.update(inspector);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 4000.0));
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            time: Some(time),
+            ..egui::RawInput::default()
+        };
+        let mut give = Some(give);
+        let mut output = ctx.run_ui(input, |ui| {
+            let mut pass = Pass::default();
+            inspector.follow(&remote);
+            let (left, right) = ui.max_rect().split_left_right_at_fraction(0.5);
+            let entities = egui::UiBuilder::new().id_salt("Entities").max_rect(left);
+            ui.scope_builder(entities, |ui| inspector.entities(&remote, ui, &mut pass));
+            let pending = remote.pending(inspector.picked);
+            let inspect = egui::UiBuilder::new().id_salt("Inspector").max_rect(right);
+            ui.scope_builder(inspect, |ui| {
+                inspector.inspect(&remote, ui, &mut pass, &pending);
+            });
+            if let Some(give) = give.take() {
+                give(&mut pass);
+            }
+            remote.send(pass, inspector);
+        });
+        output.textures_delta.clear();
+        inspector.remote = Some(remote);
+        texts_in(&output.shapes)
+            .into_iter()
+            .map(|(text, _)| text)
+            .collect()
+    }
+
+    /// Runs frames of `game` and of `inspector`, the first given `give`, until `until` holds of
+    /// the Inspector's texts and the game; returns the texts.
+    fn until(
+        inspector: &mut Inspector,
+        game: &mut Game,
+        ctx: &egui::Context,
+        time: &mut f64,
+        give: impl FnOnce(&mut Pass),
+        until: impl Fn(&[String], &Game) -> bool,
+    ) -> Vec<String> {
+        let start = Instant::now();
+        let mut give = Some(give);
+        loop {
+            assert!(start.elapsed() < DEADLINE, "it never came");
+            game.frame();
+            *time += 1.0 / 60.0;
+            let texts = frame(inspector, ctx, *time, |pass| {
+                if let Some(give) = give.take() {
+                    give(pass);
+                }
+            });
+            if until(&texts, game) {
+                return texts;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn x(game: &Game, entity: Entity) -> f32 {
+        let transform = game.cx.world().get::<Transform>(entity);
+        transform.expect("a transform").translation.x
+    }
+
+    /// A remote Inspector lists a game's entities through its API, as they come and go, shows the
+    /// one picked, its components in the order they registered, sets a field in a gesture, which
+    /// one undo takes back, its Edit menu naming the edit, and creates an entity, which it picks.
+    #[test]
+    fn a_remote_inspector_shows_and_edits_a_game_through_the_api() {
+        let app = "Remote Inspector";
+        let events: &'static gg_core::log::Events = Box::leak(Box::default());
+        let api = Api::start(app, &[], None, events, None, None).expect("the API starts");
+        let file = Session::file_name(app, std::process::id());
+        let path = crate::beside_exe("sessions").join(file);
+        let text = std::fs::read(path).expect("the session file");
+        let session: Session = serde_json::from_slice(&text).expect("a session");
+        let mut cx = Context::seeded(6);
+        let world = cx.world_mut();
+        let hero = world.spawn((Transform::IDENTITY, called("Hero")));
+        let kid = world.spawn((Transform::IDENTITY, called("Kid")));
+        world.set_parent(kid, Some(hero)).expect("no cycle");
+        let (hero_id, kid_id) = (id(world, hero), id(world, kid));
+        let mut stepper = Stepper::default();
+        stepper.pause();
+        let mut game = Game {
+            api,
+            cx,
+            stack: Stack::default(),
+            stepper,
+        };
+        let mut inspector = Inspector::remote("editor");
+        inspector.link().reach(Some(session));
+        let (ctx, mut time) = (crate::egui_context(), 0.0);
+        let has = |texts: &[String], text: &str| texts.iter().any(|shown| shown == text);
+        // The tree, its root closed.
+        let texts = until(
+            &mut inspector,
+            &mut game,
+            &ctx,
+            &mut time,
+            |_| {},
+            |texts, _| has(texts, "Hero") && has(texts, "2 entities"),
+        );
+        assert!(!has(&texts, "Kid"), "{texts:?}");
+        // Picked through the link, its components in the order they registered.
+        inspector.link().pick(Some(hero_id));
+        let heading = format!("Hero, entity {hero_id}");
+        let texts = until(
+            &mut inspector,
+            &mut game,
+            &ctx,
+            &mut time,
+            |_| {},
+            |texts, _| has(texts, &heading) && has(texts, "Transform"),
+        );
+        assert!(has(&texts, &format!("Children: {kid_id}")), "{texts:?}");
+        let own = game.cx.world().components_of(hero).expect("alive");
+        let own: Vec<&str> = own.collect();
+        let drawn: Vec<&str> = (texts.iter())
+            .filter_map(|text| own.iter().find(|&&name| name == text).copied())
+            .collect();
+        assert_eq!(drawn, own, "in the order they registered");
+        // Two sets in one gesture, then its end.
+        let set = |x: f32| Edit {
+            component: "Transform".to_owned(),
+            path: "translation.x".to_owned(),
+            value: Value::F32(x),
+        };
+        for x in [5.0, 6.0] {
+            game.frame();
+            time += 1.0 / 60.0;
+            frame(&mut inspector, &ctx, time, |pass| {
+                pass.sets.push(set(x));
+                pass.cues.held = true;
+            });
+        }
+        let edit = format!("set `Transform.translation.x` of {hero_id}");
+        until(
+            &mut inspector,
+            &mut game,
+            &ctx,
+            &mut time,
+            |pass| {
+                pass.cues.released = true;
+            },
+            |_, game| x(game, hero) == 6.0,
+        );
+        until(
+            &mut inspector,
+            &mut game,
+            &ctx,
+            &mut time,
+            |_| {},
+            |_, _| true,
+        );
+        let labels = |inspector: &Inspector| {
+            let remote = inspector.remote.as_ref().expect("remote");
+            remote.pending(None).undo
+        };
+        let start = Instant::now();
+        while labels(&inspector).as_deref() != Some(edit.as_str()) {
+            assert!(
+                start.elapsed() < DEADLINE,
+                "the Edit menu never named the edit"
+            );
+            until(
+                &mut inspector,
+                &mut game,
+                &ctx,
+                &mut time,
+                |_| {},
+                |_, _| true,
+            );
+        }
+        // One undo takes the gesture back whole.
+        until(
+            &mut inspector,
+            &mut game,
+            &ctx,
+            &mut time,
+            |pass| {
+                pass.chosen = Some(Step::Undo);
+            },
+            |_, game| x(game, hero) == 0.0,
+        );
+        // The game despawns one, which goes from the list.
+        game.cx.world_mut().despawn(kid).expect("alive");
+        until(
+            &mut inspector,
+            &mut game,
+            &ctx,
+            &mut time,
+            |_| {},
+            |texts, _| has(texts, "1 entity"),
+        );
+        // An entity made, and picked.
+        let texts = until(
+            &mut inspector,
+            &mut game,
+            &ctx,
+            &mut time,
+            |pass| {
+                pass.operations.push(empty(None));
+            },
+            |texts, _| {
+                texts
+                    .iter()
+                    .any(|text| text.starts_with("Empty Entity, entity "))
+            },
+        );
+        assert_ne!(inspector.picked, Some(hero_id), "{texts:?}");
+        assert_eq!(game.cx.world().entities(None).expect("all").len(), 2);
+    }
 }

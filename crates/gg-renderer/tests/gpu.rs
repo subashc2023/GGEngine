@@ -64,7 +64,7 @@ fn main() -> ExitCode {
         }
     }
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("logs");
-    gg_core::log::init("renderer-gpu-tests", &dir);
+    gg_core::log::init("renderer-gpu-tests", &dir, true);
 
     let mut tests = Tests::new();
     run!(

@@ -1,8 +1,12 @@
 //! Reflection's values as the tool API writes and reads them, as gg-api's docs describe: JSON
 //! written by hand, so that a struct's fields keep their order, with the entities they hold by
 //! their IDs and the textures by their paths; and read by the type of the field it goes in, as
-//! reflection describes it.
+//! reflection describes it. A game reads and writes them with its world's entities and textures;
+//! a client, as the editor's Inspector is, with another process's, which it keeps by their IDs and
+//! paths, as [`Remote`] says; and reflection's descriptions of types go to and come back from
+//! gg-api's, as `types` answers them.
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
 
 use gg_core::math::{Quat, Vec2, Vec3, Vec4};
@@ -10,12 +14,88 @@ use gg_core::{Error, Result};
 use serde_json::{Map, Value as JsonValue};
 
 use crate::ecs::MAX_DEPTH;
-use crate::reflect::{self, Field, Ident, Shape, Type, Value};
-use crate::{Entity, EntityId, World};
+use crate::reflect::{self, Bound, Field, Ident, Meta, Shape, Show, Type, Types, Value, Variant};
+use crate::{Entity, EntityId, Texture, World};
 
-/// Writes `value` as JSON, with the entities it holds by their IDs in `world`, `null` for one that
-/// isn't alive there, and the textures by their paths, `null` for one without.
-pub(super) fn write(out: &mut String, value: &Value, world: &World) {
+/// What finds the entities and textures values hold as JSON names them, by their IDs and paths,
+/// and names them back: a game's [`World`], or a client's [`Remote`].
+pub(crate) trait Names {
+    /// The types values are read by.
+    fn types(&self) -> &Types;
+    /// The ID of `entity`, if it's alive.
+    fn id(&self, entity: Entity) -> Option<EntityId>;
+    /// The path `texture` was added from, if it has one.
+    fn path(&self, texture: Texture) -> Option<&str>;
+    /// The value of the entity of ID `id`.
+    ///
+    /// Fails with `ecs.no_entity` if it isn't alive.
+    fn entity(&self, id: EntityId) -> Result<Value>;
+    /// The value of the texture added from `path`.
+    ///
+    /// Fails with `api.no_texture` if none was.
+    fn texture(&self, path: &str) -> Result<Value>;
+}
+
+impl Names for World {
+    fn types(&self) -> &Types {
+        World::types(self)
+    }
+
+    fn id(&self, entity: Entity) -> Option<EntityId> {
+        World::id(self, entity)
+    }
+
+    fn path(&self, texture: Texture) -> Option<&str> {
+        self.assets().path(texture)
+    }
+
+    fn entity(&self, id: EntityId) -> Result<Value> {
+        let entity = World::entity(self, id)
+            .ok_or_else(|| Error::new("ecs.no_entity", format!("no living entity has ID {id}")))?;
+        Ok(Value::Entity(entity))
+    }
+
+    fn texture(&self, path: &str) -> Result<Value> {
+        let texture = self.assets().texture(path).ok_or_else(|| {
+            let message =
+                format!("no texture was added from `{path}`, a path as the app's root names it");
+            Error::new("api.no_texture", message)
+        })?;
+        Ok(Value::Texture(texture))
+    }
+}
+
+/// Another process's values, as a client of its API keeps them, by the types it described: an
+/// entity by its ID, as [`Value::String`], or [`Entity::DEAD`] for one that isn't alive, as JSON's
+/// `null` gives it; and a texture by its path, as [`Value::String`]. Written back, they're the JSON
+/// they were read from, which the game reads by its own world.
+pub(crate) struct Remote<'a>(pub(crate) &'a Types);
+
+impl Names for Remote<'_> {
+    fn types(&self) -> &Types {
+        self.0
+    }
+
+    fn id(&self, _: Entity) -> Option<EntityId> {
+        None
+    }
+
+    fn path(&self, _: Texture) -> Option<&str> {
+        None
+    }
+
+    fn entity(&self, id: EntityId) -> Result<Value> {
+        Ok(Value::String(id.to_string()))
+    }
+
+    fn texture(&self, path: &str) -> Result<Value> {
+        Ok(Value::String(path.to_owned()))
+    }
+}
+
+/// Writes `value` as JSON, with the entities it holds by their IDs, as `names` names them, `null`
+/// for one that isn't alive, and the textures by their paths, `null` for one without.
+pub(crate) fn write(out: &mut String, value: &Value, names: &dyn Names) {
     match value {
         Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
         Value::Int(n) => write!(out, "{n}").expect("a string takes any text"),
@@ -34,33 +114,33 @@ pub(super) fn write(out: &mut String, value: &Value, world: &World) {
         Value::Vec3(v) => floats(out, &v.to_array()),
         Value::Vec4(v) => floats(out, &v.to_array()),
         Value::Quat(q) => floats(out, &q.to_array()),
-        &Value::Entity(entity) => match world.id(entity) {
+        &Value::Entity(entity) => match names.id(entity) {
             Some(id) => string(out, &id.to_string()),
             None => out.push_str("null"),
         },
-        &Value::Texture(texture) => match world.assets().path(texture) {
+        &Value::Texture(texture) => match names.path(texture) {
             Some(path) => string(out, path),
             None => out.push_str("null"),
         },
         Value::Option(None) => out.push_str("null"),
-        Value::Option(Some(value)) => write(out, value, world),
+        Value::Option(Some(value)) => write(out, value, names),
         Value::List(items) => {
             out.push('[');
             for (i, item) in items.iter().enumerate() {
                 if i > 0 {
                     out.push(',');
                 }
-                write(out, item, world);
+                write(out, item, names);
             }
             out.push(']');
         }
-        Value::Struct(fields) => object(out, fields, world),
+        Value::Struct(fields) => object(out, fields, names),
         Value::Variant(name, fields) if fields.is_empty() => string(out, name),
         Value::Variant(name, fields) => {
             out.push('{');
             string(out, name);
             out.push(':');
-            object(out, fields, world);
+            object(out, fields, names);
             out.push('}');
         }
         Value::Opaque => out.push_str("\"(opaque)\""),
@@ -68,28 +148,29 @@ pub(super) fn write(out: &mut String, value: &Value, world: &World) {
 }
 
 /// The value `json` gives a field of type `ty`, as gg-api's docs describe: with the entities it
-/// names by their IDs, alive in `world`, or `null` for a dead one, as one that isn't alive writes,
-/// and the textures by their paths, among the assets `world`'s layers added; a struct, or a
-/// variant's fields, missing a field takes its default, or is opaque, which keeps or makes it as its
-/// type's own is.
+/// names by their IDs, alive as `names` finds them, or `null` for a dead one, as one that isn't
+/// alive writes, and the textures by their paths, as `names` finds them; a struct, or a variant's
+/// fields, missing a field takes its default, or is opaque, which keeps or makes it as its type's
+/// own is; and a whole number an `Int` for a signed field, as reflection reads one, and a `UInt`
+/// for an unsigned one, if it can be.
 ///
 /// Fails, saying where in the value, with `reflect.wrong_kind` for JSON of another kind than the
 /// type's, `reflect.no_variant` and `reflect.no_field` for a variant or a field the type hasn't,
 /// `ecs.bad_id` and `ecs.no_entity` for an ID that isn't one or names no living entity,
 /// `api.no_texture` for a path no texture was added from, and `api.too_deep` for a value nested
 /// more than a scene's values may be.
-pub(super) fn read(json: &JsonValue, ty: &Type, world: &World) -> Result<Value> {
-    read_at(json, ty, world, 1)
+pub(crate) fn read(json: &JsonValue, ty: &Type, names: &dyn Names) -> Result<Value> {
+    read_at(json, ty, names, 1)
 }
 
 /// As [`read`], for a value `depth` levels deep, the first being a component's.
-fn read_at(json: &JsonValue, ty: &Type, world: &World, depth: u32) -> Result<Value> {
+fn read_at(json: &JsonValue, ty: &Type, names: &dyn Names, depth: u32) -> Result<Value> {
     if depth > MAX_DEPTH {
         let message =
             format!("a value more than {MAX_DEPTH} levels deep, the most a scene's may be");
         return Err(Error::new("api.too_deep", message));
     }
-    let types = world.types();
+    let types = names.types();
     let wrong = |expected: &str| {
         let found = match json {
             JsonValue::Null => "null",
@@ -133,11 +214,12 @@ fn read_at(json: &JsonValue, ty: &Type, world: &World, depth: u32) -> Result<Val
             &JsonValue::Bool(b) => Value::Bool(b),
             _ => return Err(wrong("a boolean")),
         },
-        Type::Int { .. } => match json {
-            JsonValue::Number(n) => match (n.as_u64(), n.as_i64()) {
-                (Some(n), _) => Value::UInt(n),
-                (None, Some(n)) => Value::Int(n),
-                (None, None) => return Err(wrong("a whole number")),
+        &Type::Int { signed, .. } => match json {
+            // The other, for a number outside its kind, which reflection refuses, saying so.
+            JsonValue::Number(n) => match (signed, n.as_i64(), n.as_u64()) {
+                (true, Some(n), _) | (false, Some(n), None) => Value::Int(n),
+                (_, _, Some(n)) => Value::UInt(n),
+                (_, None, None) => return Err(wrong("a whole number")),
             },
             _ => return Err(wrong("a whole number")),
         },
@@ -152,40 +234,26 @@ fn read_at(json: &JsonValue, ty: &Type, world: &World, depth: u32) -> Result<Val
         Type::Vec4 => Value::Vec4(Vec4::from_slice(&floats(4)?)),
         Type::Quat => Value::Quat(Quat::from_slice(&floats(4)?)),
         Type::Entity => match json {
-            JsonValue::String(text) => {
-                let id: EntityId = text.parse()?;
-                let entity = world.entity(id).ok_or_else(|| {
-                    Error::new("ecs.no_entity", format!("no living entity has ID {id}"))
-                })?;
-                Value::Entity(entity)
-            }
+            JsonValue::String(text) => names.entity(text.parse()?)?,
             // As a reference to one that isn't alive writes.
             JsonValue::Null => Value::Entity(Entity::DEAD),
             _ => return Err(wrong("an entity's ID, a string, or null for none alive")),
         },
         Type::Texture => match json {
-            JsonValue::String(path) => {
-                let texture = world.assets().texture(path).ok_or_else(|| {
-                    let message = format!(
-                        "no texture was added from `{path}`, a path as the app's root names it"
-                    );
-                    Error::new("api.no_texture", message)
-                })?;
-                Value::Texture(texture)
-            }
+            JsonValue::String(path) => names.texture(path)?,
             _ => return Err(wrong("a texture's path, a string")),
         },
         Type::Option(inner) => match json {
             JsonValue::Null => Value::Option(None),
-            json => Value::Option(Some(Box::new(read_at(json, inner, world, depth + 1)?))),
+            json => Value::Option(Some(Box::new(read_at(json, inner, names, depth + 1)?))),
         },
         Type::List(inner) => match json {
-            JsonValue::Array(items) => Value::List(list(items, inner, world, depth)?),
+            JsonValue::Array(items) => Value::List(list(items, inner, names, depth)?),
             _ => return Err(wrong("an array")),
         },
         Type::Array(inner, n) => match json {
             JsonValue::Array(items) if items.len() == *n as usize => {
-                Value::List(list(items, inner, world, depth)?)
+                Value::List(list(items, inner, names, depth)?)
             }
             _ => return Err(wrong(&format!("an array of {n}"))),
         },
@@ -193,12 +261,12 @@ fn read_at(json: &JsonValue, ty: &Type, world: &World, depth: u32) -> Result<Val
         &Type::Named(index) => match &types.info(index).shape {
             Shape::Struct { fields, .. } => match json {
                 JsonValue::Object(given) => {
-                    Value::Struct(object_fields(given, fields, world, depth)?)
+                    Value::Struct(object_fields(given, fields, names, depth)?)
                 }
                 _ => return Err(wrong("an object of the struct's fields")),
             },
             Shape::Enum(variants) => {
-                let names = || variants.iter().map(|variant| variant.name.as_ref());
+                let variant_names = || variants.iter().map(|variant| variant.name.as_ref());
                 let (name, given) = match json {
                     JsonValue::String(name) => (name.as_str(), None),
                     JsonValue::Object(one) if one.len() == 1 => {
@@ -213,12 +281,13 @@ fn read_at(json: &JsonValue, ty: &Type, world: &World, depth: u32) -> Result<Val
                     }
                 };
                 let Some(variant) = variants.iter().find(|variant| variant.name == name) else {
-                    return Err(reflect::no_variant(name, &names().collect::<Vec<_>>()));
+                    let given: Vec<_> = variant_names().collect();
+                    return Err(reflect::no_variant(name, &given));
                 };
                 let fields = match given {
-                    None => object_fields(&Map::new(), &variant.fields, world, depth)?,
+                    None => object_fields(&Map::new(), &variant.fields, names, depth)?,
                     Some(JsonValue::Object(given)) => {
-                        object_fields(given, &variant.fields, world, depth)
+                        object_fields(given, &variant.fields, names, depth)
                             .map_err(|error| reflect::within(error, name))?
                     }
                     Some(_) => {
@@ -234,9 +303,9 @@ fn read_at(json: &JsonValue, ty: &Type, world: &World, depth: u32) -> Result<Val
 }
 
 /// `items`, each read as a `ty` a level below `depth`.
-fn list(items: &[JsonValue], ty: &Type, world: &World, depth: u32) -> Result<Vec<Value>> {
+fn list(items: &[JsonValue], ty: &Type, names: &dyn Names, depth: u32) -> Result<Vec<Value>> {
     let items = items.iter().enumerate().map(|(i, item)| {
-        read_at(item, ty, world, depth + 1)
+        read_at(item, ty, names, depth + 1)
             .map_err(|error| reflect::within(error, &format!("[{i}]")))
     });
     items.collect()
@@ -249,7 +318,7 @@ fn list(items: &[JsonValue], ty: &Type, world: &World, depth: u32) -> Result<Vec
 fn object_fields(
     given: &Map<String, JsonValue>,
     fields: &[Field],
-    world: &World,
+    names: &dyn Names,
     depth: u32,
 ) -> Result<Vec<(Ident, Value)>> {
     if let Some(name) = given
@@ -263,10 +332,10 @@ fn object_fields(
         );
         return Err(Error::new("reflect.no_field", message));
     }
-    let types = world.types();
+    let types = names.types();
     let fields = fields.iter().map(|field| {
         let value = match given.get(field.name.as_ref()) {
-            Some(json) => read_at(json, &field.ty, world, depth + 1),
+            Some(json) => read_at(json, &field.ty, names, depth + 1),
             None if field.ty.is_opaque(types) => Ok(Value::Opaque),
             None => types.field_default(field),
         };
@@ -285,12 +354,12 @@ fn opaque(json: &JsonValue, wrong: &dyn Fn(&str) -> Error) -> Result<Value> {
 }
 
 /// Writes `text` as a JSON string.
-pub(super) fn string(out: &mut String, text: &str) {
+pub(crate) fn string(out: &mut String, text: &str) {
     out.push_str(&serde_json::to_string(text).expect("a string is a JSON string"));
 }
 
 /// Writes `fields` as an object, in their order.
-fn object(out: &mut String, fields: &[(Ident, Value)], world: &World) {
+fn object(out: &mut String, fields: &[(Ident, Value)], names: &dyn Names) {
     out.push('{');
     for (i, (name, value)) in fields.iter().enumerate() {
         if i > 0 {
@@ -298,7 +367,7 @@ fn object(out: &mut String, fields: &[(Ident, Value)], world: &World) {
         }
         string(out, name);
         out.push(':');
-        write(out, value, world);
+        write(out, value, names);
     }
     out.push('}');
 }
@@ -336,11 +405,269 @@ fn not_finite(out: &mut String, nan: bool, positive: bool) {
     });
 }
 
+/// `value` as JSON, as [`write()`] writes it.
+fn json(value: &Value, names: &dyn Names) -> JsonValue {
+    let mut out = String::new();
+    write(&mut out, value, names);
+    serde_json::from_str(&out).expect("written as JSON")
+}
+
+/// `world`'s component types and the named types, as `types` answers them.
+pub(super) fn describe(world: &World) -> gg_api::Types {
+    let types = world.types();
+    let components = world.component_types().map(|name| {
+        let (default, refused) = match world.default_of(name) {
+            Ok(default) => (Some(json(&default, world)), None),
+            Err(error) => (None, Some(format!("{error:#}"))),
+        };
+        gg_api::ComponentInfo {
+            name: name.to_owned(),
+            default,
+            refused,
+        }
+    });
+    let ty = |ty: &Type| api_type(types, ty);
+    let fields = |fields: &[Field]| -> Vec<gg_api::FieldInfo> {
+        let field = |field: &Field| gg_api::FieldInfo {
+            name: field.name.to_string(),
+            ty: ty(&field.ty),
+            min: field.meta.min.map(api_bound),
+            max: field.meta.max.map(api_bound),
+            show: match field.meta.show {
+                Show::Plain => gg_api::Show::Plain,
+                Show::Degrees => gg_api::Show::Degrees,
+                Show::Color => gg_api::Show::Color,
+            },
+            doc: field.meta.doc.to_string(),
+            // No default holds a living entity, nor a texture, which have none.
+            default: field.default.as_ref().map(|default| json(default, world)),
+        };
+        fields.iter().map(field).collect()
+    };
+    let described = types.iter().map(|(_, info)| gg_api::TypeInfo {
+        name: info.name.to_string(),
+        doc: info.doc.to_string(),
+        shape: match &info.shape {
+            Shape::Struct {
+                fields: given,
+                tuple,
+            } => gg_api::Shape::Struct {
+                fields: fields(given),
+                tuple: *tuple,
+            },
+            Shape::Enum(variants) => gg_api::Shape::Enum(
+                variants
+                    .iter()
+                    .map(|variant| gg_api::VariantInfo {
+                        name: variant.name.to_string(),
+                        fields: fields(&variant.fields),
+                        tuple: variant.tuple,
+                    })
+                    .collect(),
+            ),
+            Shape::Opaque => gg_api::Shape::Opaque,
+        },
+    });
+    gg_api::Types {
+        components: components.collect(),
+        types: described.collect(),
+    }
+}
+
+fn api_type(types: &Types, ty: &Type) -> gg_api::Type {
+    use gg_api::Type as Api;
+
+    let inner = |ty: &Type| Box::new(api_type(types, ty));
+    match ty {
+        Type::Bool => Api::Bool,
+        &Type::Int { bits, signed } => Api::Int { bits, signed },
+        Type::F32 => Api::F32,
+        Type::F64 => Api::F64,
+        Type::String => Api::String,
+        Type::Vec2 => Api::Vec2,
+        Type::Vec3 => Api::Vec3,
+        Type::Vec4 => Api::Vec4,
+        Type::Quat => Api::Quat,
+        Type::Entity => Api::Entity,
+        Type::Texture => Api::Texture,
+        Type::Option(of) => Api::Option(inner(of)),
+        Type::List(of) => Api::List(inner(of)),
+        Type::Array(of, n) => Api::Array(inner(of), *n),
+        &Type::Named(index) => Api::Named(types.info(index).name.to_string()),
+        Type::Opaque => Api::Opaque,
+    }
+}
+
+fn api_bound(bound: Bound) -> gg_api::Bound {
+    match bound {
+        Bound::Int(n) => gg_api::Bound::Int(n),
+        Bound::Float(x) => gg_api::Bound::Float(x),
+    }
+}
+
+/// The types another process described, as its `types` answered them, by which a client reads,
+/// draws and writes its values, as [`Remote`] keeps them; and its component types, in the order
+/// they registered, each with the value an add without one gives it, or why there's none.
+pub(crate) struct Described {
+    pub(crate) types: Types,
+    pub(crate) components: Vec<(String, std::result::Result<Value, String>)>,
+}
+
+/// The types `given` describes, as [`Described`] says.
+///
+/// Fails with `api.protocol` for a description that isn't one: two types of one name, a type it
+/// names but doesn't describe, or a default that isn't its field's.
+pub(crate) fn described(given: &gg_api::Types) -> Result<Described> {
+    let protocol = |what: String| Error::new("api.protocol", format!("`types` answered {what}"));
+    let names = given.types.iter().map(|info| {
+        let doc = Cow::Owned(info.doc.clone());
+        (Ident::from(info.name.clone()), doc)
+    });
+    let mut types = Types::described(names);
+    if types.iter().len() != given.types.len() {
+        return Err(protocol("two types of one name".to_owned()));
+    }
+    // Their shapes first, which their fields' defaults are read by.
+    let fields = |types: &Types, given: &[gg_api::FieldInfo]| -> Result<Vec<Field>> {
+        let field = |field: &gg_api::FieldInfo| {
+            Ok(Field {
+                name: Ident::from(field.name.clone()),
+                ty: own_type(types, &field.ty).map_err(protocol)?,
+                meta: Meta {
+                    min: field.min.map(own_bound),
+                    max: field.max.map(own_bound),
+                    show: match field.show {
+                        gg_api::Show::Plain => Show::Plain,
+                        gg_api::Show::Degrees => Show::Degrees,
+                        gg_api::Show::Color => Show::Color,
+                    },
+                    doc: Cow::Owned(field.doc.clone()),
+                },
+                default: None,
+            })
+        };
+        given.iter().map(field).collect()
+    };
+    for info in &given.types {
+        let shape = match &info.shape {
+            gg_api::Shape::Struct {
+                fields: given,
+                tuple,
+            } => Shape::Struct {
+                fields: fields(&types, given)?,
+                tuple: *tuple,
+            },
+            gg_api::Shape::Enum(variants) => Shape::Enum(
+                variants
+                    .iter()
+                    .map(|variant| {
+                        Ok(Variant {
+                            name: Ident::from(variant.name.clone()),
+                            fields: fields(&types, &variant.fields)?,
+                            tuple: variant.tuple,
+                        })
+                    })
+                    .collect::<Result<_>>()?,
+            ),
+            gg_api::Shape::Opaque => Shape::Opaque,
+        };
+        let index = types.find(&info.name).expect("each named");
+        types.info_mut(index).shape = shape;
+    }
+    // Then the defaults, each read by its field's type, and set once all are.
+    let mut defaults = Vec::new();
+    for info in &given.types {
+        let given = match &info.shape {
+            gg_api::Shape::Struct { fields, .. } => vec![fields],
+            gg_api::Shape::Enum(variants) => variants.iter().map(|v| &v.fields).collect(),
+            gg_api::Shape::Opaque => Vec::new(),
+        };
+        for (i, fields) in given.into_iter().enumerate() {
+            for (j, field) in fields.iter().enumerate() {
+                let Some(default) = &field.default else {
+                    continue;
+                };
+                let ty = own_type(&types, &field.ty).map_err(protocol)?;
+                let value = read(default, &ty, &Remote(&types)).map_err(|error| {
+                    protocol(format!(
+                        "`{}.{}`'s default {default}: {error}",
+                        info.name, field.name
+                    ))
+                })?;
+                defaults.push((types.find(&info.name).expect("each named"), i, j, value));
+            }
+        }
+    }
+    for (index, i, j, value) in defaults {
+        let fields = match &mut types.info_mut(index).shape {
+            Shape::Struct { fields, .. } => fields,
+            Shape::Enum(variants) => &mut variants[i].fields,
+            Shape::Opaque => unreachable!("an opaque type has no fields"),
+        };
+        fields[j].default = Some(value);
+    }
+    let components = given.components.iter().map(|component| {
+        let default = match (&component.default, &component.refused) {
+            (Some(default), _) => {
+                let index = types.find(&component.name).ok_or_else(|| {
+                    protocol(format!("component type `{}` undescribed", component.name))
+                })?;
+                let value = read(default, &Type::Named(index), &Remote(&types));
+                Ok(value.map_err(|error| {
+                    protocol(format!("`{}`'s default {default}: {error}", component.name))
+                })?)
+            }
+            (None, refused) => Err(refused.clone().unwrap_or_default()),
+        };
+        Ok((component.name.clone(), default))
+    });
+    let components = components.collect::<Result<_>>()?;
+    Ok(Described { types, components })
+}
+
+/// The type `ty` names, among `types`.
+///
+/// Fails, saying so, for a named type that isn't among them.
+fn own_type(types: &Types, ty: &gg_api::Type) -> std::result::Result<Type, String> {
+    use gg_api::Type as Api;
+
+    let inner = |ty: &Api| own_type(types, ty).map(Box::new);
+    Ok(match ty {
+        Api::Bool => Type::Bool,
+        &Api::Int { bits, signed } => Type::Int { bits, signed },
+        Api::F32 => Type::F32,
+        Api::F64 => Type::F64,
+        Api::String => Type::String,
+        Api::Vec2 => Type::Vec2,
+        Api::Vec3 => Type::Vec3,
+        Api::Vec4 => Type::Vec4,
+        Api::Quat => Type::Quat,
+        Api::Entity => Type::Entity,
+        Api::Texture => Type::Texture,
+        Api::Option(of) => Type::Option(inner(of)?),
+        Api::List(of) => Type::List(inner(of)?),
+        Api::Array(of, n) => Type::Array(inner(of)?, *n),
+        Api::Named(name) => match types.find(name) {
+            Some(index) => Type::Named(index),
+            None => return Err(format!("a type named `{name}` that it doesn't describe")),
+        },
+        Api::Opaque => Type::Opaque,
+    })
+}
+
+fn own_bound(bound: gg_api::Bound) -> Bound {
+    match bound {
+        gg_api::Bound::Int(n) => Bound::Int(n),
+        gg_api::Bound::Float(x) => Bound::Float(x),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::borrow::Cow;
 
     use gg_core::math::{Quat, Vec3};
+    use serde_json::json;
 
     use super::*;
     use crate::Transform;
@@ -491,6 +818,86 @@ mod tests {
         let error =
             read_json(&world, &sprite, r#"{"texture": "assets/none.png"}"#).expect_err("none");
         assert_eq!(error.code(), "api.no_texture", "{error}");
+    }
+
+    /// A whole number reads as reflection reads its field's: an `Int` for a signed one, and a
+    /// `UInt` for an unsigned one, but for a number outside its kind, which a set then refuses.
+    #[test]
+    fn whole_numbers_read_by_their_fields_sign() {
+        let types = Types::default();
+        let names = Remote(&types);
+        let int = |signed| Type::Int { bits: 64, signed };
+        let read = |json: JsonValue, ty: &Type| super::read(&json, ty, &names).expect("read");
+        assert_eq!(read(json!(3), &int(true)), Value::Int(3));
+        assert_eq!(read(json!(3), &int(false)), Value::UInt(3));
+        assert_eq!(read(json!(-1), &int(false)), Value::Int(-1));
+        assert_eq!(read(json!(u64::MAX), &int(true)), Value::UInt(u64::MAX));
+    }
+
+    /// Another process's description of its types is refused for what it can't mean: two types of
+    /// one name, a type it names but doesn't describe, a component's default of a type undescribed,
+    /// and a default that isn't its field's.
+    #[test]
+    fn a_description_that_isnt_one_is_refused() {
+        let field = |ty: gg_api::Type, default| gg_api::FieldInfo {
+            name: "a".to_owned(),
+            ty,
+            min: None,
+            max: None,
+            show: gg_api::Show::Plain,
+            doc: String::new(),
+            default,
+        };
+        let named = |name: &str, fields| gg_api::TypeInfo {
+            name: name.to_owned(),
+            doc: String::new(),
+            shape: gg_api::Shape::Struct {
+                fields,
+                tuple: false,
+            },
+        };
+        let component = |name: &str, default| gg_api::ComponentInfo {
+            name: name.to_owned(),
+            default,
+            refused: None,
+        };
+        let types = |components, types| gg_api::Types { components, types };
+        let byte = gg_api::Type::Int {
+            bits: 8,
+            signed: false,
+        };
+        let fine = named("Fine", vec![field(byte.clone(), Some(json!(3)))]);
+        let given = types(
+            vec![component("Fine", Some(json!({"a": 4})))],
+            vec![fine.clone()],
+        );
+        let described = described(&given).map_err(|error| error.to_string());
+        let described = described.expect("described");
+        let index = described.types.find("Fine").expect("described");
+        let Shape::Struct { fields, .. } = &described.types.info(index).shape else {
+            panic!("a struct");
+        };
+        assert_eq!(fields[0].default, Some(Value::UInt(3)));
+        let missing = gg_api::Type::Named("Missing".to_owned());
+        let refused = [
+            types(Vec::new(), vec![fine.clone(), fine.clone()]),
+            types(
+                Vec::new(),
+                vec![named("Holder", vec![field(missing, None)])],
+            ),
+            types(
+                vec![component("Missing", Some(json!({})))],
+                vec![fine.clone()],
+            ),
+            types(
+                Vec::new(),
+                vec![named("Bad", vec![field(byte, Some(json!("x")))])],
+            ),
+        ];
+        for given in refused {
+            let error = super::described(&given).err().expect("refused");
+            assert_eq!(error.code(), "api.protocol", "{error}");
+        }
     }
 
     fn read_json(world: &World, ty: &Type, json: &str) -> Result<Value> {

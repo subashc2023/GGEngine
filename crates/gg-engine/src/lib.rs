@@ -88,7 +88,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 pub use actions::{Actions, Binding, Change, Source, Toward};
 pub use camera::{
@@ -366,7 +366,9 @@ fn run_args(
         }
     };
 
-    let log = gg_core::log::init(app.name, &beside_exe("logs"));
+    // An embedded run's tool reads its events through the tool API's `logs`, and its stderr too,
+    // which would show each a second time.
+    let log = gg_core::log::init(app.name, &beside_exe("logs"), !args.embedded);
     info!(
         version = env!("CARGO_PKG_VERSION"),
         app = app.name,
@@ -429,14 +431,24 @@ fn run_args(
             args::Net::Host(_) => 0,
             args::Net::Join(_) => 1,
         });
-        let api = api::start(
+        let api = match api::start(
             app.name,
             app.stack.names(),
             log.as_deref(),
             player,
             app.manifest().map(|manifest| manifest.path.as_path()),
             args.api,
-        );
+        ) {
+            Ok(api) => api,
+            // Its tool reaches it through the API alone, as its console is off: it ends, saying
+            // why, which the tool hears of as the run ends, rather than running unseen.
+            Err(error) if args.embedded => return Err(error),
+            Err(error) => {
+                let consequence = "tools can't reach this run";
+                warn!(code = error.code(), "{error:#}; {consequence}");
+                None
+            }
+        };
         if args.headless || args.embedded {
             run_headless(&mut app, &args, api, snapshot)
         } else {

@@ -1,14 +1,14 @@
 //! `gg mcp`: the tool API served to agents that speak MCP, the Model Context Protocol, over stdio:
 //! JSON-RPC 2.0 messages, a line each, read on stdin and answered on stdout, as MCP's stdio
-//! transport has them. Each tool is a method of the API, or `gg`'s `sessions` and `logs`, and
-//! answers what they answer, as JSON text, a capture its PNG too. Each call connects afresh to the
-//! game the options pick, so that one `gg run` restarted is the one it reaches, as the MCP client
-//! its `initialize` names, the author of the edits it applies; `mcp` if it names none.
+//! transport has them. Each tool is a method of the API, or `gg`'s `sessions`, and answers what
+//! they answer, as JSON text, a capture its PNG too. Each call connects afresh to the game the
+//! options pick, so that one `gg run` restarted is the one it reaches, as the MCP client its
+//! `initialize` names, the author of the edits it applies; `mcp` if it names none.
 
 use std::fs;
 use std::io::{self, BufRead, Write as _};
 
-use gg_api::Failure;
+use gg_api::{Failure, LogEvents};
 use serde_json::{Map, Value, json};
 
 use crate::game::{self, Pick};
@@ -18,7 +18,7 @@ use crate::game::{self, Pick};
 /// that's served; not 2025-03-26, whose servers take batches of messages, which this doesn't.
 const VERSIONS: [&str; 3] = ["2025-11-25", "2025-06-18", "2024-11-05"];
 
-/// How many of the log's lines `logs` gives at most, the last.
+/// How many of the log's events `logs` gives without `from`, the last.
 const MOST_LOG_LINES: usize = 200;
 
 /// What `initialize` tells the client of the tools, for its model.
@@ -246,12 +246,28 @@ fn tools() -> Value {
         ),
         tool(
             "logs",
-            "The last lines of the game's JSON log whose events are at a level or above.",
-            json!({"level": {
-                "type": "string",
-                "enum": ["error", "warn", "info", "debug", "trace"],
-                "default": "warn",
-            }}),
+            "The game's log's events at a level or above, each its JSON log's line: the last 200 \
+             the game keeps, or those since an earlier answer's `next`, given as `from` with that \
+             answer's `run`. Answers them with `next` and `run`, for the next call, and how many it \
+             `missed`, dropped before they were read.",
+            json!({
+                "level": {
+                    "type": "string",
+                    "enum": gg_api::LEVELS,
+                    "default": "warn",
+                },
+                "from": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "An earlier answer's `next`: the events since it",
+                },
+                "run": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "The earlier answer's `run`, so that after the game restarts, \
+                                    its events are read from the oldest kept",
+                },
+            }),
             &[],
         ),
     ])
@@ -330,19 +346,39 @@ fn run(pick: &Pick, name: &str, mut arguments: Map<String, Value>) -> Result<Ran
             Ok(Ran::Image(captured.get().to_owned(), png))
         }
         "logs" => {
-            let level = arguments
-                .get("level")
-                .and_then(Value::as_str)
-                .unwrap_or("warn");
-            let rank = game::rank(&level.to_ascii_uppercase()).ok_or_else(|| {
+            let level = arguments.get("level").and_then(Value::as_str);
+            let level = level.unwrap_or("warn").to_ascii_lowercase();
+            if !gg_api::LEVELS.contains(&level.as_str()) {
                 let message = format!(
                     "`level` is `error`, `warn`, `info`, `debug` or `trace`, not `{level}`"
                 );
-                Failure::new("gg.args", message)
-            })?;
-            let mut lines = game::log_lines(pick, rank)?;
-            let cut = lines.len().saturating_sub(MOST_LOG_LINES);
-            Ok(Ran::Json(format!("[{}]", lines.split_off(cut).join(","))))
+                return Err(Failure::new("gg.args", message));
+            }
+            let number = |name: &str| match arguments.get(name) {
+                None | Some(Value::Null) => Ok(None),
+                Some(given) => given.as_u64().map(Some).ok_or_else(|| {
+                    let message = format!("`{name}` is a whole number, not {given}");
+                    Failure::new("gg.args", message)
+                }),
+            };
+            let params = match (number("from")?, number("run")?) {
+                // A cursor numbers one run's events, which a restart starts again.
+                (Some(_), None) => {
+                    let message = "takes `from` with the `run` of the answer it came from";
+                    return Err(Failure::new("gg.args", message));
+                }
+                (Some(from), run) => json!({"level": level, "from": from, "run": run}),
+                (None, _) => json!({"level": level, "last": MOST_LOG_LINES}),
+            };
+            let read: LogEvents = game::connect(pick)?.call_as("logs", params)?;
+            let events: Vec<&str> = read.events.iter().map(|event| event.get()).collect();
+            Ok(Ran::Json(format!(
+                r#"{{"run":{},"next":{},"missed":{},"events":[{}]}}"#,
+                read.run,
+                read.next,
+                read.missed,
+                events.join(",")
+            )))
         }
         other => Err(Failure::new(
             "gg.args",
@@ -436,17 +472,26 @@ mod tests {
         assert_eq!(broken["error"]["code"], -32700);
     }
 
-    /// A tool that fails, as one given a level there's none of does, answers a result whose
-    /// `isError` is set; a tool there's none of is a protocol's error.
+    /// A tool that fails, as one given a level there's none of, or a cursor that isn't a number,
+    /// does, before it looks for a game, answers a result whose `isError` is set; a tool there's
+    /// none of is a protocol's error.
     #[test]
     fn a_tool_that_fails_answers_an_error_result() {
-        let call = r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"logs","arguments":{"level":"loud"}}}"#;
-        let answer = answer(&mut pick(), call).expect("answered");
-        assert_eq!(answer["result"]["isError"], true);
-        let text = answer["result"]["content"][0]["text"]
-            .as_str()
-            .expect("text");
-        assert!(text.contains("gg.args"), "{text}");
+        for arguments in [
+            r#"{"level":"loud"}"#,
+            r#"{"from":"later"}"#,
+            r#"{"from":3}"#,
+        ] {
+            let call = format!(
+                r#"{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"logs","arguments":{arguments}}}}}"#
+            );
+            let answer = answer(&mut pick(), &call).expect("answered");
+            assert_eq!(answer["result"]["isError"], true, "{arguments}");
+            let text = answer["result"]["content"][0]["text"]
+                .as_str()
+                .expect("text");
+            assert!(text.contains("gg.args"), "{arguments}: {text}");
+        }
         let call = r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"nope"}}"#;
         let answer = super::answer(&mut pick(), call).expect("answered");
         assert_eq!(answer["error"]["code"], -32602);

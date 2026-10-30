@@ -90,9 +90,9 @@ game's shader again as its files change (`Shader reloaded`), warning at a change
 game under `cargo gg run`, in the background: it patches in an edit inside function bodies as it's
 saved, with Dioxus's `dx` of the root Cargo.toml's `subsecond` release (`gg` names its install),
 and restarts it from a snapshot after any other change, a crash or a hang (without `dx`, after a
-`cargo build`). `cargo gg status`, `capture` (a PNG), `set`, `undo` and the rest answer in JSON;
-`cargo gg mcp` serves them over MCP. A layer's `load` makes its assets; its `attach`, which a
-restart skips, builds the world. Test `dev` with `--features dev -p gg-engine`.
+`cargo build`). `cargo gg status`, `capture` (a PNG), `set`, `undo`, `logs --follow` and the
+rest answer in JSON; `cargo gg mcp` serves them over MCP. A layer's `load` makes its assets; its
+`attach`, which a restart skips, builds the world. Test `dev` with `--features dev -p gg-engine`.
 
 A change is done when all six pass:
 

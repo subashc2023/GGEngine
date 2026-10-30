@@ -55,7 +55,7 @@ fn main() -> ExitCode {
         }
     }
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("logs");
-    let log = gg_core::log::init("gpu-tests", &dir).expect("the tests read the JSON log");
+    let log = gg_core::log::init("gpu-tests", &dir, true).expect("the tests read the JSON log");
 
     let mut tests = Tests::new();
     run!(

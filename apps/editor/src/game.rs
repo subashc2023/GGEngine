@@ -3,10 +3,13 @@
 //! restarts it after any other change, and which ends, with the game, as the editor ends, closing
 //! its stdin. The game renders offscreen for the editor, which shows its view in the Viewport from
 //! memory the two share, as the tool API's `view` asks, and forwards it the input the view gets.
-//! The Logs panel shows `gg run`'s events, the build's errors among them, and what the game and
-//! the build print; the title bar, how the run goes, with pause and step.
+//! The Entities and Inspector panels show the game's world, and edit it, through the API, as a
+//! remote [`Inspector`] does; the Logs panel shows `gg run`'s events, the build's errors among
+//! them, the game's events as it logs them, which the tool API's `logs` follows, and what the game
+//! and the build print; the title bar, how the run goes, with pause and step.
 
 use std::collections::VecDeque;
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -15,9 +18,12 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gg_api::view::Reader;
-use gg_api::{Client, Failure, InputEvent, Session, Status};
+use gg_api::{Client, Failure, InputEvent, LogEvents, Session, Status};
 use gg_engine::egui::{self, Color32, RichText, ScrollArea};
-use gg_engine::{App, Context, Docked, Event, Layer, MouseButton, PerfPanel, Scroll, Ui};
+use gg_engine::{
+    App, Context, Docked, Event, Inspector, InspectorLink, Layer, MouseButton, PerfPanel, Scroll,
+    Ui,
+};
 use serde_json::{Value, json};
 use tracing::{info, warn};
 
@@ -31,22 +37,36 @@ const CONNECT: Duration = Duration::from_secs(10);
 /// which answers the first requests.
 const ANSWER: Duration = Duration::from_secs(120);
 
+/// How long each `logs` that follows the game's events waits for them to come, in milliseconds.
+const FOLLOWING_MS: u64 = 1_000;
+
+/// How long the connection that follows the game's events waits for each answer: well past the
+/// time each `logs` waits.
+const FOLLOWING: Duration = Duration::from_secs(30);
+
 /// How long the editor, as it ends, waits for `gg run` to end the game and itself.
 const ENDING: Duration = Duration::from_secs(15);
 
 /// How many frames the measures of the view's frames keep, from the last; 68 s at 240 fps.
 const MEASURED: usize = 16_384;
 
-/// The editor of the project in directory `dir`: the game's view in the Viewport, the Logs below
-/// it, and the Performance panel beside it.
+/// The editor of the project in directory `dir`: the game's view in the Viewport, its entities
+/// left of it, the one picked right of it, above the Performance panel, and the Logs below it.
 pub(crate) fn app(dir: PathBuf) -> App {
     let app = App::new("Editor").root(env!("CARGO_MANIFEST_DIR"));
     let app = app.custom_title_bar().view_panel("Viewport");
     let app = app
-        .dock("Logs", Docked::Below("Viewport"))
-        .dock("Performance", Docked::RightOf("Viewport"));
-    app.layer(Game::new(dir)).overlay(PerfPanel)
+        .dock("Inspector", Docked::RightOf("Viewport"))
+        .dock("Entities", Docked::LeftOf("Viewport"))
+        .dock("Performance", Docked::Below("Inspector"))
+        .dock("Logs", Docked::Below("Viewport"));
+    let inspector = Inspector::remote(CLIENT);
+    let game = Game::new(dir, inspector.link());
+    app.layer(game).overlay(PerfPanel).overlay(inspector)
 }
+
+/// The client the editor is to the game, the author of its edits.
+const CLIENT: &str = "editor";
 
 /// The editor's layer in a project: the `gg run` of its game, the connection to the game that
 /// serves, the memory its view is shared through, and what the Logs panel and the title bar show.
@@ -58,8 +78,10 @@ struct Game {
     lines: Receiver<Line>,
     /// What the threads reading `gg run`'s output send `lines`, until the run starts.
     send: Option<Sender<Line>>,
-    /// The connection to the game that serves, on a thread of its own.
+    /// The connections to the game that serves, each on a thread of its own.
     talker: Option<Talker>,
+    /// The link to the Inspector, which shows the world of the game that serves.
+    inspector: InspectorLink,
     /// The memory the game's view is shared through, and memory a `view` asked the game to share it
     /// through instead, until the game answers; and whether the game refused a `view`, after which
     /// the editor asks for none until another game serves.
@@ -116,15 +138,18 @@ struct Logged {
     text: String,
 }
 
+/// How a line of the Logs panel shows: `Debug` for the game's debug and trace events, which
+/// recede.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Level {
+    Debug,
     Info,
     Warn,
     Error,
 }
 
 impl Game {
-    fn new(dir: PathBuf) -> Self {
+    fn new(dir: PathBuf, inspector: InspectorLink) -> Self {
         let (send, lines) = mpsc::channel();
         Self {
             dir,
@@ -132,6 +157,7 @@ impl Game {
             lines,
             send: Some(send),
             talker: None,
+            inspector,
             reader: None,
             asked: None,
             refused: false,
@@ -231,7 +257,19 @@ impl Game {
                 self.run_state = RunState::Ended(how);
             }
             self.run = None;
-            self.talker = None;
+            self.disconnect();
+        }
+    }
+
+    /// Takes the game's events logged since, each a line of the Logs panel, as [`logged`] makes it.
+    fn take_logged(&mut self) {
+        let Some(talker) = &self.talker else {
+            return;
+        };
+        let reads: Vec<Vec<Value>> = talker.logged.try_iter().collect();
+        for event in reads.iter().flatten() {
+            let Logged { level, text } = logged(event);
+            self.log(level, text);
         }
     }
 
@@ -283,9 +321,11 @@ impl Game {
         }
     }
 
-    /// Lets go of the connection to the game, which has gone, and of the input it didn't get.
+    /// Lets go of the connection to the game, which has gone, and of the input it didn't get; and
+    /// the Inspector, of its world.
     fn disconnect(&mut self) {
         self.talker = None;
+        self.inspector.reach(None);
         self.input.clear();
         self.inputting = false;
     }
@@ -305,6 +345,7 @@ impl Game {
             return;
         };
         self.disconnect();
+        self.inspector.reach(Some(session.clone()));
         self.talker = Some(Talker::connect(session));
         // The game before's memory, which this one makes anew; the view shows its last frame
         // until this one's first.
@@ -394,6 +435,8 @@ impl Layer for Game {
     }
 
     fn update(&mut self, cx: &mut Context, _: Duration) {
+        // Before `gg run`'s lines, which may say the game has gone, letting go of what it logged.
+        self.take_logged();
         self.take_lines();
         self.take_answers();
         if let Some(view) = cx.view() {
@@ -469,6 +512,7 @@ impl Layer for Game {
                     for logged in logs {
                         let text = RichText::new(&logged.text).monospace();
                         let text = match logged.level {
+                            Level::Debug => text.weak(),
                             Level::Info => text,
                             Level::Warn => text.color(Color32::from_rgb(230, 190, 60)),
                             Level::Error => text.color(Color32::from_rgb(240, 90, 80)),
@@ -532,6 +576,73 @@ fn read_lines(from: impl Read + Send + 'static, send: Sender<Line>, line: fn(Str
     });
 }
 
+/// The fields of an event of the game's JSON log that aren't shown among its other fields: where
+/// and when it was logged, and those shown before them.
+const PLACES: [&str; 9] = [
+    "timestamp",
+    "level",
+    "code",
+    "message",
+    "target",
+    "filename",
+    "line_number",
+    "spans",
+    "threadName",
+];
+
+/// The Logs panel's line for `event`, an event of the game's JSON log, as the console shows it but
+/// for where and when it was logged: `[code] message  name=value ...`, a string among the fields
+/// quoted if it's empty or has spaces; at its level, `Debug` for a debug or trace event.
+fn logged(event: &Value) -> Logged {
+    let level = match event["level"].as_str() {
+        Some("ERROR") => Level::Error,
+        Some("WARN") => Level::Warn,
+        Some("INFO") => Level::Info,
+        _ => Level::Debug,
+    };
+    let mut text = match &event["code"] {
+        Value::Null => String::new(),
+        Value::String(code) => format!("[{code}] "),
+        code => format!("[{code}] "),
+    };
+    text.push_str(event["message"].as_str().unwrap_or_default());
+    let mut separator = "  ";
+    for (name, value) in event.as_object().into_iter().flatten() {
+        // `log.*` fields carry the metadata of events from the `log` crate.
+        if PLACES.contains(&name.as_str()) || name.starts_with("log.") {
+            continue;
+        }
+        let _ = match value {
+            Value::String(value) if !value.is_empty() && !value.contains(char::is_whitespace) => {
+                write!(text, "{separator}{name}={value}")
+            }
+            value => write!(text, "{separator}{name}={value}"),
+        };
+        separator = " ";
+    }
+    Logged { level, text }
+}
+
+/// Follows the log of the game `session` names on a connection of its own, as the editor, sending
+/// `send` each `logs`'s events, from the oldest the game keeps, as each comes, until the game ends
+/// or the editor lets go of it, `send`'s receiver dropping: each `logs` sends, events or none.
+fn follow(session: &Session, send: &Sender<Vec<Value>>) {
+    let connected = Client::connect(session, CLIENT, CONNECT)
+        .and_then(|mut client| client.set_timeout(Some(FOLLOWING)).map(|()| client));
+    let Ok(mut client) = connected else {
+        return;
+    };
+    let mut params = json!({"wait_ms": FOLLOWING_MS});
+    while let Ok(read) = client.call_as::<LogEvents>("logs", &params) {
+        let events = read.events.iter();
+        let events = events.filter_map(|event| serde_json::from_str(event.get()).ok());
+        if send.send(events.collect()).is_err() {
+            return;
+        }
+        params = json!({"from": read.next, "run": read.run, "wait_ms": FOLLOWING_MS});
+    }
+}
+
 /// The event of the tool API's `input` that the game gets for `event`, which the view got, the
 /// cursor's position taken from the main window's pixels to the view's, whose top left is at
 /// `origin`; `None` for what the game reads itself, or doesn't get.
@@ -573,11 +684,14 @@ fn forwarded(event: &Event<'_>, origin: [u32; 2]) -> Option<InputEvent> {
     Some(event)
 }
 
-/// A connection to the game, on a thread of its own, so that no frame waits for the game's answer:
-/// requests go to it in order, and their answers come back in order.
+/// Connections to the game, each on a thread of its own, so that no frame waits for the game's
+/// answer: one that requests go to in order, their answers coming back in order; and one that
+/// follows the game's log, as [`follow`] does, whose events come back as they're read, each
+/// read's together.
 struct Talker {
     asks: Sender<(String, Value)>,
     answers: Receiver<(String, Result<Value, Failure>)>,
+    logged: Receiver<Vec<Value>>,
 }
 
 impl Talker {
@@ -585,8 +699,11 @@ impl Talker {
     fn connect(session: Session) -> Self {
         let (asks, asked) = mpsc::channel::<(String, Value)>();
         let (answer, answers) = mpsc::channel();
+        let (log, logged) = mpsc::channel();
+        let followed = session.clone();
+        thread::spawn(move || follow(&followed, &log));
         thread::spawn(move || {
-            let connected = Client::connect(&session, "editor", CONNECT)
+            let connected = Client::connect(&session, CLIENT, CONNECT)
                 .and_then(|mut client| client.set_timeout(Some(ANSWER)).map(|()| client));
             let mut client = match connected {
                 Ok(client) => client,
@@ -604,7 +721,11 @@ impl Talker {
                 }
             }
         });
-        Self { asks, answers }
+        Self {
+            asks,
+            answers,
+            logged,
+        }
     }
 
     /// Sends request `method` with `params`, whose answer comes back in `answers`.
@@ -726,7 +847,7 @@ mod tests {
 
     #[test]
     fn gg_runs_events_say_how_the_run_goes_and_reach_the_logs() {
-        let mut game = Game::new(PathBuf::from("."));
+        let mut game = Game::new(PathBuf::from("."), Inspector::remote(CLIENT).link());
         let send = game.send.take().expect("not started");
         let failed = json!({"code": "gg.build", "message": "error[E0308]: mismatched types"});
         let running = json!({"code": "gg.running", "message": "another `gg run` runs shards"});
@@ -753,5 +874,42 @@ mod tests {
             game.run_state,
             RunState::Ended("[gg.running] another `gg run` runs shards".to_owned())
         );
+    }
+
+    /// The game's events reach the Logs as they're read, each with its code, its message and its
+    /// fields, but where and when it was logged, at its level.
+    #[test]
+    fn the_games_events_reach_the_logs_with_their_codes_and_fields() {
+        let mut game = Game::new(PathBuf::from("."), Inspector::remote(CLIENT).link());
+        let (asks, _) = mpsc::channel();
+        let (_, answers) = mpsc::channel();
+        let (log, logged) = mpsc::channel();
+        game.talker = Some(Talker {
+            asks,
+            answers,
+            logged,
+        });
+        let warned = r#"{"timestamp":"2026-10-30T12:00:00.000000Z","level":"WARN",
+            "code":"asset.missing","path":"assets/hero sprite.png","tries":2,"empty":"",
+            "message":"Can't load the texture","target":"shards",
+            "filename":"games/shards/src/main.rs","line_number":40,"threadName":"main"}"#;
+        let traced = r#"{"timestamp":"2026-10-30T12:00:00.000001Z","level":"TRACE",
+            "message":"A tick","target":"gg_engine::main_loop","spans":[{"name":"tick"}],
+            "threadName":"main"}"#;
+        let events = [warned, traced].map(|line| serde_json::from_str(line).expect("JSON"));
+        log.send(events.to_vec()).expect("sent");
+        log.send(Vec::new()).expect("sent");
+        game.take_logged();
+        let logs: Vec<_> = (game.logs.iter())
+            .map(|logged| (logged.level, logged.text.as_str()))
+            .collect();
+        let expected = [
+            (
+                Level::Warn,
+                r#"[asset.missing] Can't load the texture  empty="" path="assets/hero sprite.png" tries=2"#,
+            ),
+            (Level::Debug, "A tick"),
+        ];
+        assert_eq!(logs, expected);
     }
 }

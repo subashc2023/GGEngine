@@ -9,13 +9,14 @@ use egui::ecolor::{Hsva, HsvaGamma};
 use gg_core::math::{self, EulerRot, Quat, Vec2, Vec3, Vec4};
 use tracing::warn;
 
+use super::inspected::Inspected;
 use super::{Edit, Refusal, shown_right};
+use crate::EntityId;
 use crate::reflect::{self, Bound, Field, Ident, Meta, Shape, Show, Type, Types, Value, Variant};
-use crate::{EntityId, World};
 
 /// Draws the fields of one component, and keeps the edits they make.
 pub(super) struct Fields<'a> {
-    pub(super) world: &'a World,
+    pub(super) world: &'a dyn Inspected,
     pub(super) types: &'a Types,
     /// The ID of the entity whose component it is.
     pub(super) entity: EntityId,
@@ -23,7 +24,7 @@ pub(super) struct Fields<'a> {
     pub(super) refusals: &'a [Refusal],
     pub(super) edits: &'a mut Vec<Edit>,
     /// The sets of the entity's fields that wait for a tick, in the order they were made.
-    pub(super) waiting: &'a [&'a Edit],
+    pub(super) waiting: &'a [Edit],
 }
 
 /// What's drawn at a path: its type; the hints of the field it's in, which its parts and elements
@@ -233,20 +234,13 @@ impl Fields<'_> {
                 Some(Value::Vec4(Vec4::from(v)))
             }
             (Type::Quat, &Value::Quat(q)) => self.rotation(ui, slot, q, path),
-            (Type::Entity, Value::Entity(entity)) => {
-                // A despawned entity has no ID, only its handle.
-                match self.world.id(*entity) {
-                    Some(id) => ui.label(id.to_string()),
-                    None => ui.label(entity.to_string()),
-                };
+            // By the type, as another process's world keeps them otherwise than its own.
+            (Type::Entity, value) => {
+                ui.label(self.world.entity_label(value));
                 None
             }
-            (Type::Texture, &Value::Texture(texture)) => {
-                // Shown by its path; picking another comes with the Assets panel's images.
-                match self.world.assets().path(texture) {
-                    Some(path) => ui.label(path),
-                    None => ui.label(format!("texture {}", texture.index())),
-                };
+            (Type::Texture, value) => {
+                ui.label(self.world.texture_label(value));
                 None
             }
             _ => opaque(ui),
@@ -769,9 +763,9 @@ fn speed(meta: &Meta, otherwise: f64) -> f64 {
 }
 
 /// Drags `x`, an `f32`'s if `is_f32`, in degrees if `meta` says, and returns it if it changed: no
-/// further than the field's bounds, as [`World::set_field`] compares them, and finite, so that
-/// what's dragged or typed is a value the field takes. NaN is shown as text, as wide as a field:
-/// a drag over it would change it every frame.
+/// further than the field's bounds, as [`World::set_field`](crate::World::set_field) compares
+/// them, and finite, so that what's dragged or typed is a value the field takes. NaN is shown as
+/// text, as wide as a field: a drag over it would change it every frame.
 fn float(ui: &mut egui::Ui, x: f64, meta: &Meta, is_f32: bool) -> Option<f64> {
     if x.is_nan() {
         ui.add_sized(ui.spacing().interact_size, egui::Label::new(x.to_string()));

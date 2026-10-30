@@ -2,10 +2,11 @@
 //! logs.
 
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use gg_api::{Client, Failure, Pulse, Session};
+use gg_api::{Client, Failure, LogEvents, Pulse, Session};
 use serde_json::value::RawValue;
 use serde_json::{Map, Value, json};
 
@@ -14,6 +15,9 @@ use crate::build;
 /// How long a connection to a game may take: it's on the loopback, where only one that has ended
 /// takes any time, refusing it.
 const CONNECT: Duration = Duration::from_secs(2);
+
+/// How long each `logs` that follows a game's events waits for them to come, in milliseconds.
+const FOLLOWING_MS: u64 = 1_000;
 
 /// Which running game to talk to, how long to wait for its answers, the client to say hello as,
 /// the author of the edits it applies, and the project whose games alone it reaches, by its
@@ -179,40 +183,48 @@ pub(crate) fn sessions(project: Option<&Path>) -> Result<Value, Failure> {
     Ok(Value::Array(games))
 }
 
-/// Prints the lines of the log of the game `pick` picks whose events are at `level` or above, as
-/// [`log_lines`] gives them.
+/// Prints the events the game `pick` picks keeps at `level` and more severe, as the API's `logs`
+/// reads them, each its JSON log's line, from the oldest to the last logged as the first answer
+/// came; and with `follow`, then each as it's logged, until the game ends, or stdout does, as when
+/// piped into `head`.
 ///
-/// Fails as `log_lines` does.
-pub(crate) fn logs(pick: &Pick, level: u8) -> Result<(), Failure> {
-    for line in log_lines(pick, level)? {
-        crate::print(&line);
+/// Fails as [`connect`] does, and as the calls fail, but for the game's ending while it follows.
+pub(crate) fn logs(pick: &Pick, level: &str, follow: bool) -> Result<(), Failure> {
+    let mut client = connect(pick)?;
+    let mut read: LogEvents = client.call_as("logs", json!({"level": level}))?;
+    let end = read.end;
+    let mut caught_up = false;
+    loop {
+        if !printed(&read) {
+            return Ok(());
+        }
+        if read.next >= end && !caught_up {
+            if !follow {
+                return Ok(());
+            }
+            caught_up = true;
+            client.set_timeout(Some(Duration::from_millis(FOLLOWING_MS) + pick.timeout))?;
+        }
+        let wait_ms = if caught_up { FOLLOWING_MS } else { 0 };
+        let params =
+            json!({"from": read.next, "run": read.run, "level": level, "wait_ms": wait_ms});
+        read = match client.call_as("logs", params) {
+            Ok(read) => read,
+            Err(failure)
+                if follow && matches!(failure.code.as_str(), "api.closed" | "api.connect") =>
+            {
+                return Ok(());
+            }
+            Err(failure) => return Err(failure),
+        };
     }
-    Ok(())
 }
 
-/// The lines of the log of the game `pick` picks whose events are at `level` or above, as [`rank`]
-/// ranks them.
-///
-/// Fails with `gg.no_log` if the game has no log, or it can't be read.
-pub(crate) fn log_lines(pick: &Pick, level: u8) -> Result<Vec<String>, Failure> {
-    let client = connect(pick)?;
-    let Some(log) = client.welcome().log.clone() else {
-        return Err(Failure::new("gg.no_log", "the game writes no JSON log"));
-    };
-    let text = fs::read_to_string(&log).map_err(|error| {
-        Failure::new(
-            "gg.no_log",
-            format!("can't read the log {}: {error}", log.display()),
-        )
-    })?;
-    let lines = whole_lines(&text).filter(|line| {
-        let event: Option<Map<String, Value>> = serde_json::from_str(line).ok();
-        let ranked = event
-            .as_ref()
-            .and_then(|event| rank(event.get("level")?.as_str()?));
-        ranked.is_some_and(|ranked| ranked >= level)
-    });
-    Ok(lines.map(str::to_owned).collect())
+/// Prints the events `read` read, each its line; returns whether stdout took them, as it doesn't
+/// once it's piped into a `head` that has ended.
+fn printed(read: &LogEvents) -> bool {
+    let mut out = std::io::stdout().lock();
+    (read.events.iter()).all(|event| writeln!(out, "{}", event.get()).is_ok())
 }
 
 /// The lines of `text` that end in a line break: a log's, but for a last line still being written.
@@ -220,20 +232,6 @@ fn whole_lines(text: &str) -> impl Iterator<Item = &str> {
     text.split_inclusive('\n')
         .filter_map(|line| line.strip_suffix('\n'))
         .map(|line| line.strip_suffix('\r').unwrap_or(line))
-}
-
-/// Where a level ranks, from `TRACE`, 1, to `ERROR`, 5, as the log's events name them; `None` for
-/// what isn't one.
-pub(crate) fn rank(level: &str) -> Option<u8> {
-    let rank = match level {
-        "TRACE" => 1,
-        "DEBUG" => 2,
-        "INFO" => 3,
-        "WARN" => 4,
-        "ERROR" => 5,
-        _ => return None,
-    };
-    Some(rank)
 }
 
 /// The events of the JSON log at `log`, each as it was written, but for the lines that aren't one.

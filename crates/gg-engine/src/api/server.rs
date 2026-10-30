@@ -1,11 +1,11 @@
 //! The API's server: it listens on the machine's loopback, at a port the OS picks, which the session
 //! file in the `sessions` directory beside the executable gives with a token. A thread accepts
-//! connections, and each has a thread that reads its requests, answering `hello` and `ping` itself
-//! and passing the rest on to the main loop, and one that writes its answers. The main loop answers
-//! them as a frame starts, before its ticks, so that a `patch` applies between ticks; a `step` once
-//! its ticks have run; a `capture` once a frame that rendered brings its view back, whose PNG a
-//! thread of its own writes; and a `snapshot` once a thread of its own has written the copy of the
-//! world the main thread took.
+//! connections, and each has a thread that reads its requests, answering `hello`, `ping` and `logs`
+//! itself, `logs` from the events the run's log keeps, and passing the rest on to the main loop,
+//! and one that writes its answers. The main loop answers them as a frame starts, before its ticks,
+//! so that a `patch` applies between ticks; a `step` once its ticks have run; a `capture` once a
+//! frame that rendered brings its view back, whose PNG a thread of its own writes; and a `snapshot`
+//! once a thread of its own has written the copy of the world the main thread took.
 
 use std::fmt::Display;
 use std::fs;
@@ -26,12 +26,13 @@ use gg_api::{
     History, Input, InputEvent, Listed, Patched, Pulse, Request, Session, Snapshotted, Status,
     Step, View, Welcome,
 };
+use gg_core::log::Events;
 use gg_core::{Error, Result};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use subsecond::JumpTable;
-use tracing::{debug, info, warn};
+use tracing::{Level, debug, info, warn};
 
 use super::{Waiting, json};
 use crate::edits::{Done, Edit};
@@ -47,9 +48,10 @@ use crate::{
 };
 
 /// The methods, as `api.unknown_method` lists them.
-const METHODS: [&str; 20] = [
+const METHODS: [&str; 22] = [
     "hello", "ping", "status", "pause", "resume", "step", "capture", "view", "input", "entities",
-    "entity", "get", "hash", "snapshot", "patch", "apply", "undo", "redo", "edits", "quit",
+    "entity", "get", "types", "hash", "snapshot", "patch", "apply", "undo", "redo", "edits",
+    "logs", "quit",
 ];
 
 /// The client a connection whose `hello` names none is, the author of its edits.
@@ -63,6 +65,18 @@ const MOST_LISTED: usize = 10_000;
 
 /// How long a connection has to say hello before it's dropped.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The longest a `logs` waits for an event to come, in milliseconds.
+const MOST_WAIT_MS: u64 = 10_000;
+
+/// The levels of `tracing`, in the order [`gg_api::LEVELS`] names them.
+const LEVELS: [Level; 5] = [
+    Level::ERROR,
+    Level::WARN,
+    Level::INFO,
+    Level::DEBUG,
+    Level::TRACE,
+];
 
 /// The tool API, from when it starts until the run ends, as it drops, which removes its session
 /// file.
@@ -120,6 +134,10 @@ struct Shared {
     frames: AtomicU64,
     /// What wakes the main loop as a request comes, so that it answers while frames pause.
     waker: Mutex<Option<Box<dyn Fn() + Send>>>,
+    /// The events of the run's log that `logs` reads, and the number drawn at random that tells
+    /// its cursors from another run's.
+    events: &'static Events,
+    run: u64,
 }
 
 /// A request for the main loop to answer, the client of its connection, and where its answer goes.
@@ -152,10 +170,12 @@ enum Call {
         component: String,
         path: String,
     },
+    Types,
     Hash,
     Snapshot(Option<PathBuf>),
     Patch(JumpTable),
-    Apply(Vec<gg_api::Operation>),
+    /// An edit's operations, and the gesture it's part of, if it's a set of one.
+    Apply(Vec<gg_api::Operation>, Option<u64>),
     /// An undo, or a redo, of the edits of the author named, or else of the client's own.
     Undo {
         author: Option<String>,
@@ -208,15 +228,17 @@ struct Png {
 
 impl Api {
     /// Starts serving app `app`'s run, whose layers are `layers`, from the bottom up, whose JSON
-    /// log is at `log`, if it has one, which plays `player` in a lockstep session, if it's a peer
-    /// of one, and whose project's manifest is at `project`, if it's a project's game: listens on
-    /// the loopback, starts its threads and writes the session file.
+    /// log is at `log`, if it has one, and keeps its last events in `events`, which plays `player`
+    /// in a lockstep session, if it's a peer of one, and whose project's manifest is at `project`,
+    /// if it's a project's game: listens on the loopback, starts its threads and writes the session
+    /// file.
     ///
     /// Fails with `api.start` if it can't.
     pub(crate) fn start(
         app: &str,
         layers: &[&str],
         log: Option<&Path>,
+        events: &'static Events,
         player: Option<u8>,
         project: Option<&Path>,
     ) -> Result<Self> {
@@ -231,6 +253,9 @@ impl Api {
         // tells nothing of them.
         let random = RandomState::new();
         let token = format!("{:016x}{:016x}", random.hash_one(1), random.hash_one(2));
+        // Under 2^53, so that JSON's readers that take every number for a double, as JavaScript's
+        // do, which agents' MCP clients may be written in, read it whole.
+        let run = random.hash_one(3) & ((1 << 53) - 1);
         let session = Session {
             app: app.to_owned(),
             pid,
@@ -253,6 +278,8 @@ impl Api {
         let shared = Arc::new(Shared {
             frames: AtomicU64::new(0),
             waker: Mutex::new(None),
+            events,
+            run,
         });
         let (pngs, to_write) = mpsc::channel();
         thread::Builder::new()
@@ -448,6 +475,7 @@ impl Api {
                     component,
                     path,
                 } => reply.send(field(world, id, &component, &path)),
+                Call::Types => reply.result(&json::describe(world)),
                 Call::Hash => {
                     let hash = world.hash();
                     reply.result(&Hash {
@@ -485,11 +513,16 @@ impl Api {
                         answer_done(reply, &Offer::Patch, stepper.ticks, done);
                     }
                 },
-                Call::Apply(given) => match operations(world, given) {
-                    Ok(operations) => {
-                        let edit = Edit::Apply {
-                            author: client.to_string(),
-                            operations,
+                Call::Apply(given, gesture) => match operations(world, given) {
+                    Ok(mut operations) => {
+                        let author = client.to_string();
+                        let edit = match gesture {
+                            Some(gesture) => Edit::Amend {
+                                author,
+                                gesture,
+                                operation: operations.pop().expect("checked as it was read"),
+                            },
+                            None => Edit::Apply { author, operations },
                         };
                         let offered = stack.offer(cx, edit);
                         self.answer_offered(reply, offered, Offer::Apply, stepper.ticks);
@@ -696,10 +729,14 @@ fn listed(world: &World, entity: Entity) -> Listed {
     let components = world
         .components_of(entity)
         .expect("a listed entity is alive");
+    let children = world.children(entity).expect("a listed entity is alive");
     Listed {
         id: id(entity).expect("a listed entity is alive"),
         name: world.get::<Name>(entity).map(|name| name.0.clone()),
         parent: parent.and_then(id),
+        children: children
+            .map(|child| id(child).expect("a child is alive"))
+            .collect(),
         components: components.map(str::to_owned).collect(),
     }
 }
@@ -909,9 +946,9 @@ fn accept(
 }
 
 /// Serves connection `stream`: its first request must be `hello` with `token`, which it answers
-/// with `welcome`; then it answers `ping` itself, and passes the rest on to the main loop through
-/// `to_main`, waking it, each answer going back through a thread that writes them as they come. A
-/// line that isn't a request ends it.
+/// with `welcome`; then it answers `ping` and `logs` itself, and passes the rest on to the main
+/// loop through `to_main`, waking it, each answer going back through a thread that writes them as
+/// they come. A line that isn't a request ends it.
 fn connection(
     stream: TcpStream,
     token: &str,
@@ -963,6 +1000,10 @@ fn connection(
             reply.result(&pulse);
             continue;
         }
+        if request.method == "logs" {
+            reply.send(logs(&request.params, shared));
+            continue;
+        }
         match parse(&request) {
             Ok(call) => {
                 let client = client.clone();
@@ -990,6 +1031,59 @@ fn connection(
             Err(failure) => reply.send(Err(failure)),
         }
     }
+}
+
+/// What `logs`, given `params`, answers, from the events `shared` keeps, as gg-api's docs say: read
+/// on the connection's own thread, which a wait holds.
+///
+/// Fails with `api.bad_params` for parameters it doesn't take, a `level` that isn't one, or a wait
+/// of more than [`MOST_WAIT_MS`].
+fn logs(params: &Value, shared: &Shared) -> Result<String, Failure> {
+    let method = "logs";
+    let gg_api::Logs {
+        from,
+        run,
+        last,
+        level,
+        wait_ms,
+    } = take(method, params)?;
+    let min = match level {
+        Some(level) => {
+            let at = gg_api::LEVELS.iter().position(|&name| name == level);
+            let at = at.ok_or_else(|| {
+                let what = format!(
+                    "takes a `level` of `error`, `warn`, `info`, `debug` or `trace`, not `{level}`"
+                );
+                bad_params(method, what)
+            })?;
+            LEVELS[at]
+        }
+        None => Level::TRACE,
+    };
+    if wait_ms > MOST_WAIT_MS {
+        let what = format!("waits at most {MOST_WAIT_MS} ms, not {wait_ms}");
+        return Err(bad_params(method, what));
+    }
+    // Another run's cursor numbers another run's events, so all of this run's are new to it.
+    let from = match (from, run) {
+        (Some(_), Some(run)) if run != shared.run => Some(0),
+        (from, _) => from,
+    };
+    let wait = Duration::from_millis(wait_ms);
+    let read = (shared.events).read(from, last, min, wait, gg_api::MAX_LINE / 2);
+    // Each line is an object of JSON already, as the log wrote it.
+    let mut answer = format!(
+        r#"{{"run":{},"next":{},"end":{},"missed":{},"events":["#,
+        shared.run, read.next, read.end, read.missed
+    );
+    for (i, line) in read.lines.iter().enumerate() {
+        if i > 0 {
+            answer.push(',');
+        }
+        answer.push_str(line);
+    }
+    answer.push_str("]}");
+    Ok(answer)
 }
 
 /// The next request `reader` reads: `None` once the connection ends or breaks, or at a line that
@@ -1111,6 +1205,7 @@ fn parse(request: &Request) -> Result<Call, Failure> {
         "status" => none(method, params).map(|()| Call::Status)?,
         "pause" => none(method, params).map(|()| Call::Pause)?,
         "resume" => none(method, params).map(|()| Call::Resume)?,
+        "types" => none(method, params).map(|()| Call::Types)?,
         "hash" => none(method, params).map(|()| Call::Hash)?,
         "snapshot" => {
             let gg_api::Snapshot { path } = take(method, params)?;
@@ -1135,8 +1230,14 @@ fn parse(request: &Request) -> Result<Call, Failure> {
             Call::Patch(table)
         }
         "apply" => {
-            let Apply { operations } = take(method, params)?;
-            Call::Apply(operations)
+            let Apply {
+                operations,
+                gesture,
+            } = take(method, params)?;
+            if gesture.is_some() && !matches!(operations[..], [gg_api::Operation::Set { .. }]) {
+                return Err(bad_params(method, "takes one set as a gesture's"));
+            }
+            Call::Apply(operations, gesture)
         }
         "undo" | "redo" => Call::Undo {
             author: take::<gg_api::Undo>(method, params)?.author,
@@ -1292,7 +1393,7 @@ fn entity_id(text: &str) -> Result<EntityId, Failure> {
 mod tests {
     use std::time::Instant;
 
-    use gg_api::{Client, Session};
+    use gg_api::{Client, LogEvents, Session};
     use gg_core::math::Vec3;
     use serde_json::json;
 
@@ -1307,11 +1408,16 @@ mod tests {
     const PROJECT: &str = "games/tested/project.ron";
 
     /// Starts the API for app `app`, a name of the test's own, so that tests running at once write
-    /// session files of their own, a game of the project [`PROJECT`] names; and returns it, with
-    /// the session its file gives.
+    /// session files of their own, a game of the project [`PROJECT`] names, which keeps no events;
+    /// and returns it, with the session its file gives.
     fn started(app: &str) -> (Api, Session) {
+        started_keeping(app, Box::leak(Box::default()))
+    }
+
+    /// As [`started`], the run's events kept in `events`.
+    fn started_keeping(app: &str, events: &'static Events) -> (Api, Session) {
         let project = Some(Path::new(PROJECT));
-        let api = Api::start(app, &[], None, None, project).expect("the API starts");
+        let api = Api::start(app, &[], None, events, None, project).expect("the API starts");
         let pid = std::process::id();
         let file = crate::beside_exe("sessions").join(Session::file_name(app, pid));
         let text = fs::read(file).expect("the session file");
@@ -1351,14 +1457,17 @@ mod tests {
         status: Status,
         page: EntityList,
         rest: EntityList,
+        all: EntityList,
         entity: Value,
         field: f32,
+        types: gg_api::Types,
         hash: Hash,
         refused: Vec<String>,
     }
 
     /// A client pauses the simulation, steps it, and reads the world: its status, pages of its
-    /// entities, an entity whole, a field and the hash; and is refused, with a code, what's wrong.
+    /// entities, an entity whole, a field, its types, whose description describes them again as
+    /// they are, and the hash; and is refused, with a code, what's wrong.
     #[test]
     fn a_client_pauses_and_steps_the_simulation_and_reads_the_world() {
         let (mut api, session) = started("Api Reads");
@@ -1395,10 +1504,12 @@ mod tests {
                 rest: client
                     .call_as("entities", json!({"skip": 4}))
                     .expect("the rest"),
+                all: client.call_as("entities", ()).expect("them all"),
                 entity: client
                     .call_as("entity", json!({"id": hero}))
                     .expect("the hero"),
                 field: client.call_as("get", field).expect("its y"),
+                types: client.call_as("types", ()).expect("the types"),
                 hash: client.call_as("hash", ()).expect("a hash"),
                 refused: (refused.into_iter())
                     .map(|(method, params)| client.call(method, params).expect_err(method).code)
@@ -1424,12 +1535,42 @@ mod tests {
                 .contains(&"Sprite".to_owned())
         );
         assert_eq!((read.rest.total, read.rest.entities.len()), (5, 1));
+        let listed = |id: &str| read.all.entities.iter().find(|listed| listed.id == id);
+        let listed = |id: &str| listed(id).expect("listed");
+        assert_eq!(listed(&hero).children, std::slice::from_ref(&kid));
+        assert_eq!(listed(&kid).parent.as_ref(), Some(&hero));
         assert_eq!(read.entity["name"], "Hero");
         assert_eq!(read.entity["parent"], Value::Null);
         assert_eq!(read.entity["children"], json!([kid]));
         let translation = &read.entity["components"]["Transform"]["translation"];
         assert_eq!(*translation, json!([1.0, 2.0, 3.0]));
         assert_eq!(read.field, 2.0);
+        let types = cx.world().types();
+        let names: Vec<&str> = read
+            .types
+            .components
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(names, cx.world().component_types().collect::<Vec<_>>());
+        let parent = read.types.components.iter().find(|c| c.name == "Parent");
+        let refused = parent.expect("a parent's type").refused.as_deref();
+        assert!(
+            refused.is_some_and(|why| why.contains("entity")),
+            "{refused:?}"
+        );
+        let described = json::described(&read.types).expect("described");
+        assert_eq!(described.types.iter().len(), types.iter().len());
+        for ((_, ours), (_, theirs)) in types.iter().zip(described.types.iter()) {
+            assert_eq!(ours, theirs, "described as it is");
+        }
+        let transform = described
+            .components
+            .iter()
+            .find(|(name, _)| name == "Transform");
+        let transform = transform.map(|(_, default)| default.as_ref().ok());
+        let identity = crate::Reflect::to_value(&Transform::IDENTITY);
+        assert_eq!(transform, Some(Some(&identity)));
         assert_eq!(
             read.hash.content,
             format!("{:016x}", cx.world().hash().content)
@@ -1468,6 +1609,104 @@ mod tests {
         let pulse: Pulse = client.call_as("ping", ()).expect("a pulse");
         assert_eq!(pulse.waiting.as_deref(), Some("menu"));
         drop(waiting);
+    }
+
+    /// The numbers of the events `read` read, each event's `n`.
+    fn numbers(read: &LogEvents) -> Vec<u64> {
+        let events = read.events.iter().map(|event| {
+            let event: Value = serde_json::from_str(event.get()).expect("an object");
+            event["n"].as_u64().expect("its number")
+        });
+        events.collect()
+    }
+
+    /// A client follows the run's logs while no frame serves: the events kept, at a level and more
+    /// severe, from the oldest or the last of them, and those that come as it waits; a cursor of
+    /// another run's reads from the oldest kept; and what's wrong is refused, with a code.
+    #[test]
+    fn a_client_follows_the_logs_without_frames() {
+        let events: &'static Events = Box::leak(Box::default());
+        let (_api, session) = started_keeping("Api Logs", events);
+        let line = |n: u64, level: Level| format!(r#"{{"level":"{level}","n":{n}}}"#);
+        for (n, level) in [Level::INFO, Level::WARN, Level::DEBUG]
+            .into_iter()
+            .enumerate()
+        {
+            events.push(level, &line(n as u64, level));
+        }
+        let mut client = Client::connect(&session, "test", DEADLINE).expect("it connects");
+        let all: LogEvents = client.call_as("logs", ()).expect("the events");
+        assert_eq!(numbers(&all), [0, 1, 2]);
+        assert_eq!((all.next, all.end, all.missed), (3, 3, 0));
+        let warned: LogEvents =
+            (client.call_as("logs", json!({"level": "warn"}))).expect("the warnings");
+        assert_eq!((numbers(&warned), warned.next), (vec![1], 3));
+        let last: LogEvents = client
+            .call_as("logs", json!({"last": 1}))
+            .expect("the last");
+        assert_eq!(numbers(&last), [2]);
+        assert_eq!(last.run, all.run, "one run's");
+
+        let pusher = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            events.push(Level::ERROR, &line(3, Level::ERROR));
+        });
+        let next = json!({"from": all.next, "run": all.run, "level": "error", "wait_ms": 10_000});
+        let start = Instant::now();
+        let waited: LogEvents = client.call_as("logs", next).expect("the next");
+        pusher.join().expect("the pusher didn't panic");
+        assert!(start.elapsed() < DEADLINE, "answered as it came");
+        assert_eq!((numbers(&waited), waited.next), (vec![3], 4));
+
+        let other = json!({"from": waited.next, "run": all.run ^ 1});
+        let other: LogEvents = client.call_as("logs", other).expect("the events");
+        assert_eq!(numbers(&other), [0, 1, 2, 3]);
+        for refused in [json!({"level": "loud"}), json!({"wait_ms": 10_001})] {
+            let code = client
+                .call("logs", refused.clone())
+                .err()
+                .map(|failure| failure.code);
+            assert_eq!(code.as_deref(), Some("api.bad_params"), "{refused}");
+        }
+    }
+
+    /// A client's sets of one field in one gesture undo as one edit, and a gesture's apply is of
+    /// one set.
+    #[test]
+    fn a_gestures_sets_undo_as_one_edit() {
+        let (mut api, session) = started("Api Gestures");
+        let mut cx = Context::seeded(3);
+        let hero = cx.world_mut().spawn(Transform::IDENTITY);
+        let hero_id = cx.world().id(hero).expect("alive").to_string();
+        let mut stepper = Stepper::default();
+        stepper.pause();
+        let client = move |mut client: Client| {
+            let set = |x: i32| {
+                let path = "translation.x";
+                json!({"set": {"id": hero_id, "component": "Transform", "path": path, "value": x}})
+            };
+            for x in [1, 2, 3] {
+                let apply = json!({"operations": [set(x)], "gesture": 9});
+                client.call_as::<Applied>("apply", apply).expect("set");
+            }
+            let two = json!({"operations": [set(4), set(5)], "gesture": 9});
+            let refused = client.call("apply", two).expect_err("two sets").code;
+            let history: History = client.call_as("edits", ()).expect("the edits");
+            let undone: Option<gg_api::Edit> = client.call_as("undo", ()).expect("undone");
+            (refused, history, undone)
+        };
+        let (refused, history, undone) =
+            serving(&mut api, &mut cx, &mut stepper, session, client, |_, _| {});
+        assert_eq!(refused, "api.bad_params");
+        assert_eq!(history.authors[0].done.len(), 1, "one edit: {history:?}");
+        assert!(undone.is_some());
+        let x = cx
+            .world()
+            .get::<Transform>(hero)
+            .expect("a transform")
+            .translation
+            .x;
+        assert_eq!(x, 0.0, "the gesture undone whole");
     }
 
     /// What [`clients_apply_edits_and_each_undoes_its_own`]'s clients get.

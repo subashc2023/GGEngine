@@ -5,12 +5,15 @@
 //! editor can show it for a game in another process, and names entities by their names, where they
 //! have one, and their IDs. Its edits and operations are its commands: the panels queue them, its
 //! next tick makes them, and a recording keeps them. Its link lets another layer pick and edit as
-//! the panels do.
+//! the panels do. A remote Inspector shows a game's world in another process, as the tool API gives
+//! it, and edits it through the API.
 
 mod commands;
 mod entities;
 mod fields;
+mod inspected;
 mod link;
+mod remote;
 #[cfg(test)]
 mod tests;
 
@@ -25,13 +28,14 @@ use tracing::warn;
 
 use commands::{Command, Queue};
 use fields::{Fields, Slot};
+use inspected::{Inspected, Pending};
 pub use link::InspectorLink;
 use link::{Linked, Linking, links_field};
+use remote::Remote;
 
 use crate::reflect::{Meta, Shape, Type, Value};
 use crate::{
-    Commands, Context, Entity, EntityId, Layer, Log, Name, Operation, Reflect, Tick, Transform, Ui,
-    World,
+    Commands, Context, EntityId, Layer, Log, Name, Operation, Reflect, Tick, Transform, Ui, World,
 };
 
 /// The Entities and Inspector panels, which an app adds as an overlay,
@@ -60,6 +64,12 @@ use crate::{
 /// an app that swaps one world for another and back has it, as the editor's Play and Stop do,
 /// finds its edits, pick and open rows as they were. Another layer picks and edits as the panels
 /// do through the [`InspectorLink`] that [`link`](Self::link) gives it.
+///
+/// A remote Inspector, which [`remote`](Self::remote) makes, shows the world of the game its link
+/// reaches, as [`InspectorLink::reach`] says, in place of the app's own, as the tool API gives it,
+/// a few times a second, and edits it as the panels do through the API, as the game's client: its
+/// sets of a gesture join as the log's do, its Edit menu undoes and redoes the client's edits, and
+/// the panels draw what waits for the game's answers as it will be.
 #[derive(Default)]
 pub struct Inspector {
     /// By its ID, which outlives it, so that a pick despawned is still named by its ID: its name
@@ -94,6 +104,8 @@ pub struct Inspector {
     open: Option<Gesture>,
     /// What it shares with its links.
     link: Rc<RefCell<Linked>>,
+    /// The game's world it shows, if it's remote.
+    remote: Option<Remote>,
 }
 
 /// What the Inspector had of a world it left, by its serial.
@@ -179,6 +191,7 @@ struct Refusal {
 }
 
 /// A field to set, found as the Inspector panel draws, and set at the next tick.
+#[derive(Clone)]
 struct Edit {
     component: String,
     path: String,
@@ -203,6 +216,10 @@ impl Layer for Inspector {
     }
 
     fn tick(&mut self, world: &mut World, _: Tick) {
+        // The app's own world isn't the one it shows.
+        if self.remote.is_some() {
+            return;
+        }
         let mut queued = mem::take(&mut self.queued.0);
         // Another world's entities aren't those the pick, the rows, the log and the commands
         // queued name, though they may have their IDs, as a scene reopened gives them back; nor
@@ -248,26 +265,48 @@ impl Layer for Inspector {
 
     fn ui(&mut self, cx: &mut Context, ui: &mut Ui<'_>) {
         let _zone = gg_core::zone!("inspector");
+        // Apart, so that it's what the panels show while they change the rest.
+        let mut remote = self.remote.take();
+        if let Some(remote) = &mut remote {
+            remote.update(self);
+        }
         let world = cx.world();
-        self.follow(world);
+        let source: &dyn Inspected = match &remote {
+            Some(remote) => remote,
+            None => world,
+        };
+        self.follow(source);
         let mut pass = Pass::default();
-        ui.menu("Edit", |ui| pass.chosen = self.edit_menu(ui));
+        let labels = match &remote {
+            Some(remote) => remote.pending(self.picked),
+            None => self.pending(),
+        };
+        ui.menu("Edit", |ui| pass.chosen = self.edit_menu(ui, &labels));
         ui.menu("Entity", |ui| {
-            self.entity_menu(world, ui, &mut pass.operations)
+            self.entity_menu(source, ui, &mut pass.operations)
         });
-        ui.panel("Entities", |ui| self.entities(world, ui, &mut pass));
+        ui.panel("Entities", |ui| self.entities(source, ui, &mut pass));
         ui.panel("Inspector", |ui| {
+            // As the pick the Entities panel may just have made has them.
+            let pending = match &remote {
+                Some(remote) => remote.pending(self.picked),
+                None => self.pending(),
+            };
             // A new panel floats smaller than its contents.
             let scroll = egui::ScrollArea::vertical();
-            scroll.show(ui, |ui| self.inspect(world, ui, &mut pass));
+            scroll.show(ui, |ui| self.inspect(source, ui, &mut pass, &pending));
         });
         // The Edit and Entity menus' keys, wherever the panels are.
         pass.cues.read(ui.egui());
-        self.duplicate_picked(world, &mut pass);
+        self.duplicate_picked(source, &mut pass);
         // Every pass, even one egui discards, which alone had the frame's input; and empty ones
         // too, whose cues end an edit.
-        self.queue(pass);
+        match &mut remote {
+            Some(remote) => remote.send(pass, self),
+            None => self.queue(pass),
+        }
         self.link.borrow_mut().picked = self.picked;
+        self.remote = remote;
     }
 }
 
@@ -278,16 +317,56 @@ impl Inspector {
         InspectorLink(self.link.clone())
     }
 
+    #[cfg(feature = "dev")]
+    /// A remote Inspector, which shows the world of the game its link reaches, as
+    /// [`InspectorLink::reach`] says, rather than the app's own, and edits it as the game's client
+    /// `client`, the author of its edits, which its Edit menu undoes and redoes.
+    pub fn remote(client: &str) -> Self {
+        Self {
+            remote: Some(Remote::new(client)),
+            ..Self::default()
+        }
+    }
+
+    /// What waits for the next tick: the queued sets of the picked entity's fields, and then the
+    /// link's since the last pass, which the pass queues after them; the queued adds and removes;
+    /// and the edits the log would undo and redo next.
+    fn pending(&self) -> Pending {
+        let id = self.picked;
+        let queued = self.queued.0.iter().filter_map(|command| match command {
+            Command::Set(set, edit) if Some(*set) == id => Some(edit.clone()),
+            _ => None,
+        });
+        let linked = self.link.borrow();
+        let linking = linked.pending.iter().filter_map(|linking| match linking {
+            Linking::Set(set, edit) if Some(*set) == id => Some(edit.clone()),
+            _ => None,
+        });
+        let changes = self.queued.0.iter().filter_map(|command| match command {
+            Command::Add(entity, component, _) => Some((*entity, component.clone(), true)),
+            Command::Remove(entity, component) => Some((*entity, component.clone(), false)),
+            _ => None,
+        });
+        let first = |edit: Option<&[Operation]>| edit.and_then(<[_]>::first).map(|o| o.to_string());
+        Pending {
+            waiting: queued.chain(linking).collect(),
+            changes: changes.collect(),
+            undo: first(self.log.undoable()),
+            redo: first(self.log.redoable()),
+        }
+    }
+
     /// Makes the pick the link asked for since the last pass, before the panels draw: a living
     /// entity's ID picks it and opens the rows above its own, as Find does, and any other, or
     /// none, unpicks. A debug build checks the link's sets against the world's types first, which
-    /// the link hasn't, as [`InspectorLink::set`] says.
-    fn follow(&mut self, world: &World) {
-        if cfg!(debug_assertions) {
+    /// the link hasn't, as [`InspectorLink::set`] says, once it shows the world: a game's, once its
+    /// types are read.
+    fn follow(&mut self, world: &dyn Inspected) {
+        if cfg!(debug_assertions) && world.waiting().is_none() {
             for linking in &self.link.borrow().pending {
                 if let Linking::Set(_, edit) = linking {
                     assert!(
-                        links_field(world, edit),
+                        links_field(world.types(), edit),
                         "a link sets a field of a component's own that holds nothing the panels \
                          set at a path of its own, or a component of a vector that's one; got \
                          `{}` of `{}`",
@@ -300,31 +379,21 @@ impl Inspector {
         let Some(pick) = self.link.borrow_mut().pick.take() else {
             return;
         };
-        match pick.and_then(|id| Some((id, world.entity(id)?))) {
-            Some((id, entity)) => {
+        match pick.filter(|&id| world.alive(id) == Some(true)) {
+            Some(id) => {
                 self.pick(id);
-                self.open_ancestors(world, entity);
+                self.open_ancestors(world, id);
             }
             None => self.unpick(),
         }
     }
 
-    /// The Edit menu: Undo and Redo, each naming the edit it steps through; returns the one
-    /// clicked.
-    fn edit_menu(&self, ui: &mut egui::Ui) -> Option<Step> {
+    /// The Edit menu: Undo and Redo, each naming the edit it steps through, as `pending` has
+    /// them; returns the one clicked.
+    fn edit_menu(&self, ui: &mut egui::Ui, pending: &Pending) -> Option<Step> {
         let items = [
-            (
-                Step::Undo,
-                "Undo",
-                self.log.undoable().and_then(<[_]>::first),
-                UNDO,
-            ),
-            (
-                Step::Redo,
-                "Redo",
-                self.log.redoable().and_then(<[_]>::first),
-                REDO[0],
-            ),
+            (Step::Undo, "Undo", &pending.undo, UNDO),
+            (Step::Redo, "Redo", &pending.redo, REDO[0]),
         ];
         let mut chosen = None;
         for (step, name, edit, shortcut) in items {
@@ -345,8 +414,13 @@ impl Inspector {
     /// while it's alive, Create Empty Child, which makes a child of it, Duplicate, which copies it
     /// and its descendants, as Ctrl+D (Cmd+D on macOS) does too, and Delete, which deletes it and
     /// its descendants. The operation chosen goes in `operations`.
-    fn entity_menu(&mut self, world: &World, ui: &mut egui::Ui, operations: &mut Vec<Command>) {
-        let live = self.picked.filter(|&id| world.entity(id).is_some());
+    fn entity_menu(
+        &mut self,
+        world: &dyn Inspected,
+        ui: &mut egui::Ui,
+        operations: &mut Vec<Command>,
+    ) {
+        let live = self.picked.filter(|&id| world.alive(id) == Some(true));
         if ui.button("Create Empty").clicked() {
             operations.push(empty(None));
         }
@@ -376,8 +450,8 @@ impl Inspector {
 
     /// Has `pass` duplicate the entity picked, while it's alive in `world`, if its input's Ctrl+D
     /// asks for that.
-    fn duplicate_picked(&self, world: &World, pass: &mut Pass) {
-        let live = self.picked.filter(|&id| world.entity(id).is_some());
+    fn duplicate_picked(&self, world: &dyn Inspected, pass: &mut Pass) {
+        let live = self.picked.filter(|&id| world.alive(id) == Some(true));
         if let Some(id) = live.filter(|_| pass.cues.duplicate) {
             pass.operations.push(Command::Duplicate(id));
         }
@@ -513,10 +587,7 @@ impl Inspector {
             return;
         };
         self.pick(made);
-        let made = world
-            .entity(made)
-            .expect("the entity a create made is alive");
-        self.open_ancestors(world, made);
+        self.open_ancestors(&*world, made);
     }
 
     /// Forgets the values `entity`'s `component` refused, if it's the entity picked, whose
@@ -540,21 +611,30 @@ impl Inspector {
         self.refusals.clear();
     }
 
-    /// Opens the rows of `entity`'s ancestors, so that the tree shows its own.
-    fn open_ancestors(&mut self, world: &World, entity: Entity) {
-        let mut up = world.parent(entity).expect("alive");
-        while let Some(parent) = up {
-            self.expanded
-                .insert(world.id(parent).expect("a parent is alive"));
-            up = world.parent(parent).expect("a parent is alive");
+    /// Opens the rows of the ancestors of the entity of ID `id`, so that the tree shows its own; up
+    /// to one met again, as a hierarchy put together from reads of a game's world at two moments
+    /// may have it.
+    fn open_ancestors(&mut self, world: &dyn Inspected, id: EntityId) {
+        let mut met = HashSet::from([id]);
+        let mut up = world.parent(id);
+        while let Some(parent) = up.filter(|&parent| met.insert(parent)) {
+            self.expanded.insert(parent);
+            up = world.parent(parent);
         }
     }
 
     /// The Inspector panel: the picked entity's components, each under a header that collapses,
     /// with its fields' widgets, and beside it a menu that removes it; and below them, a menu that
-    /// adds one. The fields they change, the operations the menus choose, and what the input of
-    /// the window it draws in says of them, go in `pass`.
-    fn inspect(&self, world: &World, ui: &mut egui::Ui, pass: &mut Pass) {
+    /// adds one; each drawn as what's `pending` will leave it. The fields they change, the
+    /// operations the menus choose, and what the input of the window it draws in says of them, go
+    /// in `pass`.
+    fn inspect(
+        &self,
+        world: &dyn Inspected,
+        ui: &mut egui::Ui,
+        pass: &mut Pass,
+        pending: &Pending,
+    ) {
         pass.cues.read(ui.ctx());
         if let Some(not_done) = &self.not_done {
             ui.label(not_done.as_str());
@@ -563,29 +643,23 @@ impl Inspector {
             ui.label("Nothing picked: pick an entity in the Entities panel");
             return;
         };
-        let Some(entity) = world.entity(id) else {
-            ui.label(format!("Entity {id} was despawned"));
-            return;
-        };
-        let components = world.components_of(entity);
-        let components = components.expect("the entity of an ID is alive");
-        let queued = self.queued.0.iter().filter_map(|command| match command {
-            Command::Set(set, edit) if *set == id => Some(edit),
-            _ => None,
-        });
-        // Then the link's since the last pass, which the pass queues after those.
-        let linked = self.link.borrow();
-        let linking = linked.pending.iter().filter_map(|linking| match linking {
-            Linking::Set(set, edit) if *set == id => Some(edit),
-            _ => None,
-        });
-        let waiting: Vec<&Edit> = queued.chain(linking).collect();
-        let heading = match entity_name(world, entity) {
+        match world.alive(id) {
+            Some(true) => {}
+            Some(false) => {
+                ui.label(format!("Entity {id} was despawned"));
+                return;
+            }
+            None => {
+                ui.label(format!("Reading entity {id}"));
+                return;
+            }
+        }
+        let heading = match world.name(id) {
             Some(name) => format!("{name}, entity {id}"),
             None => format!("Entity {id}"),
         };
         ui.label(heading);
-        if let Some(children) = children(world, entity) {
+        if let Some(children) = children(world, id) {
             ui.label(children);
         }
         // So that what's typed into a field of one entity never lands in the field of the next
@@ -594,21 +668,27 @@ impl Inspector {
         let scope = egui::UiBuilder::new().scope_id(ui.make_persistent_id(id));
         ui.scope_builder(scope, |ui| {
             let types = world.types();
-            for component in components {
+            for component in world.components(id) {
                 // Drawn as the next tick will leave it.
-                if let Some(Command::Remove(..)) = self.change(id, component) {
+                if pending.change(id, component) == Some(false) {
                     continue;
                 }
-                let (Ok(value), Some(index)) = (
-                    world.get_field(entity, component, ""),
-                    types.find(component),
-                ) else {
+                let (Some(value), Some(index)) =
+                    (world.component(id, component), types.find(component))
+                else {
                     continue;
                 };
                 let header = egui::CollapsingHeader::new(component)
                     .id_salt(component)
                     .default_open(true)
                     .show(ui, |ui| {
+                        let value = match value {
+                            Ok(value) => value,
+                            Err(error) => {
+                                ui.label(error);
+                                return;
+                            }
+                        };
                         let mut fields = Fields {
                             world,
                             types,
@@ -616,7 +696,7 @@ impl Inspector {
                             component,
                             refusals: &self.refusals,
                             edits: &mut pass.sets,
-                            waiting: &waiting,
+                            waiting: &pending.waiting,
                         };
                         let (ty, meta) = (Type::Named(index), Meta::default());
                         let slot = Slot {
@@ -638,44 +718,33 @@ impl Inspector {
                     header.on_hover_text(doc.as_ref());
                 }
             }
-            self.add_menu(world, ui, entity, id, &mut pass.operations);
+            self.add_menu(world, ui, id, pending, &mut pass.operations);
         });
     }
 
-    /// The add or the remove of component `name` of the entity of ID `id` that waits for a tick,
-    /// the last if several do.
-    fn change(&self, id: EntityId, name: &str) -> Option<&Command> {
-        self.queued.0.iter().rev().find(|command| match command {
-            Command::Add(entity, component, _) | Command::Remove(entity, component) => {
-                *entity == id && component == name
-            }
-            _ => false,
-        })
-    }
-
-    /// The Add Component menu, below the components of `entity`, whose ID is `id`: the types it
-    /// can be given, in the order they registered, each with its doc on hover; but not those it
-    /// has, nor a parent, which the world gives it, nor those opaque as a whole, such as handles,
-    /// which are code's to make, nor those an add of waits for a tick. A type whose default an add
-    /// would refuse shows disabled, saying why on hover. The defaults are made only while it's
-    /// open. The add chosen, of the type's default, goes in `operations`.
+    /// The Add Component menu, below the components of the entity of ID `id`: the types it can be
+    /// given, in the order they registered, each with its doc on hover; but not those it has, nor
+    /// a parent, which the world gives it, nor those opaque as a whole, such as handles, which are
+    /// code's to make, nor those an add of is `pending`. A type whose default an add would refuse
+    /// shows disabled, saying why on hover. The defaults are made only while it's open. The add
+    /// chosen, of the type's default, goes in `operations`.
     fn add_menu(
         &self,
-        world: &World,
+        world: &dyn Inspected,
         ui: &mut egui::Ui,
-        entity: Entity,
         id: EntityId,
+        pending: &Pending,
         operations: &mut Vec<Command>,
     ) {
         let config = egui::menu::MenuConfig::new().style(crate::menu_style);
         let button = egui::menu::MenuButton::new("Add Component").config(config);
         button.ui(ui, |ui| {
             let types = world.types();
-            let own: Vec<&str> = world.components_of(entity).into_iter().flatten().collect();
+            let own = world.components(id);
             for name in world.component_types() {
                 let info = types.find(name).map(|index| types.info(index));
                 let opaque = info.is_some_and(|info| matches!(info.shape, Shape::Opaque));
-                let adding = matches!(self.change(id, name), Some(Command::Add(..)));
+                let adding = pending.change(id, name) == Some(true);
                 if name == PARENT || own.contains(&name) || opaque || adding {
                     continue;
                 }
@@ -693,13 +762,12 @@ impl Inspector {
                     }
                     Err(error) => {
                         let item = ui.add_enabled(false, item);
-                        item.on_disabled_hover_text(error.to_string());
+                        item.on_disabled_hover_text(error);
                     }
                 }
             }
         });
     }
-
     /// Sets the field `edit` changed of `entity`, the entity picked as it was made, as part of the
     /// edit going on, and keeps the refusal if it's refused, while that's still the entity picked.
     fn apply(&mut self, world: &mut World, entity: Option<EntityId>, edit: Edit) {
@@ -807,20 +875,6 @@ fn shown_right(ui: &egui::Ui) -> f32 {
     ui.max_rect().right().min(ui.clip_rect().right()) - bar
 }
 
-/// `entity`'s name, if it has a [`Name`] holding one. It reads it by name, as the panels read the
-/// world, and lists the entity's components first, so that one without a name builds no error, as
-/// getting the field it hasn't would, each frame it's drawn.
-fn entity_name(world: &World, entity: Entity) -> Option<String> {
-    let mut components = world.components_of(entity).ok()?;
-    if !components.any(|component| component == "Name") {
-        return None;
-    }
-    match world.get_field(entity, "Name", "0") {
-        Ok(Value::String(name)) => Some(name),
-        _ => None,
-    }
-}
-
 /// The command that creates an empty entity, the last of `parent`'s children, or a root: a name
 /// that says so, and a transform that leaves it where its parent is.
 fn empty(parent: Option<EntityId>) -> Command {
@@ -834,15 +888,15 @@ fn empty(parent: Option<EntityId>) -> Command {
     }
 }
 
-/// `entity`'s children, by their IDs, as "Children: 5f3a9c0e12b47d68, 0c41b2e79d6a3f15": the
-/// first 16 of them, then how many more there are; `None` if it has none.
-fn children(world: &World, entity: Entity) -> Option<String> {
-    let mut children = world.children(entity).ok()?.peekable();
+/// The children of the entity of ID `id`, by their IDs, as "Children: 5f3a9c0e12b47d68,
+/// 0c41b2e79d6a3f15": the first 16 of them, then how many more there are; `None` if it has none.
+fn children(world: &dyn Inspected, id: EntityId) -> Option<String> {
+    let mut children = world.children(id).peekable();
     children.peek()?;
     let shown: Vec<String> = children
         .by_ref()
         .take(16)
-        .map(|child| world.id(child).expect("a child is alive").to_string())
+        .map(|child| child.to_string())
         .collect();
     let mut line = format!("Children: {}", shown.join(", "));
     let more = children.count();

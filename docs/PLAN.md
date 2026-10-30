@@ -67,19 +67,17 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Phase 5, tool API and hot reload: v0.1** (2026-10-30)
 - **Projects and `gg new`** (2026-10-30)
 - **The game's view in the editor** (2026-10-30)
+- **The game's world and diagnostics in the editor's panels** (2026-10-30)
 
 ## Now
 
-**The game's world and diagnostics in the editor's panels**, Phase 6's third milestone. In a
-project, the editor's Entities and Inspector panels show the game's world, which they read through
-the tool API, `entities`, `entity` and `get`, as it changes, and edit through `apply`, `undo` and
-`redo`, as the editor's own edits; and Logs shows the game's diagnostics as it logs them, through a
-`logs` request, which serves the log's events as they come, rather than its file, beside `gg run`'s
-events, which `gg logs` and `gg mcp` follow too. *Done when*, from `games/shards`, the Entities
-panel lists Shards' entities as they come and go, the Inspector shows a player's components as they
-change and sets a field, which Undo takes back, a warning the game logs shows in Logs with its code
-as it's logged, and `gg logs` follows a running game's events through the API.
-
+**Editing in the game's view**, Phase 6's fourth milestone, which waits on the open question of who
+owns the game's one view. In a project, the editor edits the game's entities in its view as it
+edits its own world's: a click picks the entity under the cursor, which the view outlines and the
+panels show picked, and the handles move, turn and scale it, through the tool API, each drag one
+edit of the editor's, the game showing it as it moves. *Done when*, from `games/shards`, a click in
+the view picks a shard, which the Entities panel shows picked and the view outlines, and a drag of
+its handles moves it, the view showing it moving, which one Undo takes back.
 ## Next
 
 Each phase ends in something you can run and check.
@@ -156,7 +154,6 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | RenderDoc captures from code or through the tool API, and more than one a run: `--capture` names one frame as the run starts, and the tool API's `capture` writes the view's pixels alone | An agent needs a frame's GPU work as well as its pixels |
 | `gg build` and `gg test`, with their results as data: `run` and `check` build through cargo, passing on its messages about the code as it renders them, and cargo's test harness writes JSON on nightly alone | An agent needs a build's or the tests' results as data, or libtest's JSON output is stable |
 | Capabilities each client of the tool API is granted, as [Agents and tools](../ARCHITECTURE.md#agents-and-tools) describes: a connection that says hello with the session's token reaches everything, which only processes that can read the session file beside the game do | A client the user doesn't run as their own, such as one on another machine or a mod's, or an agent kept to one scene |
-| Diagnostics served by the tool API: `gg logs` reads the JSON log the session file names | A client on another machine, or one that follows a run's events as they come |
 | MCP beyond tools: resources, prompts, progress, cancellation and the client's roots; `gg mcp`'s tools are the API's methods but `quit`, `patch` and the paths of `capture` and `snapshot`, a capture's PNG coming inline | An agent needs one of them |
 | Watching the scene files the editor opens, saves and reloads, which it reads through `World::replace_scene` rather than `Context::load_scene_file` | Phase 6's editor |
 | Steps and captures while the window is minimized, which fail with `api.paused`, and requests while a file dialog or Windows' window menu holds the main thread, which wait; `ping` says which | A tool needs them then |
@@ -377,7 +374,11 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Gamepads in an embedded game: windowed runs poll the pads, and the editor forwards keys, the mouse and focus | Someone plays a project's game in the editor with a pad |
 | Captures of a view that shows pixels from elsewhere, as the editor's does a game's: `capture` fails there (`api.no_view`); the game's own capture has the same pixels | A tool captures the editor's view |
 | `gg run --embedded` with `--peers 2`, which the editor's one view would show one of: it's refused | The editor shows a lockstep session's peers |
-| Filtering the Logs panel by level or text, and the game's console's debug lines kept out of it: it shows all `gg run` prints | Logs gets too long to read |
+| Filtering the Logs panel by level or text, and its game's debug events kept out of it: it shows every event the game logs, which it keeps the last 10,000 of, each one's fields in their names' order rather than as logged, and all `gg run` prints | Logs gets too long to read |
+| The editor's panels reading only what they show of a game's world: a remote Inspector reads the game's whole list of entities, their names, parents, children and components' types, every quarter of a second, which costs the game's main thread a few steps an entity, and keeps the list in memory; `entities` by parent, for the rows a panel shows, would bound both by its height | A project's game of tens of thousands of entities |
+| A remote Inspector's set of an option or an enum whole, as the panel sets what's inside one, holding an entity despawned since it was read, which the game refuses (`ecs.no_entity`); and a component holding a texture without a path, which it can't read, saying why: every texture a layer adds comes from a file so far | Layers make textures of their own, or someone edits such an option or enum |
+| `logs` reading at most so many events, and `gg logs` and the editor's Logs saying how many the game dropped before they were read: a read gives up to 8 MiB of them, and neither says what `missed` does, which `gg mcp` gives | An agent follows a busy game's logs through MCP, or misses events unseen |
+| The last of a run's events through the API: `Exited cleanly` is logged once the API has stopped, so its file alone has it | A tool needs to know through the API how a run ended |
 
 ## Open questions
 

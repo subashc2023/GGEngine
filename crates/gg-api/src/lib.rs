@@ -28,6 +28,10 @@
 //! - `entity`, [`Entity`]: answers the entity: `{"id":...,"name":...,"parent":...,"children":[...],
 //!   "components":{"Transform":{...},...}}`, its components in the order their types registered.
 //! - `get`, [`Field`]: answers a component's field, as a value.
+//! - `types`: answers [`Types`], the world's component types and the descriptions of the types
+//!   they hold, which values are read and written by: a client draws and checks values by them, as
+//!   the editor's Inspector does. A type's description never changes once it's registered, but a
+//!   game rebuilt may describe its types otherwise.
 //! - `hash`: answers [`struct@Hash`], the world's.
 //! - `snapshot`, [`Snapshot`]: saves the world whole as a file, which a run given `--restore`
 //!   starts from, and answers [`Snapshotted`] once it's written; before the simulation's first tick
@@ -41,19 +45,29 @@
 //!   the game's build, as one that exports no `main` isn't.
 //! - `apply`, [`Apply`]: applies an edit, [`Operation`]s that undo and redo together, as the
 //!   frame starts, between ticks, and answers [`Applied`]; it applies all or none, failing with
-//!   the code of the first refused, such as `ecs.no_entity`, which names it.
+//!   the code of the first refused, such as `ecs.no_entity`, which names it. A set of a gesture,
+//!   such as a drag, joins the client's last edit if that's a set of the same field in the same
+//!   gesture, so that the gesture undoes whole.
 //! - `undo` and `redo`, [`Undo`]: undo the last edit of an author, the client's own by default,
 //!   such as a scene file's, which its path names, or redo the last it undid, and answer
 //!   [`Edit`], or `null` if there's none; an edit the world refuses to undo or redo, as when an
 //!   entity it changed is gone since, fails, and is dropped.
 //! - `edits`, [`Edits`]: answers [`History`], an author's edits, or each author's.
+//! - `logs`, [`Logs`]: answers [`LogEvents`], events of the game's JSON log, each its line as the
+//!   log wrote it, of the last the game keeps, at most 10,000 and 8 MiB of lines: from an earlier
+//!   answer's `next`, or else the last of them, or all, from the oldest; those at a level and more
+//!   severe; waiting for one to come, if none is there. A `from` given with another run's `run`, as
+//!   a client following the game's logs across a restart gives, reads from the oldest kept, so that
+//!   the client misses nothing it can still have.
 //! - `quit`: answers `{}`, and the run ends cleanly, as when its window closes, but without asking
 //!   its layers, which may keep a window open.
 //!
-//! The methods but `hello` and `ping` are answered by the game's main thread, as a frame starts.
-//! While the window is minimized, and no frames run, it answers them between frames, but `step`
-//! and `capture`, which need frames, fail with `api.paused`; while a file dialog or the window menu
-//! Windows runs is open, holding the main thread, they wait.
+//! The methods but `hello`, `ping` and `logs` are answered by the game's main thread, as a frame
+//! starts. While the window is minimized, and no frames run, it answers them between frames, but
+//! `step` and `capture`, which need frames, fail with `api.paused`; while a file dialog or the
+//! window menu Windows runs is open, holding the main thread, they wait. The connection's own
+//! thread answers `hello`, `ping` and `logs` as it reads them, so that a `logs` that waits holds up
+//! the connection's later requests: follow the logs on a connection of their own.
 //!
 //! A value is JSON as its kind is: a number, a string, a `bool`; a vector or a quaternion an array
 //! of numbers, `[x, y, z, w]` for a quaternion; a float that isn't finite the string `inf`, `-inf`
@@ -195,8 +209,12 @@ pub struct Answer {
 }
 
 /// A field that's there, whatever its JSON, `null` too, which an `Option` would take for none.
-fn present<'de, D: serde::Deserializer<'de>>(json: D) -> Result<Option<Box<RawValue>>, D::Error> {
-    Box::<RawValue>::deserialize(json).map(Some)
+fn present<'de, D, T>(json: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(json).map(Some)
 }
 
 /// The line answering request `id`: with `result`, its JSON, or with the error it failed with.
@@ -436,13 +454,16 @@ pub struct EntityList {
     pub entities: Vec<Listed>,
 }
 
-/// An entity as `entities` lists it: its ID, its name, its parent's ID, and its components' types,
-/// in the order they registered.
+/// An entity as `entities` lists it: its ID, its name, its parent's ID, its children's, in their
+/// order, and its components' types, in the order they registered.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Listed {
     pub id: String,
     pub name: Option<String>,
     pub parent: Option<String>,
+    /// Empty from an engine older than lists of them.
+    #[serde(default)]
+    pub children: Vec<String>,
     pub components: Vec<String>,
 }
 
@@ -462,6 +483,131 @@ pub struct Field {
     pub component: String,
     #[serde(default)]
     pub path: String,
+}
+
+/// What `types` answers: the world's component types, in the order they registered, and the named
+/// types, structs and enums, that they are and hold, in the order they were described, each under
+/// a name no other has.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Types {
+    pub components: Vec<ComponentInfo>,
+    pub types: Vec<TypeInfo>,
+}
+
+/// A component type, as `types` gives it: its name, which its description has too, and the value an
+/// `add` without one gives it, or why there's none, as when it holds an entity, which has no
+/// default.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ComponentInfo {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<String>,
+}
+
+/// A named type as reflection describes it: `{"name":"Spin","doc":...,"shape":{"struct":
+/// {"fields":[...],"tuple":false}}}`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TypeInfo {
+    pub name: String,
+    /// Its doc comment, its lines joined into paragraphs.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub doc: String,
+    pub shape: Shape,
+}
+
+/// What a named type holds: a struct's fields, a tuple struct's named `0`, `1` and so on; an enum's
+/// variants; or, for `"opaque"`, nothing values give or take but `(opaque)`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Shape {
+    Struct { fields: Vec<FieldInfo>, tuple: bool },
+    Enum(Vec<VariantInfo>),
+    Opaque,
+}
+
+/// A field of a struct or of a variant: its name, which paths name it by; its type; the least and
+/// the most its numbers, its vectors' components and its elements may be; how the Inspector shows
+/// it; its doc comment; and its own default, if its description gives it one, which may be `null`,
+/// as an option's: without one, its type's is, as gg-engine's `Types::field_default` makes it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FieldInfo {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub ty: Type,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<Bound>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<Bound>,
+    #[serde(default, skip_serializing_if = "Show::is_plain")]
+    pub show: Show,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub doc: String,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub default: Option<Value>,
+}
+
+/// An enum's variant: its name and its fields, a tuple's if `tuple`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VariantInfo {
+    pub name: String,
+    pub fields: Vec<FieldInfo>,
+    pub tuple: bool,
+}
+
+/// A field's type: `"bool"`, `{"int":{"bits":32,"signed":true}}`, `"f32"`, `"f64"`, `"string"`,
+/// `"vec2"`, `"vec3"`, `"vec4"`, `"quat"`, `"entity"`, `"texture"`, `{"option":...}`,
+/// `{"list":...}`, `{"array":[..., 4]}`, `{"named":"Transform"}`, a type `types` describes, or
+/// `"opaque"`, a field reflection leaves as it is.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Type {
+    Bool,
+    Int { bits: u8, signed: bool },
+    F32,
+    F64,
+    String,
+    Vec2,
+    Vec3,
+    Vec4,
+    Quat,
+    Entity,
+    Texture,
+    Option(Box<Type>),
+    List(Box<Type>),
+    Array(Box<Type>, u32),
+    Named(String),
+    Opaque,
+}
+
+/// A field's `min` or `max`, as written: `{"int":-3}` or `{"float":0.5}`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Bound {
+    Int(i128),
+    Float(f64),
+}
+
+/// How the Inspector shows a field: `"plain"`; `"degrees"`, an `f32` of radians in degrees; or
+/// `"color"`, a `vec3` or `vec4` of linear color.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Show {
+    #[default]
+    Plain,
+    Degrees,
+    Color,
+}
+
+impl Show {
+    fn is_plain(&self) -> bool {
+        *self == Self::Plain
+    }
 }
 
 /// What `hash` answers: the world's hash, its content's and its layout's, each 16 hex digits, as
@@ -564,11 +710,21 @@ pub enum Operation {
     },
 }
 
-/// What `apply` takes: an edit's operations, applied in order.
+/// What `apply` takes: an edit's operations, applied in order; and, for a set that's part of a
+/// gesture, such as a drag or a number typed, the gesture, a number the client gives each of its
+/// own, the same for each of its sets: a set of the field that the client's last edit set, with the
+/// same gesture, joins that edit, taking its value and keeping what undoes it, so that the gesture
+/// undoes whole, and any other edit of the client's that reaches the world ends it, refused there
+/// or not; one refused as it's read, as for an ID that isn't one, a type there's none of or a value
+/// of another kind, doesn't. Since a client's edits are those of every connection with its name, a
+/// gesture's number is its own across them, as one drawn at random to start from is. With a
+/// gesture, an apply is of one set, or refused with `api.bad_params`.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Apply {
     pub operations: Vec<Operation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gesture: Option<u64>,
 }
 
 /// What `apply` answers: the ticks the simulation had run as the edit applied, the next being the
@@ -620,6 +776,43 @@ pub struct Authored {
     pub author: String,
     pub done: Vec<Vec<String>>,
     pub undone: Vec<Vec<String>>,
+}
+
+/// The levels `logs` reads from, by the names its `level` takes, the most severe first.
+pub const LEVELS: [&str; 5] = ["error", "warn", "info", "debug", "trace"];
+
+/// What `logs` takes: the number of the event to read from, `from`, as an earlier answer's `next`
+/// gives it, with that answer's `run`; without `from`, the `last` events to read, or else all, from
+/// the oldest kept; the least severe `level` to read, one of [`LEVELS`], every event the game's
+/// filter let through without one; and how long to wait for an event to come, if none is there to
+/// read, `wait_ms`, in milliseconds, 0 by default and at most 10,000.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Logs {
+    #[serde(default)]
+    pub from: Option<u64>,
+    #[serde(default)]
+    pub run: Option<u64>,
+    #[serde(default)]
+    pub last: Option<usize>,
+    #[serde(default)]
+    pub level: Option<String>,
+    #[serde(default)]
+    pub wait_ms: u64,
+}
+
+/// What `logs` answers: the run read, `run`, drawn at random as the game's API started, for the next
+/// `logs` to give with `next`, the number of the event to read from then; `end`, the number the
+/// next event logged gets; how many events from where it read, before `next`, it `missed`, of any
+/// level, dropped as newer ones came or too long to keep, as a line of more than 1 MiB is; and the
+/// events read, in order, each the JSON log's line, as written, but for its line break.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LogEvents {
+    pub run: u64,
+    pub next: u64,
+    pub end: u64,
+    pub missed: u64,
+    pub events: Vec<Box<RawValue>>,
 }
 
 /// A connection to a running game's API, for tools: a request at a time, each waiting for its
@@ -845,6 +1038,49 @@ mod tests {
         ] {
             assert!(read(refused).is_err(), "{refused}");
         }
+    }
+
+    /// A field's default given as `null` is a default, unlike one left out; bounds keep integers
+    /// apart from floats, the widest of a `u64` too.
+    #[test]
+    fn types_read_as_their_docs_say() {
+        let json = r#"{"name": "Spin", "shape": {"struct": {"tuple": false, "fields": [
+            {"name": "speed", "type": "f32", "min": {"float": -0.5}, "show": "degrees"},
+            {"name": "count", "type": {"int": {"bits": 64, "signed": false}},
+             "max": {"int": 18446744073709551615}},
+            {"name": "target", "type": {"option": "entity"}, "default": null},
+            {"name": "grid", "type": {"array": [{"named": "Cell"}, 4]}}]}}}"#;
+        let info: TypeInfo = serde_json::from_str(json).unwrap();
+        let Shape::Struct { fields, tuple } = &info.shape else {
+            panic!("a struct: {info:?}");
+        };
+        assert!(!tuple);
+        assert_eq!(fields[0].min, Some(Bound::Float(-0.5)));
+        assert_eq!(fields[0].show, Show::Degrees);
+        assert_eq!(fields[0].default, None);
+        assert_eq!(fields[1].max, Some(Bound::Int(u64::MAX.into())));
+        assert_eq!(fields[2].ty, Type::Option(Box::new(Type::Entity)));
+        assert_eq!(fields[2].default, Some(Value::Null));
+        let cell = Box::new(Type::Named("Cell".to_owned()));
+        assert_eq!(fields[3].ty, Type::Array(cell, 4));
+        let back: TypeInfo = serde_json::from_str(&serde_json::to_string(&info).unwrap()).unwrap();
+        assert_eq!(back, info);
+    }
+
+    /// `logs` takes nothing but what its docs say, defaulting the rest; and its answer keeps each
+    /// event as the log wrote it, its fields in their order.
+    #[test]
+    fn logs_read_as_their_docs_say_and_answer_events_as_written() {
+        let logs: Logs = serde_json::from_str(r#"{"from": 3, "run": 7}"#).unwrap();
+        assert_eq!((logs.from, logs.run, logs.last), (Some(3), Some(7), None));
+        assert_eq!((logs.level, logs.wait_ms), (None, 0));
+        assert!(serde_json::from_str::<Logs>(r#"{"form": 3}"#).is_err());
+        let event = r#"{"timestamp":"t","level":"WARN","code":"asset.missing","message":"m"}"#;
+        let answer = format!(r#"{{"run":7,"next":4,"end":4,"missed":0,"events":[{event}]}}"#);
+        let read: LogEvents = serde_json::from_str(&answer).unwrap();
+        assert_eq!((read.run, read.next, read.end, read.missed), (7, 4, 4, 0));
+        assert_eq!(read.events.len(), 1);
+        assert_eq!(read.events[0].get(), event);
     }
 
     #[test]

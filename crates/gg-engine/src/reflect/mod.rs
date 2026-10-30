@@ -497,6 +497,42 @@ impl Types {
         Ok(Value::Variant(variant.name.clone(), fields))
     }
 
+    #[cfg(feature = "dev")]
+    /// Types another process described, as the tool API's `types` gives them, each by its name and
+    /// doc, in their order, opaque until [`info_mut`](Self::info_mut) gives each its shape, whose
+    /// [`Type::Named`]s [`find`](Self::find) finds among them: values are read, drawn and written
+    /// by them, but no Rust type is any of them. A name given again is skipped.
+    pub(crate) fn described(names: impl IntoIterator<Item = (Ident, Cow<'static, str>)>) -> Self {
+        /// What stands for the Rust type of each, of which there's none.
+        struct Described;
+
+        let mut types = Self::default();
+        for (name, doc) in names {
+            if types.by_name.contains_key(&name) {
+                continue;
+            }
+            let index = TypeIndex(u32::try_from(types.entries.len()).expect("fewer than 2^32"));
+            types.by_name.insert(name.clone(), index);
+            types.entries.push(Entry {
+                info: TypeInfo {
+                    name,
+                    doc,
+                    shape: Shape::Opaque,
+                },
+                type_id: TypeId::of::<Described>(),
+                rust: "a type another process described",
+            });
+        }
+        types
+    }
+
+    #[cfg(feature = "dev")]
+    /// The description of the type `index` names, to describe a type of
+    /// [`described`](Self::described)'s.
+    pub(crate) fn info_mut(&mut self, index: TypeIndex) -> &mut TypeInfo {
+        &mut self.entries[index.0 as usize].info
+    }
+
     /// The type named `name`, if there's one.
     pub fn find(&self, name: &str) -> Option<TypeIndex> {
         self.by_name.get(name).copied()

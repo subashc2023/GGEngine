@@ -61,9 +61,10 @@ The editor uses `gg-api` too, beside `gg-engine`, as a client of the tool API, a
 - **`gg-macros`:** the derives `gg-engine` re-exports beside its traits of the same names,
   `Reflect` and `Component`. Rust builds a derive as a crate of its own; only `gg-engine`
   depends on it, and games derive through `gg-engine`.
-- **`gg-api`:** the [tool API](#agents-and-tools)'s protocol: its messages, the session file that
-  says where a game serves it, a client, which tools and the editor speak it through, and the
-  memory a game's view is shared through as it renders; and the reader and writer of a
+- **`gg-api`:** the [tool API](#agents-and-tools)'s protocol: its messages, the descriptions of a
+  game's types that a client reads and writes its values by, the session file that says where a
+  game serves it, a client, which tools and the editor speak it through, and the memory a game's
+  view is shared through as it renders; and the reader and writer of a
   [project](#project-state)'s manifest, another file that tools and development builds share. It
   depends on no `gg-*` crate, so that tools build without the engine, and `gg-engine` uses it in
   development builds alone, so that only they read a manifest: shipping builds start from cooked
@@ -74,11 +75,13 @@ The editor uses `gg-api` too, beside `gg-engine`, as a client of the tool API, a
 - **`editor`:** the editor, one more client of the tool API: a dock that fills its window, with
   the game's view in a panel among the others. Started in a game's project, it runs the project's
   game as an agent does, under `gg run --embedded`, which ends as the editor does, and shows the
-  game's view, forwarding it the view's input; elsewhere, until Phase 6 is done, it edits a world
-  of its own, with an orbit camera of its own. Its Play and Simulate run a copy of the world in the
-  world's place, and Stop brings back the very world as it was edited, so that outside them the
-  world changes only by edits, which undo. Play, Simulate and Stop are commands, which recordings
-  keep. [main.rs](apps/editor/src/main.rs) describes the rest.
+  game's view, forwarding it the view's input, the game's world in its Entities and Inspector
+  panels, a remote Inspector's, which edit it through the API as the editor's own edits, and the
+  game's events in its Logs as the game logs them; elsewhere, until Phase 6 is done, it edits a
+  world of its own, with an orbit camera of its own. Its Play and Simulate run a copy of the world
+  in the world's place, and Stop brings back the very world as it was edited, so that outside them
+  the world changes only by edits, which undo. Play, Simulate and Stop are commands, which
+  recordings keep. [main.rs](apps/editor/src/main.rs) describes the rest.
 - **`player`:** the reference player. It runs a cooked scene without game code and shows how a
   game builds its own player.
 - **`tools/gg`:** the command-line tool, a client of the tool API, which `cargo gg` runs.
@@ -197,7 +200,11 @@ in the editor is out of an agent's reach.
   connection's first request says hello with the token, so that only processes that can read the
   file reach the game. A thread of the API's reads each connection and answers its pings itself,
   from the frames the main loop counts, so that a tool tells a hung game from a busy one, and from
-  one whose frames have paused for the user, as for a minimized window or a file dialog. The main
+  one whose frames have paused for the user, as for a minimized window or a file dialog; and its
+  reads of the log, from the events the run keeps in memory as it logs them, its last 10,000, each
+  numbered, which `logs` serves as they come, waiting for one if none has, so that a client follows
+  them from the number it left off at, and, by the run's own number, which a restart changes,
+  misses none across a restart that the new run kept. The main
   loop answers the rest as each frame starts, before its ticks: a step once its ticks have run, a
   capture once the render thread has read the frame's view back, without the UI, which a thread of
   the API's writes as a PNG, and a snapshot once a thread of the API's has written the copy of the
@@ -291,17 +298,18 @@ A project's state is text that people and agents edit, diff and merge with ordin
   agent's, switches which entity has it, and one undo switches it back. A log keeps the edits
   applied, in order, each its operations with their inverses: it undoes and redoes an edit whole,
   applies one of several operations all or nothing, merges a gesture's sets of one field, such as
-  a drag's, into one edit, and drops an entry whose undo the world refuses. A running game applies
-  the tool API's edits between ticks, as a frame starts, paused or not, in the order they arrive,
-  so several clients can edit it at once; each author, a client by the name it says hello with or
-  a scene file by its path, undoes and redoes its own through a log of its own, as the Inspector
-  does through its, and a recording keeps each edit as it was asked for, before the tick after,
-  where a replay applies it. Editing a scene file while the game runs is an edit too: one a game
-  loaded through `Context::load_scene_file`, saved, applies in a development build as the
-  operations that take the world's entities from what the file held to what it holds, which keep
-  what the file doesn't change, such as where the game has moved an entity, and leave alone what
-  the game has deleted; the entities it adds are made first, so that the rest may hold them. A
-  snapshot keeps the files watched, as last applied, so that a restarted run watches them too.
+  a drag's, into one edit, a tool API client's too, by the number it gives each of its gestures,
+  and drops an entry whose undo the world refuses. A running game applies the tool API's edits
+  between ticks, as a frame starts, paused or not, in the order they arrive, so several clients
+  can edit it at once; each author, a client by the name it says hello with or a scene file by
+  its path, undoes and redoes its own through a log of its own, as the Inspector does through its,
+  and a recording keeps each edit as it was asked for, before the tick after, where a replay
+  applies it. Editing a scene file while the game runs is an edit too: one a game loaded through
+  `Context::load_scene_file`, saved, applies in a development build as the operations that take
+  the world's entities from what the file held to what it holds, which keep what the file doesn't
+  change, such as where the game has moved an entity, and leave alone what the game has deleted;
+  the entities it adds are made first, so that the rest may hold them. A snapshot keeps the files
+  watched, as last applied, so that a restarted run watches them too.
   [ops.rs](crates/gg-engine/src/ecs/ops.rs), `World::undo` among it,
   [log.rs](crates/gg-engine/src/ecs/log.rs), [edits.rs](crates/gg-engine/src/edits.rs) and
   [scene_files.rs](crates/gg-engine/src/scene_files.rs) have the rest.
@@ -387,8 +395,14 @@ and `Opaque` for what reflection keeps but doesn't read, such as a `MeshDraw`, w
 make. The world reads and sets a field by its component's name and a path, such as
 `rect[1].y`: a set checks the whole value against the description before anything changes, and
 returns the old value, which sets it back unless code stored one that a set refuses. The Inspector
-edits the world through these calls and operations alone, which the tool API serves, so that an
-editor can show it for a game in another process.
+reads the world through these calls, its IDs and its hierarchy, and edits it through operations,
+all of which the tool API serves, so that a remote Inspector shows a game's world in another
+process, as the editor's does: it reads the game's entities and the picked one's components
+through the API a few times a second, and the descriptions of its types once, and again as a type
+it hasn't comes, with one request at a time, so that what it reads after an edit's answer shows the
+edit, and edits the world as the game's client, drawing what waits for an answer as it will be.
+Values cross as JSON, read and written by the types the game describes, an entity's by its ID and
+a texture's by its path.
 
 A field's default is the one `#[reflect(default = ...)]` gives, or else its type's, so that
 adding a component, switching an enum to another variant and resetting a field each start from a
@@ -532,7 +546,9 @@ Diagnostics are data, so agents and tools can act on them as reliably as people 
   readable, colored lines to stderr, which keeps stdout for machine-readable output, and writes
   every event as a JSON line to a file that agents and tools read:
   `logs/<app>-<UTC time>-<process ID>.jsonl` beside the executable, whose path the run logs as it
-  starts.
+  starts; and keeps the last of those lines in memory, which the tool API's `logs` serves as they
+  come, as `gg logs --follow` and the editor's Logs follow them. A run embedded in a tool prints no
+  readable lines, since the tool shows its events, which it follows through the API.
 - **Errors and warnings name their subject.** Each carries a stable code, a dotted name such as
   `gpu.device_lost`, and the thing it is about: an entity's ID, or a despawned entity's handle,
   since it has none; an asset path, a render pass, a shader file and line, or a scene's line and

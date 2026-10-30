@@ -4,7 +4,7 @@
 //! reports.
 
 #[cfg(feature = "dev")]
-mod json;
+pub(crate) mod json;
 #[cfg(feature = "dev")]
 mod server;
 
@@ -26,10 +26,12 @@ pub(crate) use server::Api;
 pub(crate) enum Api {}
 
 /// Starts serving the tool API for app `app`, whose layers are `layers`, from the bottom up, whose
-/// JSON log is at `log`, if it has one, which plays `player` in a lockstep session, if it's a peer
-/// of one, and whose project's manifest is at `project`, if it's a project's game, unless `serve`
-/// says not to: `None` then, and without `dev`. If it can't start, the run goes on without it,
-/// warning `api.start`.
+/// JSON log is at `log`, if it has one, its last events kept in gg-core's `log::EVENTS`, which
+/// plays `player` in a lockstep session, if it's a peer of one, and whose project's manifest is at
+/// `project`, if it's a project's game, unless `serve` says not to: `None` then, and without `dev`.
+///
+/// Fails, with `api.start`, if it can't start, as when its port can't be bound or its session file
+/// written: the run goes on without it, warning so, but for an embedded one, which ends.
 pub(crate) fn start(
     app: &str,
     layers: &[&str],
@@ -37,18 +39,13 @@ pub(crate) fn start(
     player: Option<u8>,
     project: Option<&Path>,
     serve: bool,
-) -> Option<Api> {
+) -> gg_core::Result<Option<Api>> {
     #[cfg(feature = "dev")]
     if serve {
-        return Api::start(app, layers, log, player, project)
-            .inspect_err(|error| {
-                let consequence = "tools can't reach this run";
-                tracing::warn!(code = error.code(), "{error:#}; {consequence}");
-            })
-            .ok();
+        return Api::start(app, layers, log, &gg_core::log::EVENTS, player, project).map(Some);
     }
     let _ = (app, layers, log, player, project, serve);
-    None
+    Ok(None)
 }
 
 /// As a frame starts, before its ticks, in a development build, applies the scene files saved since,

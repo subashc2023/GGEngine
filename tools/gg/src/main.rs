@@ -103,7 +103,10 @@ Talk to a running game, through its tool API:
                                  `scenes/grid.ron`, printing it, or `null` if there's none
   redo [--author <NAME>]         Redo the last edit gg, or NAME, undid
   edits [--author <NAME>]        Each author's edits, or NAME's, those to undo and those to redo
-  logs [--level <LEVEL>]         Its log's events at LEVEL (`warn`) and above
+  logs [--level <LEVEL>] [--follow]
+                                 Its log's events at LEVEL (`warn`) and above, of the last 10,000 it
+                                 keeps, each its JSON log's line; with `--follow`, then each as it's
+                                 logged, until it ends
   quit                           End it cleanly, as closing its window does, unasked
   call <METHOD> [<PARAMS>]       Send METHOD with PARAMS, as JSON, and print what it answers
 
@@ -122,8 +125,8 @@ Options for every command but `new`:
   --project <PATH>      Work in the project PATH names, by its directory or its `project.ron`,
                         rather than in the one gg is in
 
-Each result is a line of JSON on stdout; `logs` prints the log's lines, and `run` a line for each
-event. An error is a line on stderr, {\"error\":{\"code\":...,\"message\":...}}. Exits 0 on success,
+Each result is a line of JSON on stdout; `logs` prints a line for each of the game's events, and
+`run` one for each of its own. An error is a line on stderr, {\"error\":{\"code\":...,\"message\":...}}. Exits 0 on success,
 1 on an error, a check that failed or a run that didn't end cleanly, and 2 on bad arguments.
 ";
 
@@ -152,7 +155,8 @@ enum Command {
     Sessions(Option<PathBuf>),
     Logs {
         pick: Pick,
-        level: u8,
+        level: String,
+        follow: bool,
     },
     Call {
         pick: Pick,
@@ -188,7 +192,11 @@ fn main() -> ExitCode {
             print(&sessions.to_string());
             true
         }),
-        Command::Logs { pick, level } => game::logs(&pick, level).map(|()| true),
+        Command::Logs {
+            pick,
+            level,
+            follow,
+        } => game::logs(&pick, &level, follow).map(|()| true),
         Command::Call {
             pick,
             method,
@@ -488,16 +496,18 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
             Command::Sessions(parsed.scope()?.map(|scope| scope.manifest))
         }
         "logs" => {
-            parsed.positional(0, 0, "logs [--level <LEVEL>]")?;
+            parsed.positional(0, 0, "logs [--level <LEVEL>] [--follow]")?;
             let level = parsed.value("--level").unwrap_or_else(|| "warn".to_owned());
-            let level = game::rank(&level.to_ascii_uppercase()).ok_or_else(|| {
-                bad(format!(
+            let level = level.to_ascii_lowercase();
+            if !gg_api::LEVELS.contains(&level.as_str()) {
+                return Err(bad(format!(
                     "`--level` is `error`, `warn`, `info`, `debug` or `trace`, not `{level}`"
-                ))
-            })?;
+                )));
+            }
             Command::Logs {
                 pick: parsed.pick()?,
                 level,
+                follow: parsed.switch("--follow"),
             }
         }
         method @ ("status" | "pause" | "resume" | "hash" | "quit") => {
@@ -722,10 +732,14 @@ mod tests {
             };
             assert_eq!((method.as_str(), params), ("snapshot", want), "{args:?}");
         }
-        let Ok(Command::Logs { level, .. }) = parsed(&["logs", "--level", "info"]) else {
+        let Ok(Command::Logs { level, follow, .. }) = parsed(&["logs", "--level", "INFO"]) else {
             panic!("logs");
         };
-        assert_eq!(Some(level), game::rank("INFO"));
+        assert_eq!((level.as_str(), follow), ("info", false));
+        let Ok(Command::Logs { level, follow, .. }) = parsed(&["logs", "--follow"]) else {
+            panic!("logs");
+        };
+        assert_eq!((level.as_str(), follow), ("warn", true));
     }
 
     #[test]

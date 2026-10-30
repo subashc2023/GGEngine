@@ -5,8 +5,9 @@ use std::collections::HashSet;
 use std::ops::Range;
 
 use super::commands::Command;
-use super::{Inspector, Pass, empty, entity_name};
-use crate::{Entity, EntityId, World};
+use super::inspected::Inspected;
+use super::{Inspector, Pass, empty};
+use crate::EntityId;
 
 impl Inspector {
     /// The Entities panel: a field that finds an entity by its ID, which component the entities
@@ -14,8 +15,11 @@ impl Inspector {
     /// which only those in view are drawn; and below them, where they leave room, space whose
     /// click unpicks, and whose context menu makes a root. The operations its menus choose, and
     /// what the input of the window it draws in says of the edits, go in `pass`.
-    pub(super) fn entities(&mut self, world: &World, ui: &mut egui::Ui, pass: &mut Pass) {
+    pub(super) fn entities(&mut self, world: &dyn Inspected, ui: &mut egui::Ui, pass: &mut Pass) {
         pass.cues.read(ui.ctx());
+        if let Some(waiting) = world.waiting() {
+            ui.label(waiting);
+        }
         ui.horizontal(|ui| {
             ui.label("Find");
             let field = egui::TextEdit::singleline(&mut self.find).hint_text("an entity's ID");
@@ -38,14 +42,14 @@ impl Inspector {
                     }
                 }
             });
-        let entities = match world.entities(self.with.as_deref()) {
-            Ok(entities) => entities,
+        let count = match world.count(self.with.as_deref()) {
+            Ok(count) => count,
             Err(error) => {
-                ui.label(error.to_string());
+                ui.label(error);
                 return;
             }
         };
-        ui.label(match entities.len() {
+        ui.label(match count {
             1 => "1 entity".to_owned(),
             n => format!("{n} entities"),
         });
@@ -53,17 +57,16 @@ impl Inspector {
         let operations = &mut pass.operations;
         let scroll = egui::ScrollArea::vertical();
         if self.with.is_some() {
-            let rows = entities.len();
-            scroll.show_rows(ui, height, rows, |ui, shown| {
-                for entity in entities.skip(shown.start).take(shown.len()) {
-                    self.row(world, ui, entity, None, operations);
+            scroll.show_rows(ui, height, count, |ui, shown| {
+                for id in world.page(self.with.as_deref(), shown) {
+                    self.row(world, ui, id, None, operations);
                 }
             });
         } else {
             let tree = Tree::new(world, &self.expanded);
             scroll.show_rows(ui, height, tree.len, |ui, shown| {
-                for (entity, depth) in tree.page(world, shown) {
-                    self.row(world, ui, entity, Some(depth), operations);
+                for (id, depth) in tree.page(world, shown) {
+                    self.row(world, ui, id, Some(depth), operations);
                 }
             });
         }
@@ -80,19 +83,18 @@ impl Inspector {
         });
     }
 
-    /// Draws `entity`'s row: its label, across the rest of the row, which picks it, and whose
-    /// context menu makes an empty child of it, duplicates it or deletes it, the operation chosen
-    /// going in `operations`; in the tree, at `depth`, after an arrow that shows and hides its
-    /// children's rows, if it has any.
+    /// Draws the row of the entity of ID `id`: its label, across the rest of the row, which picks
+    /// it, and whose context menu makes an empty child of it, duplicates it or deletes it, the
+    /// operation chosen going in `operations`; in the tree, at `depth`, after an arrow that shows
+    /// and hides its children's rows, if it has any.
     fn row(
         &mut self,
-        world: &World,
+        world: &dyn Inspected,
         ui: &mut egui::Ui,
-        entity: Entity,
+        id: EntityId,
         depth: Option<usize>,
         operations: &mut Vec<Command>,
     ) {
-        let id = world.id(entity).expect("the world lists living entities");
         // The entity's own, not its row's, so that its widgets' IDs go with it as rows change, as
         // tables swap theirs: a context menu open on it acts on it, not on the entity that comes
         // to its row.
@@ -100,12 +102,12 @@ impl Inspector {
         ui.scope_builder(scope, |ui| {
             ui.horizontal(|ui| {
                 if let Some(depth) = depth {
-                    self.arrow(world, ui, entity, id, depth);
+                    self.arrow(world, ui, id, depth);
                 }
                 let picked = self.picked == Some(id);
                 // On one line, as a horizontal row has it, since the rows' paging takes each to be
                 // one tall: a vertical layout would wrap it.
-                let label = egui::Button::selectable(picked, row_label(world, entity))
+                let label = egui::Button::selectable(picked, row_label(world, id))
                     .wrap_mode(egui::TextWrapMode::Extend);
                 let across = egui::Layout::top_down_justified(egui::Align::LEFT);
                 let label = ui.with_layout(across, |ui| ui.add(label)).inner;
@@ -128,23 +130,13 @@ impl Inspector {
         });
     }
 
-    /// Indents a row of the tree to `depth`, and draws the arrow of `entity`, whose ID is `id`, if
-    /// it has children, which shows and hides their rows; or, if it hasn't, space as wide, so that
-    /// the labels line up.
-    fn arrow(
-        &mut self,
-        world: &World,
-        ui: &mut egui::Ui,
-        entity: Entity,
-        id: EntityId,
-        depth: usize,
-    ) {
+    /// Indents a row of the tree to `depth`, and draws the arrow of the entity of ID `id`, if it
+    /// has children, which shows and hides their rows; or, if it hasn't, space as wide, so that the
+    /// labels line up.
+    fn arrow(&mut self, world: &dyn Inspected, ui: &mut egui::Ui, id: EntityId, depth: usize) {
         let size = egui::vec2(ui.spacing().indent, ui.spacing().interact_size.y);
         ui.add_space(depth as f32 * size.x);
-        let parent = world
-            .children(entity)
-            .is_ok_and(|mut children| children.next().is_some());
-        if !parent {
+        if world.children(id).next().is_none() {
             ui.allocate_exact_size(size, egui::Sense::hover());
             return;
         }
@@ -165,16 +157,16 @@ impl Inspector {
 
     /// Picks the entity whose ID is in the Find field, which may be quoted, as a scene writes it,
     /// and opens the rows of its ancestors; or says why it finds none.
-    fn find(&mut self, world: &World) -> Result<(), String> {
+    fn find(&mut self, world: &dyn Inspected) -> Result<(), String> {
         let text = self.find.trim().trim_matches('"');
         let id: EntityId = text
             .parse()
             .map_err(|error: crate::Error| error.to_string())?;
-        let Some(entity) = world.entity(id) else {
+        if world.alive(id) != Some(true) {
             return Err(format!("no entity has ID {id}"));
-        };
+        }
         self.pick(id);
-        self.open_ancestors(world, entity);
+        self.open_ancestors(world, id);
         Ok(())
     }
 }
@@ -185,69 +177,88 @@ impl Inspector {
 /// rows are listed, and only the page in view found, so that a frame costs a few steps a table, a
 /// step a table for each open root, one for each row under an open root, and one for each row of
 /// the page: never one for each root.
+///
+/// [`World::roots`]: crate::World::roots
 pub(super) struct Tree {
     /// Each open root's place among the roots, in order, and how many rows are under it.
     pub(super) spans: Vec<(usize, usize)>,
     /// The rows under each open root, in the order of `spans`: each entity, and its depth.
-    under: Vec<Vec<(Entity, usize)>>,
+    under: Vec<Vec<(EntityId, usize)>>,
     /// How many rows there are.
     pub(super) len: usize,
 }
 
 impl Tree {
     /// The tree of `world`, whose open rows `expanded` holds, by their entities' IDs.
-    pub(super) fn new(world: &World, expanded: &HashSet<EntityId>) -> Self {
-        let open = expanded.iter().filter_map(|&id| {
-            let entity = world.entity(id)?;
-            Some((world.root_index(entity)?, entity))
-        });
-        let mut open: Vec<(usize, Entity)> = open.collect();
+    pub(super) fn new(world: &dyn Inspected, expanded: &HashSet<EntityId>) -> Self {
+        let open = expanded
+            .iter()
+            .filter_map(|&id| Some((world.root_index(id)?, id)));
+        let mut open: Vec<(usize, EntityId)> = open.collect();
         open.sort_unstable_by_key(|&(at, _)| at);
-        let under: Vec<Vec<(Entity, usize)>> = open
+        let under: Vec<Vec<(EntityId, usize)>> = open
             .iter()
             .map(|&(_, root)| descendants(world, expanded, root))
             .collect();
         let spans = open.iter().zip(&under);
         let spans = spans.map(|(&(at, _), rows)| (at, rows.len())).collect();
-        let len = world.roots().len() + under.iter().map(Vec::len).sum::<usize>();
+        let len = world.roots() + under.iter().map(Vec::len).sum::<usize>();
         Self { spans, under, len }
     }
 
     /// The rows `shown`: each entity, and its depth.
-    pub(super) fn page(&self, world: &World, shown: Range<usize>) -> Vec<(Entity, usize)> {
-        // One iterator of the roots for the page, since their places only rise down it, which
-        // skips a table at a time; and the place of the root it gives next.
-        let mut roots = world.roots();
-        let mut next = 0;
-        shown
-            .map(|row| match locate(row, &self.spans) {
-                Place::Root(at) => {
-                    let root = roots
-                        .nth(at - next)
-                        .expect("the tree's roots are the world's");
-                    next = at + 1;
-                    (root, 0)
-                }
-                Place::Under(span, offset) => self.under[span][offset],
-            })
-            .collect()
+    pub(super) fn page(
+        &self,
+        world: &dyn Inspected,
+        shown: Range<usize>,
+    ) -> Vec<(EntityId, usize)> {
+        let places: Vec<Place> = shown.map(|row| locate(row, &self.spans)).collect();
+        // The page's roots, which are next to each other among the roots, in one go.
+        let mut at = places.iter().filter_map(|place| match *place {
+            Place::Root(at) => Some(at),
+            Place::Under(..) => None,
+        });
+        let first = at.next();
+        let roots = match first {
+            Some(first) => {
+                let last = at.next_back().unwrap_or(first);
+                world.roots_page(first..last + 1)
+            }
+            None => Vec::new(),
+        };
+        let place = |place: &Place| match *place {
+            Place::Root(at) => {
+                let root = roots.get(at - first.expect("a root's place"));
+                Some((*root?, 0))
+            }
+            Place::Under(span, offset) => Some(self.under[span][offset]),
+        };
+        // A root gone since the tree was found leaves the page short.
+        places.iter().filter_map(place).collect()
     }
 }
 
-/// The rows under `root`, which is alive: its descendants, depth first in the order of their
-/// parents' children, each with its depth, as far down as `expanded` holds their parents' IDs.
-fn descendants(world: &World, expanded: &HashSet<EntityId>, root: Entity) -> Vec<(Entity, usize)> {
+/// The rows under `root`: its descendants, depth first in the order of their parents' children,
+/// each with its depth, as far down as `expanded` holds their parents' IDs. An entity met again,
+/// as a hierarchy put together from reads of a game's world at two moments may have it, its own
+/// ancestor, isn't opened again.
+fn descendants(
+    world: &dyn Inspected,
+    expanded: &HashSet<EntityId>,
+    root: EntityId,
+) -> Vec<(EntityId, usize)> {
     let mut rows = Vec::new();
+    let mut opened = HashSet::from([root]);
     // The children left at each depth, from the root's down.
-    let mut stack = vec![world.children(root).expect("an open root is alive")];
+    let mut stack = vec![world.children(root)];
     while let Some(children) = stack.last_mut() {
         let Some(child) = children.next() else {
             stack.pop();
             continue;
         };
         rows.push((child, stack.len()));
-        if expanded.contains(&world.id(child).expect("a child is alive")) {
-            stack.push(world.children(child).expect("a child is alive"));
+        if expanded.contains(&child) && opened.insert(child) {
+            stack.push(world.children(child));
         }
     }
     rows
@@ -280,10 +291,10 @@ fn locate(row: usize, spans: &[(usize, usize)]) -> Place {
     Place::Root(row - before)
 }
 
-/// What `entity`'s row in the Entities panel says: its name alone, leaving its ID and components
-/// to the Inspector; or, without a name, or with an empty one, "Entity", faintly.
-pub(super) fn row_label(world: &World, entity: Entity) -> egui::WidgetText {
-    match entity_name(world, entity).filter(|name| !name.trim().is_empty()) {
+/// What the row of the entity of ID `id` in the Entities panel says: its name alone, leaving its
+/// ID and components to the Inspector; or, without a name, or with an empty one, "Entity", faintly.
+pub(super) fn row_label(world: &dyn Inspected, id: EntityId) -> egui::WidgetText {
+    match world.name(id).filter(|name| !name.trim().is_empty()) {
         Some(name) => name.into(),
         None => egui::RichText::new("Entity").weak().into(),
     }
