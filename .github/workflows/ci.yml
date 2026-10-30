@@ -30,7 +30,7 @@ jobs:
           # Hosted runners have no GPU. On Linux the GPU tests run on lavapipe, Mesa's CPU
           # Vulkan driver, from Debian trixie: Mesa 25.0, the first with Vulkan 1.4, and the
           # validation layer 1.4.309. Elsewhere they're skipped.
-          - { name: Linux x86-64, runner: ubuntu-24.04, container: "debian:trixie", shipping: true }
+          - { name: Linux x86-64, runner: ubuntu-24.04, container: "debian:trixie", once: true }
           - { name: Linux ARM64, runner: ubuntu-24.04-arm, container: "debian:trixie" }
           - { name: Windows x86-64, runner: windows-2025, skip-gpu-tests: "1" }
           - { name: Windows ARM64, runner: windows-11-arm, skip-gpu-tests: "1" }
@@ -97,8 +97,13 @@ jobs:
       # The shipping configuration, the player alone, whose gg-engine leaves out `dev`: on one
       # runner, as what `dev` leaves out is alike on every platform.
       - name: Check the shipping configuration
-        if: matrix.shipping
+        if: matrix.once
         run: cargo clippy -p player --all-targets --locked -- -D warnings
+      # The docs, private items' included, without a warning: on one runner too, as they're alike
+      # on every platform but in code built for one alone.
+      - name: Check the docs
+        if: matrix.once
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items --locked
       - run: cargo test --workspace --locked
       # Whether the engine runs: rendering offscreen on lavapipe, under validation, it exits 0.
       - name: Run the sandbox headless

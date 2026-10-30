@@ -105,6 +105,39 @@ impl MeshDraw {
     pub(crate) fn params(&self) -> &[u8] {
         &self.params[..usize::from(self.len)]
     }
+
+    /// Its parts as a snapshot keeps them, which [`from_parts`](Self::from_parts) makes it again
+    /// from: its mesh's index and its shader's, whether its shader is opaque, whether it culls,
+    /// and its parameters' bytes.
+    #[doc(hidden)]
+    pub fn parts(&self) -> (u32, u32, bool, bool, &[u8]) {
+        let parts = (self.mesh, self.shader, self.opaque, self.culls);
+        (parts.0, parts.1, parts.2, parts.3, self.params())
+    }
+
+    /// A draw of the parts [`parts`](Self::parts) gave, for a renderer handed the same meshes and
+    /// shaders, in the same order, as the one it was made for: in another, it draws another mesh,
+    /// or panics as it draws, if its vertices or its parameters aren't its shader's. `None` for
+    /// parameters of more than [`MAX_PARAMS`](Self::MAX_PARAMS) bytes.
+    #[doc(hidden)]
+    pub fn from_parts(
+        mesh: u32,
+        shader: u32,
+        opaque: bool,
+        culls: bool,
+        params: &[u8],
+    ) -> Option<Self> {
+        let mut copy = [0; Self::MAX_PARAMS];
+        copy.get_mut(..params.len())?.copy_from_slice(params);
+        Some(Self {
+            mesh,
+            shader,
+            opaque,
+            culls,
+            params: copy,
+            len: params.len() as u8,
+        })
+    }
 }
 
 /// The meshes a renderer draws, the first of them the engine's quad, which sprites are drawn on.
@@ -127,6 +160,11 @@ pub(crate) struct Added {
 }
 
 impl Meshes {
+    /// How many it has handed out, the engine's quad among them: the index of the next.
+    pub fn count(&self) -> u32 {
+        self.count
+    }
+
     /// Adds a mesh of triangles, three of `indices` each, which index `vertices`. `name` names it
     /// in errors and GPU captures. It draws with shaders for `V`, which read its vertices as
     /// [`Shaders::add`](crate::Shaders::add) says.

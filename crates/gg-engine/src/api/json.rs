@@ -1,5 +1,6 @@
 //! Reflection's values as the tool API writes them, as gg-api's docs describe: JSON written by hand,
-//! so that a struct's fields keep their order, with the entities they hold by their IDs.
+//! so that a struct's fields keep their order, with the entities they hold by their IDs and the
+//! textures by their paths.
 
 use std::fmt::Write as _;
 
@@ -7,7 +8,7 @@ use crate::World;
 use crate::reflect::{Ident, Value};
 
 /// Writes `value` as JSON, with the entities it holds by their IDs in `world`, `null` for one that
-/// isn't alive there.
+/// isn't alive there, and the textures by their paths, `null` for one without.
 pub(super) fn write(out: &mut String, value: &Value, world: &World) {
     match value {
         Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
@@ -29,6 +30,10 @@ pub(super) fn write(out: &mut String, value: &Value, world: &World) {
         Value::Quat(q) => floats(out, &q.to_array()),
         &Value::Entity(entity) => match world.id(entity) {
             Some(id) => string(out, &id.to_string()),
+            None => out.push_str("null"),
+        },
+        &Value::Texture(texture) => match world.assets().path(texture) {
+            Some(path) => string(out, path),
             None => out.push_str("null"),
         },
         Value::Option(None) => out.push_str("null"),

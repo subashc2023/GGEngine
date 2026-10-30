@@ -66,8 +66,7 @@ tick as it ends, so theirs leave out blending between ticks, which windowed runs
 
 A replay that goes another way names the tick and the part of the hash; `--replay <path> --dump
 <tick>`, run where it goes another way and where it doesn't, prints each world's content there a
-field a line, and the two diff to the field where they part. Where the layout alone goes another
-way, they're the same.
+field a line, and the two diff to the field where they part, or match where the layout alone parts.
 
 The `tracy` feature sends the engine's zones to Tracy: run the Tracy viewer of the release the
 root Cargo.toml names, and connect it to the running app. To capture a headless run instead,
@@ -83,20 +82,22 @@ there. renderdoccmd exits 0 whatever the run does, so read the run's log. `rende
 <capture> -c xml -o <capture>.xml` writes the capture as XML, every object's name
 (`vkSetDebugUtilsObjectNameEXT`) and pass's label (`vkCmdBeginDebugUtilsLabelEXT`) among it.
 
-Development builds, with gg-engine's `dev` feature, as the sandbox and the editor are, serve the
-tool API, and windowed, compile a game's shader again as its files change, logging `Shader
-reloaded`, or warning and drawing on as it did at a change that doesn't compile or breaks the shader
-contract. Run a game under `cargo gg run` in the background and talk to it beside it: `cargo gg
-status`, `capture` (its view as a PNG, in place of a screenshot), `step` and the rest each answer a
-line of JSON. `dev`'s tests need `--features dev` with `-p gg-engine`; `--workspace` merges it in.
+Development builds (gg-engine's `dev`, as the sandbox's and the editor's are) serve the tool API,
+and windowed, compile a game's shader again as its files change (`Shader reloaded`), or warn and
+draw on at a change that doesn't compile or breaks the shader contract. Run a game under `cargo gg
+run` in the background, which restarts it from a snapshot after a crash, a hang or a `cargo build`,
+and talk to it: `cargo gg status`, `capture` (its view as a PNG), `step` and the rest answer in
+JSON. A layer's `load` makes its assets; its `attach`, which a restart skips, builds the world.
+`dev`'s tests need `--features dev` with `-p gg-engine`; `--workspace` merges it in.
 
-A change is done when all five pass:
+A change is done when all six pass:
 
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy --workspace --all-targets --features sandbox/tracy -- -D warnings
 cargo clippy -p player --all-targets -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
 cargo test --workspace
 ```
 
@@ -120,8 +121,8 @@ Inspector, undoing and redoing an edit, and closes; not File > Save, since the a
 grid's scene.
 
 CI ([ci.yml](.github/workflows/ci.yml)) runs the gates on every push, on Windows and Linux, x86-64
-and ARM64, and on macOS ARM64, the shipping gate on Linux x86-64 alone, and the layering check.
-Only its Linux jobs run the GPU tests, on lavapipe, and the apps headless, as its steps say,
+and ARM64, and on macOS ARM64, the shipping and doc gates on Linux x86-64 alone, and the layering
+check. Only its Linux jobs run the GPU tests, on lavapipe, and the apps headless, as its steps say,
 grepping the sandbox's log for `engine.perf`'s fields; Windows' and macOS's runners have no GPU, so
 there `GG_SKIP_GPU_TESTS` skips the GPU tests. lavapipe has no queue for transfers alone, so CI
 never uploads through one: after changing uploads, run the GPU tests on a GPU that has one, as
@@ -178,9 +179,8 @@ probe CI only for a change another platform could break.
   commit's subject begins with, or a phase and its name, and the date, and move what was skipped to
   Deferred. A defect left in goes in `docs/DEFECTS.md`, by area: what it costs, the fix, and when
   the fix would be worth it.
-- Open questions are the user's to decide: bring a recommendation instead of settling one
-  yourself. Once one is decided, the answer goes in ARCHITECTURE.md and the question leaves
-  docs/PLAN.md.
+- Open questions are the user's to decide: bring a recommendation instead of settling one yourself.
+  Once one is decided, the answer goes in ARCHITECTURE.md and the question leaves docs/PLAN.md.
 
 ## Keeping the docs lean
 

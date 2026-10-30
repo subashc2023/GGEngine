@@ -616,7 +616,13 @@ impl<'de> DeserializeSeed<'de> for Read<'_, '_> {
         }
         let types = load.types;
         match ty {
-            Type::Bool | Type::Int { .. } | Type::F32 | Type::F64 | Type::String | Type::Entity => {
+            Type::Bool
+            | Type::Int { .. }
+            | Type::F32
+            | Type::F64
+            | Type::String
+            | Type::Entity
+            | Type::Texture => {
                 let leaf = Leaf {
                     load,
                     item,
@@ -721,8 +727,10 @@ fn saved<'f>(types: &Types, fields: &'f [Field]) -> impl Iterator<Item = (usize,
     saved.filter(move |(_, field)| !field.ty.is_opaque(types))
 }
 
-/// The fields `given` of `fields`, each saved field's from the scene and each opaque one's as
-/// [`Value::Opaque`], in the description's order, for a struct or a variant at `item`.
+/// The fields `given` of `fields`, each saved field's from the scene, each opaque one's as
+/// [`Value::Opaque`], and each other the scene leaves out as its default, as a scene saved before
+/// its type had the field leaves it out; in the description's order, for a struct or a variant at
+/// `item`.
 fn assemble<E: de::Error>(
     load: &mut Load<'_>,
     item: u32,
@@ -734,16 +742,19 @@ fn assemble<E: de::Error>(
         let value = match value {
             Some(value) => value,
             None if field.ty.is_opaque(load.types) => Value::Opaque,
-            None => {
-                let error = Error::new(
-                    "reflect.missing_field",
-                    format!(
-                        "field `{}` isn't given, but a scene gives each field that isn't opaque",
-                        field.name
-                    ),
-                );
-                return Err(load.refuse(item, error));
-            }
+            None => match load.types.field_default(field) {
+                Ok(value) => value,
+                Err(error) => {
+                    let error = Error::new(
+                        "reflect.missing_field",
+                        format!(
+                            "field `{}` isn't given, and has no default to start from: {error}",
+                            field.name
+                        ),
+                    );
+                    return Err(load.refuse(item, error));
+                }
+            },
         };
         parts.push((field.name.clone(), value));
     }
@@ -821,13 +832,27 @@ impl Visitor<'_> for Leaf<'_, '_> {
                 let id = id.map_err(|error| self.load.refuse(self.item, error))?;
                 Ok(Value::Entity(self.load.reference(id, self.item)))
             }
+            Type::Texture => match self.load.world.assets().texture(text) {
+                Some(texture) => Ok(Value::Texture(texture)),
+                None => {
+                    let error = Error::new(
+                        "asset.no_texture",
+                        format!(
+                            "no texture was loaded from `{text}`: a game loads the textures its \
+                             scenes show, with `Context::add_texture` or `add_sprite_sheet`, \
+                             before it loads them"
+                        ),
+                    );
+                    Err(self.load.refuse(self.item, error))
+                }
+            },
             _ => Ok(Value::String(text.to_owned())),
         }
     }
 
     fn visit_string<E: de::Error>(self, text: String) -> Result<Value, E> {
         match self.ty {
-            Type::Entity => self.visit_str(&text),
+            Type::Entity | Type::Texture => self.visit_str(&text),
             _ => Ok(Value::String(text)),
         }
     }
@@ -1106,7 +1131,7 @@ impl<'de> Visitor<'de> for Parts<'_, '_> {
                 .inspect_err(within!(self.load, &field.name))?
             {
                 Some(value) => given[i] = Some(value),
-                // The first not given is refused.
+                // Those left out take their defaults, as a struct's fields do.
                 None => return assemble(self.load, self.item, self.fields, given),
             }
         }

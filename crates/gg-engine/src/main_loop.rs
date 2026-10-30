@@ -18,6 +18,7 @@ use crate::dock::{Dock, Ui};
 use crate::layer::{Context, Stack, Tick};
 use crate::perf::{self, Perf, Summary};
 use crate::render_thread::{Render, RenderThread, TextureChanges};
+use crate::snapshot::Snapshot;
 use crate::viewports::Drawn;
 use crate::{App, BUILD, egui_context};
 
@@ -25,12 +26,19 @@ use crate::{App, BUILD, egui_context};
 /// each frame, so that a run of a set number of frames runs as many ticks on any machine. Frames
 /// render on the render thread, as a windowed run's do, the last as the run ends. `api` serves
 /// tools as each frame starts; while it has paused the simulation with nothing asked of the
-/// frames, each waits up to a tick's time for a request, rather than spinning.
-pub(crate) fn run_headless(app: &mut App, args: &Args, mut api: Option<Api>) -> Result<Ran> {
+/// frames, each waits up to a tick's time for a request, rather than spinning. The run starts from
+/// `snapshot`'s world, at its ticks, if it's given one, rather than the one its layers attach, and
+/// drops it once it has.
+pub(crate) fn run_headless(
+    app: &mut App,
+    args: &Args,
+    mut api: Option<Api>,
+    snapshot: Option<Snapshot>,
+) -> Result<Ran> {
     let (width, height) = (1280, 720);
     let renderer = Renderer::headless(&settings(app, args), width, height)?;
     let mut render = RenderThread::start(renderer)?;
-    let mut cx = Context::of_run(None, app.seed);
+    let mut cx = Context::of_run(None, app);
     let mut clock = Clock::default();
     let mut stepper = match app.headless_step {
         Some(_) => Stepper::default(),
@@ -49,11 +57,19 @@ pub(crate) fn run_headless(app: &mut App, args: &Args, mut api: Option<Api>) -> 
     let mut egui_runs = true;
     // The frames handed over to render, and those rendered.
     let (mut handed, mut frames) = (0, 0);
-    app.stack.attach(&mut cx);
-    let rendered = (|| -> Result<()> {
+    let started = match snapshot {
+        Some(snapshot) => {
+            (app.stack.restore(&mut cx, &snapshot)).map(|ticks| stepper.start_at(ticks))
+        }
+        None => {
+            app.stack.attach(&mut cx);
+            Ok(())
+        }
+    };
+    let rendered = started.and_then(|()| {
         while args.frames.is_none_or(|limit| handed < limit) {
             api::idle(&mut api, &stepper);
-            if api::serve(&mut api, &cx, &mut stepper) {
+            if api::serve(&mut api, &cx, &app.stack, &mut stepper) {
                 debug!("A tool asked the run to end");
                 break;
             }
@@ -101,7 +117,7 @@ pub(crate) fn run_headless(app: &mut App, args: &Args, mut api: Option<Api>) -> 
             app.stack.recorded()?;
         }
         Ok(())
-    })();
+    });
     // The last frame ends here, and the frame handed over last renders before the run's end is
     // timed.
     cx.perf.finish(clock.since_last(Instant::now()));
@@ -320,6 +336,8 @@ pub(crate) struct Stepper {
     owed: Duration,
     /// The ticks run, which number the next.
     pub(crate) ticks: u64,
+    /// The ticks the run started from: a snapshot's, in a run restored from one, else 0.
+    from: u64,
     /// The whole ticks the time owed held that no frame ran.
     dropped: u64,
     /// One tick every frame, whatever its time.
@@ -339,6 +357,16 @@ impl Stepper {
             lockstep: true,
             ..Self::default()
         }
+    }
+
+    /// Numbers the ticks on from `ticks`, those a snapshot that the run starts from had run.
+    pub(crate) fn start_at(&mut self, ticks: u64) {
+        (self.ticks, self.from) = (ticks, ticks);
+    }
+
+    /// The ticks the run has run, since it started.
+    pub(crate) fn ran(&self) -> u64 {
+        self.ticks - self.from
     }
 
     /// Runs, through `tick`, the ticks owed by a frame `dt` after the last, numbered on from the
@@ -449,7 +477,7 @@ pub(crate) fn settings<'a>(app: &'a App, args: &'a Args) -> Settings<'a> {
 /// What a run did, reported when it ends.
 pub(crate) struct Ran {
     frames: u64,
-    /// The simulation's ticks.
+    /// The ticks the simulation ran in the run: past a snapshot's, in a run restored from one.
     ticks: u64,
     /// The whole ticks the frames' time held that they didn't run, which the simulation fell
     /// behind by.
@@ -481,7 +509,7 @@ impl Ran {
         drop(renderer);
         Self {
             frames,
-            ticks: stepper.ticks,
+            ticks: stepper.ran(),
             ticks_dropped: stepper.dropped,
             validation,
             gpu,

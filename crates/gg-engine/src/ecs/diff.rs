@@ -162,6 +162,9 @@ fn same(a: &Value, ours: &World, b: &Value, theirs: &World) -> bool {
         (Value::Vec4(x), Value::Vec4(y)) => floats(x.as_ref(), y.as_ref()),
         (Value::Quat(x), Value::Quat(y)) => floats(&x.to_array(), &y.to_array()),
         (&Value::Entity(x), &Value::Entity(y)) => ours.id(x) == theirs.id(y),
+        (&Value::Texture(x), &Value::Texture(y)) => {
+            ours.assets().path(x) == theirs.assets().path(y)
+        }
         (Value::Option(x), Value::Option(y)) => match (x, y) {
             (Some(x), Some(y)) => same(x, ours, y, theirs),
             (x, y) => x.is_none() && y.is_none(),

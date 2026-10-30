@@ -6,6 +6,7 @@ use std::fmt;
 
 use super::id::mix64;
 use super::{Entity, EntityId, World};
+use crate::Texture;
 use crate::reflect::Reflect;
 
 // What a type's key, a term of the content and the layout start from: the 64-bit words of π's
@@ -87,6 +88,14 @@ impl Digest<'_> {
     /// By its ID, the world's handle being its own, or 0 if it isn't alive.
     pub(crate) fn entity(&mut self, entity: Entity) {
         self.word(self.world.id(entity).map_or(0, EntityId::get));
+    }
+
+    /// By its path, the renderer's handle being its own, or 0 if it has none.
+    pub(crate) fn texture(&mut self, texture: Texture) {
+        match self.world.assets().path(texture) {
+            Some(path) => self.bytes(path.as_bytes()),
+            None => self.word(0),
+        }
     }
 }
 
@@ -216,6 +225,8 @@ mod tests {
         let text = world.save_scene(&[r, f]).expect("saved");
         let loaded = |transform_first: bool| {
             let mut loaded = World::seeded(1);
+            // Its context's, which names the sprite's texture.
+            loaded.assets = world.assets.clone();
             let registered = if transform_first {
                 [
                     loaded.register::<Transform>(),
@@ -378,10 +389,11 @@ mod tests {
         assert_ne!(point, first, "a variant, by its index");
         let texture = Textures::default().add("own", [1, 1], &[255, 0, 0, 255], Mipmaps::None);
         let texture = texture.expect("a texture");
+        world.assets_mut().add_texture(texture, "own.png".into());
         let textured = changed(&mut world, posed, |sprite: &mut Sprite| {
-            sprite.texture = texture;
+            sprite.texture = Some(texture);
         });
-        assert_eq!(textured, start, "a sprite's texture");
+        assert_ne!(textured, start, "a sprite's texture, by its path");
 
         let target = |world: &mut World, target: Option<Entity>| {
             changed(world, all, move |e: &mut Everything| e.target = target)

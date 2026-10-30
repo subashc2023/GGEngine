@@ -18,7 +18,11 @@
 //! - `entity`, [`Entity`]: answers the entity: `{"id":...,"name":...,"parent":...,"children":[...],
 //!   "components":{"Transform":{...},...}}`, its components in the order their types registered.
 //! - `get`, [`Field`]: answers a component's field, as a value.
-//! - `hash`: answers [`Hash`], the world's.
+//! - `hash`: answers [`struct@Hash`], the world's.
+//! - `snapshot`, [`Snapshot`]: saves the world whole as a file, which a run given `--restore`
+//!   starts from, and answers [`Snapshotted`] once it's written; before the simulation's first tick
+//!   in the run, which applies what the layers queued as they started, it fails with
+//!   `api.not_ticked`.
 //! - `quit`: answers `{}`, and the run ends cleanly, as when its window closes, but without asking
 //!   its layers, which may keep a window open.
 //!
@@ -29,11 +33,12 @@
 //!
 //! A value is JSON as its kind is: a number, a string, a `bool`; a vector or a quaternion an array
 //! of numbers, `[x, y, z, w]` for a quaternion; a float that isn't finite the string `inf`, `-inf`
-//! or `NaN`; an entity its ID, a string of 16 hex digits, or `null` if it isn't alive; an option
-//! `null` or its value; a list an array; a struct an object of its fields, in their order, a tuple
-//! struct's named `0`, `1` and so on; an enum's variant its name, as a string, or for a variant with
-//! fields an object of one key, its name, whose value is an object of the fields; and what
-//! reflection doesn't read, such as a sprite's texture, the string `(opaque)`.
+//! or `NaN`; an entity its ID, a string of 16 hex digits, or `null` if it isn't alive; a texture
+//! its path, such as `assets/logo.png`, or `null` for one without; an option `null` or its value; a
+//! list an array; a struct an object of its fields, in their order, a tuple struct's named `0`,
+//! `1` and so on; an enum's variant its name, as a string, or for a variant with fields an object
+//! of one key, its name, whose value is an object of the fields; and what reflection doesn't read,
+//! such as a `MeshDraw`, the string `(opaque)`.
 
 use std::fmt;
 use std::fs;
@@ -332,6 +337,25 @@ pub struct Field {
 pub struct Hash {
     pub content: String,
     pub layout: String,
+}
+
+/// What `snapshot` takes: where to write the snapshot, an absolute path, whose directory exists;
+/// without one, a file in the `snapshots` directory beside the game's executable.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Snapshot {
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+}
+
+/// What `snapshot` answers: where the snapshot is, the ticks the simulation had run as it was taken,
+/// which a run restored from it goes on from, its entities, and its size in bytes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Snapshotted {
+    pub path: PathBuf,
+    pub ticks: u64,
+    pub entities: usize,
+    pub bytes: u64,
 }
 
 /// A connection to a running game's API, for tools: a request at a time, each waiting for its

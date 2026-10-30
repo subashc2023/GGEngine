@@ -1,6 +1,7 @@
 //! 2D physics: bodies that rapier moves at the world's ticks, in the XY plane, as their entities'
 //! components describe them; the world's resource that holds rapier's bodies and contacts, which
-//! snapshots copy; and the colliders' outlines, drawn where their entities draw.
+//! snapshots copy and snapshot files hold; and the colliders' outlines, drawn where their entities
+//! draw.
 
 use std::f32::consts::TAU;
 
@@ -12,10 +13,12 @@ use rapier2d::prelude::{
     PhysicsPipeline, RigidBodyBuilder, RigidBodyHandle, RigidBodySet, RigidBodyType, Rotation,
     SoftBodySet, Vector,
 };
+use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::draw::Poses;
-use crate::{Component, Entity, Reflect, Tick, Transform, World};
+use crate::recording::text;
+use crate::{Component, Entity, EntityId, Error, Reflect, Result, Saved, Tick, Transform, World};
 
 /// How a [`RigidBody2D`] moves.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Reflect)]
@@ -173,7 +176,7 @@ pub struct Physics2D {
 const NONE: u32 = u32::MAX;
 
 /// What rapier keeps from one step to the next.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Rapier {
     bodies: RigidBodySet,
     colliders: ColliderSet,
@@ -255,6 +258,113 @@ impl Clone for Physics2D {
         self.linked.clone_from(&source.linked);
         self.by_slot.clone_from(&source.by_slot);
         self.children.clone_from(&source.children);
+    }
+}
+
+/// What a snapshot file holds of [`Physics2D`], `R` its rapier's state, as its own or borrowed: its
+/// gravity; rapier's state, through rapier's own serialization, which carries on exactly; each body,
+/// with its entity by its ID; and the bodies under a parent warned of, by their entities' IDs.
+#[derive(Serialize, Deserialize)]
+struct SavedPhysics<R> {
+    gravity: [f32; 2],
+    rapier: R,
+    linked: Vec<SavedLinked>,
+    children: Vec<Option<u64>>,
+}
+
+/// A body as a snapshot file holds it: its entity's ID, none for an entity gone since the last step,
+/// which the next takes the body out for; its handles; what the last step left in its entity's
+/// components, each as a recording's text writes values, so that a component whose type changed
+/// is matched to it as the component is; and how far it was turned.
+#[derive(Serialize, Deserialize)]
+struct SavedLinked {
+    entity: Option<u64>,
+    body: RigidBodyHandle,
+    colliders: [Option<ColliderHandle>; 2],
+    rigid_body: String,
+    transform: String,
+    box_collider: Option<String>,
+    circle_collider: Option<String>,
+    angle: f32,
+}
+
+/// Saved through rapier's own serialization, written as RON, so that a world restored in another
+/// process steps on as the one saved would have: its contacts' warm starts, its islands' sleep and
+/// its handles as they were, which bodies made again from their components would lose. A rapier of
+/// another version may not read it, which leaves physics out, to be made again from the entities.
+impl Saved for Physics2D {
+    const NAME: &'static str = "Physics2D";
+
+    fn save(&self, world: &World) -> Result<String> {
+        let id = |entity: Entity| world.id(entity).map(EntityId::get);
+        let value = |component: &dyn Reflect| {
+            let mut out = String::new();
+            text::write(&mut out, &component.to_value(), world);
+            out
+        };
+        let linked = self.linked.iter().map(|linked| SavedLinked {
+            entity: id(linked.entity),
+            body: linked.body,
+            colliders: linked.colliders,
+            rigid_body: value(&linked.rigid_body),
+            transform: value(&linked.transform),
+            box_collider: linked.box_collider.as_ref().map(|it| value(it)),
+            circle_collider: linked.circle_collider.as_ref().map(|it| value(it)),
+            angle: linked.angle,
+        });
+        let saved = SavedPhysics {
+            gravity: self.gravity.to_array(),
+            rapier: &self.rapier,
+            linked: linked.collect(),
+            children: self.children.iter().map(|&child| id(child)).collect(),
+        };
+        ron::to_string(&saved).map_err(|error| Error::new("physics.save", error.to_string()))
+    }
+
+    fn load(text: &str, world: &World) -> Result<Self> {
+        let saved: SavedPhysics<Rapier> =
+            ron::from_str(text).map_err(|error| Error::new("physics.load", error.to_string()))?;
+        let entity = |id: Option<u64>| {
+            let id = id.and_then(EntityId::new);
+            id.and_then(|id| world.entity(id)).unwrap_or(Entity::DEAD)
+        };
+        let mut linked = Vec::with_capacity(saved.linked.len());
+        for body in saved.linked {
+            let boxed = body.box_collider.as_ref();
+            let circled = body.circle_collider.as_ref();
+            linked.push(Linked {
+                entity: entity(body.entity),
+                body: body.body,
+                colliders: body.colliders,
+                rigid_body: world.component_from_text(&body.rigid_body)?,
+                transform: world.component_from_text(&body.transform)?,
+                box_collider: boxed
+                    .map(|text| world.component_from_text(text))
+                    .transpose()?,
+                circle_collider: circled
+                    .map(|text| world.component_from_text(text))
+                    .transpose()?,
+                angle: body.angle,
+            });
+        }
+        let mut by_slot = Vec::new();
+        for (index, linked) in (0..).zip(&linked) {
+            if linked.entity != Entity::DEAD {
+                if by_slot.len() <= linked.entity.slot() {
+                    by_slot.resize(linked.entity.slot() + 1, NONE);
+                }
+                by_slot[linked.entity.slot()] = index;
+            }
+        }
+        Ok(Self {
+            gravity: Vec2::from_array(saved.gravity),
+            rapier: saved.rapier,
+            pipeline: PhysicsPipeline::new(),
+            linked,
+            by_slot,
+            found: Vec::new(),
+            children: saved.children.into_iter().map(entity).collect(),
+        })
     }
 }
 
@@ -755,6 +865,43 @@ mod tests {
         remade.remove_resource::<Physics2D>();
         step(&mut remade, 60);
         assert_ne!(remade.hash(), went, "its bodies made again");
+    }
+
+    /// A world whose bodies are moving and touching, saved whole to text as a snapshot file holds
+    /// it and loaded into a world of another process's making, steps as the world it was saved
+    /// from did, bit for bit: physics' bodies and contacts come back through its saved state, and a
+    /// change to a body's component since its last step is taken by the next, as it would have
+    /// been.
+    #[test]
+    #[cfg(feature = "dev")]
+    fn a_world_saved_whole_steps_as_it_did() {
+        let mut world = World::seeded(7);
+        world.register_saved::<Physics2D>().expect("saved");
+        let bodies = pile(&mut world);
+        step(&mut world, 40);
+        // An edit since the last step, which the next takes.
+        let pushed = world.get_mut::<RigidBody2D>(bodies[5]).expect("a body");
+        pushed.velocity = Vec2::new(3.0, 1.0);
+        let mut text = String::new();
+        world.save_whole(&mut text).expect("saved");
+        assert!(text.contains("\nresource Physics2D "), "{text}");
+        let mut loaded = World::seeded(1);
+        for registered in [
+            loaded.register::<Transform>(),
+            loaded.register::<RigidBody2D>(),
+            loaded.register::<BoxCollider2D>(),
+            loaded.register::<CircleCollider2D>(),
+            loaded.register_saved::<Physics2D>(),
+        ] {
+            registered.expect("registered");
+        }
+        let lines = (1..).zip(text.lines());
+        let changes = loaded.load_whole(lines, true).expect("loaded");
+        assert!(changes.is_empty(), "{changes:?}");
+        assert_eq!(loaded.hash(), world.hash(), "loaded");
+        step(&mut world, 60);
+        step(&mut loaded, 60);
+        assert_eq!(loaded.hash(), world.hash(), "stepped on");
     }
 
     /// The world's hash after physics has stepped a pile of boxes and balls for four seconds, which

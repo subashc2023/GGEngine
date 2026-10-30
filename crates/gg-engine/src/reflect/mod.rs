@@ -21,8 +21,8 @@ pub use gg_core::{Error, Result};
 /// Describes a struct or an enum to reflection: [`Reflect`] says how.
 pub use gg_macros::Reflect;
 
-use crate::Entity;
 pub use crate::ecs::Digest;
+use crate::{Entity, Texture};
 pub(crate) use path::{reach, reach_mut, reach_opaque, resolve};
 
 /// An identifier: a type's, a field's or a variant's name, borrowed for Rust's types, and owned
@@ -51,6 +51,10 @@ pub enum Value {
     /// The entity's handle in this process: scenes and recordings map it to its persistent ID
     /// where values cross into them, as the tool API and replication will.
     Entity(Entity),
+    /// A texture's handle, which the renderer alone hands out, so that no value makes one it
+    /// didn't: scenes, recordings, snapshots and the tool API name it by its path, which the
+    /// world's [assets](crate::App::root) map it to where values cross into them.
+    Texture(Texture),
     Option(Option<Box<Value>>),
     /// A list's elements, or an array's.
     List(Vec<Value>),
@@ -58,9 +62,9 @@ pub enum Value {
     Struct(Vec<(Ident, Value)>),
     /// An enum's variant by name, with its fields, as a struct's.
     Variant(Ident, Vec<(Ident, Value)>),
-    /// What reflection doesn't read, such as a texture's handle: an opaque field reads as this, and
-    /// set to it keeps what it has, so that what's opaque doesn't keep a value read whole from
-    /// setting back whole. Anywhere else it's `reflect.wrong_kind`.
+    /// What reflection doesn't read, such as a [`MeshDraw`](crate::MeshDraw): an opaque field reads
+    /// as this, and set to it keeps what it has, so that what's opaque doesn't keep a value read
+    /// whole from setting back whole. Anywhere else it's `reflect.wrong_kind`.
     Opaque,
 }
 
@@ -82,6 +86,9 @@ pub enum Type {
     Vec4,
     Quat,
     Entity,
+    /// A texture, named by its path: it has no default, so a component that shows none, as a
+    /// sprite does by default, holds one in an `Option`.
+    Texture,
     Option(Box<Type>),
     List(Box<Type>),
     /// This many elements, always.
@@ -412,6 +419,14 @@ impl Types {
                     "reflect.no_default",
                     "an entity has no default, since a handle to none can't be saved or set; a \
                      field that may hold none is an `Option<Entity>`, whose default is `None`",
+                ));
+            }
+            Type::Texture => {
+                return Err(Error::new(
+                    "reflect.no_default",
+                    "a texture has no default, since only a texture loaded from a file has a path \
+                     to save; a field that may show none is an `Option<Texture>`, whose default is \
+                     `None`",
                 ));
             }
             Type::Option(_) => Value::Option(None),
@@ -806,6 +821,7 @@ pub(crate) fn kind(value: &Value) -> &'static str {
         Value::Vec4(_) => "Vec4",
         Value::Quat(_) => "Quat",
         Value::Entity(_) => "Entity",
+        Value::Texture(_) => "Texture",
         Value::Option(_) => "Option",
         Value::List(_) => "List",
         Value::Struct(_) => "Struct",
@@ -1018,6 +1034,7 @@ fn what_is(types: &Types, ty: &Type) -> String {
         Type::Vec4 => "a Vec4".to_owned(),
         Type::Quat => "a quaternion".to_owned(),
         Type::Entity => "an entity".to_owned(),
+        Type::Texture => "a texture".to_owned(),
         Type::Option(inner) => format!("an option of {}", what_is(types, inner)),
         Type::List(inner) => format!("a list of {}", what_is(types, inner)),
         Type::Array(inner, len) => format!("an array of {len} of {}", what_is(types, inner)),

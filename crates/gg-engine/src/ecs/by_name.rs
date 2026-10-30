@@ -423,13 +423,15 @@ mod tests {
         assert_eq!(world.get::<Everything>(entity), Some(&everything()));
     }
 
+    /// A sprite's texture reads as its handle, which sets it whole or alone; none is the white
+    /// texture.
     #[test]
-    fn a_sprite_set_whole_keeps_its_texture() {
+    fn a_sprite_reads_and_sets_its_texture() {
         let texture = Textures::default().add("first", [1, 1], &[0; 4], Mipmaps::None);
         let texture = texture.expect("a texture");
         let mut world = World::default();
         let sprite = Sprite {
-            texture,
+            texture: Some(texture),
             ..Sprite::default()
         };
         let entity = world.spawn(sprite);
@@ -437,7 +439,8 @@ mod tests {
         else {
             panic!("a sprite is a struct");
         };
-        assert_eq!(fields[1], named("texture", Value::Opaque));
+        let shown = Value::Option(Some(Box::new(Value::Texture(texture))));
+        assert_eq!(fields[1], named("texture", shown.clone()));
         fields[0].1 = Value::Vec4(Vec4::new(0.5, 0.5, 0.5, 1.0));
         world
             .set_field(entity, "Sprite", "", &Value::Struct(fields))
@@ -445,13 +448,15 @@ mod tests {
         let set = world.get::<Sprite>(entity).expect("a sprite");
         assert_eq!(
             (set.texture, set.color),
-            (texture, Vec4::new(0.5, 0.5, 0.5, 1.0))
+            (Some(texture), Vec4::new(0.5, 0.5, 0.5, 1.0))
         );
-        // Opaque, it reads and sets as such alone.
-        let read = world.get_field(entity, "Sprite", "texture");
-        assert_eq!(read.expect("a field"), Value::Opaque);
-        let set = world.set_field(entity, "Sprite", "texture", &Value::Opaque);
-        assert_eq!(set.expect("kept"), Value::Opaque);
+        let white = world.set_field(entity, "Sprite", "texture", &Value::Option(None));
+        assert_eq!(white.expect("set"), shown);
+        let set = world.get::<Sprite>(entity).expect("a sprite");
+        assert_eq!(set.texture, None);
+        world
+            .set_field(entity, "Sprite", "texture", &shown)
+            .expect("set");
         let sampler = Value::Variant("NearestRepeat".into(), Vec::new());
         world
             .set_field(entity, "Sprite", "sampler", &sampler)
@@ -459,7 +464,7 @@ mod tests {
         let set = world.get::<Sprite>(entity).expect("a sprite");
         assert_eq!(
             (set.texture, set.sampler),
-            (texture, Sampler::NearestRepeat)
+            (Some(texture), Sampler::NearestRepeat)
         );
     }
 
@@ -602,7 +607,7 @@ mod tests {
                 "Sprite",
                 "texture",
                 Value::UInt(1),
-                "reflect.opaque",
+                "reflect.wrong_kind",
                 "Sprite.texture",
             ),
             (

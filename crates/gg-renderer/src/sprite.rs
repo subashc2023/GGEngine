@@ -20,8 +20,8 @@ pub struct Sprite {
     /// In linear RGBA, alpha not multiplied in, which multiplies the texture's colors and alpha:
     /// over the white texture, the sprite's own color. White by default.
     pub color: Vec4,
-    /// The engine's white texture by default.
-    pub texture: Texture,
+    /// The texture it shows: `None`, the default, for the engine's white texture, a pixel across.
+    pub texture: Option<Texture>,
     /// The part of `texture` to show, its top left then its bottom right, in texture coordinates,
     /// from (0, 0) at the texture's top left to (1, 1) at its bottom right: the whole texture by
     /// default, and a sheet's cells from [`SpriteSheet::sprite`]. Past 0 or 1, a repeating sampler
@@ -40,7 +40,7 @@ impl Default for Sprite {
     fn default() -> Self {
         Self {
             color: Vec4::ONE,
-            texture: Texture::WHITE,
+            texture: None,
             rect: [Vec2::ZERO, Vec2::ONE],
             sampler: Sampler::LinearClamp,
         }
@@ -87,7 +87,7 @@ impl SpriteSheet {
         let [left, right] = fractions(0);
         let [top, bottom] = fractions(1);
         Sprite {
-            texture: self.texture,
+            texture: Some(self.texture),
             rect: [Vec2::new(left, top), Vec2::new(right, bottom)],
             ..Sprite::default()
         }
@@ -100,7 +100,7 @@ impl Sprite {
         Params {
             color: self.color.to_array(),
             rect: self.rect,
-            texture: self.texture,
+            texture: self.texture.unwrap_or(Texture::WHITE),
             sampler: self.sampler.index(),
         }
     }
@@ -176,7 +176,7 @@ mod tests {
         assert_eq!(
             tree,
             Sprite {
-                texture: SHEET.texture,
+                texture: Some(SHEET.texture),
                 rect: tree.rect,
                 ..Sprite::default()
             }

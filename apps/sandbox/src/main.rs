@@ -14,9 +14,9 @@ use gg_engine::egui::{self, ViewportCommand, ViewportId};
 use gg_engine::math::{self, EulerRot, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_engine::{
     Actions, App, Binding, Blend, Change, Commands, Component, Context, Entity, Event, FlyAction,
-    FlyCameraController, Key, Layer, Mesh, MeshDraw, OrthographicCameraController, PadButton,
-    Projection, Reflect, Sampler, Shader, Source, Sprite, SpriteSheet, Stick, Tick, Transform, Ui,
-    Viewpoint, World,
+    FlyCameraController, Key, Layer, Mesh, MeshDraw, Model, OrthographicCameraController,
+    PadButton, Projection, Reflect, Sampler, Shader, Source, Sprite, SpriteSheet, Stick, Texture,
+    Tick, Transform, Ui, Viewpoint, World,
 };
 use tracing::{error, info};
 
@@ -27,7 +27,8 @@ fn main() -> ExitCode {
 /// The sandbox, with the engine's Performance, Entities and Inspector panels: what `main` runs,
 /// and what its recordings replay.
 fn app() -> App {
-    let app = App::new("Sandbox").custom_title_bar();
+    let app = App::new("Sandbox").root(env!("CARGO_MANIFEST_DIR"));
+    let app = app.custom_title_bar();
     let app = app.layer(Sandbox::new()).overlay(gg_engine::PerfPanel);
     app.overlay(gg_engine::Inspector::default())
 }
@@ -192,10 +193,21 @@ fn overlooking(center: Vec2, height: f32) -> Viewpoint {
     }
 }
 
-/// What the sandbox set up as it attached, which its ticks go by: the swarm's sprites, one for each
+/// What the sandbox set up as it loaded, which its ticks go by: the swarm's sprites, one for each
 /// cell of a sheet of 4 by 4 shapes with transparent margins, row by row.
 struct SwarmShapes {
     shapes: [Sprite; 16],
+}
+
+/// What the sandbox loaded, which it builds its world from as it attaches: the checkerboard's and
+/// the logo's textures, the map's tiles, the triangle's mesh and shader, and the truck.
+struct Loaded {
+    checkerboard: Texture,
+    logo: Texture,
+    tiles: SpriteSheet,
+    triangle: Mesh<Colored>,
+    shader: Shader<Colored>,
+    truck: Model,
 }
 
 /// One of the swarm's sprites: how it moves, picked once from its index.
@@ -545,15 +557,17 @@ struct Sandbox {
     /// Steers the camera while `flying`, rather than `camera`.
     fly: FlyCameraController,
     flying: bool,
-    /// The cubes' mesh and shader, once the sandbox attaches.
+    /// The cubes' mesh and shader, once the sandbox loads.
     cubes: Option<(Mesh<Colored>, Shader<Colored>)>,
+    /// What the sandbox loaded, which it builds its world from as it attaches.
+    loaded: Option<Loaded>,
     /// How long the cubes have turned: every frame but those Space is held through, whether the
     /// clear color drifts or not.
     turned: Duration,
     actions: Actions<Act>,
     /// How many sprites the swarm has, as its panel says.
     swarm: u32,
-    /// The swarm's shapes, set up as the sandbox attaches.
+    /// The swarm's shapes, set up as the sandbox loads.
     scene: Option<SwarmShapes>,
     /// What the panels, the File menu and the actions changed since the last tick.
     commands: Vec<Command>,
@@ -653,6 +667,7 @@ impl Sandbox {
             fly,
             flying: false,
             cubes: None,
+            loaded: None,
             turned: Duration::ZERO,
             actions,
             swarm: SWARM_START,
@@ -758,9 +773,9 @@ impl Sandbox {
 }
 
 impl Layer for Sandbox {
-    fn attach(&mut self, cx: &mut Context) {
-        // A shader that doesn't compile, a texture or a model that doesn't load, or a scene that's
-        // refused stops the sandbox, with what went wrong.
+    fn load(&mut self, cx: &mut Context) {
+        // A shader that doesn't compile, or a texture or a model that doesn't load, stops the
+        // sandbox, with what went wrong.
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let assets = root.join("assets");
         let colored = cx.add_shader(
@@ -780,17 +795,34 @@ impl Layer for Sandbox {
         let (vertices, indices) = cube();
         let cube = cx.add_mesh("cube", &vertices, &indices);
         self.cubes = Some((cube.expect("the cube is whole triangles"), shader));
+        self.scene = Some(SwarmShapes {
+            shapes: std::array::from_fn(|i| shapes.sprite([i as u32 % 4, i as u32 / 4], [1, 1])),
+        });
+        self.loaded = Some(Loaded {
+            checkerboard: checkerboard.expect("the checkerboard loads"),
+            logo: logo.expect("the logo loads"),
+            tiles: tiles.expect("the tiles load"),
+            triangle: mesh,
+            shader,
+            truck: truck.expect("the truck loads"),
+        });
+        register(cx.world_mut());
+    }
 
+    fn attach(&mut self, cx: &mut Context) {
+        // A scene that's refused stops the sandbox, with what went wrong.
+        let Some(made) = &self.loaded else {
+            return;
+        };
         let world = cx.world_mut();
-        register(world);
-        spawn_map(world, &tiles.expect("the tiles load"));
+        spawn_map(world, &made.tiles);
         let (grid, path) = read_scene("grid.ron");
         let loaded = world.load_scene(&grid);
         loaded.unwrap_or_else(|error| panic!("{}:{error}", path.display()));
         // 1.5 units across, over the grid's middle.
         let middle = Vec3::splat(1.5);
         let checkerboard = Sprite {
-            texture: checkerboard.expect("the checkerboard loads"),
+            texture: Some(made.checkerboard),
             ..Sprite::default()
         };
         let at = Transform {
@@ -807,12 +839,13 @@ impl Layer for Sandbox {
         let steer = Steer {
             heading: Vec2::ZERO,
         };
-        let triangle = world.spawn((at, MeshDraw::new(mesh, shader, ()), spin, steer));
+        let draw = MeshDraw::new(made.triangle, made.shader, ());
+        let triangle = world.spawn((at, draw, spin, steer));
         let (moons, path) = read_scene("moons.ron");
         let placed = world.place_prefab(&moons, Some(triangle));
         placed.unwrap_or_else(|error| panic!("{}:{error}", path.display()));
         let logo = Sprite {
-            texture: logo.expect("the logo loads"),
+            texture: Some(made.logo),
             ..Sprite::default()
         };
         let at = Transform {
@@ -827,15 +860,44 @@ impl Layer for Sandbox {
             rotation: Quat::from_rotation_y(-0.7),
             scale: Vec3::splat(0.25),
         };
-        truck.expect("the truck loads").spawn(world, at);
-        self.scene = Some(SwarmShapes {
-            shapes: std::array::from_fn(|i| shapes.sprite([i as u32 % 4, i as u32 / 4], [1, 1])),
-        });
+        made.truck.spawn(world, at);
         apply_settings(world, self.settings);
         color_grid(world, self.grid_colors);
         // At the first tick, so that a recording holds the swarm's size, which a build's own
         // differs from another's.
         self.commands.push(Command::Swarm(self.swarm));
+    }
+
+    /// Takes the panels' values from the world, which a snapshot brought back as they had left it,
+    /// and lets go of the arrows, which may have been held as the snapshot was taken.
+    fn restored(&mut self, cx: &mut Context) {
+        let world = cx.world();
+        self.swarm = world.query::<&Drifter>().count() as u32;
+        if let Some((_, sprite)) = world.query::<(&MapTile, &Sprite)>().next() {
+            self.settings.smooth_map = sprite.sampler == Sampler::LinearClamp;
+        }
+        if let Some((_, sprite)) = world.query::<(&Checkerboard, &Sprite)>().next() {
+            self.settings.smooth = sprite.sampler == Sampler::LinearRepeat;
+            self.settings.tiles = sprite.rect[1].x;
+            self.settings.tint = sprite.color.to_array();
+        }
+        // Each the color most of its squares have, which a square set apart in the Inspector
+        // doesn't change.
+        let mut counts: [Vec<([f32; 3], u32)>; 2] = Default::default();
+        for (cell, sprite) in world.query::<(&GridCell, &Sprite)>() {
+            let seen = sprite.color.truncate().to_array();
+            let counted = &mut counts[cell.color as usize];
+            match counted.iter_mut().find(|(color, _)| *color == seen) {
+                Some((_, count)) => *count += 1,
+                None => counted.push((seen, 1)),
+            }
+        }
+        for (color, counted) in self.grid_colors.iter_mut().zip(&counts) {
+            if let Some(&(most, _)) = counted.iter().max_by_key(|&&(_, count)| count) {
+                *color = most;
+            }
+        }
+        self.commands.push(Command::Steer(Vec2::ZERO));
     }
 
     fn tick(&mut self, world: &mut World, tick: Tick) {
@@ -1375,11 +1437,12 @@ mod tests {
     /// swarm, or of where the triangle is going, which the world holds.
     #[test]
     fn a_restored_world_simulates_as_before() {
-        let mut cx = Context::seeded(0x5eed);
+        let mut cx = Context::seeded(0x5eed).root(env!("CARGO_MANIFEST_DIR"));
         let mut sandbox = Sandbox {
             swarm: 1_000,
             ..Sandbox::new()
         };
+        sandbox.load(&mut cx);
         sandbox.attach(&mut cx);
         let world = cx.world_mut();
         for number in 0..64 {
@@ -1453,12 +1516,15 @@ mod tests {
     /// layout: one after it attaches, and one at each of 256 ticks, between which the script queues
     /// what the panels would, and sets what the Inspector would.
     fn simulate() -> Vec<String> {
-        let mut cx = Context::seeded(0x5eed);
+        // Rooted as the app is, so that its textures' names, which the hash reads, are the same
+        // wherever the repository is.
+        let mut cx = Context::seeded(0x5eed).root(env!("CARGO_MANIFEST_DIR"));
         // One swarm for debug and release builds, whose own differ.
         let mut sandbox = Sandbox {
             swarm: 1_000,
             ..Sandbox::new()
         };
+        sandbox.load(&mut cx);
         sandbox.attach(&mut cx);
         let hashed = |at: &dyn std::fmt::Display, world: &World| format!("{at} {}", world.hash());
         let mut lines = vec![hashed(&"attach", cx.world())];

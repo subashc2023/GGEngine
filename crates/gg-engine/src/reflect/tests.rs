@@ -216,7 +216,10 @@ fn types_describe_their_fields_once_each() {
     let sprite = named("Sprite");
     let color = field(types, &sprite, "color");
     assert_eq!((&color.ty, color.meta.show), (&Type::Vec4, Show::Color));
-    assert!(field(types, &sprite, "texture").ty.is_opaque(types));
+    assert_eq!(
+        field(types, &sprite, "texture").ty,
+        Type::Option(Box::new(Type::Texture))
+    );
     let rect = &field(types, &sprite, "rect").ty;
     assert_eq!(*rect, Type::Array(Box::new(Type::Vec2), 2));
     assert_eq!(field(types, &sprite, "sampler").ty, named("Sampler"));
@@ -486,11 +489,9 @@ fn paths_lead_to_fields_and_their_hints() {
             .min,
         Some(Bound::Int(-1))
     );
-    assert!(
-        resolve("Sprite", "texture")
-            .expect("a field")
-            .ty
-            .is_opaque(types)
+    assert_eq!(
+        resolve("Sprite", "texture").expect("a field").ty,
+        Type::Option(Box::new(Type::Texture))
     );
 
     for (root, path, says) in [

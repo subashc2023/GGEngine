@@ -60,16 +60,21 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Simulate and the pick's outline** (2026-10-28)
 - **Spring cleaning** (2026-10-29)
 - **The tool API and `tools/gg`** (2026-10-29)
+- **Restarting a game from a snapshot** (2026-10-29)
 
 ## Now
 
-**Restarting a game from a snapshot**, Phase 5's second milestone. A world saved whole to a file
-and loaded back: its entities, its resources, physics' state among them, its ticks and the stream
-its IDs are drawn from; assets named by their paths, which scenes save; layers' `attach` split, so
-that a restart makes the GPU's resources without building the world again; and `gg run` restarting
-a game that crashed, hung or was rebuilt from its last snapshot, matching each changed component to
-its new layout by field name. *Done when* the sandbox, killed, or rebuilt with a field added to a
-component, comes back under `gg run` where it was, its world as it was but for the new field.
+**subsecond's patches**, Phase 5's third milestone. `gg run` starts a game's development build as
+`dx build --fat-binary` makes it, watches its crate, and as a file changes builds a patch of what
+changed inside function bodies with `dx tools hotpatch`, whose jump table it sends through the tool
+API; the game applies it between ticks. The engine calls each layer's methods through subsecond's
+`HotFn`, from generic function items, so that a patch reaches them and the systems and scripts they
+call. An edit no patch carries, such as a field, a type, a closure the size of a pointer or an
+engine edit, rebuilds the game, which `gg run` restarts from a snapshot, as it does now. Game
+crates stay binaries alone, since a crate with a library too gets empty patches. *Done when* an
+edit to a function body of the sandbox's layer, saved while the sandbox runs under `gg run`,
+changes what the running sandbox does within a couple of seconds, its world and its ticks going on
+untouched, and an edit that adds a field still restarts it where it was.
 
 ## Next
 
@@ -176,7 +181,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Sprite sheets with space between or around their cells, as some tile sets come; `SpriteSheet` takes cells packed edge to edge from the top left | A game's art comes that way |
 | Tiling one cell of a sheet: a repeating sampler repeats the whole texture | A game tiles part of an atlas, such as a background |
 | A sprite that samples past its rectangle, so that a seamless texture tiled across sprites side by side blends across their edges under a linear sampler | A game tiles one texture across sprites |
-| A tile map in the engine, which scenes save; the sandbox's map is code of its own | Phase 5, which names assets |
+| A tile map in the engine, which scenes save; the sandbox's map is code of its own, its tiles sprites that snapshots and scenes save each with its texture's path | A game edits its map |
 | glTF that `Context::add_model` refuses or ignores, as it lists: lighting and the material's other textures, skins and animations, morph targets, cameras, models without a scene and scenes other than the default, sparse accessors and accessors without a buffer view, primitives other than triangle lists, samplers that wrap across and down differently, minification filters, texture transforms, quantized or compressed meshes and textures (KHR_mesh_quantization, Draco, meshopt, Basis Universal), and integers written as floats, such as `1.0`, which glTF allows | Each with the first model that needs it; lighting and the other textures in Phase 6, compression with Phase 7's cooker |
 | Decoding images off the main thread; `Context::add_texture` and `add_model` decode before they return | Phase 7, with the streaming loader |
 | Models that take more than 4 GiB to read, of their buffers, decoded images, vertices and nodes, which `add_model` refuses with `engine.unsupported_model` | Phase 7, with streaming and the GPU's memory budget |
@@ -240,11 +245,11 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | The shader watcher allocates as it looks: each shader's stamps, collected at every look on every platform; on Windows, each file's path, which it converts to UTF-16 to read the file's times; and the entries of a failing shader's directories, which it lists | A development build's frames must allocate nothing on any thread |
 | Compiling at once the shaders whose changes hold on the same look, rather than one after another: after an edit to an include that N shaders share, the last reloads about N tenths of a second after the first, and no file is looked at meanwhile | A game with many shaders that share an include |
 | `VK_KHR_pipeline_binary`, which saves and loads pipelines whole; ash 0.38 lacks it | ash's next release, or a driver whose pipeline cache keeps less |
-| Saving the pipeline cache as pipelines are made rather than as the run ends, which a crash skips | Phase 5, which restarts games after a crash |
+| Saving the pipeline cache as pipelines are made rather than as the run ends, which a crash skips, so that a game `gg run` restarts after one makes its pipelines again | A restart after a crash takes noticeably longer for it |
 | Pruning the pipeline cache, which keeps every pipeline it was given, an edited shader's old ones too | It grows to tens of megabytes |
 | Requiring a slangc that decorates sampled images `NonUniform` itself, Slang 2026.11's or later, such as the Vulkan SDK 1.4.363's, and dropping gg-renderer's `decorate_non_uniform`, which does it for older ones | The engine requires the Vulkan SDK 1.4.363 or later |
 | Games' shaders compile with slangc as they're added, so running a game needs slangc where its build found it | Phase 7, which cooks shaders |
-| Beyond Phase 5's assets named by their paths: a library that finds one by its path or name, so that a file added twice loads once, where now it loads twice; `MeshDraw`'s mesh and shader named, as `Sprite.texture` will be, both opaque until then: shown, but not set, saved, hashed or carried across a rebuild; setting them by name, hashing them, and dropping the Assets panel's images onto a sprite | Phase 5, which names assets |
+| Beyond textures named by their paths: a library that finds an asset by its path or name, so that a file added twice loads once, where now it loads twice, and that loads one a scene names; `MeshDraw`'s mesh and shader named, as `Sprite.texture` is: opaque until then, shown but not set, saved in scenes or hashed, and carried across a restart by their indices only where the layers added the same assets in the same order; setting them by name, and dropping the Assets panel's images onto a sprite, whose texture the Inspector shows but doesn't set | A game builds its draws from data, or someone edits a sprite's texture in the editor |
 | 8- and 16-bit vertex fields, whose features Vulkan 1.4 guarantees but the device doesn't enable | A mesh packs its vertices, as Phase 7's cooker will |
 | Splits in a torn-off window, which holds one tab group | A tool wants panels side by side outside the main window |
 | Reordering tabs by dragging them along their bar; a drop among the tabs adds one at the end | Phase 9, the editor |
@@ -270,7 +275,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Spawning many entities at once, faster than one by one: 100,000 sprites take about 16 ms in release, 5.5 ms of it their IDs, and the swarm spawns its 100,000 in one tick, longer than a tick is. A load spawns its entities one by one too, building each component from a value into a column of its own: 100,000 sprites, 45 MB of text, load in about 650 ms in release | A spawn hitch matters, or a scene's load time |
 | Micro-benchmarks, with criterion | A CPU hot path gets a target of its own; batching's is a frame time, which `engine.perf` measures |
 | Gates on time in CI: hosted runners' times vary too much to gate on | A self-hosted runner, as for the GPU tests |
-| Moving values to a type that changed: matching fields by name and by alias, defaults for fields added, and fields dropped; a scene with a field its type hasn't, or without one it has, is refused | Phase 5, when `Sprite` gains its texture's name, or with its hot reload |
+| Aliases for renamed fields, variants and component types, which a restart and a scene would match values by: a restart drops a field, a variant or a type it doesn't find, and a scene refuses one, as it refuses a field its type hasn't, against typos; and tuple fields reordered among themselves, which match by their places | Someone renames a field whose values they want kept |
 | In the Inspector, turning an option on or off, and adding or removing a list's elements; by path, a value sets them whole | A component needs one edited |
 | Flags for fields that saving, the world's hash or replication skip, and fields that are read only; `Parent` is read only as a whole type, which `set_field` refuses | Each with its first user |
 | Generic types deriving `Reflect` or `Component` | A game needs one |
@@ -319,13 +324,13 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Replaying a log into another world, which maps values' handles to IDs, as a recording's commands are; `set_field` and operations store a dead handle without complaint | Phase 5, the tool API |
 | A delete saying what refers to its entities from outside, or refusing; those references dangle until it's undone, and the world doesn't save in between | An agent deletes through the tool API |
 | Undoing a create whose entity has children since that the create didn't make, such as game code gave it, by keeping them where they are; it's refused (`ecs.has_children`), and the log drops it | An agent attaches children to what another's create made, or Phase 9's editor |
-| Layers holding what a restore takes back: the sandbox's swarm is in the world, and the Inspector drops its log and pick once the world's serial is another's, but nothing else tells a layer that `Context`'s world was restored, so the sandbox doesn't snapshot | Something restores the running world, such as rollback or Phase 5's restart |
+| Layers holding what a restore in place takes back: the sandbox's swarm is in the world, and the Inspector drops its log and pick once the world's serial is another's, but nothing tells a layer that `Context`'s world was restored within a run, as `Layer::restored` does in a run started from a snapshot, so the sandbox doesn't snapshot | Something restores the running world in place, such as rollback |
 | Reparenting from the panels: dragging a row onto another, and taking a `Parent` away, as Remove Component would, making its entity a root; `Parent` is read only, so the Inspector offers neither | Phase 9's scene tree |
 | Picking several entities, to edit or delete them at once | Someone edits many entities alike |
 | A search field in Add Component's menu, which lists every type registered | A game registers more types than the menu shows at once |
 | A Delete key for the entity picked: keys reach egui even while the view has them, so it would delete as the world plays, its keys driving it, as Ctrl+Z undoes and Ctrl+D duplicates then; the Entity menu and a row's context menu delete | Keys go to the panel under the pointer, or the view takes them from egui |
 | A bound on the log, which keeps a session's entries, a delete's components and slots among them, until it's cleared | A session's memory shows it |
-| A log that outlives a run or a restore: inverses that keep components typed can't be saved, and a restored world refuses every inverse from before, the slots kept when the snapshot was taken staying unused; a snapshot could keep the log's place, which a restore would rewind it to | Phase 5's restart from a snapshot |
+| A log that outlives a run or a restore: inverses that keep components typed can't be saved, and a restored world refuses every inverse from before, the slots kept when the snapshot was taken staying unused, and freed in a run restored from a file; a snapshot could keep the log's place, which a restore would rewind it to | Someone misses undo across a restart |
 | A depth limit on values set or created by name, as scenes' 64; a deeper one recurses without one | The tool API takes values from outside |
 | Snapshots that copy less, only the tables changed, or on several threads: the swarm's 100,450 entities copy about 20 MB each way, in about 0.5 ms taken again or restored | A game's rollback frames need the time |
 | An app's own tick rate; the simulation runs 64 ticks a second | A game needs another rate |
@@ -338,16 +343,17 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | The sign of a zero that f32's `min`, `max` and `clamp` give, which std leaves to the platform, and its `algebraic_*` methods, which clippy doesn't refuse; the simulation calls none of them | The simulation first calls one |
 | The ban on std's float methods for games in their own repositories, which the workspace's clippy.toml doesn't reach, though glam's features do, since Cargo merges them | The first game outside the workspace |
 | Locating a divergence of the layout alone, to the table, row, children or stream of IDs where two worlds part; `World::difference` compares their content, and a replay names the part of the hash | A replay's layout goes another way first |
-| Replaying from a snapshot and the commands after it, and a SyncTest, which runs each tick again from a snapshot and checks its hash, as rollback needs | Rollback |
+| Replaying from a snapshot and the commands after it, and a SyncTest, which runs each tick again from a snapshot and checks its hash, as rollback needs; and recording a run restored from a snapshot, which `--restore` refuses with `--record`, a recording's replay starting from a seed and the layers' attach, so that `gg run` doesn't restart a run that records | Rollback, or a crash `gg run` restarted from is worth replaying |
+| Layers' own state across a restart from a snapshot: the camera controllers' viewpoints, the clear color, and the editor's scene file, tool and camera, which start as a fresh run's do; the world is as it was, and a layer takes back from it what its panels show, as the sandbox's `restored` does, and the editor comes back stopped, with the world as it was edited | Someone misses where they were looking after a restart |
+| What's opaque in a component of a type that isn't opaque as a whole, which a snapshot file leaves out, its component coming back on its type's base: `Component::save_opaque` and `load_opaque` carry types opaque as a whole, as `MeshDraw` | A game's component holds an opaque field |
+| Snapshots that cost the main thread less than a copy of the world, which each takes as a frame starts before a thread of the API's writes it: some 6 MB of text for the debug sandbox's 10,461 entities, taken every 5 seconds under `gg run` | A game's snapshots show as hitches |
+| Removing the snapshot file of a `gg run` that's stopped, or ends in an error, which stays in `snapshots` beside the executable; one whose game exits cleanly removes it | They pile up enough to matter |
+| Starting again a game that waits for a rebuild as its scenes or assets change too: only its executable changing starts it again | A game crashes for its data rather than its code |
 | Recordings that keep what their attach read, such as the sandbox's grid scene, and the commit they were built from; a file changed since shows as a divergence at the attach, and a recording names its engine's version and build alone | Recordings replayed far from where they were made, such as bug reports from people's runs |
 | Recording every run, as a flight recorder; a run records only with `--record` | Bug reports from people's runs |
 
 ## Open questions
 
-- A sixth gate, `cargo doc --workspace --no-deps --document-private-items` with
-  `RUSTDOCFLAGS=-D warnings`? Without one, broken doc links come back unseen, as nine had before
-  the cleaning cleared them; it takes 15 to 40 s here. Recommendation: yes, and in CI on Linux
-  x86-64 alone, as the shipping gate is. Decide before the next milestone's first commit.
 - Which multiplayer model does the first demo, a simple networked game, use? Recommendation:
   deterministic lockstep between two peers, on one machine or a LAN: each sends its commands for a
   tick ahead, as recordings write them, with the world's hash after the tick, so that a desync names

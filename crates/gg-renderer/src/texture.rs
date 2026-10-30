@@ -21,6 +21,12 @@ pub struct Texture {
 impl Texture {
     /// The engine's white texture, a pixel across, which a sprite of only a color shows.
     pub(crate) const WHITE: Self = Self { index: 0 };
+
+    /// Its index, the order [`Textures::add`] handed it out in, from 0, the engine's white
+    /// texture's: what finds its name, where the handle is the renderer's own.
+    pub fn index(self) -> u32 {
+        self.index
+    }
 }
 
 /// Whether a texture has smaller mip levels, which shaders sample where it's drawn smaller than it
@@ -124,6 +130,11 @@ impl Textures {
     /// adds any.
     pub fn room(&self) -> u32 {
         PLACED_TEXTURES - self.count
+    }
+
+    /// How many it has handed out, the engine's white texture among them: the index of the next.
+    pub fn count(&self) -> u32 {
+        self.count
     }
 }
 

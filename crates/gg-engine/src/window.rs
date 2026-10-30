@@ -34,6 +34,7 @@ use crate::main_loop::{
 use crate::pads::Gamepads;
 use crate::pipeline_cache;
 use crate::render_thread::RenderThread;
+use crate::snapshot::Snapshot;
 use crate::view_input::{Reach, ViewInput};
 use crate::viewports::{self, Viewports, WindowInput};
 #[cfg(target_os = "windows")]
@@ -42,7 +43,12 @@ use crate::{App, Context, Event, egui_context, event};
 
 /// Runs `app` in a window until it closes, `api` serving tools as each frame starts, and between
 /// frames while the window is minimized, woken by each request.
-pub(crate) fn run(app: &mut App, args: &Args, mut api: Option<Api>) -> Result<Ran> {
+pub(crate) fn run(
+    app: &mut App,
+    args: &Args,
+    mut api: Option<Api>,
+    snapshot: Option<Snapshot>,
+) -> Result<Ran> {
     let event_loop = EventLoop::new().map_err(|error| {
         Error::new(
             "engine.window",
@@ -74,6 +80,7 @@ pub(crate) fn run(app: &mut App, args: &Args, mut api: Option<Api>) -> Result<Ra
         pipelines,
         app,
         args,
+        snapshot,
         chrome,
         window: None,
         #[cfg(target_os = "windows")]
@@ -121,6 +128,9 @@ pub(crate) fn run(app: &mut App, args: &Args, mut api: Option<Api>) -> Result<Ra
 struct Handler<'a> {
     app: &'a mut App,
     args: &'a Args,
+    /// The snapshot the run starts from, if it's given one, in place of the world the layers
+    /// attach, until the window opens and its world is restored.
+    snapshot: Option<Snapshot>,
     /// Who draws the windows' frames.
     chrome: Chrome,
     window: Option<Arc<Window>>,
@@ -207,10 +217,16 @@ impl Handler<'_> {
             window.clone(),
             self.chrome,
         ));
-        self.cx = Context::of_run(Some(crate::Window::new(window.clone())), self.app.seed);
+        self.cx = Context::of_run(Some(crate::Window::new(window.clone())), self.app);
         self.gamepads = Gamepads::open(window.has_focus());
         self.window = Some(window);
-        self.app.stack.attach(&mut self.cx);
+        match self.snapshot.take() {
+            Some(snapshot) => {
+                let ticks = self.app.stack.restore(&mut self.cx, &snapshot)?;
+                self.stepper.start_at(ticks);
+            }
+            None => self.app.stack.attach(&mut self.cx),
+        }
         #[cfg(feature = "dev")]
         {
             let started = HotReload::start().inspect_err(|error| {
@@ -232,7 +248,7 @@ impl Handler<'_> {
             let _ = dispatch(&mut app.stack, cx, &event);
         });
         self.take_pause();
-        if api::serve(&mut self.api, &self.cx, &mut self.stepper) {
+        if api::serve(&mut self.api, &self.cx, &self.app.stack, &mut self.stepper) {
             debug!("A tool asked the run to end");
             event_loop.exit();
             return;
@@ -605,7 +621,9 @@ impl ApplicationHandler for Handler<'_> {
     /// A request has come to the tool API: frames answer requests as they start, but while the
     /// window is minimized, and no frames run, it's answered here, unless it needs a frame.
     fn user_event(&mut self, event_loop: &ActiveEventLoop, (): ()) {
-        if self.minimized && api::serve_paused(&mut self.api, &self.cx, &mut self.stepper) {
+        if self.minimized
+            && api::serve_paused(&mut self.api, &self.cx, &self.app.stack, &mut self.stepper)
+        {
             debug!("A tool asked the run to end");
             event_loop.exit();
         }

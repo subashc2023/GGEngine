@@ -1,6 +1,7 @@
 //! The text of a recording's values: reflection's [`Value`]s, each on one line, every part tagged
-//! with its kind, so that they read back without their types, with their floats' bits, and with the
-//! entities they hold by their IDs. The engine writes the text itself, and `ron` only reads it.
+//! with its kind, so that they read back without their types, with their floats' bits, with the
+//! entities they hold by their IDs and with the textures by their paths. The engine writes the text
+//! itself, and `ron` only reads it.
 
 use std::fmt::Write as _;
 
@@ -18,8 +19,9 @@ use crate::{Entity, EntityId, World};
 /// Writes `value` on one line, each part tagged with its kind: such as `Variant("Swarm", [("0",
 /// UInt(10000))])`. A float is the shortest text that reads back to its bits, but for a NaN, which
 /// keeps its sign but not its payload, as arithmetic leaves that to the platform; a string is
-/// quoted by a scene's escapes, which leave no line break; and an entity is its ID in `world`, or
-/// `Dead` if it isn't alive there.
+/// quoted by a scene's escapes, which leave no line break; an entity is its ID in `world`, or
+/// `Dead` if it isn't alive there; and a texture is its path in `world`, or `Opaque` if it has
+/// none, which nothing sets.
 pub(crate) fn write(out: &mut String, value: &Value, world: &World) {
     put(out, value, world, false);
 }
@@ -88,6 +90,14 @@ fn put(out: &mut String, value: &Value, world: &World, fold: bool) {
             Some(id) => write!(out, "Entity(\"{id}\")").expect("a string takes any text"),
             None => out.push_str("Dead"),
         },
+        &Value::Texture(texture) => match world.assets().path(texture) {
+            Some(path) => {
+                out.push_str("Texture(");
+                quote(out, path);
+                out.push(')');
+            }
+            None => out.push_str("Opaque"),
+        },
         Value::Option(None) => out.push_str("None"),
         Value::Option(Some(value)) => {
             out.push_str("Some(");
@@ -137,6 +147,8 @@ pub(crate) enum Text {
     Entity(Id),
     /// An entity that wasn't alive as it was written.
     Dead,
+    /// A texture, by its path.
+    Texture(String),
     None,
     Some(Box<Text>),
     List(Vec<Text>),
@@ -147,7 +159,7 @@ pub(crate) enum Text {
 
 /// An entity's ID, read from its text.
 #[derive(Debug)]
-pub(crate) struct Id(EntityId);
+pub(crate) struct Id(pub(crate) EntityId);
 
 impl<'de> Deserialize<'de> for Id {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -160,6 +172,31 @@ impl<'de> Deserialize<'de> for Id {
 }
 
 impl Text {
+    /// What kind of value it is, as its variant's name says: such as `Vec2`.
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Self::Bool(_) => "Bool",
+            Self::Int(_) => "Int",
+            Self::UInt(_) => "UInt",
+            Self::F32(_) => "F32",
+            Self::F64(_) => "F64",
+            Self::String(_) => "String",
+            Self::Vec2(..) => "Vec2",
+            Self::Vec3(..) => "Vec3",
+            Self::Vec4(..) => "Vec4",
+            Self::Quat(..) => "Quat",
+            Self::Entity(_) => "Entity",
+            Self::Dead => "Dead",
+            Self::Texture(_) => "Texture",
+            Self::None => "None",
+            Self::Some(_) => "Some",
+            Self::List(_) => "List",
+            Self::Struct(_) => "Struct",
+            Self::Variant(..) => "Variant",
+            Self::Opaque => "Opaque",
+        }
+    }
+
     /// Reads the value `text` writes, which is all of it, and starts at column `from` of its line.
     /// It may nest as many levels as a scene's values do, 64.
     ///
@@ -190,7 +227,8 @@ impl Text {
     }
 
     /// The value it gives in `world`, where each entity it holds is the one with its ID, or, if none
-    /// has it, a handle that names none.
+    /// has it, a handle that names none; and each texture the one with its path, or, if none has
+    /// it, `Opaque`, which nothing sets.
     pub(crate) fn value(&self, world: &World) -> Value {
         let fields = |given: &[(String, Text)]| {
             let given = given.iter();
@@ -211,6 +249,9 @@ impl Text {
             &Self::Quat(x, y, z, w) => Value::Quat(Quat::from_xyzw(x, y, z, w)),
             Self::Entity(Id(id)) => Value::Entity(world.entity(*id).unwrap_or(Entity::DEAD)),
             Self::Dead => Value::Entity(Entity::DEAD),
+            Self::Texture(path) => {
+                (world.assets().texture(path)).map_or(Value::Opaque, Value::Texture)
+            }
             Self::None => Value::Option(None),
             Self::Some(text) => Value::Option(Some(Box::new(text.value(world)))),
             Self::List(items) => Value::List(items.iter().map(|item| item.value(world)).collect()),

@@ -37,6 +37,8 @@ pub use draws::Draws;
 pub use gg_gpu::{Blend, MAX_TEXTURE_SIZE, Sampler, UploadPath, Validation, Window, Wrap};
 pub use line::Line;
 pub use mesh::{Mesh, MeshDraw, Meshes};
+#[doc(hidden)]
+pub use model::Params as ModelParams;
 pub use model::{AlphaMode, Material, ModelVertex};
 pub use pick::{MAX_PICKS, Pick};
 pub use shader::{Compiled, Shader, ShaderSource, Shaders};

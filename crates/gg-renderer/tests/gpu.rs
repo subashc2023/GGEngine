@@ -544,7 +544,7 @@ fn sprites_match_their_reference() {
             * Mat4::from_scale(Vec3::new(width, height, 1.0))
     };
     let whole = Sprite {
-        texture: sheet,
+        texture: Some(sheet),
         sampler: Sampler::NearestClamp,
         ..Sprite::default()
     };
@@ -908,11 +908,11 @@ fn batches_match_their_reference() {
     // transparent, and the checker in yellow.
     let looks = [
         (white, Vec4::new(0.9, 0.4, 0.1, 1.0)),
-        (quadrants, Vec4::ONE),
-        (checker, Vec4::new(0.3, 0.8, 1.0, 1.0)),
+        (Some(quadrants), Vec4::ONE),
+        (Some(checker), Vec4::new(0.3, 0.8, 1.0, 1.0)),
         (white, Vec4::new(0.6, 0.2, 0.9, 1.0)),
-        (quadrants, Vec4::new(1.0, 1.0, 1.0, 0.5)),
-        (checker, Vec4::new(1.0, 0.9, 0.3, 1.0)),
+        (Some(quadrants), Vec4::new(1.0, 1.0, 1.0, 0.5)),
+        (Some(checker), Vec4::new(1.0, 0.9, 0.3, 1.0)),
     ];
     // The sprite at `place` of six along a row at height `y`, from x = -2.5 to 2.5, in `look`,
     // turned 25 degrees more than the one before it, and wider or taller by turns.
@@ -947,7 +947,7 @@ fn batches_match_their_reference() {
     let away = Mat4::from_translation(Vec3::new(100.0, 100.0, 0.0));
     let unseen = Sprite {
         color: Vec4::new(1.0, 0.0, 1.0, 1.0),
-        texture: quadrants,
+        texture: Some(quadrants),
         ..Sprite::default()
     };
     let mut draws = Draws::default();
@@ -1105,7 +1105,7 @@ fn sheets_match_their_reference(path: UploadPath) {
     // Texels 1.7 to 3.3 across and 0.7 to 2.3 down, 20 pixels a texel, so that 6 pixels of each
     // edge show the texel the edge cuts.
     let cut = Sprite {
-        texture: sheet.texture,
+        texture: Some(sheet.texture),
         rect: [
             Vec2::new(1.7 / 8.0, 0.7 / 4.0),
             Vec2::new(3.3 / 8.0, 2.3 / 4.0),
@@ -1121,7 +1121,7 @@ fn sheets_match_their_reference(path: UploadPath) {
     // Texels 6 to 10 across, past the sheet's right edge, and all 4 down: 12 pixels a texel across
     // and 8 down.
     let tiled = Sprite {
-        texture: sheet.texture,
+        texture: Some(sheet.texture),
         rect: [Vec2::new(0.75, 0.0), Vec2::new(1.25, 1.0)],
         sampler: Sampler::LinearRepeat,
         ..Sprite::default()
@@ -1129,7 +1129,7 @@ fn sheets_match_their_reference(path: UploadPath) {
     draws.push_sprite(place([-0.4, -1.8], [1.2, 0.8], 0.0), tiled);
     // On the edge between texels 3 and 4, down the whole sheet.
     let line = Sprite {
-        texture: sheet.texture,
+        texture: Some(sheet.texture),
         rect: [Vec2::new(0.5, 0.0), Vec2::new(0.5, 1.0)],
         ..Sprite::default()
     };
@@ -1214,7 +1214,7 @@ fn views_match_their_reference() {
     // Across the last view's bottom, 4 units by half a unit: 160 by 20 pixels, the tile repeated
     // to a texel each, whose centers are the pixels' centers.
     let band = Sprite {
-        texture: tile,
+        texture: Some(tile),
         rect: [Vec2::ZERO, Vec2::new(80.0, 10.0)],
         sampler: Sampler::NearestRepeat,
         ..Sprite::default()
@@ -1582,12 +1582,12 @@ fn mixed_textures_match_their_reference() {
         .expect("a texture");
     let sprites = [
         Sprite {
-            texture: quadrants,
+            texture: Some(quadrants),
             sampler: Sampler::NearestClamp,
             ..Sprite::default()
         },
         Sprite {
-            texture: checker,
+            texture: Some(checker),
             sampler: Sampler::LinearClamp,
             ..Sprite::default()
         },
@@ -1728,7 +1728,7 @@ fn picks_answer_what_their_frame_drew() {
         .add("half", [2, 1], half.as_flattened(), Mipmaps::None)
         .expect("a texture");
     let halved = Sprite {
-        texture: half,
+        texture: Some(half),
         sampler: Sampler::NearestClamp,
         ..Sprite::default()
     };

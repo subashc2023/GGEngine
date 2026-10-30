@@ -241,6 +241,14 @@ impl Fields<'_> {
                 };
                 None
             }
+            (Type::Texture, &Value::Texture(texture)) => {
+                // Shown by its path; picking another comes with the Assets panel's images.
+                match self.world.assets().path(texture) {
+                    Some(path) => ui.label(path),
+                    None => ui.label(format!("texture {}", texture.index())),
+                };
+                None
+            }
             _ => opaque(ui),
         }
     }

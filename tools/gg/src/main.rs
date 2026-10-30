@@ -23,11 +23,18 @@ const USAGE: &str = "\
 Usage: gg <command> [options]
 
 Build and run:
-  run <PACKAGE> [--release] [--hang <SECONDS>] [-- <ARGS>...]
-      Build PACKAGE's development build and run it with ARGS until it ends, printing a line as it
+  run <PACKAGE> [--release] [--hang <SECONDS>] [--snapshot <SECONDS>] [-- <ARGS>...]
+      Build PACKAGE's development build and run a copy of it with ARGS, printing a line as it
       starts, as it serves the tool API, and as it ends: `exited`, or `crashed` or `hung`, with the
-      errors its log holds. A run whose frames stop for SECONDS (10), while it waits for nothing
-      the user does, has hung, and is ended.
+      errors its log holds. A run whose frames stop for `--hang` seconds (10), while it waits for
+      nothing the user does, has hung, and is ended. It's snapshotted every `--snapshot` seconds
+      (5) from its first frame, `snapshot_failed` saying why they fail, and started again from its
+      last snapshot after a crash or a hang, and from one taken then as PACKAGE is rebuilt
+      (`rebuilt`). One that ends before its first snapshot waits for a rebuild (`waiting`); one that
+      refuses its snapshot starts afresh (`refused`). `run` ends as the game comes to its own end,
+      as its window closes, `quit` asks or its frames run out, whatever its status; as one that has
+      never served the API ends; and as it ends at all with `--snapshot 0` or ARGS with `--record`,
+      `--replay` or `--no-api`, which turn restarts off.
   check <PACKAGE> [--release] [--frames <N>] [--timeout <SECONDS>] [-- <ARGS>...]
       Build PACKAGE and run it headless for N frames (60) with ARGS, and print what it did: its exit
       status, its warnings and errors, and its frame times. One that runs longer than SECONDS
@@ -40,6 +47,7 @@ Talk to a running game, through its tool API:
   resume                         Run its simulation in real time again
   step [N]                       Run N ticks (1), and stay paused
   capture [PATH]                 Write its view as a PNG at PATH, or in `captures` beside it
+  snapshot [PATH]                Write its world as a snapshot at PATH, or in `snapshots` beside it
   entities [--with <COMPONENT>] [--skip <N>] [--take <N>]
                                  List its entities, those with COMPONENT, N at a time (100)
   entity <ID>                    An entity and its components' values
@@ -139,11 +147,12 @@ fn bad(message: String) -> Failure {
 }
 
 /// The flags that take a value: `--name value` or `--name=value`.
-const VALUED: [&str; 9] = [
+const VALUED: [&str; 10] = [
     "--pid",
     "--app",
     "--timeout",
     "--hang",
+    "--snapshot",
     "--frames",
     "--with",
     "--skip",
@@ -284,6 +293,7 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
                 package,
                 release: parsed.switch("--release"),
                 hang: parsed.seconds("--hang", 10)?,
+                snapshot: parsed.seconds("--snapshot", 5)?,
                 args: std::mem::take(&mut parsed.rest),
             })
         }
@@ -328,8 +338,8 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
             };
             call(&mut parsed, "step", json!({"ticks": ticks}))?
         }
-        "capture" => {
-            let path = parsed.positional(0, 1, "capture [PATH]")?;
+        method @ ("capture" | "snapshot") => {
+            let path = parsed.positional(0, 1, &format!("{method} [PATH]"))?;
             let params = match path.first() {
                 // The game's working directory may not be this one.
                 Some(path) => {
@@ -339,7 +349,7 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
                 }
                 None => json!({}),
             };
-            call(&mut parsed, "capture", params)?
+            call(&mut parsed, method, params)?
         }
         "entities" => {
             parsed.positional(
@@ -435,9 +445,27 @@ mod tests {
         };
         assert_eq!((run.package.as_str(), run.release), ("sandbox", false));
         assert_eq!(
-            (run.hang, run.args),
-            (Duration::from_secs(30), vec!["--vsync".to_owned()])
+            (run.hang, run.snapshot, run.args),
+            (
+                Duration::from_secs(30),
+                Duration::from_secs(5),
+                vec!["--vsync".to_owned()]
+            )
         );
+        let Ok(Command::Run(run)) = parsed(&["run", "sandbox", "--snapshot=0"]) else {
+            panic!("a run");
+        };
+        assert_eq!(run.snapshot, Duration::ZERO);
+        let path = std::path::absolute("world.snapshot").unwrap();
+        for (args, want) in [
+            (&["snapshot"][..], json!({})),
+            (&["snapshot", "world.snapshot"], json!({"path": path})),
+        ] {
+            let Ok(Command::Call { method, params, .. }) = parsed(args) else {
+                panic!("a call");
+            };
+            assert_eq!((method.as_str(), params), ("snapshot", want), "{args:?}");
+        }
         let Ok(Command::Logs { level, .. }) = parsed(&["logs", "--level", "info"]) else {
             panic!("logs");
         };
@@ -450,6 +478,8 @@ mod tests {
             &["nonsense"][..],
             &["run"],
             &["run", "a", "b"],
+            &["run", "a", "--snapshot", "often"],
+            &["snapshot", "a", "b"],
             &["status", "--frames", "2"],
             &["status", "extra"],
             &["step", "many"],

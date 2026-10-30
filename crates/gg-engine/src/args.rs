@@ -25,6 +25,8 @@ pub(crate) struct Args {
     pub(crate) dump: Option<Dump>,
     /// Whether a development build serves the tool API.
     pub(crate) api: bool,
+    /// The snapshot the run starts from, in place of the world its layers would attach.
+    pub(crate) restore: Option<PathBuf>,
 }
 
 /// Where a replay stops to write the world: once its layers have attached, or after a tick.
@@ -36,8 +38,9 @@ pub(crate) enum Dump {
 
 /// The flags of a run that a replay, which renders nothing, records nothing and serves no tools,
 /// refuses.
-const NOT_REPLAYED: [&str; 9] = [
+const NOT_REPLAYED: [&str; 10] = [
     "--record",
+    "--restore",
     "--headless",
     "--frames",
     "--capture",
@@ -66,6 +69,8 @@ Options:
   --record <PATH>   Record the run to PATH: its seed, its layers' commands and its hash each tick
   --replay <PATH>   Replay the recording at PATH without a window or a GPU, checking each hash
   --dump <TICK>     With --replay, stop after tick TICK, or at `attach`, and print the world
+  --restore <PATH>  Start from the snapshot at PATH, which the tool API's `snapshot` writes, where
+                    its world was, rather than building the world afresh
   --no-api          Serve no tool API, which development builds serve for tools such as `gg`
   -h, --help        Print this help
 
@@ -96,6 +101,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
         replay: None,
         dump: None,
         api: true,
+        restore: None,
     };
     // The first flag given that a replay refuses.
     let mut not_replayed = None;
@@ -153,6 +159,8 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
             "--gpu" => parsed.gpu = Some(value_of(flag)?),
             "--record" => parsed.record = Some(value_of(flag)?.into()),
             "--replay" => parsed.replay = Some(value_of(flag)?.into()),
+            // The last given, which `gg run` gives after the game's own.
+            "--restore" => parsed.restore = Some(value_of(flag)?.into()),
             "--dump" => {
                 let at = value_of(flag)?;
                 let dump = match at.as_str() {
@@ -178,6 +186,13 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
             "`--replay` runs the recording's ticks alone, rendering and recording nothing, so it \
              takes no `{flag}`"
         )));
+    }
+    if parsed.restore.is_some() && parsed.record.is_some() {
+        return Err(bad(
+            "`--restore` starts the run from a snapshot, which a recording, whose replay starts \
+             from a seed, can't start from, so it takes no `--record`"
+                .to_owned(),
+        ));
     }
     if parsed.dump.is_some() && parsed.replay.is_none() {
         return Err(bad(
@@ -254,6 +269,10 @@ mod tests {
         // Development builds serve the tool API unless told not to.
         assert!(args.api);
         assert!(!parse_strs(&["--no-api"]).unwrap().unwrap().api);
+        // The last snapshot given, which `gg run` gives after the game's own arguments.
+        let args = parse_strs(&["--restore", "a.snapshot", "--restore=b.snapshot"]);
+        let restore = args.unwrap().unwrap().restore;
+        assert_eq!(restore, Some(PathBuf::from("b.snapshot")));
         for (dump, at) in [("attach", Dump::Attach), ("300", Dump::Tick(300))] {
             let args = parse_strs(&["--replay", "run.recording", "--dump", dump]);
             let args = args.unwrap().unwrap();
@@ -266,7 +285,8 @@ mod tests {
     fn a_replay_refuses_the_flags_of_a_run() {
         for flag in NOT_REPLAYED {
             let args = ["--replay", "run.recording", flag, "1"];
-            let takes_value = ["--frames", "--capture", "--gpu", "--record"].contains(&flag);
+            let takes_value =
+                ["--frames", "--capture", "--gpu", "--record", "--restore"].contains(&flag);
             let refused = if takes_value { &args[..] } else { &args[..3] };
             let error = parse_strs(refused).unwrap_err();
             assert_eq!(error.code(), "engine.args", "{flag}: {error}");
@@ -295,6 +315,7 @@ mod tests {
             &["--dump", "attach"],
             &["--replay", "run.recording", "--dump", "-1"],
             &["--replay", "run.recording", "--dump", "first"],
+            &["--restore", "run.snapshot", "--record", "run.recording"],
         ] {
             let error = parse_strs(args).unwrap_err();
             assert_eq!(error.code(), "engine.args", "{args:?}: {error}");

@@ -789,7 +789,7 @@ pub(super) mod tests {
         assert_eq!(world.hash().content, start_content);
         assert!(same_snapshots(&sorted(world), &start_sorted));
         let sprite = world.get::<Sprite>(x.a).expect("a sprite");
-        assert_eq!(sprite.texture, x.texture);
+        assert_eq!(sprite.texture, Some(x.texture));
         let all = world.get::<Everything>(x.f).expect("everything");
         assert_eq!(all.handle, Handle(99));
         assert_eq!(world.get::<Sealed>(x.g), Some(&Sealed(5)));

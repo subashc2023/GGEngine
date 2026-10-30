@@ -419,6 +419,8 @@ impl Replay {
             )));
         }
         let mut cx = Context::seeded(recording.seed);
+        // So that its textures are named as the run's were.
+        cx.root.clone_from(&app.root);
         app.stack.attach(&mut cx);
         Ok(Self {
             app,
@@ -679,6 +681,7 @@ mod tests {
     use crate::layer::Stack;
     use crate::main_loop::Stepper;
     use crate::main_loop::tests::{Turner, red};
+    use crate::reflect::tests::Handle;
     use crate::{
         Actions, Binding, Change, Component, Event, Key, Layer, Reflect, Source, Sprite, Transform,
         args, recording,
@@ -721,10 +724,10 @@ mod tests {
         }
     }
 
-    /// A command of [`Placer`]'s: spawns this sprite, whose texture is opaque, which no value
-    /// makes.
+    /// A command of [`Placer`]'s: spawns this sprite, with a handle of the layer's own, which is
+    /// opaque, so that no value makes it.
     #[derive(Reflect)]
-    struct Place(Sprite);
+    struct Place(Sprite, #[reflect(opaque)] Handle);
 
     /// Queues a sprite to place as it attaches, which its next tick spawns.
     #[derive(Default)]
@@ -732,11 +735,11 @@ mod tests {
 
     impl Layer for Placer {
         fn attach(&mut self, _: &mut Context) {
-            self.0.push(Place(red()));
+            self.0.push(Place(red(), Handle(1)));
         }
 
         fn tick(&mut self, world: &mut World, _: Tick) {
-            for Place(sprite) in self.0.drain(..) {
+            for Place(sprite, _) in self.0.drain(..) {
                 world.spawn((Transform::IDENTITY, sprite));
             }
         }
@@ -1153,11 +1156,7 @@ mod tests {
         let text = std::fs::read_to_string(&path).expect("written");
         assert_eq!(error.code(), "record.bad_command", "{error}");
         let message = error.to_string();
-        for named in [
-            "layer 1, Placer,",
-            "(\"texture\", Opaque)",
-            "at `0.texture`: it's opaque",
-        ] {
+        for named in ["layer 1, Placer,", "(\"1\", Opaque)", "at `1`: it's opaque"] {
             assert!(message.contains(named), "{named}: {message}");
         }
         // Its header and its attach's hash alone: neither the command, nor the tick's hash after

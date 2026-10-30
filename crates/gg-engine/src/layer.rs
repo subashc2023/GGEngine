@@ -3,7 +3,7 @@
 use std::any::type_name;
 use std::mem;
 use std::ops::ControlFlow;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,23 +11,26 @@ use bytemuck::NoUninit;
 use gg_core::math::{Mat4, Vec2, Vec3, Vec4};
 use gg_core::{Error, Result};
 use gg_renderer::{
-    Blend, Circle, Draws, Line, MAX_PICKS, Mesh, Meshes, Mipmaps, Outline, Shader, Shaders, Sprite,
-    SpriteSheet, Texture, Textures, Viewpoint, Viewport,
+    Blend, Circle, Draws, Line, MAX_PICKS, Mesh, Meshes, Mipmaps, ModelParams, ModelVertex,
+    Outline, Shader, Shaders, Sprite, SpriteSheet, Texture, Textures, Viewpoint, Viewport,
 };
 use tracing::info;
 
+use crate::assets::{self, Assets};
 use crate::camera::{self, Camera, Tie};
 use crate::draw::{self, Poses, Scratch};
 use crate::gltf;
 use crate::image::{self, Image};
 use crate::interpolation::Past;
 use crate::perf::Perf;
-use crate::physics::{self, CircleCollider2D};
+use crate::physics::{self, CircleCollider2D, Physics2D};
 use crate::recording::Recorder;
 use crate::reflect::{Reflect, Value};
 use crate::render_thread::Extracted;
+use crate::snapshot::Snapshot;
 use crate::{
-    BoxCollider2D, EntityId, Event, Input, MeshDraw, Model, Name, RigidBody2D, Transform, Ui, World,
+    App, BoxCollider2D, EntityId, Event, Input, MeshDraw, Model, Name, RigidBody2D, Transform, Ui,
+    World,
 };
 
 /// A part of an app that the main loop drives. Every method has a default that does nothing,
@@ -38,10 +41,37 @@ use crate::{
 /// layer reads it, and queues commands, data of its own, for its next tick to apply, so that the
 /// simulation goes on at its own rate whatever the frame rate. A tick changes the world only
 /// through its commands and its systems, so that a recording of the commands replays the run.
+///
+/// As the app starts, every layer loads, from the bottom up, then every layer attaches, building
+/// the world; or, in a run restored from a snapshot (`--restore`), whose world comes from the
+/// snapshot, picks up from the world in its place, so that a game that restarts, after a crash or
+/// a rebuild, goes on where it was.
 pub trait Layer {
-    /// Called once as the app starts, before the first tick and update: it builds the world the
-    /// simulation starts from.
+    /// Called once as the app starts, before any layer attaches, and in a run restored from a
+    /// snapshot too: it makes what the layer draws with, such as its textures, meshes and shaders,
+    /// and registers the component types its world holds, which a restored run needs as much as a
+    /// fresh one, but spawns nothing, since a restored run's world comes from the snapshot. A layer
+    /// that spawns here panics.
+    fn load(&mut self, _cx: &mut Context) {}
+
+    /// Called once as the app starts, after every layer has loaded, before the first tick and
+    /// update: it builds the world the simulation starts from. A run restored from a snapshot calls
+    /// [`restored`](Self::restored) in its place.
     fn attach(&mut self, _cx: &mut Context) {}
+
+    /// Called once as a run restored from a snapshot starts, in place of [`attach`](Self::attach),
+    /// once every layer has loaded and the world is back as it was: the layer picks up from the
+    /// world, such as the values its panels show, and queues what its ticks need, such as letting
+    /// go of what was held as the snapshot was taken. The world changes only at ticks from here.
+    fn restored(&mut self, _cx: &mut Context) {}
+
+    /// The world a snapshot of the run saves in place of the context's while the layer holds aside
+    /// the world the simulation goes back to, as the editor holds the world as it was edited while
+    /// a copy of it plays, so that a restart comes back to that world; `None`, the default,
+    /// otherwise.
+    fn saved_world(&self) -> Option<&World> {
+        None
+    }
 
     /// Called once as the app ends, after the last tick.
     fn detach(&mut self, _cx: &mut Context) {}
@@ -215,6 +245,13 @@ pub struct Context {
     /// Set from when the layers have attached until they detach: the world then changes only at
     /// ticks.
     attached: bool,
+    /// What the files of the assets the layers add are named from, as [`App::root`] says.
+    ///
+    /// [`App::root`]: crate::App::root
+    pub(crate) root: Option<PathBuf>,
+    /// The assets the layers added: the world's, which a world that a layer puts in its place
+    /// takes again, as [`share_assets`](Self::share_assets) says.
+    assets: Arc<Assets>,
     /// How long frames take, which the main loop measures and
     /// [`PerfPanel`](crate::PerfPanel) shows.
     pub(crate) perf: Perf,
@@ -229,10 +266,13 @@ impl Context {
         Self::with_world(window, World::default())
     }
 
-    /// A run's context, in `window`, if it has one, whose world draws its entities' IDs from
-    /// `seed`, or from a seed drawn at random without one.
-    pub(crate) fn of_run(window: Option<Window>, seed: Option<u64>) -> Self {
-        Self::with_world(window, seed.map_or_else(World::default, World::seeded))
+    /// A context for `app`'s run, in `window`, if it has one, whose world draws its entities' IDs
+    /// from the app's seed, or from a seed drawn at random without one.
+    pub(crate) fn of_run(window: Option<Window>, app: &App) -> Self {
+        let world = app.seed.map_or_else(World::default, World::seeded);
+        let mut cx = Self::with_world(window, world);
+        cx.root.clone_from(&app.root);
+        cx
     }
 
     /// A context without a window, a renderer or a stack, whose world draws its entities' IDs from
@@ -242,6 +282,17 @@ impl Context {
     #[doc(hidden)]
     pub fn seeded(seed: u64) -> Self {
         Self::with_world(None, World::seeded(seed))
+    }
+
+    /// Names the assets the layers add from files by their paths relative to `root`, as
+    /// [`App::root`](crate::App::root) does for a run: for a [`seeded`](Self::seeded) context, so
+    /// that the world's hash, which reads its textures' names, doesn't depend on where the game's
+    /// files are.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.root = Some(root.into());
+        self
     }
 
     fn with_world(window: Option<Window>, mut world: World) -> Self {
@@ -255,9 +306,12 @@ impl Context {
             world.register::<RigidBody2D>()?;
             world.register::<BoxCollider2D>()?;
             world.register::<Circle>()?;
-            world.register::<CircleCollider2D>()
+            world.register::<CircleCollider2D>()?;
+            world.register_saved::<Physics2D>()
         });
         registered.expect("the engine's components describe themselves");
+        let assets = Arc::default();
+        world.share_assets(&assets);
         Self {
             window,
             input: Input::default(),
@@ -281,6 +335,8 @@ impl Context {
             scratch: Scratch::default(),
             past: Past::default(),
             attached: false,
+            root: None,
+            assets,
             perf: Perf::default(),
             paused: false,
         }
@@ -396,7 +452,11 @@ impl Context {
         path: impl AsRef<Path>,
         blend: Blend,
     ) -> Result<Shader<V, P>> {
-        self.shaders.add(name, path.as_ref(), blend)
+        let shader = self.shaders.add(name, path.as_ref(), blend)?;
+        let named = assets::name_of(self.root.as_deref(), path.as_ref());
+        let types = format!("{} {} {blend:?}", layout::<V>(), layout::<P>());
+        self.added("shader", &format!("{named} {types}"));
+        Ok(shader)
     }
 
     /// Loads the PNG or JPEG file at `path` as a texture for sprites and layers' shaders to sample
@@ -413,9 +473,15 @@ impl Context {
     /// most every Vulkan 1.4 device takes, and with `renderer.too_many_textures` past the 61,440 a
     /// renderer holds, the engine's white one among them.
     pub fn add_texture(&mut self, name: &str, path: impl AsRef<Path>) -> Result<Texture> {
-        let image = image::load_image(name, path.as_ref())?;
-        self.textures
-            .add(name, image.size, image.pixels, Mipmaps::None)
+        let path = path.as_ref();
+        let image = image::load_image(name, path)?;
+        let texture = self
+            .textures
+            .add(name, image.size, image.pixels, Mipmaps::None)?;
+        let named = assets::name_of(self.root.as_deref(), path);
+        self.add_assets(|assets| assets.add_texture(texture, named.clone()));
+        self.added("texture", &named);
+        Ok(texture)
     }
 
     /// Loads the PNG or JPEG file at `path` as a sprite sheet: a texture, as
@@ -432,7 +498,11 @@ impl Context {
     ) -> Result<SpriteSheet> {
         let path = path.as_ref();
         let image = image::load_image(name, path)?;
-        add_sheet(&mut self.textures, name, path, image, cell)
+        let sheet = add_sheet(&mut self.textures, name, path, image, cell)?;
+        let named = assets::name_of(self.root.as_deref(), path);
+        self.add_assets(|assets| assets.add_texture(sheet.texture, named.clone()));
+        self.added("texture", &named);
+        Ok(sheet)
     }
 
     /// Adds a mesh for layers to draw from then on: triangles, three of `indices` each, which
@@ -448,7 +518,9 @@ impl Context {
         vertices: &[V],
         indices: &[u32],
     ) -> Result<Mesh<V>> {
-        self.meshes.add(name, vertices, indices)
+        let mesh = self.meshes.add(name, vertices, indices)?;
+        self.added("mesh", &format!("{name} {}", layout::<V>()));
+        Ok(mesh)
     }
 
     /// Loads the glTF 2.0 model at `path`, a `.gltf` or `.glb` file, and the files it names: what
@@ -504,8 +576,39 @@ impl Context {
                 imported.ignored.join(", ")
             );
         }
+        let before = self.textures.count();
         let (meshes, shaders, textures) = (&mut self.meshes, &mut self.shaders, &mut self.textures);
-        Model::add(name, imported, meshes, shaders, textures)
+        let model = Model::add(name, imported, meshes, shaders, textures)?;
+        let named = assets::name_of(self.root.as_deref(), path);
+        let count = self.textures.count();
+        self.add_assets(|assets| assets.add_images(&named, before, count));
+        let types = format!("{} {}", layout::<ModelVertex>(), layout::<ModelParams>());
+        self.added("model", &format!("{named} {types}"));
+        Ok(model)
+    }
+
+    /// Records that a layer added an asset of `kind`, as `what` says it: its name, and the types
+    /// that a mesh's, a shader's or a model's draws hold the bytes of, as [`Assets`] keeps it.
+    fn added(&mut self, kind: &str, what: &str) {
+        let (meshes, shaders) = (self.meshes.count(), self.shaders.count());
+        let added = format!("{kind} {meshes} {shaders} {} {what}", self.textures.count());
+        self.add_assets(|assets| assets.note(added));
+    }
+
+    /// Has `add` change the assets the layers added, which the world shares from then on: the
+    /// context's, so that a world that took the world's place doesn't lose them, and copied only
+    /// where a copy of the world shares them.
+    fn add_assets(&mut self, add: impl FnOnce(&mut Assets)) {
+        // The world lets go of its share for the change.
+        self.world.share_assets(&Arc::default());
+        add(Arc::make_mut(&mut self.assets));
+        self.world.share_assets(&self.assets);
+    }
+
+    /// Has the world share the assets the layers added again, if a layer put another world in its
+    /// place, as it loaded, attached or ticked, as [`World::share_assets`] says.
+    pub(crate) fn share_assets(&mut self) {
+        self.world.share_assets(&self.assets);
     }
 
     /// Draws `mesh` with `shader` this frame, where `transform` places it in the world, over the
@@ -760,6 +863,12 @@ fn add_sheet(
     })
 }
 
+/// Type `T`'s name and size, such as `glam::f32::vec3::Vec3 12`: what a snapshot's assets say a
+/// draw holds the bytes of, so that a draw kept in one comes back only where they're the same.
+fn layout<T>() -> String {
+    format!("{} {}", type_name::<T>(), size_of::<T>())
+}
+
 /// The name of type `L`, without its path or its generics: such as `Inspector`.
 fn short_name<L>() -> &'static str {
     let name = type_name::<L>();
@@ -835,20 +944,66 @@ impl Stack {
         self.recorder.as_ref().map_or(Ok(()), Recorder::check)
     }
 
-    /// Attaches the layers, from the bottom up, in `cx`, whose world nothing has drawn an ID from:
-    /// its seed is what a recording starts from.
+    /// Loads the layers, then attaches them, each from the bottom up, in `cx`, whose world nothing
+    /// has drawn an ID from: its seed is what a recording starts from.
     pub(crate) fn attach(&mut self, cx: &mut Context) {
         let _zone = gg_core::zone!();
         if let Some(recorder) = &mut self.recorder {
             recorder.start(&self.names, cx.world.stream_state());
         }
+        self.load(cx);
         for layer in &mut self.layers {
             layer.attach(cx);
+            cx.share_assets();
         }
         cx.attached = true;
         if let Some(recorder) = &mut self.recorder {
             recorder.attached(&cx.world);
         }
+    }
+
+    /// Loads the layers, then puts `snapshot`'s world in `cx`'s place, as a run restored from it
+    /// starts, and has each layer pick up from it, each from the bottom up; returns the ticks the
+    /// simulation had run as it was taken, which the run's go on from.
+    ///
+    /// Fails as [`Snapshot::restore`] does.
+    pub(crate) fn restore(&mut self, cx: &mut Context, snapshot: &Snapshot) -> Result<u64> {
+        let _zone = gg_core::zone!();
+        self.load(cx);
+        let ticks = snapshot.restore(&mut cx.world, &self.names)?;
+        cx.attached = true;
+        for layer in &mut self.layers {
+            layer.restored(cx);
+        }
+        Ok(ticks)
+    }
+
+    /// Loads the layers, from the bottom up.
+    ///
+    /// # Panics
+    ///
+    /// If a layer spawned an entity, or changed the world's rows otherwise, as it loaded: a
+    /// restored run, whose world comes from a snapshot, would spawn it again.
+    fn load(&mut self, cx: &mut Context) {
+        let before = cx.world.version();
+        for (layer, name) in self.layers.iter_mut().zip(&self.names) {
+            layer.load(cx);
+            cx.share_assets();
+            assert_eq!(
+                cx.world.version(),
+                before,
+                "layer {name} changed the world's entities as it loaded, which its attach does, so \
+                 that a run restored from a snapshot doesn't spawn them again"
+            );
+        }
+    }
+
+    /// The world a snapshot of the run saves: the one a layer holds aside, as
+    /// [`Layer::saved_world`] says, or else `cx`'s.
+    #[cfg(feature = "dev")]
+    pub(crate) fn saved_world<'w>(&'w self, cx: &'w Context) -> &'w World {
+        let held = self.layers.iter().find_map(|layer| layer.saved_world());
+        held.unwrap_or(&cx.world)
     }
 
     /// Detaches from the top down, the reverse of attaching, once a recording has its end.
@@ -863,7 +1018,8 @@ impl Stack {
         }
     }
 
-    /// Runs a tick of the simulation: each layer's, from the bottom up. A recording gets each
+    /// Runs a tick of the simulation: each layer's, from the bottom up, after which the world
+    /// shares the context's assets again, as [`Context::share_assets`] says. A recording gets each
     /// layer's commands just before its tick applies them, so that a tick that panics leaves them,
     /// and the world's hash after the last.
     pub(crate) fn tick(&mut self, cx: &mut Context, tick: Tick) {
@@ -881,6 +1037,7 @@ impl Stack {
                 recorder.queued(index, names[index], commands, &cx.world);
             }
             layer.tick(&mut cx.world, tick);
+            cx.share_assets();
         }
         if let Some(recorder) = recorder {
             recorder.ticked(tick, &cx.world);
@@ -900,6 +1057,7 @@ impl Stack {
         for (index, layer) in self.layers.iter_mut().enumerate() {
             fill(index, layer.commands(), &cx.world)?;
             layer.tick(&mut cx.world, tick);
+            cx.share_assets();
         }
         Ok(())
     }
@@ -1066,6 +1224,40 @@ mod tests {
         );
         assert_eq!(stack.names(), ["Probe"; 3]);
         assert_eq!(short_name::<Vec<crate::inspector::Inspector>>(), "Vec");
+    }
+
+    /// Puts a new world in the context's place at each tick.
+    struct Replacer;
+
+    impl Layer for Replacer {
+        fn tick(&mut self, world: &mut World, _: Tick) {
+            *world = World::default();
+        }
+    }
+
+    /// A world a tick puts in the context's place shares the context's assets after it, so that
+    /// the textures the layers added stay named, and one added afterwards is named after them.
+    #[test]
+    fn a_world_put_in_the_contexts_place_shares_its_assets() {
+        let mut stack = Stack::default();
+        stack.push_layer(Replacer);
+        let mut cx = Context::new(None);
+        stack.attach(&mut cx);
+        let add = |cx: &mut Context, path: &str| {
+            let texture = cx.textures.add(path, [1, 1], &[0; 4], Mipmaps::None);
+            let texture = texture.expect("a texture");
+            cx.add_assets(|assets| assets.add_texture(texture, path.into()));
+            texture
+        };
+        let first = add(&mut cx, "first.png");
+        stack.tick(&mut cx, Tick { number: 0 });
+        let second = add(&mut cx, "second.png");
+        stack.tick(&mut cx, Tick { number: 1 });
+        let assets = cx.world().assets();
+        assert_eq!(
+            [first, second].map(|texture| assets.path(texture)),
+            [Some("first.png"), Some("second.png")]
+        );
     }
 
     #[test]

@@ -2,8 +2,9 @@
 //! file in the `sessions` directory beside the executable gives with a token. A thread accepts
 //! connections, and each has a thread that reads its requests, answering `hello` and `ping` itself
 //! and passing the rest on to the main loop, and one that writes its answers. The main loop answers
-//! them as a frame starts, before its ticks; a `step` once its ticks have run; and a `capture` once
-//! a frame that rendered brings its view back, whose PNG a thread of its own writes.
+//! them as a frame starts, before its ticks; a `step` once its ticks have run; a `capture` once a
+//! frame that rendered brings its view back, whose PNG a thread of its own writes; and a `snapshot`
+//! once a thread of its own has written the copy of the world the main thread took.
 
 use std::fmt::Display;
 use std::fs;
@@ -19,7 +20,7 @@ use std::time::Duration;
 
 use gg_api::{
     Capture, Captured, EntityList, Failure, Field, Hash, Hello, Listed, Pulse, Request, Session,
-    Status, Step, Welcome,
+    Snapshotted, Status, Step, Welcome,
 };
 use gg_core::{Error, Result};
 use serde::Serialize;
@@ -28,14 +29,15 @@ use serde_json::Value;
 use tracing::{debug, info};
 
 use super::{Waiting, json};
+use crate::layer::Stack;
 use crate::main_loop::Stepper;
 use crate::render_thread::{Extracted, Shot};
-use crate::{Context, Entity, EntityId, Name, World};
+use crate::{Context, Entity, EntityId, Name, World, snapshot};
 
 /// The methods, as `api.unknown_method` lists them.
-const METHODS: [&str; 12] = [
+const METHODS: [&str; 13] = [
     "hello", "ping", "status", "pause", "resume", "step", "capture", "entities", "entity", "get",
-    "hash", "quit",
+    "hash", "snapshot", "quit",
 ];
 
 /// The most ticks a `step` runs.
@@ -72,6 +74,11 @@ pub(crate) struct Api {
     numbered: u64,
     /// To the thread that writes captures' PNGs.
     pngs: Sender<Png>,
+    /// Where snapshots without a path go, and how many have, which number their files.
+    snapshots: PathBuf,
+    snapshotted: u64,
+    /// To the thread that writes snapshots.
+    taken: Sender<Taken>,
 }
 
 /// What the main loop shares with the connections' threads.
@@ -108,6 +115,7 @@ enum Call {
         path: String,
     },
     Hash,
+    Snapshot(Option<PathBuf>),
     Quit,
 }
 
@@ -132,6 +140,15 @@ impl Reply {
     }
 }
 
+/// A snapshot for the thread that writes them: the copy of the world, the ticks the simulation had
+/// run as it was taken, where it goes, and where the answer goes.
+struct Taken {
+    world: World,
+    ticks: u64,
+    path: PathBuf,
+    reply: Reply,
+}
+
 /// A capture's PNG for the thread that writes them: the view, where it goes, the ticks the frame
 /// that shows it had run, and where the answer goes.
 struct Png {
@@ -142,11 +159,12 @@ struct Png {
 }
 
 impl Api {
-    /// Starts serving app `app`'s run, whose JSON log is at `log`, if it has one: listens on the
-    /// loopback, starts its threads and writes the session file.
+    /// Starts serving app `app`'s run, whose layers are `layers`, from the bottom up, and whose JSON
+    /// log is at `log`, if it has one: listens on the loopback, starts its threads and writes the
+    /// session file.
     ///
     /// Fails with `api.start` if it can't.
-    pub(crate) fn start(app: &str, log: Option<&Path>) -> Result<Self> {
+    pub(crate) fn start(app: &str, layers: &[&str], log: Option<&Path>) -> Result<Self> {
         let failed = |what: String| move |error| Error::new("api.start", what).with_source(error);
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .map_err(failed("can't listen on the loopback".to_owned()))?;
@@ -185,6 +203,15 @@ impl Api {
             .map_err(failed(
                 "can't start the thread that writes captures".to_owned(),
             ))?;
+        let (taken, to_save) = mpsc::channel();
+        let named = app.to_owned();
+        let stack: Vec<String> = layers.iter().map(|&name| name.to_owned()).collect();
+        thread::Builder::new()
+            .name("gg-api-snapshot".to_owned())
+            .spawn(move || write_snapshots(&to_save, &named, &stack))
+            .map_err(failed(
+                "can't start the thread that writes snapshots".to_owned(),
+            ))?;
         let token = session.token.clone();
         let accepting = shared.clone();
         thread::Builder::new()
@@ -222,6 +249,9 @@ impl Api {
             riding_ticks: 0,
             numbered: 0,
             pngs,
+            snapshots: crate::beside_exe("snapshots"),
+            snapshotted: 0,
+            taken,
         })
     }
 
@@ -235,23 +265,29 @@ impl Api {
     }
 
     /// As a frame starts, before its ticks, answers the requests that have come, from `cx`, whose
-    /// simulation `stepper` steps: first the `step`s whose ticks have run, then the rest in the
-    /// order they came, `capture`s once a frame has rendered the view, as
-    /// [`frame_back`](Self::frame_back) says. Returns whether one asked the run to end.
-    pub(crate) fn serve(&mut self, cx: &Context, stepper: &mut Stepper) -> bool {
+    /// layers are `stack`'s and whose simulation `stepper` steps: first the `step`s whose ticks have
+    /// run, then the rest in the order they came, `capture`s once a frame has rendered the view, as
+    /// [`frame_back`](Self::frame_back) says, and `snapshot`s once their files are written, but
+    /// refused before the run's first tick. Returns whether one asked the run to end.
+    pub(crate) fn serve(&mut self, cx: &Context, stack: &Stack, stepper: &mut Stepper) -> bool {
         self.shared.frames.fetch_add(1, Ordering::Relaxed);
-        self.answer(cx, stepper, false)
+        self.answer(cx, stack, stepper, false)
     }
 
     /// As [`serve`](Self::serve), between frames while they pause for a minimized window, without
     /// counting a frame: a `capture` or a `step`, which need frames, fail with `api.paused`.
-    pub(crate) fn serve_paused(&mut self, cx: &Context, stepper: &mut Stepper) -> bool {
-        self.answer(cx, stepper, true)
+    pub(crate) fn serve_paused(
+        &mut self,
+        cx: &Context,
+        stack: &Stack,
+        stepper: &mut Stepper,
+    ) -> bool {
+        self.answer(cx, stack, stepper, true)
     }
 
     /// Answers the requests that have come, as [`serve`](Self::serve) says, `paused` if frames
     /// have paused.
-    fn answer(&mut self, cx: &Context, stepper: &mut Stepper, paused: bool) -> bool {
+    fn answer(&mut self, cx: &Context, stack: &Stack, stepper: &mut Stepper, paused: bool) -> bool {
         let ran = self
             .steps
             .extract_if(.., |&mut (_, until)| until <= stepper.ticks);
@@ -303,6 +339,27 @@ impl Api {
                         content: format!("{:016x}", hash.content),
                         layout: format!("{:016x}", hash.layout),
                     });
+                }
+                Call::Snapshot(_) if stepper.ran() == 0 => {
+                    let message = "the simulation hasn't ticked since the run started, and a \
+                                   snapshot before then would miss what the layers queued for its \
+                                   first tick; ask once it has";
+                    reply.send(Err(Failure::new("api.not_ticked", message)));
+                }
+                Call::Snapshot(path) => {
+                    let path = path.unwrap_or_else(|| {
+                        self.snapshotted += 1;
+                        let name = format!("{}-{}.snapshot", self.stem, self.snapshotted);
+                        self.snapshots.join(name)
+                    });
+                    let taken = Taken {
+                        world: stack.saved_world(cx).clone(),
+                        ticks: stepper.ticks,
+                        path,
+                        reply,
+                    };
+                    // The thread runs until the API drops.
+                    let _ = self.taken.send(taken);
                 }
                 Call::Quit => {
                     reply.send(Ok("{}".to_owned()));
@@ -633,6 +690,40 @@ fn write_pngs(pngs: &Receiver<Png>) {
     }
 }
 
+/// Writes the snapshots `taken` brings, each a file of app `app`'s, whose layers are `layers`, as
+/// [`snapshot::write`] writes one, whole or not at all, making the `snapshots` directory beside the
+/// executable if it goes there; and answers each, until the API drops.
+fn write_snapshots(taken: &Receiver<Taken>, app: &str, layers: &[String]) {
+    let layers: Vec<&str> = layers.iter().map(String::as_str).collect();
+    for Taken {
+        world,
+        ticks,
+        path,
+        reply,
+    } in taken
+    {
+        let written = snapshot::write(&world, app, &layers, ticks).and_then(|text| {
+            if path.parent() == Some(crate::beside_exe("snapshots").as_path()) {
+                fs::create_dir_all(crate::beside_exe("snapshots")).map_err(|error| {
+                    let message = format!("can't make the directory of {}", path.display());
+                    Error::new("snapshot.file", message).with_source(error)
+                })?;
+            }
+            snapshot::save(&path, &text)?;
+            Ok(text.len() as u64)
+        });
+        match written {
+            Ok(bytes) => reply.result(&Snapshotted {
+                path,
+                ticks,
+                entities: world.entities(None).map_or(0, |entities| entities.len()),
+                bytes,
+            }),
+            Err(error) => reply.send(Err(failure(&error))),
+        }
+    }
+}
+
 /// Writes `shot` as an 8-bit RGB PNG at `path`, whole or not at all, making the `captures`
 /// directory beside the executable if it's there: the view's pixels are sRGB-encoded, as a PNG's
 /// are taken to be without a chunk that says otherwise, and its alpha goes, since the view shows
@@ -677,6 +768,15 @@ fn parse(request: &Request) -> Result<Call, Failure> {
         "pause" => none(method, params).map(|()| Call::Pause)?,
         "resume" => none(method, params).map(|()| Call::Resume)?,
         "hash" => none(method, params).map(|()| Call::Hash)?,
+        "snapshot" => {
+            let gg_api::Snapshot { path } = take(method, params)?;
+            if path.as_deref().is_some_and(|path| !path.is_absolute()) {
+                let what = "takes an absolute path, since the game's working directory may not be \
+                            the tool's";
+                return Err(bad_params(method, what));
+            }
+            Call::Snapshot(path)
+        }
         "quit" => none(method, params).map(|()| Call::Quit)?,
         "step" => {
             let Step { ticks } = take(method, params)?;
@@ -782,7 +882,7 @@ mod tests {
     /// Starts the API for app `app`, a name of the test's own, so that tests running at once write
     /// session files of their own; and returns it, with the session its file gives.
     fn started(app: &str) -> (Api, Session) {
-        let api = Api::start(app, None).expect("the API starts");
+        let api = Api::start(app, &[], None).expect("the API starts");
         let pid = std::process::id();
         let file = crate::beside_exe("sessions").join(Session::file_name(app, pid));
         let text = fs::read(file).expect("the session file");
@@ -806,7 +906,7 @@ mod tests {
         let start = Instant::now();
         while !client.is_finished() {
             assert!(start.elapsed() < DEADLINE, "the client never finished");
-            api.serve(cx, stepper);
+            api.serve(cx, &Stack::default(), stepper);
             stepper.step(Tick::DT, |_| {}, || Duration::ZERO);
             frame(api, stepper);
             thread::sleep(Duration::from_millis(1));
@@ -952,11 +1052,55 @@ mod tests {
                 .map(|result| result.get().to_owned())
         });
         let start = Instant::now();
-        while !api.serve(&cx, &mut stepper) {
+        while !api.serve(&cx, &Stack::default(), &mut stepper) {
             assert!(start.elapsed() < DEADLINE, "no quit came");
             thread::sleep(Duration::from_millis(1));
         }
         assert_eq!(client.join().expect("no panic").as_deref(), Ok("{}"));
+    }
+
+    /// `snapshot` writes the world whole where it's asked, once a thread of its own has, and answers
+    /// where, at how many ticks, of how many entities and bytes: a file a run restores the world
+    /// from, at those ticks. A path that isn't absolute is refused, and so is a snapshot before the
+    /// run's first tick.
+    #[test]
+    fn a_snapshot_is_written_where_its_asked() {
+        let (mut api, session) = started("Api Snapshots");
+        let mut cx = Context::seeded(5);
+        for _ in 0..3 {
+            cx.world_mut()
+                .spawn((Transform::IDENTITY, Sprite::default()));
+        }
+        // Paused, so that no tick runs before the client asks.
+        let mut stepper = Stepper::default();
+        stepper.pause();
+        let dir = std::env::temp_dir().join(format!("gg-engine-api-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("a directory");
+        let path = dir.join("world.snapshot");
+        let asked = path.clone();
+        let client = move |mut client: Client| {
+            let mut refused = Vec::new();
+            for path in [json!("world.snapshot"), json!(asked)] {
+                let call = client.call("snapshot", json!({ "path": path }));
+                refused.push(call.expect_err("refused").code);
+            }
+            client.call("step", json!({"ticks": 1})).expect("stepped");
+            let taken: Snapshotted =
+                (client.call_as("snapshot", json!({"path": asked}))).expect("a snapshot");
+            (refused, taken)
+        };
+        let (refused, taken) = serving(&mut api, &cx, &mut stepper, session, client, |_, _| {});
+        assert_eq!(refused, ["api.bad_params", "api.not_ticked"]);
+        assert_eq!((&taken.path, taken.ticks, taken.entities), (&path, 1, 3));
+        assert_eq!(taken.bytes, fs::metadata(&path).expect("written").len());
+        let snapshot = crate::snapshot::Snapshot::read(&path, "Api Snapshots").expect("read");
+        let mut restored = Context::seeded(6);
+        let ticks = snapshot
+            .restore(restored.world_mut(), &[])
+            .expect("restored");
+        assert_eq!(ticks, taken.ticks);
+        assert_eq!(restored.world().hash(), cx.world().hash());
+        let _ = fs::remove_file(&path);
     }
 
     /// A capture rides with the frames handed off until one that rendered brings the view back: an

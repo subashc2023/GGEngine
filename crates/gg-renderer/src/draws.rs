@@ -278,7 +278,7 @@ mod tests {
         for (x, index) in [0, 5, 6].into_iter().enumerate() {
             let texture = Texture { index };
             let sprite = Sprite {
-                texture,
+                texture: Some(texture),
                 ..Sprite::default()
             };
             draws.push_sprite(at(x as f32), sprite);

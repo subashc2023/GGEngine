@@ -1,28 +1,24 @@
 //! The engine's components that `gg-renderer` defines, and the sampler a sprite holds, which
 //! `gg-gpu` does, described to reflection here, since neither crate can derive it.
 
+use std::fmt::Write as _;
+
 use gg_core::Error;
 use gg_core::math::{Vec2, Vec4};
-use gg_renderer::{Circle, MeshDraw, Sampler, Sprite};
+use gg_renderer::{Circle, MeshDraw, Sampler, Sprite, Texture};
 
 use crate::reflect::{
     self, Bound, Digest, Field, Meta, Reflect, Result, Shape, Show, Type, Types, Value,
 };
 use crate::{Component, Writable};
 
-/// Built on the default sprite, so that a scene's sprite, which leaves its texture out, shows the
-/// white texture until code sets another.
-impl Component for Sprite {
-    fn base() -> Option<Self> {
-        Some(Self::default())
-    }
-}
-
+impl Component for Sprite {}
 impl Writable for Sprite {}
 
 /// Taken apart whole, so that a field `gg-renderer` adds fails to compile here until it's
-/// described. Its texture is opaque, so that no value makes the index of a texture, which shaders
-/// sample unchecked. Its fields' defaults are the default sprite's.
+/// described. Its texture is named by its path, as [`Value::Texture`] says, and only a texture the
+/// renderer handed out sets it, so that no value makes an index that shaders would sample
+/// unchecked. Its fields' defaults are the default sprite's.
 impl Reflect for Sprite {
     fn describe(types: &mut Types) -> Result<Type> {
         let field = |name: &'static str, ty, show, default, doc: &'static str| Field {
@@ -50,10 +46,10 @@ impl Reflect for Sprite {
                 ),
                 field(
                     "texture",
-                    Type::Opaque,
+                    <Option<Texture>>::describe(types)?,
                     Show::Plain,
-                    None,
-                    "The texture it shows, which code sets.",
+                    Some(base.texture.to_value()),
+                    "The texture it shows, by its path: none for the engine's white texture.",
                 ),
                 field(
                     "rect",
@@ -81,21 +77,20 @@ impl Reflect for Sprite {
     fn to_value(&self) -> Value {
         let Sprite {
             color,
-            texture: _,
+            texture,
             rect,
             sampler,
         } = self;
         Value::Struct(vec![
             ("color".into(), color.to_value()),
-            ("texture".into(), Value::Opaque),
+            ("texture".into(), texture.to_value()),
             ("rect".into(), rect.to_value()),
             ("sampler".into(), sampler.to_value()),
         ])
     }
 
     fn from_value(value: &Value) -> Result<Self> {
-        let [_, texture, ..] = reflect::fields(value, SPRITE_FIELDS)?;
-        reflect::make_opaque(texture).map_err(|error| reflect::within(error, "texture"))
+        Self::default().with_value(value)
     }
 
     fn with_value(&self, value: &Value) -> Result<Self> {
@@ -110,7 +105,7 @@ impl Reflect for Sprite {
         let at = |name| move |error: Error| reflect::within(error, name);
         Ok(Sprite {
             color: color.with_value(new_color).map_err(at("color"))?,
-            texture: reflect::keep(texture, new_texture).map_err(at("texture"))?,
+            texture: texture.with_value(new_texture).map_err(at("texture"))?,
             rect: rect.with_value(new_rect).map_err(at("rect"))?,
             sampler: sampler.with_value(new_sampler).map_err(at("sampler"))?,
         })
@@ -124,12 +119,13 @@ impl Reflect for Sprite {
     fn part(&self, index: u32) -> Option<&dyn Reflect> {
         let Sprite {
             color,
-            texture: _,
+            texture,
             rect,
             sampler,
         } = self;
         match index {
             0 => Some(color),
+            1 => Some(texture),
             2 => Some(rect),
             3 => Some(sampler),
             _ => None,
@@ -139,12 +135,13 @@ impl Reflect for Sprite {
     fn part_mut(&mut self, index: u32) -> Option<&mut dyn Reflect> {
         let Sprite {
             color,
-            texture: _,
+            texture,
             rect,
             sampler,
         } = self;
         match index {
             0 => Some(color),
+            1 => Some(texture),
             2 => Some(rect),
             3 => Some(sampler),
             _ => None,
@@ -154,11 +151,12 @@ impl Reflect for Sprite {
     fn digest(&self, to: &mut Digest<'_>) {
         let Sprite {
             color,
-            texture: _,
+            texture,
             rect,
             sampler,
         } = self;
         color.digest(to);
+        texture.digest(to);
         rect.digest(to);
         sampler.digest(to);
     }
@@ -373,7 +371,45 @@ impl Reflect for Sampler {
     }
 }
 
-impl Component for MeshDraw {}
+/// A snapshot keeps its mesh's and its shader's indices, whether its shader is opaque and whether
+/// it culls, and its parameters' bytes in hex, as `1 2 true false x0a0b`: what a restart takes back
+/// into a run whose layers added the same assets in the same order, which the indices name there
+/// too, as the snapshot's `asset` lines check.
+impl Component for MeshDraw {
+    fn save_opaque(&self) -> Option<String> {
+        let (mesh, shader, opaque, culls, params) = self.parts();
+        let mut text = format!("{mesh} {shader} {opaque} {culls} x");
+        for byte in params {
+            write!(text, "{byte:02x}").expect("a string takes any text");
+        }
+        Some(text)
+    }
+
+    fn load_opaque(text: &str) -> Result<Self> {
+        let bad = || {
+            let message = format!("`{text}` isn't a mesh draw's parts");
+            Error::new("snapshot.opaque", message)
+        };
+        let parts: Vec<&str> = text.split(' ').collect();
+        let [mesh, shader, opaque, culls, params] = parts[..] else {
+            return Err(bad());
+        };
+        let hex = params.strip_prefix('x').filter(|hex| hex.len() % 2 == 0);
+        let hex = hex.ok_or_else(bad)?;
+        let bytes: Option<Vec<u8>> = (0..hex.len() / 2)
+            .map(|at| u8::from_str_radix(hex.get(at * 2..at * 2 + 2)?, 16).ok())
+            .collect();
+        MeshDraw::from_parts(
+            mesh.parse().map_err(|_| bad())?,
+            shader.parse().map_err(|_| bad())?,
+            opaque.parse().map_err(|_| bad())?,
+            culls.parse().map_err(|_| bad())?,
+            &bytes.ok_or_else(bad)?,
+        )
+        .ok_or_else(bad)
+    }
+}
+
 impl Writable for MeshDraw {}
 
 /// Opaque: its mesh and its shader are indices private to `gg-renderer`, which no value may make.

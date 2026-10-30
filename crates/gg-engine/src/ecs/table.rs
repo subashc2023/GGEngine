@@ -297,6 +297,15 @@ pub trait AnyColumn: Any + Send + Sync {
     /// Fails as [`Reflect::with_value`] and [`Reflect::from_value`] do.
     fn push_value(&mut self, value: &Value) -> Result<()>;
 
+    /// What a snapshot keeps of `row`'s value's opaque state, as [`Component::save_opaque`] gives
+    /// it.
+    fn opaque(&self, row: usize) -> Option<String>;
+
+    /// Pushes the component `text` makes, as [`Component::load_opaque`] makes it.
+    ///
+    /// Fails as `load_opaque` does.
+    fn push_opaque(&mut self, text: &str) -> Result<()>;
+
     /// A copy of the column.
     fn cloned(&self) -> Box<dyn AnyColumn>;
 
@@ -335,6 +344,15 @@ impl<T: Component> AnyColumn for Vec<T> {
             None => T::from_value(value)?,
         };
         self.push(made);
+        Ok(())
+    }
+
+    fn opaque(&self, row: usize) -> Option<String> {
+        self[row].save_opaque()
+    }
+
+    fn push_opaque(&mut self, text: &str) -> Result<()> {
+        self.push(T::load_opaque(text)?);
         Ok(())
     }
 

@@ -656,9 +656,9 @@ fn widgets_set_the_fields_they_show() {
 
     inspector.pick(id(&world, sprite));
     let texts = run(&mut inspector, &mut world, Vec::new());
-    // Its color's button, in the column the texture's "opaque" starts: its popup opens.
+    // Its color's button, in the column the texture's "None" starts: its popup opens.
     let at = egui::pos2(
-        find(&texts, "texture", "opaque").min.x + 10.0,
+        find(&texts, "texture", "None").min.x + 10.0,
         find(&texts, "Sprite", "color").center().y,
     );
     let opened = run(&mut inspector, &mut world, click(Primary, at));
@@ -719,7 +719,7 @@ fn a_gray_keeps_its_hue(gray: Vec4, every_frame: bool) {
     inspector.pick(id(&world, sprite));
     let texts = run(&mut inspector, &mut world, Vec::new());
     let at = egui::pos2(
-        find(&texts, "texture", "opaque").min.x + 10.0,
+        find(&texts, "texture", "None").min.x + 10.0,
         find(&texts, "Sprite", "color").center().y,
     );
     let opened = run(&mut inspector, &mut world, click(Primary, at));

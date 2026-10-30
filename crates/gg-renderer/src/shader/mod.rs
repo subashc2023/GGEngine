@@ -130,6 +130,12 @@ impl Types {
 }
 
 impl Shaders {
+    /// How many it has handed out, the engine's sprite shader among them, and those of its own it
+    /// added as they were first asked for: the index of the next.
+    pub fn count(&self) -> u32 {
+        self.count
+    }
+
     /// Compiles the Slang shader at `path`, which draws meshes of vertex type `V` and takes
     /// parameters of type `P` with each draw, such as a color: `()` for none. `blend` says how its
     /// color goes over what's drawn before it: [`Blend::Alpha`] blends by the alpha it returns, not

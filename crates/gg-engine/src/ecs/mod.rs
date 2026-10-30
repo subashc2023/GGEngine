@@ -8,6 +8,7 @@
 
 mod by_name;
 mod diff;
+mod file;
 mod hash;
 mod hierarchy;
 mod id;
@@ -26,6 +27,7 @@ use std::fmt;
 use std::hash::{BuildHasher, RandomState};
 use std::mem;
 use std::num::NonZeroU32;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use gg_core::{Error, Result};
@@ -40,13 +42,14 @@ use id::IdStream;
 pub use log::Log;
 pub use ops::Operation;
 pub use query::{Query, QueryIter, QueryIterMut, ReadOnlyQuery};
-pub use resources::Resource;
 use resources::Resources;
+pub use resources::{Resource, Saved};
 pub(crate) use scene::{MAX_DEPTH, float, quote};
 pub use scene::{read_scene, write_scene};
 pub(crate) use table::ComponentId;
 use table::{AnyColumn, Components, Row, Table};
 
+use crate::assets::Assets;
 use crate::reflect::Reflect;
 
 /// Data an entity can have: a struct or an enum that derives it, with `#[derive(Clone,
@@ -62,7 +65,7 @@ use crate::reflect::Reflect;
 )]
 pub trait Component: Reflect + Clone {
     /// What a scene's component of the type is built on, which gives it what's opaque, since
-    /// scenes leave that out, as [`Sprite`](crate::Sprite)'s white texture: it's made with
+    /// scenes leave that out, as a field marked `#[reflect(opaque)]`: it's made with
     /// [`with_value`](Reflect::with_value). `None`, the derive's, makes it with
     /// [`from_value`](Reflect::from_value) alone, which fails where it has something opaque, so
     /// that a type with an opaque field implements `Component` by hand to load.
@@ -78,6 +81,26 @@ pub trait Component: Reflect + Clone {
     /// `primary` is one. `None`, the derive's.
     fn exclusive() -> Option<&'static str> {
         None
+    }
+
+    /// What a snapshot file keeps of a component of a type that's opaque as a whole, as
+    /// [`MeshDraw`](crate::MeshDraw) is, a line of text of its own, which
+    /// [`load_opaque`](Self::load_opaque) makes it again from, in a run restored from the file
+    /// whose layers added the same assets in the same order as the run it was taken from: `None`,
+    /// the derive's, for a type that keeps nothing, which a restart leaves out.
+    fn save_opaque(&self) -> Option<String> {
+        None
+    }
+
+    /// Makes a component again from `text`, which [`save_opaque`](Self::save_opaque) gave.
+    ///
+    /// Fails with `snapshot.opaque` by default, for a type that keeps nothing, or as the type
+    /// says for text it doesn't take.
+    fn load_opaque(_text: &str) -> Result<Self> {
+        Err(Error::new(
+            "snapshot.opaque",
+            "its type keeps nothing opaque in snapshots",
+        ))
     }
 }
 
@@ -235,6 +258,9 @@ pub struct World {
     lists: Vec<Vec<Entity>>,
     /// What it holds beside its entities.
     resources: Resources,
+    /// What names the textures its components show, where they cross into text: its context's,
+    /// which its copies share, and which the context gives it again after each layer's tick.
+    assets: Arc<Assets>,
 }
 
 impl Default for World {
@@ -300,6 +326,29 @@ impl World {
             scratch: Vec::new(),
             lists: Vec::new(),
             resources: Resources::default(),
+            assets: Arc::default(),
+        }
+    }
+
+    /// What names the textures its components show.
+    pub(crate) fn assets(&self) -> &Assets {
+        &self.assets
+    }
+
+    /// What names the textures its components show, to name another, which its copies from before
+    /// don't see.
+    #[cfg(test)]
+    pub(crate) fn assets_mut(&mut self) -> &mut Assets {
+        Arc::make_mut(&mut self.assets)
+    }
+
+    /// Shares `assets`, its context's, unless it shares them already: a world that took the
+    /// context's world's place may name others, as a new world names none, and a copy taken before
+    /// an asset was added fewer, where the context's are all those the layers added, which only
+    /// grow.
+    pub(crate) fn share_assets(&mut self, assets: &Arc<Assets>) {
+        if !Arc::ptr_eq(&self.assets, assets) {
+            self.assets.clone_from(assets);
         }
     }
 
@@ -790,6 +839,7 @@ impl World {
             scratch: Vec::new(),
             lists: Vec::new(),
             resources: Resources::default(),
+            assets: self.assets.clone(),
         };
         // Alive, vacant or retired; a retired slot stays so.
         for (index, free) in (0..).zip(was_free) {

@@ -12,6 +12,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::Context;
+use crate::layer::Stack;
 use crate::main_loop::Stepper;
 use crate::render_thread::{Render, RenderThread};
 
@@ -22,42 +23,53 @@ pub(crate) use server::Api;
 #[cfg(not(feature = "dev"))]
 pub(crate) enum Api {}
 
-/// Starts serving the tool API for app `app`, whose JSON log is at `log`, if it has one, unless
-/// `serve` says not to: `None` then, and without `dev`. If it can't start, the run goes on without
-/// it, warning `api.start`.
-pub(crate) fn start(app: &str, log: Option<&Path>, serve: bool) -> Option<Api> {
+/// Starts serving the tool API for app `app`, whose layers are `layers`, from the bottom up, and
+/// whose JSON log is at `log`, if it has one, unless `serve` says not to: `None` then, and without
+/// `dev`. If it can't start, the run goes on without it, warning `api.start`.
+pub(crate) fn start(app: &str, layers: &[&str], log: Option<&Path>, serve: bool) -> Option<Api> {
     #[cfg(feature = "dev")]
     if serve {
-        return Api::start(app, log)
+        return Api::start(app, layers, log)
             .inspect_err(|error| {
                 let consequence = "tools can't reach this run";
                 tracing::warn!(code = error.code(), "{error:#}; {consequence}");
             })
             .ok();
     }
-    let _ = (app, log, serve);
+    let _ = (app, layers, log, serve);
     None
 }
 
 /// As a frame starts, before its ticks, answers the requests that have come, from `cx`, whose
-/// simulation `stepper` steps, as [`Api::serve`] says; returns whether one asked the run to end.
-pub(crate) fn serve(api: &mut Option<Api>, cx: &Context, stepper: &mut Stepper) -> bool {
+/// layers are `stack`'s and whose simulation `stepper` steps, as [`Api::serve`] says; returns
+/// whether one asked the run to end.
+pub(crate) fn serve(
+    api: &mut Option<Api>,
+    cx: &Context,
+    stack: &Stack,
+    stepper: &mut Stepper,
+) -> bool {
     #[cfg(feature = "dev")]
     if let Some(api) = api {
-        return api.serve(cx, stepper);
+        return api.serve(cx, stack, stepper);
     }
-    let _ = (api, cx, stepper);
+    let _ = (api, cx, stack, stepper);
     false
 }
 
 /// Between frames, while they pause, answers the requests that need none, as [`Api::serve`] does
 /// those of a frame; returns whether one asked the run to end.
-pub(crate) fn serve_paused(api: &mut Option<Api>, cx: &Context, stepper: &mut Stepper) -> bool {
+pub(crate) fn serve_paused(
+    api: &mut Option<Api>,
+    cx: &Context,
+    stack: &Stack,
+    stepper: &mut Stepper,
+) -> bool {
     #[cfg(feature = "dev")]
     if let Some(api) = api {
-        return api.serve_paused(cx, stepper);
+        return api.serve_paused(cx, stack, stepper);
     }
-    let _ = (api, cx, stepper);
+    let _ = (api, cx, stack, stepper);
     false
 }
 

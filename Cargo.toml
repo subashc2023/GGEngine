@@ -51,7 +51,9 @@ quote = "1.0.47"
 # glam's scalar math and libm's functions, simba's libm, ordered maps in place of hashed ones, and
 # zeros of one sign; its solver's SIMD stays four lanes wide, which keeps that, where eight
 # wouldn't. Its glam is 0.33, not the engine's, so vectors cross between them as numbers.
-rapier2d = { version = "0.36.1", features = ["enhanced-determinism"] }
+# serde-serialize, so that snapshot files hold its bodies and contacts, which a restored world
+# steps on from as the world saved would have.
+rapier2d = { version = "0.36.1", features = ["enhanced-determinism", "serde-serialize"] }
 raw-window-handle = { version = "0.6.2", features = ["std"] }
 # The job system's pool and `join`, with the thread that ticks as a thread of the pool: `join` from
 # one keeps its job on the stack, where a call from outside the pool allocates through its queue.
@@ -62,7 +64,8 @@ rayon-core = "1.13.0"
 # zenity's without a portal. Its defaults, so that on Wayland the portal's dialog attaches to the
 # window it's shown over.
 rfd = "0.17.2"
-ron = "0.12.2"
+# integer128, for the 128-bit fields of rapier's bodies and colliders that snapshots hold.
+ron = { version = "0.12.2", features = ["integer128"] }
 scoped-tls = "1.0.1"
 serde = { version = "1.0.229", features = ["derive"] }
 # float_roundtrip, so that numbers parse to the float nearest them in every build: Cargo turns a

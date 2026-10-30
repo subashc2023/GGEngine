@@ -155,6 +155,15 @@ impl Writer<'_> {
             (_, Value::Vec4(v)) => floats(out, v.as_ref()),
             (_, Value::Quat(q)) => floats(out, &q.to_array()),
             (_, &Value::Entity(entity)) => self.reference(entity)?,
+            (_, &Value::Texture(texture)) => {
+                let Some(path) = self.world.assets().path(texture) else {
+                    return Err(Error::new(
+                        "asset.unnamed",
+                        "it's a texture that wasn't loaded from a file, so it has no path to save",
+                    ));
+                };
+                quote(out, path);
+            }
             (Type::Option(_), Value::Option(None)) => out.push_str("None"),
             (Type::Option(inner), Value::Option(Some(value))) => {
                 if **value == Value::Opaque {

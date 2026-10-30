@@ -37,7 +37,7 @@ enum Mode {
     Bounce(u8),
 }
 
-/// The golden scene, byte for byte: its first entity's sprite has a texture, which isn't saved.
+/// The golden scene, byte for byte.
 const GOLDEN: &str = r#"(
     entities: {
         "2b7e151628aed2a6": (
@@ -46,6 +46,7 @@ const GOLDEN: &str = r#"(
             ),
             Sprite: (
                 color: (0.8, 0.2, 0.3, 1.0),
+                texture: None,
                 rect: [
                     (0.0, 0.0),
                     (1.0, 1.0),
@@ -189,9 +190,7 @@ fn a_scene_loads_and_saves_as_its_canonical_text() {
         .save_scene(&roots)
         .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(saved, GOLDEN);
-    // A texture that code sets isn't saved; nor are entities that aren't the roots' subtrees.
-    let texture = Textures::default().add("first", [1, 1], &[0; 4], Mipmaps::None);
-    world.get_mut::<Sprite>(cell).expect("a sprite").texture = texture.expect("a texture");
+    // Entities that aren't the roots' subtrees aren't saved.
     assert_eq!(world.save_scene(&[cell, mover]).expect("saved"), GOLDEN);
     assert_eq!(
         world.save_scene(&[]).expect("saved"),
@@ -322,11 +321,11 @@ fn a_refused_scene_changes_nothing_and_says_where() {
                 + "there's no field `stopz`; the fields are `target`, `stops` and `mode`",
         ),
         (
-            "                stops: [],\n",
-            String::new(),
+            "Parent: (\"2b7e151628aed2a6\")",
+            "Parent: ()".to_owned(),
             "reflect.missing_field",
-            "(\n                target",
-            about("Patrol") + "field `stops` isn't given",
+            "(),\n            Patrol",
+            about("Parent") + "field `0` isn't given, and has no default to start from",
         ),
         (
             "stops: [],\n",
@@ -398,11 +397,12 @@ fn a_refused_scene_changes_nothing_and_says_where() {
         ),
         (
             "            Parent:",
-            "            Sprite: (\n                texture: 0,\n            ),\n            Parent:"
+            "            Sprite: (\n                texture: Some(\"nowhere.png\"),\n            ),\n            \
+             Parent:"
                 .to_owned(),
-            "reflect.opaque",
-            "texture",
-            about("Sprite") + "field `texture` is opaque",
+            "asset.no_texture",
+            "\"nowhere.png\"",
+            about("Sprite.texture") + "no texture was loaded from `nowhere.png`",
         ),
         (
             "            ),\n        ),\n    },\n)",
@@ -1133,4 +1133,57 @@ fn a_copy_that_would_have_a_living_or_kept_entitys_id_is_another() {
         }
         check_ids(&world);
     }
+}
+
+/// A sprite's texture saves as its path, which a load finds the texture by in a world that has it;
+/// one without that path refuses the scene, and a texture without a path refuses the save.
+#[test]
+fn a_sprite_saves_its_texture_by_its_path() {
+    let mut textures = Textures::default();
+    let mut add = |name| textures.add(name, [1, 1], &[0; 4], Mipmaps::None);
+    let [logo, unnamed] = ["logo", "unnamed"].map(|name| add(name).expect("a texture"));
+    let mut world = golden_world(4);
+    world
+        .assets_mut()
+        .add_texture(logo, "assets/logo.png".into());
+    let shown = Sprite {
+        texture: Some(logo),
+        ..Sprite::default()
+    };
+    let entity = world.spawn(shown);
+    let text = world.save_scene(&[entity]).expect("saved");
+    assert!(
+        text.contains("texture: Some(\"assets/logo.png\"),"),
+        "{text}"
+    );
+    let mut other = golden_world(5);
+    other
+        .assets_mut()
+        .add_texture(logo, "assets/logo.png".into());
+    let loaded = other.load_scene(&text).expect("loaded")[0];
+    assert_eq!(other.get::<Sprite>(loaded), Some(&shown));
+    let refused = golden_world(6)
+        .load_scene(&text)
+        .expect_err("no such texture");
+    assert_eq!(refused.code(), "asset.no_texture", "{refused}");
+    world.get_mut::<Sprite>(entity).expect("a sprite").texture = Some(unnamed);
+    let refused = world.save_scene(&[entity]).expect_err("no path");
+    assert_eq!(refused.code(), "asset.unnamed", "{refused}");
+}
+
+/// A field a scene leaves out, as a scene saved before its type had the field does, takes its
+/// default; and the scene saves again with it.
+#[test]
+fn a_field_a_scene_leaves_out_takes_its_default() {
+    let older = GOLDEN
+        .replacen("                texture: None,\n", "", 1)
+        .replacen("                stops: [],\n", "", 1);
+    let mut world = golden_world(7);
+    let roots = world.load_scene(&older).expect("loaded");
+    let mover = world.entity(id("9f86d081884c7d65")).expect("loaded");
+    assert_eq!(
+        world.get::<Patrol>(mover).map(|patrol| patrol.stops.len()),
+        Some(0)
+    );
+    assert_eq!(world.save_scene(&roots).expect("saved"), GOLDEN);
 }

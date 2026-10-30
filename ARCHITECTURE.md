@@ -120,6 +120,10 @@ until a viewer connects. Apps and games turn it on through `gg-engine`'s, as the
 Vulkan validation is a runtime switch rather than a feature, on by default in debug builds, so
 tests run with it whatever the features.
 
+The docs are a gate too: rustdoc's warnings, private items' docs included, as doc comments are
+most of what people and agents read of the code, so that a link that breaks, or comes to name two
+items, fails the change that broke it.
+
 ### Growth
 
 A module becomes its own crate once it has its own responsibility and a second user, not
@@ -166,22 +170,30 @@ in the editor is out of an agent's reach.
 - **The tool API.** A game's development build serves an API on the machine's loopback, at a port
   the OS picks, which it writes with a token in a session file in `sessions` beside its
   executable, removed as the run ends: query the world, apply and undo
-  [operations](#project-state), run, pause and step, capture frames, and read
+  [operations](#project-state), run, pause and step, capture frames, save the world whole as a
+  snapshot file, as [ECS](#ecs) describes, which a run given `--restore` starts from, and read
   [diagnostics](#diagnostics). Requests and their answers are lines of JSON, as
   [gg-api](crates/gg-api/src/lib.rs) describes, and a connection's first request says hello with
   the token, so that only processes that can read the file reach the game. A thread of the API's
   reads each connection and answers its pings itself, from the frames the main loop counts, so
   that a tool tells a hung game from a busy one, and from one whose frames have paused for the
   user, as for a minimized window or a file dialog. The main loop answers the rest as each frame
-  starts, before its ticks: a step once its ticks have run, and a capture once the render thread
-  has read the frame's view back, without the UI, which a thread of the API's writes as a PNG.
+  starts, before its ticks: a step once its ticks have run, a capture once the render thread has
+  read the frame's view back, without the UI, which a thread of the API's writes as a PNG, and a
+  snapshot once a thread of the API's has written the copy of the world the main loop took, but
+  none before the run's first tick, which applies what the layers queued as they started.
   Paused, frames run no ticks but those a step asks for, and draw the world as the last tick left
   it, so that a capture shows what a query reads. Each client gets only the capabilities it is
   granted, such as reading the world or editing one scene.
-- **Clients.** The command-line tool, `tools/gg`, builds and runs games, supervising them and
-  telling when one crashes or hangs, runs headless checks, and talks to running games, all with
-  machine-readable results; an MCP server gives agents that speak MCP the same reach; the editor
-  is one more client, with no ability an agent lacks.
+- **Clients.** The command-line tool, `tools/gg`, builds and runs games, supervising them: it
+  runs a copy of a game's executable, so that cargo builds the game again meanwhile, removing those
+  runs it killed left; snapshots it every few seconds from its first frame; and starts it again
+  from its last snapshot after a crash or a hang, and from one taken then as it's rebuilt, telling
+  of each, or waits for a rebuild if the game would only end the same way again, as one that ends
+  before its first snapshot would. A game that comes to its own end, as its window closes, ends the
+  supervision, as one that never serves does. It runs headless checks, and talks to running
+  games, all with machine-readable results; an MCP server gives agents that speak MCP the same
+  reach; the editor is one more client, with no ability an agent lacks.
 - **Headless runs.** Every app runs without a window (`--headless`) and can run a set number
   of frames, then exit with a status (`--frames N`): 0 for a clean run, 1 after an error or any
   validation message, and 2 for bad arguments. Dedicated servers, CI and agents checking their
@@ -208,13 +220,15 @@ A project's state is text that people and agents edit, diff and merge with ordin
   line and paragraph separators and default-ignorable code points; names ASCII identifiers; at
   most 64 levels deep. The engine writes the text itself, so that the bytes depend on no
   library's formatting, line endings or Rust release, and `ron` only reads it, through seeds
-  that reflection's descriptions drive, never its untyped values. What's opaque, such as a sprite's
-  texture or a `MeshDraw`, isn't saved: a load builds each component on its type's
-  `Component::base`, which gives it that, or from the scene alone. A child's `Parent` is saved as
-  its parent's ID, and a root's isn't. A save makes each component again as a load would, so that
-  every scene saved loads; a load checks everything before it spawns anything, all or nothing, and a
-  refusal begins with the line and column where the text is refused, and, but for a syntax error,
-  names the entity, the component and the field.
+  that reflection's descriptions drive, never its untyped values. A texture is saved as its path,
+  relative to the app's root (`App::root`), which a load finds it by among the textures the game
+  has loaded; what's opaque, such as a `MeshDraw`, isn't saved: a load builds each component on its
+  type's `Component::base`, which gives it that, or from the scene alone. A field a scene leaves
+  out, as one saved before its type had the field does, takes its default, and saves again whole.
+  A child's `Parent` is saved as its parent's ID, and a root's isn't. A save makes each component
+  again as a load would, so that every scene saved loads; a load checks everything before it spawns
+  anything, all or nothing, and a refusal begins with the line and column where the text is
+  refused, and, but for a syntax error, names the entity, the component and the field.
 - **Prefabs.** A prefab is a scene of one subtree, placed as a copy under a parent. Each of the
   copy's IDs is mixed from one drawn for the copy and the prefab's own, `mix64(local ^
   mix64(instance ^ PLACE))`, a permutation of the prefab's IDs for each copy, fixed for good, so
@@ -315,8 +329,10 @@ register as it starts, so that their names are taken first, and a game's the fir
 has one. Values cross as a closed `Value`: integers of fixed sizes only, so that a value means the
 same on every machine; `f32` apart from `f64`, so that bits come back as they went; an entity as
 its handle, as components hold one, which scenes, the tool API and replication name by its ID;
-and `Opaque` for what reflection keeps but doesn't read, such as a texture's handle, which no
-value may make. The world reads and sets a field by its component's name and a path, such as
+a texture as its handle, which the renderer alone makes, so that no value makes an index that
+shaders sample unchecked, and which scenes, snapshots, recordings and the tool API name by its path;
+and `Opaque` for what reflection keeps but doesn't read, such as a `MeshDraw`, which no value may
+make. The world reads and sets a field by its component's name and a path, such as
 `rect[1].y`: a set checks the whole value against the description before anything changes, and
 returns the old value, which sets it back unless code stored one that a set refuses. The Inspector
 edits the world through these calls and operations alone, which the tool API serves, so that an
@@ -348,10 +364,32 @@ handles with the same IDs and finding entities in the same order. A copy is anot
 serial of its own, which refuses what undoes an operation applied before, so that undo history
 doesn't outlive a restore.
 
+A snapshot file holds a world whole as text, so that a run restored from it, in another process,
+after a crash or a rebuild, goes on where the world was: each slot under its generation, the free
+ones in their order; each table in the order it was made, empty ones too, and its rows in theirs,
+each with its entity's ID and its components' values, as a recording's text writes values, by their
+fields' names; each parent's children in their order; the stream of IDs; the resources that save
+themselves; the ticks the simulation had run; and the assets the layers had added. Loaded, it's the
+world saved, hash for hash, but for the slots a log kept vacant, which no log in the new process
+gives back, so that they're freed. A component whose type changed since is matched to the type as
+it is by its fields' names: a field added takes its default, one dropped goes, a number of another
+kind is taken where it's exactly a number of the field's, and a component that no longer reads, or
+whose type is gone, is left out, its entity going on without it, each change warned of once, by
+the type's path rather than by value (`snapshot.changed`); a rotation that rounding took off unit
+length is normalized. What's opaque, such as a `MeshDraw`'s mesh and shader, holds indices, so it
+comes back only into a run whose layers added the same assets in the same order, of the same
+types, as the file's `asset` lines check, a draw's bytes by its mesh's and shader's types' names
+and sizes, and is left out otherwise. A world no load could read, such as a value nested deeper
+than a scene's may, isn't saved. [ecs/file.rs](crates/gg-engine/src/ecs/file.rs) and
+[snapshot.rs](crates/gg-engine/src/snapshot.rs) have the rest.
+
 A world holds resources beside its entities, a value of each type, for the rest of the simulation,
 such as 2D physics' bodies and contacts. Snapshots copy them, so that a restored world steps as the
-one it was taken from did; and no scene, hash, recording or dump holds them, so a resource holds
-what the simulation carries on from, or makes again from the entities, as physics makes its bodies.
+one it was taken from did, and snapshot files hold those whose types implement `Saved`, as physics'
+does through rapier's own serialization, while a restored run keeps those its layers made as they
+loaded of the other types; no scene, hash, recording or dump holds them, so a resource holds what
+the simulation carries on from, or makes again from the entities, as physics makes its bodies
+where a world has none.
 
 A world can be emptied, or have its entities replaced with a scene's, as the editor's New and Open
 do: `World::clear` and `World::replace_scene` free every slot, the vacant ones a log keeps too,
@@ -435,9 +473,13 @@ minimize), keyboard and mouse, and gamepads' from gilrs. winit and gilrs stay in
 so apps and games never see their types.
 
 An app is a stack of layers, which its `main` describes on `App`: layers, then overlays above them.
-Each layer attaches when the app starts and detaches when it ends, ticks with the simulation, as
-[ECS](#ecs) describes, updates every frame with the time since the last, for what's presented,
-handles events and draws UI. Frames pause while the main window is minimized, while a file dialog is
+As the app starts, each layer loads, making what it draws with and registering its component types,
+then attaches, building the world; in a run restored from a snapshot, whose world comes from the
+file, each loads, then picks up from the world in place of attaching (`Layer::restored`), such as
+the values its panels show. A layer that spawns as it loads panics, since a restored run would
+spawn it again. Each detaches when the app ends, ticks with the simulation, as [ECS](#ecs)
+describes, updates every frame with the time since the last, for what's presented, handles events
+and draws UI. Frames pause while the main window is minimized, while a file dialog is
 open, and on Windows while the window menu that the UI's title bar opens is open, which the OS runs
 in a loop of its own; the clock restarts after each, so that neither the frame times nor the next
 update count the pause. An event goes down the stack from the top overlay until a layer handles it,

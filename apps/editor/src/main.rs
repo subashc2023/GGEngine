@@ -66,7 +66,8 @@ fn main() -> ExitCode {
 }
 
 fn app() -> App {
-    let app = App::new("Editor").custom_title_bar().view_panel("Viewport");
+    let app = App::new("Editor").root(env!("CARGO_MANIFEST_DIR"));
+    let app = app.custom_title_bar().view_panel("Viewport");
     let app = app
         .dock("Inspector", Docked::RightOf("Viewport"))
         .dock("Entities", Docked::LeftOf("Viewport"))
@@ -811,10 +812,22 @@ fn alt_down(input: &Input) -> bool {
 }
 
 impl Layer for Editor {
-    fn attach(&mut self, cx: &mut Context) {
+    fn load(&mut self, cx: &mut Context) {
         cx.set_clear_color([0.02, 0.02, 0.025, 1.0]);
         self.grid = Some(Grid::new(cx));
+        // Before any entity has one, so that a world restored from a snapshot finds it by name.
+        let registered = cx.world_mut().register::<CameraController>();
+        registered.expect("the editor's script describes itself");
+    }
+
+    fn attach(&mut self, cx: &mut Context) {
         spawn_world(cx.world_mut());
+    }
+
+    /// While a copy plays or simulates, the world as it was edited, which Stop brings back, so that
+    /// a restart comes back to it, stopped.
+    fn saved_world(&self) -> Option<&World> {
+        self.edited.as_ref()
     }
 
     fn tick(&mut self, world: &mut World, tick: Tick) {
@@ -2012,6 +2025,9 @@ mod tests {
         assert_ne!(cx.world().serial(), edited, "a copy plays");
         assert!(height(&cx) < 3.0, "it falls");
         assert!(editor.carried.is_some());
+        // A snapshot saves the world as it was edited, which a restart comes back to, stopped.
+        let saved = editor.saved_world().map(World::serial);
+        assert_eq!(saved, Some(edited), "a snapshot's world");
         editor.update(&mut cx, Duration::ZERO);
         assert_eq!(editor.carried, None, "picked");
         // Changed as it plays, and saved meanwhile as it was edited.

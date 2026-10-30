@@ -1,8 +1,10 @@
 //! Resources: what a world holds beside its entities, one of each type, such as 2D physics' bodies
-//! and contacts, which snapshots copy and restores bring back with the entities, but which no
-//! scene, hash, recording or dump holds.
+//! and contacts, which snapshots copy and restores bring back with the entities, and snapshot files
+//! hold those that save themselves, but which no scene, hash, recording or dump holds.
 
 use std::any::{Any, TypeId};
+
+use gg_core::{Error, Result};
 
 use super::World;
 
@@ -17,10 +19,58 @@ pub trait Resource: Clone + Send + Sync + 'static {}
 
 impl<T: Clone + Send + Sync + 'static> Resource for T {}
 
+/// A resource that snapshot files hold, so that a run restored from one in another process takes it
+/// back as it was, as [`Physics2D`](crate::Physics2D) does: under a name of its own, as a line of
+/// text that [`save`](Self::save) writes and [`load`](Self::load) reads. A world's file holds those
+/// whose types it registered with [`World::register_saved`]; others are left out, made again from
+/// the entities, as after a scene loads.
+pub trait Saved: Resource {
+    /// Its name in snapshot files, which no other saved resource's type has.
+    const NAME: &'static str;
+
+    /// Writes it as a line of text, without line breaks, in `world`, whose entities it names by
+    /// their IDs, as [`World::id`] gives them.
+    ///
+    /// Fails as the type says, for what it can't write.
+    fn save(&self, world: &World) -> Result<String>;
+
+    /// Makes it again from `text`, which [`save`](Self::save) wrote, in `world`, whose entities
+    /// are back, each under its ID.
+    ///
+    /// Fails as the type says, for text it doesn't take.
+    fn load(text: &str, world: &World) -> Result<Self>;
+}
+
 /// A world's resources, in the order their types first came, which a copy keeps, so that one taken
-/// again into a copy kept from before copies each into the one in its place.
+/// again into a copy kept from before copies each into the one in its place; and the types that
+/// save themselves.
 #[derive(Default)]
-pub(super) struct Resources(Vec<Slot>);
+pub(super) struct Resources {
+    slots: Vec<Slot>,
+    saved: Vec<SavedType>,
+}
+
+/// A [`Saved`] resource's type: its name, and what writes and reads a resource of it without its
+/// type.
+#[derive(Clone, Copy)]
+pub(super) struct SavedType {
+    pub(super) type_id: TypeId,
+    pub(super) name: &'static str,
+    #[cfg(feature = "dev")]
+    save: fn(&dyn AnyResource, &World) -> Result<String>,
+    pub(super) load: fn(&str, &World) -> Result<Box<dyn AnyResource>>,
+}
+
+#[cfg(feature = "dev")]
+fn save_as<T: Saved>(resource: &dyn AnyResource, world: &World) -> Result<String> {
+    let resource: &dyn Any = resource;
+    let resource = resource.downcast_ref::<T>();
+    resource.expect("a type's resource").save(world)
+}
+
+fn load_as<T: Saved>(text: &str, world: &World) -> Result<Box<dyn AnyResource>> {
+    Ok(Box::new(T::load(text, world)?))
+}
 
 /// A type's resource, or `None` while [`World::resource_scope`] has it out of the world, or since
 /// it was removed.
@@ -30,7 +80,7 @@ struct Slot {
 }
 
 /// A resource, of a type the world doesn't know: what copies it.
-trait AnyResource: Any + Send + Sync {
+pub(super) trait AnyResource: Any + Send + Sync {
     fn cloned(&self) -> Box<dyn AnyResource>;
 
     /// Makes `to`, a resource of the same type, a copy of this one, in the memory it holds.
@@ -52,22 +102,26 @@ impl<T: Resource> AnyResource for T {
 
 impl Clone for Resources {
     fn clone(&self) -> Self {
-        let slots = self.0.iter().map(|slot| Slot {
+        let slots = self.slots.iter().map(|slot| Slot {
             type_id: slot.type_id,
             resource: slot.resource.as_ref().map(|resource| (**resource).cloned()),
         });
-        Self(slots.collect())
+        Self {
+            slots: slots.collect(),
+            saved: self.saved.clone(),
+        }
     }
 
     /// Copies each resource into the one of its type in its place, in the memory it holds, while
     /// the slots are of the same types in the same order; and copies them whole otherwise.
     fn clone_from(&mut self, source: &Self) {
-        let ours = self.0.iter().map(|slot| slot.type_id);
-        if !ours.eq(source.0.iter().map(|slot| slot.type_id)) {
+        self.saved.clone_from(&source.saved);
+        let ours = self.slots.iter().map(|slot| slot.type_id);
+        if !ours.eq(source.slots.iter().map(|slot| slot.type_id)) {
             *self = source.clone();
             return;
         }
-        for (slot, from) in self.0.iter_mut().zip(&source.0) {
+        for (slot, from) in self.slots.iter_mut().zip(&source.slots) {
             match (&mut slot.resource, &from.resource) {
                 (Some(to), Some(from)) => (**from).copy_to(&mut **to),
                 (to, from) => *to = from.as_ref().map(|from| (**from).cloned()),
@@ -79,17 +133,110 @@ impl Clone for Resources {
 impl Resources {
     /// The slot of `T`'s resource, if `T` has one.
     fn slot<T: Resource>(&self) -> Option<&Slot> {
-        self.0.iter().find(|slot| slot.type_id == TypeId::of::<T>())
+        self.slots
+            .iter()
+            .find(|slot| slot.type_id == TypeId::of::<T>())
     }
 
     fn slot_mut<T: Resource>(&mut self) -> Option<&mut Slot> {
-        self.0
+        self.slots
             .iter_mut()
             .find(|slot| slot.type_id == TypeId::of::<T>())
+    }
+
+    /// No resources, but the types that save themselves these have.
+    pub(super) fn emptied(&self) -> Self {
+        Self {
+            slots: Vec::new(),
+            saved: self.saved.clone(),
+        }
+    }
+
+    /// The type that saves its resources under `name`, if one does.
+    pub(super) fn saved(&self, name: &str) -> Option<SavedType> {
+        self.saved.iter().find(|saved| saved.name == name).copied()
+    }
+
+    /// Writes each resource that saves itself after `out`, a line each, `resource`, its name and
+    /// its text, in `world`, in the order their types first came.
+    ///
+    /// Fails as a resource's [`Saved::save`] does, with `snapshot.bad_name` for a name that isn't a
+    /// word, and with `snapshot.line_break` for text with a line break.
+    #[cfg(feature = "dev")]
+    pub(super) fn save(&self, world: &World, out: &mut String) -> Result<()> {
+        use std::fmt::Write as _;
+
+        use super::file::{one_line, one_word};
+
+        for slot in &self.slots {
+            let saved = self
+                .saved
+                .iter()
+                .find(|saved| saved.type_id == slot.type_id);
+            let (Some(saved), Some(resource)) = (saved, &slot.resource) else {
+                continue;
+            };
+            one_word(saved.name)?;
+            let text = (saved.save)(&**resource, world)?;
+            one_line(&text, &format!("resource `{}`", saved.name))?;
+            writeln!(out, "resource {} {text}", saved.name).expect("a string takes any text");
+        }
+        Ok(())
+    }
+
+    /// Puts `resource`, of the type `type_id` names, in its type's slot.
+    pub(super) fn restore(&mut self, type_id: TypeId, resource: Box<dyn AnyResource>) {
+        match self.slots.iter_mut().find(|slot| slot.type_id == type_id) {
+            Some(slot) => slot.resource = Some(resource),
+            None => self.slots.push(Slot {
+                type_id,
+                resource: Some(resource),
+            }),
+        }
+    }
+
+    /// Takes each resource `from` holds of a type it holds none of, after its own, as a world
+    /// loaded from a file keeps those its layers made as they loaded, which the file doesn't hold.
+    pub(super) fn keep(&mut self, from: Self) {
+        for slot in from.slots {
+            let ours = self.slots.iter().any(|ours| ours.type_id == slot.type_id);
+            if slot.resource.is_some() && !ours {
+                self.slots.push(slot);
+            }
+        }
     }
 }
 
 impl World {
+    /// Has snapshot files hold the world's `T`, as [`Saved`] says, and its copies', and the
+    /// worlds a file loads into it. Registering it again changes nothing.
+    ///
+    /// Fails with `ecs.name_taken` if another type saves under its name.
+    pub fn register_saved<T: Saved>(&mut self) -> Result<()> {
+        let saved = &mut self.resources.saved;
+        if let Some(other) = saved.iter().find(|saved| saved.name == T::NAME) {
+            if other.type_id == TypeId::of::<T>() {
+                return Ok(());
+            }
+            return Err(Error::new(
+                "ecs.name_taken",
+                format!(
+                    "`{}` saves under the name `{}`, which another resource's type has",
+                    std::any::type_name::<T>(),
+                    T::NAME
+                ),
+            ));
+        }
+        saved.push(SavedType {
+            type_id: TypeId::of::<T>(),
+            name: T::NAME,
+            #[cfg(feature = "dev")]
+            save: save_as::<T>,
+            load: load_as::<T>,
+        });
+        Ok(())
+    }
+
     /// The world's `T`, if it has one.
     pub fn resource<T: Resource>(&self) -> Option<&T> {
         let resource: &dyn Any = &**self.resources.slot::<T>()?.resource.as_ref()?;
@@ -109,7 +256,7 @@ impl World {
         let boxed: Box<dyn AnyResource> = Box::new(resource);
         match self.resources.slot_mut::<T>() {
             Some(slot) => slot.resource = Some(boxed),
-            None => self.resources.0.push(Slot {
+            None => self.resources.slots.push(Slot {
                 type_id: TypeId::of::<T>(),
                 resource: Some(boxed),
             }),
@@ -142,7 +289,7 @@ impl World {
         );
         match self.resources.slot_mut::<T>() {
             Some(slot) => slot.resource = Some(resource),
-            None => self.resources.0.push(Slot {
+            None => self.resources.slots.push(Slot {
                 type_id: TypeId::of::<T>(),
                 resource: Some(resource),
             }),

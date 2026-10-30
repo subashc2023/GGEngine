@@ -918,13 +918,14 @@ pub(super) mod tests {
             .for_each(|done| done.expect("registered"));
         let texture = Textures::default().add("own", [1, 1], &[255, 0, 0, 255], Mipmaps::None);
         let texture = texture.expect("a texture");
+        world.assets_mut().add_texture(texture, "own.png".into());
         let at = |x: f32| Transform {
             translation: Vec3::new(x, 0.0, 0.0),
             ..Transform::IDENTITY
         };
         let r = world.spawn(at(0.0));
         let sprite = Sprite {
-            texture,
+            texture: Some(texture),
             ..Sprite::default()
         };
         let a = world.spawn((at(1.0), sprite));
@@ -1057,7 +1058,7 @@ pub(super) mod tests {
         }
         // What's opaque, which no value reads, came back too.
         let sprite = x.world.get::<Sprite>(x.a).expect("a sprite");
-        assert_eq!(sprite.texture, x.texture);
+        assert_eq!(sprite.texture, Some(x.texture));
         let all = x.world.get::<Everything>(x.f).expect("everything");
         assert_eq!(all.handle, Handle(99));
         assert_eq!(x.world.get::<Sealed>(x.g), Some(&Sealed(5)));
@@ -1098,7 +1099,7 @@ pub(super) mod tests {
             assert_ne!(x.world.id(copy), Some(x.id(original)));
         }
         let sprite = x.world.get::<Sprite>(a).expect("copied");
-        assert_eq!(sprite.texture, x.texture, "opaque");
+        assert_eq!(sprite.texture, Some(x.texture), "opaque");
         assert_eq!(x.world.get::<Sealed>(g), Some(&Sealed(5)));
         let all = x.world.get::<Everything>(f).expect("copied");
         assert_eq!(all.target, Some(e), "its copy's");
@@ -1191,7 +1192,7 @@ pub(super) mod tests {
         assert_eq!(all.target, Some(x.e));
         x.world.save_scene(&roots).expect("whole again");
         let sprite = x.world.get::<Sprite>(x.a).expect("a sprite");
-        assert_eq!(sprite.texture, x.texture);
+        assert_eq!(sprite.texture, Some(x.texture));
         check_ids(&x.world);
         check_links(&x.world);
         // Redone and dropped, its entities are gone for good, their slots free under their next

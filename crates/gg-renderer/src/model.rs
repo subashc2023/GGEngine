@@ -69,10 +69,12 @@ impl Default for Material {
     }
 }
 
-/// The model shaders' parameters: `Material` in model.slang.
+/// The model shaders' parameters: `Material` in model.slang. Public for its name and size alone,
+/// which a snapshot's assets give as what a model's draws hold.
+#[doc(hidden)]
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, NoUninit)]
-pub(crate) struct Params {
+pub struct Params {
     color: Vec4,
     texture: Texture,
     sampler: u32,

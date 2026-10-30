@@ -47,6 +47,24 @@ file, under Workflow.
 |---|---|---|
 | A command nested deeper than 64 levels, the most a replay reads, is recorded, so its replay refuses the whole recording, at that command's line (`replay.syntax`): the recorder ends a recording before a command only as its queue's `check` says, and neither a `Vec`'s, which makes the command, nor the Inspector's, which checks nothing, counts its levels | Count a command's levels as it's recorded, ending the recording before one nested deeper with `record.bad_command`, as before one its queue's `check` refuses | A command nests that deep, or the tool API takes values from outside |
 
+## Reflection
+
+| Defect | Fix | Worth it when |
+|---|---|---|
+| A bound whose text starts with `0`, as `min = 0.5`, on a field of an array type, as `[f32; 3]`, fails `clippy -D warnings` with `zero_prefixed_literal`: the derive's check that a bound suits its field's type places the type's tokens at the bound, so that an error shows there, the array's length among them, and clippy reads the bound's text as the length's | Place only the check's own tokens at the bound, leaving the type's literals where they're written | A game bounds an array field so |
+
+## Snapshots
+
+| Defect | Fix | Worth it when |
+|---|---|---|
+| A restore whose only change to the world is an enum's variants reordered, or one inserted before others, warns `snapshot.hash` that the world goes on otherwise than it would have, though every value came back: a snapshot names a variant, which a restore matches by name, while the hash digests its place, and nothing in the file says where it was | Write a digest of each component type's fields' and variants' names and types, in order, beside its tables, and check the hash only where every type is as it was | The warning misleads someone after such a rebuild |
+
+## Physics
+
+| Defect | Fix | Worth it when |
+|---|---|---|
+| A body that turns for minutes drifts off unit length: a step multiplies its rotation by the step's turn without normalizing it, which in a model of it passed what a rotation may be after 2 to 5 minutes at 3 to 7 radians a second, so that a scene saved of the world is refused (`reflect.not_normalized`), and a snapshot normalizes it, with a note | Normalize the rotation as each step turns it, writing physics' reference hash again by hand | A game's bodies turn for long, or a game saves scenes as it plays |
+
 ## Layers
 
 | Defect | Fix | Worth it when |
@@ -71,3 +89,9 @@ file, under Workflow.
 | A scene dragged onto the view from the Assets panel torn off into a window of its own opens nothing: egui's drag stays in the window it started in, so the view never sees it let go | Follow a drag out of the window it started in, so that the view takes its release | Someone drags from a torn-off Assets panel |
 | The Inspector sets a rotation whole, and a vector inside an option or a variant, as the panel last read it, after the ticks of the layers below it: turning one angle of something that spins, as the sandbox's triangle does, holds the others where they were, and an undo takes back the spin made since too | Set only the part that changed | Someone edits a rotation, or a vector held so, as it moves |
 | After an undo or a redo, above 64 frames a second, a field shows its value from before for a frame or so, and a refusal and the Edit menu's names come at the tick: the Inspector draws a set waiting for its tick as the set will make it, but not an undo or a redo | Draw an undo or a redo waiting for its tick as it will make it, as a set is drawn | It shows, or Phase 9's editor in another process |
+
+## Tools
+
+| Defect | Fix | Worth it when |
+|---|---|---|
+| `gg run` removes the copies of a game's executable that other runs left as it starts, but for those Windows holds while a game runs from them; so one that another `gg run` of the game has just made, and not yet started its game from, goes too, and that run fails with `gg.run` | Hold a lock on a file beside each copy for the run's life, with `File::try_lock`, and remove only the copies whose lock is free | Two runs of one game start at once, as a networked game's peers may |

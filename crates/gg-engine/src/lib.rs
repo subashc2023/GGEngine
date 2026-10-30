@@ -22,6 +22,7 @@ extern crate self as gg_engine;
 mod actions;
 mod api;
 mod args;
+mod assets;
 mod camera;
 mod chrome;
 // In development builds alone, as `dev` has it.
@@ -54,6 +55,7 @@ pub mod reflect;
 mod render_thread;
 mod renderer_components;
 mod script;
+mod snapshot;
 // What the UI's tests share, in tests alone.
 #[cfg(test)]
 mod testing;
@@ -88,8 +90,8 @@ pub use dialog::FileDialog;
 pub use dock::{Docked, Ui};
 pub use ecs::{
     Bundle, Component, Difference, Entities, Entity, EntityId, Log, Operation, Parent, Pose, Query,
-    QueryIter, QueryIterMut, ReadOnlyQuery, Resource, World, WorldHash, Writable, read_scene,
-    write_scene,
+    QueryIter, QueryIterMut, ReadOnlyQuery, Resource, Saved, World, WorldHash, Writable,
+    read_scene, write_scene,
 };
 /// The UI library layers draw with, in [`Layer::ui`]; apps use it from here, so that they
 /// share the engine's version.
@@ -133,6 +135,7 @@ use recording::Recorder;
 pub use recording::Replay;
 pub use reflect::Reflect;
 pub use script::{Script, run_scripts};
+use snapshot::Snapshot;
 pub use transform::Transform;
 
 const BUILD: &str = if cfg!(debug_assertions) {
@@ -155,6 +158,8 @@ pub struct App {
     seed: Option<u64>,
     /// How far apart headless frames are, rather than a tick each.
     headless_step: Option<Duration>,
+    /// What the files of the assets the layers add are named from.
+    root: Option<PathBuf>,
 }
 
 impl App {
@@ -168,7 +173,19 @@ impl App {
             docked: Vec::new(),
             seed: None,
             headless_step: None,
+            root: None,
         }
+    }
+
+    /// Names each asset the layers add from a file by its path relative to `root`, the game's
+    /// directory, as `env!("CARGO_MANIFEST_DIR")` gives it, with `/` between its parts, such as
+    /// `assets/logo.png`: what scenes, snapshots, recordings and the tool API name a sprite's
+    /// texture by, so that they find it again in another run, or on another machine. Without it,
+    /// or for a file outside it, an asset is named by its path as the layer gave it.
+    #[must_use]
+    pub fn root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.root = Some(root.into());
+        self
     }
 
     /// Draws the world's IDs from `seed` rather than from a seed drawn at random, so that a run's
@@ -350,20 +367,25 @@ fn run_args(
     if let Some(path) = &args.replay {
         return recording::replay(app, path, args.dump);
     }
+    // Before the tool API starts, as tools take a run that serves it to have started, so that a
+    // snapshot it can't take ends it first.
+    let snapshot = (args.restore.as_deref())
+        .map(|path| Snapshot::read(path, app.name))
+        .transpose();
     let recorder = args
         .record
         .as_deref()
         .map(|path| Recorder::create(path, app.name));
-    let ran = recorder.transpose().and_then(|recorder| {
-        if let Some(recorder) = recorder {
+    let ran = snapshot.and_then(|snapshot| {
+        if let Some(recorder) = recorder.transpose()? {
             app.stack.record(recorder);
         }
         // Before the renderer starts, so that tools find a run that hangs as it starts.
-        let api = api::start(app.name, log.as_deref(), args.api);
+        let api = api::start(app.name, app.stack.names(), log.as_deref(), args.api);
         if args.headless {
-            run_headless(&mut app, &args, api)
+            run_headless(&mut app, &args, api, snapshot)
         } else {
-            window::run(&mut app, &args, api)
+            window::run(&mut app, &args, api, snapshot)
         }
     });
     match ran {

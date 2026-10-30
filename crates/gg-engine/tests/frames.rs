@@ -190,7 +190,7 @@ impl Scene {
             world.spawn((below, circle, CircleCollider2D::default()))
         } else {
             let textured = Sprite {
-                texture: assets.texture,
+                texture: Some(assets.texture),
                 ..Sprite::default()
             };
             world.spawn((below, textured))
@@ -249,7 +249,7 @@ impl Layer for Scene {
                     ..Sprite::default()
                 },
                 2 => Sprite {
-                    texture: assets.texture,
+                    texture: Some(assets.texture),
                     ..Sprite::default()
                 },
                 _ => assets.sheet.sprite([(i / 4 % 2) as u32, 0], [1, 1]),
