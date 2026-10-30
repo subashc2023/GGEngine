@@ -188,9 +188,10 @@ struct Png {
 }
 
 impl Api {
-    /// Starts serving app `app`'s run, whose layers are `layers`, from the bottom up, and whose JSON
-    /// log is at `log`, if it has one: listens on the loopback, starts its threads and writes the
-    /// session file.
+    /// Starts serving app `app`'s run, whose layers are `layers`, from the bottom up, whose JSON
+    /// log is at `log`, if it has one, which plays `player` in a lockstep session, if it's a peer
+    /// of one, and whose project's manifest is at `project`, if it's a project's game: listens on
+    /// the loopback, starts its threads and writes the session file.
     ///
     /// Fails with `api.start` if it can't.
     pub(crate) fn start(
@@ -198,6 +199,7 @@ impl Api {
         layers: &[&str],
         log: Option<&Path>,
         player: Option<u8>,
+        project: Option<&Path>,
     ) -> Result<Self> {
         let failed = |what: String| move |error| Error::new("api.start", what).with_source(error);
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -219,6 +221,7 @@ impl Api {
             engine: crate::recording::engine(),
             aslr_reference: patch::aslr_reference(),
             player,
+            project: project.map(Path::to_owned),
         };
         let welcome = Welcome {
             app: session.app.clone(),
@@ -1150,10 +1153,15 @@ mod tests {
     /// How long a test waits for what should come at once, past which it fails rather than hangs.
     const DEADLINE: Duration = Duration::from_secs(20);
 
+    /// The manifest of the project whose game [`started`] starts the API for.
+    const PROJECT: &str = "games/tested/project.ron";
+
     /// Starts the API for app `app`, a name of the test's own, so that tests running at once write
-    /// session files of their own; and returns it, with the session its file gives.
+    /// session files of their own, a game of the project [`PROJECT`] names; and returns it, with
+    /// the session its file gives.
     fn started(app: &str) -> (Api, Session) {
-        let api = Api::start(app, &[], None, None).expect("the API starts");
+        let project = Some(Path::new(PROJECT));
+        let api = Api::start(app, &[], None, None, project).expect("the API starts");
         let pid = std::process::id();
         let file = crate::beside_exe("sessions").join(Session::file_name(app, pid));
         let text = fs::read(file).expect("the session file");
@@ -1290,6 +1298,7 @@ mod tests {
     #[test]
     fn a_connection_says_hello_with_the_token_and_pings_without_frames() {
         let (_api, session) = started("Api Hello");
+        assert_eq!(session.project.as_deref(), Some(Path::new(PROJECT)));
         let wrong = Session {
             token: "0".repeat(32),
             ..session.clone()

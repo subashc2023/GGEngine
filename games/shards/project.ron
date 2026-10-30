@@ -1,0 +1,8 @@
+(
+    game: "shards",
+    assets: ".",
+    scenes: [
+        "scenes",
+    ],
+    start: "scenes/arena.ron",
+)

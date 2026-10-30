@@ -1,8 +1,11 @@
 //! Cargo, for `gg`: building a package and finding its executable; the workspace's target
-//! directory, where games write their session files; and what `gg run`'s patches need of a package.
+//! directory, where games write their session files; what `gg run`'s patches need of a package; and
+//! whether a project's game is the package beside its manifest. Each runs cargo in a directory it's
+//! given, a project's, where it finds the workspace, or else in `gg`'s own.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
+use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -10,17 +13,25 @@ use std::process::{Command, Stdio};
 use gg_api::Failure;
 use serde_json::Value;
 
-/// The cargo to run: the one running `gg`, as `cargo gg` does, or else the first on the `PATH`.
-fn cargo() -> OsString {
-    std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into())
+use crate::Scope;
+
+/// Cargo, run in directory `dir`, or in `gg`'s own: the one running `gg`, as `cargo gg` does, or
+/// else the first on the `PATH`.
+fn cargo(dir: Option<&Path>) -> Command {
+    let mut command =
+        Command::new(std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo")));
+    if let Some(dir) = dir {
+        command.current_dir(dir);
+    }
+    command
 }
 
-/// Builds package `package`, in the release profile if `release`, through cargo, whose messages
-/// about the code go to stderr as cargo renders them; and returns its executable.
+/// Builds package `package`, in the release profile if `release`, through cargo run in `dir`,
+/// whose messages about the code go to stderr as cargo renders them; and returns its executable.
 ///
 /// Fails with `gg.build` if cargo can't run, the build fails, or it makes no executable.
-pub(crate) fn build(package: &str, release: bool) -> Result<PathBuf, Failure> {
-    let mut command = Command::new(cargo());
+pub(crate) fn build(package: &str, release: bool, dir: Option<&Path>) -> Result<PathBuf, Failure> {
+    let mut command = cargo(dir);
     command.args([
         "build",
         "--package",
@@ -58,20 +69,20 @@ pub(crate) fn build(package: &str, release: bool) -> Result<PathBuf, Failure> {
     exe.ok_or_else(|| failed(format!("package `{package}` has no executable")))
 }
 
-/// The directory cargo builds the workspace into, as `cargo metadata` says.
+/// The directory cargo builds the workspace into, as `cargo metadata`, run in `dir`, says.
 ///
 /// Fails with `gg.cargo` if cargo can't say, as outside a workspace.
-pub(crate) fn target_dir() -> Result<PathBuf, Failure> {
-    target_of(&metadata(false)?)
+pub(crate) fn target_dir(dir: Option<&Path>) -> Result<PathBuf, Failure> {
+    target_of(&metadata(false, dir)?)
 }
 
-/// What `cargo metadata` says of the workspace, and with `deps`, of the packages it depends on and
-/// how they resolve.
+/// What `cargo metadata`, run in `dir`, says of the workspace, and with `deps`, of the packages it
+/// depends on and how they resolve.
 ///
 /// Fails with `gg.cargo` if cargo can't say, as outside a workspace.
-fn metadata(deps: bool) -> Result<Value, Failure> {
+pub(crate) fn metadata(deps: bool, dir: Option<&Path>) -> Result<Value, Failure> {
     let failed = |what: String| Failure::new("gg.cargo", what);
-    let mut command = Command::new(cargo());
+    let mut command = cargo(dir);
     command.args(["metadata", "--format-version", "1"]);
     if !deps {
         command.arg("--no-deps");
@@ -121,11 +132,43 @@ pub(crate) struct Package {
     pub(crate) target: PathBuf,
 }
 
-/// Package `name` of the workspace, as `gg run`'s patches need it.
+/// Package `name` of the workspace, as cargo run in `dir` finds it, as `gg run`'s patches need it.
 ///
 /// Fails with `gg.cargo` if cargo can't say, and as [`package_in`] does.
-pub(crate) fn package(name: &str) -> Result<Package, Failure> {
-    package_in(&metadata(true)?, name)
+pub(crate) fn package(name: &str, dir: Option<&Path>) -> Result<Package, Failure> {
+    package_in(&metadata(true, dir)?, name)
+}
+
+/// Checks that the game the project `scope` names is the package whose manifest is beside the
+/// project's, as a manifest copied from another game's wouldn't be.
+///
+/// Fails with `gg.project` if it isn't, naming both, and with `gg.cargo` if cargo can't say.
+pub(crate) fn check_project(scope: &Scope) -> Result<(), Failure> {
+    beside(&metadata(false, Some(scope.dir()))?, scope)
+}
+
+/// As [`check_project`], with `metadata`, what `cargo metadata` said of the workspace, comparing
+/// the directories canonical where they're there, as the project's may be named in another form.
+fn beside(metadata: &Value, scope: &Scope) -> Result<(), Failure> {
+    let canonical = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+    let game = scope.game.as_str();
+    let manifest = (list(&metadata["packages"]).iter())
+        .find(|package| package["name"] == game)
+        .and_then(|package| Some(PathBuf::from(package["manifest_path"].as_str()?)));
+    let dir = manifest.as_deref().and_then(Path::parent).map(canonical);
+    if dir == Some(canonical(scope.dir())) {
+        return Ok(());
+    }
+    let found = match &manifest {
+        Some(manifest) => format!(
+            "that package's manifest is {}, not beside the project's",
+            manifest.display()
+        ),
+        None => "the workspace has no such package".to_owned(),
+    };
+    let project = scope.manifest.display();
+    let message = format!("the project {project} names its game `{game}`, but {found}");
+    Err(Failure::new("gg.project", message))
 }
 
 /// Package `name`, as `metadata`, what `cargo metadata` said with the dependencies, has it.
@@ -282,6 +325,24 @@ mod tests {
                 {"id": "subsecond 0.7.2", "deps": []},
             ]},
         })
+    }
+
+    /// A project's game is the package beside its manifest, which a copied manifest's isn't, nor
+    /// one of a package the workspace hasn't.
+    #[test]
+    fn a_projects_game_is_the_package_beside_it() {
+        let scope = |game: &str| Scope {
+            manifest: PathBuf::from("/w/game/project.ron"),
+            game: game.to_owned(),
+        };
+        assert_eq!(beside(&workspace(), &scope("game")), Ok(()));
+        for game in ["engine", "nothing"] {
+            let refused = beside(&workspace(), &scope(game)).err();
+            assert_eq!(
+                refused.map(|failure| failure.code).as_deref(),
+                Some("gg.project")
+            );
+        }
     }
 
     #[test]

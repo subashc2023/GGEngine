@@ -17,15 +17,14 @@ crates/           libraries
   gg-core/        math, logging, profiling, errors
   gg-gpu/         Vulkan through ash: the only crate that touches Vulkan
   gg-renderer/    passes, materials, render graph (to come); gets plain render data, never the scene
-  gg-engine/      what games use: main loop, window, input, scene, image and glTF loading,
-                  hot reload, the tool API
+  gg-engine/      what games use: main loop, window, input, scene, assets, hot reload, the tool API
   gg-macros/      the derives gg-engine re-exports
-  gg-api/         the tool API's protocol, which gg-engine and tools share
+  gg-api/         the tool API's protocol and projects' manifests, which gg-engine and tools share
 apps/             executables
   sandbox/        the engine's own app: a swarm of up to 100,000 sprites and a grid's scene file
   editor/         the editor: the game's view in a panel among dockable panels
   player/         reference player, with no layers; runs cooked scenes without game code (to come)
-games/shards/     the first demo: two players, alone or as lockstep peers (`--host`, `--join`)
+games/shards/     the first demo, a project: two players, alone or in lockstep (`--host`, `--join`)
 tools/gg/         the command-line tool, which `cargo gg` runs
 docs/PLAN.md      the roadmap (see Workflow)
 docs/DEFECTS.md   known defects of the code that exists (see Workflow)
@@ -51,7 +50,8 @@ cargo run -p sandbox --release --features tracy   # with zones for Tracy
 cargo build -p player --release   # shipping: the player alone, as wider builds merge in dev
 cargo test -p gg-renderer --test gpu -- picks   # the GPU tests whose names contain picks
 cargo gg run sandbox              # supervised, serving the tool API: `cargo gg help`
-cargo gg run shards --peers 2     # a lockstep session's host and joiner, supervised together
+cargo gg run --peers 2            # in games/shards, its project: a lockstep host and joiner
+cargo gg new <NAME>               # a new game, games/NAME, a project with an empty start scene
 ```
 
 Building needs a C++ compiler, for the Vulkan Memory Allocator, and `slangc` for the shaders: the

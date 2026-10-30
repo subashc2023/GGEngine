@@ -306,7 +306,9 @@ fn run(pick: &Pick, name: &str, mut arguments: Map<String, Value>) -> Result<Ran
         game::call(pick, method, params).map(|result| Ran::Json(result.get().to_owned()))
     };
     match name {
-        "sessions" => game::sessions().map(|sessions| Ran::Json(sessions.to_string())),
+        "sessions" => {
+            game::sessions(pick.project.as_deref()).map(|sessions| Ran::Json(sessions.to_string()))
+        }
         "status" | "pause" | "resume" | "hash" | "snapshot" => call(name, Value::Null),
         "step" | "entities" | "entity" | "get" | "apply" | "undo" | "redo" | "edits" => {
             call(name, Value::Object(arguments))
@@ -381,6 +383,7 @@ mod tests {
             app: None,
             timeout: Duration::from_secs(1),
             client: "mcp".to_owned(),
+            project: None,
         }
     }
 

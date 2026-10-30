@@ -413,7 +413,8 @@ impl Replay {
     /// format, ends in its header, or is of another app or other layers; and, saying at which line,
     /// with `replay.syntax` for a line that isn't one of a recording's, with `replay.bad_command`
     /// for a command of a layer the recording hasn't, and with `replay.diverged`, as
-    /// [`step`](Self::step) does, if the hash isn't the one recorded.
+    /// [`step`](Self::step) does, if the hash isn't the one recorded; and as the app's project's
+    /// manifest didn't read, as [`App::project`] says.
     pub fn new(app: App, text: &str) -> Result<Self> {
         let replay = Self::attach(app, text)?;
         replay.check(None)?;
@@ -422,6 +423,9 @@ impl Replay {
 
     /// As [`new`](Self::new), without checking the world's hash.
     fn attach(mut app: App, text: &str) -> Result<Self> {
+        if let Some(Err(error)) = app.project.take_if(|project| project.is_err()) {
+            return Err(error);
+        }
         let recording = Recording::parse(text)?;
         if recording.app != app.name {
             return Err(format_error(format!(
@@ -443,8 +447,9 @@ impl Replay {
             )));
         }
         let mut cx = Context::seeded(recording.seed);
-        // So that its textures are named as the run's were.
+        // So that its textures are named as the run's were, and it starts in the run's scene.
         cx.root.clone_from(&app.root);
+        cx.start = app.manifest().map(|manifest| manifest.start.clone());
         app.stack.attach(&mut cx);
         Ok(Self {
             app,

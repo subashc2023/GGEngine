@@ -7,7 +7,7 @@
 //! saved.
 
 use std::ops::ControlFlow;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -26,7 +26,7 @@ fn main() -> ExitCode {
 /// The game, with the engine's Performance, Entities and Inspector panels: what `main` runs, and
 /// what its recordings replay.
 fn app() -> App {
-    let app = App::new("Shards").root(env!("CARGO_MANIFEST_DIR"));
+    let app = App::new("Shards").project(env!("CARGO_MANIFEST_DIR"));
     let app = app.layer(Shards::new()).overlay(gg_engine::PerfPanel);
     app.overlay(gg_engine::Inspector::default())
 }
@@ -206,8 +206,8 @@ impl Layer for Shards {
 
     fn attach(&mut self, cx: &mut Context) {
         self.player = cx.player().unwrap_or(0);
-        // Watched as the game runs, in development builds, which apply its saves.
-        let loaded = cx.load_scene_file(scene("arena.ron"));
+        // The arena, watched as the game runs, in development builds, which apply its saves.
+        let loaded = cx.load_start_scene();
         loaded.unwrap_or_else(|error| panic!("{error:#}"));
         build(cx.world_mut());
     }
@@ -300,13 +300,6 @@ fn register(world: &mut World) {
         world.register::<Match>()
     });
     registered.expect("the game's components describe themselves");
-}
-
-/// The path of the game's scene file `name`.
-fn scene(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("scenes")
-        .join(name)
 }
 
 /// Builds what the arena's scene doesn't hold: the camera, the match, the players at their starts

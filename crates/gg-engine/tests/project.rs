@@ -1,0 +1,39 @@
+//! A game whose project's manifest doesn't read ends as its run starts, with status 1 and the
+//! manifest's error as the last thing its log says, before any renderer, so that it needs no GPU.
+//!
+//! It runs in a process of its own, as a run starts the log, which a process starts once.
+
+use std::fs;
+use std::path::Path;
+use std::process::ExitCode;
+
+use gg_engine::App;
+
+#[test]
+fn a_project_whose_manifest_doesnt_read_ends_the_run_as_it_starts() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("bad-project");
+    fs::create_dir_all(&dir).expect("a directory");
+    fs::write(dir.join("project.ron"), "(\n    game: \"bad\",\n)\n").expect("written");
+    let app = App::new("Bad Project").project(&dir);
+    let status = gg_engine::run_with(app, ["--headless", "--frames", "1"]);
+    assert_eq!(status, ExitCode::FAILURE);
+    let exe = std::env::current_exe().expect("the test's executable");
+    let logs = exe.parent().expect("its directory").join("logs");
+    let ending = format!("-{}.jsonl", std::process::id());
+    let log = fs::read_dir(&logs).into_iter().flatten().flatten();
+    let log = log
+        .map(|entry| entry.path())
+        .find(|path| path.to_str().is_some_and(|path| path.ends_with(&ending)))
+        .expect("the run's log");
+    let text = fs::read_to_string(&log).expect("the log");
+    let last = text.lines().last().unwrap_or_default();
+    // A build without `dev` reads no manifest.
+    let code = if cfg!(feature = "dev") {
+        "project.bad"
+    } else {
+        "engine.no_project"
+    };
+    let error =
+        last.contains("\"level\":\"ERROR\"") && last.contains(&format!("\"code\":\"{code}\""));
+    assert!(error, "{}: {last}", log.display());
+}

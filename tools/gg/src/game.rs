@@ -15,20 +15,45 @@ use crate::build;
 /// takes any time, refusing it.
 const CONNECT: Duration = Duration::from_secs(2);
 
-/// Which running game to talk to, how long to wait for its answers, and the client to say hello as,
-/// the author of the edits it applies.
+/// Which running game to talk to, how long to wait for its answers, the client to say hello as,
+/// the author of the edits it applies, and the project whose games alone it reaches, by its
+/// manifest's path, inside one.
 #[derive(Clone)]
 pub(crate) struct Pick {
     pub(crate) pid: Option<u32>,
     pub(crate) app: Option<String>,
     pub(crate) timeout: Duration,
     pub(crate) client: String,
+    pub(crate) project: Option<PathBuf>,
 }
 
 /// The session files of the games built in the workspace, as [`sessions_in`] its target directory
-/// finds them.
-fn session_files() -> Result<Vec<(PathBuf, Session)>, Failure> {
-    Ok(sessions_in(&build::target_dir()?))
+/// finds them; with `project`, a manifest's path, only those of the project's games, as [`scoped`]
+/// says, in the target directory cargo names from the project's directory.
+fn session_files(project: Option<&Path>) -> Result<Vec<(PathBuf, Session)>, Failure> {
+    let sessions = sessions_in(&build::target_dir(project.and_then(Path::parent))?);
+    Ok(match project {
+        Some(manifest) => scoped(sessions, manifest),
+        None => sessions,
+    })
+}
+
+/// The sessions of `sessions` whose games name the project manifest at `manifest`, comparing the
+/// paths canonical, as one may be named in another form, such as Windows' `\\?\` one, or through a
+/// link: none that names no project, as a game's whose engine is older than projects, or one that
+/// isn't there.
+fn scoped(sessions: Vec<(PathBuf, Session)>, manifest: &Path) -> Vec<(PathBuf, Session)> {
+    let Ok(manifest) = fs::canonicalize(manifest) else {
+        return Vec::new();
+    };
+    let ours = |session: &Session| {
+        let named = session.project.as_deref().map(fs::canonicalize);
+        named.is_some_and(|named| named.is_ok_and(|named| named == manifest))
+    };
+    sessions
+        .into_iter()
+        .filter(|(_, session)| ours(session))
+        .collect()
 }
 
 /// The session files in the `sessions` directory of each profile of target directory `target`:
@@ -61,10 +86,12 @@ fn connect_to(path: &Path, session: &Session, client: &str) -> Result<Option<Cli
 ///
 /// Fails with `gg.no_game` if none runs that it picks, and `gg.which_game` if more than one does.
 pub(crate) fn connect(pick: &Pick) -> Result<Client, Failure> {
-    let picked = session_files()?.into_iter().filter(|(_, session)| {
-        pick.pid.is_none_or(|pid| session.pid == pid)
-            && (pick.app.as_ref()).is_none_or(|app| session.app.eq_ignore_ascii_case(app))
-    });
+    let picked = session_files(pick.project.as_deref())?
+        .into_iter()
+        .filter(|(_, session)| {
+            pick.pid.is_none_or(|pid| session.pid == pid)
+                && (pick.app.as_ref()).is_none_or(|app| session.app.eq_ignore_ascii_case(app))
+        });
     let mut running = Vec::new();
     for (path, session) in picked {
         if let Some(client) = connect_to(&path, &session, &pick.client)? {
@@ -84,12 +111,21 @@ pub(crate) fn connect(pick: &Pick) -> Result<Client, Failure> {
     let mut running: Vec<Client> = running.into_iter().map(|(_, client)| client).collect();
     let mut client = match running.len() {
         0 => {
-            let which = match (&pick.pid, &pick.app) {
-                (None, None) => "no game is running".to_owned(),
-                _ => "no game that `--pid` or `--app` picks is running".to_owned(),
+            let of = (pick.project.as_ref())
+                .map(|project| format!(" of the project {}", project.display()))
+                .unwrap_or_default();
+            let picks = pick.pid.is_some() || pick.app.is_some();
+            let that = if picks {
+                " that `--pid` or `--app` picks"
+            } else {
+                ""
+            };
+            let run = match pick.project {
+                Some(_) => "`gg run` runs its game",
+                None => "`gg run <PACKAGE>` runs one",
             };
             let message = format!(
-                "{which}; `gg run <PACKAGE>` runs one, and `gg sessions` lists those running"
+                "no game{of}{that} is running; {run}, and `gg sessions` lists those running"
             );
             return Err(Failure::new("gg.no_game", message));
         }
@@ -118,11 +154,12 @@ pub(crate) fn call(pick: &Pick, method: &str, params: Value) -> Result<Box<RawVa
     connect(pick)?.call(method, params)
 }
 
-/// The running games, as an array: each one's app, process, address, engine, log, the frames it
-/// has run, and what it waits for, if anything.
-pub(crate) fn sessions() -> Result<Value, Failure> {
+/// The running games, those of the project whose manifest is at `project` alone, as an array: each
+/// one's app, process, address, engine, player, project, log, the frames it has run, and what it
+/// waits for, if anything.
+pub(crate) fn sessions(project: Option<&Path>) -> Result<Value, Failure> {
     let mut games = Vec::new();
-    for (path, session) in session_files()? {
+    for (path, session) in session_files(project)? {
         let Some(mut client) = connect_to(&path, &session, "gg")? else {
             continue;
         };
@@ -133,6 +170,7 @@ pub(crate) fn sessions() -> Result<Value, Failure> {
             "address": session.address,
             "engine": session.engine,
             "player": session.player,
+            "project": session.project,
             "log": session.log,
             "frames": pulse.frames,
             "waiting": pulse.waiting,
@@ -240,6 +278,35 @@ pub(crate) fn log_of(dir: &Path, pid: u32) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    /// Writes the session file of a game in process `pid`, of the project whose manifest is at
+    /// `project`, if any, in `dir`.
+    fn write_session(dir: &Path, pid: u32, project: Option<PathBuf>) {
+        fs::create_dir_all(dir).expect("a directory");
+        let session = Session {
+            app: "Sandbox".to_owned(),
+            pid,
+            address: "127.0.0.1:4000".parse().expect("an address"),
+            token: "t".to_owned(),
+            log: None,
+            engine: "0.1.0 debug".to_owned(),
+            aslr_reference: 0,
+            player: None,
+            project,
+        };
+        let text = serde_json::to_string(&session).expect("JSON");
+        fs::write(dir.join(Session::file_name("Sandbox", pid)), text).expect("written");
+    }
+
+    /// The process IDs of `sessions`, in order.
+    fn pids(sessions: Vec<(PathBuf, Session)>) -> Vec<u32> {
+        let mut pids: Vec<u32> = sessions
+            .into_iter()
+            .map(|(_, session)| session.pid)
+            .collect();
+        pids.sort();
+        pids
+    }
+
     /// Games cargo built, and one dx built, which builds for its target, are all found.
     #[test]
     fn sessions_are_found_in_cargos_profiles_and_in_those_of_dxs_target() {
@@ -247,26 +314,37 @@ mod tests {
         let _ = fs::remove_dir_all(&target);
         let profiles = ["debug", "release", "x86_64-pc-windows-msvc/desktop-dev"];
         for (pid, profile) in (1..).zip(profiles) {
-            let dir = Session::dir(&target.join(profile));
-            fs::create_dir_all(&dir).expect("a directory");
-            let session = Session {
-                app: "Sandbox".to_owned(),
-                pid,
-                address: "127.0.0.1:4000".parse().expect("an address"),
-                token: "t".to_owned(),
-                log: None,
-                engine: "0.1.0 debug".to_owned(),
-                aslr_reference: 0,
-                player: None,
-            };
-            let text = serde_json::to_string(&session).expect("JSON");
-            fs::write(dir.join(Session::file_name("Sandbox", pid)), text).expect("written");
+            write_session(&Session::dir(&target.join(profile)), pid, None);
         }
-        let mut pids: Vec<u32> = (sessions_in(&target).into_iter())
-            .map(|(_, session)| session.pid)
-            .collect();
+        let pids = pids(sessions_in(&target));
         let _ = fs::remove_dir_all(&target);
-        pids.sort();
         assert_eq!(pids, [1, 2, 3]);
+    }
+
+    /// Inside a project, its games' sessions alone are found, by its manifest's path in whatever
+    /// form each names it: not another project's, nor a game's that names none.
+    #[test]
+    fn sessions_are_scoped_to_their_project() {
+        let root = std::env::temp_dir().join(format!("gg-scoped-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let manifests = ["a", "b"].map(|game| root.join(game).join("project.ron"));
+        for manifest in &manifests {
+            fs::create_dir_all(manifest.parent().expect("a directory")).expect("a directory");
+            fs::write(manifest, "").expect("written");
+        }
+        let dir = Session::dir(&root.join("target").join("debug"));
+        let roundabout = root.join("b").join("..").join("a").join("project.ron");
+        write_session(&dir, 1, Some(roundabout));
+        write_session(&dir, 2, Some(manifests[1].clone()));
+        write_session(&dir, 3, None);
+        let found = |manifest: &Path| pids(scoped(sessions_in(&root.join("target")), manifest));
+        let (a, b, none) = (
+            found(&manifests[0]),
+            found(&manifests[1]),
+            found(&root.join("c")),
+        );
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!((a, b), (vec![1], vec![2]));
+        assert!(none.is_empty());
     }
 }

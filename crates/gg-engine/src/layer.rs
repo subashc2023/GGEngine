@@ -262,6 +262,11 @@ pub struct Context {
     ///
     /// [`App::root`]: crate::App::root
     pub(crate) root: Option<PathBuf>,
+    /// The project's start scene, which [`load_start_scene`](Self::load_start_scene) loads, as
+    /// [`App::project`] says.
+    ///
+    /// [`App::project`]: crate::App::project
+    pub(crate) start: Option<PathBuf>,
     /// The assets the layers added: the world's, which a world that a layer puts in its place
     /// takes again, as [`share_assets`](Self::share_assets) says.
     assets: Arc<Assets>,
@@ -292,6 +297,7 @@ impl Context {
         let world = app.seed.map_or_else(World::default, World::seeded);
         let mut cx = Self::with_world(window, world);
         cx.root.clone_from(&app.root);
+        cx.start = app.manifest().map(|manifest| manifest.start.clone());
         cx
     }
 
@@ -313,6 +319,19 @@ impl Context {
     pub fn root(mut self, root: impl Into<PathBuf>) -> Self {
         self.root = Some(root.into());
         self
+    }
+
+    /// Makes the context's game the project whose manifest is in `dir`, as
+    /// [`App::project`](crate::App::project) does for a run, naming assets from its asset root and
+    /// loading its start scene: for a [`seeded`](Self::seeded) context.
+    ///
+    /// Fails as the manifest's reading does in a run that `App::project` made a project's.
+    #[doc(hidden)]
+    pub fn project(mut self, dir: impl AsRef<Path>) -> Result<Self> {
+        let manifest = crate::Manifest::read(dir.as_ref())?;
+        self.root = Some(manifest.root);
+        self.start = Some(manifest.start);
+        Ok(self)
     }
 
     fn with_world(window: Option<Window>, mut world: World) -> Self {
@@ -356,6 +375,7 @@ impl Context {
             past: Past::default(),
             attached: false,
             root: None,
+            start: None,
             assets,
             perf: Perf::default(),
             paused: false,
@@ -783,6 +803,26 @@ impl Context {
         self.scenes
             .loaded(SceneFile::new(path.to_owned(), author, text));
         Ok(roots)
+    }
+
+    /// Loads the project's start scene as the layer attaches, as
+    /// [`load_scene_file`](Self::load_scene_file) loads a scene file, and returns its roots: in a
+    /// development build, watched, its edits' author its path from the asset root, such as
+    /// `scenes/arena.ron`.
+    ///
+    /// Fails with `engine.no_project` for a game that isn't a project's, as
+    /// [`App::project`](crate::App::project) makes it, and as `load_scene_file` does.
+    ///
+    /// # Panics
+    ///
+    /// Outside the layers' attach and detach, as [`world_mut`](Self::world_mut) does.
+    pub fn load_start_scene(&mut self) -> Result<Vec<Entity>> {
+        let Some(start) = self.start.clone() else {
+            let message = "the game isn't a project's, which has a start scene: `App::project` \
+                           makes it one";
+            return Err(Error::new("engine.no_project", message));
+        };
+        self.load_scene_file(start)
     }
 
     /// Applies `edit`, an author's from outside the layers, to the world, between ticks, unrecorded,

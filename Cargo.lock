@@ -849,6 +849,7 @@ dependencies = [
 name = "gg-api"
 version = "0.1.0"
 dependencies = [
+ "ron",
  "serde",
  "serde_json",
 ]
@@ -2536,6 +2537,7 @@ name = "shards"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "gg-api",
  "gg-engine",
 ]
 

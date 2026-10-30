@@ -154,6 +154,12 @@ jobs:
         run: cargo run -p sandbox --locked --features tracy -- --headless --frames 60
         env:
           TRACY_NO_INVARIANT_CHECK: "1"
+      # `gg new`'s game builds against the engine as it is and runs headless, from the workspace and
+      # from inside its project: nothing else compiles its template. Last, as the new member changes
+      # the lock file, which `--locked` refuses.
+      - name: Make a new game, and check it
+        if: matrix.once
+        run: cargo gg new probe && cargo gg check probe && (cd games/probe && cargo gg check)
 
   layering:
     name: Layering rules

@@ -267,6 +267,38 @@ mod tests {
         file.set_modified(at).expect("stamped");
     }
 
+    /// A project's start scene loads as a scene file, watched, its edits' author its path from the
+    /// project's asset root; a game that isn't a project's has none.
+    #[test]
+    fn the_start_scene_loads_as_a_scene_file_of_its_project() {
+        let dir = Scratch::new("start-scene");
+        fs::create_dir_all(dir.0.join("scenes")).expect("a directory");
+        let project = gg_api::Project {
+            game: "tested".to_owned(),
+            assets: ".".to_owned(),
+            scenes: vec!["scenes".to_owned()],
+            start: "scenes/main.ron".to_owned(),
+        };
+        fs::write(dir.0.join(gg_api::Project::FILE), project.text()).expect("written");
+        let mut file = crate::World::seeded(1);
+        let a = file.spawn(Transform::IDENTITY);
+        let path = dir.0.join("scenes").join("main.ron");
+        fs::write(&path, file.save_scene(&[a]).expect("saved")).expect("written");
+        let mut cx = Context::seeded(2)
+            .project(&dir.0)
+            .expect("the project reads");
+        assert_eq!(cx.root.as_deref(), Some(dir.0.as_path()));
+        assert_eq!(cx.load_start_scene().expect("loaded").len(), 1);
+        let files = &cx.scenes.files;
+        assert_eq!(files.len(), 1);
+        assert_eq!(
+            (&files[0].path, files[0].author.as_str()),
+            (&path, "scenes/main.ron")
+        );
+        let none = Context::seeded(3).load_start_scene().err();
+        assert_eq!(none.map(|error| error.code()), Some("engine.no_project"));
+    }
+
     /// A scene file a layer loaded applies as it's saved, as an edit of its own, which an undo of
     /// its author takes back; one saved that doesn't load changes nothing, and the next save is
     /// compared with the file as last applied.

@@ -12,8 +12,8 @@
 //! frame, for the log and the Performance panel; loading what layers add, images as textures and
 //! glTF models, whose nodes spawn as entities; lockstep between two peers, each tick run on both
 //! peers' inputs; the pipeline cache's file, which windowed runs keep;
-//! and in development builds, behind `dev`, compiling games' shaders again as their files change,
-//! and the OS's file dialogs.
+//! and in development builds, behind `dev`, reading a game's project's manifest, compiling games'
+//! shaders again as their files change, and the OS's file dialogs.
 //!
 //! An app's `main` starts the engine; there is no separate entry-point crate.
 
@@ -169,6 +169,8 @@ pub struct App {
     headless_step: Option<Duration>,
     /// What the files of the assets the layers add are named from.
     root: Option<PathBuf>,
+    /// The project's manifest, as [`project`](Self::project) read it, or why it couldn't.
+    project: Option<Result<Manifest>>,
 }
 
 impl App {
@@ -183,6 +185,7 @@ impl App {
             seed: None,
             headless_step: None,
             root: None,
+            project: None,
         }
     }
 
@@ -195,6 +198,29 @@ impl App {
     pub fn root(mut self, root: impl Into<PathBuf>) -> Self {
         self.root = Some(root.into());
         self
+    }
+
+    /// Makes the app the game of the project whose manifest, `project.ron`, is in `dir`, the
+    /// game's directory, as `env!("CARGO_MANIFEST_DIR")` gives it, as ARCHITECTURE.md's Project
+    /// state describes: names the assets the layers add from the project's asset root, as
+    /// [`root`](Self::root) does; has [`Context::load_start_scene`] load its start scene; and has
+    /// the tool API's session file name the manifest, which tools inside the project find the run
+    /// by. A manifest that doesn't read ends the run as it starts, with its error, as does a build
+    /// without `dev`, which reads none: shipping builds start from cooked data.
+    #[must_use]
+    pub fn project(mut self, dir: impl AsRef<Path>) -> Self {
+        let manifest = Manifest::read(dir.as_ref());
+        if let Ok(manifest) = &manifest {
+            self.root = Some(manifest.root.clone());
+        }
+        self.project = Some(manifest);
+        self
+    }
+
+    /// The project's manifest, as [`project`](Self::project) read it; `None` for an app that isn't
+    /// a project's game, or one whose manifest didn't read.
+    fn manifest(&self) -> Option<&Manifest> {
+        self.project.as_ref()?.as_ref().ok()
     }
 
     /// Draws the world's IDs from `seed` rather than from a seed drawn at random, so that a run's
@@ -366,6 +392,10 @@ fn run_args(
         "Options"
     );
 
+    if let Some(Err(error)) = &app.project {
+        error!(code = error.code(), "{error:#}");
+        return ExitCode::FAILURE;
+    }
     // Before the replay too, which ticks on them as a run does.
     if let Err(error) = jobs::start(args.threads) {
         error!(code = error.code(), "{error:#}");
@@ -403,6 +433,7 @@ fn run_args(
             app.stack.names(),
             log.as_deref(),
             player,
+            app.manifest().map(|manifest| manifest.path.as_path()),
             args.api,
         );
         if args.headless {
@@ -416,6 +447,46 @@ fn run_args(
         Err(error) => {
             error!(code = error.code(), "{error:#}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+/// What a run takes from its project's manifest, as [`App::project`] says: the manifest's path, the
+/// project's asset root and its start scene's path.
+pub(crate) struct Manifest {
+    pub(crate) path: PathBuf,
+    pub(crate) root: PathBuf,
+    pub(crate) start: PathBuf,
+}
+
+impl Manifest {
+    /// Reads the manifest of the project in directory `dir`.
+    ///
+    /// Fails as gg-api's `Project::read` does, with `project.read` or `project.bad`; and with
+    /// `engine.no_project` in a build without `dev`, which reads none.
+    pub(crate) fn read(dir: &Path) -> Result<Self> {
+        #[cfg(feature = "dev")]
+        {
+            let project = gg_api::Project::read(dir).map_err(|failure| {
+                // The codes it fails with, as the engine's codes are static.
+                let code = match failure.code.as_str() {
+                    "project.read" => "project.read",
+                    _ => "project.bad",
+                };
+                Error::new(code, failure.message)
+            })?;
+            Ok(Self {
+                path: dir.join(gg_api::Project::FILE),
+                root: project.assets_dir(dir),
+                start: project.start_path(dir),
+            })
+        }
+        #[cfg(not(feature = "dev"))]
+        {
+            let _ = dir;
+            let message = "a build without `dev` reads no project's manifest; shipping builds \
+                           start from cooked data";
+            Err(Error::new("engine.no_project", message))
         }
     }
 }

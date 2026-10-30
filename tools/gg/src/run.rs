@@ -14,13 +14,15 @@ use gg_api::{Client, Failure, Pulse, Session, Snapshot, Snapshotted};
 use serde_json::{Value, json};
 
 use crate::patch::{Patches, Process};
-use crate::{build, game};
+use crate::{Scope, build, game};
 
-/// What `gg run` runs: a package, its profile, whether it's patched, unless `--no-patch`, how long
-/// its frames may stop before it has hung, how often it's snapshotted, zero for never, how many
-/// peers of a lockstep session it runs, 1 for a game alone, and the arguments each is given.
+/// What `gg run` runs: a package, the project gg works in, if any, the package's profile, whether
+/// it's patched, unless `--no-patch`, how long its frames may stop before it has hung, how often
+/// it's snapshotted, zero for never, how many peers of a lockstep session it runs, 1 for a game
+/// alone, and the arguments each is given.
 pub(crate) struct Run {
     pub(crate) package: String,
+    pub(crate) project: Option<Scope>,
     pub(crate) release: bool,
     pub(crate) patches: bool,
     pub(crate) hang: Duration,
@@ -67,12 +69,18 @@ impl Run {
             (arg.strip_prefix(flag)).is_some_and(|rest| rest.is_empty() || rest.starts_with('='))
         })
     }
+
+    /// The directory cargo runs in: the project's, inside one.
+    pub(crate) fn dir(&self) -> Option<&Path> {
+        self.project.as_ref().map(Scope::dir)
+    }
 }
 
-/// What `gg check` runs: a package, its profile, how many frames, how long it may take, and the
-/// arguments it's given.
+/// What `gg check` runs: a package, the project gg works in, if any, the package's profile, how
+/// many frames, how long it may take, and the arguments it's given.
 pub(crate) struct Check {
     pub(crate) package: String,
+    pub(crate) project: Option<Scope>,
     pub(crate) release: bool,
     pub(crate) frames: u64,
     pub(crate) timeout: Duration,
@@ -122,13 +130,15 @@ pub(crate) fn event(event: &Value) {
 /// that they always run the same code; each starts from its own snapshot, the joiner going on from
 /// the host's world as it joins.
 ///
-/// Fails with `gg.build` if it doesn't build, `gg.cargo` if cargo can't say what the package is,
-/// and `gg.run` if it can't be copied, started or waited for, or no port is free for the peers.
+/// Fails as [`check_game`] does, with `gg.build` if it doesn't build, `gg.cargo` if cargo can't
+/// say what the package is, and `gg.run` if it can't be copied, started or waited for, or no port
+/// is free for the peers.
 pub(crate) fn run(run: &Run) -> Result<bool, Failure> {
+    check_game(&run.package, run.project.as_ref())?;
     let patches = Patches::new(run)?;
     let exe = match &patches {
         Some(patches) => patches.exe().to_owned(),
-        None => build::build(&run.package, run.release)?,
+        None => build::build(&run.package, run.release, run.dir())?,
     };
     let dir = exe.parent().unwrap_or(Path::new(".")).to_owned();
     let snapshots = dir.join("snapshots");
@@ -415,6 +425,7 @@ impl Supervisor<'_> {
                     "pid": pid,
                     "app": session.app,
                     "address": session.address,
+                    "project": session.project,
                     "log": session.log,
                 }));
                 self.served = true;
@@ -832,9 +843,15 @@ fn failed(exe: &Path, error: std::io::Error) -> Failure {
 /// what it did as a line of JSON: its exit status, its warnings and errors, and `engine.perf`'s
 /// frame times. Returns whether it passed: it exited cleanly, in time, and logged no error.
 ///
-/// Fails with `gg.build` if it doesn't build, and `gg.run` if it can't start or be waited for.
+/// Fails as [`check_game`] does, with `gg.build` if it doesn't build, and `gg.run` if it can't
+/// start or be waited for.
 pub(crate) fn check(check: &Check) -> Result<bool, Failure> {
-    let exe = build::build(&check.package, check.release)?;
+    check_game(&check.package, check.project.as_ref())?;
+    let exe = build::build(
+        &check.package,
+        check.release,
+        check.project.as_ref().map(Scope::dir),
+    )?;
     let frames = check.frames.to_string();
     // Its console says what its JSON log does, which is read below.
     let mut child = Command::new(&exe)
@@ -878,6 +895,15 @@ pub(crate) fn check(check: &Check) -> Result<bool, Failure> {
     Ok(passed)
 }
 
+/// Checks that `package`, if it's the game of the project `project`, gg works in, is the package
+/// beside the project's manifest, as [`build::check_project`] does.
+fn check_game(package: &str, project: Option<&Scope>) -> Result<(), Failure> {
+    match project {
+        Some(scope) if scope.game == package => build::check_project(scope),
+        _ => Ok(()),
+    }
+}
+
 /// Waits for `child` to end, for at most `timeout`, past which it's ended and `None` returned.
 fn wait(child: &mut Child, timeout: Duration) -> std::io::Result<Option<ExitStatus>> {
     let start = Instant::now();
@@ -901,6 +927,7 @@ mod tests {
     fn run(args: &[&str], snapshot: u64) -> Run {
         Run {
             package: "sandbox".to_owned(),
+            project: None,
             release: false,
             patches: true,
             hang: Duration::from_secs(10),

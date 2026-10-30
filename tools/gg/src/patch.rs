@@ -98,7 +98,7 @@ impl Patches {
         if let Some(why) = run.unpatched() {
             return off("gg.no_patch", why);
         }
-        let package = build::package(&run.package)?;
+        let package = build::package(&run.package, run.dir())?;
         if package.library {
             let why = format!(
                 "package `{}` has a library beside its binary, and subsecond patches the binary's \
@@ -838,6 +838,7 @@ mod tests {
             engine: "0.1.0 debug".to_owned(),
             aslr_reference,
             player: None,
+            project: None,
         };
         let (patchable, unpatchable) = (session(26064), session(0));
         let serving = |session| {

@@ -65,10 +65,21 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Operations through the API** (2026-10-30)
 - **The first demo** (2026-10-30)
 - **Phase 5, tool API and hot reload: v0.1** (2026-10-30)
+- **Projects and `gg new`** (2026-10-30)
 
 ## Now
 
-**Phase 6's first milestone**, chosen as [Phase 6](#next) starts; its plan says when it's done.
+**The game's view in the editor**, Phase 6's second milestone. The editor opens the project it's
+started in and runs its game as an agent would, under `cargo gg run` in the project's directory,
+ending it as the editor closes, and shows the game's view in its Viewport: the game runs
+`--embedded`, offscreen without a window, publishing its view's frames to the editor through the
+tool API, as the first open question below decides, and the editor forwards its input to it. A
+Logs panel shows `gg run`'s events and the build's errors, and the title bar the run's status,
+pause and step. *Done when*, from `games/shards`, the editor opens Shards' project and shows it
+running in the Viewport, steered by its keys; an edit inside a function body is patched in, and a
+new field rebuilds and restarts the game, both showing in the view and in Logs; a second `gg run`
+of the game is refused; closing the editor ends the game; and the cost and age of the view's
+frames at 1920x1080 are measured against budgets set as it starts.
 
 ## Next
 
@@ -80,7 +91,10 @@ Each phase ends in something you can run and check.
    tool API alone: its panels (the scene tree among them), Play, Simulate, Stop, pause and step, and
    its File menu reaching the game through it; a panel of logs and errors; and the game's view,
    embedded. *Done when* the editor opens the demo's project, has no path into the game but the
-   tool API, and the v0.1 loop works from inside it.
+   tool API, and the v0.1 loop works from inside it. Its milestones, in order: projects and
+   `gg new`; the game's view in the editor; the game's world and diagnostics in the editor's
+   panels; editing in the game's view; Play, Simulate and Stop in the game, the editor's own world
+   deleted; and scenes through the API and the File menu.
 7. **Assets.** An asset database: every asset of a project found by a stable ID kept in a text file
    beside it, which scenes name it by, with its import settings; assets loaded once whoever asks,
    by ID or by path, and reloaded as their files change, textures, meshes and shaders alike; and the
@@ -305,7 +319,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Linked prefab instances, with overrides, nesting, apply and revert; a placement is a flattened copy, each ID mixed from its instance's and its own, which links will keep | Phase 6's editor, or a game editing a prefab its scenes hold many copies of |
 | Placing a prefab without parsing it again: `World::place_prefab` parses its text each time, which allocates | A game places prefabs as it runs, rather than as it loads |
 | A derive hint for `Component::base`, and opaque values in lists and options, which saving refuses, as does a set's undo (`reflect.opaque`) where the old value holds something opaque in a variant, an option or a list; a type with opaque fields implements `Component` by hand to load, as `Sprite` does | A game's component holds something opaque |
-| Names in scenes beyond ASCII identifiers, which saving refuses (`scene.bad_name`) | A game names a type or a field so |
+| Names in scenes beyond ASCII identifiers, which saving refuses (`scene.bad_name`), and a project manifest's strings beyond printable ASCII, which reading refuses (`project.bad`) | A game names a type, a field or a folder so |
 | Loading a scene in place of some of a world's entities in one step, as the sandbox's grid reload does in three; a load refuses IDs the world has, and `World::replace_scene` replaces all of its entities; a scene file a game loaded through `Context::load_scene_file`, saved, applies as operations | Another game reloads part of its world from a file of its own |
 | A version in scene files, a file without one reading as the first | The first change to the format that old files can't be read by |
 | Comments in scene files, which a save drops | People annotate scenes |
@@ -340,7 +354,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Naming the job system's threads and the render thread for Tracy on macOS, whose client reads no thread's name from the OS there, so they show as numbers: a call into gg-core, which keeps Tracy's client, from rayon-core's start handler and the render thread's start. On Windows and Linux they show as `gg-job-N` and `gg-render` | Someone profiles on macOS |
 | Checking that every job thread's floating-point environment, its rounding and flush-to-zero, is the main thread's, which a driver could change on the main thread alone | A replay goes another way on one machine on more threads than one |
 | The sign of a zero that f32's `min`, `max` and `clamp` give, which std leaves to the platform, and its `algebraic_*` methods, which clippy doesn't refuse; the simulation calls none of them | The simulation first calls one |
-| The ban on std's float methods for games in their own repositories, which the workspace's clippy.toml doesn't reach, though glam's features do, since Cargo merges them | The first game outside the workspace |
+| The ban on std's float methods for games in their own repositories, which the workspace's clippy.toml doesn't reach, though glam's features do, since Cargo merges them; and `gg new` for such a game, which makes games in the workspace's `games/` alone: its own workspace, the engine a pinned dependency, copies of clippy.toml and the toolchain's pin, and gg and dx installed | The first game outside the workspace |
 | Locating a divergence of the layout alone, to the table, row, children or stream of IDs where two worlds part; `World::difference` compares their content, and a replay names the part of the hash | A replay's layout goes another way first |
 | Replaying from a snapshot and the commands after it, and a SyncTest, which runs each tick again from a snapshot and checks its hash, as rollback needs; and recording a run restored from a snapshot, which `--restore` refuses with `--record`, a recording's replay starting from a seed and the layers' attach, so that `gg run` doesn't restart a run that records | Rollback, or a crash `gg run` restarted from is worth replaying |
 | Layers' own state across a restart from a snapshot: the camera controllers' viewpoints, the clear color, and the editor's scene file, tool and camera, which start as a fresh run's do; the world is as it was, and a layer takes back from it what its panels show, as the sandbox's `restored` does, and the editor comes back stopped, with the world as it was edited | Someone misses where they were looking after a restart |
@@ -355,9 +369,33 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Lockstep beyond two peers on a LAN: more players, spectators, a delay that follows the link's latency rather than [`DELAY`](../crates/gg-engine/src/net.rs)'s 62.5 ms, and play across the internet | Phase 11, or a game for more than two |
 | `gg run --peers 2`'s two windows opening apart: the OS puts them one over the other | Someone plays both peers on one screen |
 | Recording a joiner, whose world comes from the host's, which `--join` refuses with `--record`; the host's recording replays the session | A desync is worth replaying from the joiner's side |
+| Rebuilding or restarting a running game as its project's manifest changes, which `gg run` doesn't watch | Someone edits a manifest while its game runs |
+| Builds without `dev` reading their project's manifest: `App::project` ends their runs (`engine.no_project`), as shipping builds start from cooked data | Phase 10, with the cooked start scene |
+| The sandbox and the editor as projects, which name their roots themselves | A tool opens them as projects |
+| The project in `hello`'s answer: tools find a project's games by their session files | A client reaches a game without reading its session file, as one on another machine would |
+| An app's name and `gg run`'s defaults for it, such as `--peers 2`, in the project's manifest | A tool needs them |
 
 ## Open questions
 
 - Which license? Recommendation: MIT OR Apache-2.0, the Rust convention, chosen once; until
   then, `publish = false` keeps the crates off crates.io. Decide before anyone outside the
   project contributes.
+- How does the game's view reach the editor, and is a channel that a request of the tool API opens
+  part of the API, as Phase 6 has the editor reach the game through the API alone? Recommendation:
+  the game publishes its view's frames into OS shared memory that the editor makes and a `view`
+  request names, defined in gg-api so that agents can read live frames too, the editor's input going
+  back through an `input` request, and the game's diagnostics through a `logs` request rather than
+  its log's file. It works on Windows, X11, Wayland and macOS alike, where embedding the game's own
+  window works on Windows and X11 alone, and the editor couldn't draw over it. Decide before the
+  game's view in the editor.
+- Who owns the game's one view while the editor drives it: its viewpoint, outline, grid and
+  colliders? Recommendation: one set for each game, which any client sets, the last setter winning,
+  with `capture` able to ask for the world's own camera, as the engine has one view. Decide before
+  editing in the game's view.
+- What does Simulate do in a game whose ticks are all its own code, as Shards' are?
+  Recommendation: run the game as Play does, from the world as edited, seen through the editor's
+  camera, with no input forwarded. Decide before Play, Simulate and Stop in the game.
+- Which entities does a scene file own, and so what do Save, Open and New do in a game whose attach
+  builds entities beside its scene, as Shards' players are? Recommendation: those its text held as
+  last applied, which the scene watch already tracks, and those made into it while it's the open
+  scene, so that Save writes none the game made itself. Decide before scenes through the API.

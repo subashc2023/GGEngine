@@ -1,23 +1,25 @@
 //! `gg`, the command-line tool for GGEngine's games, as ARCHITECTURE.md's Agents and tools
 //! describes: it builds a game's development build and runs it, supervising it; runs headless
-//! checks; and talks to running games through the tool API. It prints what it finds as JSON, a line
-//! at a time, for agents and scripts as much as for people.
+//! checks; talks to running games through the tool API; and makes new games. Inside a game's
+//! project, it builds the project's game and reaches the project's games alone. It prints what it
+//! finds as JSON, a line at a time, for agents and scripts as much as for people.
 
 mod build;
 mod classify;
 mod dx;
 mod game;
 mod mcp;
+mod new;
 mod patch;
 mod run;
 
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::str::FromStr;
 use std::time::Duration;
 
-use gg_api::Failure;
+use gg_api::{Failure, Project};
 use serde_json::{Value, json};
 
 use game::Pick;
@@ -26,20 +28,25 @@ use run::{Check, Run};
 const USAGE: &str = "\
 Usage: gg <command> [options]
 
+In a game's project, the directory that holds its `project.ron` beside its `Cargo.toml`, and those
+below it, or in the project that `--project <PATH>` names, by its directory or its `project.ron`,
+gg builds the project's game, runs cargo in the project's directory, and talks to the project's
+games alone; a manifest that doesn't read is an error. Elsewhere, it works on the whole workspace.
+
 Build and run:
-  run <PACKAGE> [--release] [--no-patch] [--hang <SECONDS>] [--snapshot <SECONDS>] [--peers <N>]
+  run [PACKAGE] [--release] [--no-patch] [--hang <SECONDS>] [--snapshot <SECONDS>] [--peers <N>]
       [-- <ARGS>...]
-      Build PACKAGE's development build and run a copy of it with ARGS, printing a line as it
-      starts, as it serves the tool API, and as it ends: `exited`, or `crashed` or `hung`, with the
-      errors its log holds. A run whose frames stop for `--hang` seconds (10), while it waits for
-      nothing the user does, has hung, and is ended. It's snapshotted every `--snapshot` seconds
-      (5) from its first frame, `snapshot_failed` saying why they fail, and started again from its
-      last snapshot after a crash or a hang, and from one taken then as PACKAGE is rebuilt
-      (`rebuilt`). One that ends before its first snapshot waits for a rebuild (`waiting`); one that
-      refuses its snapshot starts afresh (`refused`). `run` ends as the game comes to its own end,
-      as its window closes, `quit` asks or its frames run out, whatever its status; as one that has
-      never served the API ends; and as it ends at all with `--snapshot 0` or ARGS with `--record`,
-      `--replay` or `--no-api`, which turn restarts off.
+      Build PACKAGE's development build, the project's game without one, and run a copy of it with
+      ARGS, printing a line as it starts, as it serves the tool API, and as it ends: `exited`, or
+      `crashed` or `hung`, with the errors its log holds. A run whose frames stop for `--hang`
+      seconds (10), while it waits for nothing the user does, has hung, and is ended. It's
+      snapshotted every `--snapshot` seconds (5) from its first frame, `snapshot_failed` saying why
+      they fail, and started again from its last snapshot after a crash or a hang, and from one
+      taken then as PACKAGE is rebuilt (`rebuilt`). One that ends before its first snapshot waits
+      for a rebuild (`waiting`); one that refuses its snapshot starts afresh (`refused`). `run` ends
+      as the game comes to its own end, as its window closes, `quit` asks or its frames run out,
+      whatever its status; as one that has never served the API ends; and as it ends at all with
+      `--snapshot 0` or ARGS with `--record`, `--replay` or `--no-api`, which turn restarts off.
       With dx, Dioxus's tool, on the PATH, of the release of the subsecond PACKAGE builds with,
       the game is patched as its code changes, unless `--no-patch`, `--release`, restarts' being
       off or a library beside PACKAGE's binary, which no patch reaches, turns patches off
@@ -56,10 +63,19 @@ Build and run:
       the host given `--host` and the joiner `--join` at a free port of the loopback, each
       `started` naming its `player`: patched together, and stopped and started again together as
       either ends or the game is rebuilt.
-  check <PACKAGE> [--release] [--frames <N>] [--timeout <SECONDS>] [-- <ARGS>...]
-      Build PACKAGE and run it headless for N frames (60) with ARGS, and print what it did: its exit
-      status, its warnings and errors, and its frame times. One that runs longer than SECONDS
-      (600) is ended.
+  check [PACKAGE] [--release] [--frames <N>] [--timeout <SECONDS>] [-- <ARGS>...]
+      Build PACKAGE, the project's game without one, and run it headless for N frames (60) with
+      ARGS, and print what it did: its exit status, its warnings and errors, and its frame times.
+      One that runs longer than SECONDS (600) is ended.
+      Building the project's game, `run` and `check` first check that it's the package beside the
+      project's manifest (`gg.project`).
+
+Make a game:
+  new <NAME>
+      Write a new game in the workspace, in `games/NAME`, writing over nothing: package NAME, whose
+      binary is `gg-NAME`, a development build of the engine's; its project, whose start scene is
+      `scenes/main.ron`, empty; and its main module, whose layer loads the start scene. Prints a
+      line naming its directory and files.
 
 Talk to a running game, through its tool API:
   sessions                       List the running games
@@ -98,17 +114,38 @@ Options for talking to a game:
   --app <NAME>          The game whose app is NAME, when more than one runs
   --timeout <SECONDS>   How long to wait for its answer (30)
 
+Options for every command but `new`:
+  --project <PATH>      Work in the project PATH names, by its directory or its `project.ron`,
+                        rather than in the one gg is in
+
 Each result is a line of JSON on stdout; `logs` prints the log's lines, and `run` a line for each
 event. An error is a line on stderr, {\"error\":{\"code\":...,\"message\":...}}. Exits 0 on success,
 1 on an error, a check that failed or a run that didn't end cleanly, and 2 on bad arguments.
 ";
+
+/// The project gg works in, as `--project` names it or gg finds it: its manifest's path, absolute,
+/// in whose directory cargo runs, and the game it names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Scope {
+    pub(crate) manifest: PathBuf,
+    pub(crate) game: String,
+}
+
+impl Scope {
+    /// The project's directory.
+    pub(crate) fn dir(&self) -> &Path {
+        self.manifest.parent().unwrap_or(Path::new("."))
+    }
+}
 
 /// What `gg` was asked to do.
 enum Command {
     Help,
     Run(Run),
     Check(Check),
-    Sessions,
+    New(String),
+    /// The running games, those of the project whose manifest it names alone.
+    Sessions(Option<PathBuf>),
     Logs {
         pick: Pick,
         level: u8,
@@ -131,7 +168,8 @@ fn main() -> ExitCode {
         Ok(command) => command,
         Err(failure) => {
             report(&failure);
-            return ExitCode::from(2);
+            // Bad arguments, or else a project's manifest that doesn't read, an error.
+            return ExitCode::from(if failure.code == "gg.args" { 2 } else { 1 });
         }
     };
     let done = match command {
@@ -141,7 +179,8 @@ fn main() -> ExitCode {
         }
         Command::Run(run) => run::run(&run),
         Command::Check(check) => run::check(&check),
-        Command::Sessions => game::sessions().map(|sessions| {
+        Command::New(name) => new::new(&name).map(|()| true),
+        Command::Sessions(project) => game::sessions(project.as_deref()).map(|sessions| {
             print(&sessions.to_string());
             true
         }),
@@ -185,7 +224,8 @@ fn bad(message: String) -> Failure {
 }
 
 /// The flags that take a value: `--name value` or `--name=value`.
-const VALUED: [&str; 12] = [
+const VALUED: [&str; 13] = [
+    "--project",
     "--peers",
     "--author",
     "--pid",
@@ -272,7 +312,8 @@ impl Parsed {
         Some(self.flags.remove(at).1)
     }
 
-    /// The options for talking to a game.
+    /// The options for talking to a game, in the project gg works in, as [`scope`](Self::scope)
+    /// finds it.
     fn pick(&mut self) -> Result<Pick, Failure> {
         Ok(Pick {
             pid: self
@@ -283,7 +324,54 @@ impl Parsed {
             app: self.value("--app"),
             timeout: self.seconds("--timeout", 30)?,
             client: "gg".to_owned(),
+            project: self.scope()?.map(|scope| scope.manifest),
         })
+    }
+
+    /// The project gg works in: the one `--project` names, by its directory or its manifest, or
+    /// else the one the working directory is in, as gg-api's `Project::find` finds it; `None`
+    /// outside one.
+    ///
+    /// Fails with `gg.args` if gg can't tell where the working directory, or `--project`'s path,
+    /// is; and with `project.read` or `project.bad` for a manifest that doesn't read, as
+    /// `Project::read` does, rather than working on the whole workspace.
+    fn scope(&mut self) -> Result<Option<Scope>, Failure> {
+        let dir = match self.value("--project") {
+            Some(given) => {
+                let path = std::path::absolute(&given)
+                    .map_err(|error| bad(format!("can't tell where `{given}` is: {error}")))?;
+                match (path.file_name(), path.parent()) {
+                    (Some(name), Some(dir)) if name == Project::FILE => dir.to_owned(),
+                    _ => path,
+                }
+            }
+            None => {
+                let here = std::env::current_dir().map_err(|error| {
+                    bad(format!("can't tell which directory gg runs in: {error}"))
+                })?;
+                let Some(dir) = Project::find(&here) else {
+                    return Ok(None);
+                };
+                dir
+            }
+        };
+        let project = Project::read(&dir)?;
+        Ok(Some(Scope {
+            manifest: dir.join(Project::FILE),
+            game: project.game,
+        }))
+    }
+
+    /// The package `run` or `check` builds, `command`'s: the one given, or else the game of the
+    /// project gg works in, `scope`.
+    ///
+    /// Fails with `gg.args` if neither is.
+    fn package(&mut self, command: &str, scope: Option<&Scope>) -> Result<String, Failure> {
+        let given = self
+            .positional(0, 1, &format!("{command} [PACKAGE]"))?
+            .pop();
+        let package = given.or_else(|| Some(scope?.game.clone()));
+        package.ok_or_else(|| bad(format!("outside a project, `gg {command}` takes a PACKAGE")))
     }
 
     /// The positional arguments, checking that there are at least `least` and at most `most`, as
@@ -313,7 +401,10 @@ impl Parsed {
     }
 }
 
-/// The command `args`, the arguments after `gg`, give.
+/// The command `args`, the arguments after `gg`, give, in the project gg works in, as
+/// [`Parsed::scope`] finds it.
+///
+/// Fails with `gg.args` for arguments that aren't a command's, and as `Parsed::scope` does.
 fn parse(args: &[String]) -> Result<Command, Failure> {
     let Some((name, args)) = args.split_first() else {
         return Ok(Command::Help);
@@ -329,9 +420,10 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
     let command = match name.as_str() {
         "help" | "-h" | "--help" => Command::Help,
         "run" => {
-            let package = parsed.positional(1, 1, "run <PACKAGE>")?.remove(0);
+            let project = parsed.scope()?;
             let run = Run {
-                package,
+                package: parsed.package("run", project.as_ref())?,
+                project,
                 release: parsed.switch("--release"),
                 patches: !parsed.switch("--no-patch"),
                 hang: parsed.seconds("--hang", 10)?,
@@ -359,18 +451,29 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
             Command::Run(run)
         }
         "check" => {
-            let package = parsed.positional(1, 1, "check <PACKAGE>")?.remove(0);
+            let project = parsed.scope()?;
             Command::Check(Check {
-                package,
+                package: parsed.package("check", project.as_ref())?,
+                project,
                 release: parsed.switch("--release"),
                 frames: parsed.number("--frames", 60)?,
                 timeout: parsed.seconds("--timeout", 600)?,
                 args: std::mem::take(&mut parsed.rest),
             })
         }
+        "new" => {
+            let name = parsed.positional(1, 1, "new <NAME>")?.remove(0);
+            if new::project(&name).check().is_err() {
+                return Err(bad(format!(
+                    "`gg new` takes a package's name, of ASCII letters, digits, `-` and `_`, not \
+                     starting with a digit, not `{name}`"
+                )));
+            }
+            Command::New(name)
+        }
         "sessions" => {
             parsed.positional(0, 0, "sessions")?;
-            Command::Sessions
+            Command::Sessions(parsed.scope()?.map(|scope| scope.manifest))
         }
         "logs" => {
             parsed.positional(0, 0, "logs [--level <LEVEL>]")?;
@@ -559,6 +662,35 @@ mod tests {
             panic!("a run");
         };
         assert_eq!(run.peers, 2);
+        // Tests run in the package's directory, which is in no project.
+        assert_eq!(run.project, None);
+        let shards = std::path::absolute("../../games/shards").unwrap();
+        for project in ["../../games/shards", "../../games/shards/project.ron"] {
+            let Ok(Command::Run(run)) = parsed(&["run", "--project", project]) else {
+                panic!("a run");
+            };
+            assert_eq!(run.package, "shards", "{project}");
+            let manifest = shards.join(Project::FILE);
+            assert_eq!(run.project.map(|scope| scope.manifest), Some(manifest));
+        }
+        let Ok(Command::Check(check)) =
+            parsed(&["check", "sandbox", "--project=../../games/shards"])
+        else {
+            panic!("a check");
+        };
+        assert_eq!(
+            (check.package.as_str(), check.project.is_some()),
+            ("sandbox", true)
+        );
+        let Ok(Command::Call { pick, .. }) = parsed(&["status", "--project", "../../games/shards"])
+        else {
+            panic!("a call");
+        };
+        assert_eq!(pick.project, Some(shards.join(Project::FILE)));
+        let Ok(Command::New(name)) = parsed(&["new", "probe"]) else {
+            panic!("a new game");
+        };
+        assert_eq!(name, "probe");
         let path = std::path::absolute("world.snapshot").unwrap();
         for (args, want) in [
             (&["snapshot"][..], json!({})),
@@ -595,9 +727,20 @@ mod tests {
             &["call", "status", "{not json"],
             &["status", "--release=yes"],
             &["status", "--", "x"],
+            &["check"],
+            &["new"],
+            &["new", "2probe"],
+            &["new", "a", "b"],
+            &["new", "probe", "--project", "../../games/shards"],
         ] {
             let error = parsed(args).err().map(|error| error.code);
             assert_eq!(error.as_deref(), Some("gg.args"), "{args:?}");
         }
+        // A project whose manifest doesn't read is an error, which isn't the arguments'.
+        let error = parsed(&["status", "--project", "src"]).err();
+        assert_eq!(
+            error.map(|error| error.code).as_deref(),
+            Some("project.read")
+        );
     }
 }

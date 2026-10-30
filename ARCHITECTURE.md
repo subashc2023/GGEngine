@@ -60,9 +60,11 @@ sandbox  editor   player       apps/: executables          gg  tools/: tools
   `Reflect` and `Component`. Rust builds a derive as a crate of its own; only `gg-engine`
   depends on it, and games derive through `gg-engine`.
 - **`gg-api`:** the [tool API](#agents-and-tools)'s protocol: its messages, the session file that
-  says where a game serves it, and a client, which tools speak it through. It depends on no `gg-*`
-  crate, so that tools build without the engine, and `gg-engine` uses it in development builds
-  alone.
+  says where a game serves it, and a client, which tools speak it through; and the reader and
+  writer of a [project](#project-state)'s manifest, another file that tools and development builds
+  share. It depends on no `gg-*` crate, so that tools build without the engine, and `gg-engine`
+  uses it in development builds alone, so that only they read a manifest: shipping builds start
+  from cooked data.
 - **`sandbox`:** the engine's own app, for its development: a swarm of up to 100,000 sprites
   drifting on the job system's threads, which measures how fast the engine simulates and draws, and
   a grid from its scene file.
@@ -142,9 +144,9 @@ before:
 Game code is Rust, as fast and as unrestricted as the engine's own. Each game is a crate that
 depends on `gg-engine` and builds its own player, statically linked and optimized for shipping. Game
 crates forbid `unsafe`, so a bug in game code panics rather than corrupting memory. Games built
-alongside the engine, the demos and then the flagship, live in `games/` in this workspace, so one
-change can span engine and game, and `games/*` joins the workspace members with the first one;
-anyone else's game depends on the engine from its own repository.
+alongside the engine, the demos and then the flagship, live in `games/` in this workspace, among its
+members, so one change can span engine and game, each a [project](#project-state), which `gg new`
+makes; anyone else's game depends on the engine from its own repository.
 
 - **The game runs in its own process.** The development tools launch the game's development
   build and work on it through the [tool API](#agents-and-tools). A crash, panic or hang in
@@ -179,8 +181,8 @@ Agents work on a game the way people do, through the same interfaces: nothing a 
 in the editor is out of an agent's reach.
 
 - **The tool API.** A game's development build serves an API on the machine's loopback, at a port
-  the OS picks, which it writes with a token in a session file in `sessions` beside its
-  executable, removed as the run ends: query the world, apply and undo
+  the OS picks, which it writes with a token, and its project's manifest's path, in a session file
+  in `sessions` beside its executable, removed as the run ends: query the world, apply and undo
   [operations](#project-state), run, pause and step, capture frames, save the world whole as a
   snapshot file, as [ECS](#ecs) describes, which a run given `--restore` starts from, apply
   patches of the game's code, as [Game code](#game-code) describes, and read
@@ -204,8 +206,11 @@ in the editor is out of an agent's reach.
   again from its last snapshot after a crash or a hang, and from one taken then as it's rebuilt,
   telling of each, or waits for a rebuild if the game would only end the same way again, as one
   that ends before its first snapshot would. A game that comes to its own end, as its window
-  closes, ends the supervision, as one that never serves does. It runs headless checks, and talks
-  to running games, all with machine-readable results; `gg mcp` gives agents that speak MCP the
+  closes, ends the supervision, as one that never serves does. It runs headless checks, talks to
+  running games, all with machine-readable results, and makes new games. Inside a game's
+  [project](#project-state), found from where it runs or named by `--project`, it runs cargo in the
+  project's directory, builds the project's game, and reaches the project's games alone, those
+  whose session files name its manifest; `gg mcp` gives agents that speak MCP the
   same reach over stdio, a tool for each of the API's methods, connecting at each call to the game
   it picks, so that a restarted game is the one it reaches, as the agent, by its MCP client's name;
   the editor is one more client, with no ability an agent lacks.
@@ -220,6 +225,13 @@ in the editor is out of an agent's reach.
 
 A project's state is text that people and agents edit, diff and merge with ordinary tools.
 
+- **Projects.** A game's project is its crate's directory, which holds its manifest,
+  `project.ron`, beside its `Cargo.toml`, in canonical RON: the game's package (`game`); its asset
+  root (`assets`), which is `App::root`; the folders in it that hold its scenes (`scenes`); and the
+  scene it starts in (`start`), which `Context::load_start_scene` loads; each path relative to the
+  manifest's directory. Tools read a manifest and never rewrite it, and `gg new` writes one. A
+  development build reads its game's, through `App::project`; shipping builds start from cooked
+  data, so a build without `dev` reads none.
 - **Canonical text files.** Scenes, prefabs and project settings are saved as RON in a
   canonical form: saving what was loaded gives the same bytes, entities are ordered by ID, and
   changing a field changes only that field's lines. RON maps Rust's enums and tuples directly,

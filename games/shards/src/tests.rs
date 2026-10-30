@@ -1,11 +1,15 @@
 use std::fs;
+use std::path::PathBuf;
+
+use gg_api::Project;
 
 use super::*;
 
-/// The game as it attaches, rooted as the app is, so that the world's hash doesn't depend on where
-/// the repository is, its world's IDs drawn from `seed`.
+/// The game as it attaches, the project's as the app is, so that the world's hash doesn't depend on
+/// where the repository is, its world's IDs drawn from `seed`.
 fn attached(seed: u64) -> (Context, Shards) {
-    let mut cx = Context::seeded(seed).root(env!("CARGO_MANIFEST_DIR"));
+    let cx = Context::seeded(seed).project(env!("CARGO_MANIFEST_DIR"));
+    let mut cx = cx.expect("the project reads");
     let mut shards = Shards::new();
     shards.load(&mut cx);
     shards.attach(&mut cx);
@@ -17,6 +21,24 @@ fn player_at(world: &World, index: u8) -> Vec2 {
     let mut players = world.query::<(&Player, &Transform)>();
     let found = players.find(|(player, _)| player.index == index);
     found.expect("the player").1.translation.truncate()
+}
+
+/// The path of the game's scene file `name`.
+fn scene(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("scenes")
+        .join(name)
+}
+
+/// The game's project's manifest is canonical, writing back to its own bytes, and starts the game
+/// in the arena.
+#[test]
+fn the_project_is_canonical_and_starts_in_the_arena() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let text = fs::read_to_string(dir.join(Project::FILE)).expect("the manifest");
+    let project = Project::parse(&text).expect("the project reads");
+    assert_eq!(project.text(), text);
+    assert_eq!(project.start_path(dir), scene("arena.ron"));
 }
 
 /// The arena's scene loads and saves to its own bytes, so that a type of the game's that changes

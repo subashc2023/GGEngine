@@ -1,8 +1,9 @@
 //! The tool API's protocol, which a game's development build serves and tools speak, as
 //! ARCHITECTURE.md's Agents and tools describes: requests and their answers as lines of JSON over a
 //! TCP connection on the machine's loopback; the session file a running game says where it serves
-//! in; what each method takes and answers; and a client, for tools. It depends on no crate of the
-//! engine's, so that tools build without the GPU's toolchain.
+//! in; what each method takes and answers; and a client, for tools. It also reads a game's project
+//! manifest, [`Project`], which tools find a game by and its development build reads. It depends on
+//! no crate of the engine's, so that tools build without the GPU's toolchain.
 //!
 //! A request is `{"id":1,"method":"step","params":{"ticks":2}}`, without `params` for a method that
 //! takes none, and its answer `{"id":1,"result":...}` or `{"id":1,"error":{"code":...,"message":...}}`,
@@ -60,6 +61,8 @@
 //! which takes its default, as in a scene; what's opaque is kept as it is, or made as the type's
 //! own is, as an `(opaque)` that a create or an add gives says.
 
+mod project;
+
 use std::fmt;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -71,6 +74,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_json::value::RawValue;
+
+pub use project::Project;
 
 /// The most bytes a line may have, its line break aside, past which the side reading it drops the
 /// connection: a request's or an answer's, such as a page of entities.
@@ -104,6 +109,11 @@ pub struct Session {
     /// game alone, or one whose engine is older than lockstep.
     #[serde(default)]
     pub player: Option<u8>,
+    /// The path of the game's project manifest, as the game named it, which tools inside the
+    /// project reach it by; `None` for an app that isn't a project, or one whose engine is older
+    /// than projects.
+    #[serde(default)]
+    pub project: Option<PathBuf>,
 }
 
 impl Session {
@@ -706,6 +716,7 @@ mod tests {
             engine: "0.1.0 debug".to_owned(),
             aslr_reference: 0x7ff6_1234_5678,
             player: None,
+            project: Some(PathBuf::from("games/shards/project.ron")),
         };
         for pid in [2, 1] {
             let text = serde_json::to_string(&session(pid)).unwrap();
@@ -715,10 +726,15 @@ mod tests {
         let whole = serde_json::to_string(&session(3)).unwrap();
         fs::write(dir.join("sandbox-3.json.tmp"), whole).unwrap();
         fs::write(dir.join("sandbox-4.json"), "{\"app\":").unwrap();
+        // Of an engine older than projects.
+        let mut older = serde_json::to_value(session(5)).unwrap();
+        older.as_object_mut().unwrap().remove("project");
+        fs::write(dir.join("sandbox-5.json"), older.to_string()).unwrap();
         let listed = Session::list(&dir);
         let pids: Vec<_> = listed.iter().map(|(_, session)| session.pid).collect();
-        assert_eq!(pids, [1, 2]);
+        assert_eq!(pids, [1, 2, 5]);
         assert_eq!(listed[0].1, session(1));
+        assert_eq!(listed[2].1.project, None);
         assert!(Session::list(&dir.join("none")).is_empty());
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -792,6 +808,7 @@ mod tests {
             engine: "0.1.0 debug".to_owned(),
             aslr_reference: 0x7ff6_1234_5678,
             player: None,
+            project: None,
         }
     }
 

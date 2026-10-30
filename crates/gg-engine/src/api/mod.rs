@@ -24,26 +24,28 @@ pub(crate) use server::Api;
 pub(crate) enum Api {}
 
 /// Starts serving the tool API for app `app`, whose layers are `layers`, from the bottom up, whose
-/// JSON log is at `log`, if it has one, and which plays `player` in a lockstep session, if it's a
-/// peer of one, unless `serve` says not to: `None` then, and without `dev`. If it can't start, the
-/// run goes on without it, warning `api.start`.
+/// JSON log is at `log`, if it has one, which plays `player` in a lockstep session, if it's a peer
+/// of one, and whose project's manifest is at `project`, if it's a project's game, unless `serve`
+/// says not to: `None` then, and without `dev`. If it can't start, the run goes on without it,
+/// warning `api.start`.
 pub(crate) fn start(
     app: &str,
     layers: &[&str],
     log: Option<&Path>,
     player: Option<u8>,
+    project: Option<&Path>,
     serve: bool,
 ) -> Option<Api> {
     #[cfg(feature = "dev")]
     if serve {
-        return Api::start(app, layers, log, player)
+        return Api::start(app, layers, log, player, project)
             .inspect_err(|error| {
                 let consequence = "tools can't reach this run";
                 tracing::warn!(code = error.code(), "{error:#}; {consequence}");
             })
             .ok();
     }
-    let _ = (app, layers, log, player, serve);
+    let _ = (app, layers, log, player, project, serve);
     None
 }
 
