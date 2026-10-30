@@ -47,6 +47,11 @@ mod main_loop;
 mod model;
 mod name;
 mod pads;
+// subsecond applies a patch of the game's code only through unsafe code: this module alone may use
+// it, in development builds alone.
+#[cfg(feature = "dev")]
+#[allow(unsafe_code)]
+mod patch;
 mod perf;
 mod physics;
 mod pipeline_cache;

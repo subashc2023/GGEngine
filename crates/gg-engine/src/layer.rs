@@ -14,6 +14,8 @@ use gg_renderer::{
     Blend, Circle, Draws, Line, MAX_PICKS, Mesh, Meshes, Mipmaps, ModelParams, ModelVertex,
     Outline, Shader, Shaders, Sprite, SpriteSheet, Texture, Textures, Viewpoint, Viewport,
 };
+#[cfg(feature = "dev")]
+use subsecond::HotFn;
 use tracing::info;
 
 use crate::assets::{self, Assets};
@@ -46,6 +48,12 @@ use crate::{
 /// the world; or, in a run restored from a snapshot (`--restore`), whose world comes from the
 /// snapshot, picks up from the world in its place, so that a game that restarts, after a crash or
 /// a rebuild, goes on where it was.
+///
+/// In a development build, the engine calls each method through subsecond's `HotFn`, so that a
+/// patch of the game's code, which `gg run` builds as the game's files change and the engine
+/// applies between ticks, reaches the method and what it calls directly, such as the systems and
+/// scripts its tick runs; but not what it calls through a trait object or a function pointer of
+/// the game's own, which waits for the next rebuild.
 pub trait Layer {
     /// Called once as the app starts, before any layer attaches, and in a run restored from a
     /// snapshot too: it makes what the layer draws with, such as its textures, meshes and shaders,
@@ -916,6 +924,8 @@ pub(crate) struct Stack {
 impl Stack {
     /// Adds a layer on top of the other layers, under the overlays.
     pub(crate) fn push_layer<L: Layer + 'static>(&mut self, layer: L) {
+        #[cfg(feature = "dev")]
+        let layer = Hot(layer);
         self.layers.insert(self.overlays, Box::new(layer));
         self.names.insert(self.overlays, short_name::<L>());
         self.types.insert(self.overlays, type_name::<L>());
@@ -924,6 +934,8 @@ impl Stack {
 
     /// Adds an overlay on top of everything.
     pub(crate) fn push_overlay<L: Layer + 'static>(&mut self, overlay: L) {
+        #[cfg(feature = "dev")]
+        let overlay = Hot(overlay);
         self.layers.push(Box::new(overlay));
         self.names.push(short_name::<L>());
         self.types.push(type_name::<L>());
@@ -1109,6 +1121,62 @@ impl Stack {
             }
         }
         handled
+    }
+}
+
+/// A layer as a development build's stack holds it, which calls each of the layer's methods
+/// through subsecond's `HotFn`, as [`Layer`] says, since the stack calls what it holds through a
+/// vtable, which no patch changes, while `HotFn`, in a build with debug assertions, looks each call
+/// up in the jump table of the last patch applied. Each call goes through the method as a function
+/// item, such as `L::tick`: `HotFn` finds a function of no size in the table by its own `call_it`
+/// for it, which the game's crate makes, since `L` is the game's, and so the patch makes again; it
+/// takes anything the size of a pointer, a closure that holds one among them, for a function
+/// pointer, and calls it as one. A method added to `Layer` needs its call here too, or the trait's
+/// default runs in place of the layer's own. The stack names the layer by `L`, and `L`'s default
+/// `ui` names `L`, as the stack's types do. A call allocates nothing.
+#[cfg(feature = "dev")]
+struct Hot<L>(L);
+
+#[cfg(feature = "dev")]
+impl<L: Layer> Layer for Hot<L> {
+    fn load(&mut self, cx: &mut Context) {
+        HotFn::current(L::load).call((&mut self.0, cx));
+    }
+
+    fn attach(&mut self, cx: &mut Context) {
+        HotFn::current(L::attach).call((&mut self.0, cx));
+    }
+
+    fn restored(&mut self, cx: &mut Context) {
+        HotFn::current(L::restored).call((&mut self.0, cx));
+    }
+
+    fn saved_world(&self) -> Option<&World> {
+        HotFn::current(L::saved_world).call((&self.0,))
+    }
+
+    fn detach(&mut self, cx: &mut Context) {
+        HotFn::current(L::detach).call((&mut self.0, cx));
+    }
+
+    fn tick(&mut self, world: &mut World, tick: Tick) {
+        HotFn::current(L::tick).call((&mut self.0, world, tick));
+    }
+
+    fn commands(&mut self) -> Option<&mut dyn Commands> {
+        HotFn::current(L::commands).call((&mut self.0,))
+    }
+
+    fn update(&mut self, cx: &mut Context, dt: Duration) {
+        HotFn::current(L::update).call((&mut self.0, cx, dt));
+    }
+
+    fn event(&mut self, cx: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
+        HotFn::current(L::event).call((&mut self.0, cx, event))
+    }
+
+    fn ui(&mut self, cx: &mut Context, ui: &mut Ui<'_>) {
+        HotFn::current(L::ui).call((&mut self.0, cx, ui));
     }
 }
 
@@ -1530,6 +1598,77 @@ mod tests {
         // As while a tab shows over a dockspace's view, whose dock then has it nowhere.
         cx.extract(&mut frame, Viewport::from_points(egui::Rect::NOTHING, 1.5));
         assert_eq!(cx.view(), None);
+    }
+
+    /// Records each call of its methods but `saved_world`, which takes it as it is, and holds a
+    /// world aside and a queued command.
+    #[cfg(feature = "dev")]
+    #[derive(Default)]
+    struct Keeper {
+        calls: Vec<&'static str>,
+        held: World,
+        queued: Vec<u32>,
+    }
+
+    #[cfg(feature = "dev")]
+    impl Layer for Keeper {
+        fn load(&mut self, _: &mut Context) {
+            self.calls.push("load");
+        }
+        fn attach(&mut self, _: &mut Context) {
+            self.calls.push("attach");
+        }
+        fn restored(&mut self, _: &mut Context) {
+            self.calls.push("restored");
+        }
+        fn saved_world(&self) -> Option<&World> {
+            Some(&self.held)
+        }
+        fn detach(&mut self, _: &mut Context) {
+            self.calls.push("detach");
+        }
+        fn tick(&mut self, _: &mut World, _: Tick) {
+            self.calls.push("tick");
+        }
+        fn commands(&mut self) -> Option<&mut dyn Commands> {
+            self.calls.push("commands");
+            Some(&mut self.queued)
+        }
+        fn update(&mut self, _: &mut Context, _: Duration) {
+            self.calls.push("update");
+        }
+        fn event(&mut self, _: &mut Context, _: &Event<'_>) -> ControlFlow<()> {
+            self.calls.push("event");
+            ControlFlow::Break(())
+        }
+    }
+
+    /// A development build's stack holds each layer in a `Hot`, which calls the layer's own
+    /// methods and gives back what they return; `ui` is
+    /// `layers_draw_ui_unless_theirs_is_the_default`'s to check, through the stack.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_hot_layer_calls_the_layers_own_methods() {
+        let mut hot = Hot(Keeper {
+            queued: vec![7],
+            ..Keeper::default()
+        });
+        let (mut cx, mut world) = (Context::new(None), World::default());
+        hot.load(&mut cx);
+        hot.attach(&mut cx);
+        hot.restored(&mut cx);
+        hot.tick(&mut world, Tick { number: 0 });
+        let queued = hot.commands().map(|commands| commands.len());
+        hot.update(&mut cx, Duration::ZERO);
+        let handled = hot.event(&mut cx, &Event::CursorEntered);
+        hot.detach(&mut cx);
+        let held = hot.saved_world().expect("the world held aside");
+        assert!(std::ptr::eq(held, &hot.0.held));
+        assert_eq!((queued, handled), (Some(1), ControlFlow::Break(())));
+        let calls = [
+            "load", "attach", "restored", "tick", "commands", "update", "event", "detach",
+        ];
+        assert_eq!(hot.0.calls, calls);
     }
 
     /// Without a window, as in headless runs and tests, a file dialog shows nothing, so it picks

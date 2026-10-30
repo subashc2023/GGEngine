@@ -21,6 +21,7 @@ ron.workspace = true
 scoped-tls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+subsecond = { workspace = true, optional = true }
 tracing.workspace = true
 winit.workspace = true
 zune-jpeg.workspace = true
@@ -33,8 +34,8 @@ tracing-subscriber.workspace = true
 # The engine's zones for Tracy, through gg-core's profile module.
 tracy = ["gg-core/tracy"]
 # Development tooling, which development builds turn on and shipping builds never do: the tool API,
-# hot reload of games' shaders, and the OS's file dialogs, for now.
-dev = ["dep:gg-api", "dep:rfd"]
+# hot reload of games' shaders and patches of their code, and the OS's file dialogs, for now.
+dev = ["dep:gg-api", "dep:rfd", "dep:subsecond"]
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { workspace = true, features = [

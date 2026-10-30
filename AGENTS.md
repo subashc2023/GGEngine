@@ -85,10 +85,12 @@ there. renderdoccmd exits 0 whatever the run does, so read the run's log. `rende
 Development builds (gg-engine's `dev`, as the sandbox's and the editor's are) serve the tool API,
 and windowed, compile a game's shader again as its files change (`Shader reloaded`), or warn and
 draw on at a change that doesn't compile or breaks the shader contract. Run a game under `cargo gg
-run` in the background, which restarts it from a snapshot after a crash, a hang or a `cargo build`,
-and talk to it: `cargo gg status`, `capture` (its view as a PNG), `step` and the rest answer in
-JSON. A layer's `load` makes its assets; its `attach`, which a restart skips, builds the world.
-`dev`'s tests need `--features dev` with `-p gg-engine`; `--workspace` merges it in.
+run` in the background, which patches in an edit inside its function bodies as it's saved, with
+Dioxus's `dx` of the root Cargo.toml's `subsecond` release, whose install it names if it's missing,
+and restarts it from a snapshot after any other change, a crash or a hang (without `dx`, after a
+`cargo build`), and talk to it: `cargo gg status`, `capture` (its view as a PNG), `step` and the
+rest answer in JSON. A layer's `load` makes its assets; its `attach`, which a restart skips, builds
+the world. `dev`'s tests need `--features dev` with `-p gg-engine`; `--workspace` merges it in.
 
 A change is done when all six pass:
 
@@ -102,23 +104,22 @@ cargo test --workspace
 ```
 
 The tests include GPU tests, which need a Vulkan 1.4 driver and the Khronos validation layer.
-Without a GPU, lavapipe serves: on Debian or Ubuntu, `mesa-vulkan-drivers` (Mesa 25.0 or later)
-and `vulkan-validationlayers`. When a test's image differs from its reference, the test says
-where it wrote its own; after an intended change, `GG_UPDATE_REFERENCES=1` rewrites the
-references, which you look at before committing them. The sandbox's world hashes, at each tick of
-a seeded run, are a reference too, which CI checks on every platform: a change to its simulation,
-to what the hash reads, or to glam or libm changes them, and `GG_UPDATE_REFERENCES=1 cargo test -p
-sandbox` rewrites them alone, with those of its live recording,
-`apps/sandbox/tests/references/live.recording`. gg-engine's `physics.rs` holds another, the hash
-of a pile of bodies, which a change to rapier2d, to the physics code or to what the hash reads
-changes, and which is edited by hand. A difference on some platforms only is a bug, not
-a reference to rewrite. Some changes need a new recording, since rewriting the hashes would keep
-what they break: a change to the sandbox's layers, to a command's type that its lines no longer
-read as, or to what its commands name, the grid scene's types and the field the Inspector sets,
-whose reload and set would then be refused at their ticks. Make one with a windowed run and
-`--record` that holds the arrows and taps R, uses the panels, File > Reload the grid and the
-Inspector, undoing and redoing an edit, and closes; not File > Save, since the attach reads the
-grid's scene.
+Without a GPU, lavapipe serves: on Debian or Ubuntu, `mesa-vulkan-drivers` (Mesa 25.0 or later) and
+`vulkan-validationlayers`. When a test's image differs from its reference, the test says where it
+wrote its own; after an intended change, `GG_UPDATE_REFERENCES=1` rewrites the references, which you
+look at before committing them. The sandbox's world hashes, at each tick of a seeded run, are a
+reference too, which CI checks on every platform: a change to its simulation, to what the hash
+reads, or to glam or libm changes them, and `GG_UPDATE_REFERENCES=1 cargo test -p sandbox` rewrites
+them alone, with those of its live recording, `apps/sandbox/tests/references/live.recording`.
+gg-engine's `physics.rs` holds another, the hash of a pile of bodies, which a change to rapier2d, to
+the physics code or to what the hash reads changes, and which is edited by hand. A difference on
+some platforms only is a bug, not a reference to rewrite. Some changes need a new recording, since
+rewriting the hashes would keep what they break: a change to the sandbox's layers, to a command's
+type that its lines no longer read as, or to what its commands name, the grid scene's types and the
+field the Inspector sets, whose reload and set would then be refused at their ticks. Make one with a
+windowed run and `--record` that holds the arrows and taps R, uses the panels, File > Reload the
+grid and the Inspector, undoing and redoing an edit, and closes; not File > Save, since the attach
+reads the grid's scene.
 
 CI ([ci.yml](.github/workflows/ci.yml)) runs the gates on every push, on Windows and Linux, x86-64
 and ARM64, and on macOS ARM64, the shipping and doc gates on Linux x86-64 alone, and the layering
@@ -150,9 +151,8 @@ probe CI only for a change another platform could break.
 ## Engine rules
 
 - Validation errors are test failures: debug builds and tests run under the Khronos validation
-  layer with synchronization validation, and a test fails on any validation message. GPU tests
-  fail without synchronization validation too, which needs a layer that takes
-  `VK_EXT_layer_settings`.
+  layer with synchronization validation, and a test fails on any validation message. GPU tests fail
+  without synchronization validation too, which needs a layer that takes `VK_EXT_layer_settings`.
 - GPU tests run headless: they render offscreen and compare against reference images within a
   tolerance, so lavapipe can run them without a GPU.
 - Name and time everything: every Vulkan object gets a debug name and every pass a debug label,

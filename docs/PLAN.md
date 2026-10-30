@@ -61,20 +61,19 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Spring cleaning** (2026-10-29)
 - **The tool API and `tools/gg`** (2026-10-29)
 - **Restarting a game from a snapshot** (2026-10-29)
+- **subsecond's patches** (2026-10-29)
 
 ## Now
 
-**subsecond's patches**, Phase 5's third milestone. `gg run` starts a game's development build as
-`dx build --fat-binary` makes it, watches its crate, and as a file changes builds a patch of what
-changed inside function bodies with `dx tools hotpatch`, whose jump table it sends through the tool
-API; the game applies it between ticks. The engine calls each layer's methods through subsecond's
-`HotFn`, from generic function items, so that a patch reaches them and the systems and scripts they
-call. An edit no patch carries, such as a field, a type, a closure the size of a pointer or an
-engine edit, rebuilds the game, which `gg run` restarts from a snapshot, as it does now. Game
-crates stay binaries alone, since a crate with a library too gets empty patches. *Done when* an
-edit to a function body of the sandbox's layer, saved while the sandbox runs under `gg run`,
-changes what the running sandbox does within a couple of seconds, its world and its ticks going on
-untouched, and an edit that adds a field still restarts it where it was.
+**Operations through the API**, Phase 5's fourth milestone. The tool API applies, undoes and
+redoes [operations](../ARCHITECTURE.md#project-state), each client undoing its own, and `gg` gives
+each a command. A scene file a game loaded, saved while it runs, applies as the operations that
+take the world's entities from what the file held to what it holds, which undo together. `gg mcp`
+serves the API to agents that speak MCP, over stdio. The Deferred rows that wait for the API's
+operations, such as clients' capabilities and the log in `Context`, are settled as it starts.
+*Done when* an agent, through MCP alone, finds the sandbox's spinner, sets its speed and undoes
+it, and an edit to the grid's scene file, saved while the sandbox runs under `gg run`, changes the
+running world, which an undo through the API takes back.
 
 ## Next
 
@@ -348,9 +347,11 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | What's opaque in a component of a type that isn't opaque as a whole, which a snapshot file leaves out, its component coming back on its type's base: `Component::save_opaque` and `load_opaque` carry types opaque as a whole, as `MeshDraw` | A game's component holds an opaque field |
 | Snapshots that cost the main thread less than a copy of the world, which each takes as a frame starts before a thread of the API's writes it: some 6 MB of text for the debug sandbox's 10,461 entities, taken every 5 seconds under `gg run` | A game's snapshots show as hitches |
 | Removing the snapshot file of a `gg run` that's stopped, or ends in an error, which stays in `snapshots` beside the executable; one whose game exits cleanly removes it | They pile up enough to matter |
-| Starting again a game that waits for a rebuild as its scenes or assets change too: only its executable changing starts it again | A game crashes for its data rather than its code |
+| Starting again a game that waits for a rebuild as its scenes or assets change too: only a rebuild starts it again, as a change to its sources brings one, or without patches, its executable changing | A game crashes for its data rather than its code |
 | Recordings that keep what their attach read, such as the sandbox's grid scene, and the commit they were built from; a file changed since shows as a divergence at the attach, and a recording names its engine's version and build alone | Recordings replayed far from where they were made, such as bug reports from people's runs |
 | Recording every run, as a flight recorder; a run records only with `--record` | Bug reports from people's runs |
+| Patching an edit to a constant, which rebuilds the game: `gg run` patches edits inside function bodies alone, though one to a constant that no type, static or `const fn` reads would patch as well | Agents tune constants as the game runs, and the rebuilds' restarts slow them |
+| Removing the patches' libraries a `gg run` that's killed leaves; a run removes those its game loaded as it ends | They pile up enough to matter |
 
 ## Open questions
 

@@ -27,6 +27,7 @@ deny = [
     { crate = "gilrs-core", wrappers = ["gilrs"], reason = "gg-engine owns the window and input" },
     { crate = "rayon-core", wrappers = ["gg-engine"], reason = "gg-engine's jobs module is the way into the pool" },
     { crate = "rapier2d", wrappers = ["gg-engine"], reason = "gg-engine's physics module is the way into rapier" },
+    { crate = "subsecond", wrappers = ["gg-engine"], reason = "gg-engine calls the layers, which is where patches reach a game" },
     { crate = "tracy-client", wrappers = ["gg-core"], reason = "gg-core's profile module is the way into Tracy" },
     { crate = "tracy-client-sys", wrappers = ["tracy-client", "gg-core"], reason = "gg-core's profile module is the way into Tracy" },
 ]

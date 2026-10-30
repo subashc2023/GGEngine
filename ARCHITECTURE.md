@@ -150,12 +150,19 @@ anyone else's game depends on the engine from its own repository.
   editor's view, and one run without it in its own window.
 - **Hot reload keeps the world.** `subsecond` patches an edit inside a function body into the
   running game, which reaches calls made through its `HotFn` but none through a vtable or a
-  function pointer made before the patch. The engine calls each layer's methods through `HotFn`
-  and applies patches between ticks, so that a patch reaches those methods and the systems and
+  function pointer made before the patch. `gg run` builds a game's development build with
+  Dioxus's `dx`, of the release of the game's subsecond, and watches its sources: an edit inside
+  function bodies of the game's crate, as it's saved, it builds as a patch, which it sends through
+  the [tool API](#agents-and-tools), and the game applies between ticks. A development build calls
+  each layer's methods through `HotFn`, so that a patch reaches those methods and the systems and
   scripts they call; an edit that only a game's own trait object or function pointer reaches
-  waits for the next rebuild. Any other change, such as a new field, a new component or an
-  engine edit, rebuilds the game, restarts it and restores the world from a snapshot taken just
-  before, matching each changed component to its new layout by field name.
+  waits for the next rebuild. subsecond patches the binary's crate alone, so a game's crate is a
+  binary with no library beside it, and that crate's statics start over at each patch, so a game
+  keeps its state in the world. Any other change, such as a new field, even of a type declared in
+  a function's body, a new component, a constant, an engine edit, or an edit to code that has run
+  as the game started, `main` and a layer's `load` and `restored`, which a patch would come after,
+  rebuilds the game, restarts it and restores the world from a snapshot taken just before,
+  matching each changed component to its new layout by field name.
 - **Luau comes after v0.1, for mods and quick scripts.** Players can install sandboxed mods,
   and quests, dialogue and level events reload in milliseconds. Scripts reach Rust components
   through reflection, without hand-written bindings, and can declare components of their own.
@@ -171,7 +178,8 @@ in the editor is out of an agent's reach.
   the OS picks, which it writes with a token in a session file in `sessions` beside its
   executable, removed as the run ends: query the world, apply and undo
   [operations](#project-state), run, pause and step, capture frames, save the world whole as a
-  snapshot file, as [ECS](#ecs) describes, which a run given `--restore` starts from, and read
+  snapshot file, as [ECS](#ecs) describes, which a run given `--restore` starts from, apply
+  patches of the game's code, as [Game code](#game-code) describes, and read
   [diagnostics](#diagnostics). Requests and their answers are lines of JSON, as
   [gg-api](crates/gg-api/src/lib.rs) describes, and a connection's first request says hello with
   the token, so that only processes that can read the file reach the game. A thread of the API's
@@ -186,14 +194,15 @@ in the editor is out of an agent's reach.
   it, so that a capture shows what a query reads. Each client gets only the capabilities it is
   granted, such as reading the world or editing one scene.
 - **Clients.** The command-line tool, `tools/gg`, builds and runs games, supervising them: it
-  runs a copy of a game's executable, so that cargo builds the game again meanwhile, removing those
-  runs it killed left; snapshots it every few seconds from its first frame; and starts it again
-  from its last snapshot after a crash or a hang, and from one taken then as it's rebuilt, telling
-  of each, or waits for a rebuild if the game would only end the same way again, as one that ends
-  before its first snapshot would. A game that comes to its own end, as its window closes, ends the
-  supervision, as one that never serves does. It runs headless checks, and talks to running
-  games, all with machine-readable results; an MCP server gives agents that speak MCP the same
-  reach; the editor is one more client, with no ability an agent lacks.
+  runs a copy of a game's executable, so that the game builds again meanwhile, removing those runs
+  it killed left; patches it as its code changes, and rebuilds it at any other change, as [Game
+  code](#game-code) describes; snapshots it every few seconds from its first frame; and starts it
+  again from its last snapshot after a crash or a hang, and from one taken then as it's rebuilt,
+  telling of each, or waits for a rebuild if the game would only end the same way again, as one
+  that ends before its first snapshot would. A game that comes to its own end, as its window
+  closes, ends the supervision, as one that never serves does. It runs headless checks, and talks
+  to running games, all with machine-readable results; an MCP server gives agents that speak MCP
+  the same reach; the editor is one more client, with no ability an agent lacks.
 - **Headless runs.** Every app runs without a window (`--headless`) and can run a set number
   of frames, then exit with a status (`--frames N`): 0 for a clean run, 1 after an error or any
   validation message, and 2 for bad arguments. Dedicated servers, CI and agents checking their
@@ -788,7 +797,7 @@ on the main thread.
 |---|---|
 | Language | Rust stable, edition 2024 |
 | Game code | Rust; Luau through `mlua` after v0.1, for mods and quick scripts |
-| Hot patching | `subsecond` |
+| Hot patching | `subsecond`, its patches built by Dioxus's `dx` of the same release, which `gg run` checks |
 | GPU API | Vulkan through `ash`: one backend, no multi-API abstraction layer |
 | GPU memory | VMA through our own binding in `gg-gpu`, for its budgets, aliasing, pools and defragmentation |
 | Window and input | `winit`, with `ash-window` for surfaces and `gilrs` for gamepads |

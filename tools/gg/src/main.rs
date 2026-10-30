@@ -4,7 +4,10 @@
 //! at a time, for agents and scripts as much as for people.
 
 mod build;
+mod classify;
+mod dx;
 mod game;
+mod patch;
 mod run;
 
 use std::io::Write as _;
@@ -23,7 +26,7 @@ const USAGE: &str = "\
 Usage: gg <command> [options]
 
 Build and run:
-  run <PACKAGE> [--release] [--hang <SECONDS>] [--snapshot <SECONDS>] [-- <ARGS>...]
+  run <PACKAGE> [--release] [--no-patch] [--hang <SECONDS>] [--snapshot <SECONDS>] [-- <ARGS>...]
       Build PACKAGE's development build and run a copy of it with ARGS, printing a line as it
       starts, as it serves the tool API, and as it ends: `exited`, or `crashed` or `hung`, with the
       errors its log holds. A run whose frames stop for `--hang` seconds (10), while it waits for
@@ -35,6 +38,19 @@ Build and run:
       as its window closes, `quit` asks or its frames run out, whatever its status; as one that has
       never served the API ends; and as it ends at all with `--snapshot 0` or ARGS with `--record`,
       `--replay` or `--no-api`, which turn restarts off.
+      With dx, Dioxus's tool, on the PATH, of the release of the subsecond PACKAGE builds with,
+      the game is patched as its code changes, unless `--no-patch`, `--release`, restarts' being
+      off or a library beside PACKAGE's binary, which no patch reaches, turns patches off
+      (`patches_off` says why): `run` builds it with `dx build --fat-binary` and watches PACKAGE's
+      modules, the workspace's packages it builds with, and the workspace's manifest and lock file
+      (`watching`). An edit inside function bodies of PACKAGE's modules is built as a patch with
+      `dx tools hotpatch`, which the game applies between ticks (`patched`, or `patch_failed` with
+      rustc's errors, the game running on); any other change rebuilds it with dx, saying which file
+      and why (`rebuilding`, then `rebuilt` or `rebuild_failed`): one to a type, even one declared
+      in a body, or to code that has run as the game started, `main` and a layer's `load` and
+      `restored`, and any change while the last rebuild has failed. A game that waits for a
+      rebuild gets one at any change, and one started again is patched with the edits since its
+      build at once.
   check <PACKAGE> [--release] [--frames <N>] [--timeout <SECONDS>] [-- <ARGS>...]
       Build PACKAGE and run it headless for N frames (60) with ARGS, and print what it did: its exit
       status, its warnings and errors, and its frame times. One that runs longer than SECONDS
@@ -292,6 +308,7 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
             Command::Run(Run {
                 package,
                 release: parsed.switch("--release"),
+                patches: !parsed.switch("--no-patch"),
                 hang: parsed.seconds("--hang", 10)?,
                 snapshot: parsed.seconds("--snapshot", 5)?,
                 args: std::mem::take(&mut parsed.rest),
@@ -443,7 +460,10 @@ mod tests {
         else {
             panic!("a run");
         };
-        assert_eq!((run.package.as_str(), run.release), ("sandbox", false));
+        assert_eq!(
+            (run.package.as_str(), run.release, run.patches),
+            ("sandbox", false, true)
+        );
         assert_eq!(
             (run.hang, run.snapshot, run.args),
             (
@@ -452,10 +472,11 @@ mod tests {
                 vec!["--vsync".to_owned()]
             )
         );
-        let Ok(Command::Run(run)) = parsed(&["run", "sandbox", "--snapshot=0"]) else {
+        let Ok(Command::Run(run)) = parsed(&["run", "sandbox", "--snapshot=0", "--no-patch"])
+        else {
             panic!("a run");
         };
-        assert_eq!(run.snapshot, Duration::ZERO);
+        assert_eq!((run.snapshot, run.patches), (Duration::ZERO, false));
         let path = std::path::absolute("world.snapshot").unwrap();
         for (args, want) in [
             (&["snapshot"][..], json!({})),

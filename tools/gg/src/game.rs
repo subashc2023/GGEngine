@@ -22,13 +22,23 @@ pub(crate) struct Pick {
     pub(crate) timeout: Duration,
 }
 
-/// The session files of the games built in the workspace: those in the `sessions` directory of
-/// each of its target directory's profiles.
+/// The session files of the games built in the workspace, as [`sessions_in`] its target directory
+/// finds them.
 fn session_files() -> Result<Vec<(PathBuf, Session)>, Failure> {
-    let target = build::target_dir()?;
-    let profiles = fs::read_dir(&target).into_iter().flatten().flatten();
-    let sessions = profiles.flat_map(|profile| Session::list(&Session::dir(&profile.path())));
-    Ok(sessions.collect())
+    Ok(sessions_in(&build::target_dir()?))
+}
+
+/// The session files in the `sessions` directory of each profile of target directory `target`:
+/// cargo's, as `target/debug`, and those of a target's directory in it, where dx builds, as
+/// `target/x86_64-pc-windows-msvc/desktop-dev`.
+fn sessions_in(target: &Path) -> Vec<(PathBuf, Session)> {
+    let dirs = |dir: &Path| fs::read_dir(dir).into_iter().flatten().flatten();
+    let profiles = dirs(target).flat_map(|dir| {
+        let dir = dir.path();
+        dirs(&dir).map(|profile| profile.path()).chain([dir])
+    });
+    let sessions = profiles.flat_map(|profile| Session::list(&Session::dir(&profile)));
+    sessions.collect()
 }
 
 /// Connects to the game that `session`, read from the file at `path`, names, removing the file if
@@ -198,4 +208,38 @@ pub(crate) fn log_of(dir: &Path, pid: u32) -> Option<PathBuf> {
         .collect();
     logs.sort();
     logs.pop()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Games cargo built, and one dx built, which builds for its target, are all found.
+    #[test]
+    fn sessions_are_found_in_cargos_profiles_and_in_those_of_dxs_target() {
+        let target = std::env::temp_dir().join(format!("gg-sessions-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&target);
+        let profiles = ["debug", "release", "x86_64-pc-windows-msvc/desktop-dev"];
+        for (pid, profile) in (1..).zip(profiles) {
+            let dir = Session::dir(&target.join(profile));
+            fs::create_dir_all(&dir).expect("a directory");
+            let session = Session {
+                app: "Sandbox".to_owned(),
+                pid,
+                address: "127.0.0.1:4000".parse().expect("an address"),
+                token: "t".to_owned(),
+                log: None,
+                engine: "0.1.0 debug".to_owned(),
+                aslr_reference: 0,
+            };
+            let text = serde_json::to_string(&session).expect("JSON");
+            fs::write(dir.join(Session::file_name("Sandbox", pid)), text).expect("written");
+        }
+        let mut pids: Vec<u32> = (sessions_in(&target).into_iter())
+            .map(|(_, session)| session.pid)
+            .collect();
+        let _ = fs::remove_dir_all(&target);
+        pids.sort();
+        assert_eq!(pids, [1, 2, 3]);
+    }
 }

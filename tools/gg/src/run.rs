@@ -1,5 +1,6 @@
-//! Running a game's development build: supervised, and started again from a snapshot after a
-//! crash, a hang or a rebuild, until it exits; or headless for a set number of frames, as a check.
+//! Running a game's development build: supervised, patched as its code changes, and started again
+//! from a snapshot after a crash, a hang or a rebuild, until it exits; or headless for a set number
+//! of frames, as a check.
 
 use std::fs;
 use std::io;
@@ -11,19 +12,42 @@ use std::time::{Duration, Instant, SystemTime};
 use gg_api::{Client, Failure, Pulse, Session, Snapshot, Snapshotted};
 use serde_json::{Value, json};
 
+use crate::patch::{Patches, Process};
 use crate::{build, game};
 
-/// What `gg run` runs: a package, its profile, how long its frames may stop before it has hung,
-/// how often it's snapshotted, zero for never, and the arguments it's given.
+/// What `gg run` runs: a package, its profile, whether it's patched, unless `--no-patch`, how long
+/// its frames may stop before it has hung, how often it's snapshotted, zero for never, and the
+/// arguments it's given.
 pub(crate) struct Run {
     pub(crate) package: String,
     pub(crate) release: bool,
+    pub(crate) patches: bool,
     pub(crate) hang: Duration,
     pub(crate) snapshot: Duration,
     pub(crate) args: Vec<String>,
 }
 
 impl Run {
+    /// Why the run's options turn patches off, if they do: `--no-patch`; `--release`, as subsecond
+    /// patches debug builds alone; or restarts' being off, as an edit no patch carries rebuilds the
+    /// game and starts it again, and a recording would replay without the patches its run took.
+    pub(crate) fn unpatched(&self) -> Option<&'static str> {
+        let why = if !self.patches {
+            "`--no-patch` turns them off"
+        } else if self.release {
+            "subsecond patches debug builds alone, and `--release` makes an optimized one"
+        } else if !self.serves() {
+            "the game doesn't serve the tool API, which patches go through"
+        } else if self.given("--record") {
+            "the recording would replay without the patches the run took"
+        } else if self.snapshot.is_zero() {
+            "an edit no patch carries restarts the game, which `--snapshot 0` turns off"
+        } else {
+            return None;
+        };
+        Some(why)
+    }
+
     /// Whether the game serves the tool API: not given `--no-api`, nor replaying a recording.
     fn serves(&self) -> bool {
         !self.given("--no-api") && !self.given("--replay")
@@ -75,25 +99,31 @@ const QUIT: Duration = Duration::from_secs(10);
 /// may still be writing it.
 const SETTLE: Duration = Duration::from_secs(1);
 
-/// How long copying the executable, or removing the copy, is tried for: Windows may hold the copy
-/// a process ran for a moment after it ends.
+/// How long copying the executable, or removing the copy or a patch's library, is tried for:
+/// Windows may hold a file a process ran or loaded for a moment after it ends.
 const COPYING: Duration = Duration::from_secs(5);
 
 /// Prints `event`, a line of JSON.
-fn event(event: &Value) {
+pub(crate) fn event(event: &Value) {
     crate::print(&event.to_string());
 }
 
-/// Builds `run`'s package and runs a copy of its executable, so that cargo can build it again
-/// meanwhile, supervising the game until it exits cleanly: returns whether it did, having printed
-/// a line for each event. While restarts are on, it snapshots the game every so often as it serves
-/// the API, and starts it again from a snapshot after a crash or a hang, and as its executable is
-/// rebuilt, as [`next`] says; with them off, the game's first end ends it.
+/// Builds `run`'s package, with dx while patches are on, as [`Patches::new`] says, and runs a copy
+/// of its executable, so that it can be built again meanwhile, supervising the game until it exits
+/// cleanly: returns whether it did, having printed a line for each event. While restarts are on, it
+/// snapshots the game every so often as it serves the API, and starts it again from a snapshot
+/// after a crash or a hang, and as its executable is rebuilt, as [`next`] says; with them off, the
+/// game's first end ends it. While patches are on, it patches the game, or rebuilds it, as its
+/// sources change, as [`Patches::tend`] says.
 ///
-/// Fails with `gg.build` if it doesn't build, and `gg.run` if it can't be copied, started or
-/// waited for.
+/// Fails with `gg.build` if it doesn't build, `gg.cargo` if cargo can't say what the package is,
+/// and `gg.run` if it can't be copied, started or waited for.
 pub(crate) fn run(run: &Run) -> Result<bool, Failure> {
-    let exe = build::build(&run.package, run.release)?;
+    let patches = Patches::new(run)?;
+    let exe = match &patches {
+        Some(patches) => patches.exe().to_owned(),
+        None => build::build(&run.package, run.release)?,
+    };
     let dir = exe.parent().unwrap_or(Path::new(".")).to_owned();
     let snapshots = dir.join("snapshots");
     let restarts = run.restarts();
@@ -115,17 +145,22 @@ pub(crate) fn run(run: &Run) -> Result<bool, Failure> {
         served: false,
         latest: None,
         failed: None,
+        patches,
     };
     let supervised = supervisor.supervise();
-    // Once its game has ended; one still running keeps it.
-    let _ = retrying(|| remove(&supervisor.copy));
+    // Once its game has ended; one still running keeps it, and the patches' libraries it loaded.
+    if retrying(|| remove(&supervisor.copy)).is_ok()
+        && let Some(patches) = &supervisor.patches
+    {
+        patches.remove_libs();
+    }
     supervised
 }
 
 /// What `gg run` keeps across the game's restarts: what it runs, the executable and the copy of it
 /// that runs, where the game is snapshotted, whether a process of the game has served the API, the
-/// last snapshot that succeeded, and the code of the last snapshot failure printed, until one
-/// succeeds.
+/// last snapshot that succeeded, the code of the last snapshot failure printed, until one
+/// succeeds, and the run's patches, while they're on.
 struct Supervisor<'a> {
     run: &'a Run,
     exe: PathBuf,
@@ -138,6 +173,7 @@ struct Supervisor<'a> {
     served: bool,
     latest: Option<Snapshotted>,
     failed: Option<String>,
+    patches: Option<Patches>,
 }
 
 /// A game's process under `gg run`, and what's known of it: the snapshot it started from, its
@@ -175,7 +211,11 @@ impl Supervisor<'_> {
         // Set once the executable is rebuilt, until the game starts again from the new build.
         let mut rebuilt = false;
         loop {
-            if self.restarts && watch.rebuilt(stamp(&self.exe), Instant::now()) {
+            let now = Instant::now();
+            // While patches are on, the run makes the builds itself.
+            if let Some(patches) = &mut self.patches {
+                rebuilt |= patches.tend(game.as_ref().map(Game::process), now);
+            } else if self.restarts && watch.rebuilt(stamp(&self.exe), now) {
                 event(&json!({"event": "rebuilt", "exe": self.exe}));
                 rebuilt = true;
             }
@@ -200,6 +240,9 @@ impl Supervisor<'_> {
                 }
                 Next::Wait(why) => {
                     event(&json!({"event": "waiting", "for": "rebuild", "why": why}));
+                    if let Some(patches) = &mut self.patches {
+                        patches.waiting();
+                    }
                     game = None;
                 }
                 Next::End(clean) => {
@@ -212,10 +255,12 @@ impl Supervisor<'_> {
         }
     }
 
-    /// Starts the game from snapshot `from`, or afresh: copies the executable again, as it may have
-    /// been rebuilt, runs the copy, and prints `started`.
-    fn start(&self, from: Option<Snapshotted>) -> Result<Game, Failure> {
-        copy(&self.exe, &self.copy)?;
+    /// Starts the game from snapshot `from`, or afresh: copies the executable again if it may have
+    /// been rebuilt, as without patches it always may, runs the copy, and prints `started`.
+    fn start(&mut self, from: Option<Snapshotted>) -> Result<Game, Failure> {
+        if self.patches.as_mut().is_none_or(Patches::starting) {
+            copy(&self.exe, &self.copy)?;
+        }
         let mut command = Command::new(&self.copy);
         command.args(&self.run.args).stdin(Stdio::null());
         if let Some(from) = &from {
@@ -440,6 +485,14 @@ impl Supervisor<'_> {
 }
 
 impl Game {
+    /// What patches see of it.
+    fn process(&self) -> Process<'_> {
+        Process {
+            pid: self.pid,
+            session: self.session.as_ref(),
+        }
+    }
+
     /// What the snapshot in flight gave, waiting for it to be done; `None` if none was in flight,
     /// or its thread panicked.
     fn landed(&mut self) -> Option<Result<Snapshotted, Failure>> {
@@ -509,13 +562,17 @@ fn next(happened: Happened, latest: Option<&Snapshotted>, restarts: bool) -> Nex
     }
 }
 
-/// When the executable was last changed, and its length, which show that it was rebuilt; `None`
-/// while it can't be read, as while cargo replaces it.
-type Stamp = Option<(SystemTime, u64)>;
+/// When a file was last changed, and its length, which show that it changed, as an executable that
+/// was rebuilt; `None` while it can't be read, as while cargo replaces an executable.
+pub(crate) type Stamp = Option<(SystemTime, u64)>;
 
 /// Executable `exe`'s stamp, as the file system has it.
 fn stamp(exe: &Path) -> Stamp {
-    let metadata = fs::metadata(exe).ok()?;
+    fs::metadata(exe).ok().and_then(stamped)
+}
+
+/// The stamp of the file whose metadata is `metadata`.
+pub(crate) fn stamped(metadata: fs::Metadata) -> Stamp {
     Some((metadata.modified().ok()?, metadata.len()))
 }
 
@@ -605,7 +662,7 @@ fn copy(exe: &Path, to: &Path) -> Result<(), Failure> {
 }
 
 /// Removes the file at `path`, if there's one.
-fn remove(path: &Path) -> io::Result<()> {
+pub(crate) fn remove(path: &Path) -> io::Result<()> {
     match fs::remove_file(path) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         removed => removed,
@@ -613,7 +670,7 @@ fn remove(path: &Path) -> io::Result<()> {
 }
 
 /// Does `what` until it succeeds, for at most [`COPYING`], returning how it last went.
-fn retrying(mut what: impl FnMut() -> io::Result<()>) -> io::Result<()> {
+pub(crate) fn retrying(mut what: impl FnMut() -> io::Result<()>) -> io::Result<()> {
     let start = Instant::now();
     loop {
         match what() {
@@ -742,6 +799,7 @@ mod tests {
         Run {
             package: "sandbox".to_owned(),
             release: false,
+            patches: true,
             hang: Duration::from_secs(10),
             snapshot: Duration::from_secs(snapshot),
             args: args.iter().map(|&arg| arg.to_owned()).collect(),
@@ -761,6 +819,27 @@ mod tests {
             assert!(!run(args, 5).restarts(), "{args:?}");
         }
         assert!(!run(&["--replay=run.recording"], 5).serves());
+    }
+
+    #[test]
+    fn patches_are_off_for_release_builds_and_runs_without_restarts() {
+        assert_eq!(run(&["--vsync"], 5).unpatched(), None);
+        let unpatched = [
+            Run {
+                patches: false,
+                ..run(&[], 5)
+            },
+            Run {
+                release: true,
+                ..run(&[], 5)
+            },
+            run(&[], 0),
+            run(&["--no-api"], 5),
+            run(&["--record", "run.recording"], 5),
+        ];
+        for run in unpatched {
+            assert!(run.unpatched().is_some(), "{:?}", run.args);
+        }
     }
 
     #[test]

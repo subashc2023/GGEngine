@@ -73,6 +73,9 @@ serde = { version = "1.0.229", features = ["derive"] }
 # it would parse a model's transforms, which reach the world hash, to other bits than one where none
 # did.
 serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
+# Hot patching. The release of dx, Dioxus's tool, that builds the patches, which must be its own:
+# `gg run` checks the machine's dx against it.
+subsecond = "=0.7.2"
 # serde_derive's version, so that the two build once.
 syn = "3.0.9"
 # Without its default `attributes`, the `#[instrument]` macro, which nothing uses.

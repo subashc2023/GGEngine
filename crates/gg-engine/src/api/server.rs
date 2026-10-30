@@ -2,9 +2,10 @@
 //! file in the `sessions` directory beside the executable gives with a token. A thread accepts
 //! connections, and each has a thread that reads its requests, answering `hello` and `ping` itself
 //! and passing the rest on to the main loop, and one that writes its answers. The main loop answers
-//! them as a frame starts, before its ticks; a `step` once its ticks have run; a `capture` once a
-//! frame that rendered brings its view back, whose PNG a thread of its own writes; and a `snapshot`
-//! once a thread of its own has written the copy of the world the main thread took.
+//! them as a frame starts, before its ticks, so that a `patch` applies between ticks; a `step` once
+//! its ticks have run; a `capture` once a frame that rendered brings its view back, whose PNG a
+//! thread of its own writes; and a `snapshot` once a thread of its own has written the copy of the
+//! world the main thread took.
 
 use std::fmt::Display;
 use std::fs;
@@ -19,25 +20,26 @@ use std::thread;
 use std::time::Duration;
 
 use gg_api::{
-    Capture, Captured, EntityList, Failure, Field, Hash, Hello, Listed, Pulse, Request, Session,
-    Snapshotted, Status, Step, Welcome,
+    Capture, Captured, EntityList, Failure, Field, Hash, Hello, Listed, Patched, Pulse, Request,
+    Session, Snapshotted, Status, Step, Welcome,
 };
 use gg_core::{Error, Result};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use subsecond::JumpTable;
 use tracing::{debug, info};
 
 use super::{Waiting, json};
 use crate::layer::Stack;
 use crate::main_loop::Stepper;
 use crate::render_thread::{Extracted, Shot};
-use crate::{Context, Entity, EntityId, Name, World, snapshot};
+use crate::{Context, Entity, EntityId, Name, World, patch, snapshot};
 
 /// The methods, as `api.unknown_method` lists them.
-const METHODS: [&str; 13] = [
+const METHODS: [&str; 14] = [
     "hello", "ping", "status", "pause", "resume", "step", "capture", "entities", "entity", "get",
-    "hash", "snapshot", "quit",
+    "hash", "snapshot", "patch", "quit",
 ];
 
 /// The most ticks a `step` runs.
@@ -116,6 +118,7 @@ enum Call {
     },
     Hash,
     Snapshot(Option<PathBuf>),
+    Patch(JumpTable),
     Quit,
 }
 
@@ -183,6 +186,7 @@ impl Api {
             token,
             log: log.map(Path::to_owned),
             engine: crate::recording::engine(),
+            aslr_reference: patch::aslr_reference(),
         };
         let welcome = Welcome {
             app: session.app.clone(),
@@ -361,6 +365,12 @@ impl Api {
                     // The thread runs until the API drops.
                     let _ = self.taken.send(taken);
                 }
+                Call::Patch(table) => match patch::apply(table, stepper.ticks) {
+                    Ok(()) => reply.result(&Patched {
+                        ticks: stepper.ticks,
+                    }),
+                    Err(error) => reply.send(Err(failure(&error))),
+                },
                 Call::Quit => {
                     reply.send(Ok("{}".to_owned()));
                     quit = true;
@@ -777,6 +787,19 @@ fn parse(request: &Request) -> Result<Call, Failure> {
             }
             Call::Snapshot(path)
         }
+        "patch" => {
+            let gg_api::Patch { table } = take(method, params)?;
+            let table: JumpTable = serde_json::from_value(table).map_err(|error| {
+                let what = "takes as its `table` the jump table that `dx tools hotpatch` printed";
+                bad_params(method, format!("{what}: {error}"))
+            })?;
+            if !table.lib.is_absolute() {
+                let what = "takes a table whose `lib` is an absolute path, since the OS would look \
+                            for a library named so where it finds any";
+                return Err(bad_params(method, what));
+            }
+            Call::Patch(table)
+        }
         "quit" => none(method, params).map(|()| Call::Quit)?,
         "step" => {
             let Step { ticks } = take(method, params)?;
@@ -1103,6 +1126,29 @@ mod tests {
         let _ = fs::remove_file(&path);
     }
 
+    /// A patch that can't apply is answered with `api.patch`: here, one whose table's reference is
+    /// past where any process's `main` is, which a test's build refuses whether its executable
+    /// exports `main` or not, as `patch`'s own tests say.
+    #[test]
+    fn a_patch_that_cant_apply_is_refused() {
+        let (mut api, session) = started("Api Patches");
+        let cx = Context::seeded(7);
+        let mut stepper = Stepper::default();
+        let client = |mut client: Client| {
+            let table = json!({
+                "lib": std::env::temp_dir().join("patch.dll"),
+                "map": {},
+                "aslr_reference": u64::MAX,
+                "new_base_address": 0,
+                "ifunc_count": 0,
+            });
+            let call = client.call("patch", json!({ "table": table }));
+            call.expect_err("refused")
+        };
+        let refused = serving(&mut api, &cx, &mut stepper, session, client, |_, _| {});
+        assert_eq!(refused.code, "api.patch", "{}", refused.message);
+    }
+
     /// A capture rides with the frames handed off until one that rendered brings the view back: an
     /// error, which it answers, or the view, whose PNG it writes where it's asked and answers.
     #[test]
@@ -1175,6 +1221,32 @@ mod tests {
         };
         let given = json!({"with": "Sprite"});
         assert_eq!(parse(&request("entities", given)), Ok(entities));
+        // As `dx tools hotpatch` prints it, the map's keys as strings, its library a path from the
+        // root.
+        let lib = std::env::temp_dir().join("patch.dll");
+        let table = json!({
+            "lib": lib,
+            "map": {"4096": 8192},
+            "aslr_reference": 1,
+            "new_base_address": 2,
+            "ifunc_count": 0,
+        });
+        let jump = JumpTable {
+            lib,
+            map: [(4096, 8192)].into_iter().collect(),
+            aslr_reference: 1,
+            new_base_address: 2,
+            ifunc_count: 0,
+        };
+        let given = json!({ "table": table });
+        assert_eq!(parse(&request("patch", given)), Ok(Call::Patch(jump)));
+        let half = json!({"table": {"lib": "patch.dll"}});
+        let refused = parse(&request("patch", half.clone())).err();
+        let message = refused.map(|failure| failure.message).unwrap_or_default();
+        assert!(message.contains("`map`"), "says what's missing: {message}");
+        let extra = json!({"table": table, "lib": "x"});
+        let mut relative = table.clone();
+        relative["lib"] = json!("patch.dll");
         for (method, params, code) in [
             ("status", json!({"x": 1}), "api.bad_params"),
             ("step", json!({"ticks": 0}), "api.bad_params"),
@@ -1183,6 +1255,10 @@ mod tests {
             ("capture", json!({"path": "relative.png"}), "api.bad_params"),
             ("entities", json!({"take": 10_001}), "api.bad_params"),
             ("entity", json!({"id": "nope"}), "ecs.bad_id"),
+            ("patch", Value::Null, "api.bad_params"),
+            ("patch", json!({ "table": relative }), "api.bad_params"),
+            ("patch", extra, "api.bad_params"),
+            ("patch", half, "api.bad_params"),
             ("hello", json!({"token": "x"}), "api.bad_request"),
             ("bogus", Value::Null, "api.unknown_method"),
         ] {

@@ -23,6 +23,12 @@
 //!   starts from, and answers [`Snapshotted`] once it's written; before the simulation's first tick
 //!   in the run, which applies what the layers queued as they started, it fails with
 //!   `api.not_ticked`.
+//! - `patch`, [`Patch`]: applies a patch of the game's code, which `dx tools hotpatch` built for the
+//!   game's process, between ticks, and answers [`Patched`]; fails with `api.bad_params` if the
+//!   table's library, `lib`, isn't an absolute path, and with `api.patch` if the build can't take
+//!   patches, as [`Session::aslr_reference`] says, the table's reference is past where the game's
+//!   `main` is, so that it isn't for this process, the library doesn't load, or it isn't a patch of
+//!   the game's build, as one that exports no `main` isn't.
 //! - `quit`: answers `{}`, and the run ends cleanly, as when its window closes, but without asking
 //!   its layers, which may keep a window open.
 //!
@@ -73,6 +79,13 @@ pub struct Session {
     pub log: Option<PathBuf>,
     /// The engine's version and build, such as `0.1.0 debug`.
     pub engine: String,
+    /// Where the game's `main` is in its process, which `dx tools hotpatch` builds a patch for the
+    /// process against (`--aslr-reference`), as the OS loads the executable somewhere else in each;
+    /// 0 in a build that can't take patches: one whose executable exports no `main`, as one that
+    /// cargo built for Windows or Linux doesn't, or one without debug assertions, without which
+    /// subsecond never looks a patch up. A debug build that cargo made for macOS exports its `main`
+    /// all the same, though only patches of the build `dx build --fat-binary` made suit a process.
+    pub aslr_reference: u64,
 }
 
 impl Session {
@@ -358,6 +371,21 @@ pub struct Snapshotted {
     pub bytes: u64,
 }
 
+/// What `patch` takes: the jump table that `dx tools hotpatch` printed, as it printed it, which
+/// names the patch's library and maps each function the patch replaces to its new address.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Patch {
+    pub table: Value,
+}
+
+/// What `patch` answers: the ticks the simulation had run as the patch applied, the first that runs
+/// the patched code being the next.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Patched {
+    pub ticks: u64,
+}
+
 /// A connection to a running game's API, for tools: a request at a time, each waiting for its
 /// answer.
 pub struct Client {
@@ -527,6 +555,7 @@ mod tests {
             token: "t".to_owned(),
             log: None,
             engine: "0.1.0 debug".to_owned(),
+            aslr_reference: 0x7ff6_1234_5678,
         };
         for pid in [2, 1] {
             let text = serde_json::to_string(&session(pid)).unwrap();
@@ -583,6 +612,7 @@ mod tests {
             token: "secret".to_owned(),
             log: None,
             engine: "0.1.0 debug".to_owned(),
+            aslr_reference: 0x7ff6_1234_5678,
         }
     }
 
