@@ -26,7 +26,7 @@
 //! ```
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use gg_core::{Error, Result};
 use tracing::{info, warn};
@@ -44,7 +44,6 @@ const FORMAT: &str = "gg-snapshot 1";
 /// up, as the simulation had run `ticks` ticks.
 ///
 /// Fails as [`World::save_whole`] does.
-#[cfg(feature = "dev")]
 pub(crate) fn write(
     world: &World,
     scenes: &[SceneFile],
@@ -98,7 +97,8 @@ pub(crate) fn save(path: &Path, text: &str) -> Result<()> {
 /// A snapshot file, as a run restored from it reads it as it starts: its header, checked, and the
 /// lines of its world, which load once the layers have.
 pub(crate) struct Snapshot {
-    path: PathBuf,
+    /// Where it came from, as messages name it: its file's path, or a lockstep host.
+    from: String,
     text: String,
     layers: Vec<String>,
     ticks: u64,
@@ -121,8 +121,14 @@ impl Snapshot {
             let message = format!("can't read the snapshot {}", path.display());
             Error::new("snapshot.file", message).with_source(error)
         })?;
-        let refused =
-            |what: String| Error::new("snapshot.format", format!("{}: {what}", path.display()));
+        Self::parse(text, path.display().to_string(), app)
+    }
+
+    /// Reads `text`, a snapshot file's, from where `from` names, for app `app`, checking its header.
+    ///
+    /// Fails with `snapshot.format` as [`read`](Self::read) does.
+    pub(crate) fn parse(text: String, from: String, app: &str) -> Result<Self> {
+        let refused = |what: String| Error::new("snapshot.format", format!("{from}: {what}"));
         let lines: Vec<&str> = text.lines().collect();
         if lines.first() != Some(&FORMAT) {
             return Err(refused(format!(
@@ -198,7 +204,7 @@ impl Snapshot {
             world += 1;
         }
         Ok(Self {
-            path: path.to_owned(),
+            from,
             layers: layers.collect(),
             ticks,
             hash,
@@ -218,7 +224,7 @@ impl Snapshot {
     ///
     /// Fails as `load_whole` does.
     pub(crate) fn restore(&self, world: &mut World, layers: &[&str]) -> Result<u64> {
-        let path = self.path.display();
+        let path = &self.from;
         if !self
             .layers
             .iter()

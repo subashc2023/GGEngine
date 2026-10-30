@@ -67,8 +67,21 @@ pub(crate) fn connect(pick: &Pick) -> Result<Client, Failure> {
     });
     let mut running = Vec::new();
     for (path, session) in picked {
-        running.extend(connect_to(&path, &session, &pick.client)?);
+        if let Some(client) = connect_to(&path, &session, &pick.client)? {
+            running.push((session.player, client));
+        }
     }
+    // A lockstep session's peers, of one game, are reached through the host, whose edits and
+    // patches both peers apply.
+    let peers = running.iter().all(|(player, _)| player.is_some());
+    let hosts = running
+        .iter()
+        .filter(|(player, _)| *player == Some(0))
+        .count();
+    if running.len() > 1 && peers && hosts == 1 {
+        running.retain(|(player, _)| *player == Some(0));
+    }
+    let mut running: Vec<Client> = running.into_iter().map(|(_, client)| client).collect();
     let mut client = match running.len() {
         0 => {
             let which = match (&pick.pid, &pick.app) {
@@ -119,6 +132,7 @@ pub(crate) fn sessions() -> Result<Value, Failure> {
             "pid": session.pid,
             "address": session.address,
             "engine": session.engine,
+            "player": session.player,
             "log": session.log,
             "frames": pulse.frames,
             "waiting": pulse.waiting,
@@ -243,6 +257,7 @@ mod tests {
                 log: None,
                 engine: "0.1.0 debug".to_owned(),
                 aslr_reference: 0,
+                player: None,
             };
             let text = serde_json::to_string(&session).expect("JSON");
             fs::write(dir.join(Session::file_name("Sandbox", pid)), text).expect("written");

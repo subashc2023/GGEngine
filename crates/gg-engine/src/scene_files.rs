@@ -24,6 +24,10 @@ pub(crate) struct SceneFile {
     /// When it last changed and its size, as last looked at; `None` before the first look.
     #[cfg(feature = "dev")]
     stamp: Option<(SystemTime, u64)>,
+    /// Its text as last read, which the next save is compared with: in a lockstep session a save
+    /// applies at a tick to come, after which `text` is what was read.
+    #[cfg(feature = "dev")]
+    read: String,
 }
 
 impl SceneFile {
@@ -31,6 +35,8 @@ impl SceneFile {
         Self {
             path,
             author,
+            #[cfg(feature = "dev")]
+            read: text.clone(),
             text,
             #[cfg(feature = "dev")]
             stamp: None,
@@ -67,20 +73,25 @@ mod watch {
 
     use tracing::{info, warn};
 
+    use gg_core::{Error, Result};
+
     use super::{LOOK, SceneFile};
     use crate::Context;
     use crate::ecs::SceneEdit;
-    use crate::edits::Edit;
+    use crate::edits::{Done, Edit};
     use crate::layer::Stack;
 
     /// As a frame starts, between ticks, applies the scene files saved since the last look, at
     /// most one a [`LOOK`]: each as the edit that takes the world's entities from the file's text as
     /// last applied to its text now, through `stack`, which records it, logging `scene.applied`.
     /// One that doesn't load, or whose edit the world refuses, warns with the error's code and
-    /// changes nothing, and the next save is compared with the file as last applied.
+    /// changes nothing, and the next save is compared with the file as last applied. In a lockstep
+    /// session, the host offers each save for a tick both peers apply it before, as
+    /// [`Stack::offer_save`] says, and a joiner doesn't look.
     pub(crate) fn look(cx: &mut Context, stack: &mut Stack) {
         let now = Instant::now();
-        if cx.scenes.files.is_empty()
+        if !stack.watches_scenes()
+            || cx.scenes.files.is_empty()
             || cx
                 .scenes
                 .looked
@@ -89,8 +100,8 @@ mod watch {
             return;
         }
         cx.scenes.looked = Some(now);
-        let mut files = mem::take(&mut cx.scenes.files);
-        for file in &mut files {
+        let mut saves = Vec::new();
+        for file in &mut cx.scenes.files {
             let stamp = fs::metadata(&file.path)
                 .and_then(|meta| Ok((meta.modified()?, meta.len())))
                 .ok();
@@ -102,18 +113,51 @@ mod watch {
                 continue;
             };
             file.stamp = stamp;
-            if text != file.text {
-                apply(cx, stack, file, text);
+            if text != file.read {
+                file.read.clone_from(&text);
+                saves.push((file.author.clone(), text));
             }
         }
-        // Any the layers loaded meanwhile come after.
-        files.append(&mut cx.scenes.files);
-        cx.scenes.files = files;
+        // With the files in place, which a save finds its own among as it applies, now or at a
+        // tick to come.
+        for (author, text) in saves {
+            stack.offer_save(cx, author, text);
+        }
     }
 
-    /// Applies the edit that takes `cx`'s world from `file`'s text to `text`, its text now, as
-    /// [`look`] says.
-    fn apply(cx: &mut Context, stack: &mut Stack, file: &mut SceneFile, text: String) {
+    /// Applies the save of the scene file whose author is `author`, its text now `text`, through
+    /// `edit`, which applies an edit to `cx`'s world and records it, as [`look`] says.
+    ///
+    /// Fails with `scene.not_watched` for an author no scene file has, and as [`apply`] does.
+    pub(crate) fn apply_save(
+        cx: &mut Context,
+        edit: &mut dyn FnMut(&mut Context, Edit) -> Result<Done>,
+        author: &str,
+        text: String,
+    ) -> Result<Done> {
+        let mut files = mem::take(&mut cx.scenes.files);
+        let applied = match files.iter_mut().find(|file| file.author == author) {
+            Some(file) => apply(cx, edit, file, text),
+            None => Err(Error::new(
+                "scene.not_watched",
+                format!("no scene file the layers loaded is {author}"),
+            )),
+        };
+        files.append(&mut cx.scenes.files);
+        cx.scenes.files = files;
+        applied.map(|()| Done::Applied(Vec::new()))
+    }
+
+    /// Applies the edit that takes `cx`'s world from `file`'s text to `text`, its text now, through
+    /// `edit`, as [`look`] says.
+    ///
+    /// Fails, having warned, as the text's load or the edit does.
+    fn apply(
+        cx: &mut Context,
+        edit: &mut dyn FnMut(&mut Context, Edit) -> Result<Done>,
+        file: &mut SceneFile,
+        text: String,
+    ) -> Result<()> {
         let _zone = gg_core::zone!();
         let path = file.path.display();
         let author = || file.author.clone();
@@ -136,44 +180,44 @@ mod watch {
         let applied = cx
             .world()
             .scene_edit(old.as_deref(), &text)
-            .and_then(|edit| match edit {
+            .and_then(|found| match found {
                 SceneEdit::Changes(changes) => {
                     operations = changes.len();
                     if changes.is_empty() {
                         return Ok(());
                     }
-                    let edit = Edit::Apply {
+                    let apply = Edit::Apply {
                         author: author(),
                         operations: changes,
                     };
-                    stack.edit(cx, edit).map(drop)
+                    edit(cx, apply).map(drop)
                 }
                 SceneEdit::Creates(creates) => {
                     operations = creates.len();
-                    let edit = Edit::Apply {
+                    let apply = Edit::Apply {
                         author: author(),
                         operations: creates,
                     };
-                    stack.edit(cx, edit)?;
+                    edit(cx, apply)?;
                     // With the entities made, the rest, which may hold them; refused, the append
                     // undoes the creates too.
                     let rest = match cx.world().scene_edit(old.as_deref(), &text) {
                         Ok(SceneEdit::Changes(rest)) => rest,
                         Ok(SceneEdit::Creates(_)) => unreachable!("every entity is made"),
                         Err(error) => {
-                            let _ = stack.edit(cx, Edit::Undo { author: author() });
+                            let _ = edit(cx, Edit::Undo { author: author() });
                             return Err(error);
                         }
                     };
                     operations += rest.len();
-                    let edit = Edit::Append {
+                    let append = Edit::Append {
                         author: author(),
                         operations: rest,
                     };
-                    stack.edit(cx, edit).map(drop)
+                    edit(cx, append).map(drop)
                 }
             });
-        match applied {
+        match &applied {
             Ok(()) => {
                 info!(
                     code = "scene.applied",
@@ -192,11 +236,12 @@ mod watch {
                 );
             }
         }
+        applied
     }
 }
 
 #[cfg(feature = "dev")]
-pub(crate) use watch::look;
+pub(crate) use watch::{apply_save, look};
 
 #[cfg(all(test, feature = "dev"))]
 mod tests {
@@ -206,10 +251,12 @@ mod tests {
     use gg_core::math::Vec3;
 
     use super::*;
+    use crate::args::Net;
     use crate::dirs::tests::Scratch;
     use crate::edits::Edit;
     use crate::layer::Stack;
-    use crate::{Context, Transform};
+    use crate::net::{DELAY, Lockstep};
+    use crate::{Context, Tick, Transform};
 
     /// Writes `text` at `path`, stamped `later` seconds past now, so that a look sees it changed
     /// whatever the clock's grain.
@@ -285,5 +332,45 @@ mod tests {
                 ..Transform::IDENTITY
             }
         );
+    }
+
+    /// In a lockstep session, whose saves apply at a tick to come, a file put back before its
+    /// save has applied is a save too, and the world ends as the file does.
+    #[test]
+    fn a_file_put_back_before_its_save_applies_applies_as_put_back() {
+        let dir = Scratch::new("scene-files-lockstep");
+        fs::create_dir_all(dir.0.join("scenes")).expect("a directory");
+        let path = dir.0.join("scenes").join("level.ron");
+        let mut file = crate::World::seeded(1);
+        let a = file.spawn(Transform::IDENTITY);
+        let old = file.save_scene(&[a]).expect("saved");
+        save(&path, &old, 0);
+        let mut cx = Context::seeded(2).root(&dir.0);
+        let roots = cx.load_scene_file(&path).expect("loaded");
+        let mut stack = Stack::default();
+        let net = Net::Host("127.0.0.1:0".to_owned());
+        stack.lockstep(Lockstep::start(&net, "Tested", &[]).expect("hosting"));
+        let look = |cx: &mut Context, stack: &mut Stack| {
+            cx.scenes.looked = None;
+            look(cx, stack);
+        };
+        look(&mut cx, &mut stack);
+        let moved = Transform {
+            translation: Vec3::new(1.0, 2.0, 3.0),
+            ..Transform::IDENTITY
+        };
+        file.insert(a, moved).expect("alive");
+        save(&path, &file.save_scene(&[a]).expect("saved"), 2);
+        look(&mut cx, &mut stack);
+        save(&path, &old, 4);
+        look(&mut cx, &mut stack);
+        for number in 0..=DELAY {
+            assert!(stack.tick(&mut cx, Tick { number }));
+        }
+        assert_eq!(
+            *cx.world().get::<Transform>(roots[0]).expect("one"),
+            Transform::IDENTITY
+        );
+        assert_eq!(cx.scenes.files[0].text, old);
     }
 }

@@ -63,65 +63,66 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Restarting a game from a snapshot** (2026-10-29)
 - **subsecond's patches** (2026-10-29)
 - **Operations through the API** (2026-10-30)
+- **The first demo** (2026-10-30)
+- **Phase 5, tool API and hot reload: v0.1** (2026-10-30)
 
 ## Now
 
-**The first demo**, Phase 5's last milestone: a simple networked game in `games/`, which joins
-the workspace's members with it, a crate of its own as [Game code](../ARCHITECTURE.md#game-code)
-says, with the networking it needs, the engine's first, by the multiplayer model the open question
-below settles, decided as it starts. *Done when* Phase 5's is: the v0.1 loop works on the demo,
-watching it run, the user asks Claude Code for a change, Claude Code edits the game's Rust code or
-applies operations through the API, and the game shows the change with its state intact; and an
-agent runs a headless check through `tools/gg` and acts on its result.
+**Phase 6's first milestone**, chosen as [Phase 6](#next) starts; its plan says when it's done.
 
 ## Next
 
 Each phase ends in something you can run and check.
 
-5. **Tool API and hot reload: v0.1.** The tool API in development builds, as
-   [ARCHITECTURE.md](../ARCHITECTURE.md#agents-and-tools) describes. `tools/gg`, the
-   command-line tool: build, run and test with machine-readable results; launch and supervise a
-   game's development build, restarting it from its last snapshot after a crash or hang; talk to
-   it through the API. An MCP server with the same reach. Assets named by their paths, which scenes
-   save and a restart from a snapshot carries across a rebuild. Scene files edited while the game
-   runs apply as operations. `subsecond` patches edits inside function bodies into the running game;
-   it patches only the game's main crate and needs Dioxus's `dx` tool to build patches. The engine
-   calls each layer's methods through its `HotFn` and applies patches between ticks, as
-   [Game code](../ARCHITECTURE.md#game-code) describes. Any other change rebuilds the game and
-   restarts it from a snapshot, matching each changed component to its new layout by field name.
-   Its milestones, in order: the tool API and `tools/gg`; restarting a game from a snapshot after a
-   crash, a hang or a rebuild; subsecond's patches; operations through the API, with undo, scene
-   files applied as operations, and the MCP server; and the first demo, a simple networked game in
-   `games/`, with the networking it needs, the first of the engine's. *Done when* the v0.1 loop
-   works on that demo: watching the running game, the user asks Claude Code for a change, Claude
-   Code edits the game's Rust code or applies operations through the API, and the game shows the
-   change with its state intact; and an agent runs a headless check through `tools/gg` and acts on
-   its result.
-6. **Render graph and PBR.** Passes declare the resources they read and write; the graph
-   places barriers and layout transitions, aliases transient memory and schedules async
-   compute. Physically based shading (glTF metallic-roughness), image-based lighting, cascaded
-   shadow maps, HDR and tonemapping; reference-image tests on lavapipe. *Done when* Sponza
-   renders lit and shadowed, synchronization validation is clean, and per-pass GPU timings
-   show in Tracy.
-7. **Assets and player.** `tools/cook` turns glTF into engine meshes (meshoptimizer: vertex and
-   index optimization, meshlets, LODs), textures into BC-compressed KTX2 and games' shaders into
-   SPIR-V, packed into a memory-mappable package; an async streaming loader with a per-frame
-   upload budget; hot reload in the sandbox; the player runs a package under a shipping profile
-   (LTO, one codegen unit). *Done when* the player runs a cooked Amazon Lumberyard Bistro on all
-   three OSes, with load time and memory measured.
-8. **GPU-driven rendering.** GPU culling (frustum, then two-pass occlusion against a depth
-   pyramid); indirect draws; meshlets, through mesh shaders where supported and a compute path
-   elsewhere; a visibility buffer; clustered lighting; TAA. *Done when* CPU frame time stays
-   flat as the instance count grows, and Bistro with many instances meets a frame-time target
-   set in this phase on the RTX 4090 and an Apple Silicon Mac.
-9. **Editor.** `apps/editor` on the tool API: its panels (the scene tree among them), Play, Simulate
-   and Stop, and its File menu reaching the game through it; a panel of logs and errors; and the
-   view of a game running in its own process, embedded. *Done when* the editor has no path into the
-   game but the tool API, and the v0.1 loop works from inside it.
+6. **Projects and the editor on the tool API.** A project: a manifest naming its game's crate, its
+   asset root, its scenes and the scene it starts in, which `gg new` makes and every tool reads.
+   `apps/editor` opens a project and works on its game, running in its own process, through the
+   tool API alone: its panels (the scene tree among them), Play, Simulate, Stop, pause and step, and
+   its File menu reaching the game through it; a panel of logs and errors; and the game's view,
+   embedded. *Done when* the editor opens the demo's project, has no path into the game but the
+   tool API, and the v0.1 loop works from inside it.
+7. **Assets.** An asset database: every asset of a project found by a stable ID kept in a text file
+   beside it, which scenes name it by, with its import settings; assets loaded once whoever asks,
+   by ID or by path, and reloaded as their files change, textures, meshes and shaders alike; and the
+   editor's Assets panel dropping a texture onto a sprite, a model into the scene. *Done when* a
+   texture dragged from the Assets panel onto a sprite saves in its scene by ID, survives renaming
+   its file, and an edit to it in an image editor shows in the running game.
+8. **Text and sound.** Text drawn from multi-channel signed distance fields, crisp at any size,
+   fonts baked by the asset pipeline; a game's own UI, HUDs and menus, apart from the development
+   UI; and audio: sounds and music, mixed, positioned in 2D, loaded as assets. *Done when* the demo
+   shows its scores and a menu in text and plays its sounds.
+9. **Scripting.** Luau, as [Game code](../ARCHITECTURE.md#game-code) describes: scripts as assets,
+   attached to entities, their fields in the Inspector, reaching other entities and Rust components
+   through reflection, reloaded as they're saved with the world kept, deterministic for lockstep
+   and replays, and debugged with breakpoints, pause and step; and the tool API's capabilities, so
+   that a mod's scripts reach only what they're granted. *Done when* a game's behavior written in
+   Luau reloads as it's saved, in sync on both peers of the demo, and a mod runs sandboxed.
+10. **Cooking and the player.** `tools/cook` turns glTF into engine meshes (meshoptimizer: vertex
+    and index optimization, meshlets, LODs), textures into BC-compressed KTX2, fonts into their
+    fields and games' shaders into SPIR-V, packed into a memory-mappable package; an async
+    streaming loader with a per-frame upload budget; the player runs a package under a shipping
+    profile (LTO, one codegen unit). *Done when* the demo ships as a cooked package its own player
+    runs on all three OSes, with load time and memory measured.
+11. **Networking beyond lockstep.** Rollback, from the snapshots and replays the world already has,
+    with a SyncTest; a server that owns the world, replicating it to clients that predict; and a
+    desync debugger that names the entity and field where peers part. *Done when* the demo plays
+    over a link with 100 ms of latency and loss, under rollback and under a server, without a
+    desync, and a desync forced in a test is named to its field.
+12. **Render graph and PBR.** Passes declare the resources they read and write; the graph
+    places barriers and layout transitions, aliases transient memory and schedules async
+    compute. Physically based shading (glTF metallic-roughness), image-based lighting, cascaded
+    shadow maps, HDR and tonemapping; reference-image tests on lavapipe. *Done when* Sponza
+    renders lit and shadowed, synchronization validation is clean, and per-pass GPU timings
+    show in Tracy.
+13. **GPU-driven rendering.** GPU culling (frustum, then two-pass occlusion against a depth
+    pyramid); indirect draws; meshlets, through mesh shaders where supported and a compute path
+    elsewhere; a visibility buffer; clustered lighting; TAA. *Done when* CPU frame time stays
+    flat as the instance count grows, and a cooked Amazon Lumberyard Bistro with many instances
+    meets a frame-time target set in this phase on the RTX 4090 and an Apple Silicon Mac.
 
-Later: Luau scripting and mods; networking (replication, lockstep, rollback); 3D physics, audio,
-animation, UI; upscalers (DLSS, FSR, XeSS); ray-traced effects where the driver exposes ray
-tracing (no macOS driver does today); and the built-in coding agent for v1.
+Later: 3D physics, animation (sprite flipbooks and tweens, then skeletal), particles, linked
+prefabs; upscalers (DLSS, FSR, XeSS); ray-traced effects where the driver exposes ray tracing (no
+macOS driver does today); and the built-in coding agent for v1.
 
 ## Deferred
 
@@ -131,8 +132,8 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 |---|---|
 | The engine as a dynamic library in development builds, to shorten relinks | Rebuilding a game gets slow |
 | Optimized dependencies in dev builds (`[profile.dev.package."*"] opt-level = 3`); zune-jpeg alone is, for the reason the root Cargo.toml gives | Physics or another heavy dependency makes debug builds slow |
-| Compiling trace and debug events out of shipping builds, through `tracing`'s `release_max_level_*` features | Phase 7, with the shipping profile |
-| No console window for shipping builds on Windows (`windows_subsystem = "windows"` on the player); the JSON log still records the run | Phase 7, with the shipping profile |
+| Compiling trace and debug events out of shipping builds, through `tracing`'s `release_max_level_*` features | Phase 10, with the shipping profile |
+| No console window for shipping builds on Windows (`windows_subsystem = "windows"` on the player); the JSON log still records the run | Phase 10, with the shipping profile |
 | Checking the sandbox by hand on Linux, and on macOS with KosmicKrisp (Vulkan SDK 1.4.363.0 or later, the first conformant build), its gamepads, the editor's file dialogs and the drawn title bars too, with the menu button's inset clear of macOS's traffic lights (72 points) and a torn-off window moving by its tab bar where X11 and macOS move windows asynchronously, and the render thread there: acquiring, presenting and rebuilding swapchains as windows resize off the main thread under KosmicKrisp, and on Wayland a frame in flight presenting at its old size after a maximize; and the `frames` test on macOS, whose CI runner has no GPU to run it: std's mutexes there are boxed as they're first locked, so a mutex made each frame allocates there alone | A Linux machine and an Apple Silicon Mac are at hand |
 | Deleting old JSON logs; every run's log is kept | Logs pile up enough to matter |
 | A clean shutdown on Ctrl+C, which now ends the process at once; the JSON log keeps every line written until then, and a recording every whole line but its `end` | A headless run that goes on until it's stopped, such as a dedicated server |
@@ -144,32 +145,32 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Capabilities each client of the tool API is granted, as [Agents and tools](../ARCHITECTURE.md#agents-and-tools) describes: a connection that says hello with the session's token reaches everything, which only processes that can read the session file beside the game do | A client the user doesn't run as their own, such as one on another machine or a mod's, or an agent kept to one scene |
 | Diagnostics served by the tool API: `gg logs` reads the JSON log the session file names | A client on another machine, or one that follows a run's events as they come |
 | MCP beyond tools: resources, prompts, progress, cancellation and the client's roots; `gg mcp`'s tools are the API's methods but `quit`, `patch` and the paths of `capture` and `snapshot`, a capture's PNG coming inline | An agent needs one of them |
-| Watching the scene files the editor opens, saves and reloads, which it reads through `World::replace_scene` rather than `Context::load_scene_file` | Phase 9's editor |
+| Watching the scene files the editor opens, saves and reloads, which it reads through `World::replace_scene` rather than `Context::load_scene_file` | Phase 6's editor |
 | Steps and captures while the window is minimized, which fail with `api.paused`, and requests while a file dialog or Windows' window menu holds the main thread, which wait; `ping` says which | A tool needs them then |
-| Labels inside passes: each run of draws labeled by what it draws, and the frame pass's view and UI apart; a capture shows a label for each pass | Phase 6, with the render graph |
+| Labels inside passes: each run of draws labeled by what it draws, and the frame pass's view and UI apart; a capture shows a label for each pass | Phase 12, with the render graph |
 | Synchronization validation under RenderDoc, whose layer hides the validation layer's settings: through `VK_EXT_validation_features`, or the validation layer's environment | A synchronization bug shows under RenderDoc alone |
 | Captures on macOS, where RenderDoc doesn't run, so `--capture` is refused | Someone needs a capture of a Mac's frames |
-| egui, the dock and the Inspector behind `dev`: the player links them, though it runs egui for its first frame alone, as an app none of whose layers draw UI does; `Ui`, which `Layer::ui` takes, is the type to turn into a no-op | Phase 7, with the shipping profile |
+| egui, the dock and the Inspector behind `dev`: the player links them, though it runs egui for its first frame alone, as an app none of whose layers draw UI does; `Ui`, which `Layer::ui` takes, is the type to turn into a no-op | Phase 10, with the shipping profile |
 | The main thread takes the renderer back once a frame's UI is drawn, so a frame's input is read about a frame before it renders: a refresh under `--vsync`; and drawing between ticks draws the world up to a tick behind the simulation. Starting each frame once the render thread has acquired the image it renders into would win the first back, and extrapolating from the latest ticks the second | A game's input latency needs it |
 | Pushing and popping layers while the app runs; `App` fixes the stack before it starts | A tool or game needs a layer for only part of a run |
 | Composed text from an input method (winit's `Ime` events), for languages typed through one | A game takes text input, such as chat |
-| Frames that draw UI and allocate nothing: egui allocates as it lays out and tessellates, and as it collects its input, where winit reads the window's title, and so do the dock, the Inspector, and the render thread while a panel has a window of its own | A game's shipping frames draw UI, or Phase 7 puts egui behind `dev` |
+| Frames that draw UI and allocate nothing: egui allocates as it lays out and tessellates, and as it collects its input, where winit reads the window's title, and so do the dock, the Inspector, and the render thread while a panel has a window of its own | A game's shipping frames draw UI, or Phase 10 puts egui behind `dev` |
 | Counting what the Vulkan loader, the drivers, the validation layer and VMA allocate beneath the engine, through `VkAllocationCallbacks`, which drivers may bypass for their own: the `frames` test counts Rust's allocator | A profile shows them allocating each frame |
-| Keeping within the GPU's memory budget (`VK_EXT_memory_budget` through VMA) | Phase 7, with streaming |
+| Keeping within the GPU's memory budget (`VK_EXT_memory_budget` through VMA) | Phase 10, with streaming |
 | Removing meshes, shaders and textures, which last until the app ends, and replacing meshes and textures; shaders are replaced as they reload | Phase 7, with asset hot reload |
-| Per-frame data in a buffer: shaders get the camera's view and projection as one matrix, and see the world through each draw's transform, but not the camera's position, the time or the lights | Phase 6, with lighting |
-| Materials: parameters kept on the GPU and written when they change, rather than copied every frame with each instance; `MeshDraw`'s cap of 64 bytes of parameters, past which a shader draws through `Context::draw`, goes with it | Phase 6, with materials |
-| Textures of data rather than color, such as normal maps, which shaders read as stored rather than decoded from sRGB | Phase 6, with PBR's maps |
+| Per-frame data in a buffer: shaders get the camera's view and projection as one matrix, and see the world through each draw's transform, but not the camera's position, the time or the lights | Phase 12, with lighting |
+| Materials: parameters kept on the GPU and written when they change, rather than copied every frame with each instance; `MeshDraw`'s cap of 64 bytes of parameters, past which a shader draws through `Context::draw`, goes with it | Phase 12, with materials |
+| Textures of data rather than color, such as normal maps, which shaders read as stored rather than decoded from sRGB | Phase 12, with PBR's maps |
 | Premultiplied alpha for games' textures: with straight alpha, as PNGs store it, a linear filter at an edge mixes in the color of the transparent pixels beside it | A game's art shows dark or colored fringes |
 | Sorting what blends back to front by its depth in the view, rather than by its z in the world, which orders it rightly only as seen from in front, as [Rendering](../ARCHITECTURE.md#rendering) says; and what layers draw themselves goes in the order given. Sorting coplanar sprites each by its own depth would sort the swarm's 100,000 every frame the camera turns, and swap overlapping ones as it does | A game blends in 3D, such as particles or glass |
 | Back-face culling for games' own meshes: `MeshDraw::new` and `Context::draw` draw both faces, as sprites mirrored by a negative scale need; models' materials alone cull | A game draws closed meshes of its own |
 | Mirrored and unmirrored instances of one culling mesh, interleaved in the order of their IDs, draw a run each, since a run culls one way; sorting a run's instances by how they wind would keep it to two | A model instanced many times, some mirrored |
 | Depth other than what a shader's blend implies: draws that ignore it, as gizmos and overlays do, a skybox that tests it without writing it, decals, and sprites cut out by their alpha that write it | Each with its first user |
-| Depth bias, whose sign flips with depth reversed | Phase 6, with shadow maps |
+| Depth bias, whose sign flips with depth reversed | Phase 12, with shadow maps |
 | Depth bias for lines, so that one lying on an opaque mesh's face shows whole: across its width, a line's quad keeps the line's depth, so where the face slopes across the line in the view, it hides half of it | Lines drawn on 3D surfaces, as debug drawing in 3D |
 | Joins where lines meet: lines end squared off, so a rectangle's sides overlap at its corners, which a translucent one shows darker, and a thick polyline's segments overlap at each bend | A game draws translucent outlines or thick polylines |
 | Circle colliders' outlines of as many lines as their size on screen needs: each is 64, round to within a pixel up to some 800 pixels across, so a larger one shows its sides and a smaller one draws more lines than it needs | A game shows the outlines of many circle colliders, or a large one shows its sides |
-| A far plane for perspective, as glTF's `zfar` gives; it sees out to infinity | A glTF camera with one, or Phase 8's culling |
+| A far plane for perspective, as glTF's `zfar` gives; it sees out to infinity | A glTF camera with one, or Phase 13's culling |
 | Keeping the view's depth past its pass, to sample: each frame clears it and doesn't store it | Post-processing, finding the point under the cursor, or captures of depth |
 | Rendering the view's IDs only in frames that pick or outline: every frame renders them, for the reason [Rendering](../ARCHITECTURE.md#rendering) gives | A profile shows them |
 | Answering picks sooner than [Rendering](../ARCHITECTURE.md#rendering) says they come: reading them as soon as the timeline says the GPU has rendered them would win a frame or so | Picking that the latency shows in, such as highlighting what's under the cursor |
@@ -182,14 +183,14 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Tiling one cell of a sheet: a repeating sampler repeats the whole texture | A game tiles part of an atlas, such as a background |
 | A sprite that samples past its rectangle, so that a seamless texture tiled across sprites side by side blends across their edges under a linear sampler | A game tiles one texture across sprites |
 | A tile map in the engine, which scenes save; the sandbox's map is code of its own, its tiles sprites that snapshots and scenes save each with its texture's path | A game edits its map |
-| glTF that `Context::add_model` refuses or ignores, as it lists: lighting and the material's other textures, skins and animations, morph targets, cameras, models without a scene and scenes other than the default, sparse accessors and accessors without a buffer view, primitives other than triangle lists, samplers that wrap across and down differently, minification filters, texture transforms, quantized or compressed meshes and textures (KHR_mesh_quantization, Draco, meshopt, Basis Universal), and integers written as floats, such as `1.0`, which glTF allows | Each with the first model that needs it; lighting and the other textures in Phase 6, compression with Phase 7's cooker |
-| Decoding images off the main thread; `Context::add_texture` and `add_model` decode before they return | Phase 7, with the streaming loader |
-| Models that take more than 4 GiB to read, of their buffers, decoded images, vertices and nodes, which `add_model` refuses with `engine.unsupported_model` | Phase 7, with streaming and the GPU's memory budget |
-| Mip levels made on the CPU, on the render thread, as the frame that uploads a model's texture renders: a 2,048 by 2,048 texture's take about 0.3 s of that frame in a debug build | Phase 7, which cooks them; or blits on the GPU, if a hitch shows first |
+| glTF that `Context::add_model` refuses or ignores, as it lists: lighting and the material's other textures, skins and animations, morph targets, cameras, models without a scene and scenes other than the default, sparse accessors and accessors without a buffer view, primitives other than triangle lists, samplers that wrap across and down differently, minification filters, texture transforms, quantized or compressed meshes and textures (KHR_mesh_quantization, Draco, meshopt, Basis Universal), and integers written as floats, such as `1.0`, which glTF allows | Each with the first model that needs it; lighting and the other textures in Phase 12, compression with Phase 10's cooker |
+| Decoding images off the main thread; `Context::add_texture` and `add_model` decode before they return | Phase 10, with the streaming loader |
+| Models that take more than 4 GiB to read, of their buffers, decoded images, vertices and nodes, which `add_model` refuses with `engine.unsupported_model` | Phase 10, with streaming and the GPU's memory budget |
+| Mip levels made on the CPU, on the render thread, as the frame that uploads a model's texture renders: a 2,048 by 2,048 texture's take about 0.3 s of that frame in a debug build | Phase 10, which cooks them; or blits on the GPU, if a hitch shows first |
 | Layers making textures from their own pixels; `Textures::add` takes pixels, but `Context` adds only PNGs and JPEGs | A game makes its own textures |
-| Keeping the frames' arenas near their frames' peak, within the GPU's memory budget: an arena grows by a buffer at least twice its last, and merges them as it resets, so it can hold a few times what its largest frame took, in memory the CPU writes, of instances' transforms, IDs and parameters and the UI's vertices, indices and texture changes | Phase 7, with the GPU's memory budget |
+| Keeping the frames' arenas near their frames' peak, within the GPU's memory budget: an arena grows by a buffer at least twice its last, and merges them as it resets, so it can hold a few times what its largest frame took, in memory the CPU writes, of instances' transforms, IDs and parameters and the UI's vertices, indices and texture changes | Phase 10, with the GPU's memory budget |
 | A frame's copies through a transfer queue start only once it's submitted, after its passes are recorded, and the frame waits for them | A profile shows a frame waiting for its uploads |
-| Staging and the frame's arena kept within the device's `maxMemoryAllocationSize` and `maxBufferSize`, each at least 1 GiB: both grow by doubling, each staging buffer an allocation of its own, so a frame that adds more than that at once fails, which ends the run | A frame adds that much at once, or Phase 7, with the GPU's memory budget |
+| Staging and the frame's arena kept within the device's `maxMemoryAllocationSize` and `maxBufferSize`, each at least 1 GiB: both grow by doubling, each staging buffer an allocation of its own, so a frame that adds more than that at once fails, which ends the run | A frame adds that much at once, or Phase 10, with the GPU's memory budget |
 | Images' sizes checked against the device's `maxImageDimension2D` and `maxFramebufferWidth` and `Height` as they're made; a pass checks its viewport against the device's limits, which an image past those exceeds only if it's past `maxViewportDimensions` too | A device's limits fall below a window's size |
 | Host image copy where a transfer queue exists, or where the driver says it costs the GPU in reading the image, as KosmicKrisp's does, turning off Apple's lossless compression, so that macOS uploads through the graphics queue; and meshes written straight into GPU memory the CPU reaches, as ReBAR and unified memory allow, rather than copied | A measurement shows either is faster |
 | More than one view, such as split screen, or the editor's scene view beside the game's: the view sees through one camera, the world's primary one, or a layer's viewpoint | A game or the editor draws several |
@@ -199,9 +200,9 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | A scene or prefab loaded with a primary camera making the world's other cameras not primary, as an operation's does: a load sets fields as they're written, and of several primary, the view sees through the lowest ID's, warning | A prefab brings a camera of its own, as a player's would |
 | Finding the point in the world under the cursor, as `Context::pick` finds the entity there: the editor's camera finds one on a plane itself, but nothing reads the view's depth; and the orthographic camera controller zooms about the view's center | Something places what it adds at the cursor's depth, or a game zooms toward the cursor |
 | A dockspace's view in a window of its own: it docks and floats over the main window alone, since only the main window's input reaches the layers, and its image is made at the main window's scale | The editor shows the game on a display of its own |
-| Showing whether keys reach the view, such as an outline around it while they do: from a press on it, or with the cursor over it | Someone misses it, or Phase 9's editor |
+| Showing whether keys reach the view, such as an outline around it while they do: from a press on it, or with the cursor over it | Someone misses it, or Phase 6's editor |
 | Gamepads following a dockspace's view: they reach the layers whichever panel has the keys, as they do in games | The editor binds a pad, or a panel takes a pad's input |
-| F framing what's picked, the editor's camera easing to see it whole | Someone frames often, or Phase 9's editor |
+| F framing what's picked, the editor's camera easing to see it whole | Someone frames often, or Phase 6's editor |
 | The handles along the world's axes as well as along the entity's own, as other editors' toggles have it: they turn with what's picked | Someone moves things along the world's axes |
 | Snapping steps of one's own: the command key snaps to half units, 45° and halves | Someone needs other steps |
 | The amount a drag of the handles has moved, turned or scaled, shown beside them as it goes | Someone wants exact drags without the Inspector |
@@ -226,7 +227,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Keys' and gamepad buttons' labels, for prompts that show a binding: both are positions, and the engine drops what a keyboard's layout makes of a key, and whether a pad is an Xbox or a PlayStation one | A game shows its bindings |
 | A hold of an axis shorter than a tick, which moves nothing: its two changes apply at one tick | A game needs one, as a flag that the tick clears |
 | An engine type for what an action holds in the world, such as a button's held flag and its presses this tick; each game writes its own component | A game other than the sandbox and the editor's own world writes the same |
-| Pressing and setting actions from code, ahead of the commands, and listing a game's actions by name, for the tool API and agents | Phase 5, the tool API |
+| Pressing and setting actions from code, ahead of the commands, and listing a game's actions by name, for the tool API and agents | An agent plays a game through the tool API, or a test presses its actions |
 | Gamepads in `Input`, for layers to poll: `Input` holds keys and mouse buttons alone, and actions read the pads | A layer polls a pad |
 | Gamepads connecting and disconnecting as events, and their names, which only the log has | A game prompts as a pad connects |
 | Binding a source to one gamepad, or the keyboard to one player: every pad drives every layer's actions | Local multiplayer |
@@ -237,8 +238,8 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | gilrs's allocations: on Windows.Gaming.Input, its polling thread's, which reads every pad every 8 ms, and the string of a pad's ID that each event the frame takes asks Windows for; and the channel's blocks, which the frame that takes their last event frees. The engine's own feeding of pads to actions allocates only as a pad first reports, and as a second pad first holds more than one does | A game's frames must allocate nothing with a pad connected |
 | winit's allocations on Windows as it takes each key's press and release: a list for each message's text, and one of the messages it collects; Linux's keyboard reuses a buffer | A game's frames must allocate nothing as keys are pressed on Windows, or winit stops |
 | Making the job threads' first allocations as the pool starts: each thread's first steal allocates its record in crossbeam-epoch, and on macOS its first sleep std's mutex and condition variable; the pool's other threads do both in its first ticks, and the ticks' thread sleeps only when a wait drags on, which may come at any tick. rayon-core doesn't say when a thread has slept, so a warm-up could only wait and hope | A game's ticks must allocate nothing from their first, or rayon-core says when a thread sleeps |
-| Codes for dependencies' own warnings, which reach the log as they give them: as a pad connects on Windows.Gaming.Input, gilrs warns, without a code, that it has no mapping for it, since that backend gives every pad a nil UUID, and goes on with its default mapping, the right one there | Phase 5, as the tool API serves diagnostics |
-| Checking a game's vertex and parameter structs field by field: the check compares each struct's size with its Rust type's and finds its fields 32-bit, so fields of one size in another order or of another kind, such as an integer read as a float, draw garbage without a message. A derive on vertex and parameter types would give it each field's offset, scalar type and vector width | Agents edit games' shaders, in Phase 5 |
+| Codes for dependencies' own warnings, which reach the log as they give them: as a pad connects on Windows.Gaming.Input, gilrs warns, without a code, that it has no mapping for it, since that backend gives every pad a nil UUID, and goes on with its default mapping, the right one there | A tool acts on a dependency's warnings, or the tool API serves diagnostics |
+| Checking a game's vertex and parameter structs field by field: the check compares each struct's size with its Rust type's and finds its fields 32-bit, so fields of one size in another order or of another kind, such as an integer read as a float, draw garbage without a message. A derive on vertex and parameter types would give it each field's offset, scalar type and vector width | A game's struct mixes fields of one size but other kinds, or an agent's edit to one draws garbage unseen |
 | Wave operations in games' shaders, and the other SPIR-V capabilities a device's properties decide rather than its features, which the check refuses | A game's shader needs them |
 | Hot reloading the engine's own shaders, which the build compiles in | Work on the engine's shaders wants it |
 | Watching shaders' files through the OS's notifications, rather than by their times and lengths every tenth of a second, which reads every watched file each time, and, while a shader fails, every file in the directories its files are in, but none in directories within them: an include in one of those that a failing shader found broken, fixed where it is, waits for another change | Phase 7, with asset hot reload, or a game with many shaders |
@@ -248,17 +249,17 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Saving the pipeline cache as pipelines are made rather than as the run ends, which a crash skips, so that a game `gg run` restarts after one makes its pipelines again | A restart after a crash takes noticeably longer for it |
 | Pruning the pipeline cache, which keeps every pipeline it was given, an edited shader's old ones too | It grows to tens of megabytes |
 | Requiring a slangc that decorates sampled images `NonUniform` itself, Slang 2026.11's or later, such as the Vulkan SDK 1.4.363's, and dropping gg-renderer's `decorate_non_uniform`, which does it for older ones | The engine requires the Vulkan SDK 1.4.363 or later |
-| Games' shaders compile with slangc as they're added, so running a game needs slangc where its build found it | Phase 7, which cooks shaders |
+| Games' shaders compile with slangc as they're added, so running a game needs slangc where its build found it | Phase 10, which cooks shaders |
 | Beyond textures named by their paths: a library that finds an asset by its path or name, so that a file added twice loads once, where now it loads twice, and that loads one a scene names; `MeshDraw`'s mesh and shader named, as `Sprite.texture` is: opaque until then, shown but not set, saved in scenes or hashed, and carried across a restart by their indices only where the layers added the same assets in the same order; setting them by name, and dropping the Assets panel's images onto a sprite, whose texture the Inspector shows but doesn't set | A game builds its draws from data, or someone edits a sprite's texture in the editor |
-| 8- and 16-bit vertex fields, whose features Vulkan 1.4 guarantees but the device doesn't enable | A mesh packs its vertices, as Phase 7's cooker will |
+| 8- and 16-bit vertex fields, whose features Vulkan 1.4 guarantees but the device doesn't enable | A mesh packs its vertices, as Phase 10's cooker will |
 | Splits in a torn-off window, which holds one tab group | A tool wants panels side by side outside the main window |
-| Reordering tabs by dragging them along their bar; a drop among the tabs adds one at the end | Phase 9, the editor |
+| Reordering tabs by dragging them along their bar; a drop among the tabs adds one at the end | Phase 6, the editor |
 | A minimum width for each panel, as Hazel keeps its Properties panel 370 pixels wide: a split keeps each side 48 points, and the Inspector's rows of axes clip in a narrower panel | Someone narrows the Inspector past its rows |
 | Checking Windows' frame on Windows 10, whose DWM may draw no border along the top of a window whose inside reaches it | Someone runs the tools on Windows 10 |
 | Checking Windows' frame around torn-off windows as their scale changes, across monitors of different scales | Someone docks across such monitors |
 | A button in the title bar hiding the panels docked above the view, as those left of, below and right of it hide, and keys for the buttons, as VS Code's Ctrl+B, Ctrl+J and Ctrl+Alt+B | Someone docks a panel above the view and wants it out of the way, or reaches for the buttons often |
 | On macOS, the menus in the system's menu bar, and a double-click on the title bar doing what the user's setting says | A tool ships on macOS |
-| Alt and access keys to reach the menus, and layers adding items to one another's menus | Phase 9, the editor |
+| Alt and access keys to reach the menus, and layers adding items to one another's menus | Phase 6, the editor |
 | Windows of their own on Wayland, where groups float over the main window | winit can place windows on Wayland |
 | egui's deferred viewports, which don't open (`engine.viewport_deferred`); immediate ones do | A tool needs a window that repaints apart from the main one |
 | egui's own scopes in Tracy, which egui marks for the `profiling` crate: `profiling` 1.0.18 takes tracy-client 0.18, and two Tracy clients don't link together | `profiling` takes tracy-client 0.19; deny.toml's wrappers for tracy-client then add it |
@@ -281,7 +282,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Generic types deriving `Reflect` or `Component` | A game needs one |
 | Drag speeds as hints; the Inspector picks them from a field's bounds and kind | A field drags too coarsely or too finely |
 | Paths resolved once and kept, for sets made again and again | A profile |
-| Picking an entity for a field, a parent or a child picked by clicking it; the Entities panel scrolling to an entity found or picked in the view, or to a root that an add or a remove moved to the end of another table, and so of the tree's roots | Phase 9's scene tree |
+| Picking an entity for a field, a parent or a child picked by clicking it; the Entities panel scrolling to an entity found or picked in the view, or to a root that an add or a remove moved to the end of another table, and so of the tree's roots | Phase 6's scene tree |
 | Finding an entity by its name: the Find field takes an ID | A world names more entities than the Entities panel shows at once |
 | An icon on each of the Entities panel's rows saying what its entity is, from its components, such as a camera's, a sprite's or a mesh's: a row says its name alone | Names alone stop telling entities apart at a glance |
 | World transforms stored and propagated after the ticks, with change detection; drawing computes each child's from its ancestors, every frame, as the latest tick left them, for its z, and blended between ticks, to draw it | Bodies under a parent, or a profile showing the walks up the hierarchy |
@@ -294,21 +295,21 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Sets that jump: an Inspector set of a moving entity's transform, and its undo, glide there over a tick, as a drag does, rather than reset its interpolation, as an agent's set through the tool API does too | Someone wants a set of a moving entity to glide |
 | A flag for headless frames at a fraction of a tick of their own, for captures between ticks and for perf runs that measure blending, which headless frames, drawing their ticks, leave out; tests have them, through `App::headless_step` | A capture between ticks, or a change to blending that needs measuring headless |
 | Interpolation across rollback: a world restored in a tick draws where the tick left it, all of it, so rollback that restores every tick would draw at the tick rate; how rollback restores is decided with it | Rollback |
-| Reparenting that keeps where a child is in the world, by decomposing its matrix, which loses any shear; `set_parent` keeps its own transform | Phase 9's scene tree, or an agent attaching something where it stands |
+| Reparenting that keeps where a child is in the world, by decomposing its matrix, which loses any shear; `set_parent` keeps its own transform | Phase 6's scene tree, or an agent attaching something where it stands |
 | Spawning a child into its table at once from code: `spawn`, then `set_parent`, moves it to another table; a load and a create operation spawn one there | A profile |
-| Children in an order that means something: reordering them, and saving their order; an undo puts a child back last | Phase 9's scene tree, or UI laid out by the hierarchy |
+| Children in an order that means something: reordering them, and saving their order; an undo puts a child back last | Phase 6's scene tree, or UI laid out by the hierarchy |
 | Each session's seed and count saved with the world and merged with it, so that an ID maps back to its session and when it was drawn, and a load refuses IDs no session drew | The tool API refusing an ID an agent made up |
 | An `EntityId` query term | The first system that reads IDs as it iterates, such as replication |
 | Errors carrying their entity, and a scene's line and column, as fields, not only in their message, which the tool API gives as its code and message alone | A tool reads an error's entity or place without parsing its message |
 | Drawing rows at one z in ID order for less. Every frame reads them in that order rather than their tables', about 0.9 ms of the swarm's 4.3 ms frame in release; a frame that changes rows or z's, or follows a restore, sorts them by ID again, about 2.5 ms more for 100,000; and 100,000 sprites each at a z of their own, as sorting by y gives them, take about 5 ms, for a group and an item each. Tables kept in ID order would make the reads a sweep, and a radix sort the sort quicker | A game's frames need the time |
-| Linked prefab instances, with overrides, nesting, apply and revert; a placement is a flattened copy, each ID mixed from its instance's and its own, which links will keep | Phase 9's editor, or a game editing a prefab its scenes hold many copies of |
+| Linked prefab instances, with overrides, nesting, apply and revert; a placement is a flattened copy, each ID mixed from its instance's and its own, which links will keep | Phase 6's editor, or a game editing a prefab its scenes hold many copies of |
 | Placing a prefab without parsing it again: `World::place_prefab` parses its text each time, which allocates | A game places prefabs as it runs, rather than as it loads |
 | A derive hint for `Component::base`, and opaque values in lists and options, which saving refuses, as does a set's undo (`reflect.opaque`) where the old value holds something opaque in a variant, an option or a list; a type with opaque fields implements `Component` by hand to load, as `Sprite` does | A game's component holds something opaque |
 | Names in scenes beyond ASCII identifiers, which saving refuses (`scene.bad_name`) | A game names a type or a field so |
 | Loading a scene in place of some of a world's entities in one step, as the sandbox's grid reload does in three; a load refuses IDs the world has, and `World::replace_scene` replaces all of its entities; a scene file a game loaded through `Context::load_scene_file`, saved, applies as operations | Another game reloads part of its world from a file of its own |
 | A version in scene files, a file without one reading as the first | The first change to the format that old files can't be read by |
 | Comments in scene files, which a save drops | People annotate scenes |
-| A prompt before the editor's New, Open or Quit, or a scene dropped on its view, discards edits not saved: they discard them | Someone loses work, or Phase 9's editor |
+| A prompt before the editor's New, Open or Quit, or a scene dropped on its view, discards edits not saved: they discard them | Someone loses work, or Phase 6's editor |
 | The scene's file named in the editor, whose title bar's middle holds Play, and a list of recent scenes: Save writes to the file opened or saved last, which nothing shows | Someone loses track of which file Save writes |
 | Listing the Assets panel's folder off the main thread, as a thread watching it would: it's listed on the main thread each second it shows, which a folder of many thousands of files would hold up for milliseconds | A game's folder that big, once the tool API brings one |
 | Pause and step, as Hazel's later episodes add | Someone steps through a play or a simulation |
@@ -322,9 +323,9 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Physics' state in the world's hash, `--dump` and `World::difference`, which read entities alone, as they read no resource: a step that goes another way inside rapier shows in the bodies' transforms a tick later | A replay goes another way inside physics unseen for long |
 | Replaying a log into another world, which maps values' handles to IDs, as a recording's commands are; `set_field` and operations store a dead handle without complaint | Edits sent to another world, as a server's or a peer's |
 | A delete saying what refers to its entities from outside, or refusing; those references dangle until it's undone, and the world doesn't save as a scene in between, though snapshots keep them dead | Someone loses a scene's save to a reference a delete left dangling |
-| Undoing a create whose entity has children since that the create didn't make, such as game code gave it, by keeping them where they are; it's refused (`ecs.has_children`), and the log drops it | An agent attaches children to what another's create made, or Phase 9's editor |
+| Undoing a create whose entity has children since that the create didn't make, such as game code gave it, by keeping them where they are; it's refused (`ecs.has_children`), and the log drops it | An agent attaches children to what another's create made, or Phase 6's editor |
 | Layers holding what a restore in place takes back: the sandbox's swarm is in the world, and the Inspector drops its log and pick once the world's serial is another's, but nothing tells a layer that `Context`'s world was restored within a run, as `Layer::restored` does in a run started from a snapshot, so the sandbox doesn't snapshot | Something restores the running world in place, such as rollback |
-| Reparenting from the panels: dragging a row onto another, and taking a `Parent` away, as Remove Component would, making its entity a root; `Parent` is read only, so the Inspector offers neither | Phase 9's scene tree |
+| Reparenting from the panels: dragging a row onto another, and taking a `Parent` away, as Remove Component would, making its entity a root; `Parent` is read only, so the Inspector offers neither | Phase 6's scene tree |
 | Picking several entities, to edit or delete them at once | Someone edits many entities alike |
 | A search field in Add Component's menu, which lists every type registered | A game registers more types than the menu shows at once |
 | A Delete key for the entity picked: keys reach egui even while the view has them, so it would delete as the world plays, its keys driving it, as Ctrl+Z undoes and Ctrl+D duplicates then; the Entity menu and a row's context menu delete | Keys go to the panel under the pointer, or the view takes them from egui |
@@ -351,15 +352,12 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Recording every run, as a flight recorder; a run records only with `--record` | Bug reports from people's runs |
 | Patching an edit to a constant, which rebuilds the game: `gg run` patches edits inside function bodies alone, though one to a constant that no type, static or `const fn` reads would patch as well | Agents tune constants as the game runs, and the rebuilds' restarts slow them |
 | Removing the patches' libraries a `gg run` that's killed leaves; a run removes those its game loaded as it ends | They pile up enough to matter |
+| Lockstep beyond two peers on a LAN: more players, spectators, a delay that follows the link's latency rather than [`DELAY`](../crates/gg-engine/src/net.rs)'s 62.5 ms, and play across the internet | Phase 11, or a game for more than two |
+| `gg run --peers 2`'s two windows opening apart: the OS puts them one over the other | Someone plays both peers on one screen |
+| Recording a joiner, whose world comes from the host's, which `--join` refuses with `--record`; the host's recording replays the session | A desync is worth replaying from the joiner's side |
 
 ## Open questions
 
-- Which multiplayer model does the first demo, a simple networked game, use? Recommendation:
-  deterministic lockstep between two peers, on one machine or a LAN: each sends its commands for a
-  tick ahead, as recordings write them, with the world's hash after the tick, so that a desync names
-  its tick; commands, hashes and replays already do most of it, and the loop then has to patch or
-  restart both peers at the same tick. Rollback and replication come later. Decide before Phase 5's
-  demo milestone.
 - Which license? Recommendation: MIT OR Apache-2.0, the Rust convention, chosen once; until
   then, `publish = false` keeps the crates off crates.io. Decide before anyone outside the
   project contributes.

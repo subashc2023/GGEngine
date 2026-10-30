@@ -1,9 +1,10 @@
 //! Running a game's development build: supervised, patched as its code changes, and started again
-//! from a snapshot after a crash, a hang or a rebuild, until it exits; or headless for a set number
-//! of frames, as a check.
+//! from a snapshot after a crash, a hang or a rebuild, until it exits, alone or as the two peers of a
+//! lockstep session; or headless for a set number of frames, as a check.
 
 use std::fs;
 use std::io;
+use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread::{self, JoinHandle};
@@ -16,14 +17,15 @@ use crate::patch::{Patches, Process};
 use crate::{build, game};
 
 /// What `gg run` runs: a package, its profile, whether it's patched, unless `--no-patch`, how long
-/// its frames may stop before it has hung, how often it's snapshotted, zero for never, and the
-/// arguments it's given.
+/// its frames may stop before it has hung, how often it's snapshotted, zero for never, how many
+/// peers of a lockstep session it runs, 1 for a game alone, and the arguments each is given.
 pub(crate) struct Run {
     pub(crate) package: String,
     pub(crate) release: bool,
     pub(crate) patches: bool,
     pub(crate) hang: Duration,
     pub(crate) snapshot: Duration,
+    pub(crate) peers: usize,
     pub(crate) args: Vec<String>,
 }
 
@@ -60,7 +62,7 @@ impl Run {
     }
 
     /// Whether the game's arguments give flag `flag`, as `--flag` or `--flag=value`.
-    fn given(&self, flag: &str) -> bool {
+    pub(crate) fn given(&self, flag: &str) -> bool {
         self.args.iter().any(|arg| {
             (arg.strip_prefix(flag)).is_some_and(|rest| rest.is_empty() || rest.starts_with('='))
         })
@@ -114,10 +116,14 @@ pub(crate) fn event(event: &Value) {
 /// snapshots the game every so often as it serves the API, and starts it again from a snapshot
 /// after a crash or a hang, and as its executable is rebuilt, as [`next`] says; with them off, the
 /// game's first end ends it. While patches are on, it patches the game, or rebuilds it, as its
-/// sources change, as [`Patches::tend`] says.
+/// sources change, as [`Patches::tend`] says. Two peers run as one game: the host, given `--host`
+/// at a port of the loopback the OS picks, and the joiner, given `--join` there, each from a copy of
+/// its own, patched together, and stopped and started again together, as any of them ends, so
+/// that they always run the same code; each starts from its own snapshot, the joiner going on from
+/// the host's world as it joins.
 ///
 /// Fails with `gg.build` if it doesn't build, `gg.cargo` if cargo can't say what the package is,
-/// and `gg.run` if it can't be copied, started or waited for.
+/// and `gg.run` if it can't be copied, started or waited for, or no port is free for the peers.
 pub(crate) fn run(run: &Run) -> Result<bool, Failure> {
     let patches = Patches::new(run)?;
     let exe = match &patches {
@@ -133,23 +139,32 @@ pub(crate) fn run(run: &Run) -> Result<bool, Failure> {
     }
     let pid = std::process::id();
     remove_leftovers(&exe, pid);
-    let name = format!("{}-{pid}.snapshot", run.package);
+    let peers = peers_args(run.peers)?.into_iter().enumerate();
+    let peers = peers.map(|(peer, args)| Peer {
+        args,
+        copy: running_copy(&exe, pid, peer),
+        snapshot: snapshots.join(snapshot_name(&run.package, pid, peer)),
+        latest: None,
+    });
     let mut supervisor = Supervisor {
         run,
-        copy: running_copy(&exe, pid),
+        peers: peers.collect(),
         exe,
         dir,
-        snapshot: snapshots.join(name),
         serves: run.serves(),
         restarts,
         served: false,
-        latest: None,
         failed: None,
         patches,
     };
     let supervised = supervisor.supervise();
-    // Once its game has ended; one still running keeps it, and the patches' libraries it loaded.
-    if retrying(|| remove(&supervisor.copy)).is_ok()
+    // Once its games have ended; one still running keeps its copy, and the patches' libraries it
+    // loaded.
+    let copies = supervisor.peers.iter();
+    let kept = copies
+        .filter(|peer| retrying(|| remove(&peer.copy)).is_err())
+        .count();
+    if kept == 0
         && let Some(patches) = &supervisor.patches
     {
         patches.remove_libs();
@@ -157,23 +172,61 @@ pub(crate) fn run(run: &Run) -> Result<bool, Failure> {
     supervised
 }
 
-/// What `gg run` keeps across the game's restarts: what it runs, the executable and the copy of it
-/// that runs, where the game is snapshotted, whether a process of the game has served the API, the
-/// last snapshot that succeeded, the code of the last snapshot failure printed, until one
-/// succeeds, and the run's patches, while they're on.
+/// The arguments each of `peers` peers is given beside the run's: none for a game alone; for two,
+/// the host's `--host` and the joiner's `--join`, at a port of the loopback free as the run starts.
+///
+/// Fails with `gg.run` if no port is.
+fn peers_args(peers: usize) -> Result<Vec<Vec<String>>, Failure> {
+    if peers == 1 {
+        return Ok(vec![Vec::new()]);
+    }
+    let free = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).and_then(|free| free.local_addr());
+    let address = free.map_err(|error| {
+        Failure::new(
+            "gg.run",
+            format!("no port of the loopback is free for the peers: {error}"),
+        )
+    })?;
+    let address = address.to_string();
+    Ok(vec![
+        vec!["--host".to_owned(), address.clone()],
+        vec!["--join".to_owned(), address],
+    ])
+}
+
+/// The name of the snapshot of peer `peer`, from 0, of `package`'s game under the `gg run` of
+/// process `pid`, as `sandbox-42.snapshot`, or `shards-42-1.snapshot` for a joiner.
+fn snapshot_name(package: &str, pid: u32, peer: usize) -> String {
+    match peer {
+        0 => format!("{package}-{pid}.snapshot"),
+        peer => format!("{package}-{pid}-{peer}.snapshot"),
+    }
+}
+
+/// What `gg run` keeps across the game's restarts: what it runs, the executable, each peer's, one
+/// for a game alone, whether a process of the game has served the API, the code of the last
+/// snapshot failure printed, until one succeeds, and the run's patches, while they're on.
 struct Supervisor<'a> {
     run: &'a Run,
     exe: PathBuf,
-    copy: PathBuf,
+    peers: Vec<Peer>,
     /// The executable's directory, where the game writes its logs and session files.
     dir: PathBuf,
-    snapshot: PathBuf,
     serves: bool,
     restarts: bool,
     served: bool,
-    latest: Option<Snapshotted>,
     failed: Option<String>,
     patches: Option<Patches>,
+}
+
+/// A peer of the game under `gg run`, or the game alone: the arguments it's given beside the run's,
+/// the copy of the executable it runs, where it's snapshotted, and its last snapshot that
+/// succeeded.
+struct Peer {
+    args: Vec<String>,
+    copy: PathBuf,
+    snapshot: PathBuf,
+    latest: Option<Snapshotted>,
 }
 
 /// A game's process under `gg run`, and what's known of it: the snapshot it started from, its
@@ -202,40 +255,57 @@ struct Game {
 
 impl Supervisor<'_> {
     /// Runs the game until it exits cleanly, or with restarts off until it ends at all, returning
-    /// whether it exited cleanly.
+    /// whether it exited cleanly. Peers go together: as one ends, the others stop, as for a
+    /// rebuild, and what [`next`] says of the one that ended is what all of them do.
     fn supervise(&mut self) -> Result<bool, Failure> {
         // Taken before the first copy, so that a rebuild as it's made shows.
         let mut watch = Watch::new(stamp(&self.exe), Instant::now());
-        // `None` while it waits for a rebuild.
-        let mut game = Some(self.start(None)?);
+        // Empty while it waits for a rebuild.
+        let mut games = self.start(vec![None; self.peers.len()])?;
         // Set once the executable is rebuilt, until the game starts again from the new build.
         let mut rebuilt = false;
         loop {
             let now = Instant::now();
             // While patches are on, the run makes the builds itself.
             if let Some(patches) = &mut self.patches {
-                rebuilt |= patches.tend(game.as_ref().map(Game::process), now);
+                let processes: Vec<Process> = games.iter().map(Game::process).collect();
+                rebuilt |= patches.tend(&processes, now);
             } else if self.restarts && watch.rebuilt(stamp(&self.exe), now) {
                 event(&json!({"event": "rebuilt", "exe": self.exe}));
                 rebuilt = true;
             }
-            let happened = match game.as_mut() {
-                None => rebuilt.then_some(Happened::Rebuilt),
-                Some(game) => match self.tend(game)? {
-                    None if rebuilt => {
-                        self.stop(game)?;
-                        Some(Happened::Rebuilt)
-                    }
-                    happened => happened,
-                },
-            };
-            let Some(happened) = happened else {
+            let mut happened = None;
+            for (peer, game) in games.iter_mut().enumerate() {
+                if let Some(what) = self.tend(peer, game)? {
+                    happened = Some((peer, what));
+                    break;
+                }
+            }
+            if happened.is_none() && rebuilt {
+                happened = Some((0, Happened::Rebuilt));
+            }
+            let Some((ended, happened)) = happened else {
                 thread::sleep(Duration::from_millis(100));
                 continue;
             };
-            match next(happened, self.latest.as_ref(), self.restarts) {
+            // The rest stop, snapshotted first, so that they start again with the one that ended.
+            let rebuild = matches!(happened, Happened::Rebuilt);
+            for (peer, game) in games.iter_mut().enumerate() {
+                if rebuild || peer != ended {
+                    self.stop(peer, game)?;
+                }
+            }
+            games.clear();
+            match next(happened, self.peers[ended].latest.as_ref(), self.restarts) {
                 Next::Start(from) => {
-                    game = Some(self.start(from)?);
+                    let froms = (self.peers.iter().enumerate()).map(|(peer, them)| {
+                        if peer == ended {
+                            from.clone()
+                        } else {
+                            them.latest.clone()
+                        }
+                    });
+                    games = self.start(froms.collect())?;
                     rebuilt = false;
                 }
                 Next::Wait(why) => {
@@ -243,11 +313,12 @@ impl Supervisor<'_> {
                     if let Some(patches) = &mut self.patches {
                         patches.waiting();
                     }
-                    game = None;
                 }
                 Next::End(clean) => {
                     if clean {
-                        let _ = fs::remove_file(&self.snapshot);
+                        for peer in &self.peers {
+                            let _ = fs::remove_file(&peer.snapshot);
+                        }
                     }
                     return Ok(clean);
                 }
@@ -255,28 +326,52 @@ impl Supervisor<'_> {
         }
     }
 
-    /// Starts the game from snapshot `from`, or afresh: copies the executable again if it may have
-    /// been rebuilt, as without patches it always may, runs the copy, and prints `started`.
-    fn start(&mut self, from: Option<Snapshotted>) -> Result<Game, Failure> {
-        if self.patches.as_mut().is_none_or(Patches::starting) {
-            copy(&self.exe, &self.copy)?;
+    /// Starts each peer, the game alone or a lockstep session's, from its snapshot in `froms`, or
+    /// afresh, as [`start_peer`](Self::start_peer) does, the executable copied again if it may have
+    /// been rebuilt, as without patches it always may.
+    fn start(&mut self, froms: Vec<Option<Snapshotted>>) -> Result<Vec<Game>, Failure> {
+        let built = self.patches.as_mut().is_none_or(Patches::starting);
+        let froms = froms.into_iter().enumerate();
+        froms
+            .map(|(peer, from)| self.start_peer(peer, from, built))
+            .collect()
+    }
+
+    /// Starts peer `peer` from snapshot `from`, or afresh: copies the executable again if `built`,
+    /// runs the copy, and prints `started`.
+    fn start_peer(
+        &mut self,
+        peer: usize,
+        from: Option<Snapshotted>,
+        built: bool,
+    ) -> Result<Game, Failure> {
+        let them = &self.peers[peer];
+        if built {
+            copy(&self.exe, &them.copy)?;
         }
-        let mut command = Command::new(&self.copy);
-        command.args(&self.run.args).stdin(Stdio::null());
+        let mut command = Command::new(&them.copy);
+        command
+            .args(&self.run.args)
+            .args(&them.args)
+            .stdin(Stdio::null());
         if let Some(from) = &from {
             command.arg("--restore").arg(&from.path);
         }
-        let child = command.spawn().map_err(|error| failed(&self.copy, error))?;
+        let child = command.spawn().map_err(|error| failed(&them.copy, error))?;
         let pid = child.id();
         let restored =
             (from.as_ref()).map(|from| json!({"snapshot": from.path, "ticks": from.ticks}));
-        event(&json!({
+        let mut started = json!({
             "event": "started",
             "pid": pid,
             "exe": self.exe,
-            "copy": self.copy,
+            "copy": them.copy,
             "restored": restored,
-        }));
+        });
+        if self.peers.len() > 1 {
+            started["player"] = json!(peer);
+        }
+        event(&started);
         let now = Instant::now();
         Ok(Game {
             child,
@@ -294,19 +389,19 @@ impl Supervisor<'_> {
         })
     }
 
-    /// Looks after `game` for a turn of the loop: finds its session once it serves, snapshots it,
-    /// and pings it; and returns what happened if its process ended, or hung and was ended, having
-    /// printed it.
-    fn tend(&mut self, game: &mut Game) -> Result<Option<Happened>, Failure> {
+    /// Looks after `game`, peer `peer`'s, for a turn of the loop: finds its session once it serves,
+    /// snapshots it, and pings it; and returns what happened if its process ended, or hung and was
+    /// ended, having printed it.
+    fn tend(&mut self, peer: usize, game: &mut Game) -> Result<Option<Happened>, Failure> {
         let ended = game.child.try_wait();
-        if let Some(status) = ended.map_err(|error| failed(&self.copy, error))? {
-            return Ok(Some(self.ended(game, status)));
+        if let Some(status) = ended.map_err(|error| failed(&self.peers[peer].copy, error))? {
+            return Ok(Some(self.ended(peer, game, status)));
         }
         if let Some(taking) = &game.snapshotting
             && taking.is_finished()
             && let Some(taken) = game.landed()
         {
-            self.note(game, taken);
+            self.note(peer, game, taken);
         }
         if self.serves && game.session.is_none() {
             let pid = game.pid;
@@ -335,7 +430,7 @@ impl Supervisor<'_> {
             && game.snapped.elapsed() >= self.run.snapshot
         {
             game.snapped = Instant::now();
-            let (session, path) = (session.clone(), self.snapshot.clone());
+            let (session, path) = (session.clone(), self.peers[peer].snapshot.clone());
             game.snapshotting = Some(thread::spawn(move || snapshot(&session, &path)));
         }
         if game.pinged.elapsed() < PING {
@@ -363,7 +458,7 @@ impl Supervisor<'_> {
         }
         let _ = game.child.kill();
         let _ = game.child.wait();
-        let (log, errors) = self.remains(game);
+        let (log, errors) = self.remains(peer, game);
         event(&json!({
             "event": "hung",
             "pid": game.pid,
@@ -381,8 +476,8 @@ impl Supervisor<'_> {
     /// One that came to its own end, as its window closed, a `quit` asked or its frames ran out,
     /// logs `engine.perf`, which one that crashed doesn't, and exited, whatever its status: 1 if
     /// validation reported anything.
-    fn ended(&mut self, game: &mut Game, status: ExitStatus) -> Happened {
-        let (log, errors) = self.remains(game);
+    fn ended(&mut self, peer: usize, game: &mut Game, status: ExitStatus) -> Happened {
+        let (log, errors) = self.remains(peer, game);
         let refusal = |error: &Value| {
             (error["code"].as_str()).is_some_and(|code| code.starts_with("snapshot."))
         };
@@ -419,9 +514,9 @@ impl Supervisor<'_> {
     /// What `game` left as its process ended: its log, and the errors it holds; and removes the
     /// session file a process that was killed leaves, as [`forget`](Self::forget) says. A snapshot
     /// in flight then counts if it was written first; if it failed, the end is why.
-    fn remains(&mut self, game: &mut Game) -> (Option<PathBuf>, Vec<Value>) {
+    fn remains(&mut self, peer: usize, game: &mut Game) -> (Option<PathBuf>, Vec<Value>) {
         if let Some(Ok(taken)) = game.landed() {
-            self.note(game, Ok(taken));
+            self.note(peer, game, Ok(taken));
         }
         let log = log(&self.dir, game.pid, game.session.as_ref());
         let errors = log.as_deref().map(errors).unwrap_or_default();
@@ -440,17 +535,17 @@ impl Supervisor<'_> {
         }
     }
 
-    /// Stops `game` as its executable has been rebuilt: if it serves, snapshots it first, once a
-    /// snapshot in flight is done, and asks it to quit, killing it if it hasn't ended within
-    /// [`QUIT`]; if it doesn't serve yet, kills it.
-    fn stop(&mut self, game: &mut Game) -> Result<(), Failure> {
+    /// Stops `game`, peer `peer`'s, as its executable has been rebuilt or another peer ended: if it
+    /// serves, snapshots it first, once a snapshot in flight is done, and asks it to quit, killing
+    /// it if it hasn't ended within [`QUIT`]; if it doesn't serve yet, kills it.
+    fn stop(&mut self, peer: usize, game: &mut Game) -> Result<(), Failure> {
         match game.session.clone() {
             Some(session) => {
                 if let Some(taken) = game.landed() {
-                    self.note(game, taken);
+                    self.note(peer, game, taken);
                 }
-                let taken = snapshot(&session, &self.snapshot);
-                self.note(game, taken);
+                let taken = snapshot(&session, &self.peers[peer].snapshot);
+                self.note(peer, game, taken);
                 if let Ok(mut client) = Client::connect(&session, "gg", PULSE) {
                     let _ = client.call("quit", Value::Null);
                 }
@@ -459,18 +554,19 @@ impl Supervisor<'_> {
                 let _ = game.child.kill();
             }
         }
-        wait(&mut game.child, QUIT).map_err(|error| failed(&self.copy, error))?;
+        let waited = wait(&mut game.child, QUIT);
+        waited.map_err(|error| failed(&self.peers[peer].copy, error))?;
         self.forget(game.pid);
         Ok(())
     }
 
-    /// Notes what a snapshot of `game` gave, `taken`: the snapshot, which restarts start from; or
-    /// the failure, printed unless the last one printed had its code.
-    fn note(&mut self, game: &mut Game, taken: Result<Snapshotted, Failure>) {
+    /// Notes what a snapshot of `game`, peer `peer`'s, gave, `taken`: the snapshot, which restarts
+    /// start from; or the failure, printed unless the last one printed had its code.
+    fn note(&mut self, peer: usize, game: &mut Game, taken: Result<Snapshotted, Failure>) {
         match taken {
             Ok(taken) => {
                 game.snapshotted = true;
-                self.latest = Some(taken);
+                self.peers[peer].latest = Some(taken);
                 self.failed = None;
             }
             Err(failure) => {
@@ -610,13 +706,17 @@ impl Watch {
     }
 }
 
-/// Where the `gg run` of process `pid` copies executable `exe` to run it: beside it, so that what
-/// the game writes beside its executable stays where it is, and named for the process, so that
-/// two runs of one game, as a networked game's peers are, each have one, as
-/// `gg-sandbox-running-42.exe` for `gg-sandbox.exe`.
-fn running_copy(exe: &Path, pid: u32) -> PathBuf {
+/// Where the `gg run` of process `pid` copies executable `exe` to run peer `peer` of it, from 0, the
+/// game alone being peer 0: beside it, so that what the game writes beside its executable stays
+/// where it is, and named for the process and the peer, so that two runs of one game each have
+/// one, and each peer, as `gg-sandbox-running-42.exe` for `gg-sandbox.exe`, and
+/// `gg-shards-running-42-1.exe` for a joiner.
+fn running_copy(exe: &Path, pid: u32, peer: usize) -> PathBuf {
     let mut name = exe.file_stem().unwrap_or_default().to_owned();
     name.push(format!("-running-{pid}"));
+    if peer > 0 {
+        name.push(format!("-{peer}"));
+    }
     if let Some(extension) = exe.extension() {
         name.push(".");
         name.push(extension);
@@ -639,9 +739,12 @@ fn remove_leftovers(exe: &Path, pid: u32) {
         let Some(rest) = name.to_str().and_then(|name| name.strip_prefix(&prefix)) else {
             continue;
         };
-        let theirs = rest.split('.').next().and_then(|pid| pid.parse().ok());
+        let theirs = rest
+            .split(['.', '-'])
+            .next()
+            .and_then(|pid| pid.parse().ok());
         if let Some(theirs) = theirs.filter(|&theirs| theirs != pid)
-            && running_copy(exe, theirs) == entry.path()
+            && (0..2).any(|peer| running_copy(exe, theirs, peer) == entry.path())
         {
             let _ = fs::remove_file(entry.path());
         }
@@ -802,6 +905,7 @@ mod tests {
             patches: true,
             hang: Duration::from_secs(10),
             snapshot: Duration::from_secs(snapshot),
+            peers: 1,
             args: args.iter().map(|&arg| arg.to_owned()).collect(),
         }
     }
@@ -844,10 +948,13 @@ mod tests {
 
     #[test]
     fn the_copy_that_runs_is_beside_the_executable() {
-        let copy = running_copy(Path::new("target/debug/gg-sandbox.exe"), 42);
+        let copy = running_copy(Path::new("target/debug/gg-sandbox.exe"), 42, 0);
         assert_eq!(copy, Path::new("target/debug/gg-sandbox-running-42.exe"));
-        let copy = running_copy(Path::new("target/debug/gg-sandbox"), 42);
+        let copy = running_copy(Path::new("target/debug/gg-sandbox"), 42, 0);
         assert_eq!(copy, Path::new("target/debug/gg-sandbox-running-42"));
+        let copy = running_copy(Path::new("target/debug/gg-shards.exe"), 42, 1);
+        assert_eq!(copy, Path::new("target/debug/gg-shards-running-42-1.exe"));
+        assert_eq!(snapshot_name("shards", 42, 1), "shards-42-1.snapshot");
     }
 
     /// A run came to its own end if its log has `engine.perf`, which a crash leaves out.
@@ -873,7 +980,9 @@ mod tests {
         let exe = dir.join("gg-sandbox.exe");
         let names = [
             "gg-sandbox-running-7.exe",
+            "gg-sandbox-running-7-1.exe",
             "gg-sandbox-running-42.exe",
+            "gg-sandbox-running-42-1.exe",
             "gg-editor-running-7.exe",
             "gg-sandbox-running-7.exe.bak",
             "gg-sandbox.exe",
@@ -884,7 +993,7 @@ mod tests {
         remove_leftovers(&exe, 42);
         let left: Vec<bool> = names.iter().map(|name| dir.join(name).exists()).collect();
         let _ = fs::remove_dir_all(&dir);
-        assert_eq!(left, [false, true, true, true, true]);
+        assert_eq!(left, [false, false, true, true, true, true, true]);
     }
 
     #[test]

@@ -148,7 +148,6 @@ impl Recorder {
         }
     }
 
-    #[cfg(feature = "dev")]
     /// Writes `edit`, an author's from outside the layers as a value, applied between ticks, with
     /// the entities it holds by their IDs in `world`: it belongs to the tick after, before its
     /// commands.

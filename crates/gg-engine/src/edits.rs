@@ -140,7 +140,6 @@ fn made(log: &Log) -> Vec<EntityId> {
 }
 
 impl Edit {
-    #[cfg(feature = "dev")]
     /// The edit as a value, which a recording keeps: variants `Apply` and `Append`, with its author
     /// and its operations, `Undo` and `Redo`, with their author; each operation a variant named as
     /// its [`Operation`]'s, with its entities' IDs as text.
@@ -215,7 +214,6 @@ impl Edit {
     }
 }
 
-#[cfg(feature = "dev")]
 /// `operation` as a value, as [`Edit::to_value`] writes it.
 fn operation_value(operation: &Operation) -> Value {
     let text = |text: &str| Value::String(text.to_owned());
@@ -287,7 +285,6 @@ fn operation_value(operation: &Operation) -> Value {
     Value::Variant(name.into(), fields)
 }
 
-#[cfg(feature = "dev")]
 /// An entity's ID as an operation's value holds it, as text.
 fn id(id: &EntityId) -> Value {
     Value::String(id.to_string())

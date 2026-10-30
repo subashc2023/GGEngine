@@ -27,7 +27,8 @@ const USAGE: &str = "\
 Usage: gg <command> [options]
 
 Build and run:
-  run <PACKAGE> [--release] [--no-patch] [--hang <SECONDS>] [--snapshot <SECONDS>] [-- <ARGS>...]
+  run <PACKAGE> [--release] [--no-patch] [--hang <SECONDS>] [--snapshot <SECONDS>] [--peers <N>]
+      [-- <ARGS>...]
       Build PACKAGE's development build and run a copy of it with ARGS, printing a line as it
       starts, as it serves the tool API, and as it ends: `exited`, or `crashed` or `hung`, with the
       errors its log holds. A run whose frames stop for `--hang` seconds (10), while it waits for
@@ -51,7 +52,10 @@ Build and run:
       in a body, or to code that has run as the game started, `main` and a layer's `load` and
       `restored`, and any change while the last rebuild has failed. A game that waits for a
       rebuild gets one at any change, and one started again is patched with the edits since its
-      build at once.
+      build at once. With `--peers 2`, it runs the two peers of a lockstep session from one build,
+      the host given `--host` and the joiner `--join` at a free port of the loopback, each
+      `started` naming its `player`: patched together, and stopped and started again together as
+      either ends or the game is rebuilt.
   check <PACKAGE> [--release] [--frames <N>] [--timeout <SECONDS>] [-- <ARGS>...]
       Build PACKAGE and run it headless for N frames (60) with ARGS, and print what it did: its exit
       status, its warnings and errors, and its frame times. One that runs longer than SECONDS
@@ -181,7 +185,8 @@ fn bad(message: String) -> Failure {
 }
 
 /// The flags that take a value: `--name value` or `--name=value`.
-const VALUED: [&str; 11] = [
+const VALUED: [&str; 12] = [
+    "--peers",
     "--author",
     "--pid",
     "--app",
@@ -325,14 +330,33 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
         "help" | "-h" | "--help" => Command::Help,
         "run" => {
             let package = parsed.positional(1, 1, "run <PACKAGE>")?.remove(0);
-            Command::Run(Run {
+            let run = Run {
                 package,
                 release: parsed.switch("--release"),
                 patches: !parsed.switch("--no-patch"),
                 hang: parsed.seconds("--hang", 10)?,
                 snapshot: parsed.seconds("--snapshot", 5)?,
+                peers: parsed.number("--peers", 1)?,
                 args: std::mem::take(&mut parsed.rest),
-            })
+            };
+            if !(1..=2).contains(&run.peers) {
+                return Err(bad(format!(
+                    "`--peers` takes 1, a game alone, or 2, a lockstep session's host and joiner, \
+                     not {}",
+                    run.peers
+                )));
+            }
+            if run.peers > 1
+                && let Some(flag) = ["--host", "--join", "--record"]
+                    .into_iter()
+                    .find(|&flag| run.given(flag))
+            {
+                return Err(bad(format!(
+                    "`--peers 2` gives the peers their `--host` and `--join` itself, and a joiner \
+                     records nothing, so the game's arguments take no `{flag}`"
+                )));
+            }
+            Command::Run(run)
         }
         "check" => {
             let package = parsed.positional(1, 1, "check <PACKAGE>")?.remove(0);
@@ -527,7 +551,14 @@ mod tests {
         else {
             panic!("a run");
         };
-        assert_eq!((run.snapshot, run.patches), (Duration::ZERO, false));
+        assert_eq!(
+            (run.snapshot, run.patches, run.peers),
+            (Duration::ZERO, false, 1)
+        );
+        let Ok(Command::Run(run)) = parsed(&["run", "shards", "--peers", "2"]) else {
+            panic!("a run");
+        };
+        assert_eq!(run.peers, 2);
         let path = std::path::absolute("world.snapshot").unwrap();
         for (args, want) in [
             (&["snapshot"][..], json!({})),
@@ -551,6 +582,10 @@ mod tests {
             &["run"],
             &["run", "a", "b"],
             &["run", "a", "--snapshot", "often"],
+            &["run", "a", "--peers", "3"],
+            &["run", "a", "--peers", "0"],
+            &["run", "a", "--peers", "2", "--", "--host", "0.0.0.0:7700"],
+            &["run", "a", "--peers", "2", "--", "--record=run.recording"],
             &["snapshot", "a", "b"],
             &["status", "--frames", "2"],
             &["status", "extra"],

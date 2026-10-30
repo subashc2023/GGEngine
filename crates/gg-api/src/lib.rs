@@ -100,6 +100,10 @@ pub struct Session {
     /// subsecond never looks a patch up. A debug build that cargo made for macOS exports its `main`
     /// all the same, though only patches of the build `dx build --fat-binary` made suit a process.
     pub aslr_reference: u64,
+    /// The player it plays in a lockstep session, 0 for the host and 1 for the joiner; `None` for a
+    /// game alone, or one whose engine is older than lockstep.
+    #[serde(default)]
+    pub player: Option<u8>,
 }
 
 impl Session {
@@ -701,6 +705,7 @@ mod tests {
             log: None,
             engine: "0.1.0 debug".to_owned(),
             aslr_reference: 0x7ff6_1234_5678,
+            player: None,
         };
         for pid in [2, 1] {
             let text = serde_json::to_string(&session(pid)).unwrap();
@@ -786,6 +791,7 @@ mod tests {
             log: None,
             engine: "0.1.0 debug".to_owned(),
             aslr_reference: 0x7ff6_1234_5678,
+            player: None,
         }
     }
 

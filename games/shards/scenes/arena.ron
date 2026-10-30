@@ -1,0 +1,154 @@
+(
+    entities: {
+        "10b03ba5e0966fcd": (
+            BoxCollider2D: (
+                offset: (0.0, 0.0),
+                size: (1.0, 1.0),
+                density: 1.0,
+                friction: 0.5,
+                restitution: 0.0,
+            ),
+            Name: ("Left wall"),
+            RigidBody2D: (
+                body_type: Static,
+                fixed_rotation: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
+            Sprite: (
+                color: (0.22, 0.25, 0.32, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-8.25, 0.0, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.5, 10.0, 1.0),
+            ),
+        ),
+        "285651506b245f15": (
+            BoxCollider2D: (
+                offset: (0.0, 0.0),
+                size: (1.0, 1.0),
+                density: 1.0,
+                friction: 0.5,
+                restitution: 0.0,
+            ),
+            Name: ("Bottom wall"),
+            RigidBody2D: (
+                body_type: Static,
+                fixed_rotation: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
+            Sprite: (
+                color: (0.22, 0.25, 0.32, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.0, -4.75, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (16.0, 0.5, 1.0),
+            ),
+        ),
+        "2ad329089a2c13cd": (
+            BoxCollider2D: (
+                offset: (0.0, 0.0),
+                size: (1.0, 1.0),
+                density: 1.0,
+                friction: 0.5,
+                restitution: 0.0,
+            ),
+            Name: ("Pillar"),
+            RigidBody2D: (
+                body_type: Static,
+                fixed_rotation: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
+            Sprite: (
+                color: (0.22, 0.25, 0.32, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.0, 0.0, 0.1),
+                rotation: (0.0, 0.0, 0.38268346, 0.9238795),
+                scale: (1.2, 1.2, 1.0),
+            ),
+        ),
+        "7f02c8dffe7c53ae": (
+            BoxCollider2D: (
+                offset: (0.0, 0.0),
+                size: (1.0, 1.0),
+                density: 1.0,
+                friction: 0.5,
+                restitution: 0.0,
+            ),
+            Name: ("Right wall"),
+            RigidBody2D: (
+                body_type: Static,
+                fixed_rotation: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
+            Sprite: (
+                color: (0.22, 0.25, 0.32, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (8.25, 0.0, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.5, 10.0, 1.0),
+            ),
+        ),
+        "c3a0e0bde5d91b8c": (
+            BoxCollider2D: (
+                offset: (0.0, 0.0),
+                size: (1.0, 1.0),
+                density: 1.0,
+                friction: 0.5,
+                restitution: 0.0,
+            ),
+            Name: ("Top wall"),
+            RigidBody2D: (
+                body_type: Static,
+                fixed_rotation: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
+            Sprite: (
+                color: (0.22, 0.25, 0.32, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.0, 4.75, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (16.0, 0.5, 1.0),
+            ),
+        ),
+    },
+)

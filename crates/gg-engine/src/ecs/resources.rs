@@ -56,12 +56,10 @@ pub(super) struct Resources {
 pub(super) struct SavedType {
     pub(super) type_id: TypeId,
     pub(super) name: &'static str,
-    #[cfg(feature = "dev")]
     save: fn(&dyn AnyResource, &World) -> Result<String>,
     pub(super) load: fn(&str, &World) -> Result<Box<dyn AnyResource>>,
 }
 
-#[cfg(feature = "dev")]
 fn save_as<T: Saved>(resource: &dyn AnyResource, world: &World) -> Result<String> {
     let resource: &dyn Any = resource;
     let resource = resource.downcast_ref::<T>();
@@ -162,7 +160,6 @@ impl Resources {
     ///
     /// Fails as a resource's [`Saved::save`] does, with `snapshot.bad_name` for a name that isn't a
     /// word, and with `snapshot.line_break` for text with a line break.
-    #[cfg(feature = "dev")]
     pub(super) fn save(&self, world: &World, out: &mut String) -> Result<()> {
         use std::fmt::Write as _;
 
@@ -230,7 +227,6 @@ impl World {
         saved.push(SavedType {
             type_id: TypeId::of::<T>(),
             name: T::NAME,
-            #[cfg(feature = "dev")]
             save: save_as::<T>,
             load: load_as::<T>,
         });

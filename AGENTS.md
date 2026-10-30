@@ -22,9 +22,10 @@ crates/           libraries
   gg-macros/      the derives gg-engine re-exports
   gg-api/         the tool API's protocol, which gg-engine and tools share
 apps/             executables
-  sandbox/        development playground
+  sandbox/        the engine's own app: a swarm of up to 100,000 sprites and a grid's scene file
   editor/         the editor: the game's view in a panel among dockable panels
   player/         reference player, with no layers; runs cooked scenes without game code (to come)
+games/shards/     the first demo: two players, alone or as lockstep peers (`--host`, `--join`)
 tools/gg/         the command-line tool, which `cargo gg` runs
 docs/PLAN.md      the roadmap (see Workflow)
 docs/DEFECTS.md   known defects of the code that exists (see Workflow)
@@ -50,6 +51,7 @@ cargo run -p sandbox --release --features tracy   # with zones for Tracy
 cargo build -p player --release   # shipping: the player alone, as wider builds merge in dev
 cargo test -p gg-renderer --test gpu -- picks   # the GPU tests whose names contain picks
 cargo gg run sandbox              # supervised, serving the tool API: `cargo gg help`
+cargo gg run shards --peers 2     # a lockstep session's host and joiner, supervised together
 ```
 
 Building needs a C++ compiler, for the Vulkan Memory Allocator, and `slangc` for the shaders: the
@@ -82,7 +84,7 @@ there. renderdoccmd exits 0 whatever the run does, so read the run's log. `rende
 <capture> -c xml -o <capture>.xml` writes the capture as XML, every object's name
 (`vkSetDebugUtilsObjectNameEXT`) and pass's label (`vkCmdBeginDebugUtilsLabelEXT`) among it.
 
-Development builds (gg-engine's `dev`, the sandbox's and the editor's) serve the tool API, apply a
+Development builds (gg-engine's `dev`, the apps' and the games') serve the tool API, apply a
 scene file a layer loaded with `Context::load_scene_file` as it's saved, and windowed, compile a
 game's shader again as its files change (`Shader reloaded`), warning at a change that fails. Run a
 game under `cargo gg run`, in the background: it patches in an edit inside function bodies as it's
@@ -107,24 +109,22 @@ The tests include GPU tests, which need a Vulkan 1.4 driver and the Khronos vali
 Without a GPU, lavapipe serves: on Debian or Ubuntu, `mesa-vulkan-drivers` (Mesa 25.0 or later) and
 `vulkan-validationlayers`. When a test's image differs from its reference, the test says where it
 wrote its own; after an intended change, `GG_UPDATE_REFERENCES=1` rewrites the references, which you
-look at before committing them. The sandbox's world hashes, at each tick of a seeded run, are a
-reference too, which CI checks on every platform: a change to its simulation, to what the hash
-reads, or to glam or libm changes them, and `GG_UPDATE_REFERENCES=1 cargo test -p sandbox` rewrites
-them alone, with those of its live recording, `apps/sandbox/tests/references/live.recording`.
-gg-engine's `physics.rs` holds another, the hash of a pile of bodies, which a change to rapier2d, to
-the physics code or to what the hash reads changes, and which is edited by hand. A difference on
-some platforms only is a bug, not a reference to rewrite. Some changes need a new recording, since
-rewriting the hashes would keep what they break: a change to the sandbox's layers, to a command's
-type that its lines no longer read as, or to what its commands name, the grid scene's types and the
-field the Inspector sets, whose reload and set would then be refused at their ticks. Make one with a
-windowed run and `--record` that holds the arrows and taps R, uses the panels, File > Reload the
-grid and the Inspector, undoing and redoing an edit, and closes; not File > Save, since the attach
-reads the grid's scene.
+look at before committing them. The sandbox's and the demo's world hashes, at each tick of a seeded
+run, are references too, which CI checks on every platform: a change to their simulations, to what
+the hash reads, or to glam, libm or rapier2d changes them, and `GG_UPDATE_REFERENCES=1 cargo test -p
+sandbox -p shards` rewrites them alone, with those of the demo's live recording,
+`games/shards/tests/references/live.recording`. gg-engine's `physics.rs` holds another, edited by
+hand. A difference on some platforms only is a bug, not a reference to rewrite. Some changes need a
+new recording, since rewriting the hashes would keep what they break: a change to the demo's layers,
+to a command's type that its lines no longer read as, or to the arena's types, whose edits would
+then be refused at their ticks. Make one with a windowed run of the demo and `--record` that steers
+and dashes with the keys, sets a field through `cargo gg set`, then `undo` and `redo`, saves
+`scenes/arena.ron` changed and puts it back, and closes.
 
 CI ([ci.yml](.github/workflows/ci.yml)) runs the gates on every push, on Windows and Linux, x86-64
 and ARM64, and on macOS ARM64, the shipping and doc gates on Linux x86-64 alone, and the layering
-check. Only its Linux jobs run the GPU tests, on lavapipe, and the apps headless, as its steps say,
-grepping the sandbox's log for `engine.perf`'s fields; Windows' and macOS's runners have no GPU, so
+check. Only its Linux jobs run the GPU tests, on lavapipe, and the apps and the demo's two lockstep
+peers headless, grepping their logs; Windows' and macOS's runners have no GPU, so
 there `GG_SKIP_GPU_TESTS` skips the GPU tests. lavapipe has no queue for transfers alone, so CI
 never uploads through one: after changing uploads, run the GPU tests on a GPU that has one, as
 NVIDIA's do. Its minutes are billed, a macOS minute at ten times a Linux one, so push a branch to

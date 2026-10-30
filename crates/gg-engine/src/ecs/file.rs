@@ -17,7 +17,6 @@ use std::num::NonZeroU32;
 use gg_core::math::Quat;
 use gg_core::{Error, Result};
 
-#[cfg(feature = "dev")]
 use super::MAX_DEPTH;
 use super::hierarchy::Links;
 use super::id::IdStream;
@@ -75,7 +74,6 @@ impl World {
     /// couldn't be read by; with `snapshot.too_deep` for a value nested deeper than a scene's may,
     /// as no load reads; and with `snapshot.line_break` for opaque state or a resource's text that
     /// breaks its line.
-    #[cfg(feature = "dev")]
     pub(crate) fn save_whole(&self, out: &mut String) -> Result<()> {
         use std::fmt::Write as _;
 
@@ -740,7 +738,6 @@ fn whole(x: f64) -> Option<i128> {
 }
 
 /// Refuses `name`, a type's, which a snapshot's lines split at whitespace, unless it's a word.
-#[cfg(feature = "dev")]
 pub(super) fn one_word(name: &str) -> Result<()> {
     if !name.is_empty() && !name.contains(char::is_whitespace) {
         return Ok(());
@@ -752,7 +749,6 @@ pub(super) fn one_word(name: &str) -> Result<()> {
 }
 
 /// Refuses `text`, what `what` keeps on a line of a snapshot's, if it breaks the line.
-#[cfg(feature = "dev")]
 pub(super) fn one_line(text: &str, what: &str) -> Result<()> {
     if !text.contains(['\n', '\r']) {
         return Ok(());
@@ -765,7 +761,6 @@ pub(super) fn one_line(text: &str, what: &str) -> Result<()> {
 
 /// How many levels `value` nests, as [`MAX_DEPTH`] counts them: it's the first, and each value it
 /// holds a level deeper than it.
-#[cfg(feature = "dev")]
 fn depth(value: &Value) -> u32 {
     let inner = match value {
         Value::Option(Some(value)) => depth(value),

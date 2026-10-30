@@ -10,7 +10,8 @@
 //! log, which undoes and redoes them; recordings of runs, the commands their ticks applied, which
 //! replay without a GPU to the same world, naming where one goes another way; and measuring each
 //! frame, for the log and the Performance panel; loading what layers add, images as textures and
-//! glTF models, whose nodes spawn as entities; the pipeline cache's file, which windowed runs keep;
+//! glTF models, whose nodes spawn as entities; lockstep between two peers, each tick run on both
+//! peers' inputs; the pipeline cache's file, which windowed runs keep;
 //! and in development builds, behind `dev`, compiling games' shaders again as their files change,
 //! and the OS's file dialogs.
 //!
@@ -47,6 +48,7 @@ mod layer;
 mod main_loop;
 mod model;
 mod name;
+mod net;
 mod pads;
 // subsecond applies a patch of the game's code only through unsafe code: this module alone may use
 // it, in development builds alone.
@@ -63,7 +65,7 @@ mod renderer_components;
 mod scene_files;
 mod script;
 mod snapshot;
-// What the UI's tests share, in tests alone.
+// What tests share, in tests alone.
 #[cfg(test)]
 mod testing;
 mod transform;
@@ -387,8 +389,22 @@ fn run_args(
         if let Some(recorder) = recorder.transpose()? {
             app.stack.record(recorder);
         }
+        if let Some(net) = &args.net {
+            let net = net::Lockstep::start(net, app.name, app.stack.names())?;
+            app.stack.lockstep(net);
+        }
         // Before the renderer starts, so that tools find a run that hangs as it starts.
-        let api = api::start(app.name, app.stack.names(), log.as_deref(), args.api);
+        let player = args.net.as_ref().map(|net| match net {
+            args::Net::Host(_) => 0,
+            args::Net::Join(_) => 1,
+        });
+        let api = api::start(
+            app.name,
+            app.stack.names(),
+            log.as_deref(),
+            player,
+            args.api,
+        );
         if args.headless {
             run_headless(&mut app, &args, api, snapshot)
         } else {

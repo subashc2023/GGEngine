@@ -27,6 +27,15 @@ pub(crate) struct Args {
     pub(crate) api: bool,
     /// The snapshot the run starts from, in place of the world its layers would attach.
     pub(crate) restore: Option<PathBuf>,
+    /// The lockstep session the run hosts or joins, if it's networked.
+    pub(crate) net: Option<Net>,
+}
+
+/// A lockstep session's end a run takes, and the address it listens at or connects to, as given.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Net {
+    Host(String),
+    Join(String),
 }
 
 /// Where a replay stops to write the world: once its layers have attached, or after a tick.
@@ -38,7 +47,7 @@ pub(crate) enum Dump {
 
 /// The flags of a run that a replay, which renders nothing, records nothing and serves no tools,
 /// refuses.
-const NOT_REPLAYED: [&str; 10] = [
+const NOT_REPLAYED: [&str; 12] = [
     "--record",
     "--restore",
     "--headless",
@@ -49,6 +58,8 @@ const NOT_REPLAYED: [&str; 10] = [
     "--no-validation",
     "--vsync",
     "--no-api",
+    "--host",
+    "--join",
 ];
 
 /// The help text, for the program called `program`.
@@ -72,6 +83,8 @@ Options:
   --restore <PATH>  Start from the snapshot at PATH, which the tool API's `snapshot` writes, where
                     its world was, rather than building the world afresh
   --no-api          Serve no tool API, which development builds serve for tools such as `gg`
+  --host <ADDRESS>  Host a lockstep session at ADDRESS, such as `0.0.0.0:7700`, as player 0
+  --join <ADDRESS>  Join the lockstep session at ADDRESS as player 1, from the host's world
   -h, --help        Print this help
 
 Environment:
@@ -102,6 +115,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
         dump: None,
         api: true,
         restore: None,
+        net: None,
     };
     // The first flag given that a replay refuses.
     let mut not_replayed = None;
@@ -161,6 +175,15 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
             "--replay" => parsed.replay = Some(value_of(flag)?.into()),
             // The last given, which `gg run` gives after the game's own.
             "--restore" => parsed.restore = Some(value_of(flag)?.into()),
+            "--host" | "--join" if parsed.net.is_some() => {
+                return Err(bad(
+                    "a run hosts one lockstep session or joins one, so it takes one `--host` or \
+                     `--join`"
+                        .to_owned(),
+                ));
+            }
+            "--host" => parsed.net = Some(Net::Host(value_of(flag)?)),
+            "--join" => parsed.net = Some(Net::Join(value_of(flag)?)),
             "--dump" => {
                 let at = value_of(flag)?;
                 let dump = match at.as_str() {
@@ -190,6 +213,13 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
     if parsed.restore.is_some() && parsed.record.is_some() {
         return Err(bad(
             "`--restore` starts the run from a snapshot, which a recording, whose replay starts \
+             from a seed, can't start from, so it takes no `--record`"
+                .to_owned(),
+        ));
+    }
+    if matches!(parsed.net, Some(Net::Join(_))) && parsed.record.is_some() {
+        return Err(bad(
+            "`--join` starts the run from the host's world, which a recording, whose replay starts \
              from a seed, can't start from, so it takes no `--record`"
                 .to_owned(),
         ));
@@ -273,6 +303,11 @@ mod tests {
         let args = parse_strs(&["--restore", "a.snapshot", "--restore=b.snapshot"]);
         let restore = args.unwrap().unwrap().restore;
         assert_eq!(restore, Some(PathBuf::from("b.snapshot")));
+        let host = parse_strs(&["--host", "0.0.0.0:7700"]).unwrap().unwrap();
+        assert_eq!(host.net, Some(Net::Host("0.0.0.0:7700".to_owned())));
+        let join = parse_strs(&["--join=127.0.0.1:7700", "--restore", "a.snapshot"]);
+        let join = join.unwrap().unwrap().net;
+        assert_eq!(join, Some(Net::Join("127.0.0.1:7700".to_owned())));
         for (dump, at) in [("attach", Dump::Attach), ("300", Dump::Tick(300))] {
             let args = parse_strs(&["--replay", "run.recording", "--dump", dump]);
             let args = args.unwrap().unwrap();
@@ -285,8 +320,16 @@ mod tests {
     fn a_replay_refuses_the_flags_of_a_run() {
         for flag in NOT_REPLAYED {
             let args = ["--replay", "run.recording", flag, "1"];
-            let takes_value =
-                ["--frames", "--capture", "--gpu", "--record", "--restore"].contains(&flag);
+            let takes_value = [
+                "--frames",
+                "--capture",
+                "--gpu",
+                "--record",
+                "--restore",
+                "--host",
+                "--join",
+            ]
+            .contains(&flag);
             let refused = if takes_value { &args[..] } else { &args[..3] };
             let error = parse_strs(refused).unwrap_err();
             assert_eq!(error.code(), "engine.args", "{flag}: {error}");
@@ -316,6 +359,9 @@ mod tests {
             &["--replay", "run.recording", "--dump", "-1"],
             &["--replay", "run.recording", "--dump", "first"],
             &["--restore", "run.snapshot", "--record", "run.recording"],
+            &["--host", "0.0.0.0:7700", "--join", "127.0.0.1:7700"],
+            &["--join", "127.0.0.1:7700", "--record", "run.recording"],
+            &["--host"],
         ] {
             let error = parse_strs(args).unwrap_err();
             assert_eq!(error.code(), "engine.args", "{args:?}: {error}");

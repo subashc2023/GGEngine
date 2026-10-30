@@ -63,7 +63,9 @@ sandbox  editor   player       apps/: executables          gg  tools/: tools
   says where a game serves it, and a client, which tools speak it through. It depends on no `gg-*`
   crate, so that tools build without the engine, and `gg-engine` uses it in development builds
   alone.
-- **`sandbox`:** the development playground for engine features.
+- **`sandbox`:** the engine's own app, for its development: a swarm of up to 100,000 sprites
+  drifting on the job system's threads, which measures how fast the engine simulates and draws, and
+  a grid from its scene file.
 - **`editor`:** the editor, one more client of the tool API: a dock that fills its window, with
   the game's view in a panel among the others, and an orbit camera of its own. Its Play and
   Simulate run a copy of the world in the world's place, and Stop brings back the very world as it
@@ -73,7 +75,9 @@ sandbox  editor   player       apps/: executables          gg  tools/: tools
   game builds its own player.
 - **`tools/gg`:** the command-line tool, a client of the tool API, which `cargo gg` runs.
 
-Games depend on `gg-engine` the same way the apps do; see [Game code](#game-code). Executables are
+Games depend on `gg-engine` the same way the apps do; see [Game code](#game-code). The first, in
+`games/shards`, is a demo of two players, alone or networked in lockstep, as
+[Networking](#networking) describes, which the v0.1 loop is tested on. Executables are
 named `gg-` and the app, such as `gg-sandbox`: GPU drivers apply per-game settings by executable
 name, and a generic name can match one.
 
@@ -451,6 +455,46 @@ authoring: the Inspector's edits, undos and redos wait for its next tick, and an
 and edits through its link, `Inspector::link`, as the editor's view and handles do. Edits from
 outside the layers, the tool API's and the scene files', are the engine's own, which apply between
 ticks, and the authors' logs the context's, rebuilt by a replay as the Inspector's is.
+
+## Networking
+
+The engine supplies what each multiplayer model needs, the first of them deterministic lockstep
+between two peers, on one machine or a LAN; rollback and a server that owns the world come later,
+from the same snapshots, commands and hashes. A run given `--host <address>` listens there, and one
+given `--join <address>` connects to it; the host is player 0 and the joiner player 1, as
+`Context::player` tells a layer, which queues commands for its own player alone, naming it in
+them, since each peer runs both players' world.
+
+- **A tick runs on its inputs alone.** A tick's inputs are each layer's commands, the host's then
+  the joiner's, and the edits from outside the layers that apply before it, as a recording keeps
+  them: so a peer runs a tick only once it has the other's inputs for it, and frames go on drawing
+  while it waits. Each tick, a peer takes what its layers queued since the last and sends it as its
+  inputs for the tick [`DELAY`](crates/gg-engine/src/net.rs) ticks on, so that the inputs reach the
+  other peer before it needs them; a frame that ticks drains the socket first. Inputs travel as
+  text, the values written as recordings write them, entities by their IDs, read into values only
+  at their tick, against the world then.
+- **Edits and patches are inputs too.** The tool API's edits, on either peer, go out with the
+  peer's inputs for the tick `DELAY` on, and apply on both before it, so that a request's answer
+  comes once its edit has applied. A scene file's save is an edit of the file's text, which each
+  peer turns into operations against its own world at that tick, as both worlds are the same; the
+  host alone watches scene files. `gg run` gives both peers each patch, in the same order, and the
+  host chooses the tick it applies before, `DELAY` on from its next as it gets it, which neither
+  peer has run; it tells its joiner, which waits at that tick for its own patch if it hasn't it yet.
+- **A joiner starts from the host's world.** As a joiner connects, the host sends its world as a
+  snapshot file's text, as it stands between two ticks, with how many patches its code is on, and
+  its inputs for the ticks after, up to the first the joiner can reach; the joiner restores it in
+  place of its own, as a run restored from a snapshot does, applies the patches the host had, and
+  goes on from that tick, its own inputs empty until the first it can reach. So a restart of
+  either peer, after a crash or a rebuild, rejoins: a joiner that loses its host waits for it,
+  frozen, and connects again, while a host that loses its joiner plays on alone, the joiner's
+  player still.
+- **Desyncs name their tick.** Each peer sends the world's hash after each of its ticks; a hash
+  that isn't the other's logs `net.desync` with the tick, and the host sends its world again, as to
+  a joiner, so that the peers carry on in sync.
+
+Messages are lines of text over TCP, without Nagle's delay, which keeps them in order and whole;
+[net.rs](crates/gg-engine/src/net.rs) has their format and the rest. `gg run --peers 2` runs a host
+and a joiner from one build, patching both and restarting both after a rebuild.
 
 ## Diagnostics
 

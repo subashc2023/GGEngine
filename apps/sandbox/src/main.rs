@@ -1,6 +1,9 @@
-//! Development playground: test scenes and debug tooling for engine work.
+//! The engine's development app: a swarm of up to 100,000 sprites drifting on the job system's
+//! threads, which measures how fast the engine simulates and draws, and a grid loaded from its scene
+//! file, which development builds apply as it's saved, with the engine's Performance, Entities and
+//! Inspector panels.
 
-use std::f32::consts::{FRAC_PI_2, FRAC_PI_3, TAU};
+use std::f32::consts::TAU;
 use std::mem;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
@@ -8,15 +11,12 @@ use std::process::ExitCode;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use bytemuck::NoUninit;
 use gg_engine::Error;
 use gg_engine::egui::{self, ViewportCommand, ViewportId};
-use gg_engine::math::{self, EulerRot, Mat4, Quat, Vec2, Vec3, Vec4};
+use gg_engine::math::{self, EulerRot, Quat, Vec2, Vec3};
 use gg_engine::{
-    Actions, App, Binding, Blend, Change, Commands, Component, Context, Entity, Event, FlyAction,
-    FlyCameraController, Key, Layer, Mesh, MeshDraw, Model, OrthographicCameraController,
-    PadButton, Projection, Reflect, Sampler, Shader, Source, Sprite, SpriteSheet, Stick, Texture,
-    Tick, Transform, Ui, Viewpoint, World,
+    App, Commands, Component, Context, Entity, Event, Layer, OrthographicCameraController,
+    Projection, Reflect, Sprite, Tick, Transform, Ui, Viewpoint, World,
 };
 use tracing::{error, info};
 
@@ -33,78 +33,9 @@ fn app() -> App {
     app.overlay(gg_engine::Inspector::default())
 }
 
-/// A corner of a mesh in the colors of its corners, which `shaders/vertex_color.slang` reads: its
-/// position in the mesh's own space, and its color in linear RGBA.
-#[repr(C)]
-#[derive(Clone, Copy, NoUninit)]
-struct Colored {
-    position: Vec3,
-    color: [f32; 4],
-}
-
-/// A triangle in red, green and blue, a unit across, pointing up.
-const TRIANGLE: [Colored; 3] = [
-    Colored {
-        position: Vec3::new(0.0, 0.5, 0.0),
-        color: [1.0, 0.0, 0.0, 1.0],
-    },
-    Colored {
-        position: Vec3::new(0.5, -0.5, 0.0),
-        color: [0.0, 1.0, 0.0, 1.0],
-    },
-    Colored {
-        position: Vec3::new(-0.5, -0.5, 0.0),
-        color: [0.0, 0.0, 1.0, 1.0],
-    },
-];
-
-/// A cube a unit across around its origin, each face in a color of its own, in linear RGBA, from
-/// four corners of its own: its vertices, and its indices, two triangles a face.
-fn cube() -> ([Colored; 24], [u32; 36]) {
-    // Each face's outward axis, two axes along it, and its color.
-    let faces = [
-        (Vec3::X, Vec3::Y, Vec3::Z, [0.8, 0.1, 0.1, 1.0]),
-        (Vec3::NEG_X, Vec3::Y, Vec3::Z, [0.1, 0.7, 0.7, 1.0]),
-        (Vec3::Y, Vec3::Z, Vec3::X, [0.1, 0.7, 0.1, 1.0]),
-        (Vec3::NEG_Y, Vec3::Z, Vec3::X, [0.7, 0.1, 0.7, 1.0]),
-        (Vec3::Z, Vec3::X, Vec3::Y, [0.1, 0.1, 0.8, 1.0]),
-        (Vec3::NEG_Z, Vec3::X, Vec3::Y, [0.7, 0.7, 0.1, 1.0]),
-    ];
-    let mut vertices = [Colored {
-        position: Vec3::ZERO,
-        color: [0.0; 4],
-    }; 24];
-    let mut indices = [0; 36];
-    for (face, (out, across, up, color)) in faces.into_iter().enumerate() {
-        let corners = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)];
-        for (corner, (a, b)) in corners.into_iter().enumerate() {
-            let position = (out + across * a + up * b) * 0.5;
-            vertices[face * 4 + corner] = Colored { position, color };
-        }
-        let first = face as u32 * 4;
-        let triangles = [0, 1, 2, 0, 2, 3].map(|corner| first + corner);
-        indices[face * 6..face * 6 + 6].copy_from_slice(&triangles);
-    }
-    (vertices, indices)
-}
-
-/// How fast the triangle turns, in radians a second: a quarter turn.
-const TURN_SPEED: f32 = FRAC_PI_2;
-
-/// How fast the arrows move the triangle, in units a second.
-const STEER_SPEED: f32 = 1.0;
-
-// How far forward each part of the scene is, which the engine draws back to front by its z in the
-// world, but for the triangle, which is opaque and draws first, its depth hiding what's behind it:
-// the map's ground, what stands on it, the swarm, the grid, at 0.2 in its scene, the checkerboard,
-// the triangle, its moons, each 0.01 in front of its parent in theirs, so that they're between the
-// triangle and the logo, and the logo. The orthographic camera sees from 1 behind it to 1 in front.
-const GROUND_Z: f32 = 0.0;
-const STANDING_Z: f32 = 0.01;
+/// How far forward the swarm is, behind the grid, at 0.2 in its scene. The orthographic camera sees
+/// from 1 behind it to 1 in front.
 const SWARM_Z: f32 = 0.1;
-const CHECKERBOARD_Z: f32 = 0.3;
-const TRIANGLE_Z: f32 = 0.4;
-const LOGO_Z: f32 = 0.5;
 
 /// The most sprites the swarm has.
 const SWARM_MAX: u32 = 100_000;
@@ -120,65 +51,6 @@ const SWARM_START: u32 = if cfg!(debug_assertions) {
 /// The swarm's field, centered on the origin: a little wider and taller than the view at first,
 /// so that its sprites wrap around out of sight.
 const FIELD: Vec2 = Vec2::new(8.0, 4.5);
-
-/// The map, a letter a tile, its rows top first: W water, O deep water, S sand, G grass, F flowers,
-/// D dirt, P paving, H planks; and on grass, R a rock, B a bush, T a tree, a tile across and two
-/// tall, which stands over the tile above its own.
-const MAP: [&str; 14] = [
-    "OOOOOOOOOOOOOOOOOOOOOOOO",
-    "OOWWWWWWWWWWWWWWWWWWWWOO",
-    "OWWSSSSSSSSSSWWWWSSSSWWO",
-    "OWSSGGTGGGGSSSWWSSGTGSWO",
-    "OWSGGGGGFGGGSSWWSGGGGSWO",
-    "OWSGTGGDDDDDDDHHDDDGFSWO",
-    "OWSGGGGDPPPPGSWWSGGBGSWO",
-    "OWSGFGGDPPPPGSWWSGTGGSWO",
-    "OWSGGBGDGGGRGSWWSGGGGSWO",
-    "OWSSGGGDGGTGSSWWSSGGSSWO",
-    "OWWSSSGDGGGSSWWWWSSSSWWO",
-    "OOWWSSSDSSSSWWWOOWWWWWOO",
-    "OOOWWWWWWWWWWWOOOOOOOOOO",
-    "OOOOOOOOOOOOOOOOOOOOOOOO",
-];
-const _: () = {
-    let mut row = 1;
-    while row < MAP.len() {
-        assert!(MAP[row].len() == MAP[0].len(), "the map's rows are as long");
-        row += 1;
-    }
-};
-
-/// How far across and down a tile of the map is, in units: a power of two, with the map's center a
-/// multiple of half of it, so that every corner of every tile is exact in `f32`, and tiles side by
-/// side share their edges exactly, leaving no crack between them.
-const TILE: f32 = 0.25;
-
-/// Where the map's center is: below the swarm's field, whose sprites would hide it.
-const MAP_CENTER: Vec2 = Vec2::new(0.0, -5.0);
-
-/// Where the cubes are: above the swarm's field, out of its way, and less than 1 from z = 0, where
-/// the orthographic camera sees them too.
-const CUBES: Vec3 = Vec3::new(0.0, 5.0, 0.0);
-
-/// The cells of `assets/tiles.png` that the map's `letter` draws: its ground's, and what stands on
-/// it, with how many cells tall that is.
-fn tile(letter: u8) -> ([u32; 2], Option<([u32; 2], u32)>) {
-    let on_grass = |standing| ([2, 0], Some(standing));
-    match letter {
-        b'W' => ([0, 0], None),
-        b'O' => ([2, 2], None),
-        b'S' => ([1, 0], None),
-        b'G' => ([2, 0], None),
-        b'F' => ([1, 1], None),
-        b'D' => ([2, 1], None),
-        b'P' => ([0, 1], None),
-        b'H' => ([3, 2], None),
-        b'R' => on_grass(([0, 2], 1)),
-        b'B' => on_grass(([1, 2], 1)),
-        b'T' => on_grass(([3, 0], 2)),
-        _ => panic!("the map has no tile {:?}", char::from(letter)),
-    }
-}
 
 /// A camera, unturned, over `center`, seeing `height` units from the view's bottom to its top.
 fn overlooking(center: Vec2, height: f32) -> Viewpoint {
@@ -197,17 +69,6 @@ fn overlooking(center: Vec2, height: f32) -> Viewpoint {
 /// cell of a sheet of 4 by 4 shapes with transparent margins, row by row.
 struct SwarmShapes {
     shapes: [Sprite; 16],
-}
-
-/// What the sandbox loaded, which it builds its world from as it attaches: the checkerboard's and
-/// the logo's textures, the map's tiles, the triangle's mesh and shader, and the truck.
-struct Loaded {
-    checkerboard: Texture,
-    logo: Texture,
-    tiles: SpriteSheet,
-    triangle: Mesh<Colored>,
-    shader: Shader<Colored>,
-    truck: Model,
 }
 
 /// One of the swarm's sprites: how it moves, picked once from its index.
@@ -264,14 +125,6 @@ impl Drifter {
     }
 }
 
-/// One of the map's sprites, which the map's filtering applies to.
-#[derive(Clone, Copy, Component)]
-struct MapTile;
-
-/// The checkerboard's sprite, which its panel's filtering, tiling and tint apply to.
-#[derive(Clone, Copy, Component)]
-struct Checkerboard;
-
 /// One of the grid's squares, which its sprite's color follows.
 #[derive(Clone, Copy, Component)]
 struct GridCell {
@@ -280,51 +133,19 @@ struct GridCell {
     color: u32,
 }
 
-/// Turns an entity about z.
-#[derive(Clone, Copy, Component)]
-struct Spin {
-    /// How far it turns a second, counterclockwise.
-    #[reflect(degrees)]
-    speed: f32,
-}
-
-/// Moves an entity, the triangle, as the arrows, the left stick and the D-pad steer it.
-#[derive(Clone, Copy, Component)]
-struct Steer {
-    /// Where it's going, no longer than 1: a unit vector for one arrow or two, shorter for a stick
-    /// pushed part of the way, and zero for none.
-    heading: Vec2,
-}
-
 /// Registers the sandbox's component types, as a game does before it loads a scene of them.
 fn register(world: &mut World) {
-    for registered in [
-        world.register::<Drifter>(),
-        world.register::<MapTile>(),
-        world.register::<Checkerboard>(),
-        world.register::<GridCell>(),
-        world.register::<Spin>(),
-        world.register::<Steer>(),
-    ] {
+    for registered in [world.register::<Drifter>(), world.register::<GridCell>()] {
         registered.expect("the sandbox's types describe themselves");
     }
 }
 
-/// The sandbox's scenes, in `scenes/` beside its shaders and assets: `grid.ron`, the grid, 10 by
-/// 10 squares 2 units across; and `moons.ron`, a prefab of a pivot with two moons, which the
-/// triangle carries around it as it turns, each turning too, and a moonlet, which one of them
-/// carries around in turn.
+/// The sandbox's scene `name`, in `scenes/` beside its assets: `grid.ron`, the grid, 10 by 10
+/// squares 2 units across.
 fn scene(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("scenes")
         .join(name)
-}
-
-/// The text of scene `name`, and its path; the sandbox stops without it, saying why.
-fn read_scene(name: &str) -> (String, PathBuf) {
-    let path = scene(name);
-    let text = gg_engine::read_scene(&path).unwrap_or_else(|error| panic!("{error:#}"));
-    (text, path)
 }
 
 /// The grid's squares.
@@ -427,81 +248,6 @@ fn color_grid(world: &mut World, colors: [[f32; 3]; 2]) {
     }
 }
 
-/// Has the map's sprites and the checkerboard's as `settings` say, as the sandbox attaches and at
-/// the tick after the panels change them: between, the Inspector may set them otherwise.
-fn apply_settings(world: &mut World, settings: Settings) {
-    let sampler = if settings.smooth_map {
-        Sampler::LinearClamp
-    } else {
-        Sampler::NearestClamp
-    };
-    for (_, sprite) in world.query_mut::<(&MapTile, &mut Sprite)>() {
-        sprite.sampler = sampler;
-    }
-    for (_, checkerboard) in world.query_mut::<(&Checkerboard, &mut Sprite)>() {
-        checkerboard.color = Vec4::from(settings.tint);
-        checkerboard.rect = [Vec2::ZERO, Vec2::splat(settings.tiles)];
-        checkerboard.sampler = if settings.smooth {
-            Sampler::LinearRepeat
-        } else {
-            Sampler::NearestRepeat
-        };
-    }
-}
-
-/// Turns each entity that spins as far as it does in `dt`.
-fn spin(world: &mut World, dt: Duration) {
-    for (spin, transform) in world.query_mut::<(&Spin, &mut Transform)>() {
-        let turn = Quat::from_rotation_z(spin.speed * dt.as_secs_f32());
-        transform.rotation = (turn * transform.rotation).normalize();
-    }
-}
-
-/// Moves each entity that steers along its heading, as far as it goes in `dt`.
-fn steer(world: &mut World, dt: Duration) {
-    for (steer, transform) in world.query_mut::<(&Steer, &mut Transform)>() {
-        // One that isn't going anywhere stays where it is, to a zero's sign.
-        if steer.heading != Vec2::ZERO {
-            let by = steer.heading * STEER_SPEED * dt.as_secs_f32();
-            transform.translation += by.extend(0.0);
-        }
-    }
-}
-
-/// Spawns the map from the cells of `tiles`, 4 by 3 of 16 by 16 pixels, packed edge to edge, of
-/// ground, and of what stands on it with transparent backgrounds: every tile's ground, then what
-/// stands on the tiles, each from the top row.
-fn spawn_map(world: &mut World, tiles: &SpriteSheet) {
-    // The top left tile's center.
-    let rows = MAP.len() as f32;
-    let columns = MAP[0].len() as f32;
-    let corner = MAP_CENTER + Vec2::new(1.0 - columns, rows - 1.0) * TILE / 2.0;
-    let mut spawn = |row: usize, column: usize, cell, tall: u32, z: f32| {
-        let at = corner + Vec2::new(column as f32, -(row as f32)) * TILE;
-        // From the tile up.
-        let height = TILE * tall as f32;
-        let center = at + Vec2::new(0.0, (height - TILE) / 2.0);
-        let transform = Transform {
-            translation: center.extend(z),
-            scale: Vec3::new(TILE, height, 1.0),
-            ..Transform::IDENTITY
-        };
-        world.spawn((transform, tiles.sprite(cell, [1, tall]), MapTile));
-    };
-    let tiles = || {
-        let rows = MAP.iter().enumerate();
-        rows.flat_map(|(row, letters)| letters.bytes().enumerate().map(move |(c, l)| (row, c, l)))
-    };
-    for (row, column, letter) in tiles() {
-        spawn(row, column, tile(letter).0, 1, GROUND_Z);
-    }
-    for (row, column, letter) in tiles() {
-        if let Some((cell, tall)) = tile(letter).1 {
-            spawn(row, column, cell, tall, STANDING_Z);
-        }
-    }
-}
-
 /// A number from 0 up to 1 that `index` and `salt` pick, the same every time: Chris Wellons's
 /// lowbias32 hash, its top 24 bits as a fraction.
 fn pick(index: u32, salt: u32) -> f32 {
@@ -514,106 +260,41 @@ fn pick(index: u32, salt: u32) -> f32 {
     (x >> 8) as f32 / (1 << 24) as f32
 }
 
-/// Draws in the game's view a swarm of sprites from a sheet's cells, drifting and turning, which
-/// tests how many sprites the engine draws; over it, a grid of sprites in two colors that
-/// alternate; over the grid's middle, a checkerboard sprite, tiled and tinted, then a triangle in
-/// red, green and blue turning, with two moons, which it carries around as it turns,
-/// one of them carrying a moonlet of its own, then a logo sprite whose alpha shows them through it.
-/// Above the swarm, two cubes that cut through each other as they turn, and a pane through them
-/// that shows them through it, which only depth sorts out; beside them, a milk truck, a textured
-/// glTF model, whose nodes are entities under a root. Below the swarm, out of its way, a map
-/// of tiles from a tile set's cells packed edge to edge, which tests that none shows any of the
-/// cells beside it. All but the cubes and the pane are entities: the world holds all of the
-/// simulation, so that a snapshot of it restores it, and a recording of the commands replays it.
-/// The triangle and the cubes are meshes with a vertex type and an opaque shader of the sandbox's
-/// own, the truck's meshes the engine's model shader's, and the rest the engine's sprites; the
-/// sandbox draws the cubes and the pane itself, each frame, before the world, so the cubes are one
-/// instanced draw, the pane another, the triangle a third, the truck four more, one of them its two
-/// wheels, and every other sprite one more. They're drawn over a color that drifts slowly, so that
-/// a running sandbox visibly animates, as the cubes turn. The engine's orthographic camera
-/// controller steers the camera, turning it too, and looking at the cubes, the engine's fly camera
-/// controller does, with perspective, but for the left stick, which steers the triangle:
-/// [`OrthographicCameraController`] and [`FlyCameraController`] give their keys, as [`Act`] gives
-/// the sandbox's own, which steer the triangle and reverse its spin. Shows six panels to dock,
-/// beside the engine's Performance panel, which counts the draws, and its Entities and Inspector
-/// panels, which list the entities and edit the picked one's components: the camera; how many
-/// sprites the swarm has; the map's filtering, smooth or sharp, and buttons that look at the map,
-/// back at the swarm, or at the cubes; the grid's colors, which can be picked; the checkerboard's
-/// filtering, how many times it repeats, and its tint; and the clear color, which can be held or
-/// picked. Logs the key, mouse and gamepad presses that reach it, which those on the panels don't.
-/// It polls input too: holding Space pauses the drift and the cubes, and a panel shows where the
-/// cursor is. The title bar's File menu saves the grid to its scene, loads it again from the
+/// Draws in the game's view a swarm of sprites from a sheet's cells, drifting and turning on the job
+/// system's threads, which tests how many sprites the engine simulates and draws, and over it a grid
+/// of sprites in two colors that alternate, from its scene file, which a development build applies
+/// as it's saved. Both are entities: the world holds all of the simulation, so that a snapshot of it
+/// restores it, and a recording of the commands replays it. The engine's orthographic camera
+/// controller steers the camera, turning it too, by the keys [`OrthographicCameraController`]
+/// gives. Shows three panels to dock, beside the engine's Performance panel, which counts the draws,
+/// and its Entities and Inspector panels, which list the entities and edit the picked one's
+/// components: the camera and the cursor; how many sprites the swarm has; and the grid's colors,
+/// which can be picked. Logs the key, mouse and gamepad presses that reach it, which those on the
+/// panels don't. The title bar's File menu saves the grid to its scene, loads it again from the
 /// scene, which a refusal of leaves it as it was, and quits.
 struct Sandbox {
-    /// How long the clear color has drifted.
-    time: Duration,
-    drift: bool,
-    /// The clear color, in linear RGB.
-    color: [f32; 3],
     /// The grid's two colors, in linear RGB.
     grid_colors: [[f32; 3]; 2],
-    settings: Settings,
     camera: OrthographicCameraController,
-    /// Steers the camera while `flying`, rather than `camera`.
-    fly: FlyCameraController,
-    flying: bool,
-    /// The cubes' mesh and shader, once the sandbox loads.
-    cubes: Option<(Mesh<Colored>, Shader<Colored>)>,
-    /// What the sandbox loaded, which it builds its world from as it attaches.
-    loaded: Option<Loaded>,
-    /// How long the cubes have turned: every frame but those Space is held through, whether the
-    /// clear color drifts or not.
-    turned: Duration,
-    actions: Actions<Act>,
     /// How many sprites the swarm has, as its panel says.
     swarm: u32,
     /// The swarm's shapes, set up as the sandbox loads.
     scene: Option<SwarmShapes>,
-    /// What the panels, the File menu and the actions changed since the last tick.
+    /// What the panels and the File menu changed since the last tick.
     commands: Vec<Command>,
     /// The drifters that wrapped at a tick, kept for its memory, with its lock: empty between
     /// ticks.
     wrapped: Mutex<Vec<Entity>>,
 }
 
-/// What the sandbox's keys and gamepads do, beside the camera controller's.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Act {
-    /// The arrows, the left stick and the D-pad: which way the triangle goes.
-    Steer,
-    /// R and South: turns the triangle the other way.
-    Reverse,
-}
-
-/// How the map and the checkerboard are drawn, as their panels say.
-#[derive(Clone, Copy, Reflect)]
-struct Settings {
-    /// Whether the map is filtered linearly rather than sampled at the nearest texel, as pixel art
-    /// is.
-    smooth_map: bool,
-    /// Whether the checkerboard is filtered linearly, which blurs its texels together, rather than
-    /// sampled at the nearest, which keeps them sharp.
-    smooth: bool,
-    /// How many times the checkerboard repeats across and down.
-    tiles: f32,
-    /// What the checkerboard's colors are multiplied by, in linear RGBA, alpha not multiplied in.
-    tint: [f32; 4],
-}
-
-/// What the sandbox's panels, File menu and actions change of its world, queued as they change it
-/// and applied at its next tick, before its systems: its commands, which a recording keeps.
+/// What the sandbox's panels and File menu change of its world, queued as they change it and
+/// applied at its next tick, before its systems: its commands, which a recording keeps.
 #[derive(Reflect)]
 enum Command {
-    /// Has the triangle go this way, until the next.
-    Steer(Vec2),
-    /// Turns the triangle, but not its moons, the other way.
-    Reverse,
     /// Spawns or despawns drifters until the swarm has this many.
     Swarm(u32),
     /// Colors the grid's squares in these, in linear RGB.
     GridColors([[f32; 3]; 2]),
-    /// Draws the map and the checkerboard so.
-    Settings(Settings),
     /// Loads the grid in place of the one there is from `text`, read from its scene as the menu
     /// was clicked, and colors it in `colors`, as the panel had them then.
     ReloadGrid { text: String, colors: [[f32; 3]; 2] },
@@ -621,126 +302,17 @@ enum Command {
 
 impl Sandbox {
     fn new() -> Self {
-        let mut camera = OrthographicCameraController::new(Self::start());
+        let mut camera = OrthographicCameraController::new(overlooking(Vec2::ZERO, 3.0));
         camera.rotation = true;
-        let mut fly = FlyCameraController::new(Self::looking_at_the_cubes());
-        // W, A, S and D alone, since the left stick steers the triangle.
-        fly.actions.unbind(FlyAction::Move);
-        let bound = fly.actions.bind(FlyAction::Move, Binding::WASD);
-        bound.expect("W, A, S and D are free once moving is unbound");
-        let mut actions = Actions::default();
-        let arrows = Binding::Axis2 {
-            x: [Key::ArrowLeft, Key::ArrowRight].map(Source::Key),
-            y: [Key::ArrowDown, Key::ArrowUp].map(Source::Key),
-        };
-        let d_pad = Binding::Axis2 {
-            x: [PadButton::DPadLeft, PadButton::DPadRight].map(Source::PadButton),
-            y: [PadButton::DPadDown, PadButton::DPadUp].map(Source::PadButton),
-        };
-        let bound = [
-            (Act::Steer, arrows),
-            (Act::Steer, Binding::stick(Stick::Left)),
-            (Act::Steer, d_pad),
-            (Act::Reverse, Binding::Button(Source::Key(Key::KeyR))),
-            (
-                Act::Reverse,
-                Binding::Button(Source::PadButton(PadButton::South)),
-            ),
-        ]
-        .into_iter()
-        .try_for_each(|(action, binding)| actions.bind(action, binding));
-        bound.expect("the sandbox's bindings are each of one kind, of other sources");
         Self {
-            time: Duration::ZERO,
-            drift: true,
-            color: [0.0; 3],
             // Blue and red.
             grid_colors: [[0.2, 0.3, 0.8], [0.8, 0.2, 0.3]],
-            settings: Settings {
-                smooth_map: false,
-                smooth: false,
-                tiles: 2.0,
-                // Pink.
-                tint: [1.0, 0.8, 0.8, 1.0],
-            },
             camera,
-            fly,
-            flying: false,
-            cubes: None,
-            loaded: None,
-            turned: Duration::ZERO,
-            actions,
             swarm: SWARM_START,
             scene: None,
             commands: Vec::new(),
             wrapped: Mutex::new(Vec::new()),
         }
-    }
-
-    /// Where the camera starts: over the origin, 3 units from the view's bottom to its top, around
-    /// the grid's 2.
-    fn start() -> Viewpoint {
-        overlooking(Vec2::ZERO, 3.0)
-    }
-
-    /// A camera with perspective, 2.5 in front of the cubes, looking at them, a sixth of a turn
-    /// from the view's bottom to its top.
-    fn looking_at_the_cubes() -> Viewpoint {
-        Viewpoint {
-            position: CUBES + Vec3::Z * 2.5,
-            rotation: Quat::IDENTITY,
-            projection: Projection::Perspective {
-                fov: FRAC_PI_3,
-                near: 0.1,
-            },
-        }
-    }
-
-    /// Has `camera` be the game's view's, steered by the controller for its projection: the fly
-    /// camera controller for one with perspective. The controller it leaves lets go of what it
-    /// held, since it's sent no more events.
-    fn look_at(&mut self, cx: &mut Context, camera: Viewpoint) {
-        let flying = matches!(camera.projection, Projection::Perspective { .. });
-        if flying != self.flying {
-            let left = Event::Focused(false);
-            let _ = if self.flying {
-                self.fly.event(cx, &left)
-            } else {
-                self.camera.event(cx, &left)
-            };
-        }
-        self.flying = flying;
-        if flying {
-            self.fly.viewpoint = camera;
-        } else {
-            self.camera.viewpoint = camera;
-        }
-    }
-
-    /// Draws two cubes half a unit across, which cut through each other as they turn opposite ways
-    /// about tilted axes, then a pane through their middles that's half transparent: what's nearer
-    /// than it hides it, and it tints what's behind it, which only depth sorts out.
-    fn draw_cubes(&self, cx: &mut Context) {
-        let Some((mesh, shader)) = self.cubes else {
-            return;
-        };
-        let turned = self.turned.as_secs_f32();
-        for way in [-1.0, 1.0] {
-            let axis = Vec3::new(1.0, way, 0.5).normalize();
-            let at = Mat4::from_scale_rotation_translation(
-                Vec3::splat(0.5),
-                Quat::from_axis_angle(axis, way * turned),
-                CUBES + Vec3::X * 0.2 * way,
-            );
-            cx.draw(mesh, shader, at, ());
-        }
-        let pane = Sprite {
-            color: Vec4::new(1.0, 1.0, 1.0, 0.5),
-            ..Sprite::default()
-        };
-        let at =
-            Mat4::from_scale_rotation_translation(Vec3::new(1.2, 0.8, 1.0), Quat::IDENTITY, CUBES);
-        cx.draw_sprite(at, pane);
     }
 
     /// Spawns drifters until the swarm has `swarm`, or despawns them until it has, from its end,
@@ -774,113 +346,31 @@ impl Sandbox {
 
 impl Layer for Sandbox {
     fn load(&mut self, cx: &mut Context) {
-        // A shader that doesn't compile, or a texture or a model that doesn't load, stops the
-        // sandbox, with what went wrong.
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let assets = root.join("assets");
-        let colored = cx.add_shader(
-            "vertex color",
-            root.join("shaders/vertex_color.slang"),
-            Blend::Opaque,
-        );
-        let triangle = cx.add_mesh("triangle", &TRIANGLE, &[0, 1, 2]);
-        let checkerboard = cx.add_texture("checkerboard", assets.join("checkerboard.png"));
-        let logo = cx.add_texture("logo", assets.join("logo.png"));
+        // A texture that doesn't load stops the sandbox, with what went wrong.
+        let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
         let shapes = cx.add_sprite_sheet("sheet", assets.join("sheet.png"), [32, 32]);
-        let tiles = cx.add_sprite_sheet("tiles", assets.join("tiles.png"), [16, 16]);
-        let truck = cx.add_model("truck", assets.join("CesiumMilkTruck.glb"));
         let shapes = shapes.expect("the shapes load");
-        let mesh = triangle.expect("the triangle is a whole triangle, of its own vertices");
-        let shader = colored.expect("the vertex color shader compiles");
-        let (vertices, indices) = cube();
-        let cube = cx.add_mesh("cube", &vertices, &indices);
-        self.cubes = Some((cube.expect("the cube is whole triangles"), shader));
         self.scene = Some(SwarmShapes {
             shapes: std::array::from_fn(|i| shapes.sprite([i as u32 % 4, i as u32 / 4], [1, 1])),
-        });
-        self.loaded = Some(Loaded {
-            checkerboard: checkerboard.expect("the checkerboard loads"),
-            logo: logo.expect("the logo loads"),
-            tiles: tiles.expect("the tiles load"),
-            triangle: mesh,
-            shader,
-            truck: truck.expect("the truck loads"),
         });
         register(cx.world_mut());
     }
 
     fn attach(&mut self, cx: &mut Context) {
-        // A scene that's refused stops the sandbox, with what went wrong.
-        let Some(made) = &self.loaded else {
-            return;
-        };
-        spawn_map(cx.world_mut(), &made.tiles);
-        // Watched as the sandbox runs, in development builds, which apply its saves.
+        // Watched as the sandbox runs, in development builds, which apply its saves; one that's
+        // refused stops the sandbox, with what went wrong.
         let loaded = cx.load_scene_file(scene("grid.ron"));
         loaded.unwrap_or_else(|error| panic!("{error:#}"));
-        let world = cx.world_mut();
-        // 1.5 units across, over the grid's middle.
-        let middle = Vec3::splat(1.5);
-        let checkerboard = Sprite {
-            texture: Some(made.checkerboard),
-            ..Sprite::default()
-        };
-        let at = Transform {
-            translation: Vec3::Z * CHECKERBOARD_Z,
-            scale: middle,
-            ..Transform::IDENTITY
-        };
-        world.spawn((at, checkerboard, Checkerboard));
-        let at = Transform {
-            translation: Vec3::Z * TRIANGLE_Z,
-            ..Transform::IDENTITY
-        };
-        let spin = Spin { speed: TURN_SPEED };
-        let steer = Steer {
-            heading: Vec2::ZERO,
-        };
-        let draw = MeshDraw::new(made.triangle, made.shader, ());
-        let triangle = world.spawn((at, draw, spin, steer));
-        let (moons, path) = read_scene("moons.ron");
-        let placed = world.place_prefab(&moons, Some(triangle));
-        placed.unwrap_or_else(|error| panic!("{}:{error}", path.display()));
-        let logo = Sprite {
-            texture: Some(made.logo),
-            ..Sprite::default()
-        };
-        let at = Transform {
-            translation: Vec3::Z * LOGO_Z,
-            scale: middle,
-            ..Transform::IDENTITY
-        };
-        world.spawn((at, logo));
-        // A quarter of its size, standing beside the cubes, turned to show its cab and a side.
-        let at = Transform {
-            translation: CUBES + Vec3::new(1.4, -0.45, 0.0),
-            rotation: Quat::from_rotation_y(-0.7),
-            scale: Vec3::splat(0.25),
-        };
-        made.truck.spawn(world, at);
-        apply_settings(world, self.settings);
-        color_grid(world, self.grid_colors);
+        color_grid(cx.world_mut(), self.grid_colors);
         // At the first tick, so that a recording holds the swarm's size, which a build's own
         // differs from another's.
         self.commands.push(Command::Swarm(self.swarm));
     }
 
-    /// Takes the panels' values from the world, which a snapshot brought back as they had left it,
-    /// and lets go of the arrows, which may have been held as the snapshot was taken.
+    /// Takes the panels' values from the world, which a snapshot brought back as they had left it.
     fn restored(&mut self, cx: &mut Context) {
         let world = cx.world();
         self.swarm = world.query::<&Drifter>().count() as u32;
-        if let Some((_, sprite)) = world.query::<(&MapTile, &Sprite)>().next() {
-            self.settings.smooth_map = sprite.sampler == Sampler::LinearClamp;
-        }
-        if let Some((_, sprite)) = world.query::<(&Checkerboard, &Sprite)>().next() {
-            self.settings.smooth = sprite.sampler == Sampler::LinearRepeat;
-            self.settings.tiles = sprite.rect[1].x;
-            self.settings.tint = sprite.color.to_array();
-        }
         // Each the color most of its squares have, which a square set apart in the Inspector
         // doesn't change.
         let mut counts: [Vec<([f32; 3], u32)>; 2] = Default::default();
@@ -897,7 +387,6 @@ impl Layer for Sandbox {
                 *color = most;
             }
         }
-        self.commands.push(Command::Steer(Vec2::ZERO));
     }
 
     fn tick(&mut self, world: &mut World, tick: Tick) {
@@ -908,19 +397,8 @@ impl Layer for Sandbox {
         let mut swarm = None;
         for command in commands.drain(..) {
             match command {
-                Command::Steer(heading) => {
-                    for steer in world.query_mut::<&mut Steer>() {
-                        steer.heading = heading;
-                    }
-                }
-                Command::Reverse => {
-                    for (_, spin) in world.query_mut::<(&Steer, &mut Spin)>() {
-                        spin.speed = -spin.speed;
-                    }
-                }
                 Command::Swarm(count) => swarm = Some(count),
                 Command::GridColors(colors) => color_grid(world, colors),
-                Command::Settings(settings) => apply_settings(world, settings),
                 Command::ReloadGrid { text, colors } => reload_grid(world, &text, colors),
             }
         }
@@ -932,8 +410,6 @@ impl Layer for Sandbox {
         drift(world, t, &mut self.wrapped);
         let wrapped = self.wrapped.get_mut();
         wrapped.expect("no job panicked holding it").clear();
-        spin(world, Tick::DT);
-        steer(world, Tick::DT);
     }
 
     fn commands(&mut self) -> Option<&mut dyn Commands> {
@@ -941,38 +417,11 @@ impl Layer for Sandbox {
     }
 
     fn update(&mut self, cx: &mut Context, dt: Duration) {
-        if self.flying {
-            self.fly.update(cx, dt);
-        } else {
-            self.camera.update(cx, dt);
-        }
-        if !cx.input().key_down(Key::Space) {
-            self.turned += dt;
-            if self.drift {
-                self.time += dt;
-                let t = self.time.as_secs_f32() * 0.4;
-                let wave = |phase: f32| 0.02 + 0.06 * (0.5 + 0.5 * math::libm::sinf(t + phase));
-                self.color = [wave(0.0), wave(2.1), wave(4.2)];
-            }
-        }
-        self.draw_cubes(cx);
+        self.camera.update(cx, dt);
     }
 
     fn event(&mut self, cx: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
-        if self.flying {
-            self.fly.event(cx, event)?;
-        } else {
-            self.camera.event(cx, event)?;
-        }
-        // Queued now, rather than at the next update, so that the next tick applies them.
-        let Self {
-            actions, commands, ..
-        } = self;
-        actions.event(event, |change| match change {
-            Change::Axis2(Act::Steer, heading) => commands.push(Command::Steer(heading)),
-            Change::Pressed(Act::Reverse) => commands.push(Command::Reverse),
-            _ => {}
-        });
+        self.camera.event(cx, event)?;
         match *event {
             Event::Key {
                 key,
@@ -1014,31 +463,17 @@ impl Layer for Sandbox {
             self.commands.push(Command::ReloadGrid { text, colors });
         }
         ui.panel("Stats", |ui| {
-            let camera = if self.flying {
-                self.fly.viewpoint
-            } else {
-                self.camera.viewpoint
-            };
+            let camera = self.camera.viewpoint;
             let [x, y, z] = camera.position.to_array();
-            let degrees = |radians| math::to_degrees(radians).rem_euclid(360.0);
-            let facing = match camera.projection {
-                Projection::Orthographic { height, .. } => {
-                    let (turn, _, _) = camera.rotation.to_euler(EulerRot::ZYX);
-                    format!("turned {:.0}°, {height:.2} units high", degrees(turn))
-                }
-                // The fly camera turns about the world's up, then looks up or down, unrolled.
-                Projection::Perspective { fov, .. } => {
-                    let (turn, up, _) = camera.rotation.to_euler(EulerRot::YXZ);
-                    // Plus 0, so that looking just below level shows as 0°, not -0°.
-                    let up = math::to_degrees(up).round() + 0.0;
-                    format!(
-                        "turned {:.0}°, looking {up:.0}° up, {:.0}° from bottom to top",
-                        degrees(turn),
-                        math::to_degrees(fov)
-                    )
-                }
+            let (turn, _, _) = camera.rotation.to_euler(EulerRot::ZYX);
+            let turn = math::to_degrees(turn).rem_euclid(360.0);
+            let height = match camera.projection {
+                Projection::Orthographic { height, .. } => height,
+                Projection::Perspective { .. } => f32::NAN,
             };
-            ui.label(format!("Camera at {x:.2}, {y:.2}, {z:.2}, {facing}"));
+            ui.label(format!(
+                "Camera at {x:.2}, {y:.2}, {z:.2}, turned {turn:.0}°, {height:.2} units high"
+            ));
             ui.label(match cx.input().cursor() {
                 Some([x, y]) => format!("Cursor at {x:.0}, {y:.0}"),
                 None => "Cursor outside the window".to_owned(),
@@ -1050,28 +485,6 @@ impl Layer for Sandbox {
                 self.commands.push(Command::Swarm(self.swarm));
             }
         });
-        let mut changed = false;
-        let mut look = None;
-        ui.panel("Map", |ui| {
-            changed |= ui
-                .checkbox(&mut self.settings.smooth_map, "Smooth the map")
-                .changed();
-            ui.horizontal(|ui| {
-                // 5 units high, so that the map, 6 across and 3.5 down, fits a view of most shapes.
-                if ui.button("Look at the map").clicked() {
-                    look = Some(overlooking(MAP_CENTER, 5.0));
-                }
-                if ui.button("Look at the swarm").clicked() {
-                    look = Some(Self::start());
-                }
-                if ui.button("Look at the cubes").clicked() {
-                    look = Some(Self::looking_at_the_cubes());
-                }
-            });
-        });
-        if let Some(camera) = look {
-            self.look_at(cx, camera);
-        }
         // By the colors rather than the buttons' changes: egui gives back the colors its picker
         // makes of them, as it first draws them too, which the world takes, as the grid's scene
         // saves them.
@@ -1087,532 +500,8 @@ impl Layer for Sandbox {
         if self.grid_colors != colors {
             self.commands.push(Command::GridColors(self.grid_colors));
         }
-        ui.panel("Textures", |ui| {
-            let settings = &mut self.settings;
-            changed |= ui
-                .checkbox(&mut settings.smooth, "Smooth the checkerboard")
-                .changed();
-            let tiles = egui::Slider::new(&mut settings.tiles, 1.0..=10.0).text("Tiles");
-            changed |= ui.add(tiles).changed();
-            ui.horizontal(|ui| {
-                ui.label("Tint");
-                changed |= ui
-                    .color_edit_button_rgba_unmultiplied(&mut settings.tint)
-                    .changed();
-            });
-        });
-        if changed {
-            self.commands.push(Command::Settings(self.settings));
-        }
-        ui.panel("Clear color", |ui| {
-            ui.checkbox(&mut self.drift, "Drift");
-            ui.horizontal(|ui| {
-                ui.label("Color");
-                // Picking a color holds it.
-                if ui.color_edit_button_rgb(&mut self.color).changed() {
-                    self.drift = false;
-                }
-            });
-        });
-        // After the panel, which may have changed it.
-        let [r, g, b] = self.color;
-        cx.set_clear_color([r, g, b, 1.0]);
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use std::fs;
-
-    use super::*;
-
-    /// A world that knows the sandbox's types, and the engine's, as the app's does.
-    fn world() -> World {
-        let mut world = World::default();
-        world.register::<Transform>().expect("registered");
-        world.register::<Sprite>().expect("registered");
-        register(&mut world);
-        world
-    }
-
-    /// Each scene loads and saves to its own bytes, so that a type of the sandbox's that changes
-    /// under its files fails here; and the moons are placed as a prefab.
-    #[test]
-    fn the_scenes_save_as_they_are() {
-        for name in ["grid.ron", "moons.ron"] {
-            let (text, _) = read_scene(name);
-            let mut world = world();
-            let roots = world.load_scene(&text);
-            let roots = roots.unwrap_or_else(|error| panic!("{name}:{error}"));
-            assert_eq!(world.save_scene(&roots).expect("saved"), text, "{name}");
-        }
-        let mut world = world();
-        world.load_scene(&read_scene("grid.ron").0).expect("loaded");
-        assert_eq!(grid(&world).len(), 100);
-        let parent = world.spawn(Transform::IDENTITY);
-        let pivot = world.place_prefab(&read_scene("moons.ron").0, Some(parent));
-        let pivot = pivot.expect("placed");
-        let moons = world.children(pivot).expect("alive").count();
-        assert_eq!(moons, 2);
-        assert_eq!(world.query::<&Spin>().count(), 3);
-    }
-
-    /// Drift finds, to reset, exactly the drifters that wrap across the field at each tick, as
-    /// their laps across it count, worked out apart from their transforms, so that the swarm
-    /// doesn't streak across the view as it wraps.
-    #[test]
-    fn drift_finds_the_drifters_that_wrap_alone() {
-        let mut world = world();
-        let drifters: Vec<(Entity, Drifter)> = (0..1000)
-            .map(|index| {
-                let (drifter, _) = Drifter::new(index);
-                (world.spawn((drifter.transform(0.0), drifter)), drifter)
-            })
-            .collect();
-        let laps = |drifter: &Drifter, t: f64| {
-            let lap = |start: f32, speed: f32, every: f32| {
-                (f64::from(start) + f64::from(speed) * t).div_euclid(f64::from(every))
-            };
-            let (start, velocity) = (drifter.start, drifter.velocity);
-            [
-                lap(start.x, velocity.x, FIELD.x),
-                lap(start.y, velocity.y, FIELD.y),
-            ]
-        };
-        let (mut found, mut seen) = (Mutex::new(Vec::new()), 0);
-        for tick in 1..=256 {
-            let [before, t] = [tick - 1, tick].map(|tick| Tick::DT.as_secs_f64() * f64::from(tick));
-            drift(&mut world, t, &mut found);
-            let lapped = drifters
-                .iter()
-                .filter(|(_, drifter)| laps(drifter, t) != laps(drifter, before));
-            let mut want: Vec<Entity> = lapped.map(|&(entity, _)| entity).collect();
-            want.sort();
-            let wrapped = found.get_mut().expect("no job panicked holding it");
-            wrapped.sort();
-            assert_eq!(*wrapped, want, "tick {tick}");
-            seen += wrapped.len();
-            wrapped.clear();
-        }
-        assert!(seen > 0, "no drifter wrapped");
-    }
-
-    /// A reload replaces the grid whole, a square that's another's descendant too, or, if it's
-    /// refused, leaves the grid there was.
-    #[test]
-    fn a_reload_replaces_the_grid_whole_or_not_at_all() {
-        let mut world = world();
-        world.load_scene(&read_scene("grid.ron").0).expect("loaded");
-        let cells = grid(&world);
-        world
-            .set_parent(cells[1], Some(cells[0]))
-            .expect("parented");
-        let nested = world.save_scene(&cells).expect("saved");
-        replace_grid(&mut world, &nested).expect("replaced");
-        assert_eq!(world.save_scene(&grid(&world)).expect("saved"), nested);
-        let refused = replace_grid(&mut world, "(entities: {").expect_err("refused");
-        assert_eq!(refused.code(), "scene.syntax");
-        assert_eq!(world.save_scene(&grid(&world)).expect("saved"), nested);
-    }
-
-    /// The panels' commands change nothing until the next tick, which applies them in the order
-    /// they came; and what the Inspector sets stays until a panel changes it again.
-    #[test]
-    fn commands_change_the_world_at_the_next_tick_in_order() {
-        let mut world = world();
-        world.load_scene(&read_scene("grid.ron").0).expect("loaded");
-        world.spawn((Transform::IDENTITY, Sprite::default(), Checkerboard));
-        let mut sandbox = Sandbox::new();
-        sandbox.scene = Some(SwarmShapes {
-            shapes: std::array::from_fn(|_| Sprite::default()),
-        });
-        let colors = [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]];
-        let commands = [
-            Command::Swarm(5),
-            Command::Swarm(3),
-            Command::GridColors(colors),
-        ];
-        sandbox.commands.extend(commands);
-        let drifters = |world: &World| world.query::<&Drifter>().count();
-        let colored = |world: &World| {
-            let cells = world.query::<(&GridCell, &Sprite)>();
-            let color = |cell: &GridCell| Vec3::from(colors[cell.color as usize]).extend(1.0);
-            cells
-                .filter(|(cell, sprite)| sprite.color == color(cell))
-                .count()
-        };
-        assert_eq!((drifters(&world), colored(&world)), (0, 0));
-        sandbox.tick(&mut world, Tick { number: 0 });
-        assert_eq!((drifters(&world), colored(&world)), (3, 100));
-        // A square colored otherwise, as the Inspector colors it, stays so at the next tick.
-        let square = world
-            .query::<(Entity, &GridCell)>()
-            .next()
-            .map(|(square, _)| square);
-        let sprite = world.get_mut::<Sprite>(square.expect("a square"));
-        sprite.expect("a sprite").color = Vec4::ONE;
-        sandbox.tick(&mut world, Tick { number: 1 });
-        assert_eq!(colored(&world), 99);
-        // And stays so through a reload that's refused, which leaves the grid as it was.
-        let text = "(entities: {".to_owned();
-        sandbox.commands.push(Command::ReloadGrid { text, colors });
-        sandbox.tick(&mut world, Tick { number: 2 });
-        assert_eq!(colored(&world), 99);
-        // The swarm's size dragged away and back between two ticks leaves its drifters be.
-        let swarm = |world: &World| {
-            let drifters = world.query::<(Entity, &Drifter)>();
-            let mut drifters: Vec<(u32, Entity)> = drifters.map(|(e, d)| (d.index, e)).collect();
-            drifters.sort_unstable();
-            drifters
-        };
-        let before = swarm(&world);
-        assert_eq!(
-            before.iter().map(|&(i, _)| i).collect::<Vec<_>>(),
-            [0, 1, 2]
-        );
-        sandbox
-            .commands
-            .extend([Command::Swarm(1), Command::Swarm(3)]);
-        sandbox.tick(&mut world, Tick { number: 3 });
-        assert_eq!(swarm(&world), before);
-        // Shrunk, it keeps its first.
-        sandbox.commands.push(Command::Swarm(2));
-        sandbox.tick(&mut world, Tick { number: 4 });
-        assert_eq!(swarm(&world), before[..2]);
-    }
-
-    /// The arrows, the left stick, the D-pad, R and South queue their changes as commands as they
-    /// come, rather than at the next update, so that the frame's ticks apply them: the arrows, the
-    /// stick and the D-pad each heading they make, and R and South a reverse for each press, not
-    /// for its repeats or its release. The right stick is the camera's alone.
-    #[test]
-    fn its_keys_and_gamepads_queue_commands_as_they_come() {
-        let mut cx = Context::seeded(0x5eed);
-        let mut sandbox = Sandbox::new();
-        let key = |key, pressed, repeat| Event::Key {
-            key,
-            pressed,
-            repeat,
-        };
-        let pad = gg_engine::Pad(0);
-        let stick = |stick, value| Event::PadStick { pad, stick, value };
-        let button = |button, pressed| Event::PadButton {
-            pad,
-            button,
-            pressed,
-        };
-        for event in [
-            key(Key::ArrowRight, true, false),
-            key(Key::ArrowUp, true, false),
-            key(Key::KeyR, true, false),
-            key(Key::KeyR, true, true),
-            key(Key::KeyR, false, false),
-            key(Key::ArrowRight, false, false),
-            key(Key::ArrowUp, false, false),
-            stick(Stick::Left, Vec2::new(-0.5, 0.0)),
-            stick(Stick::Right, Vec2::Y),
-            stick(Stick::Left, Vec2::ZERO),
-            button(PadButton::DPadDown, true),
-            button(PadButton::South, true),
-            button(PadButton::South, false),
-            button(PadButton::DPadDown, false),
-        ] {
-            assert_eq!(sandbox.event(&mut cx, &event), ControlFlow::Continue(()));
-        }
-        // Each steer's heading, and `None` for a reverse.
-        let queued = sandbox.commands.iter().map(|command| match *command {
-            Command::Steer(heading) => Some(heading),
-            Command::Reverse => None,
-            _ => panic!("the keys and pads queue steers and reverses alone"),
-        });
-        let diagonal = Vec2::ONE.clamp_length_max(1.0);
-        let expected = [
-            Some(Vec2::X),
-            Some(diagonal),
-            None,
-            Some(Vec2::Y),
-            Some(Vec2::ZERO),
-            Some(Vec2::new(-0.5, 0.0)),
-            Some(Vec2::ZERO),
-            Some(Vec2::NEG_Y),
-            None,
-            Some(Vec2::ZERO),
-        ];
-        assert_eq!(queued.collect::<Vec<_>>(), expected);
-        let camera = sandbox.camera.actions.axis2(gg_engine::CameraAction::Move);
-        assert_eq!(camera, Vec2::Y);
-    }
-
-    /// The live recording, `tests/references/live.recording`, of a windowed run whose panels and
-    /// Inspector were used, replays without a GPU to the hashes it recorded, as determinism needs,
-    /// in a debug build as in a release one and on every platform.
-    /// `GG_UPDATE_REFERENCES=1` writes its hashes again, after a change meant to change the
-    /// simulation or what the hash reads; a change to a command's type that its lines no longer
-    /// read as needs a new recording.
-    #[test]
-    fn the_live_recording_replays_to_its_hashes() {
-        let path = live_recording();
-        let text = fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("can't read {}: {error}", path.display()));
-        if std::env::var_os("GG_UPDATE_REFERENCES").is_some_and(|value| value == "1") {
-            let rewritten = gg_engine::Replay::rewrite(app(), &text);
-            fs::write(&path, rewritten.unwrap_or_else(|error| panic!("{error:#}")))
-                .expect("written");
-            println!("wrote {}", path.display());
-            return;
-        }
-        assert!(text.ends_with("\nend\n"), "the recording has its end");
-        let mut replay = gg_engine::Replay::new(app(), &text);
-        let replay = replay.as_mut().unwrap_or_else(|error| panic!("{error:#}"));
-        let mut ticks = 0;
-        while let Some(tick) = replay.step().unwrap_or_else(|error| panic!("{error:#}")) {
-            ticks = tick.number + 1;
-        }
-        let hashes = text
-            .lines()
-            .filter(|line| line.starts_with(|c: char| c.is_ascii_digit()));
-        assert_eq!(ticks, hashes.count() as u64);
-    }
-
-    fn live_recording() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/references/live.recording")
-    }
-
-    /// A copy of the live recording whose first command that colors the grid colors one of its
-    /// squares' colors otherwise goes another way at that command's tick, and the first difference
-    /// between the two worlds there is the red of the first square of that color, by its ID.
-    #[test]
-    fn a_forced_divergence_names_its_tick_entity_and_field() {
-        // Its hashes are being written again, by the test above.
-        if std::env::var_os("GG_UPDATE_REFERENCES").is_some_and(|value| value == "1") {
-            return;
-        }
-        let text = fs::read_to_string(live_recording()).expect("the live recording");
-        let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
-        let at = lines
-            .iter()
-            .position(|line| line.starts_with("> 0 Variant(\"GridColors\""));
-        let at = at.expect("the recording colors the grid");
-        // The first color's red.
-        let red = lines[at].find("F32(").expect("a color") + "F32(".len();
-        let end = red + lines[at][red..].find(')').expect("a float");
-        let old: f32 = lines[at][red..end].parse().expect("a float");
-        let new = if old > 0.5 { old - 0.25 } else { old + 0.25 };
-        lines[at].replace_range(red..end, &format!("{new:?}"));
-        let tick = lines[at..]
-            .iter()
-            .find_map(|line| line.split_once(' ')?.0.parse::<u64>().ok());
-        let tick = tick.expect("the command's tick");
-        let changed: String = lines.iter().map(|line| format!("{line}\n")).collect();
-        let mut original = gg_engine::Replay::new(app(), &text).expect("attached");
-        let mut copy = gg_engine::Replay::new(app(), &changed).expect("attached");
-        let diverged = loop {
-            let ran = original.step().expect("the recording replays");
-            let ran = ran.expect("the copy goes another way before the end");
-            if let Err(error) = copy.step() {
-                break (ran, error);
-            }
-        };
-        let (ran, error) = diverged;
-        assert_eq!(error.code(), "replay.diverged", "{error}");
-        assert_eq!(ran.number, tick, "{error}");
-        assert!(
-            error.to_string().contains(&format!("after tick {tick}")),
-            "{error}"
-        );
-        let world = original.world();
-        let squares = world
-            .query::<(Entity, &GridCell)>()
-            .filter(|(_, cell)| cell.color == 0);
-        let first = squares.map(|(square, _)| world.id(square)).min().flatten();
-        let difference = world.difference(copy.world()).expect("a difference");
-        assert_eq!(Some(difference.entity), first);
-        assert_eq!(difference.component.as_deref(), Some("Sprite"));
-        assert_eq!(difference.path, "color.x");
-        assert_eq!(difference.theirs, Some(gg_engine::reflect::Value::F32(new)));
-    }
-
-    /// A world restored from a snapshot simulates as it did from there, through a resize of the
-    /// swarm, a steer of the triangle and a reverse of its spin: the sandbox keeps none of the
-    /// swarm, or of where the triangle is going, which the world holds.
-    #[test]
-    fn a_restored_world_simulates_as_before() {
-        let mut cx = Context::seeded(0x5eed).root(env!("CARGO_MANIFEST_DIR"));
-        let mut sandbox = Sandbox {
-            swarm: 1_000,
-            ..Sandbox::new()
-        };
-        sandbox.load(&mut cx);
-        sandbox.attach(&mut cx);
-        let world = cx.world_mut();
-        for number in 0..64 {
-            // Going up and right as the snapshot is taken.
-            if number == 32 {
-                let heading = Vec2::ONE.normalize();
-                sandbox.commands.push(Command::Steer(heading));
-            }
-            sandbox.tick(world, Tick { number });
-        }
-        let snapshot = world.clone();
-        let run = |sandbox: &mut Sandbox, world: &mut World| {
-            let hashes = (64..128).map(|number| {
-                match number {
-                    72 => sandbox.commands.push(Command::Reverse),
-                    80 => sandbox.commands.push(Command::Steer(-Vec2::X)),
-                    96 => sandbox.commands.push(Command::Swarm(250)),
-                    _ => {}
-                }
-                sandbox.tick(world, Tick { number });
-                world.hash()
-            });
-            hashes.collect::<Vec<_>>()
-        };
-        let first = run(&mut sandbox, world);
-        assert_eq!(world.query::<&Drifter>().count(), 250);
-        world.clone_from(&snapshot);
-        let again = run(&mut sandbox, world);
-        let parted = first.iter().zip(&again).position(|(a, b)| a != b);
-        assert_eq!(parted.map(|tick| 64 + tick), None, "the first tick to part");
-    }
-
-    /// The sandbox's simulation, run without a GPU from a seed through the commands of a script,
-    /// hashes at its attach and at each tick as its reference says: the same in one run as in the
-    /// next, on four threads as on one, in a debug build as in a release one, and on every
-    /// platform, as determinism needs. `GG_UPDATE_REFERENCES=1` writes the reference again, after a
-    /// change meant to change the simulation or what the hash reads.
-    #[test]
-    fn the_simulation_gives_its_reference_hashes() {
-        let run = simulate();
-        let again = "; the simulation goes another way each run, or on more threads than one, so \
-                     no reference holds";
-        let on_four = gg_engine::on_threads(4, simulate);
-        first_difference(
-            &run,
-            &on_four,
-            "a second run in this process, on 4 threads",
-            again,
-        );
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/references/hashes.txt");
-        if std::env::var_os("GG_UPDATE_REFERENCES").is_some_and(|value| value == "1") {
-            fs::create_dir_all(path.parent().expect("a folder")).expect("made");
-            fs::write(&path, run.join("\n") + "\n").expect("written");
-            println!("wrote {}", path.display());
-            return;
-        }
-        let reference = fs::read_to_string(&path).unwrap_or_else(|error| {
-            panic!(
-                "can't read {}: {error}; GG_UPDATE_REFERENCES=1 writes it",
-                path.display()
-            )
-        });
-        let reference: Vec<String> = reference.lines().map(str::to_owned).collect();
-        let after = "; after a change meant to change the simulation or what the hash reads, \
-                     `GG_UPDATE_REFERENCES=1 cargo test -p sandbox` writes it again, but a \
-                     difference on some platforms alone is their simulations going apart";
-        first_difference(&run, &reference, &path.display().to_string(), after);
-    }
-
-    /// The sandbox's simulation from a seed, as lines of the world's hash, its content then its
-    /// layout: one after it attaches, and one at each of 256 ticks, between which the script queues
-    /// what the panels would, and sets what the Inspector would.
-    fn simulate() -> Vec<String> {
-        // Rooted as the app is, so that its textures' names, which the hash reads, are the same
-        // wherever the repository is.
-        let mut cx = Context::seeded(0x5eed).root(env!("CARGO_MANIFEST_DIR"));
-        // One swarm for debug and release builds, whose own differ.
-        let mut sandbox = Sandbox {
-            swarm: 1_000,
-            ..Sandbox::new()
-        };
-        sandbox.load(&mut cx);
-        sandbox.attach(&mut cx);
-        let hashed = |at: &dyn std::fmt::Display, world: &World| format!("{at} {}", world.hash());
-        let mut lines = vec![hashed(&"attach", cx.world())];
-        for number in 0..256 {
-            let world = cx.world_mut();
-            match number {
-                32 => sandbox.commands.push(Command::Swarm(1_500)),
-                48 => sandbox.commands.push(Command::Steer(Vec2::X)),
-                64 => {
-                    let colors = [[0.9, 0.6, 0.1], [0.1, 0.6, 0.9]];
-                    sandbox.commands.push(Command::GridColors(colors));
-                }
-                80 => sandbox.commands.push(Command::Steer(Vec2::ZERO)),
-                96 => sandbox.commands.push(Command::Swarm(250)),
-                // An infinite spin, which turns the drifter by a NaN that an invalid operation
-                // makes, whose sign each CPU gives it, and the hash takes as one.
-                112 => {
-                    let mut drifters = world.query_mut::<&mut Drifter>();
-                    let first = drifters.find(|drifter| drifter.index == 0);
-                    first.expect("a drifter").spin = f32::INFINITY;
-                }
-                128 => sandbox.commands.push(Command::Settings(Settings {
-                    smooth_map: true,
-                    smooth: true,
-                    tiles: 3.0,
-                    tint: [0.5, 1.0, 0.5, 1.0],
-                })),
-                // A zero whose sign the hash keeps.
-                144 => {
-                    let mut triangle = world.query_mut::<(&Steer, &mut Transform)>();
-                    let (_, at) = triangle.next().expect("the triangle");
-                    at.translation.x = -0.0;
-                }
-                160 => {
-                    let (text, _) = read_scene("grid.ron");
-                    let colors = sandbox.grid_colors;
-                    sandbox.commands.push(Command::ReloadGrid { text, colors });
-                }
-                176 => sandbox.commands.push(Command::Reverse),
-                192 => sandbox.commands.push(Command::Swarm(1_000)),
-                _ => {}
-            }
-            sandbox.tick(world, Tick { number });
-            lines.push(hashed(&number, world));
-        }
-        lines
-    }
-
-    /// Panics at the first of `run`'s lines that isn't `expected`'s, which `what` holds, saying
-    /// which part of the hash differs there and how many lines differ, then `after`; or, if one
-    /// of them ends first, at the first line the other has past its end.
-    fn first_difference(run: &[String], expected: &[String], what: &str, after: &str) {
-        let differ = |(line, other): &(&String, &String)| line != other;
-        let lines = || run.iter().zip(expected);
-        if let Some((line, other)) = lines().find(differ) {
-            let parts = |line: &str| {
-                line.split(' ')
-                    .skip(1)
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>()
-            };
-            let (ours, theirs) = (parts(line), parts(other));
-            let which: Vec<_> = ["content", "layout"]
-                .into_iter()
-                .zip(ours.iter().zip(&theirs))
-                .filter(|(_, (a, b))| a != b)
-                .map(|(part, _)| part)
-                .collect();
-            let verb = if which.len() == 1 {
-                "differs"
-            } else {
-                "differ"
-            };
-            panic!(
-                "the world's {} {verb} from {what}'s, first at its line `{other}`, which this run \
-                 has as `{line}`; {} of {} lines differ{after}",
-                which.join(" and "),
-                lines().filter(differ).count(),
-                run.len()
-            );
-        }
-        if let Some(past) = expected.get(run.len()).or(run.get(expected.len())) {
-            panic!(
-                "{what} has {} lines and this run {}, the first past the other's end being \
-                 `{past}`{after}",
-                expected.len(),
-                run.len()
-            );
-        }
-    }
-}
+mod tests;

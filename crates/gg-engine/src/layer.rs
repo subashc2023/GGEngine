@@ -16,7 +16,7 @@ use gg_renderer::{
 };
 #[cfg(feature = "dev")]
 use subsecond::HotFn;
-use tracing::info;
+use tracing::{error, info};
 
 use crate::assets::{self, Assets};
 use crate::camera::{self, Camera, Tie};
@@ -25,6 +25,9 @@ use crate::edits::{Authors, Done, Edit};
 use crate::gltf;
 use crate::image::{self, Image};
 use crate::interpolation::Past;
+#[cfg(feature = "dev")]
+use crate::net::Ticket;
+use crate::net::{Lockstep, Outside, Turn};
 use crate::perf::Perf;
 use crate::physics::{self, CircleCollider2D, Physics2D};
 use crate::recording::Recorder;
@@ -274,6 +277,8 @@ pub struct Context {
     pub(crate) authors: Authors,
     /// The scene files the layers loaded, which development builds watch.
     pub(crate) scenes: SceneFiles,
+    /// The local player, in a lockstep session.
+    player: Option<u8>,
 }
 
 impl Context {
@@ -356,7 +361,16 @@ impl Context {
             paused: false,
             authors: Authors::default(),
             scenes: SceneFiles::default(),
+            player: None,
         }
+    }
+
+    /// The player this run plays, in a lockstep session, which the run hosts (`--host`), as player
+    /// 0, or joins (`--join`), as player 1; `None` outside one. Each peer runs every player's world,
+    /// and its layers queue commands for their own player alone, naming it in them, as the other
+    /// peer's queue for theirs.
+    pub fn player(&self) -> Option<u8> {
+        self.player
     }
 
     /// The app's window; `None` in a headless run.
@@ -963,6 +977,17 @@ pub(crate) struct Stack {
     overlays: usize,
     /// What records the run, if it's recorded.
     recorder: Option<Recorder>,
+    /// The lockstep session the run is a peer of, if it's networked.
+    net: Option<Lockstep>,
+}
+
+/// What became of an edit from outside the layers, as [`Stack::offer`] says.
+#[cfg(feature = "dev")]
+pub(crate) enum Offered {
+    /// It applied, and did this.
+    Now(Result<Done>),
+    /// It applies before a tick to come, and [`Stack::offered`] gives what it did with this ticket.
+    Later(Ticket),
 }
 
 impl Stack {
@@ -995,6 +1020,134 @@ impl Stack {
         self.recorder = Some(recorder);
     }
 
+    /// The lockstep session the run is a peer of: for tests.
+    #[cfg(test)]
+    pub(crate) fn net_mut(&mut self) -> Option<&mut Lockstep> {
+        self.net.as_mut()
+    }
+
+    /// The queue of the layer at `index`, from the bottom, if it queues commands: for tests.
+    #[cfg(test)]
+    pub(crate) fn commands_of(&mut self, index: usize) -> Option<&mut dyn Commands> {
+        self.layers.get_mut(index)?.commands()
+    }
+
+    /// Has the run be a peer of `net`'s lockstep session.
+    pub(crate) fn lockstep(&mut self, net: Lockstep) {
+        self.net = Some(net);
+    }
+
+    /// Whether the run waits on its lockstep peer: a joiner without the host's world, or a tick
+    /// without the other peer's inputs, `next` being the next to run.
+    pub(crate) fn net_waits(&self, next: u64) -> bool {
+        self.net.as_ref().is_some_and(|net| !net.ready(next))
+    }
+
+    /// Between ticks, as a frame starts, the next tick to run being `next`: takes what the lockstep
+    /// peer sent since the last turn, sending the joiner the world, if the host owes it, or
+    /// restoring the host's in place of the joiner's, as [`Lockstep::turn`] says. Returns the tick
+    /// the joiner's world is at once it restores the host's, which its ticks go on from.
+    pub(crate) fn net_turn(&mut self, cx: &mut Context, next: u64) -> Option<u64> {
+        let mut net = self.net.take()?;
+        let mut restored = None;
+        match net.turn() {
+            Turn::None => {}
+            Turn::Send => {
+                let text = crate::snapshot::write(
+                    &cx.world,
+                    &cx.scenes.files,
+                    net.app(),
+                    &self.names,
+                    next,
+                );
+                match text {
+                    Ok(text) => net.send_world(&text, next),
+                    Err(error) => {
+                        error!(
+                            code = error.code(),
+                            "Can't send the joiner the world: {error:#}"
+                        );
+                    }
+                }
+            }
+            Turn::Restore((tick, text)) => {
+                let from = format!("the lockstep host's world at tick {tick}");
+                let snapshot = Snapshot::parse(text, from, net.app());
+                match snapshot.and_then(|snapshot| self.restore_in_place(cx, &snapshot)) {
+                    Ok(ticks) => {
+                        net.restored(ticks);
+                        restored = Some(ticks);
+                    }
+                    Err(error) => {
+                        error!(code = error.code(), "{error:#}");
+                        net.lose("its world can't be restored");
+                    }
+                }
+            }
+        }
+        self.net = Some(net);
+        restored
+    }
+
+    /// Whether the run hosts or plays alone, rather than joining a lockstep session, whose host
+    /// alone watches scene files.
+    #[cfg(feature = "dev")]
+    pub(crate) fn watches_scenes(&self) -> bool {
+        self.net.as_ref().is_none_or(Lockstep::hosts)
+    }
+
+    /// Applies `edit`, an author's from outside the layers, between ticks, as [`edit`](Self::edit)
+    /// does; or, in a lockstep session, offers it for the tick both peers apply it before, giving
+    /// its ticket.
+    #[cfg(feature = "dev")]
+    pub(crate) fn offer(&mut self, cx: &mut Context, edit: Edit) -> Offered {
+        match &mut self.net {
+            Some(net) => Offered::Later(net.offer(edit)),
+            None => Offered::Now(self.edit(cx, edit)),
+        }
+    }
+
+    /// Applies the save of the scene file whose author is `author`, its text now `text`, between
+    /// ticks, as [`scene_files::apply_save`](crate::scene_files::apply_save) does; or, in a lockstep
+    /// session, offers it for the tick both peers apply it before. Either way it logs what it did.
+    #[cfg(feature = "dev")]
+    pub(crate) fn offer_save(&mut self, cx: &mut Context, author: String, text: String) {
+        match &mut self.net {
+            Some(net) => net.offer_save(author, text),
+            None => {
+                let edit = &mut |cx: &mut Context, edit| self.edit(cx, edit);
+                let _ = crate::scene_files::apply_save(cx, edit, &author, text);
+            }
+        }
+    }
+
+    /// Offers the patch `table` names, as [`Lockstep::offer_patch`] does, the next tick to run
+    /// being `next`; `None` outside a lockstep session, where it applies now.
+    #[cfg(feature = "dev")]
+    pub(crate) fn offer_patch(
+        &mut self,
+        table: subsecond::JumpTable,
+        next: u64,
+    ) -> std::result::Result<Ticket, subsecond::JumpTable> {
+        match &mut self.net {
+            Some(net) => Ok(net.offer_patch(table, next)),
+            None => Err(table),
+        }
+    }
+
+    /// What the edit or the patch offered with `ticket` did, and the tick it applied before, once
+    /// it has, which it gives once.
+    #[cfg(feature = "dev")]
+    pub(crate) fn offered(&mut self, ticket: Ticket) -> Option<(u64, Result<Done>)> {
+        self.net.as_mut()?.done(ticket)
+    }
+
+    /// Whether the edit or the patch offered with `ticket` has applied, or been refused.
+    #[cfg(feature = "dev")]
+    pub(crate) fn offered_is_done(&self, ticket: Ticket) -> bool {
+        self.net.as_ref().is_some_and(|net| net.is_done(ticket))
+    }
+
     /// Fails, once the run's recording has stopped, as [`Recorder::check`] says.
     pub(crate) fn recorded(&self) -> Result<()> {
         self.recorder.as_ref().map_or(Ok(()), Recorder::check)
@@ -1007,6 +1160,7 @@ impl Stack {
         if let Some(recorder) = &mut self.recorder {
             recorder.start(&self.names, cx.world.stream_state());
         }
+        cx.player = self.net.as_ref().map(Lockstep::player);
         self.load(cx);
         for layer in &mut self.layers {
             layer.attach(cx);
@@ -1025,10 +1179,19 @@ impl Stack {
     /// Fails as [`Snapshot::restore`] does.
     pub(crate) fn restore(&mut self, cx: &mut Context, snapshot: &Snapshot) -> Result<u64> {
         let _zone = gg_core::zone!();
+        cx.player = self.net.as_ref().map(Lockstep::player);
         self.load(cx);
+        cx.attached = true;
+        self.restore_in_place(cx, snapshot)
+    }
+
+    /// Puts `snapshot`'s world in `cx`'s place, the layers having loaded, and has each layer pick
+    /// up from it, from the bottom up; returns the ticks the simulation had run as it was taken.
+    ///
+    /// Fails as [`Snapshot::restore`] does.
+    fn restore_in_place(&mut self, cx: &mut Context, snapshot: &Snapshot) -> Result<u64> {
         let ticks = snapshot.restore(&mut cx.world, &self.names)?;
         cx.scenes.files.clone_from(&snapshot.scenes);
-        cx.attached = true;
         for layer in &mut self.layers {
             layer.restored(cx);
         }
@@ -1092,16 +1255,79 @@ impl Stack {
     /// Runs a tick of the simulation: each layer's, from the bottom up, after which the world
     /// shares the context's assets again, as [`Context::share_assets`] says. A recording gets each
     /// layer's commands just before its tick applies them, so that a tick that panics leaves them,
-    /// and the world's hash after the last.
-    pub(crate) fn tick(&mut self, cx: &mut Context, tick: Tick) {
+    /// and the world's hash after the last. In a lockstep session, the tick waits for the other
+    /// peer's inputs, returning `false` without running until they've come; once they have, this
+    /// peer's queued commands go out as its inputs for a tick to come, and the tick runs on both
+    /// peers' for it, as [`Lockstep::start_tick`] says, the edits among them applying first, as a
+    /// recording keeps them.
+    pub(crate) fn tick(&mut self, cx: &mut Context, tick: Tick) -> bool {
         let _zone = gg_core::zone!();
         let Self {
             layers,
             names,
             recorder,
+            net,
             ..
         } = self;
+        let merged = match net {
+            Some(net) if !net.ready(tick.number) => return false,
+            Some(net) => {
+                let queues = layers.iter_mut().enumerate();
+                let queues = queues.filter_map(|(index, layer)| Some((index, layer.commands()?)));
+                let merged = net.start_tick(tick.number, queues, &cx.world);
+                for (ticket, input) in &merged.inputs {
+                    let done = match input {
+                        Outside::Edit(edit) => {
+                            if let Some(recorder) = recorder.as_mut() {
+                                recorder.edited(&edit.to_value(), &cx.world);
+                            }
+                            cx.apply_edit(edit.clone())
+                        }
+                        #[cfg(feature = "dev")]
+                        Outside::Scene { author, text } => {
+                            let mut edit = |cx: &mut Context, edit: Edit| {
+                                if let Some(recorder) = recorder.as_mut() {
+                                    recorder.edited(&edit.to_value(), &cx.world);
+                                }
+                                cx.apply_edit(edit)
+                            };
+                            crate::scene_files::apply_save(cx, &mut edit, author, text.clone())
+                        }
+                        // Only a development build's host watches scene files.
+                        #[cfg(not(feature = "dev"))]
+                        Outside::Scene { author, text } => Err(Error::new(
+                            "net.bad_command",
+                            format!(
+                                "a peer sent {author}'s save, {} bytes, which only development \
+                                 builds apply",
+                                text.len()
+                            ),
+                        )),
+                    };
+                    if let Some(ticket) = ticket {
+                        net.did(*ticket, tick.number, done);
+                    }
+                }
+                #[cfg(feature = "dev")]
+                for (ticket, table) in merged.patches.iter().cloned() {
+                    let patched = crate::patch::apply(table, tick.number);
+                    net.did(
+                        ticket,
+                        tick.number,
+                        patched.map(|()| Done::Applied(Vec::new())),
+                    );
+                }
+                Some(merged)
+            }
+            None => None,
+        };
         for (index, layer) in layers.iter_mut().enumerate() {
+            if let Some(merged) = &merged
+                && let Some(queue) = layer.commands()
+                && let Err(error) = merged.fill(index, queue, &cx.world)
+            {
+                error!(code = error.code(), layer = names[index], "{error:#}");
+            }
             if let Some(recorder) = recorder.as_mut()
                 && let Some(commands) = layer.commands()
             {
@@ -1113,6 +1339,10 @@ impl Stack {
         if let Some(recorder) = recorder {
             recorder.ticked(tick, &cx.world);
         }
+        if let Some(net) = net {
+            net.end_tick(tick.number, &cx.world);
+        }
+        true
     }
 
     /// Runs a tick as a replay does: as [`tick`](Self::tick) does, with each layer's queue emptied

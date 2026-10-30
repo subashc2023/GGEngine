@@ -32,8 +32,9 @@ use tracing::{debug, info};
 
 use super::{Waiting, json};
 use crate::edits::{Done, Edit};
-use crate::layer::Stack;
+use crate::layer::{Offered, Stack};
 use crate::main_loop::Stepper;
+use crate::net::Ticket;
 use crate::reflect::{self, Ident, Type};
 use crate::render_thread::{Extracted, Shot};
 use crate::scene_files::SceneFile;
@@ -87,6 +88,15 @@ pub(crate) struct Api {
     snapshotted: u64,
     /// To the thread that writes snapshots.
     taken: Sender<Taken>,
+    /// Edits and patches offered to a lockstep session, waiting for the tick they apply before.
+    offered: Vec<(Reply, Ticket, Offer)>,
+}
+
+/// What an edit or a patch offered to a lockstep session was asked as, which its answer reads as.
+enum Offer {
+    Apply,
+    Step { author: String },
+    Patch,
 }
 
 /// What the main loop shares with the connections' threads.
@@ -183,7 +193,12 @@ impl Api {
     /// session file.
     ///
     /// Fails with `api.start` if it can't.
-    pub(crate) fn start(app: &str, layers: &[&str], log: Option<&Path>) -> Result<Self> {
+    pub(crate) fn start(
+        app: &str,
+        layers: &[&str],
+        log: Option<&Path>,
+        player: Option<u8>,
+    ) -> Result<Self> {
         let failed = |what: String| move |error| Error::new("api.start", what).with_source(error);
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .map_err(failed("can't listen on the loopback".to_owned()))?;
@@ -203,6 +218,7 @@ impl Api {
             log: log.map(Path::to_owned),
             engine: crate::recording::engine(),
             aslr_reference: patch::aslr_reference(),
+            player,
         };
         let welcome = Welcome {
             app: session.app.clone(),
@@ -272,6 +288,7 @@ impl Api {
             snapshots: crate::beside_exe("snapshots"),
             snapshotted: 0,
             taken,
+            offered: Vec::new(),
         })
     }
 
@@ -324,6 +341,14 @@ impl Api {
             .extract_if(.., |&mut (_, until)| until <= stepper.ticks);
         for (reply, _) in ran.collect::<Vec<_>>() {
             reply.result(&self.status(cx, stepper));
+        }
+        let applied = self
+            .offered
+            .extract_if(.., |(_, ticket, _)| stack.offered_is_done(*ticket));
+        for (reply, ticket, offer) in applied.collect::<Vec<_>>() {
+            if let Some((ticks, done)) = stack.offered(ticket) {
+                answer_done(reply, &offer, ticks, done);
+            }
         }
         let mut quit = false;
         while let Some(Incoming {
@@ -396,32 +421,25 @@ impl Api {
                     // The thread runs until the API drops.
                     let _ = self.taken.send(taken);
                 }
-                Call::Patch(table) => match patch::apply(table, stepper.ticks) {
-                    Ok(()) => reply.result(&Patched {
-                        ticks: stepper.ticks,
-                    }),
-                    Err(error) => reply.send(Err(failure(&error))),
+                Call::Patch(table) => match stack.offer_patch(table, stepper.ticks) {
+                    Ok(ticket) => self.offered.push((reply, ticket, Offer::Patch)),
+                    Err(table) => {
+                        let patched = patch::apply(table, stepper.ticks);
+                        let done = patched.map(|()| Done::Applied(Vec::new()));
+                        answer_done(reply, &Offer::Patch, stepper.ticks, done);
+                    }
                 },
-                Call::Apply(given) => {
-                    let applied = operations(world, given).and_then(|operations| {
+                Call::Apply(given) => match operations(world, given) {
+                    Ok(operations) => {
                         let edit = Edit::Apply {
                             author: client.to_string(),
                             operations,
                         };
-                        match stack.edit(cx, edit) {
-                            Ok(Done::Applied(made)) => Ok(Applied {
-                                ticks: stepper.ticks,
-                                entities: made.iter().map(EntityId::to_string).collect(),
-                            }),
-                            Ok(Done::Stepped(_)) => unreachable!("an apply applies"),
-                            Err(error) => Err(failure(&error)),
-                        }
-                    });
-                    match applied {
-                        Ok(applied) => reply.result(&applied),
-                        Err(failure) => reply.send(Err(failure)),
+                        let offered = stack.offer(cx, edit);
+                        self.answer_offered(reply, offered, Offer::Apply, stepper.ticks);
                     }
-                }
+                    Err(failure) => reply.send(Err(failure)),
+                },
                 Call::Undo { author, redo } => {
                     let author = author.unwrap_or_else(|| client.to_string());
                     let edit = if redo {
@@ -433,17 +451,8 @@ impl Api {
                             author: author.clone(),
                         }
                     };
-                    match stack.edit(cx, edit) {
-                        Ok(Done::Stepped(stepped)) => {
-                            let edit = stepped.map(|operations| gg_api::Edit {
-                                author,
-                                operations: words(&operations),
-                            });
-                            reply.result(&edit);
-                        }
-                        Ok(Done::Applied(_)) => unreachable!("an undo or a redo steps"),
-                        Err(error) => reply.send(Err(failure(&error))),
-                    }
+                    let offered = stack.offer(cx, edit);
+                    self.answer_offered(reply, offered, Offer::Step { author }, stepper.ticks);
                 }
                 Call::Edits(author) => {
                     let logs = cx.authors.logs(world);
@@ -465,6 +474,15 @@ impl Api {
             }
         }
         quit
+    }
+
+    /// Answers `reply`, asked as `offer`, with what an edit did, if it applied now, the next tick
+    /// to run being `ticks`; or keeps it until the tick it applies before in a lockstep session.
+    fn answer_offered(&mut self, reply: Reply, offered: Offered, offer: Offer, ticks: u64) {
+        match offered {
+            Offered::Now(done) => answer_done(reply, &offer, ticks, done),
+            Offered::Later(ticket) => self.offered.push((reply, ticket, offer)),
+        }
     }
 
     /// The game as the frame that answers starts.
@@ -541,6 +559,27 @@ impl Drop for Api {
     /// kill leaves it, naming an address that refuses connections.
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.session);
+    }
+}
+
+/// Answers `reply`, asked as `offer`, with what its edit or patch did, `done`, before tick `ticks`.
+fn answer_done(reply: Reply, offer: &Offer, ticks: u64, done: Result<Done>) {
+    match (offer, done) {
+        (_, Err(error)) => reply.send(Err(failure(&error))),
+        (Offer::Apply, Ok(Done::Applied(made))) => reply.result(&Applied {
+            ticks,
+            entities: made.iter().map(EntityId::to_string).collect(),
+        }),
+        (Offer::Step { author }, Ok(Done::Stepped(stepped))) => {
+            let edit = stepped.map(|operations| gg_api::Edit {
+                author: author.clone(),
+                operations: words(&operations),
+            });
+            reply.result(&edit);
+        }
+        (Offer::Patch, Ok(_)) => reply.result(&Patched { ticks }),
+        (Offer::Apply, Ok(Done::Stepped(_))) => unreachable!("an apply applies"),
+        (Offer::Step { .. }, Ok(Done::Applied(_))) => unreachable!("an undo or a redo steps"),
     }
 }
 
@@ -1105,6 +1144,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::dirs::tests::Scratch;
     use crate::{Sprite, Tick, Transform};
 
     /// How long a test waits for what should come at once, past which it fails rather than hangs.
@@ -1113,7 +1153,7 @@ mod tests {
     /// Starts the API for app `app`, a name of the test's own, so that tests running at once write
     /// session files of their own; and returns it, with the session its file gives.
     fn started(app: &str) -> (Api, Session) {
-        let api = Api::start(app, &[], None).expect("the API starts");
+        let api = Api::start(app, &[], None, None).expect("the API starts");
         let pid = std::process::id();
         let file = crate::beside_exe("sessions").join(Session::file_name(app, pid));
         let text = fs::read(file).expect("the session file");
@@ -1139,7 +1179,7 @@ mod tests {
         while !client.is_finished() {
             assert!(start.elapsed() < DEADLINE, "the client never finished");
             api.serve(cx, &mut stack, stepper);
-            stepper.step(Tick::DT, |_| {}, || Duration::ZERO);
+            stepper.step(Tick::DT, |_| true, || Duration::ZERO);
             frame(api, stepper);
             thread::sleep(Duration::from_millis(1));
         }
@@ -1435,9 +1475,9 @@ mod tests {
         // Paused, so that no tick runs before the client asks.
         let mut stepper = Stepper::default();
         stepper.pause();
-        let dir = std::env::temp_dir().join(format!("gg-engine-api-{}", std::process::id()));
-        fs::create_dir_all(&dir).expect("a directory");
-        let path = dir.join("world.snapshot");
+        let dir = Scratch::new("api-snapshot");
+        fs::create_dir_all(&dir.0).expect("a directory");
+        let path = dir.0.join("world.snapshot");
         let asked = path.clone();
         let client = move |mut client: Client| {
             let mut refused = Vec::new();
@@ -1461,7 +1501,6 @@ mod tests {
             .expect("restored");
         assert_eq!(ticks, taken.ticks);
         assert_eq!(restored.world().hash(), cx.world().hash());
-        let _ = fs::remove_file(&path);
     }
 
     /// A patch that can't apply is answered with `api.patch`: here, one whose table's reference is
@@ -1494,9 +1533,9 @@ mod tests {
         let (mut api, session) = started("Api Captures");
         let mut cx = Context::seeded(4);
         let mut stepper = Stepper::default();
-        let dir = std::env::temp_dir().join(format!("gg-engine-api-{}", std::process::id()));
-        fs::create_dir_all(&dir).expect("a directory");
-        let path = dir.join("view.png");
+        let dir = Scratch::new("api-capture");
+        fs::create_dir_all(&dir.0).expect("a directory");
+        let path = dir.0.join("view.png");
         let asked = path.clone();
         let client = move |mut client: Client| {
             let refused = client.call("capture", Value::Null).expect_err("no view");
@@ -1541,7 +1580,6 @@ mod tests {
         let rgb = &pixels[..info.buffer_size()];
         assert_eq!(rgb, [255, 0, 0, 0, 128, 255], "alpha goes");
         assert!(!frame.capture, "nothing rides once both are answered");
-        fs::remove_dir_all(&dir).expect("removed");
     }
 
     #[test]

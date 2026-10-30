@@ -11,7 +11,6 @@ name = "gg-sandbox"
 path = "src/main.rs"
 
 [dependencies]
-bytemuck = { workspace = true, features = ["derive"] }
 # A development build, which reloads its shaders as they change.
 gg-engine = { workspace = true, features = ["dev"] }
 tracing.workspace = true

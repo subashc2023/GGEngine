@@ -43,8 +43,8 @@ type Hashes = BTreeMap<PathBuf, u64>;
 /// A run's patches: how dx builds the game, and what's watched; the build the game runs, which
 /// patches are built against, and its sources as it started; a rebuild that succeeded, which the
 /// game runs once it starts again; whether one failed since, and whether the game has started from
-/// the build; the process that serves, and what of the sources its code holds; the sources as last
-/// scanned and as last looked at; the build or patch being made; and the libraries the run's
+/// the build; the processes that serve, and what of the sources their code holds; the sources as
+/// last scanned and as last looked at; the build or patch being made; and the libraries the run's
 /// patches made.
 pub(crate) struct Patches {
     dx: Dx,
@@ -57,9 +57,10 @@ pub(crate) struct Patches {
     /// a change that would patch the game rebuilds it.
     stale: bool,
     started: bool,
-    /// The game's process that serves the API, if one does, and the hashes of the game's modules as
-    /// of the code the last process to start runs or ran: the build's, with the patches it applied.
-    process: Option<u32>,
+    /// The game's processes, once every one serves the API, a lockstep session's peers each one,
+    /// and the hashes of the game's modules as of the code the processes last started run or ran:
+    /// the build's, with the patches they applied, all alike.
+    processes: Vec<u32>,
     applied: Hashes,
     /// Whether the sources are to be looked at as soon as they're quiet, changed or not: as a
     /// process starts serving, or the run starts waiting for a rebuild.
@@ -132,7 +133,7 @@ impl Patches {
             rebuilt: None,
             stale: false,
             started: false,
-            process: None,
+            processes: Vec::new(),
             applied: baseline.modules.clone(),
             fresh: false,
             looked: seen.clone(),
@@ -149,38 +150,40 @@ impl Patches {
         &self.fat.exe
     }
 
-    /// Looks after the patches for a turn of the run's loop, given the game's process, if one runs:
-    /// notes the build or patch that's done, scans the sources, and looks at them, as
-    /// [`look`](Self::look) says, once they've stayed the same for [`QUIET`] since they changed, or
-    /// a process started serving. Returns whether a rebuild succeeded, which the run then starts
-    /// the game again from.
-    pub(crate) fn tend(&mut self, game: Option<Process>, now: Instant) -> bool {
+    /// Looks after the patches for a turn of the run's loop, given the game's processes, none while
+    /// it waits for a rebuild: notes the build or patch that's done, scans the sources, and looks at
+    /// them, as [`look`](Self::look) says, once they've stayed the same for [`QUIET`] since they
+    /// changed, or the processes all came to serve. Returns whether a rebuild succeeded, which the
+    /// run then starts the game again from.
+    pub(crate) fn tend(&mut self, games: &[Process], now: Instant) -> bool {
         let rebuilt = self.job.as_ref().is_some_and(Job::done) && self.land();
         let stamps = self.sources.scan();
         if stamps != self.seen {
             (self.seen, self.since) = (stamps, now);
         }
-        if let Some(Process {
-            pid,
-            session: Some(_),
-        }) = game
-            && self.process != Some(pid)
+        let serving = games.iter().all(|game| game.session.is_some());
+        if !games.is_empty()
+            && serving
+            && !games
+                .iter()
+                .map(|game| game.pid)
+                .eq(self.processes.iter().copied())
         {
-            self.process = Some(pid);
+            self.processes = games.iter().map(|game| game.pid).collect();
             self.fresh = true;
         }
         let due = self.fresh || self.seen != self.looked;
         let quiet = now.duration_since(self.since) >= QUIET;
         if due && quiet && self.job.is_none() && self.rebuilt.is_none() {
-            self.look(game);
+            self.look(games);
         }
         rebuilt
     }
 
-    /// Notes that the game starts, as a new process, which runs the build's code: the rebuild's that
+    /// Notes that the game starts, as new processes, which run the build's code: the rebuild's that
     /// succeeded, if one did, whose sources edits are compared with from then on. Returns whether
-    /// the build is another than the last process ran, as at the first start, whose executable the
-    /// run copies again; a process started again from the same build runs the copy the last one
+    /// the build is another than the last processes ran, as at the first start, whose executable the
+    /// run copies again; processes started again from the same build run the copies the last ones
     /// ran, as a rebuild under way may be writing the build's executable.
     pub(crate) fn starting(&mut self) -> bool {
         let mut built = !std::mem::replace(&mut self.started, true);
@@ -189,16 +192,16 @@ impl Patches {
             self.stale = false;
             built = true;
         }
-        self.process = None;
+        self.processes.clear();
         self.applied = self.baseline.modules.clone();
         built
     }
 
-    /// Notes that the run waits for a rebuild, the game's process having ended: the sources are
-    /// looked at as soon as they're quiet, and the game rebuilt if they differ from what that
-    /// process ran.
+    /// Notes that the run waits for a rebuild, the game's processes having ended: the sources are
+    /// looked at as soon as they're quiet, and the game rebuilt if they differ from what those
+    /// processes ran.
     pub(crate) fn waiting(&mut self) {
-        self.process = None;
+        self.processes.clear();
         self.fresh = true;
     }
 
@@ -214,23 +217,20 @@ impl Patches {
         }
     }
 
-    /// Looks at the sources as they are, and builds a patch for the game's process or rebuilds the
+    /// Looks at the sources as they are, and builds a patch for the game's processes or rebuilds the
     /// game, as [`act`] says.
-    fn look(&mut self, game: Option<Process>) {
+    fn look(&mut self, games: &[Process]) {
         self.looked = self.seen.clone();
         self.fresh = false;
         let diff = diff(&self.sources, &self.baseline, &self.seen);
-        match act(diff, game, &self.applied, self.stale) {
+        match act(diff, games, &self.applied, self.stale) {
             Act::Nothing => {}
             Act::Rebuild(file, why) => self.rebuild(&file, why),
             Act::Patch(files, hashes, unreadable) => {
-                if let Some(Process {
-                    pid,
-                    session: Some(session),
-                }) = game
-                {
-                    self.patch(pid, session, files, hashes, unreadable);
-                }
+                let serving = games
+                    .iter()
+                    .filter_map(|game| Some((game.pid, game.session?.clone())));
+                self.patch(serving.collect(), files, hashes, unreadable);
             }
         }
     }
@@ -251,57 +251,85 @@ impl Patches {
         self.job = Some(Job::Rebuild { started, thread });
     }
 
-    /// Builds a patch of edits to `files` for process `pid`, whose session is `session`, and has
-    /// the process apply it, on a thread of its own; once it has, its modules' hashes are `hashes`.
-    /// One whose sources changed as it built is dropped, as it may hold what wasn't looked at; and
-    /// with `unreadable`, a module whose text gg can't read, one that builds isn't applied.
+    /// Builds a patch of edits to `files` for each of `processes`, each its ID and its session, as
+    /// each is built against where its process's `main` is, and has the processes apply them, at
+    /// once, as a lockstep session's joiner waits for its own at the tick its host's applies
+    /// before, on a thread of its own; once they have, their modules' hashes are `hashes`. One whose sources changed as it
+    /// built is dropped, as it may hold what wasn't looked at; and with `unreadable`, a module whose
+    /// text gg can't read, one that builds isn't applied.
     fn patch(
         &mut self,
-        pid: u32,
-        session: &Session,
+        processes: Vec<(u32, Session)>,
         files: Vec<PathBuf>,
         hashes: Hashes,
         unreadable: Option<PathBuf>,
     ) {
-        let (dx, fat, session) = (self.dx.clone(), self.fat.clone(), session.clone());
+        let (dx, fat) = (self.dx.clone(), self.fat.clone());
         let (sources, looked, checked) = (
             self.sources.clone(),
             self.looked.clone(),
             unreadable.is_none(),
         );
+        let pids = processes.iter().map(|(pid, _)| *pid).collect();
         let thread = thread::spawn(move || {
             let start = Instant::now();
-            let table = dx.hotpatch(&fat, session.aslr_reference);
+            let mut tables = Vec::new();
+            let mut libs = Vec::new();
+            let mut failed = None;
+            for (pid, session) in processes {
+                let table = dx.hotpatch(&fat, session.aslr_reference);
+                let lib = table.as_ref().ok().and_then(|table| table["lib"].as_str());
+                libs.extend(lib.map(PathBuf::from));
+                match table {
+                    Ok(table) => tables.push((pid, session, table)),
+                    Err(failure) => {
+                        failed = Some(failure);
+                        break;
+                    }
+                }
+            }
             let built = start.elapsed();
-            let lib = table.as_ref().ok().and_then(|table| table["lib"].as_str());
-            let lib = lib.map(PathBuf::from);
-            let outcome = match table {
-                Err(failure) => Outcome::Failed(failure),
+            let outcomes = match failed {
+                Some(failure) => vec![(None, Outcome::Failed(failure))],
                 // dx built what the files held as it read them, which an edit saved since they were
                 // looked at may have changed.
-                Ok(_) if sources.scan() != looked => Outcome::Superseded,
-                Ok(_) if !checked => Outcome::Unreadable,
-                Ok(table) => {
-                    let start = Instant::now();
-                    let applied =
-                        Client::connect(&session, "gg", CONNECT).and_then(|mut client| {
-                            client.set_timeout(None)?;
-                            client.call_as::<Patched>("patch", Patch { table })
+                None if sources.scan() != looked => vec![(None, Outcome::Superseded)],
+                None if !checked => vec![(None, Outcome::Unreadable)],
+                None => {
+                    let applying = tables.into_iter().map(|(pid, session, table)| {
+                        let thread = thread::spawn(move || {
+                            let start = Instant::now();
+                            let applied =
+                                Client::connect(&session, "gg", CONNECT).and_then(|mut client| {
+                                    client.set_timeout(None)?;
+                                    client.call_as::<Patched>("patch", Patch { table })
+                                });
+                            match applied {
+                                Ok(patched) => Outcome::Applied(patched, start.elapsed()),
+                                Err(failure) => Outcome::Failed(failure),
+                            }
                         });
-                    match applied {
-                        Ok(patched) => Outcome::Applied(patched, start.elapsed()),
-                        Err(failure) => Outcome::Failed(failure),
-                    }
+                        (pid, thread)
+                    });
+                    let applying: Vec<_> = applying.collect();
+                    let panicked = || Failure::new("gg.patch", "the thread sending it panicked");
+                    let joined = applying.into_iter().map(|(pid, thread)| {
+                        let outcome = thread
+                            .join()
+                            .unwrap_or_else(|_| Outcome::Failed(panicked()));
+                        (Some(pid), outcome)
+                    });
+                    joined.collect()
                 }
             };
             Patching {
-                lib,
+                libs,
                 built,
-                outcome,
+                outcomes,
             }
         });
         self.job = Some(Job::Patch {
-            pid,
+            pids,
             files,
             hashes,
             unreadable,
@@ -330,52 +358,62 @@ impl Patches {
                 }
             }
             Some(Job::Patch {
-                pid,
+                pids,
                 files,
                 hashes,
                 unreadable,
                 thread,
             }) => {
                 let patching = thread.join().unwrap_or_else(|_| Patching {
-                    lib: None,
+                    libs: Vec::new(),
                     built: Duration::ZERO,
-                    outcome: Outcome::Failed(panicked()),
+                    outcomes: vec![(None, Outcome::Failed(panicked()))],
                 });
-                self.libs.extend(patching.lib);
-                match patching.outcome {
-                    Outcome::Applied(patched, applied) => {
-                        if self.process == Some(pid) {
-                            self.applied = hashes;
-                        }
-                        event(&json!({
+                self.libs.extend(patching.libs);
+                let current = self.processes == pids;
+                let all = patching.outcomes.len() == pids.len()
+                    && (patching.outcomes.iter())
+                        .all(|(_, outcome)| matches!(outcome, Outcome::Applied(..)));
+                if all && current {
+                    self.applied = hashes;
+                }
+                for (pid, outcome) in patching.outcomes {
+                    // A failure to build is every process's: a game alone's, its ID.
+                    let pid = match (pid, &pids[..]) {
+                        (Some(pid), _) => json!(pid),
+                        (None, [pid]) => json!(pid),
+                        (None, pids) => json!(pids),
+                    };
+                    match outcome {
+                        Outcome::Applied(patched, applied) => event(&json!({
                             "event": "patched",
                             "pid": pid,
                             "files": files,
                             "build_ms": millis(patching.built),
                             "apply_ms": millis(applied),
                             "ticks": patched.ticks,
-                        }));
-                    }
-                    Outcome::Failed(failure) => {
-                        // Sent, but its answer never came: the process may yet apply it, so what it
-                        // runs isn't known, and the next look patches it with every edit since its
-                        // build.
-                        let unanswered =
-                            matches!(failure.code.as_str(), "api.closed" | "api.timeout");
-                        if unanswered && self.process == Some(pid) {
-                            self.applied.clear();
+                        })),
+                        Outcome::Failed(failure) => {
+                            // Sent, but its answer never came: the process may yet apply it, so
+                            // what it runs isn't known, and the next look patches the processes
+                            // with every edit since their build.
+                            let unanswered =
+                                matches!(failure.code.as_str(), "api.closed" | "api.timeout");
+                            if unanswered && current {
+                                self.applied.clear();
+                            }
+                            event(&json!({
+                                "event": "patch_failed",
+                                "pid": pid,
+                                "files": files,
+                                "error": error(&failure),
+                            }));
                         }
-                        event(&json!({
-                            "event": "patch_failed",
-                            "pid": pid,
-                            "files": files,
-                            "error": error(&failure),
-                        }));
-                    }
-                    Outcome::Superseded => {}
-                    Outcome::Unreadable => {
-                        let file = unreadable.unwrap_or_default();
-                        self.rebuild(&file, "an edit gg can't read, which rustc builds");
+                        Outcome::Superseded => {}
+                        Outcome::Unreadable => {
+                            let file = unreadable.clone().unwrap_or_default();
+                            self.rebuild(&file, "an edit gg can't read, which rustc builds");
+                        }
                     }
                 }
                 false
@@ -393,10 +431,10 @@ enum Job {
         started: Instant,
         thread: JoinHandle<Result<(Fat, Baseline), Failure>>,
     },
-    /// A patch of edits to `files` for process `pid`, after which the hashes of the game's modules
-    /// are `hashes`, and the module whose text gg can't read, if one is.
+    /// A patch of edits to `files` for processes `pids`, after which the hashes of the game's
+    /// modules are `hashes`, and the module whose text gg can't read, if one is.
     Patch {
-        pid: u32,
+        pids: Vec<u32>,
         files: Vec<PathBuf>,
         hashes: Hashes,
         unreadable: Option<PathBuf>,
@@ -414,12 +452,12 @@ impl Job {
     }
 }
 
-/// How a patch went: the library it made, if it was built, how long building it took, and what
-/// came of it.
+/// How a patch went: the libraries it made, one for each process it was built for, how long
+/// building them took, and what came of it for each process, or for all of them, `None`.
 struct Patching {
-    lib: Option<PathBuf>,
+    libs: Vec<PathBuf>,
     built: Duration,
-    outcome: Outcome,
+    outcomes: Vec<(Option<u32>, Outcome)>,
 }
 
 /// What came of a patch.
@@ -455,34 +493,32 @@ enum Act {
     Rebuild(PathBuf, &'static str),
 }
 
-/// What sources that differ from the build's as `diff` says call for, given the game's process, if
-/// one runs, the hashes of the game's modules as of the code it runs, or the last one ran,
-/// `applied`, and whether a rebuild failed since the build, `stale`. A change a patch can't carry
-/// rebuilds the game. Otherwise a process that serves takes a patch of what changed since what it
-/// runs, unless it can't take patches, as one whose executable doesn't export its `main` can't, or
-/// the build is stale; one that doesn't serve yet takes one once it does; and a game whose process
-/// crashed or hung, which waits for a rebuild, gets one at any change since what that process ran,
-/// as a patch made after it starts again could come too late.
-fn act(diff: Diff, game: Option<Process>, applied: &Hashes, stale: bool) -> Act {
+/// What sources that differ from the build's as `diff` says call for, given the game's processes,
+/// none while it waits for a rebuild, the hashes of the game's modules as of the code they run, or
+/// the last ones ran, `applied`, and whether a rebuild failed since the build, `stale`. A change a
+/// patch can't carry rebuilds the game. Otherwise processes that all serve take a patch of what
+/// changed since what they run, unless one can't take patches, as one whose executable doesn't
+/// export its `main` can't, or the build is stale; while one doesn't serve yet, they take one once
+/// it does; and a game whose processes crashed or hung, which waits for a rebuild, gets one at any
+/// change since what they ran, as a patch made after they start again could come too late.
+fn act(diff: Diff, games: &[Process], applied: &Hashes, stale: bool) -> Act {
     let (hashes, unreadable) = match diff {
         Diff::Rebuild(file, why) => return Act::Rebuild(file, why),
         Diff::Bodies(hashes, unreadable) => (hashes, unreadable),
     };
-    match game {
-        None => match changed(applied, &hashes).into_iter().next() {
+    let sessions: Option<Vec<&Session>> = games.iter().map(|game| game.session).collect();
+    match sessions {
+        _ if games.is_empty() => match changed(applied, &hashes).into_iter().next() {
             Some(file) => Act::Rebuild(file, "the game waits for a rebuild"),
             None => Act::Nothing,
         },
-        Some(Process { session: None, .. }) => Act::Nothing,
-        Some(Process {
-            session: Some(session),
-            ..
-        }) => {
+        None => Act::Nothing,
+        Some(sessions) => {
             let files = changed(applied, &hashes);
             let Some(file) = files.first() else {
                 return Act::Nothing;
             };
-            if session.aslr_reference == 0 {
+            if sessions.iter().any(|session| session.aslr_reference == 0) {
                 let why = "the game can't take patches, as its executable exports no `main`";
                 return Act::Rebuild(file.clone(), why);
             }
@@ -801,54 +837,64 @@ mod tests {
             log: None,
             engine: "0.1.0 debug".to_owned(),
             aslr_reference,
+            player: None,
         };
         let (patchable, unpatchable) = (session(26064), session(0));
         let serving = |session| {
-            Some(Process {
+            vec![Process {
                 pid: 7,
                 session: Some(session),
-            })
+            }]
         };
-        let starting = Some(Process {
+        let starting = vec![Process {
             pid: 7,
             session: None,
-        });
+        }];
         let bodies = || Diff::Bodies(edited.clone(), None);
         // A change a patch can't carry rebuilds, whatever the game's process is doing.
         let lock = PathBuf::from("Cargo.lock");
-        for game in [None, starting, serving(&patchable)] {
+        for games in [vec![], starting.clone(), serving(&patchable)] {
             let rebuild = Diff::Rebuild(lock.clone(), OUTSIDE);
-            let acted = act(rebuild, game, &built, false);
+            let acted = act(rebuild, &games, &built, false);
             assert_eq!(acted, Act::Rebuild(lock.clone(), OUTSIDE));
         }
         // An edit inside function bodies patches a process that serves, of what changed since what
         // it runs, which, patched already, is nothing; and one that doesn't yet once it does.
         let main = vec![PathBuf::from("game/src/main.rs")];
         let patch = Act::Patch(main.clone(), edited.clone(), None);
-        assert_eq!(act(bodies(), serving(&patchable), &built, false), patch);
+        assert_eq!(act(bodies(), &serving(&patchable), &built, false), patch);
         assert_eq!(
-            act(bodies(), serving(&patchable), &edited, false),
+            act(bodies(), &serving(&patchable), &edited, false),
             Act::Nothing
         );
-        assert_eq!(act(bodies(), starting, &built, false), Act::Nothing);
+        assert_eq!(act(bodies(), &starting, &built, false), Act::Nothing);
+        // Peers take a patch once both serve, and rebuild if either can't take one.
+        let mut peers = serving(&patchable);
+        peers.push(starting[0]);
+        assert_eq!(act(bodies(), &peers, &built, false), Act::Nothing);
+        peers[1].session = Some(&patchable);
+        assert_eq!(act(bodies(), &peers, &built, false), patch);
+        peers[1].session = Some(&unpatchable);
+        let acted = act(bodies(), &peers, &built, false);
+        assert!(matches!(acted, Act::Rebuild(..)), "{acted:?}");
         // What gg can't read goes with the patch, which tells of it.
         let unreadable = Diff::Bodies(edited.clone(), Some(main[0].clone()));
-        let acted = act(unreadable, serving(&patchable), &built, false);
+        let acted = act(unreadable, &serving(&patchable), &built, false);
         assert_eq!(
             acted,
             Act::Patch(main.clone(), edited.clone(), Some(main[0].clone()))
         );
         // One that can't take patches rebuilds, as does one whose last rebuild failed.
         for (session, stale) in [(&unpatchable, false), (&patchable, true)] {
-            let acted = act(bodies(), serving(session), &built, stale);
+            let acted = act(bodies(), &serving(session), &built, stale);
             assert!(matches!(acted, Act::Rebuild(..)), "{acted:?}");
         }
         // A game whose process waits for a rebuild gets one at a change since what it ran, an edit
         // or one undone after a patch, but not for sources as that process had them.
         for (now, ran) in [(&edited, &built), (&built, &edited)] {
-            let waiting = act(Diff::Bodies(now.clone(), None), None, ran, false);
+            let waiting = act(Diff::Bodies(now.clone(), None), &[], ran, false);
             assert!(matches!(waiting, Act::Rebuild(..)), "{waiting:?}");
         }
-        assert_eq!(act(bodies(), None, &edited, false), Act::Nothing);
+        assert_eq!(act(bodies(), &[], &edited, false), Act::Nothing);
     }
 }

@@ -1,0 +1,20 @@
+[package]
+name = "shards"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+# GPU drivers apply per-game profiles by executable name: engine executables get a `gg-` prefix to
+# stay clear of such matches.
+[[bin]]
+name = "gg-shards"
+path = "src/main.rs"
+
+[dependencies]
+bytemuck = { workspace = true, features = ["derive"] }
+# A development build, which serves the tool API, applies its scene file's saves and reloads its
+# shader as they change.
+gg-engine = { workspace = true, features = ["dev"] }
+
+[lints]
+workspace = true

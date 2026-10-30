@@ -114,6 +114,10 @@ pub(crate) fn run_headless(
             api::frame_back(&mut api, &mut render, stepper.ticks);
             hand_off(&mut render, &mut cx, view, ui, Vec::new());
             handed += 1;
+            // Rather than spinning while a lockstep peer's inputs are on their way.
+            if app.stack.net_waits(stepper.ticks) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
             app.stack.recorded()?;
         }
         Ok(())
@@ -146,8 +150,9 @@ pub(crate) fn run_headless(
 pub(crate) const MAX_TEXTURE_SIDE: usize = MAX_TEXTURE_SIZE as usize;
 
 /// The first half of a turn of the main loop: starts the frame, `dt` after the last, for Tracy and
-/// the frame's measure, runs the ticks of the simulation that the time owes, as `stepper` steps
-/// it, copying where the world's entities are as each starts, updates the layers, draws the world
+/// the frame's measure, takes what a lockstep peer sent, as [`Stack::net_turn`] says, runs the
+/// ticks of the simulation that the time owes, as `stepper` steps it, those a lockstep peer's
+/// inputs have come for, copying where the world's entities are as each starts, updates the layers, draws the world
 /// after what they drew, as far on from where the last tick found it to where it left it as the
 /// frame is past the tick, and, given egui, the dock and egui's input in `ui`, has the layers draw
 /// their UI, in the dock and with egui. Returns that pass's output, and whether any layer draws
@@ -168,9 +173,15 @@ pub(crate) fn run_frame(
     cx.perf.start_frame(dt);
     let _zone = gg_core::zone!();
     let start = Instant::now();
-    let tick = |tick| {
+    if let Some(ticks) = stack.net_turn(cx, stepper.ticks) {
+        stepper.jump_to(ticks);
+    }
+    let tick = |tick: Tick| {
+        if stack.net_waits(tick.number) {
+            return false;
+        }
         cx.capture();
-        stack.tick(cx, tick);
+        stack.tick(cx, tick)
     };
     stepper.step(dt, tick, || start.elapsed());
     let ticked = Instant::now();
@@ -364,6 +375,14 @@ impl Stepper {
         (self.ticks, self.from) = (ticks, ticks);
     }
 
+    /// Numbers the ticks on from `ticks`, those of a world that took the world's place as the run
+    /// went on, as a lockstep joiner's world gives way to its host's, owing no time.
+    pub(crate) fn jump_to(&mut self, ticks: u64) {
+        self.from = ticks.saturating_sub(self.ran());
+        self.ticks = ticks;
+        self.owed = Duration::ZERO;
+    }
+
     /// The ticks the run has run, since it started.
     pub(crate) fn ran(&self) -> u64 {
         self.ticks - self.from
@@ -376,11 +395,13 @@ impl Stepper {
     /// frame catching up. The whole ticks not run are dropped, and the fraction of one left over
     /// carries to the next frame. In lockstep, exactly one. Paused, those the steps asked for,
     /// whatever the time, as many as the time they take allows, the rest left for the next frame.
-    /// Returns how many ran.
+    /// A tick that `tick` doesn't run, returning `false`, as one waiting for a lockstep peer's
+    /// inputs, stops the frame's ticks, and those owed are owed still, up to [`MOST_TICKS`] of them,
+    /// rather than dropped. Returns how many ran.
     pub(crate) fn step(
         &mut self,
         dt: Duration,
-        mut tick: impl FnMut(Tick),
+        mut tick: impl FnMut(Tick) -> bool,
         took: impl Fn() -> Duration,
     ) -> u64 {
         let due = if self.paused {
@@ -395,8 +416,12 @@ impl Stepper {
             (owed / step) as u64
         };
         let mut ran = 0;
+        let mut waiting = false;
         while ran < due.min(MOST_TICKS) {
-            tick(Tick { number: self.ticks });
+            if !tick(Tick { number: self.ticks }) {
+                waiting = true;
+                break;
+            }
             self.ticks += 1;
             ran += 1;
             // Slower than real time: the ticks left would only fall further behind.
@@ -406,7 +431,10 @@ impl Stepper {
         }
         if self.paused {
             self.steps -= ran;
-        } else {
+        } else if waiting && !self.lockstep {
+            let owed = self.owed + Tick::DT * (due - ran) as u32;
+            self.owed = owed.min(Tick::DT * MOST_TICKS as u32);
+        } else if !waiting {
             self.dropped += due - ran;
         }
         ran
@@ -420,7 +448,8 @@ impl Stepper {
         if self.lockstep || self.paused {
             return 1.0;
         }
-        (self.owed.as_nanos() as f64 / Tick::DT.as_nanos() as f64) as f32
+        // Past a tick while waiting for a lockstep peer, which draws the last tick as it left it.
+        (self.owed.as_nanos() as f64 / Tick::DT.as_nanos() as f64).min(1.0) as f32
     }
 
     /// Pauses the simulation, as the tool API's `pause` asks: frames run no ticks but those
@@ -799,11 +828,14 @@ pub(crate) mod tests {
         let mut stepper = Stepper::default();
         let fast = || Duration::ZERO;
         // 64.32 ticks' time: 8 run, the other 56 whole ticks are dropped, and 5 ms is left over.
-        assert_eq!(stepper.step(Duration::from_millis(1005), |_| {}, fast), 8);
+        assert_eq!(stepper.step(Duration::from_millis(1005), |_| true, fast), 8);
         assert_eq!(stepper.dropped, 56);
         // A whole tick, with the 5 ms.
-        assert_eq!(stepper.step(Duration::from_micros(10_625), |_| {}, fast), 1);
-        assert_eq!(stepper.step(Duration::ZERO, |_| {}, fast), 0);
+        assert_eq!(
+            stepper.step(Duration::from_micros(10_625), |_| true, fast),
+            1
+        );
+        assert_eq!(stepper.step(Duration::ZERO, |_| true, fast), 0);
         assert_eq!((stepper.ticks, stepper.dropped), (9, 56));
     }
 
@@ -820,11 +852,30 @@ pub(crate) mod tests {
             let tick = |tick: Tick| {
                 ran.set(ran.get() + 1);
                 numbers.push(tick.number);
+                true
             };
             assert_eq!(stepper.step(owed, tick, took), 1);
         }
         assert_eq!(numbers, [0, 1]);
         assert_eq!(stepper.dropped, 2 * (MOST_TICKS - 1));
+    }
+
+    /// A tick waiting for a lockstep peer stops the frame's ticks, and the time owed stays owed,
+    /// up to 8 ticks of it, drawn as the last tick left the world, for the frames once it comes.
+    #[test]
+    fn ticks_waiting_for_a_peer_stay_owed() {
+        let mut stepper = Stepper::default();
+        let fast = || Duration::ZERO;
+        let mut until = 2;
+        let mut tick = |tick: Tick| tick.number < until;
+        assert_eq!(stepper.step(Tick::DT * 5, &mut tick, fast), 2);
+        assert_eq!((stepper.ticks, stepper.dropped), (2, 0));
+        assert_eq!(stepper.alpha(), 1.0);
+        assert_eq!(stepper.step(Tick::DT * 20, &mut tick, fast), 0);
+        until = 100;
+        let mut tick = |tick: Tick| tick.number < until;
+        assert_eq!(stepper.step(Duration::ZERO, &mut tick, fast), MOST_TICKS);
+        assert_eq!((stepper.ticks, stepper.dropped), (2 + MOST_TICKS, 0));
     }
 
     /// Paused, frames run only the ticks asked for, at most 8 a frame, whatever their time, and
@@ -835,14 +886,17 @@ pub(crate) mod tests {
     fn a_paused_simulation_runs_only_the_steps_asked_for() {
         let mut stepper = Stepper::default();
         let fast = || Duration::ZERO;
-        assert_eq!(stepper.step(Tick::DT / 2, |_| {}, fast), 0);
+        assert_eq!(stepper.step(Tick::DT / 2, |_| true, fast), 0);
         stepper.pause();
-        assert_eq!(stepper.step(Tick::DT * 3, |_| {}, fast), 0);
+        assert_eq!(stepper.step(Tick::DT * 3, |_| true, fast), 0);
         assert_eq!(stepper.alpha(), 1.0);
         stepper.step_by(10);
         let mut numbers = Vec::new();
         for ran in [MOST_TICKS, 2, 0] {
-            let tick = |tick: Tick| numbers.push(tick.number);
+            let tick = |tick: Tick| {
+                numbers.push(tick.number);
+                true
+            };
             assert_eq!(stepper.step(Duration::ZERO, tick, fast), ran);
         }
         assert_eq!(numbers, (0..10).collect::<Vec<_>>());
@@ -853,7 +907,7 @@ pub(crate) mod tests {
         stepper.step_by(5);
         stepper.resume();
         assert_eq!((stepper.paused(), stepper.steps()), (false, 0));
-        assert_eq!(stepper.step(Tick::DT, |_| {}, fast), 1);
+        assert_eq!(stepper.step(Tick::DT, |_| true, fast), 1);
         assert_eq!(stepper.alpha(), 0.0);
     }
 
@@ -861,7 +915,7 @@ pub(crate) mod tests {
     fn headless_frames_tick_once_before_the_layers_update() {
         let mut stepper = Stepper::lockstep();
         for dt in [Duration::ZERO, Duration::from_secs(1)] {
-            assert_eq!(stepper.step(dt, |_| {}, || Duration::from_secs(1)), 1);
+            assert_eq!(stepper.step(dt, |_| true, || Duration::from_secs(1)), 1);
         }
         assert_eq!((stepper.ticks, stepper.dropped), (2, 0));
 
