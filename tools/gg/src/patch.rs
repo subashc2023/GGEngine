@@ -205,6 +205,16 @@ impl Patches {
         self.fresh = true;
     }
 
+    /// Waits for the build or patch being made, if one is, as the run ends: so that dx removes what
+    /// it wrote of the environment as it built, and no build outlives the run's lock.
+    pub(crate) fn finish(&mut self) {
+        match self.job.take() {
+            Some(Job::Rebuild { thread, .. }) => drop(thread.join()),
+            Some(Job::Patch { thread, .. }) => drop(thread.join()),
+            None => {}
+        }
+    }
+
     /// Removes the libraries the run's patches made, once the processes that loaded them have
     /// ended, with what the linker wrote beside each on Windows: its import library, its exports
     /// and its PDB, which is the largest.

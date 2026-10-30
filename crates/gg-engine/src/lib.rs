@@ -383,6 +383,7 @@ fn run_args(
     }
     debug!(
         headless = args.headless,
+        embedded = args.embedded,
         frames = args.frames,
         capture = args.capture.map(|frame| frame.get()),
         gpu = args.gpu.as_deref(),
@@ -436,7 +437,7 @@ fn run_args(
             app.manifest().map(|manifest| manifest.path.as_path()),
             args.api,
         );
-        if args.headless {
+        if args.headless || args.embedded {
             run_headless(&mut app, &args, api, snapshot)
         } else {
             window::run(&mut app, &args, api, snapshot)

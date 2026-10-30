@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use gg_core::{Error, Result};
 use gg_renderer::{
-    DrawCounts, Draws, Outline, Pick, RenderData, Renderer, Uploads, Viewpoint, Viewport,
+    DrawCounts, Draws, Outline, Pick, Pixels, RenderData, Renderer, Uploads, Viewpoint, Viewport,
 };
 
 use crate::viewports::Drawn;
@@ -44,6 +44,13 @@ pub(crate) struct Extracted {
     pub(crate) pixels_per_point: f32,
     /// What the windows of their own drew, in the order their passes ran.
     pub(crate) windows: Vec<Drawn>,
+    /// The size of the pixels the view shows in place of what's drawn, while it shows any, as
+    /// [`Context::show_pixels`](crate::Context::show_pixels) wrote them; their bytes, which keep
+    /// their memory from frame to frame; and whether they're new since a frame last rendered them,
+    /// which the renderer then takes again.
+    pub(crate) pixels: Option<[u32; 2]>,
+    pub(crate) pixel_bytes: Vec<u8>,
+    pub(crate) pixels_new: bool,
     /// Whether the frame reads the game's view back once it has rendered it, for the tool API's
     /// captures.
     #[cfg(feature = "dev")]
@@ -51,6 +58,21 @@ pub(crate) struct Extracted {
     /// The view it read back, if it was to and it rendered.
     #[cfg(feature = "dev")]
     pub(crate) captured: Option<Result<Shot>>,
+    /// The client the view is published to as frames render it, as the tool API's `view` asked.
+    #[cfg(feature = "dev")]
+    pub(crate) publish: Option<Publish>,
+}
+
+/// The client a game's view is published to, as the tool API's `view` asked: the memory it made,
+/// which each frame that renders the view writes it into once the GPU has finished it; the ticks
+/// the simulation had run in the frame handed over, and when that frame started, which the main
+/// thread sets; and why a frame wasn't published, if one wasn't, until the main thread takes it.
+#[cfg(feature = "dev")]
+pub(crate) struct Publish {
+    pub(crate) writer: gg_api::view::Writer,
+    pub(crate) ticks: u64,
+    pub(crate) started: std::time::SystemTime,
+    pub(crate) failed: Option<Error>,
 }
 
 /// The game's view as a frame rendered it, which the tool API's captures read back: rows of RGBA8
@@ -79,10 +101,15 @@ impl Default for Extracted {
             textures: TextureChanges::default(),
             pixels_per_point: 1.0,
             windows: Vec::new(),
+            pixels: None,
+            pixel_bytes: Vec::new(),
+            pixels_new: false,
             #[cfg(feature = "dev")]
             capture: false,
             #[cfg(feature = "dev")]
             captured: None,
+            #[cfg(feature = "dev")]
+            publish: None,
         }
     }
 }
@@ -107,8 +134,11 @@ pub(crate) struct Rendered {
     pub(crate) presented: Result<bool>,
     /// The time it took, its waits among it.
     pub(crate) render: Duration,
-    /// Its waits, as [`Renderer::waited`] says.
+    /// Its waits, as [`Renderer::waited`] says, and for the GPU to finish the frame, for the view
+    /// it read back.
     pub(crate) wait: Duration,
+    /// Of the rest, copying the view it read back into the memory of the client it's published to.
+    pub(crate) publish: Duration,
     pub(crate) drawn: DrawCounts,
 }
 
@@ -122,6 +152,14 @@ pub(crate) trait Render: Send + 'static {
 impl Render for Renderer {
     fn render(&mut self, frame: &mut Extracted) -> Rendered {
         let start = Instant::now();
+        #[cfg(feature = "dev")]
+        let read_view = frame.capture || frame.publish.is_some();
+        #[cfg(not(feature = "dev"))]
+        let read_view = false;
+        let pixels = frame.pixels.map(|size| Pixels {
+            size,
+            bytes: frame.pixels_new.then_some(&frame.pixel_bytes[..]),
+        });
         let data = RenderData {
             clear_color: frame.clear_color,
             viewport: frame.viewport,
@@ -130,6 +168,8 @@ impl Render for Renderer {
             draws: &frame.draws,
             picks: &frame.picks,
             outline: frame.outline,
+            read_view,
+            pixels,
         };
         let ui = gg_renderer::Ui {
             primitives: &frame.primitives,
@@ -138,20 +178,20 @@ impl Render for Renderer {
         };
         let mut windows: Vec<_> = frame.windows.iter_mut().map(Drawn::ui).collect();
         let presented = Renderer::render(self, data, ui, &mut windows);
+        let rendered = matches!(presented, Ok(true));
+        // Until a frame renders them, into a view with an area, the pixels stay new.
+        let [width, height] = frame.viewport.size;
+        frame.pixels_new &= !(rendered && width > 0 && height > 0);
         frame.picked.clear();
         frame.picked.extend_from_slice(self.picked());
         #[cfg(feature = "dev")]
-        if frame.capture && matches!(presented, Ok(true)) {
-            let read = self.read_back_view().and_then(|view| {
-                let (size, pixels) = view.ok_or_else(|| {
-                    let message = "the game's view has no area, as while another panel's tab shows \
-                                   over it";
-                    Error::new("api.no_view", message)
-                })?;
-                Ok(Shot { size, pixels })
-            });
-            frame.captured = Some(read);
-        }
+        let (waited, publish) = if read_view && rendered {
+            frame.take_view(self)
+        } else {
+            (Duration::ZERO, Duration::ZERO)
+        };
+        #[cfg(not(feature = "dev"))]
+        let (waited, publish) = (Duration::ZERO, Duration::ZERO);
         let drawn = self.drawn();
         gg_core::plot!("draws", drawn.draws as f64);
         gg_core::plot!("instances", drawn.instances as f64);
@@ -159,9 +199,66 @@ impl Render for Renderer {
         Rendered {
             presented,
             render: start.elapsed(),
-            wait: self.waited(),
+            wait: self.waited() + waited,
+            publish,
             drawn,
         }
+    }
+}
+
+#[cfg(feature = "dev")]
+impl Extracted {
+    /// Once the frame has rendered and read the view back, waits for the GPU to finish it, and
+    /// takes the view: for the captures, a copy, or the error that kept it; and for the client it's
+    /// published to, into its memory, or why it couldn't be. Returns how long it waited for the
+    /// GPU, and how long the copy into the client's memory took.
+    fn take_view(&mut self, renderer: &Renderer) -> (Duration, Duration) {
+        let start = Instant::now();
+        let read = renderer.view_read();
+        let waited = start.elapsed();
+        let read = match read {
+            Ok(Some(read)) => read,
+            Ok(None) => {
+                if self.capture {
+                    let message = "the game's view has no area, as while another panel's tab shows \
+                                   over it, or shows pixels from elsewhere, as the editor shows a \
+                                   game's";
+                    self.captured = Some(Err(Error::new("api.no_view", message)));
+                }
+                return (waited, Duration::ZERO);
+            }
+            Err(error) => {
+                if let Some(publish) = &mut self.publish {
+                    publish.failed = Some(Error::new("api.view", format!("{error:#}")));
+                }
+                if self.capture {
+                    self.captured = Some(Err(error));
+                }
+                return (waited, Duration::ZERO);
+            }
+        };
+        let size = read.size();
+        if self.capture {
+            let mut pixels = vec![0; size[0] as usize * size[1] as usize * 4];
+            self.captured = Some(read.read_into(&mut pixels).map(|()| Shot { size, pixels }));
+        }
+        let Some(publish) = &mut self.publish else {
+            return (waited, Duration::ZERO);
+        };
+        let copying = Instant::now();
+        let mut copied = Ok(());
+        let published = (publish.writer).publish(size, publish.ticks, publish.started, |pixels| {
+            copied = read.read_into(pixels);
+        });
+        let failed = match (published, copied) {
+            (Err(error), _) => Some(Error::new("api.view", error.to_string())),
+            (Ok(_), Err(error)) => Some(error),
+            (Ok(_), Ok(())) => None,
+        };
+        if failed.is_some() {
+            publish.failed = failed;
+        }
+        (waited, copying.elapsed())
     }
 }
 
@@ -409,6 +506,7 @@ mod tests {
                 presented,
                 render: Duration::ZERO,
                 wait: Duration::ZERO,
+                publish: Duration::ZERO,
                 drawn: DrawCounts {
                     draws: tag,
                     instances: self.setting,

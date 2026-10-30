@@ -239,6 +239,16 @@ pub struct Context {
     outline: Option<Outline>,
     /// Where the game's view was as the last frame handed it off, while it had an area.
     view: Option<Viewport>,
+    /// The size of the pixels the view shows in place of what's drawn, while it shows any; the
+    /// bytes [`show_pixels`](Self::show_pixels) last wrote, which the next frame handed off takes
+    /// in place of those it had; and whether they're new since a frame was.
+    shown: Option<[u32; 2]>,
+    shown_bytes: Vec<u8>,
+    shown_new: bool,
+    /// When the frame being made started, by the machine's clock, as the frames of a view
+    /// published to a tool say.
+    #[cfg(feature = "dev")]
+    pub(crate) started: std::time::SystemTime,
     /// The number of the next pick's ticket.
     tickets: u64,
     /// The picks asked this frame, at most [`MAX_PICKS`], each with where, in the main window's
@@ -366,6 +376,11 @@ impl Context {
             colliders: false,
             outline: None,
             view: None,
+            shown: None,
+            shown_bytes: Vec::new(),
+            shown_new: false,
+            #[cfg(feature = "dev")]
+            started: std::time::SystemTime::UNIX_EPOCH,
             tickets: 0,
             picks: Vec::new(),
             unseen: Vec::new(),
@@ -442,6 +457,38 @@ impl Context {
     /// cursor where it is, rather than the world.
     pub fn view(&self) -> Option<Viewport> {
         self.view
+    }
+
+    /// Has the game's view show `size` pixels in place of what's drawn, from the frame being made
+    /// on, which `fill` writes, given their bytes: rows of RGBA8, sRGB-encoded and tightly packed,
+    /// top row first. They show from the view's top left, each onto one of its pixels, as far as
+    /// they reach of it, the rest of it the clear color, and go on showing in the frames after,
+    /// until the next call or [`hide_pixels`](Self::hide_pixels): the view of another process's
+    /// game, as the editor shows it. Nothing drawn shows in the view meanwhile, and picks find
+    /// nothing there.
+    ///
+    /// # Panics
+    ///
+    /// If a side is 0 or more than [`MAX_TEXTURE_SIZE`](gg_renderer::MAX_TEXTURE_SIZE).
+    pub fn show_pixels(&mut self, size: [u32; 2], fill: impl FnOnce(&mut [u8])) {
+        let sides = 1..=gg_renderer::MAX_TEXTURE_SIZE;
+        assert!(
+            size.iter().all(|side| sides.contains(side)),
+            "{size:?} pixels; each side is 1 to {} pixels",
+            gg_renderer::MAX_TEXTURE_SIZE
+        );
+        let bytes = size[0] as usize * size[1] as usize * 4;
+        self.shown_bytes.resize(bytes, 0);
+        fill(&mut self.shown_bytes);
+        self.shown = Some(size);
+        self.shown_new = true;
+    }
+
+    /// Has the game's view show what's drawn again, from the frame being made on, after
+    /// [`show_pixels`](Self::show_pixels).
+    pub fn hide_pixels(&mut self) {
+        self.shown = None;
+        self.shown_new = false;
     }
 
     /// Asks which of the world's entities the game's view shows at `at`, in the main window's
@@ -890,8 +937,9 @@ impl Context {
     /// [`view`](Self::view) gives from then on: its draws, those over the rest last, for the last
     /// frame's, which it forgets, keeping their memory for the next; the viewpoint a layer set this
     /// frame, which it forgets too, or else where the world's camera sees from, or else the
-    /// default; what a layer outlined this frame, which it forgets too; what's been added since a
-    /// frame last took it, after what `frame` still holds; and the picks asked this frame, each at
+    /// default; what a layer outlined this frame, which it forgets too; the pixels the view shows,
+    /// if it shows any, swapping new ones for those `frame` had; what's been added since a frame
+    /// last took it, after what `frame` still holds; and the picks asked this frame, each at
     /// the pixel of the view under it, the floor of where it was asked less the view's origin, but
     /// those outside the view, which the next answers to come back answer `None`.
     pub(crate) fn extract(&mut self, frame: &mut Extracted, viewport: Viewport) {
@@ -900,6 +948,11 @@ impl Context {
         self.view = (viewport.size[0] > 0 && viewport.size[1] > 0).then_some(viewport);
         frame.viewpoint = self.viewpoint.take().or(self.seen).unwrap_or_default();
         frame.outline = self.outline.take();
+        frame.pixels = self.shown;
+        if mem::take(&mut self.shown_new) {
+            mem::swap(&mut frame.pixel_bytes, &mut self.shown_bytes);
+            frame.pixels_new = true;
+        }
         self.draws.append(&mut self.over);
         mem::swap(&mut frame.draws, &mut self.draws);
         self.draws.clear();

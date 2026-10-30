@@ -66,20 +66,19 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **The first demo** (2026-10-30)
 - **Phase 5, tool API and hot reload: v0.1** (2026-10-30)
 - **Projects and `gg new`** (2026-10-30)
+- **The game's view in the editor** (2026-10-30)
 
 ## Now
 
-**The game's view in the editor**, Phase 6's second milestone. The editor opens the project it's
-started in and runs its game as an agent would, under `cargo gg run` in the project's directory,
-ending it as the editor closes, and shows the game's view in its Viewport: the game runs
-`--embedded`, offscreen without a window, publishing its view's frames to the editor through the
-tool API, as the first open question below decides, and the editor forwards its input to it. A
-Logs panel shows `gg run`'s events and the build's errors, and the title bar the run's status,
-pause and step. *Done when*, from `games/shards`, the editor opens Shards' project and shows it
-running in the Viewport, steered by its keys; an edit inside a function body is patched in, and a
-new field rebuilds and restarts the game, both showing in the view and in Logs; a second `gg run`
-of the game is refused; closing the editor ends the game; and the cost and age of the view's
-frames at 1920x1080 are measured against budgets set as it starts.
+**The game's world and diagnostics in the editor's panels**, Phase 6's third milestone. In a
+project, the editor's Entities and Inspector panels show the game's world, which they read through
+the tool API, `entities`, `entity` and `get`, as it changes, and edit through `apply`, `undo` and
+`redo`, as the editor's own edits; and Logs shows the game's diagnostics as it logs them, through a
+`logs` request, which serves the log's events as they come, rather than its file, beside `gg run`'s
+events, which `gg logs` and `gg mcp` follow too. *Done when*, from `games/shards`, the Entities
+panel lists Shards' entities as they come and go, the Inspector shows a player's components as they
+change and sets a field, which Undo takes back, a warning the game logs shows in Logs with its code
+as it's logged, and `gg logs` follows a running game's events through the API.
 
 ## Next
 
@@ -374,20 +373,17 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | The sandbox and the editor as projects, which name their roots themselves | A tool opens them as projects |
 | The project in `hello`'s answer: tools find a project's games by their session files | A client reaches a game without reading its session file, as one on another machine would |
 | An app's name and `gg run`'s defaults for it, such as `--peers 2`, in the project's manifest | A tool needs them |
+| Sharing the game's view without copies on the CPU: the game copies each frame from the GPU's readback into the shared memory, and the editor out of it into the frame's upload arena, about 0.35 ms each at 1920x1080 on the RTX 4090; Vulkan can take the shared memory as the readback buffer itself (`VK_EXT_external_memory_host`), or share the image (external memory), where the driver has either | A view larger than 1080p, or a refresh rate, the copies don't keep up with |
+| Gamepads in an embedded game: windowed runs poll the pads, and the editor forwards keys, the mouse and focus | Someone plays a project's game in the editor with a pad |
+| Captures of a view that shows pixels from elsewhere, as the editor's does a game's: `capture` fails there (`api.no_view`); the game's own capture has the same pixels | A tool captures the editor's view |
+| `gg run --embedded` with `--peers 2`, which the editor's one view would show one of: it's refused | The editor shows a lockstep session's peers |
+| Filtering the Logs panel by level or text, and the game's console's debug lines kept out of it: it shows all `gg run` prints | Logs gets too long to read |
 
 ## Open questions
 
 - Which license? Recommendation: MIT OR Apache-2.0, the Rust convention, chosen once; until
   then, `publish = false` keeps the crates off crates.io. Decide before anyone outside the
   project contributes.
-- How does the game's view reach the editor, and is a channel that a request of the tool API opens
-  part of the API, as Phase 6 has the editor reach the game through the API alone? Recommendation:
-  the game publishes its view's frames into OS shared memory that the editor makes and a `view`
-  request names, defined in gg-api so that agents can read live frames too, the editor's input going
-  back through an `input` request, and the game's diagnostics through a `logs` request rather than
-  its log's file. It works on Windows, X11, Wayland and macOS alike, where embedding the game's own
-  window works on Windows and X11 alone, and the editor couldn't draw over it. Decide before the
-  game's view in the editor.
 - Who owns the game's one view while the editor drives it: its viewpoint, outline, grid and
   colliders? Recommendation: one set for each game, which any client sets, the last setter winning,
   with `capture` able to ask for the world's own camera, as the engine has one view. Decide before

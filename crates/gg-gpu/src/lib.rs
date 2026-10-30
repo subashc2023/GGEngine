@@ -30,7 +30,7 @@ pub use bindless::{PLACED_TEXTURES, Sampler, Wrap};
 pub use buffer::GpuBuffer;
 pub use capture::Capture;
 pub use device::{Device, SHADER_CAPABILITIES, UploadPath};
-pub use frame::{Frame, Frames, Indices, MAX_READS, Pass, Target, Upload};
+pub use frame::{Frame, Frames, ImageRead, Indices, MAX_READS, Pass, Target, Upload};
 pub use image::{ColorImage, DepthImage, IdImage};
 pub use instance::{Instance, InstanceDesc, Validation};
 pub use pipeline::{Blend, Faces, Format, GraphicsDesc, Pipeline};

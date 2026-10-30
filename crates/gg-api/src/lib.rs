@@ -1,9 +1,10 @@
 //! The tool API's protocol, which a game's development build serves and tools speak, as
 //! ARCHITECTURE.md's Agents and tools describes: requests and their answers as lines of JSON over a
 //! TCP connection on the machine's loopback; the session file a running game says where it serves
-//! in; what each method takes and answers; and a client, for tools. It also reads a game's project
-//! manifest, [`Project`], which tools find a game by and its development build reads. It depends on
-//! no crate of the engine's, so that tools build without the GPU's toolchain.
+//! in; what each method takes and answers; the memory a game's view is shared through as it
+//! renders, [`view`]; and a client, for tools. It also reads a game's project manifest,
+//! [`Project`], which tools find a game by and its development build reads. It depends on no crate
+//! of the engine's, so that tools build without the GPU's toolchain.
 //!
 //! A request is `{"id":1,"method":"step","params":{"ticks":2}}`, without `params` for a method that
 //! takes none, and its answer `{"id":1,"result":...}` or `{"id":1,"error":{"code":...,"message":...}}`,
@@ -16,6 +17,13 @@
 //! - `step`, [`Step`]: runs ticks, pausing the simulation, and answers [`Status`] once they've run.
 //! - `capture`, [`Capture`]: writes the game's view as a PNG once a frame renders it, and answers
 //!   [`Captured`].
+//! - `view`, [`View`]: has the game publish each frame's view, from the next, into the memory a
+//!   client made, as [`view::Reader`] makes it, in place of any it published to before, or stop
+//!   publishing for `null`, and answers `{}`; fails with `api.view` if the memory can't be opened.
+//!   A game run `--embedded` renders its view at the size the memory asks, and runs a frame once
+//!   the client has taken the last; another publishes its view at its own size, while it fits.
+//! - `input`, [`Input`]: hands the game's layers events, in order, as its window would, as the
+//!   frame starts, and answers `{}`.
 //! - `entities`, [`Entities`]: answers [`EntityList`], a page of the world's entities.
 //! - `entity`, [`Entity`]: answers the entity: `{"id":...,"name":...,"parent":...,"children":[...],
 //!   "components":{"Transform":{...},...}}`, its components in the order their types registered.
@@ -62,6 +70,9 @@
 //! own is, as an `(opaque)` that a create or an add gives says.
 
 mod project;
+// It maps memory another process shares, which only unsafe code reaches.
+#[allow(unsafe_code)]
+pub mod view;
 
 use std::fmt;
 use std::fs;
@@ -330,6 +341,75 @@ pub struct Captured {
     pub width: u32,
     pub height: u32,
     pub ticks: u64,
+}
+
+/// What `view` takes: the name of the memory to publish the view into, as [`view::Reader::name`]
+/// gives it, or `None` to stop publishing.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct View {
+    #[serde(default)]
+    pub memory: Option<String>,
+}
+
+/// What `input` takes: the events to hand the game's layers, in order.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Input {
+    pub events: Vec<InputEvent>,
+}
+
+/// An event `input` hands the game's layers, as its window would: `{"key":{"key":"KeyW",
+/// "pressed":true}}`, a key naming it, whose value is what it takes; `"cursor_left"` for one that
+/// takes nothing.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum InputEvent {
+    /// A key went down or up, by its position, as its W3C UI Events `code` names it, such as
+    /// `KeyW`, or winit, which names `MetaLeft` and `MetaRight` `SuperLeft` and `SuperRight`;
+    /// `repeat` marks the presses a held key repeats.
+    Key {
+        key: String,
+        pressed: bool,
+        #[serde(default)]
+        repeat: bool,
+    },
+    /// Text a key's press typed, after it.
+    Text(String),
+    /// The cursor moved over the view, to `[x, y]` pixels from its top left.
+    Cursor([f64; 2]),
+    /// The cursor came over the view.
+    CursorEntered,
+    /// The cursor left the view.
+    CursorLeft,
+    /// A mouse button went down or up.
+    Button { button: Button, pressed: bool },
+    /// The wheel or a touchpad scrolled: positive `y` up, and positive `x` left.
+    Scroll(Scroll),
+    /// The view gained or lost the keys.
+    Focused(bool),
+}
+
+/// A mouse button: `"left"`, `"right"`, `"middle"`, the side buttons `"back"` and `"forward"`,
+/// or another by its number, `{"other":9}`, which differs from one platform to another.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Button {
+    Left,
+    Right,
+    Middle,
+    Back,
+    Forward,
+    Other(u16),
+}
+
+/// How far a scroll went: `{"lines":[x, y]}`, as a wheel's notches go, or `{"pixels":[x, y]}`, as
+/// a touchpad's do.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Scroll {
+    Lines([f32; 2]),
+    Pixels([f64; 2]),
 }
 
 /// What `entities` takes: those with component `with`, or all, in the order queries find them,
@@ -765,6 +845,33 @@ mod tests {
         ] {
             assert!(read(refused).is_err(), "{refused}");
         }
+    }
+
+    #[test]
+    fn input_events_read_as_their_docs_say() {
+        let json = r#"{"events": [{"key": {"key": "KeyW", "pressed": true}}, "cursor_left",
+            {"button": {"button": {"other": 9}, "pressed": false}}, {"scroll": {"lines": [0, 1]}},
+            {"cursor": [1.5, 2]}, {"text": "a"}, {"focused": false}]}"#;
+        let input: Input = serde_json::from_str(json).unwrap();
+        let expected = [
+            InputEvent::Key {
+                key: "KeyW".to_owned(),
+                pressed: true,
+                repeat: false,
+            },
+            InputEvent::CursorLeft,
+            InputEvent::Button {
+                button: Button::Other(9),
+                pressed: false,
+            },
+            InputEvent::Scroll(Scroll::Lines([0.0, 1.0])),
+            InputEvent::Cursor([1.5, 2.0]),
+            InputEvent::Text("a".to_owned()),
+            InputEvent::Focused(false),
+        ];
+        assert_eq!(input.events, expected);
+        let refused = r#"{"events": [{"key": {"key": "KeyW", "pressed": true, "held": true}}]}"#;
+        assert!(serde_json::from_str::<Input>(refused).is_err());
     }
 
     #[test]

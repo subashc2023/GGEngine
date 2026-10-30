@@ -66,6 +66,8 @@ rayon-core = "1.13.0"
 rfd = "0.17.2"
 # integer128, for the 128-bit fields of rapier's bodies and colliders that snapshots hold.
 ron = { version = "0.12.2", features = ["integer128"] }
+# The release winit's Linux dependencies have, so that the two build once.
+rustix = "1.1.5"
 scoped-tls = "1.0.1"
 serde = { version = "1.0.229", features = ["derive"] }
 # float_roundtrip, so that numbers parse to the float nearest them in every build: Cargo turns a

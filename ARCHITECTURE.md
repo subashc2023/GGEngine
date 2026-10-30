@@ -45,6 +45,8 @@ sandbox  editor   player       apps/: executables          gg  tools/: tools
          gg-core               every crate may use gg-core
 ```
 
+The editor uses `gg-api` too, beside `gg-engine`, as a client of the tool API, as `gg` is.
+
 - **`gg-core`:** math, logging, profiling and error types.
 - **`gg-gpu`:** Vulkan through `ash`. It turns ash's unsafe API into safe types: device, memory,
   buffers, images, descriptors, pipelines, swapchain, synchronization and submission. They stay
@@ -60,19 +62,23 @@ sandbox  editor   player       apps/: executables          gg  tools/: tools
   `Reflect` and `Component`. Rust builds a derive as a crate of its own; only `gg-engine`
   depends on it, and games derive through `gg-engine`.
 - **`gg-api`:** the [tool API](#agents-and-tools)'s protocol: its messages, the session file that
-  says where a game serves it, and a client, which tools speak it through; and the reader and
-  writer of a [project](#project-state)'s manifest, another file that tools and development builds
-  share. It depends on no `gg-*` crate, so that tools build without the engine, and `gg-engine`
-  uses it in development builds alone, so that only they read a manifest: shipping builds start
-  from cooked data.
+  says where a game serves it, a client, which tools and the editor speak it through, and the
+  memory a game's view is shared through as it renders; and the reader and writer of a
+  [project](#project-state)'s manifest, another file that tools and development builds share. It
+  depends on no `gg-*` crate, so that tools build without the engine, and `gg-engine` uses it in
+  development builds alone, so that only they read a manifest: shipping builds start from cooked
+  data.
 - **`sandbox`:** the engine's own app, for its development: a swarm of up to 100,000 sprites
   drifting on the job system's threads, which measures how fast the engine simulates and draws, and
   a grid from its scene file.
 - **`editor`:** the editor, one more client of the tool API: a dock that fills its window, with
-  the game's view in a panel among the others, and an orbit camera of its own. Its Play and
-  Simulate run a copy of the world in the world's place, and Stop brings back the very world as it
-  was edited, so that outside them the world changes only by edits, which undo. Play, Simulate and
-  Stop are commands, which recordings keep. [main.rs](apps/editor/src/main.rs) describes the rest.
+  the game's view in a panel among the others. Started in a game's project, it runs the project's
+  game as an agent does, under `gg run --embedded`, which ends as the editor does, and shows the
+  game's view, forwarding it the view's input; elsewhere, until Phase 6 is done, it edits a world
+  of its own, with an orbit camera of its own. Its Play and Simulate run a copy of the world in the
+  world's place, and Stop brings back the very world as it was edited, so that outside them the
+  world changes only by edits, which undo. Play, Simulate and Stop are commands, which recordings
+  keep. [main.rs](apps/editor/src/main.rs) describes the rest.
 - **`player`:** the reference player. It runs a cooked scene without game code and shows how a
   game builds its own player.
 - **`tools/gg`:** the command-line tool, a client of the tool API, which `cargo gg` runs.
@@ -183,22 +189,28 @@ in the editor is out of an agent's reach.
 - **The tool API.** A game's development build serves an API on the machine's loopback, at a port
   the OS picks, which it writes with a token, and its project's manifest's path, in a session file
   in `sessions` beside its executable, removed as the run ends: query the world, apply and undo
-  [operations](#project-state), run, pause and step, capture frames, save the world whole as a
-  snapshot file, as [ECS](#ecs) describes, which a run given `--restore` starts from, apply
-  patches of the game's code, as [Game code](#game-code) describes, and read
-  [diagnostics](#diagnostics). Requests and their answers are lines of JSON, as
-  [gg-api](crates/gg-api/src/lib.rs) describes, and a connection's first request says hello with
-  the token, so that only processes that can read the file reach the game. A thread of the API's
-  reads each connection and answers its pings itself, from the frames the main loop counts, so
-  that a tool tells a hung game from a busy one, and from one whose frames have paused for the
-  user, as for a minimized window or a file dialog. The main loop answers the rest as each frame
-  starts, before its ticks: a step once its ticks have run, a capture once the render thread has
-  read the frame's view back, without the UI, which a thread of the API's writes as a PNG, and a
-  snapshot once a thread of the API's has written the copy of the world the main loop took, but
-  none before the run's first tick, which applies what the layers queued as they started.
-  Paused, frames run no ticks but those a step asks for, and draw the world as the last tick left
-  it, so that a capture shows what a query reads. Each client gets only the capabilities it is
-  granted, such as reading the world or editing one scene.
+  [operations](#project-state), run, pause and step, capture frames, share the view as frames
+  render it, hand the layers input as the window would, save the world whole as a snapshot file,
+  as [ECS](#ecs) describes, which a run given `--restore` starts from, apply patches of the game's
+  code, as [Game code](#game-code) describes, and read [diagnostics](#diagnostics). Requests and
+  their answers are lines of JSON, as [gg-api](crates/gg-api/src/lib.rs) describes, and a
+  connection's first request says hello with the token, so that only processes that can read the
+  file reach the game. A thread of the API's reads each connection and answers its pings itself,
+  from the frames the main loop counts, so that a tool tells a hung game from a busy one, and from
+  one whose frames have paused for the user, as for a minimized window or a file dialog. The main
+  loop answers the rest as each frame starts, before its ticks: a step once its ticks have run, a
+  capture once the render thread has read the frame's view back, without the UI, which a thread of
+  the API's writes as a PNG, and a snapshot once a thread of the API's has written the copy of the
+  world the main loop took, but none before the run's first tick, which applies what the layers
+  queued as they started. Paused, frames run no ticks but those a step asks for, and draw the world
+  as the last tick left it, so that a capture shows what a query reads. The view is shared through
+  memory the client makes and a `view` request names, rather than through the game's window, which
+  other processes can embed on Windows and X11 alone, and couldn't draw over: three slots of frames,
+  a triple buffer that neither end waits on, which the render thread writes each frame's view into
+  once the GPU has finished it, and the client reads, as agents can read live frames too. A game run
+  `--embedded` renders its view at the size the client asks, and runs each frame once the client has
+  taken the last, rather than rendering frames it never takes. Each client gets only the
+  capabilities it is granted, such as reading the world or editing one scene.
 - **Clients.** The command-line tool, `tools/gg`, builds and runs games, supervising them: it
   runs a copy of a game's executable, so that the game builds again meanwhile, removing those runs
   it killed left; patches it as its code changes, and rebuilds it at any other change, as [Game
@@ -206,18 +218,22 @@ in the editor is out of an agent's reach.
   again from its last snapshot after a crash or a hang, and from one taken then as it's rebuilt,
   telling of each, or waits for a rebuild if the game would only end the same way again, as one
   that ends before its first snapshot would. A game that comes to its own end, as its window
-  closes, ends the supervision, as one that never serves does. It runs headless checks, talks to
-  running games, all with machine-readable results, and makes new games. Inside a game's
-  [project](#project-state), found from where it runs or named by `--project`, it runs cargo in the
-  project's directory, builds the project's game, and reaches the project's games alone, those
-  whose session files name its manifest; `gg mcp` gives agents that speak MCP the
-  same reach over stdio, a tool for each of the API's methods, connecting at each call to the game
-  it picks, so that a restarted game is the one it reaches, as the agent, by its MCP client's name;
-  the editor is one more client, with no ability an agent lacks.
+  closes, ends the supervision, as one that never serves does; so does the end of the tool a run
+  embeds the game in (`--embedded`), as the editor ends, which closes gg's stdin. One `gg run` runs
+  a game at a time; a second is refused. It runs headless checks, talks to running games, all with
+  machine-readable results, and makes new games. Inside a game's [project](#project-state), found
+  from where it runs or named by `--project`, it runs cargo in the project's directory, builds the
+  project's game, and reaches the project's games alone, those whose session files name its
+  manifest; `gg mcp` gives agents that speak MCP the same reach over stdio, a tool for each of the
+  API's methods, connecting at each call to the game it picks, so that a restarted game is the one
+  it reaches, as the agent, by its MCP client's name; the editor is one more client, with no
+  ability an agent lacks.
 - **Headless runs.** Every app runs without a window (`--headless`) and can run a set number
   of frames, then exit with a status (`--frames N`): 0 for a clean run, 1 after an error or any
   validation message, and 2 for bad arguments. Dedicated servers, CI and agents checking their
-  work run this way; rendering checks render offscreen, and simulation-only runs need no GPU.
+  work run this way; rendering checks render offscreen, and simulation-only runs need no GPU. A
+  run embedded in a tool (`--embedded`), as the editor runs a project's game, renders offscreen in
+  real time, its view shared with the tool as the [tool API](#agents-and-tools) says.
   Under RenderDoc, a run can capture a frame ([Captures](#diagnostics)), which
   `renderdoccmd convert` writes out as XML for agents to read.
 

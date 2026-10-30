@@ -62,6 +62,7 @@ fn main() -> ExitCode {
         tests,
         clear_reads_back,
         sampled_images_keep_their_layout,
+        images_read_back_once_their_frame_has_finished,
         dropped_images_free_their_slots,
         depth_clears_in_every_pass,
         ids_read_back_two_frames_later,
@@ -270,6 +271,63 @@ fn sampled_images_keep_their_layout() {
     check(&validation);
 }
 
+/// Clears images, a color for each frame, reads them back as frames render them, and finds each
+/// frame's pixels once it has finished, until the frame two later reads back into its slot's
+/// buffer; a frame reads a larger image than its slot read before whole, and samples it after.
+/// Synchronization validation checks the copies' barriers, and the sampling after them.
+fn images_read_back_once_their_frame_has_finished() {
+    let instance = instance();
+    let validation = instance.validation();
+    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let mut images = [
+        ColorImage::new(&device, 8, 4, "small read target").expect("an image"),
+        ColorImage::new(&device, 16, 16, "large read target").expect("an image"),
+    ];
+    let mut frames = Frames::new(&device).expect("frames");
+    let pixels_of = |frames: &Frames, frame: u64| {
+        let read = frames.image_read(frame).expect("a wait for the frame")?;
+        let [width, height] = read.size();
+        let mut pixels = vec![0; (width * height * 4) as usize];
+        read.read_into(&mut pixels).expect("the pixels");
+        Some((read.size(), pixels))
+    };
+    let red = [1.0, 0.0, 0.0, 1.0];
+    let green = [0.0, 1.0, 0.0, 1.0];
+    let blue = [0.0, 0.0, 1.0, 1.0];
+    // The image, small or large, its color, and whether the frame reads it back.
+    for (image, color, read) in [
+        (0, red, true),
+        (0, green, true),
+        (1, blue, true),
+        (0, red, false),
+    ] {
+        let mut frame = frames
+            .begin([Target::Image(&mut images[image])])
+            .expect("a frame")
+            .expect("an offscreen image can always be rendered into");
+        drop(frame.begin_pass(0, c"clear", color, None, None));
+        if read {
+            let index = frame.read_image(0).expect("a read");
+            assert_eq!(frame.begin_sampling(0), index, "sampled as it was read");
+        }
+        frame.submit().expect("the frame's submission");
+    }
+    let solid =
+        |size: [u32; 2], pixel: [u8; 4]| Some((size, pixel.repeat((size[0] * size[1]) as usize)));
+    assert_eq!(pixels_of(&frames, 2), solid([8, 4], [0, 255, 0, 255]));
+    assert_eq!(pixels_of(&frames, 3), solid([16, 16], [0, 0, 255, 255]));
+    assert_eq!(
+        pixels_of(&frames, 1),
+        None,
+        "frame 3 read into its slot's buffer since"
+    );
+    assert_eq!(pixels_of(&frames, 4), None, "it read nothing back");
+    assert_eq!(pixels_of(&frames, 0), None);
+
+    drop((frames, images, device, instance));
+    check(&validation);
+}
+
 /// Makes and drops more images, one at a time, than the bindless set has slots to give out past
 /// the placed ones, 4,096, which works only if each gives its slot back.
 fn dropped_images_free_their_slots() {
@@ -460,11 +518,16 @@ fn forgotten_frames_and_passes_are_caught(log: &Path) {
             Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
         let mut image = ColorImage::new(&device, 4, 4, "forgotten frame target").expect("an image");
         let mut frames = Frames::new(&device).expect("frames");
-        let frame = frames
+        let mut frame = frames
             .begin([Target::Image(&mut image)])
             .expect("a frame")
             .expect("an offscreen image can always be rendered into");
+        drop(frame.begin_pass(0, c"cleared", black, None, None));
+        frame.read_image(0).expect("a read");
         mem::forget(frame);
+        // What it read is never waited for, as the GPU never gets the frame.
+        let read = frames.image_read(1).expect("no wait");
+        assert!(read.is_none(), "a frame never submitted read nothing");
         let message = panics(|| {
             let _ = frames.begin([Target::Image(&mut image)]);
         });

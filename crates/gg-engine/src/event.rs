@@ -262,6 +262,26 @@ macro_rules! keys {
                     _ => None,
                 }
             }
+
+            /// Its name, as the tool API's `input` names keys: its W3C UI Events `code` value, such
+            /// as `KeyW`, but for `SuperLeft` and `SuperRight`, winit's names for `MetaLeft` and
+            /// `MetaRight`.
+            pub fn name(self) -> &'static str {
+                match self {
+                    $(Self::$name => stringify!($name),)*
+                }
+            }
+
+            /// The key named `name`, as [`name`](Self::name) names it, or by its W3C `code` value,
+            /// `MetaLeft` and `MetaRight` among them; `None` for a name that's no key's.
+            pub fn from_name(name: &str) -> Option<Self> {
+                match name {
+                    "MetaLeft" => Some(Self::SuperLeft),
+                    "MetaRight" => Some(Self::SuperRight),
+                    $(stringify!($name) => Some(Self::$name),)*
+                    _ => None,
+                }
+            }
         }
     };
 }

@@ -19,10 +19,10 @@ crates/           libraries
   gg-renderer/    passes, materials, render graph (to come); gets plain render data, never the scene
   gg-engine/      what games use: main loop, window, input, scene, assets, hot reload, the tool API
   gg-macros/      the derives gg-engine re-exports
-  gg-api/         the tool API's protocol and projects' manifests, which gg-engine and tools share
+  gg-api/         the tool API, a game's view shared as it renders, and projects' manifests
 apps/             executables
   sandbox/        the engine's own app: a swarm of up to 100,000 sprites and a grid's scene file
-  editor/         the editor: the game's view in a panel among dockable panels
+  editor/         the editor: a project's game, embedded, in a panel among dockable panels
   player/         reference player, with no layers; runs cooked scenes without game code (to come)
 games/shards/     the first demo, a project: two players, alone or in lockstep (`--host`, `--join`)
 tools/gg/         the command-line tool, which `cargo gg` runs
@@ -41,7 +41,7 @@ check a change against the rest yourself.
 ```sh
 cargo build                       # the whole workspace
 cargo run -p sandbox
-cargo run -p editor
+cargo run -p editor               # in games/shards, the editor on Shards, its game embedded
 cargo run -p sandbox -- --help    # the flags every app shares
 cargo run -p sandbox -- --headless --frames 60   # does the engine run? 0 means cleanly
 cargo run -p sandbox -- --record target/run.recording   # a run's seed, commands and hashes

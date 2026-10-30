@@ -11,24 +11,27 @@ use std::fmt::Display;
 use std::fs;
 use std::hash::{BuildHasher, RandomState};
 use std::io::{BufReader, Write as _};
+use std::mem;
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 
+use gg_api::view::{Pacer, Writer};
 use gg_api::{
-    Applied, Apply, Authored, Capture, Captured, EntityList, Failure, Field, Hash, Hello, History,
-    Listed, Patched, Pulse, Request, Session, Snapshotted, Status, Step, Welcome,
+    Applied, Apply, Authored, Button, Capture, Captured, EntityList, Failure, Field, Hash, Hello,
+    History, Input, InputEvent, Listed, Patched, Pulse, Request, Session, Snapshotted, Status,
+    Step, View, Welcome,
 };
 use gg_core::{Error, Result};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use subsecond::JumpTable;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use super::{Waiting, json};
 use crate::edits::{Done, Edit};
@@ -36,14 +39,17 @@ use crate::layer::{Offered, Stack};
 use crate::main_loop::Stepper;
 use crate::net::Ticket;
 use crate::reflect::{self, Ident, Type};
-use crate::render_thread::{Extracted, Shot};
+use crate::render_thread::{Extracted, Publish, Shot};
 use crate::scene_files::SceneFile;
-use crate::{Context, Entity, EntityId, Name, Operation, World, patch, snapshot};
+use crate::{
+    Context, Entity, EntityId, Event, Key, MouseButton, Name, Operation, Scroll, World, patch,
+    snapshot,
+};
 
 /// The methods, as `api.unknown_method` lists them.
-const METHODS: [&str; 18] = [
-    "hello", "ping", "status", "pause", "resume", "step", "capture", "entities", "entity", "get",
-    "hash", "snapshot", "patch", "apply", "undo", "redo", "edits", "quit",
+const METHODS: [&str; 20] = [
+    "hello", "ping", "status", "pause", "resume", "step", "capture", "view", "input", "entities",
+    "entity", "get", "hash", "snapshot", "patch", "apply", "undo", "redo", "edits", "quit",
 ];
 
 /// The client a connection whose `hello` names none is, the author of its edits.
@@ -81,6 +87,15 @@ pub(crate) struct Api {
     riding_ticks: u64,
     /// The captures written without a path, which number their files.
     numbered: u64,
+    /// The memory a `view` asked for the view to be published to, or `None` to stop, until the
+    /// next frame back takes it to the render thread; and the name of the memory published to, or
+    /// asked for, which a `view` naming it again leaves as it is.
+    viewing: Option<Option<Writer>>,
+    memory: Option<String>,
+    /// What paces frames by the client's taking them, while the view is published.
+    pacer: Option<Pacer>,
+    /// Whether a frame that wasn't published has been warned of, since the view was asked for.
+    view_warned: bool,
     /// To the thread that writes captures' PNGs.
     pngs: Sender<Png>,
     /// Where snapshots without a path go, and how many have, which number their files.
@@ -122,6 +137,10 @@ enum Call {
     Resume,
     Step(u64),
     Capture(Option<PathBuf>),
+    /// The name of the memory to publish the view to, or `None` to stop.
+    View(Option<String>),
+    /// Events to hand the layers, each of which names a key that's a key's.
+    Input(Vec<InputEvent>),
     Entities {
         with: Option<String>,
         skip: usize,
@@ -287,6 +306,10 @@ impl Api {
             riding: Vec::new(),
             riding_ticks: 0,
             numbered: 0,
+            viewing: None,
+            memory: None,
+            pacer: None,
+            view_warned: false,
             pngs,
             snapshots: crate::beside_exe("snapshots"),
             snapshotted: 0,
@@ -386,6 +409,36 @@ impl Api {
                     self.steps.push((reply, until));
                 }
                 Call::Capture(path) => self.asked.push((reply, path)),
+                // A second writer of the memory would write the slot the first holds.
+                Call::View(memory) if memory.is_some() && memory == self.memory => {
+                    reply.send(Ok("{}".to_owned()));
+                }
+                Call::View(memory) => match memory.as_deref().map(Writer::open).transpose() {
+                    Ok(writer) => {
+                        match &memory {
+                            Some(memory) => info!(memory, "Publishing the view"),
+                            None => info!("No longer publishing the view"),
+                        }
+                        self.pacer = writer.as_ref().map(Writer::pacer);
+                        self.viewing = Some(writer);
+                        self.memory = memory;
+                        self.view_warned = false;
+                        reply.send(Ok("{}".to_owned()));
+                    }
+                    Err(error) => {
+                        let name = memory.unwrap_or_default();
+                        let message = format!("can't open the view's memory {name:?}: {error}");
+                        reply.send(Err(Failure::new("api.view", message)));
+                    }
+                },
+                Call::Input(events) => {
+                    let origin = cx.view().map_or([0, 0], |view| view.origin);
+                    for given in &events {
+                        let event = input_event(given, origin);
+                        let _ = stack.event(cx, &event.expect("checked as it was read"));
+                    }
+                    reply.send(Ok("{}".to_owned()));
+                }
                 Call::Entities { with, skip, take } => {
                     reply.send(list(world, with.as_deref(), skip, take));
                 }
@@ -502,9 +555,29 @@ impl Api {
 
     /// With the renderer back from a frame, `frame`, takes the view it read back, if it rode with
     /// captures and rendered, for a thread of its own to write each capture's PNG and answer it;
-    /// and has the next frame handed off, which shows the world after `ticks` ticks, read its view
-    /// back for the captures asked since, and for those whose frame had nothing to render into.
-    pub(crate) fn frame_back(&mut self, frame: &mut Extracted, ticks: u64) {
+    /// and has the next frame handed off, which shows the world after `ticks` ticks and started at
+    /// `started`, read its view back for the captures asked since, and for those whose frame had
+    /// nothing to render into, and publish it to the memory a `view` asked for, warning once of a
+    /// frame that wasn't, since the view was asked for.
+    pub(crate) fn frame_back(&mut self, frame: &mut Extracted, ticks: u64, started: SystemTime) {
+        if let Some(viewing) = self.viewing.take() {
+            frame.publish = viewing.map(|writer| Publish {
+                writer,
+                ticks,
+                started,
+                failed: None,
+            });
+        }
+        if let Some(publish) = &mut frame.publish {
+            if let Some(error) = publish.failed.take()
+                && !mem::replace(&mut self.view_warned, true)
+            {
+                let consequence = "frames go unpublished while that lasts";
+                warn!(code = error.code(), "{error:#}; {consequence}");
+            }
+            publish.ticks = ticks;
+            publish.started = started;
+        }
         match frame.captured.take() {
             Some(Ok(shot)) => {
                 let shot = Arc::new(shot);
@@ -547,6 +620,26 @@ impl Api {
             && self.asked.is_empty()
             && self.riding.is_empty()
             && self.held.is_none()
+    }
+
+    /// While the view is published, the number of the frame to be handed off next, as the client
+    /// will take it.
+    pub(crate) fn handing(&self) -> Option<u64> {
+        self.pacer
+            .as_ref()
+            .map(|pacer| pacer.published().saturating_add(1))
+    }
+
+    /// While the view is published, waits until the client has taken frame `handed`, as
+    /// [`handing`](Self::handing) gave it, for at most `timeout`.
+    pub(crate) fn pace(&self, handed: u64, timeout: Duration) {
+        let Some(pacer) = &self.pacer else {
+            return;
+        };
+        let start = Instant::now();
+        while pacer.taken() < handed && start.elapsed() < timeout {
+            thread::sleep(Duration::from_micros(250));
+        }
     }
 
     /// Waits for a request for at most `timeout`, holding it for the next turn to answer first.
@@ -1068,6 +1161,23 @@ fn parse(request: &Request) -> Result<Call, Failure> {
             }
             Call::Capture(path)
         }
+        "view" => {
+            let View { memory } = take(method, params)?;
+            Call::View(memory)
+        }
+        "input" => {
+            let Input { events } = take(method, params)?;
+            let unknown = events.iter().find_map(|given| match given {
+                InputEvent::Key { key, .. } if Key::from_name(key).is_none() => Some(key),
+                _ => None,
+            });
+            if let Some(key) = unknown {
+                let what =
+                    format!("names keys by their W3C `code`, as `KeyW`, and `{key}` is none");
+                return Err(bad_params(method, what));
+            }
+            Call::Input(events)
+        }
         "entities" => {
             let gg_api::Entities { with, skip, take } = self::take(method, params)?;
             if take > MOST_LISTED {
@@ -1106,6 +1216,46 @@ fn parse(request: &Request) -> Result<Call, Failure> {
         }
     };
     Ok(call)
+}
+
+/// The event `given` is, as the layers get it, a cursor's position over the view at `origin` in the
+/// main window taken to the window's; `None` for a key named as no key is.
+fn input_event(given: &InputEvent, origin: [u32; 2]) -> Option<Event<'_>> {
+    let event = match *given {
+        InputEvent::Key {
+            ref key,
+            pressed,
+            repeat,
+        } => Event::Key {
+            key: Key::from_name(key)?,
+            pressed,
+            repeat,
+        },
+        InputEvent::Text(ref text) => Event::Text(text),
+        InputEvent::Cursor([x, y]) => Event::CursorMoved {
+            x: x + f64::from(origin[0]),
+            y: y + f64::from(origin[1]),
+        },
+        InputEvent::CursorEntered => Event::CursorEntered,
+        InputEvent::CursorLeft => Event::CursorLeft,
+        InputEvent::Button { button, pressed } => Event::MouseButton {
+            button: match button {
+                Button::Left => MouseButton::Left,
+                Button::Right => MouseButton::Right,
+                Button::Middle => MouseButton::Middle,
+                Button::Back => MouseButton::Back,
+                Button::Forward => MouseButton::Forward,
+                Button::Other(number) => MouseButton::Other(number),
+            },
+            pressed,
+        },
+        InputEvent::Scroll(gg_api::Scroll::Lines([x, y])) => Event::Scroll(Scroll::Lines { x, y }),
+        InputEvent::Scroll(gg_api::Scroll::Pixels([x, y])) => {
+            Event::Scroll(Scroll::Pixels { x, y })
+        }
+        InputEvent::Focused(focused) => Event::Focused(focused),
+    };
+    Some(event)
 }
 
 /// Method `method`'s parameters, `params`, as a `T`, whose defaults stand for what isn't given.
@@ -1148,7 +1298,7 @@ mod tests {
 
     use super::*;
     use crate::dirs::tests::Scratch;
-    use crate::{Sprite, Tick, Transform};
+    use crate::{Sprite, Tick, Transform, Viewport};
 
     /// How long a test waits for what should come at once, past which it fails rather than hangs.
     const DEADLINE: Duration = Duration::from_secs(20);
@@ -1574,7 +1724,7 @@ mod tests {
                         _ => None,
                     };
                 }
-                api.frame_back(&mut frame, stepper.ticks);
+                api.frame_back(&mut frame, stepper.ticks, SystemTime::UNIX_EPOCH);
             },
         );
         assert_eq!(refused, "api.no_view");
@@ -1589,6 +1739,94 @@ mod tests {
         let rgb = &pixels[..info.buffer_size()];
         assert_eq!(rgb, [255, 0, 0, 0, 128, 255], "alpha goes");
         assert!(!frame.capture, "nothing rides once both are answered");
+    }
+
+    /// A client's input reaches the layers as the window's would, the cursor over the view taken
+    /// to the window's pixels, in order.
+    #[test]
+    fn input_reaches_the_layers_as_the_windows_would() {
+        let (mut api, session) = started("Api Input");
+        let mut cx = Context::seeded(5);
+        let view = Viewport {
+            origin: [10, 20],
+            size: [100, 50],
+        };
+        cx.extract(&mut Extracted::default(), view);
+        let mut stepper = Stepper::default();
+        let client = |mut client: Client| {
+            let events = json!({"events": [
+                {"key": {"key": "KeyW", "pressed": true}},
+                {"key": {"key": "KeyA", "pressed": true}},
+                {"key": {"key": "KeyA", "pressed": false}},
+                {"key": {"key": "MetaLeft", "pressed": true}},
+                {"button": {"button": "left", "pressed": true}},
+                {"cursor": [3, 4.5]},
+            ]});
+            client.call("input", events).expect("the input");
+        };
+        serving(&mut api, &mut cx, &mut stepper, session, client, |_, _| {});
+        let input = cx.input();
+        assert!(input.key_down(Key::KeyW));
+        assert!(!input.key_down(Key::KeyA), "released after its press");
+        assert!(input.key_down(Key::SuperLeft), "by its W3C name");
+        assert!(input.button_down(MouseButton::Left));
+        assert_eq!(input.cursor(), Some([13.0, 24.5]));
+    }
+
+    /// A client has the view published to the memory it made, which the next frame back takes to
+    /// the render thread, with what paces frames by it; a name that opens no memory is refused, and
+    /// leaves the view published as it was; and `null` stops publishing it.
+    #[test]
+    fn the_view_is_published_to_the_memory_a_client_names() {
+        let (mut api, session) = started("Api View");
+        let mut cx = Context::seeded(6);
+        let mut stepper = Stepper::default();
+        let mut frame = Extracted::default();
+        let client = |mut client: Client| {
+            let reader = gg_api::view::Reader::create(8, 4).expect("memory for the view");
+            let memory = json!({"memory": reader.name()});
+            client
+                .call("view", memory.clone())
+                .expect("the view published");
+            // Again, which leaves it as it is, rather than opening a second writer of the memory.
+            client
+                .call("view", memory)
+                .expect("the view published still");
+            let missing = json!({"memory": "gg-view-0-4294967295"});
+            let refused = client.call("view", missing).expect_err("no such memory");
+            (reader, refused.code)
+        };
+        let back = |api: &mut Api, stepper: &Stepper| {
+            api.frame_back(&mut frame, stepper.ticks, SystemTime::UNIX_EPOCH);
+        };
+        let (reader, refused) = serving(
+            &mut api,
+            &mut cx,
+            &mut stepper,
+            session.clone(),
+            client,
+            back,
+        );
+        assert_eq!(refused, "api.view");
+        let publish = frame.publish.as_ref().expect("the view published");
+        assert_eq!(publish.writer.asked(), Some([8, 4]));
+        assert_eq!(
+            api.handing(),
+            Some(1),
+            "the frame handed off next publishes first"
+        );
+        let client = |mut client: Client| {
+            client
+                .call("view", Value::Null)
+                .expect("publishing stopped");
+        };
+        let back = |api: &mut Api, stepper: &Stepper| {
+            api.frame_back(&mut frame, stepper.ticks, SystemTime::UNIX_EPOCH);
+        };
+        serving(&mut api, &mut cx, &mut stepper, session, client, back);
+        assert!(frame.publish.is_none());
+        assert_eq!(api.handing(), None);
+        drop(reader);
     }
 
     #[test]
@@ -1638,6 +1876,13 @@ mod tests {
             ("step", json!({"ticks": 10_001}), "api.bad_params"),
             ("step", json!({"tick": 2}), "api.bad_params"),
             ("capture", json!({"path": "relative.png"}), "api.bad_params"),
+            ("view", json!({"memory": 3}), "api.bad_params"),
+            ("input", Value::Null, "api.bad_params"),
+            (
+                "input",
+                json!({"events": [{"key": {"key": "W", "pressed": true}}]}),
+                "api.bad_params",
+            ),
             ("entities", json!({"take": 10_001}), "api.bad_params"),
             ("entity", json!({"id": "nope"}), "ecs.bad_id"),
             ("patch", Value::Null, "api.bad_params"),

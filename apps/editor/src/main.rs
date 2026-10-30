@@ -1,5 +1,5 @@
 //! The editor: the game's view in a panel among the editor's own, in a dock that fills its window.
-//! Until the tool API brings it a game, the view shows a world of the editor's own, three squares
+//! Outside a game's project, the view shows a world of the editor's own, three squares
 //! and two cameras, through the editor's camera, orthographic at first, as 2D games see theirs,
 //! over a grid, with a toolbar and a gizmo over it; or through the world's camera, as the game
 //! would, until the editor's camera moves. Play, at the middle of the title bar, at hand whichever
@@ -25,10 +25,12 @@
 //! and with Ctrl+N, Ctrl+O, Ctrl+S and Ctrl+Shift+S, Cmd for Ctrl on macOS. The Assets panel shows
 //! the files in the editor's assets folder, a folder at a time, and a scene dragged from it onto
 //! the view opens as Open opens one. When a file can't be read, opened or written, it says why,
-//! until that's dismissed.
+//! until that's dismissed. Started in a game's project, the editor runs the project's game
+//! instead, and shows its view, as [`game`] describes.
 
 mod assets;
 mod camera;
+mod game;
 mod grid;
 mod handles;
 mod overlay;
@@ -65,7 +67,19 @@ fn main() -> ExitCode {
     gg_engine::run(app())
 }
 
+/// The editor of the project it's started in, or else of its own world.
 fn app() -> App {
+    let project = std::env::current_dir()
+        .ok()
+        .and_then(|dir| gg_api::Project::find(&dir));
+    match project {
+        Some(dir) => game::app(dir),
+        None => own_app(),
+    }
+}
+
+/// The editor of a world of its own.
+fn own_app() -> App {
     let app = App::new("Editor").root(env!("CARGO_MANIFEST_DIR"));
     let app = app.custom_title_bar().view_panel("Viewport");
     let app = app

@@ -11,8 +11,12 @@ path = "src/main.rs"
 
 [dependencies]
 bytemuck = { workspace = true, features = ["derive"] }
+# The tool API's client, and the memory a game's view is shared through: the editor reaches a
+# project's game as the tools do.
+gg-api.workspace = true
 # A development build, as tools are.
 gg-engine = { workspace = true, features = ["dev"] }
+serde_json.workspace = true
 tracing.workspace = true
 
 [lints]

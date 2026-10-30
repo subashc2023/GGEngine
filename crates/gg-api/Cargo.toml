@@ -12,5 +12,17 @@ serde.workspace = true
 # their order, rather than sorted as serde_json's own values sort them.
 serde_json = { workspace = true, features = ["raw_value"] }
 
+# The memory a game's view is shared through: a file mapping on Windows, POSIX shared memory
+# elsewhere.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Memory",
+] }
+
+[target.'cfg(not(windows))'.dependencies]
+rustix = { workspace = true, features = ["fs", "mm", "shm"] }
+
 [lints]
 workspace = true

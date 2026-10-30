@@ -9,6 +9,9 @@ use gg_core::{Error, Result};
 #[derive(Debug, PartialEq)]
 pub(crate) struct Args {
     pub(crate) headless: bool,
+    /// Whether the run is embedded in the tool that started it, such as the editor: offscreen, in
+    /// real time, its view published to the tool through the tool API, as it asks.
+    pub(crate) embedded: bool,
     pub(crate) frames: Option<u64>,
     /// The frame captured through RenderDoc, counting from 1.
     pub(crate) capture: Option<NonZeroU64>,
@@ -47,10 +50,11 @@ pub(crate) enum Dump {
 
 /// The flags of a run that a replay, which renders nothing, records nothing and serves no tools,
 /// refuses.
-const NOT_REPLAYED: [&str; 12] = [
+const NOT_REPLAYED: [&str; 13] = [
     "--record",
     "--restore",
     "--headless",
+    "--embedded",
     "--frames",
     "--capture",
     "--gpu",
@@ -69,6 +73,9 @@ pub(crate) fn usage(program: &str) -> String {
 
 Options:
   --headless        Run without a window, rendering offscreen, a tick of the simulation a frame
+  --embedded        Run without a window, rendering offscreen in real time for the tool that
+                    started the run, such as the editor, which the tool API's `view` publishes the
+                    view to and its `input` forwards input from: a frame once it has taken the last
   --frames <N>      Exit after N frames
   --capture <N>     Capture frame N through RenderDoc, in a run under `renderdoccmd capture`
   --gpu <NAME>      Use the GPU whose name contains NAME, such as `--gpu amd`
@@ -101,6 +108,7 @@ on bad arguments.
 pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Args>> {
     let mut parsed = Args {
         headless: false,
+        embedded: false,
         frames: None,
         capture: None,
         gpu: None,
@@ -141,6 +149,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
         match flag {
             "-h" | "--help" => return Ok(None),
             "--headless" => parsed.headless = true,
+            "--embedded" => parsed.embedded = true,
             "--validation" => parsed.validation = true,
             "--no-validation" => parsed.validation = false,
             "--vsync" => parsed.vsync = true,
@@ -224,6 +233,20 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
                 .to_owned(),
         ));
     }
+    if parsed.embedded && parsed.headless {
+        return Err(bad(
+            "`--headless` and `--embedded` each run without a window, a tick a frame or in real \
+             time, so a run takes one"
+                .to_owned(),
+        ));
+    }
+    if parsed.embedded && !(cfg!(feature = "dev") && parsed.api) {
+        return Err(bad(
+            "`--embedded` publishes the view through the tool API, which only development builds \
+             serve, and not with `--no-api`"
+                .to_owned(),
+        ));
+    }
     if parsed.dump.is_some() && parsed.replay.is_none() {
         return Err(bad(
             "`--dump` stops a replay, so it needs `--replay`".to_owned()
@@ -299,6 +322,14 @@ mod tests {
         // Development builds serve the tool API unless told not to.
         assert!(args.api);
         assert!(!parse_strs(&["--no-api"]).unwrap().unwrap().api);
+        // A run embedded in a tool publishes its view through the API, which only they serve.
+        let embedded = parse_strs(&["--embedded"]).map(|args| args.unwrap().embedded);
+        let expected = if cfg!(feature = "dev") {
+            Ok(true)
+        } else {
+            Err("engine.args")
+        };
+        assert_eq!(embedded.map_err(|error| error.code()), expected);
         // The last snapshot given, which `gg run` gives after the game's own arguments.
         let args = parse_strs(&["--restore", "a.snapshot", "--restore=b.snapshot"]);
         let restore = args.unwrap().unwrap().restore;
@@ -362,6 +393,8 @@ mod tests {
             &["--host", "0.0.0.0:7700", "--join", "127.0.0.1:7700"],
             &["--join", "127.0.0.1:7700", "--record", "run.recording"],
             &["--host"],
+            &["--embedded", "--headless"],
+            &["--embedded", "--no-api"],
         ] {
             let error = parse_strs(args).unwrap_err();
             assert_eq!(error.code(), "engine.args", "{args:?}: {error}");

@@ -10,6 +10,8 @@ mod server;
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU8, Ordering};
+#[cfg(feature = "dev")]
+use std::time::Duration;
 
 use crate::Context;
 use crate::layer::Stack;
@@ -91,18 +93,58 @@ pub(crate) fn serve_paused(
 }
 
 /// With the renderer back from a frame, takes the view it read back, if it rode with captures and
-/// rendered, and has the next frame handed off, which shows the world after `ticks` ticks, read
-/// its view back if captures wait, as [`Api::frame_back`] says.
+/// rendered, and has the next frame handed off, which `cx` made and shows the world after `ticks`
+/// ticks, read its view back if captures wait or a client has it published, as
+/// [`Api::frame_back`] says.
 pub(crate) fn frame_back<R: Render>(
     api: &mut Option<Api>,
     render: &mut RenderThread<R>,
+    cx: &Context,
     ticks: u64,
 ) {
     #[cfg(feature = "dev")]
     if let Some(api) = api {
-        api.frame_back(render.frame_mut(), ticks);
+        api.frame_back(render.frame_mut(), ticks, cx.started);
     }
-    let _ = (api, render, ticks);
+    let _ = (api, render, cx, ticks);
+}
+
+/// The size the client the view is published to asks frames to be, while it's published, as an
+/// embedded run renders them, if it fits in the client's memory; with the renderer back from a
+/// frame.
+pub(crate) fn asked<R: Render>(render: &RenderThread<R>) -> Option<[u32; 2]> {
+    #[cfg(feature = "dev")]
+    if let Some(publish) = &render.frame().publish {
+        return publish.writer.asked();
+    }
+    let _ = render;
+    None
+}
+
+/// How long an embedded run waits for its client to take a frame, before it runs the next anyway:
+/// its ticks go on in time while the client takes none, as when its window is minimized.
+#[cfg(feature = "dev")]
+const PACED: Duration = Duration::from_millis(100);
+
+/// Before the frame's handed off, while the view is published, the number of the frame, as the
+/// client will take it, which [`pace`] then waits for.
+pub(crate) fn handing(api: &Option<Api>) -> Option<u64> {
+    #[cfg(feature = "dev")]
+    if let Some(api) = api {
+        return api.handing();
+    }
+    let _ = api;
+    None
+}
+
+/// Once the frame's handed off, waits until the client has taken it, as [`handing`] numbered it,
+/// for at most [`PACED`], so that an embedded run renders no frame its client doesn't take.
+pub(crate) fn pace(api: &Option<Api>, handed: u64) {
+    #[cfg(feature = "dev")]
+    if let Some(api) = api {
+        api.pace(handed, PACED);
+    }
+    let _ = (api, handed);
 }
 
 /// While the simulation is paused with nothing asked of the frames, waits for a request for at

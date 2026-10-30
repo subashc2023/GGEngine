@@ -29,19 +29,26 @@ use crate::{App, BUILD, egui_context};
 /// frames, each waits up to a tick's time for a request, rather than spinning. The run starts from
 /// `snapshot`'s world, at its ticks, if it's given one, rather than the one its layers attach, and
 /// drops it once it has.
+///
+/// Embedded (`--embedded`), it steps the simulation in real time instead, as a windowed run does,
+/// with no UI, and its view fills its image, at the size the client it's published to asks for:
+/// each frame then waits for the client to take it, as [`api::pace`] says, and until a client has
+/// it published, frames come a tick apart or more.
 pub(crate) fn run_headless(
     app: &mut App,
     args: &Args,
     mut api: Option<Api>,
     snapshot: Option<Snapshot>,
 ) -> Result<Ran> {
-    let (width, height) = (1280, 720);
+    let embedded = args.embedded;
+    let (mut width, mut height) = (1280, 720);
     let renderer = Renderer::headless(&settings(app, args), width, height)?;
     let mut render = RenderThread::start(renderer)?;
     let mut cx = Context::of_run(None, app);
     let mut clock = Clock::default();
     let mut stepper = match app.headless_step {
         Some(_) => Stepper::default(),
+        None if embedded => Stepper::default(),
         None => Stepper::lockstep(),
     };
     let egui = egui_context();
@@ -54,7 +61,7 @@ pub(crate) fn run_headless(
         app.custom_title_bar,
         &app.docked,
     );
-    let mut egui_runs = true;
+    let mut egui_runs = !embedded;
     // The frames handed over to render, and those rendered.
     let (mut handed, mut frames) = (0, 0);
     let started = match snapshot {
@@ -85,6 +92,7 @@ pub(crate) fn run_headless(
             });
             // The clock starts every frame, even with a step set: egui and the run's end read it.
             let since_last = clock.start_frame();
+            let frame_started = Instant::now();
             let dt = app.headless_step.unwrap_or(since_last);
             let pass = run_frame(
                 &mut app.stack,
@@ -111,9 +119,31 @@ pub(crate) fn run_headless(
             if take_back(&mut render, &mut cx, tessellated)?.is_some() {
                 frames += 1;
             }
-            api::frame_back(&mut api, &mut render, stepper.ticks);
+            api::frame_back(&mut api, &mut render, &cx, stepper.ticks);
+            let mut view = view;
+            if embedded {
+                if let Some(asked) = api::asked(&render)
+                    && asked != [width, height]
+                {
+                    [width, height] = asked;
+                    render.renderer().resize(width, height);
+                }
+                view = Viewport {
+                    origin: [0, 0],
+                    size: [width, height],
+                };
+            }
+            let handing = api::handing(&api).filter(|_| embedded);
             hand_off(&mut render, &mut cx, view, ui, Vec::new());
             handed += 1;
+            match handing {
+                Some(frame) => api::pace(&api, frame),
+                None if embedded => {
+                    let tick = frame_started + crate::Tick::DT;
+                    std::thread::sleep(tick.saturating_duration_since(Instant::now()));
+                }
+                None => {}
+            }
             // Rather than spinning while a lockstep peer's inputs are on their way.
             if app.stack.net_waits(stepper.ticks) {
                 std::thread::sleep(Duration::from_millis(1));
@@ -173,6 +203,10 @@ pub(crate) fn run_frame(
     cx.perf.start_frame(dt);
     let _zone = gg_core::zone!();
     let start = Instant::now();
+    #[cfg(feature = "dev")]
+    {
+        cx.started = std::time::SystemTime::now();
+    }
     if let Some(ticks) = stack.net_turn(cx, stepper.ticks) {
         stepper.jump_to(ticks);
     }
@@ -582,12 +616,15 @@ impl Ran {
             render_ms_p95 = perf.render.p95,
             wait_ms_mean = perf.wait.mean,
             wait_ms_p95 = perf.wait.p95,
+            publish_ms_mean = perf.publish.mean,
+            publish_ms_p95 = perf.publish.p95,
             draws_max = perf.draws_max,
             instances_max = perf.instances_max,
             triangles_max = perf.triangles_max,
             gpu = self.gpu.as_str(),
             build = BUILD,
             headless = args.headless,
+            embedded = args.embedded,
             vsync = args.vsync,
             validated = self.validation.enabled(),
             "Frame times"

@@ -315,7 +315,7 @@ impl Handler<'_> {
                 event_loop.exit();
             }
         }
-        api::frame_back(&mut self.api, render, self.stepper.ticks);
+        api::frame_back(&mut self.api, render, &self.cx, self.stepper.ticks);
         // A run that's ending hands over no more frames: one past `--frames` would present.
         let mut close = false;
         if !event_loop.exiting() {

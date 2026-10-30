@@ -35,7 +35,7 @@ games alone; a manifest that doesn't read is an error. Elsewhere, it works on th
 
 Build and run:
   run [PACKAGE] [--release] [--no-patch] [--hang <SECONDS>] [--snapshot <SECONDS>] [--peers <N>]
-      [-- <ARGS>...]
+      [--embedded] [-- <ARGS>...]
       Build PACKAGE's development build, the project's game without one, and run a copy of it with
       ARGS, printing a line as it starts, as it serves the tool API, and as it ends: `exited`, or
       `crashed` or `hung`, with the errors its log holds. A run whose frames stop for `--hang`
@@ -62,7 +62,11 @@ Build and run:
       build at once. With `--peers 2`, it runs the two peers of a lockstep session from one build,
       the host given `--host` and the joiner `--join` at a free port of the loopback, each
       `started` naming its `player`: patched together, and stopped and started again together as
-      either ends or the game is rebuilt.
+      either ends or the game is rebuilt. With `--embedded`, for the tool that started gg, such as
+      the editor, the game is given `--embedded`, running offscreen for the tool, which shows its
+      view, and the run ends cleanly, stopping the game, once gg's stdin closes (`closed`), as the
+      tool ends, a build under way finishing first. A second `run` of PACKAGE while one runs is
+      refused (`gg.running`).
   check [PACKAGE] [--release] [--frames <N>] [--timeout <SECONDS>] [-- <ARGS>...]
       Build PACKAGE, the project's game without one, and run it headless for N frames (60) with
       ARGS, and print what it did: its exit status, its warnings and errors, and its frame times.
@@ -429,8 +433,16 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
                 hang: parsed.seconds("--hang", 10)?,
                 snapshot: parsed.seconds("--snapshot", 5)?,
                 peers: parsed.number("--peers", 1)?,
+                embedded: parsed.switch("--embedded"),
                 args: std::mem::take(&mut parsed.rest),
             };
+            if run.embedded && run.peers > 1 {
+                return Err(bad(
+                    "`--embedded` runs the game for the tool that started gg, which shows one \
+                     game's view, so it takes no `--peers 2`"
+                        .to_owned(),
+                ));
+            }
             if !(1..=2).contains(&run.peers) {
                 return Err(bad(format!(
                     "`--peers` takes 1, a game alone, or 2, a lockstep session's host and joiner, \
@@ -661,7 +673,16 @@ mod tests {
         let Ok(Command::Run(run)) = parsed(&["run", "shards", "--peers", "2"]) else {
             panic!("a run");
         };
-        assert_eq!(run.peers, 2);
+        assert_eq!((run.peers, run.embedded), (2, false));
+        let Ok(Command::Run(run)) = parsed(&["run", "shards", "--embedded"]) else {
+            panic!("a run");
+        };
+        assert!(run.embedded);
+        let refused = parsed(&["run", "shards", "--embedded", "--peers", "2"]).err();
+        assert_eq!(
+            refused.map(|failure| failure.code).as_deref(),
+            Some("gg.args")
+        );
         // Tests run in the package's directory, which is in no project.
         assert_eq!(run.project, None);
         let shards = std::path::absolute("../../games/shards").unwrap();

@@ -2,11 +2,13 @@
 //! from a snapshot after a crash, a hang or a rebuild, until it exits, alone or as the two peers of a
 //! lockstep session; or headless for a set number of frames, as a check.
 
-use std::fs;
+use std::fs::{self, TryLockError};
 use std::io;
 use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -19,7 +21,7 @@ use crate::{Scope, build, game};
 /// What `gg run` runs: a package, the project gg works in, if any, the package's profile, whether
 /// it's patched, unless `--no-patch`, how long its frames may stop before it has hung, how often
 /// it's snapshotted, zero for never, how many peers of a lockstep session it runs, 1 for a game
-/// alone, and the arguments each is given.
+/// alone, whether it's embedded in the tool that started gg, and the arguments each is given.
 pub(crate) struct Run {
     pub(crate) package: String,
     pub(crate) project: Option<Scope>,
@@ -28,6 +30,7 @@ pub(crate) struct Run {
     pub(crate) hang: Duration,
     pub(crate) snapshot: Duration,
     pub(crate) peers: usize,
+    pub(crate) embedded: bool,
     pub(crate) args: Vec<String>,
 }
 
@@ -101,6 +104,9 @@ const PULSE: Duration = Duration::from_secs(5);
 /// of its own writes it, which takes a while for a large world in a debug build.
 const SNAPSHOT: Duration = Duration::from_secs(60);
 
+/// Why an embedded run ends as its tool does, as its `closed` event says.
+const CLOSED: &str = "gg's stdin closed, as the tool that started it ended";
+
 /// How long a game asked to quit, as its executable has been rebuilt, has to end before it's
 /// killed.
 const QUIT: Duration = Duration::from_secs(10);
@@ -130,11 +136,19 @@ pub(crate) fn event(event: &Value) {
 /// that they always run the same code; each starts from its own snapshot, the joiner going on from
 /// the host's world as it joins.
 ///
-/// Fails as [`check_game`] does, with `gg.build` if it doesn't build, `gg.cargo` if cargo can't
-/// say what the package is, and `gg.run` if it can't be copied, started or waited for, or no port
-/// is free for the peers.
+/// Embedded, each game is given `--embedded`, for the tool that started gg, which shows its view,
+/// and the run ends cleanly once gg's stdin closes, as the tool ends, stopping its games, though a
+/// build under way finishes first, as one does as the run ends however it ends.
+///
+/// Fails as [`check_game`] does, with `gg.running` if another `gg run` of the package runs, as
+/// [`lock`] says, `gg.build` if it doesn't build, `gg.cargo` if cargo can't say what the package
+/// is, and `gg.run` if it can't be copied, started or waited for, or no port is free for the
+/// peers.
 pub(crate) fn run(run: &Run) -> Result<bool, Failure> {
     check_game(&run.package, run.project.as_ref())?;
+    let _lock = lock(&run.package, run.dir())?;
+    // Before the build, which the tool may end under way.
+    let closed = run.embedded.then(closes);
     let patches = Patches::new(run)?;
     let exe = match &patches {
         Some(patches) => patches.exe().to_owned(),
@@ -150,12 +164,24 @@ pub(crate) fn run(run: &Run) -> Result<bool, Failure> {
     let pid = std::process::id();
     remove_leftovers(&exe, pid);
     let peers = peers_args(run.peers)?.into_iter().enumerate();
-    let peers = peers.map(|(peer, args)| Peer {
-        args,
-        copy: running_copy(&exe, pid, peer),
-        snapshot: snapshots.join(snapshot_name(&run.package, pid, peer)),
-        latest: None,
+    let peers = peers.map(|(peer, mut args)| {
+        if run.embedded {
+            args.insert(0, "--embedded".to_owned());
+        }
+        Peer {
+            args,
+            copy: running_copy(&exe, pid, peer),
+            snapshot: snapshots.join(snapshot_name(&run.package, pid, peer)),
+            latest: None,
+        }
     });
+    if closed
+        .as_ref()
+        .is_some_and(|closed| closed.load(Ordering::Relaxed))
+    {
+        event(&json!({"event": "closed", "why": CLOSED}));
+        return Ok(true);
+    }
     let mut supervisor = Supervisor {
         run,
         peers: peers.collect(),
@@ -166,8 +192,12 @@ pub(crate) fn run(run: &Run) -> Result<bool, Failure> {
         served: false,
         failed: None,
         patches,
+        closed,
     };
     let supervised = supervisor.supervise();
+    if let Some(patches) = &mut supervisor.patches {
+        patches.finish();
+    }
     // Once its games have ended; one still running keeps its copy, and the patches' libraries it
     // loaded.
     let copies = supervisor.peers.iter();
@@ -180,6 +210,57 @@ pub(crate) fn run(run: &Run) -> Result<bool, Failure> {
         patches.remove_libs();
     }
     supervised
+}
+
+/// Takes the lock of `package`'s `gg run`, a file in the target directory cargo builds the
+/// workspace into, as `cargo metadata` run in `dir` says, which the process holds until it ends,
+/// however it ends, so that a second `gg run` of the game is refused: the two would build, patch
+/// and restart it over each other.
+///
+/// Fails with `gg.running` if another process holds it, `gg.cargo` if cargo can't say where the
+/// target directory is, and `gg.run` if the file can't be opened or locked.
+fn lock(package: &str, dir: Option<&Path>) -> Result<fs::File, Failure> {
+    let target = build::target_dir(dir)?;
+    let _ = fs::create_dir_all(&target);
+    lock_at(&target.join(format!("gg-run-{package}.lock")), package)
+}
+
+/// Takes the lock of `package`'s `gg run` at `path`, as [`lock`] says.
+fn lock_at(path: &Path, package: &str) -> Result<fs::File, Failure> {
+    let failed = |error: &dyn std::fmt::Display| {
+        let message = format!("can't lock {}: {error}", path.display());
+        Failure::new("gg.run", message)
+    };
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .map_err(|error| failed(&error))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(TryLockError::WouldBlock) => Err(Failure::new(
+            "gg.running",
+            format!(
+                "another `gg run` runs {package}, holding {}, and one run builds, patches and \
+                 restarts a game; end it, or reach its game with gg's other commands",
+                path.display()
+            ),
+        )),
+        Err(TryLockError::Error(error)) => Err(failed(&error)),
+    }
+}
+
+/// Watches gg's stdin on a thread of its own, and returns what it sets once stdin closes, as the
+/// tool that started gg ends, whatever it wrote.
+fn closes() -> Arc<AtomicBool> {
+    let closed = Arc::new(AtomicBool::new(false));
+    let setting = closed.clone();
+    thread::spawn(move || {
+        let _ = io::copy(&mut io::stdin().lock(), &mut io::sink());
+        setting.store(true, Ordering::Relaxed);
+    });
+    closed
 }
 
 /// The arguments each of `peers` peers is given beside the run's: none for a game alone; for two,
@@ -227,6 +308,8 @@ struct Supervisor<'a> {
     served: bool,
     failed: Option<String>,
     patches: Option<Patches>,
+    /// Set once gg's stdin closes, while the run's embedded.
+    closed: Option<Arc<AtomicBool>>,
 }
 
 /// A peer of the game under `gg run`, or the game alone: the arguments it's given beside the run's,
@@ -291,18 +374,23 @@ impl Supervisor<'_> {
                     break;
                 }
             }
-            if happened.is_none() && rebuilt {
+            if (self.closed.as_ref()).is_some_and(|closed| closed.load(Ordering::Relaxed)) {
+                event(&json!({"event": "closed", "why": CLOSED}));
+                happened = Some((0, Happened::Closed));
+            } else if happened.is_none() && rebuilt {
                 happened = Some((0, Happened::Rebuilt));
             }
             let Some((ended, happened)) = happened else {
                 thread::sleep(Duration::from_millis(100));
                 continue;
             };
-            // The rest stop, snapshotted first, so that they start again with the one that ended.
-            let rebuild = matches!(happened, Happened::Rebuilt);
+            // The rest stop, snapshotted first, so that they start again with the one that ended;
+            // or all of them, not, as the run ends.
+            let all = matches!(happened, Happened::Rebuilt | Happened::Closed);
+            let snapshot = !matches!(happened, Happened::Closed);
             for (peer, game) in games.iter_mut().enumerate() {
-                if rebuild || peer != ended {
-                    self.stop(peer, game)?;
+                if all || peer != ended {
+                    self.stop(peer, game, snapshot)?;
                 }
             }
             games.clear();
@@ -415,19 +503,19 @@ impl Supervisor<'_> {
         }
         if self.serves && game.session.is_none() {
             let pid = game.pid;
-            let found = Session::list(&Session::dir(&self.dir)).into_iter();
-            game.session = found
-                .map(|(_, session)| session)
-                .find(|session| session.pid == pid);
-            if let Some(session) = &game.session {
+            let mut found = Session::list(&Session::dir(&self.dir)).into_iter();
+            let found = found.find(|(_, session)| session.pid == pid);
+            if let Some((file, session)) = found {
                 event(&json!({
                     "event": "serving",
                     "pid": pid,
                     "app": session.app,
                     "address": session.address,
+                    "session": file,
                     "project": session.project,
                     "log": session.log,
                 }));
+                game.session = Some(session);
                 self.served = true;
             }
         }
@@ -546,17 +634,20 @@ impl Supervisor<'_> {
         }
     }
 
-    /// Stops `game`, peer `peer`'s, as its executable has been rebuilt or another peer ended: if it
-    /// serves, snapshots it first, once a snapshot in flight is done, and asks it to quit, killing
-    /// it if it hasn't ended within [`QUIT`]; if it doesn't serve yet, kills it.
-    fn stop(&mut self, peer: usize, game: &mut Game) -> Result<(), Failure> {
+    /// Stops `game`, peer `peer`'s, as its executable has been rebuilt, another peer ended or the
+    /// run ends: if it serves, snapshots it first if `snapshot`, once a snapshot in flight is done,
+    /// and asks it to quit, killing it if it hasn't ended within [`QUIT`]; if it doesn't serve yet,
+    /// kills it.
+    fn stop(&mut self, peer: usize, game: &mut Game, snapshot: bool) -> Result<(), Failure> {
         match game.session.clone() {
             Some(session) => {
                 if let Some(taken) = game.landed() {
                     self.note(peer, game, taken);
                 }
-                let taken = snapshot(&session, &self.peers[peer].snapshot);
-                self.note(peer, game, taken);
+                if snapshot {
+                    let taken = self::snapshot(&session, &self.peers[peer].snapshot);
+                    self.note(peer, game, taken);
+                }
                 if let Ok(mut client) = Client::connect(&session, "gg", PULSE) {
                     let _ = client.call("quit", Value::Null);
                 }
@@ -633,6 +724,9 @@ enum Happened {
     Refused,
     /// Its executable was rebuilt, and its process, if one ran, has stopped.
     Rebuilt,
+    /// gg's stdin closed, as the tool that started an embedded run ended, and its processes have
+    /// stopped.
+    Closed,
 }
 
 /// What `gg run` does next.
@@ -657,6 +751,7 @@ enum Next {
 fn next(happened: Happened, latest: Option<&Snapshotted>, restarts: bool) -> Next {
     match happened {
         Happened::Exited { clean } => Next::End(clean),
+        Happened::Closed => Next::End(true),
         Happened::Failed { served: false, .. } => Next::End(false),
         Happened::Failed { .. } if !restarts => Next::End(false),
         Happened::Failed { snapshotted, .. } if snapshotted => Next::Start(latest.cloned()),
@@ -933,6 +1028,7 @@ mod tests {
             hang: Duration::from_secs(10),
             snapshot: Duration::from_secs(snapshot),
             peers: 1,
+            embedded: false,
             args: args.iter().map(|&arg| arg.to_owned()).collect(),
         }
     }
@@ -1045,6 +1141,19 @@ mod tests {
     }
 
     #[test]
+    fn a_second_run_of_a_game_is_refused_until_the_first_ends() {
+        let dir = std::env::temp_dir().join(format!("gg-run-lock-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("gg-run-shards.lock");
+        let first = lock_at(&path, "shards").expect("the first run's lock");
+        let refused = lock_at(&path, "shards").err().map(|failure| failure.code);
+        assert_eq!(refused.as_deref(), Some("gg.running"));
+        drop(first);
+        lock_at(&path, "shards").expect("the lock, once the first run has ended");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_game_starts_again_from_its_latest_snapshot_or_waits_for_a_rebuild() {
         let latest = Snapshotted {
             path: PathBuf::from("sandbox-1.snapshot"),
@@ -1083,6 +1192,8 @@ mod tests {
             let waits = next(failed(false, restored), Some(&latest), true);
             assert!(matches!(waits, Next::Wait(_)), "{waits:?}");
         }
+        // The tool an embedded run is for ending ends it, cleanly.
+        assert_eq!(next(Happened::Closed, Some(&latest), true), Next::End(true));
         // A rebuild starts it from the latest, or afresh if there's none; a refusal, afresh.
         assert_eq!(next(Happened::Rebuilt, Some(&latest), true), from_latest);
         assert_eq!(next(Happened::Rebuilt, None, true), Next::Start(None));

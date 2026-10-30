@@ -22,9 +22,9 @@ use bytemuck::NoUninit;
 use gg_core::math::{self, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{
     AlphaMode, Blend, Circle, DrawCounts, Draws, Line, Material, Mesh, MeshDraw, Meshes, Mipmaps,
-    ModelVertex, Outline, Pick, Projection, RenderData, Renderer, Sampler, Settings, Shaders,
-    Sprite, SpriteSheet, Texture, Textures, Ui, UploadPath, Uploads, ViewCallback, Viewpoint,
-    Viewport, Wrap,
+    ModelVertex, Outline, Pick, Pixels, Projection, RenderData, Renderer, Sampler, Settings,
+    Shaders, Sprite, SpriteSheet, Texture, Textures, Ui, UploadPath, Uploads, ViewCallback,
+    Viewpoint, Viewport, Wrap,
 };
 
 /// Runs each test through `tests`, by the name it's written with; after `uploading by`, giving
@@ -76,6 +76,8 @@ fn main() -> ExitCode {
         outlines_match_their_reference,
         lines_match_their_reference,
         views_match_their_reference,
+        views_read_back_as_they_render,
+        pixels_show_in_the_view,
         a_view_in_the_ui_matches_its_reference,
         replaced_shaders_draw_from_the_next_frame,
         pipelines_go_through_the_cache,
@@ -255,6 +257,8 @@ impl Stores {
             draws,
             picks: &[],
             outline: None,
+            read_view: false,
+            pixels: None,
         }
     }
 }
@@ -2068,6 +2072,148 @@ fn render_without_ui(renderer: &mut Renderer, data: RenderData<'_>) {
         renderer.render(data, ui, &mut []).expect("a frame"),
         "an offscreen image can always be rendered into"
     );
+}
+
+/// The `size` pixels at `origin` of a frame `width` pixels wide, rows of RGBA8, tightly packed.
+fn region(frame: &[u8], width: u32, origin: [u32; 2], size: [u32; 2]) -> Vec<u8> {
+    let row = |y: u32| {
+        let start = ((origin[1] + y) * width + origin[0]) as usize * 4;
+        &frame[start..start + size[0] as usize * 4]
+    };
+    (0..size[1]).flat_map(row).copied().collect()
+}
+
+/// The pixels of a headless renderer's last frame.
+fn frame_pixels(renderer: &mut Renderer) -> Vec<u8> {
+    (renderer.read_back())
+        .expect("the frame's pixels")
+        .expect("a headless renderer's frame can be read back")
+}
+
+/// The view a frame read back, as `renderer` gives it, if it read one.
+fn view_read(renderer: &Renderer) -> Option<([u32; 2], Vec<u8>)> {
+    let read = renderer.view_read().expect("a wait for the frame")?;
+    let [width, height] = read.size();
+    let mut pixels = vec![0; (width * height * 4) as usize];
+    read.read_into(&mut pixels).expect("the view's pixels");
+    Some((read.size(), pixels))
+}
+
+/// Draws a square in a view at an offset in the frame, which a frame that asks reads back, as it
+/// shows in the frame, and one that doesn't reads nothing back; then has a frame render into an
+/// offscreen image of another size, which its view fills.
+fn views_read_back_as_they_render() {
+    let mut renderer = renderer(64, 48);
+    let mut stores = Stores::default();
+    let flat = (stores.shaders)
+        .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+        .expect("a shader");
+    let square = square(&mut stores.meshes);
+    let mut draws = Draws::default();
+    draws.push(square, flat, Mat4::IDENTITY, Vec4::new(1.0, 0.5, 0.0, 1.0));
+    let viewpoint = Viewpoint {
+        projection: Projection::Orthographic {
+            height: 2.0,
+            near: -1.0,
+            far: 1.0,
+        },
+        ..Viewpoint::default()
+    };
+    let viewport = Viewport {
+        origin: [8, 4],
+        size: [40, 30],
+    };
+    for read_view in [true, false] {
+        let data = RenderData {
+            read_view,
+            ..stores.data(viewport, viewpoint, &draws)
+        };
+        render_without_ui(&mut renderer, data);
+        let frame = frame_pixels(&mut renderer);
+        let shown = region(&frame, 64, viewport.origin, viewport.size);
+        let orange = |&[r, g, b, _]: &[u8; 4]| r > 240 && (150..220).contains(&g) && b < 20;
+        assert!(
+            shown.as_chunks::<4>().0.iter().any(orange),
+            "the square shows"
+        );
+        let read = view_read(&renderer);
+        assert_eq!(read, read_view.then_some((viewport.size, shown)));
+    }
+    renderer.resize(32, 16);
+    let data = RenderData {
+        read_view: true,
+        ..stores.data(filling([32, 16]), viewpoint, &draws)
+    };
+    render_without_ui(&mut renderer, data);
+    let frame = frame_pixels(&mut renderer);
+    assert_eq!(
+        frame.len(),
+        32 * 16 * 4,
+        "the frame's image is the new size"
+    );
+    assert_eq!(view_read(&renderer), Some(([32, 16], frame)));
+    shut_down(renderer);
+}
+
+/// Shows pixels in the view, as far as they reach of it, the rest of it the clear color: new ones,
+/// the same again, ones larger than the view, and ones to show again at a size no frame wrote,
+/// which show nothing. Nothing is drawn in the view meanwhile.
+fn pixels_show_in_the_view() {
+    let mut renderer = renderer(48, 32);
+    let mut stores = Stores::default();
+    let flat = (stores.shaders)
+        .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+        .expect("a shader");
+    let square = square(&mut stores.meshes);
+    let mut draws = Draws::default();
+    let huge = Mat4::from_scale(Vec3::splat(100.0));
+    draws.push(square, flat, huge, Vec4::new(1.0, 1.0, 1.0, 1.0));
+    let viewport = filling([48, 32]);
+    let viewpoint = Viewpoint::default();
+    let nothing = Draws::default();
+    render_without_ui(&mut renderer, stores.data(viewport, viewpoint, &nothing));
+    let clear = frame_pixels(&mut renderer);
+    // Each pixel its own, so that a pixel out of its place shows.
+    let pattern = |[width, height]: [u32; 2]| -> Vec<u8> {
+        let pixel = |i: u32| [(i * 7) as u8, (i * 13) as u8, (i * 29) as u8, 255];
+        (0..width * height).flat_map(pixel).collect()
+    };
+    let small = pattern([16, 8]);
+    let large = pattern([64, 40]);
+    for (size, bytes) in [
+        ([16, 8], Some(&small[..])),
+        ([16, 8], None),
+        ([64, 40], Some(&large[..])),
+        ([20, 10], None),
+    ] {
+        let data = RenderData {
+            pixels: Some(Pixels { size, bytes }),
+            ..stores.data(viewport, viewpoint, &draws)
+        };
+        render_without_ui(&mut renderer, data);
+        let frame = frame_pixels(&mut renderer);
+        let expected = match size {
+            [16, 8] => {
+                let mut expected = clear.clone();
+                for y in 0..8 {
+                    let at = (y * 48 * 4) as usize;
+                    let row = (y * 16 * 4) as usize;
+                    expected[at..at + 64].copy_from_slice(&small[row..row + 64]);
+                }
+                expected
+            }
+            [64, 40] => region(&large, 64, [0, 0], [48, 32]),
+            _ => clear.clone(),
+        };
+        let off = (frame.iter().zip(&expected)).filter(|&(&a, &b)| a.abs_diff(b) > 1);
+        assert_eq!(
+            off.count(),
+            0,
+            "{size:?} pixels, {}",
+            bytes.map_or("again", |_| "new")
+        );
+    }
+    shut_down(renderer);
 }
 
 /// What [`replaced_shaders_draw_from_the_next_frame`] writes as its shader, in the color `COLOR`

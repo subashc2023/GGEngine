@@ -34,6 +34,8 @@ pub(crate) struct Sample {
     /// Its waits: for the GPU to finish an earlier frame, and for the display to let go of an
     /// image.
     pub(crate) wait: u64,
+    /// Of the render, copying the game's view into the memory of the client it's published to.
+    pub(crate) publish: u64,
     /// Instanced draws in the game's view.
     pub(crate) draws: u64,
     /// The meshes they drew.
@@ -58,6 +60,7 @@ impl Sample {
         self.handoff = f(self.handoff, other.handoff);
         self.render = f(self.render, other.render);
         self.wait = f(self.wait, other.wait);
+        self.publish = f(self.publish, other.publish);
         self.draws = f(self.draws, other.draws);
         self.instances = f(self.instances, other.instances);
         self.triangles = f(self.triangles, other.triangles);
@@ -121,6 +124,7 @@ impl Perf {
             sample.handoff = nanos(handoff);
             sample.render = nanos(rendered.render.saturating_sub(rendered.wait));
             sample.wait = nanos(rendered.wait);
+            sample.publish = nanos(rendered.publish);
             sample.draws = rendered.drawn.draws as u64;
             sample.instances = rendered.drawn.instances as u64;
             sample.triangles = rendered.drawn.triangles as u64;
@@ -195,6 +199,7 @@ impl Perf {
             handoff: stats(|s| s.handoff),
             render: stats(|s| s.render),
             wait: stats(|s| s.wait),
+            publish: stats(|s| s.publish),
             draws_max: self.max.draws,
             instances_max: self.max.instances,
             triangles_max: self.max.triangles,
@@ -218,6 +223,7 @@ pub(crate) struct Summary {
     pub(crate) handoff: Stats,
     pub(crate) render: Stats,
     pub(crate) wait: Stats,
+    pub(crate) publish: Stats,
     pub(crate) draws_max: u64,
     pub(crate) instances_max: u64,
     pub(crate) triangles_max: u64,
@@ -575,6 +581,7 @@ mod tests {
             presented: Ok(presented),
             render,
             wait,
+            publish: Duration::ZERO,
             drawn,
         }
     }
@@ -702,6 +709,7 @@ mod tests {
                     handoff: ms(5),
                     render: ms(6),
                     wait: ms(4),
+                    publish: 0,
                     draws: 7,
                     instances: 900,
                     triangles: 1800,

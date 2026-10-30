@@ -28,13 +28,15 @@ use std::time::Duration;
 use gg_core::{Error, Result};
 use gg_gpu::{
     ColorImage, DepthImage, Device, Frames, IdImage, Instance, InstanceDesc, Surface, Swapchain,
-    Target,
+    Target, Texture as GpuTexture, TextureFormat,
 };
 use tracing::{info, trace};
 
 pub use circle::Circle;
 pub use draws::Draws;
-pub use gg_gpu::{Blend, MAX_TEXTURE_SIZE, Sampler, UploadPath, Validation, Window, Wrap};
+pub use gg_gpu::{
+    Blend, ImageRead, MAX_TEXTURE_SIZE, Sampler, UploadPath, Validation, Window, Wrap,
+};
 pub use line::Line;
 pub use mesh::{Mesh, MeshDraw, Meshes};
 #[doc(hidden)]
@@ -52,6 +54,9 @@ use mesh::MeshPass;
 use pick::Picks;
 use ui::UiPass;
 use view::{Shown, ViewPass};
+
+/// The debug name of a headless renderer's image.
+const OFFSCREEN: &str = "offscreen color";
 
 /// The `size` pixels of a frame whose top left is at `origin`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,6 +147,24 @@ pub struct RenderData<'a> {
     pub picks: &'a [Pick],
     /// What the frame outlines in the view, after reading the picks back, if anything.
     pub outline: Option<Outline>,
+    /// Whether the frame reads the view back as it renders it, which [`Renderer::view_read`] then
+    /// gives.
+    pub read_view: bool,
+    /// Pixels the view shows in place of what `draws` would draw, from its top left, each onto one
+    /// of the frame's, as far as they reach of it, the rest of it the clear color: the view of
+    /// another process's game, say. The frame draws nothing in the view then, and answers its
+    /// picks 0. Pixels the frame is to show again, which no frame wrote at their size, as a frame
+    /// with nothing to render into doesn't, show nothing.
+    pub pixels: Option<Pixels<'a>>,
+}
+
+/// Pixels for the view to show, as [`RenderData::pixels`] has it: their width and height, and rows
+/// of RGBA8, sRGB-encoded and tightly packed, top row first; or `None` for the bytes, to show those
+/// the last frame that rendered wrote, if it wrote some of this size.
+#[derive(Clone, Copy, Debug)]
+pub struct Pixels<'a> {
+    pub size: [u32; 2],
+    pub bytes: Option<&'a [u8]>,
 }
 
 /// How to set up a renderer.
@@ -182,8 +205,12 @@ pub struct Renderer {
     /// What the game's view renders into, the IDs its draws write beside it, and the depth image
     /// they test, the size it last had, which has an area.
     view_image: Option<(ColorImage, IdImage, DepthImage)>,
-    /// Whether the last frame rendered the view, which [`Renderer::read_back_view`] reads back.
-    viewed: bool,
+    /// What the view's pixels go into while it shows pixels ([`RenderData::pixels`]), their size,
+    /// and whether a frame has written them.
+    pixels: Option<(GpuTexture, bool)>,
+    /// The number of the last frame, if it read the view back, which [`Renderer::view_read`]
+    /// gives; 0 otherwise.
+    view_read: u64,
     /// The picks asked of the view, from asked to answered.
     picks: Picks,
     ui: UiPass,
@@ -203,7 +230,8 @@ pub struct Renderer {
 
 enum Output {
     Window(Swapchain),
-    Offscreen(ColorImage),
+    /// The image, and the size it's to have, which the next frame makes it again at, if it hasn't.
+    Offscreen(ColorImage, [u32; 2]),
 }
 
 // The engine renders on a thread of its own, which the renderer and its uploads move to.
@@ -247,8 +275,9 @@ impl Renderer {
             window: None,
         })?;
         let device = Device::new(&instance, settings.gpu, None, settings.uploads)?;
-        let image = ColorImage::new(&device, width, height, "offscreen color")?;
-        Self::new(&instance, &device, Output::Offscreen(image), settings)
+        let image = ColorImage::new(&device, width, height, OFFSCREEN)?;
+        let output = Output::Offscreen(image, [width, height]);
+        Self::new(&instance, &device, output, settings)
     }
 
     fn new(
@@ -273,7 +302,7 @@ impl Renderer {
         }
         let format = match &output {
             Output::Window(swapchain) => swapchain.format(),
-            Output::Offscreen(_) => ColorImage::FORMAT,
+            Output::Offscreen(..) => ColorImage::FORMAT,
         };
         Ok(Self {
             frames: Frames::new(device)?,
@@ -283,7 +312,8 @@ impl Renderer {
             meshes: MeshPass::new(device),
             view: ViewPass::new(device, format)?,
             view_image: None,
-            viewed: false,
+            pixels: None,
+            view_read: 0,
             picks: Picks::default(),
             ui: UiPass::new(device, format)?,
             instance: instance.clone(),
@@ -296,10 +326,19 @@ impl Renderer {
         })
     }
 
-    /// Tells the renderer that the window's drawable area changed size.
+    /// Tells the renderer that the window's drawable area changed size; or, headless, has the next
+    /// frame render into an offscreen image of that size, made then.
+    ///
+    /// # Panics
+    ///
+    /// Headless, if a side is 0.
     pub fn resize(&mut self, width: u32, height: u32) {
-        if let Output::Window(swapchain) = &mut self.output {
-            swapchain.resize(width, height);
+        match &mut self.output {
+            Output::Window(swapchain) => swapchain.resize(width, height),
+            Output::Offscreen(_, size) => {
+                assert!(width > 0 && height > 0, "an offscreen image has an area");
+                *size = [width, height];
+            }
         }
     }
 
@@ -386,7 +425,7 @@ impl Renderer {
     ) -> Result<bool> {
         self.waited = Duration::ZERO;
         self.drawn = DrawCounts::default();
-        self.viewed = false;
+        self.view_read = 0;
         self.picks.ask(data.picks);
         if self.failed {
             return Err(Error::new(
@@ -435,9 +474,30 @@ impl Renderer {
         // in the frame that changes its size, so that it never shows stretched; the old ones retire
         // until the frames that use them have finished. A drag that resizes the view makes them
         // every frame, which growing them in steps, and rendering into part of them, would not. A
-        // view without an area renders nothing, and keeps the images it had.
+        // view without an area renders nothing, and keeps the images it had; so does one that shows
+        // pixels, which go into a texture of their own size, made again as that changes.
         let has_view = width > 0 && height > 0;
-        if has_view
+        let pixels = data.pixels.filter(|_| has_view);
+        if let Some(Pixels {
+            size,
+            bytes: Some(_),
+        }) = pixels
+            && (self.pixels.as_ref()).is_none_or(|(texture, _)| texture.size() != size)
+        {
+            let [width, height] = size;
+            let format = TextureFormat::Rgba8Srgb;
+            let name = "view pixels";
+            let texture = GpuTexture::new(&self.device, width, height, format, false, name)?;
+            self.pixels = Some((texture, false));
+        }
+        // Pixels to show again that no frame wrote at their size show nothing.
+        let pixels_shown = pixels.filter(|Pixels { size, bytes }| {
+            (self.pixels.as_ref()).is_some_and(|(texture, written)| {
+                texture.size() == *size && (bytes.is_some() || *written)
+            })
+        });
+        let renders_view = has_view && pixels.is_none();
+        if renders_view
             && (self.view_image.as_ref())
                 .is_none_or(|(image, ..)| image.size() != data.viewport.size)
         {
@@ -447,9 +507,14 @@ impl Renderer {
             self.view_image = Some((image, ids, depth));
             trace!(width, height, "View image made");
         }
+        if let Output::Offscreen(image, size) = &mut self.output
+            && image.size() != *size
+        {
+            *image = ColorImage::new(&self.device, size[0], size[1], OFFSCREEN)?;
+        }
         let target = match &mut self.output {
             Output::Window(swapchain) => Target::Swapchain(swapchain),
-            Output::Offscreen(image) => Target::Image(image),
+            Output::Offscreen(image, _) => Target::Image(image),
         };
         let has_ui = |key: &u64| windows.iter().any(|(drawn, _)| drawn == key);
         let others = (self.window_keys.iter().zip(&mut self.windows))
@@ -458,7 +523,7 @@ impl Renderer {
         // After the output and the other windows, which keep their places.
         let view_target = 1 + self.window_keys.iter().filter(|key| has_ui(key)).count();
         let (view, ids, depth) = match &mut self.view_image {
-            Some((image, ids, depth)) if has_view => {
+            Some((image, ids, depth)) if renders_view => {
                 (Some(Target::Image(image)), Some(ids), Some(&*depth))
             }
             _ => (None, None, None),
@@ -471,8 +536,9 @@ impl Renderer {
         self.picks.answer(frame.ids_read());
         self.meshes.upload(&mut frame, data.uploads)?;
         self.ui.write_textures(&mut frame)?;
-        let (counts, view) = match ids {
-            Some(ids) => {
+        // What the view shows, and how much of its area that covers.
+        let (counts, view) = match (ids, pixels_shown) {
+            (Some(ids), _) => {
                 let clear = data.clear_color;
                 let mut pass = frame
                     .begin_pass(view_target, c"view", clear, depth, Some(&mut *ids))
@@ -482,14 +548,36 @@ impl Renderer {
                     .meshes
                     .draw(&mut pass, view_projection, size, data.draws)?;
                 drop(pass);
-                let pixels = self.picks.take(frame.number(), Some(ids.size()));
-                frame.read_ids(ids, pixels)?;
+                let picked = self.picks.take(frame.number(), Some(ids.size()));
+                frame.read_ids(ids, picked)?;
                 let outline = (data.outline.filter(Outline::shows))
                     .map(|outline| (frame.begin_sampling_ids(ids), outline));
-                let image = frame.begin_sampling(view_target);
-                (counts, Some(Shown { image, outline }))
+                let image = if data.read_view {
+                    self.view_read = frame.number();
+                    frame.read_image(view_target)?
+                } else {
+                    frame.begin_sampling(view_target)
+                };
+                (counts, Some((Shown { image, outline }, size)))
             }
-            None => {
+            (None, Some(Pixels { size, bytes })) => {
+                self.picks.take(frame.number(), None);
+                let (texture, written) =
+                    (self.pixels.as_mut()).expect("the pixels' texture was made");
+                if let Some(bytes) = bytes {
+                    frame.write_texture(texture, [0, 0], size, bytes)?;
+                    *written = true;
+                }
+                let shown = Shown {
+                    image: texture.index(),
+                    outline: None,
+                };
+                (
+                    DrawCounts::default(),
+                    Some((shown, [size[0].min(width), size[1].min(height)])),
+                )
+            }
+            (None, None) => {
                 self.picks.take(frame.number(), None);
                 (DrawCounts::default(), None)
             }
@@ -498,15 +586,19 @@ impl Renderer {
             .begin_pass(0, c"frame", data.clear_color, None, None)
             .expect("a frame's first target has an image");
         // Under the whole UI, unless it paints the view among its own shapes.
-        if let Some(shown) = view
+        if let Some((shown, size)) = view
             && !ui::draws_view(ui.primitives)
         {
-            self.view.draw(&mut pass, data.viewport, shown, None);
+            let viewport = Viewport {
+                size,
+                ..data.viewport
+            };
+            self.view.draw(&mut pass, viewport, shown, None);
         }
-        let view = view.map(|shown| ui::View {
+        let view = view.map(|(shown, size)| ui::View {
             pass: &self.view,
             shown,
-            size: data.viewport.size,
+            size,
         });
         self.ui
             .draw(&mut pass, ui.primitives, ui.pixels_per_point, view)?;
@@ -527,7 +619,6 @@ impl Renderer {
         frame.submit()?;
         self.waited = self.frames.waited();
         self.drawn = counts;
-        self.viewed = has_view;
         Ok(true)
     }
 
@@ -579,23 +670,19 @@ impl Renderer {
     pub fn read_back(&mut self) -> Result<Option<Vec<u8>>> {
         match &mut self.output {
             Output::Window(_) => Ok(None),
-            Output::Offscreen(image) => image.read_back().map(Some),
+            Output::Offscreen(image, _) => image.read_back().map(Some),
         }
     }
 
-    /// Copies the game's view as the last [`Renderer::render`] rendered it to the CPU, waiting for
-    /// the GPU to finish that frame, which holds back the next: its width and height, and rows of
-    /// RGBA8 pixels, sRGB-encoded and tightly packed, top row first, without the UI drawn over it.
-    /// `None` if that call rendered no view, as when the view had no area or there was nothing to
-    /// render into.
-    pub fn read_back_view(&mut self) -> Result<Option<([u32; 2], Vec<u8>)>> {
-        match &mut self.view_image {
-            Some((image, ..)) if self.viewed => {
-                let size = image.size();
-                image.read_back().map(|pixels| Some((size, pixels)))
-            }
-            _ => Ok(None),
+    /// The game's view as the last [`Renderer::render`] rendered it and read it back, as
+    /// [`RenderData::read_view`] asked, without the UI drawn over it, once the GPU has finished
+    /// that frame, which this waits for, holding back the next. `None` if that call read no view
+    /// back, as when the view had no area, showed pixels, or there was nothing to render into.
+    pub fn view_read(&self) -> Result<Option<ImageRead<'_>>> {
+        if self.view_read == 0 {
+            return Ok(None);
         }
+        self.frames.image_read(self.view_read)
     }
 
     /// What validation reports. It outlives the renderer, so it also counts what's reported

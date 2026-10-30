@@ -65,6 +65,9 @@ pub struct Frames {
     /// What the last frame to use the slot of the frame being begun read back, as that one finds
     /// it: [`Frame::ids_read`]'s.
     read: Read,
+    /// What each slot's frames read offscreen images back into ([`Frame::read_image`]), in the
+    /// slots' order.
+    image_reads: Vec<ImageReads>,
     /// For each target of the frame being recorded, its image: the swapchain image's index, or 0
     /// for an offscreen image, and the layout the frame's commands so far leave it in. `None` for
     /// a swapchain that had no image ready.
@@ -112,6 +115,46 @@ struct Read {
     values: [[u32; 2]; MAX_READS],
 }
 
+/// The buffer a slot's frames read an offscreen image back into, made, or made larger, by the
+/// first read that needs it, and what the last of them read.
+#[derive(Default)]
+struct ImageReads {
+    buffer: Option<Buffer>,
+    /// The number of the frame that read into it last, 0 for none, and the image's size.
+    frame: u64,
+    size: [u32; 2],
+}
+
+/// An offscreen image as a frame read it back ([`Frame::read_image`]), once the frame has
+/// finished, which [`Frames::image_read`] gives.
+pub struct ImageRead<'a> {
+    size: [u32; 2],
+    buffer: &'a Buffer,
+}
+
+impl ImageRead<'_> {
+    /// The image's width and height in pixels.
+    pub fn size(&self) -> [u32; 2] {
+        self.size
+    }
+
+    /// Copies the image's pixels into `out`, without allocating: rows of RGBA8, sRGB-encoded and
+    /// tightly packed, top row first.
+    ///
+    /// # Panics
+    ///
+    /// If `out` doesn't hold exactly the pixels' bytes.
+    pub fn read_into(&self, out: &mut [u8]) -> Result<()> {
+        let [width, height] = self.size;
+        assert_eq!(
+            out.len() as u64,
+            u64::from(width) * u64::from(height) * 4,
+            "a {width}x{height} image's pixels fill what they're read into"
+        );
+        self.buffer.read_into(0, out)
+    }
+}
+
 /// The lists a submission and its present are built in, kept so that frames don't allocate.
 #[derive(Default)]
 struct Scratch {
@@ -154,6 +197,9 @@ impl Frames {
                 count: 0,
                 values: [[0; 2]; MAX_READS],
             },
+            image_reads: (0..FRAMES_IN_FLIGHT)
+                .map(|_| ImageReads::default())
+                .collect(),
             images: Vec::new(),
             spare_targets: Vec::new(),
             scratch: Scratch::default(),
@@ -406,6 +452,27 @@ impl Frames {
         self.submitted
     }
 
+    /// What the `frame`th frame read back of an offscreen image ([`Frame::read_image`]), once the
+    /// GPU has finished that frame, which this waits for: `None` if it read none, wasn't
+    /// submitted, or a frame since has read back into its slot's buffer, as the frame two after it
+    /// may.
+    pub fn image_read(&self, frame: u64) -> Result<Option<ImageRead<'_>>> {
+        let Some(slot) = frame.checked_sub(1) else {
+            return Ok(None);
+        };
+        let reads = &self.image_reads[(slot % FRAMES_IN_FLIGHT) as usize];
+        let read =
+            (reads.buffer.as_ref()).filter(|_| reads.frame == frame && frame <= self.submitted);
+        let Some(buffer) = read else {
+            return Ok(None);
+        };
+        self.wait(frame)?;
+        Ok(Some(ImageRead {
+            size: reads.size,
+            buffer,
+        }))
+    }
+
     /// Waits until the GPU has finished the `frame`th frame.
     fn wait(&self, frame: u64) -> Result<()> {
         wait_on(&self.device, self.timeline, "frame timeline", frame)
@@ -636,6 +703,119 @@ impl<'a> Frame<'a> {
         }
         ids.set_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
         ids.index()
+    }
+
+    /// Reads the `target`th target back, as the frame's passes left it, for [`Frames::image_read`]
+    /// to give once the frame has finished, and lets the frame's later passes sample it, as
+    /// [`Frame::begin_sampling`] does, through the index this returns. The slot's first read, and
+    /// a read of a larger image than it read before, makes the buffer it reads into, and fails if
+    /// it can't be made.
+    ///
+    /// # Panics
+    ///
+    /// If a forgotten pass is still open, the frame has no `target`th target, the target is a
+    /// swapchain's, or it's an offscreen image no pass has rendered into since it was made or
+    /// read back.
+    pub fn read_image(&mut self, target: usize) -> Result<u32> {
+        self.outside_pass();
+        let number = self.number();
+        let Target::Image(image) = &self.targets[target] else {
+            panic!("target {target} is a swapchain's, and only offscreen images are read back");
+        };
+        let Frames {
+            device,
+            slots,
+            image_reads,
+            images,
+            ..
+        } = &mut *self.frames;
+        let (index, layout) = images[target].expect("an offscreen image is always there");
+        let (src_stage, src_access) = match layout {
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL => (
+                vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+            ),
+            // Sampled, which wrote nothing of it.
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => (
+                vk::PipelineStageFlags2::FRAGMENT_SHADER,
+                vk::AccessFlags2::NONE,
+            ),
+            _ => panic!("target {target} is read back before a pass renders into it"),
+        };
+        let size = image.size();
+        let bytes = u64::from(size[0]) * u64::from(size[1]) * 4;
+        let reads = &mut image_reads[self.slot];
+        if reads
+            .buffer
+            .as_ref()
+            .is_none_or(|buffer| buffer.size() < bytes)
+        {
+            // The slot's last frame has finished, and its read with it.
+            let name = format!("frame {} image read", self.slot);
+            let usage = vk::BufferUsageFlags::TRANSFER_DST;
+            reads.buffer = Some(Buffer::new(device, bytes, usage, Memory::Readback, &name)?);
+        }
+        let buffer = (reads.buffer.as_ref())
+            .map(Buffer::raw)
+            .expect("the buffer was just made");
+        let (raw_image, _, _) = image.parts();
+        let to_copy = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(src_stage)
+            .src_access_mask(src_access)
+            .dst_stage_mask(vk::PipelineStageFlags2::COPY)
+            .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
+            .old_layout(layout)
+            .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+            .image(raw_image)
+            .subresource_range(COLOR_RANGE);
+        let to_sample = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COPY)
+            .src_access_mask(vk::AccessFlags2::NONE)
+            .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+            .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
+            .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .image(raw_image)
+            .subresource_range(COLOR_RANGE);
+        let to_host = vk::BufferMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COPY)
+            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::HOST)
+            .dst_access_mask(vk::AccessFlags2::HOST_READ)
+            .buffer(buffer)
+            .size(bytes);
+        let region = copy_region(0, [0, 0], size, 0);
+        let commands = slots[self.slot].commands;
+        let raw = device.raw();
+        // SAFETY: the commands are recording outside a pass, as checked; the region is the whole
+        // image and lies within the buffer, which is at least its size; and both live until the
+        // frame has finished: the image retires until then, and the buffer is replaced only once
+        // the slot's next frame begins, which waits for this one.
+        unsafe {
+            device.begin_label(commands, c"read image");
+            raw.cmd_pipeline_barrier2(
+                commands,
+                &vk::DependencyInfo::default().image_memory_barriers(slice::from_ref(&to_copy)),
+            );
+            raw.cmd_copy_image_to_buffer(
+                commands,
+                raw_image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                buffer,
+                &[region],
+            );
+            raw.cmd_pipeline_barrier2(
+                commands,
+                &vk::DependencyInfo::default()
+                    .image_memory_barriers(slice::from_ref(&to_sample))
+                    .buffer_memory_barriers(slice::from_ref(&to_host)),
+            );
+            device.end_label(commands);
+        }
+        images[target] = Some((index, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL));
+        reads.frame = number;
+        reads.size = size;
+        Ok(image.index())
     }
 
     /// Reads back the IDs at `pixels` of `ids`, each a pixel's column and row from its top left,
