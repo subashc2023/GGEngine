@@ -82,15 +82,15 @@ there. renderdoccmd exits 0 whatever the run does, so read the run's log. `rende
 <capture> -c xml -o <capture>.xml` writes the capture as XML, every object's name
 (`vkSetDebugUtilsObjectNameEXT`) and pass's label (`vkCmdBeginDebugUtilsLabelEXT`) among it.
 
-Development builds (gg-engine's `dev`, as the sandbox's and the editor's are) serve the tool API,
-and windowed, compile a game's shader again as its files change (`Shader reloaded`), or warn and
-draw on at a change that doesn't compile or breaks the shader contract. Run a game under `cargo gg
-run` in the background, which patches in an edit inside its function bodies as it's saved, with
-Dioxus's `dx` of the root Cargo.toml's `subsecond` release, whose install it names if it's missing,
+Development builds (gg-engine's `dev`, the sandbox's and the editor's) serve the tool API, apply a
+scene file a layer loaded with `Context::load_scene_file` as it's saved, and windowed, compile a
+game's shader again as its files change (`Shader reloaded`), warning at a change that fails. Run a
+game under `cargo gg run`, in the background: it patches in an edit inside function bodies as it's
+saved, with Dioxus's `dx` of the root Cargo.toml's `subsecond` release (`gg` names its install),
 and restarts it from a snapshot after any other change, a crash or a hang (without `dx`, after a
-`cargo build`), and talk to it: `cargo gg status`, `capture` (its view as a PNG), `step` and the
-rest answer in JSON. A layer's `load` makes its assets; its `attach`, which a restart skips, builds
-the world. `dev`'s tests need `--features dev` with `-p gg-engine`; `--workspace` merges it in.
+`cargo build`). `cargo gg status`, `capture` (a PNG), `set`, `undo` and the rest answer in JSON;
+`cargo gg mcp` serves them over MCP. A layer's `load` makes its assets; its `attach`, which a
+restart skips, builds the world. Test `dev` with `--features dev -p gg-engine`.
 
 A change is done when all six pass:
 

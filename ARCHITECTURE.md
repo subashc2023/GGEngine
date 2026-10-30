@@ -201,8 +201,10 @@ in the editor is out of an agent's reach.
   telling of each, or waits for a rebuild if the game would only end the same way again, as one
   that ends before its first snapshot would. A game that comes to its own end, as its window
   closes, ends the supervision, as one that never serves does. It runs headless checks, and talks
-  to running games, all with machine-readable results; an MCP server gives agents that speak MCP
-  the same reach; the editor is one more client, with no ability an agent lacks.
+  to running games, all with machine-readable results; `gg mcp` gives agents that speak MCP the
+  same reach over stdio, a tool for each of the API's methods, connecting at each call to the game
+  it picks, so that a restarted game is the one it reaches, as the agent, by its MCP client's name;
+  the editor is one more client, with no ability an agent lacks.
 - **Headless runs.** Every app runs without a window (`--headless`) and can run a set number
   of frames, then exit with a status (`--frames N`): 0 for a clean run, 1 after an error or any
   validation message, and 2 for bad arguments. Dedicated servers, CI and agents checking their
@@ -254,14 +256,23 @@ A project's state is text that people and agents edit, diff and merge with ordin
   applying one checks everything before anything changes. A delete's and a remove's inverses keep
   what they took out, typed, so that what's opaque comes back too. A component can name a `bool`
   field of its own exclusive, as a camera's `primary` is, so that one edit, a person's or an
-  agent's, switches which entity has it, and one undo switches it back. The log keeps the
-  operations applied, in order, with their inverses: it undoes and redoes them, merges a
-  gesture's sets of one field, such as a drag's, into one edit, and drops an entry whose undo the
-  world refuses. A running game applies operations at its ticks, in the order they arrive, so
-  several clients can edit it at once, and their log gives undo, review and replay. Editing a
-  scene file while the game runs is an edit too: the engine applies the difference as operations.
-  [ops.rs](crates/gg-engine/src/ecs/ops.rs), `World::undo` among it, and
-  [log.rs](crates/gg-engine/src/ecs/log.rs) have the rest.
+  agent's, switches which entity has it, and one undo switches it back. A log keeps the edits
+  applied, in order, each its operations with their inverses: it undoes and redoes an edit whole,
+  applies one of several operations all or nothing, merges a gesture's sets of one field, such as
+  a drag's, into one edit, and drops an entry whose undo the world refuses. A running game applies
+  the tool API's edits between ticks, as a frame starts, paused or not, in the order they arrive,
+  so several clients can edit it at once; each author, a client by the name it says hello with or
+  a scene file by its path, undoes and redoes its own through a log of its own, as the Inspector
+  does through its, and a recording keeps each edit as it was asked for, before the tick after,
+  where a replay applies it. Editing a scene file while the game runs is an edit too: one a game
+  loaded through `Context::load_scene_file`, saved, applies in a development build as the
+  operations that take the world's entities from what the file held to what it holds, which keep
+  what the file doesn't change, such as where the game has moved an entity, and leave alone what
+  the game has deleted; the entities it adds are made first, so that the rest may hold them. A
+  snapshot keeps the files watched, as last applied, so that a restarted run watches them too.
+  [ops.rs](crates/gg-engine/src/ecs/ops.rs), `World::undo` among it,
+  [log.rs](crates/gg-engine/src/ecs/log.rs), [edits.rs](crates/gg-engine/src/edits.rs) and
+  [scene_files.rs](crates/gg-engine/src/scene_files.rs) have the rest.
 
 ## ECS
 
@@ -437,7 +448,9 @@ rest of the simulation, as a snapshot restores it. The Inspector's log is the ex
 replay from the attach rebuilds from the recorded edits; it can't be a component, since its
 inverses hold typed columns tied to the world they were made in. Operations are the commands of
 authoring: the Inspector's edits, undos and redos wait for its next tick, and another layer picks
-and edits through its link, `Inspector::link`, as the editor's view and handles do.
+and edits through its link, `Inspector::link`, as the editor's view and handles do. Edits from
+outside the layers, the tool API's and the scene files', are the engine's own, which apply between
+ticks, and the authors' logs the context's, rebuilt by a replay as the Inspector's is.
 
 ## Diagnostics
 

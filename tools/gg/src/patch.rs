@@ -283,10 +283,11 @@ impl Patches {
                 Ok(_) if !checked => Outcome::Unreadable,
                 Ok(table) => {
                     let start = Instant::now();
-                    let applied = Client::connect(&session, CONNECT).and_then(|mut client| {
-                        client.set_timeout(None)?;
-                        client.call_as::<Patched>("patch", Patch { table })
-                    });
+                    let applied =
+                        Client::connect(&session, "gg", CONNECT).and_then(|mut client| {
+                            client.set_timeout(None)?;
+                            client.call_as::<Patched>("patch", Patch { table })
+                        });
                     match applied {
                         Ok(patched) => Outcome::Applied(patched, start.elapsed()),
                         Err(failure) => Outcome::Failed(failure),

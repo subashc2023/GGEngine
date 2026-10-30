@@ -34,6 +34,8 @@ use gg_core::{Error, Result};
 
 pub use by_name::Entities;
 pub use diff::Difference;
+#[cfg(feature = "dev")]
+pub(crate) use diff::SceneEdit;
 pub use hash::{Digest, WorldHash};
 use hierarchy::Links;
 pub use hierarchy::{Parent, Pose};

@@ -814,11 +814,11 @@ impl Layer for Sandbox {
         let Some(made) = &self.loaded else {
             return;
         };
+        spawn_map(cx.world_mut(), &made.tiles);
+        // Watched as the sandbox runs, in development builds, which apply its saves.
+        let loaded = cx.load_scene_file(scene("grid.ron"));
+        loaded.unwrap_or_else(|error| panic!("{error:#}"));
         let world = cx.world_mut();
-        spawn_map(world, &made.tiles);
-        let (grid, path) = read_scene("grid.ron");
-        let loaded = world.load_scene(&grid);
-        loaded.unwrap_or_else(|error| panic!("{}:{error}", path.display()));
         // 1.5 units across, over the grid's middle.
         let middle = Vec3::splat(1.5);
         let checkerboard = Sprite {

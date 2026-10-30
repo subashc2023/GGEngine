@@ -36,13 +36,18 @@ use gg_core::{Error, Result};
 use tracing::{error, info, warn};
 
 use crate::args::Dump;
+use crate::edits::Edit;
 use crate::layer::Commands;
 use crate::{App, BUILD, Context, Tick, World, WorldHash, perf};
 use text::Text;
 
 /// A recording's first line: its format, and the format's version, which a change to its lines or
 /// to its values' text takes to the next.
-const FORMAT: &str = "gg-recording 1";
+const FORMAT: &str = "gg-recording 2";
+
+/// The format of the recordings before edits from outside the layers, `@` lines, which this
+/// engine reads too.
+const BEFORE_EDITS: &str = "gg-recording 1";
 
 /// The engine, as a recording's `engine` line names it, and the tool API's session file: its
 /// version and its build.
@@ -143,6 +148,18 @@ impl Recorder {
         }
     }
 
+    #[cfg(feature = "dev")]
+    /// Writes `edit`, an author's from outside the layers as a value, applied between ticks, with
+    /// the entities it holds by their IDs in `world`: it belongs to the tick after, before its
+    /// commands.
+    pub(crate) fn edited(&mut self, edit: &crate::reflect::Value, world: &World) {
+        self.line.clear();
+        self.line.push_str("@ ");
+        text::write(&mut self.line, edit, world);
+        self.line.push('\n');
+        self.flush();
+    }
+
     /// Writes the world's hash after `tick`.
     pub(crate) fn ticked(&mut self, tick: Tick, world: &World) {
         self.line.clear();
@@ -202,6 +219,8 @@ struct Recording {
 /// of a recording cut short as their tick ran.
 #[derive(Default)]
 struct Ticked {
+    /// The edits from outside the layers applied before it, each a value and the line that gives it.
+    edits: Vec<(Text, usize)>,
     commands: Vec<Recorded>,
     hash: Option<(WorldHash, usize)>,
 }
@@ -259,7 +278,7 @@ impl Recording {
     fn parse(text: &str) -> Result<Self> {
         let mut lines = whole_lines(text);
         match lines.next() {
-            Some((_, FORMAT)) => {}
+            Some((_, FORMAT | BEFORE_EDITS)) => {}
             Some((_, line)) if line.starts_with("gg-recording ") => {
                 return Err(format_error(format!(
                     "it's a recording of format `{line}`, but this engine reads `{FORMAT}`"
@@ -313,6 +332,12 @@ impl Recording {
                 recording.complete = true;
             } else if let Some(command) = line.strip_prefix("> ") {
                 ticked.commands.push(recording.command(number, command)?);
+            } else if let Some(edit) = line.strip_prefix("@ ") {
+                let edit = Text::parse(edit, "@ ".len() + 1).map_err(|error| {
+                    let message = format!("line {number}: {error}");
+                    error.with_message(message)
+                })?;
+                ticked.edits.push((edit, number));
             } else {
                 let tick = line.split_once(' ').and_then(|(tick, hash)| {
                     Some((tick.parse::<usize>().ok()?, parse_hash(hash)?))
@@ -321,8 +346,8 @@ impl Recording {
                     return Err(syntax(
                         number,
                         format!(
-                            "expected a command, `> <layer> <value>`, a tick's hash, `<tick> \
-                             <content> <layout>`, or `end`; found `{line}`"
+                            "expected a command, `> <layer> <value>`, an edit, `@ <value>`, a tick's hash, \
+                             `<tick> <content> <layout>`, or `end`; found `{line}`"
                         ),
                     ));
                 };
@@ -338,7 +363,7 @@ impl Recording {
             }
         }
         // A tick cut short, whose commands run again unchecked, so that what stopped it stops the
-        // replay too.
+        // replay too; but not edits alone, applied after the last tick, which no tick ran with.
         if !ticked.commands.is_empty() {
             recording.ticks.push(ticked);
         }
@@ -456,6 +481,14 @@ impl Replay {
             number: self.ran as u64,
         };
         self.ran += 1;
+        // As the run did, refused where it refused them, which the hash after the tick checks.
+        for (edit, line) in &ticked.edits {
+            let edit = Edit::from_value(&edit.value(self.cx.world())).map_err(|error| {
+                let message = format!("line {line}: an edit that isn't one: {error}");
+                Error::new("replay.bad_command", message)
+            })?;
+            let _ = self.cx.apply_edit(edit);
+        }
         let names = &self.recording.layers;
         self.app
             .stack
@@ -1027,6 +1060,83 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "dev")]
+    /// Edits from outside the layers, applied between ticks, are recorded as they were asked for,
+    /// before the commands of the tick after, and replay to the hashes recorded: a create, which
+    /// draws its ID as the run did, a set of what it made, an edit refused, and an undo.
+    #[test]
+    fn edits_between_ticks_replay() {
+        let ms = Duration::from_millis;
+        let frames = [ms(20), ms(40), Tick::DT, ms(30)].repeat(4);
+        let author = || "agent".to_owned();
+        let mut frame = 0;
+        let (text, ticks, ended) = recorded_with(two_layers(), &frames, |stack, cx, _| {
+            frame += 1;
+            let made = cx.authors.logs(cx.world()).next().and_then(|(_, log)| {
+                let edit = log.edits().next()?;
+                edit.first().and_then(|operation| operation.entity())
+            });
+            let edit = match (frame, made) {
+                (2, _) => Edit::Apply {
+                    author: author(),
+                    operations: vec![crate::Operation::Create {
+                        entity: None,
+                        parent: None,
+                        components: vec![("Transform".into(), Transform::IDENTITY.to_value())],
+                    }],
+                },
+                (5, Some(made)) => Edit::Apply {
+                    author: author(),
+                    operations: vec![crate::Operation::Set {
+                        entity: made,
+                        component: "Transform".into(),
+                        path: "translation.y".to_owned(),
+                        value: crate::reflect::Value::F32(3.0),
+                    }],
+                },
+                (7, _) => Edit::Apply {
+                    author: author(),
+                    operations: vec![crate::Operation::Delete {
+                        entity: "0000000000000001".parse().expect("an ID"),
+                    }],
+                },
+                (9, _) => Edit::Undo { author: author() },
+                _ => return,
+            };
+            let _ = stack.edit(cx, edit);
+        });
+        let edits: Vec<&str> = text.lines().filter(|line| line.starts_with("@ ")).collect();
+        assert_eq!(edits.len(), 4, "{text}");
+        assert!(edits[0].starts_with("@ Variant(\"Apply\""), "{text}");
+        let (_, _, unedited) = recorded_with(two_layers(), &frames, |_, _, _| {});
+        let transforms = |world: &World| world.query::<&Transform>().count();
+        assert_eq!(
+            transforms(&ended),
+            transforms(&unedited) + 1,
+            "created, set, and the set undone"
+        );
+        let replayed = replay_all(two_layers(), &text).map_err(|(_, error)| error.to_string());
+        assert_eq!(replayed, Ok((ticks, ended.hash())));
+        // An edit that goes another way goes another way at its tick.
+        let at = text
+            .lines()
+            .position(|line| line.starts_with("@ "))
+            .expect("an edit");
+        let other = text
+            .lines()
+            .nth(at)
+            .expect("the line")
+            .replace("Transform", "Nope");
+        let (ran, error) =
+            replay_all(two_layers(), &changed(&text, at, &other)).expect_err("refused");
+        assert_eq!(error.code(), "replay.diverged", "{error}");
+        assert!(ran <= 3, "{ran}");
+        // A recording from before edits replays as one of its format.
+        let (text, ticks, hash) = recorded(two_layers(), &frames);
+        let older = changed(&text, 0, "gg-recording 1");
+        assert_eq!(replay_all(two_layers(), &older).ok(), Some((ticks, hash)));
+    }
+
     /// A recording of an app without layers, as the player is, replays too.
     #[test]
     fn a_recording_of_no_layers_replays() {
@@ -1058,7 +1168,7 @@ mod tests {
         let bad_value = "> 0 Struct([(\"0\", F32(1.0)]";
         let after_end = format!("{text}0 {hash}\n");
         let cases = [
-            (changed(&text, 0, "gg-recording 2"), "replay.format", None),
+            (changed(&text, 0, "gg-recording 3"), "replay.format", None),
             (changed(&text, 0, "(entities: {})"), "replay.format", None),
             (
                 lines[..3].iter().map(|line| format!("{line}\n")).collect(),

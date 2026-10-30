@@ -40,15 +40,20 @@ pub(crate) fn start(app: &str, layers: &[&str], log: Option<&Path>, serve: bool)
     None
 }
 
-/// As a frame starts, before its ticks, answers the requests that have come, from `cx`, whose
-/// layers are `stack`'s and whose simulation `stepper` steps, as [`Api::serve`] says; returns
-/// whether one asked the run to end.
+/// As a frame starts, before its ticks, in a development build, applies the scene files saved since,
+/// as [`scene_files::look`] says, and answers the requests that have come, from `cx`, whose layers
+/// are `stack`'s and whose simulation `stepper` steps, as [`Api::serve`] says; returns whether one
+/// asked the run to end.
+///
+/// [`scene_files::look`]: crate::scene_files
 pub(crate) fn serve(
     api: &mut Option<Api>,
-    cx: &Context,
-    stack: &Stack,
+    cx: &mut Context,
+    stack: &mut Stack,
     stepper: &mut Stepper,
 ) -> bool {
+    #[cfg(feature = "dev")]
+    crate::scene_files::look(cx, stack);
     #[cfg(feature = "dev")]
     if let Some(api) = api {
         return api.serve(cx, stack, stepper);
@@ -57,14 +62,17 @@ pub(crate) fn serve(
     false
 }
 
-/// Between frames, while they pause, answers the requests that need none, as [`Api::serve`] does
-/// those of a frame; returns whether one asked the run to end.
+/// Between frames, while they pause, applies the scene files saved since and answers the requests
+/// that need no frames, as [`serve`] does as a frame starts; returns whether one asked the run to
+/// end.
 pub(crate) fn serve_paused(
     api: &mut Option<Api>,
-    cx: &Context,
-    stack: &Stack,
+    cx: &mut Context,
+    stack: &mut Stack,
     stepper: &mut Stepper,
 ) -> bool {
+    #[cfg(feature = "dev")]
+    crate::scene_files::look(cx, stack);
     #[cfg(feature = "dev")]
     if let Some(api) = api {
         return api.serve_paused(cx, stack, stepper);

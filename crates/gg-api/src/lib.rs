@@ -8,7 +8,8 @@
 //! takes none, and its answer `{"id":1,"result":...}` or `{"id":1,"error":{"code":...,"message":...}}`,
 //! each a line. A connection's first request is `hello`, with the session's token. The methods:
 //!
-//! - `hello`, [`Hello`]: answers [`Welcome`].
+//! - `hello`, [`Hello`]: answers [`Welcome`]; names the client, whose edits the connection's
+//!   `apply`, `undo` and `redo` are.
 //! - `ping`: answers [`Pulse`] at once, even while the game's main thread is busy.
 //! - `status`, `pause` and `resume`: answer [`Status`].
 //! - `step`, [`Step`]: runs ticks, pausing the simulation, and answers [`Status`] once they've run.
@@ -29,6 +30,14 @@
 //!   patches, as [`Session::aslr_reference`] says, the table's reference is past where the game's
 //!   `main` is, so that it isn't for this process, the library doesn't load, or it isn't a patch of
 //!   the game's build, as one that exports no `main` isn't.
+//! - `apply`, [`Apply`]: applies an edit, [`Operation`]s that undo and redo together, as the
+//!   frame starts, between ticks, and answers [`Applied`]; it applies all or none, failing with
+//!   the code of the first refused, such as `ecs.no_entity`, which names it.
+//! - `undo` and `redo`, [`Undo`]: undo the last edit of an author, the client's own by default,
+//!   such as a scene file's, which its path names, or redo the last it undid, and answer
+//!   [`Edit`], or `null` if there's none; an edit the world refuses to undo or redo, as when an
+//!   entity it changed is gone since, fails, and is dropped.
+//! - `edits`, [`Edits`]: answers [`History`], an author's edits, or each author's.
 //! - `quit`: answers `{}`, and the run ends cleanly, as when its window closes, but without asking
 //!   its layers, which may keep a window open.
 //!
@@ -44,7 +53,12 @@
 //! list an array; a struct an object of its fields, in their order, a tuple struct's named `0`,
 //! `1` and so on; an enum's variant its name, as a string, or for a variant with fields an object
 //! of one key, its name, whose value is an object of the fields; and what reflection doesn't read,
-//! such as a `MeshDraw`, the string `(opaque)`.
+//! such as a `MeshDraw`, the string `(opaque)`. A value given, as an operation's, is read the same
+//! way, by the type of the field it goes in, as a component's description gives it: an integer
+//! where a float goes, a texture by the path a layer added it from, an entity by the ID of one
+//! that's alive, or `null` for none alive, and a struct, or a variant's fields, missing a field,
+//! which takes its default, as in a scene; what's opaque is kept as it is, or made as the type's
+//! own is, as an `(opaque)` that a create or an add gives says.
 
 use std::fmt;
 use std::fs;
@@ -147,11 +161,17 @@ pub struct Request {
 #[derive(Debug, Deserialize)]
 pub struct Answer {
     pub id: u64,
-    /// The result's JSON, as the game wrote it.
-    #[serde(default)]
+    /// The result's JSON, as the game wrote it: `null` too, as an `undo` with nothing to undo
+    /// answers, which is a result.
+    #[serde(default, deserialize_with = "present")]
     pub result: Option<Box<RawValue>>,
     #[serde(default)]
     pub error: Option<Failure>,
+}
+
+/// A field that's there, whatever its JSON, `null` too, which an `Option` would take for none.
+fn present<'de, D: serde::Deserializer<'de>>(json: D) -> Result<Option<Box<RawValue>>, D::Error> {
+    Box::<RawValue>::deserialize(json).map(Some)
 }
 
 /// The line answering request `id`: with `result`, its JSON, or with the error it failed with.
@@ -219,6 +239,12 @@ impl std::error::Error for Failure {}
 #[serde(deny_unknown_fields)]
 pub struct Hello {
     pub token: String,
+    /// The client, the author of the edits the connection applies, which the connection's `undo`
+    /// and `redo` step through: `api` without one. Connections with the same name share them, so
+    /// that a client undoes its own edits across connections, as `gg`'s commands do, each one's
+    /// own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<String>,
 }
 
 /// What `hello` answers: the game the connection reaches.
@@ -386,6 +412,122 @@ pub struct Patched {
     pub ticks: u64,
 }
 
+/// An authoring change to the world, as `apply` takes it: `{"set":{"id":...,"component":...,
+/// "path":...,"value":...}}`, a key naming it, whose value is an object of what it takes. It names
+/// entities by their IDs, and carries values as gg-api's docs say.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Operation {
+    /// Spawns an entity with `components`, each by its type's name, its value its whole value: the
+    /// last of `parent`'s children, or a root. Its ID is `id`, or one drawn without one, which
+    /// [`Applied`] gives.
+    Create {
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(default)]
+        parent: Option<String>,
+        #[serde(default)]
+        components: serde_json::Map<String, Value>,
+    },
+    /// Spawns a copy of entity `id` and of its descendants, the copy the last of its parent's
+    /// children, each with its components as they are, each reference to one of them to its copy,
+    /// and each exclusive field false, as a camera's `primary`: their IDs `copies`, `id`'s copy's
+    /// first, then its descendants', each parent's before its children's, or ones drawn without
+    /// them, which [`Applied`] gives.
+    Duplicate {
+        id: String,
+        #[serde(default)]
+        copies: Vec<String>,
+    },
+    /// Despawns entity `id` and its descendants.
+    Delete { id: String },
+    /// Gives entity `id` a `component`, which it hasn't: `value`, or the type's default without
+    /// one.
+    Add {
+        id: String,
+        component: String,
+        #[serde(default)]
+        value: Option<Value>,
+    },
+    /// Takes entity `id`'s `component` away.
+    Remove { id: String, component: String },
+    /// Sets the field at `path` of entity `id`'s `component`, such as `translation.x`, to `value`;
+    /// the whole component for an empty path. A component's exclusive field set true is made false
+    /// on every other entity with the component.
+    Set {
+        id: String,
+        component: String,
+        #[serde(default)]
+        path: String,
+        value: Value,
+    },
+    /// Makes entity `id` the last of `parent`'s children, or a root for `null`.
+    Reparent {
+        id: String,
+        /// Given, `null` for a root, so that one left out isn't taken for a root.
+        #[serde(deserialize_with = "Option::deserialize")]
+        parent: Option<String>,
+    },
+}
+
+/// What `apply` takes: an edit's operations, applied in order.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Apply {
+    pub operations: Vec<Operation>,
+}
+
+/// What `apply` answers: the ticks the simulation had run as the edit applied, the next being the
+/// first after it, and the IDs of the entities its creates and duplicates spawned, in order.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Applied {
+    pub ticks: u64,
+    pub entities: Vec<String>,
+}
+
+/// What `undo` and `redo` take: whose last edit to undo, or redo, by its author's name: the
+/// client's own without one.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Undo {
+    #[serde(default)]
+    pub author: Option<String>,
+}
+
+/// An edit, as `undo`, `redo` and `edits` give it: its author and its operations in words, such as
+/// ``set `Spin.speed` of 2b7e151628aed2a6``.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Edit {
+    pub author: String,
+    pub operations: Vec<String>,
+}
+
+/// What `edits` takes: whose edits to list, by its author's name; every author's without one.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Edits {
+    #[serde(default)]
+    pub author: Option<String>,
+}
+
+/// What `edits` answers: each author's log, in the order the authors first edited; each of the
+/// world the game runs, since a world took its place, as one restored from a snapshot does, which
+/// starts the logs afresh.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct History {
+    pub authors: Vec<Authored>,
+}
+
+/// An author's log, as `edits` gives it: the operations in words of each edit `undo` steps back
+/// through, the first applied first, so that `undo` undoes the last; and of each `redo` steps
+/// through, the last undone last.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Authored {
+    pub author: String,
+    pub done: Vec<Vec<String>>,
+    pub undone: Vec<Vec<String>>,
+}
+
 /// A connection to a running game's API, for tools: a request at a time, each waiting for its
 /// answer.
 pub struct Client {
@@ -400,13 +542,13 @@ pub struct Client {
 }
 
 impl Client {
-    /// Connects to the game `session` names and says hello, waiting at most `timeout` to connect
-    /// and for each answer.
+    /// Connects to the game `session` names and says hello as client `name`, the author of the
+    /// edits it applies, waiting at most `timeout` to connect and for each answer.
     ///
     /// Fails with `api.connect` if nothing listens there, as once the game has ended;
     /// `api.unauthorized` if the session's token isn't the game's; and as [`call`](Self::call)
     /// does.
-    pub fn connect(session: &Session, timeout: Duration) -> Result<Self, Failure> {
+    pub fn connect(session: &Session, name: &str, timeout: Duration) -> Result<Self, Failure> {
         let stream = TcpStream::connect_timeout(&session.address, timeout).map_err(|error| {
             let message = format!(
                 "can't connect to {} (process {}) at {}: {error}; it has ended, unless it's still \
@@ -431,8 +573,11 @@ impl Client {
             },
             broken: false,
         };
-        let token = session.token.clone();
-        client.welcome = client.call_as("hello", Hello { token })?;
+        let hello = Hello {
+            token: session.token.clone(),
+            client: Some(name.to_owned()),
+        };
+        client.welcome = client.call_as("hello", hello)?;
         Ok(client)
     }
 
@@ -573,6 +718,34 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// An operation is an object of one key, its kind, of what it takes, its defaults left out; a
+    /// reparent names its parent, `null` for a root.
+    #[test]
+    fn operations_read_as_their_docs_say() {
+        let read = |json: &str| serde_json::from_str::<Operation>(json);
+        let set = read(r#"{"set": {"id": "a", "component": "Spin", "value": 2}}"#).unwrap();
+        let expected = Operation::Set {
+            id: "a".to_owned(),
+            component: "Spin".to_owned(),
+            path: String::new(),
+            value: serde_json::json!(2),
+        };
+        assert_eq!(set, expected);
+        let root = read(r#"{"reparent": {"id": "a", "parent": null}}"#).unwrap();
+        let expected = Operation::Reparent {
+            id: "a".to_owned(),
+            parent: None,
+        };
+        assert_eq!(root, expected);
+        for refused in [
+            r#"{"reparent": {"id": "a"}}"#,
+            r#"{"set": {"id": "a", "component": "Spin", "value": 2, "extra": 1}}"#,
+            r#"{"delete": {"id": "a"}, "remove": {"id": "a", "component": "Spin"}}"#,
+        ] {
+            assert!(read(refused).is_err(), "{refused}");
+        }
+    }
+
     #[test]
     fn lines_end_at_their_breaks_and_are_kept_short() {
         let mut reader = Cursor::new(b"first\nsecond\r\nthird, cut short".to_vec());
@@ -639,7 +812,7 @@ mod tests {
     fn a_client_says_hello_and_gets_results_as_the_game_wrote_them() {
         let session = serve(game);
         let timeout = Duration::from_secs(10);
-        let mut client = Client::connect(&session, timeout).unwrap();
+        let mut client = Client::connect(&session, "test", timeout).unwrap();
         assert_eq!(client.welcome().app, "Sandbox");
         let status = client.call("status", Value::Null).unwrap();
         assert_eq!(status.get(), r#"{"zebra":1,"apple":2}"#);
@@ -655,14 +828,14 @@ mod tests {
     fn a_client_is_refused_without_the_token_and_gives_up_on_slow_answers() {
         let mut wrong = serve(game);
         wrong.token = "guess".to_owned();
-        let error = Client::connect(&wrong, Duration::from_secs(10)).err();
+        let error = Client::connect(&wrong, "test", Duration::from_secs(10)).err();
         assert_eq!(
             error.map(|error| error.code).as_deref(),
             Some("api.unauthorized")
         );
 
         let session = serve(game);
-        let mut client = Client::connect(&session, Duration::from_secs(10)).unwrap();
+        let mut client = Client::connect(&session, "test", Duration::from_secs(10)).unwrap();
         client.set_timeout(Some(Duration::from_millis(50))).unwrap();
         let error = client.call("slow", Value::Null).unwrap_err();
         assert_eq!(error.code, "api.timeout");
@@ -673,7 +846,7 @@ mod tests {
 
         let mut gone = serve(game);
         gone.address = "127.0.0.1:1".parse().unwrap();
-        let error = Client::connect(&gone, Duration::from_secs(10)).err();
+        let error = Client::connect(&gone, "test", Duration::from_secs(10)).err();
         assert_eq!(
             error.map(|error| error.code).as_deref(),
             Some("api.connect")

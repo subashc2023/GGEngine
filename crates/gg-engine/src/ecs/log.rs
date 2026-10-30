@@ -1,5 +1,5 @@
-//! The log of the operations applied to a world, in order, each with its inverse: what undo and
-//! redo step through.
+//! The log of the edits applied to a world, in order, each its operations with their inverses: what
+//! undo and redo step through.
 
 use gg_core::Result;
 use tracing::field::display;
@@ -8,12 +8,13 @@ use tracing::{debug, warn};
 use super::World;
 use super::ops::{Inverse, Operation};
 
-/// The operations applied to a world, in order, each with what undoes it: undo and redo, and a
-/// gesture's sets of one field, as a drag makes, merged into one edit.
+/// The edits applied to a world, in order, each its operations with what undoes them: undo and redo,
+/// an edit's operations together, and a gesture's sets of one field, as a drag makes, merged into
+/// one edit.
 ///
 /// An entry whose undo or redo puts entities back, a delete done or a create undone, keeps them,
 /// their components typed, their slots and their IDs, which no draw gives out meanwhile, so that it
-/// gives each back under its handle and ID, as it was, until the entry is dropped: by an operation
+/// gives each back under its handle and ID, as it was, until the entry is dropped: by an edit
 /// applied after an undo, which drops what was undone;
 /// by an undo or a redo the world refuses; or by [`clear`](Self::clear). A log dropped without
 /// `clear` leaves those slots unused for good, so whoever keeps one clears it. A world restored
@@ -32,43 +33,119 @@ pub struct Log {
     open: bool,
 }
 
+/// An edit: its operations, as applied, and what undoes each, in the same order.
 struct Entry {
-    operation: Operation,
-    inverse: Inverse,
+    operations: Vec<Operation>,
+    inverses: Vec<Inverse>,
 }
 
 impl Log {
-    /// Applies `operation` to `world` and logs it, dropping what was undone; a create given no ID
-    /// is logged with the one it drew. Refused, it changes nothing, and logs nothing, as
-    /// [`Operation`] says.
-    pub fn apply(&mut self, world: &mut World, mut operation: Operation) -> Result<()> {
-        let inverse = world.apply(&mut operation)?;
-        debug!(
-            code = "ops.applied",
-            entity = operation.entity().map(display),
-            operation = %operation,
-            "Applied an operation"
-        );
-        for dropped in self.undone.drain(..) {
-            world.release(dropped.inverse);
+    /// Applies `operation` to `world` and logs it, an edit of its own, dropping what was undone; a
+    /// create given no ID is logged with the one it drew. Refused, it changes nothing, and logs
+    /// nothing, as [`Operation`] says.
+    pub fn apply(&mut self, world: &mut World, operation: Operation) -> Result<()> {
+        self.apply_all(world, vec![operation])
+    }
+
+    /// Applies `operations` to `world`, in order, as one edit, which undoes and redoes as a whole,
+    /// and logs it, as [`apply`](Self::apply) does: all of them or none, so that one refused undoes
+    /// those before it, which changes nothing, and logs nothing. An edit of none logs nothing.
+    ///
+    /// Fails as the first operation refused is, naming it if there are others.
+    pub fn apply_all(&mut self, world: &mut World, mut operations: Vec<Operation>) -> Result<()> {
+        if operations.is_empty() {
+            return Ok(());
         }
-        self.done.push(Entry { operation, inverse });
+        let count = operations.len();
+        let mut inverses = Vec::with_capacity(count);
+        for (i, operation) in operations.iter_mut().enumerate() {
+            match world.apply(operation) {
+                Ok(inverse) => inverses.push(inverse),
+                Err(error) => {
+                    // Undone in reverse, each puts the world back as the one before it found it,
+                    // which a world that nothing else has changed meanwhile takes.
+                    for mut inverse in inverses.into_iter().rev() {
+                        world
+                            .undo(&mut inverse)
+                            .expect("an operation just applied undoes");
+                        world.release(inverse);
+                    }
+                    if count == 1 {
+                        return Err(error);
+                    }
+                    let message = format!("operation {}, {operation}: {error}", i + 1);
+                    return Err(error.with_message(message));
+                }
+            }
+        }
+        for operation in &operations {
+            debug!(
+                code = "ops.applied",
+                entity = operation.entity().map(display),
+                operation = %operation,
+                "Applied an operation"
+            );
+        }
+        for dropped in self.undone.drain(..) {
+            release(world, dropped);
+        }
+        self.done.push(Entry {
+            operations,
+            inverses,
+        });
         self.open = false;
         Ok(())
+    }
+
+    /// Applies `operations` to `world`, in order, as the rest of the last edit applied, just before
+    /// with nothing between, which undoes and redoes with them: for operations whose values hold
+    /// entities that edit made, which have handles once it's applied. Refused, they change nothing,
+    /// and that edit comes undone, and is dropped, so that the two are all or nothing too; with
+    /// nothing applied and not undone, they apply as an edit of their own.
+    ///
+    /// Fails as [`apply_all`](Self::apply_all) does.
+    pub(crate) fn append(&mut self, world: &mut World, operations: Vec<Operation>) -> Result<()> {
+        let Some(mut last) = self.done.pop() else {
+            return self.apply_all(world, operations);
+        };
+        let mut rest = Log::default();
+        match rest.apply_all(world, operations) {
+            Ok(()) => {
+                let entry = rest.done.pop();
+                let entry = entry.unwrap_or(Entry {
+                    operations: Vec::new(),
+                    inverses: Vec::new(),
+                });
+                last.operations.extend(entry.operations);
+                last.inverses.extend(entry.inverses);
+                self.done.push(last);
+                self.open = false;
+                Ok(())
+            }
+            Err(error) => {
+                for inverse in last.inverses.iter_mut().rev() {
+                    world.undo(inverse).expect("the edit just applied undoes");
+                }
+                release(world, last);
+                Err(error)
+            }
+        }
     }
 
     /// As [`apply`](Self::apply), but a set of the field the last entry set, while its gesture
     /// goes on, joins that entry: it takes the new value and keeps its inverse, so that undoing it
     /// undoes the gesture. A set starts a gesture, which [`seal`](Self::seal) ends.
     pub fn amend(&mut self, world: &mut World, mut operation: Operation) -> Result<()> {
-        let joins = |entry: &Entry| match (&entry.operation, &operation) {
+        let joins = |entry: &Entry| match (entry.operations.as_slice(), &operation) {
             (
-                Operation::Set {
-                    entity,
-                    component,
-                    path,
-                    ..
-                },
+                [
+                    Operation::Set {
+                        entity,
+                        component,
+                        path,
+                        ..
+                    },
+                ],
                 Operation::Set {
                     entity: next,
                     component: of,
@@ -87,7 +164,7 @@ impl Log {
         let inverse = world.apply(&mut operation)?;
         // What undoes this set undoes only the set before it, in the gesture.
         world.release(inverse);
-        self.done.last_mut().expect("an entry joined").operation = operation;
+        self.done.last_mut().expect("an entry joined").operations[0] = operation;
         Ok(())
     }
 
@@ -96,9 +173,9 @@ impl Log {
         self.open = false;
     }
 
-    /// Undoes the last operation applied and not undone, and returns whether there was one.
+    /// Undoes the last edit applied and not undone, and returns whether there was one.
     ///
-    /// Refused, as when the entity it changed is gone since, or the entity a create made has
+    /// Refused, as when an entity it changed is gone since, or the entity a create made has
     /// children since, which the create didn't make, it changes nothing, and its entry is dropped,
     /// with what it kept, since the world has moved on from it and it would block the entries
     /// before it: the error says why, and is logged as `ops.dropped`.
@@ -106,36 +183,43 @@ impl Log {
         self.step(world, Step::Undo)
     }
 
-    /// Redoes the last operation undone, and returns whether there was one; refused, as
+    /// Redoes the last edit undone, and returns whether there was one; refused, as
     /// [`undo`](Self::undo) is.
     pub fn redo(&mut self, world: &mut World) -> Result<bool> {
         self.step(world, Step::Redo)
     }
 
-    /// The operation [`undo`](Self::undo) undoes next.
-    pub fn undoable(&self) -> Option<&Operation> {
-        self.done.last().map(|entry| &entry.operation)
+    /// The operations of the edit [`undo`](Self::undo) undoes next.
+    pub fn undoable(&self) -> Option<&[Operation]> {
+        self.done.last().map(|entry| entry.operations.as_slice())
     }
 
-    /// The operation [`redo`](Self::redo) redoes next.
-    pub fn redoable(&self) -> Option<&Operation> {
-        self.undone.last().map(|entry| &entry.operation)
+    /// The operations of the edit [`redo`](Self::redo) redoes next.
+    pub fn redoable(&self) -> Option<&[Operation]> {
+        self.undone.last().map(|entry| entry.operations.as_slice())
     }
 
-    /// The operations applied and not undone, the first applied first: for tests, and for the
-    /// tool API to come.
-    pub fn operations(&self) -> impl ExactSizeIterator<Item = &Operation> {
-        self.done.iter().map(|entry| &entry.operation)
+    /// The operations of each edit applied and not undone, the first applied first.
+    pub fn edits(&self) -> impl ExactSizeIterator<Item = &[Operation]> {
+        self.done.iter().map(|entry| entry.operations.as_slice())
+    }
+
+    /// The operations of each edit undone, the last undone last, which redo redoes first.
+    pub fn undone(&self) -> impl ExactSizeIterator<Item = &[Operation]> {
+        self.undone.iter().map(|entry| entry.operations.as_slice())
     }
 
     /// Drops every entry, and what they kept, from `world`, which they were applied to.
     pub fn clear(&mut self, world: &mut World) {
         for dropped in self.done.drain(..).chain(self.undone.drain(..)) {
-            world.release(dropped.inverse);
+            release(world, dropped);
         }
         self.open = false;
     }
 
+    /// Undoes or redoes the last entry, its inverses the last first: each one's turns into what
+    /// redoes it, or undoes it again, so that an entry refused partway turns those it has done
+    /// back, the first first.
     fn step(&mut self, world: &mut World, step: Step) -> Result<bool> {
         self.open = false;
         let (from, to) = match step {
@@ -149,26 +233,45 @@ impl Log {
             Step::Undo => ("undo", "ops.undone", "Undid an operation"),
             Step::Redo => ("redo", "ops.redone", "Redid an operation"),
         };
-        match world.undo(&mut entry.inverse) {
-            Ok(()) => {
-                let entity = entry.operation.entity().map(display);
-                debug!(code, entity, operation = %entry.operation, "{done}");
-                to.push(entry);
-                Ok(true)
-            }
-            Err(error) => {
-                let message = format!("can't {doing} {}: {error}", entry.operation);
+        // An entry's operations come undone the last first, and redone the first first, so that
+        // each finds the world as the one after it, or before it, left it.
+        let order: Vec<usize> = match step {
+            Step::Undo => (0..entry.inverses.len()).rev().collect(),
+            Step::Redo => (0..entry.inverses.len()).collect(),
+        };
+        for (n, &i) in order.iter().enumerate() {
+            if let Err(error) = world.undo(&mut entry.inverses[i]) {
+                for &back in order[..n].iter().rev() {
+                    world
+                        .undo(&mut entry.inverses[back])
+                        .expect("an operation just undone or redone turns back");
+                }
+                let operation = &entry.operations[i];
+                let message = format!("can't {doing} {operation}: {error}");
                 warn!(
                     code = "ops.dropped",
                     refused = error.code(),
-                    entity = entry.operation.entity().map(display),
-                    operation = %entry.operation,
-                    "{message}; dropped it from the log"
+                    entity = operation.entity().map(display),
+                    operation = %operation,
+                    "{message}; dropped its edit from the log"
                 );
-                world.release(entry.inverse);
-                Err(error.with_message(message))
+                release(world, entry);
+                return Err(error.with_message(message));
             }
         }
+        for operation in &entry.operations {
+            let entity = operation.entity().map(display);
+            debug!(code, entity, operation = %operation, "{done}");
+        }
+        to.push(entry);
+        Ok(true)
+    }
+}
+
+/// Releases what `entry`'s inverses keep from `world`.
+fn release(world: &mut World, entry: Entry) {
+    for inverse in entry.inverses {
+        world.release(inverse);
     }
 }
 
@@ -183,7 +286,8 @@ impl Log {
     /// How many slots its entries keep.
     pub(super) fn kept(&self) -> usize {
         let entries = self.done.iter().chain(&self.undone);
-        entries.map(|entry| entry.inverse.kept()).sum()
+        let inverses = entries.flat_map(|entry| &entry.inverses);
+        inverses.map(Inverse::kept).sum()
     }
 }
 
@@ -254,15 +358,19 @@ pub(super) mod tests {
             states.push(sorted(&x.world));
         }
         // The create is logged with the ID it drew, which its entity has.
-        let created = log.operations().nth(3);
-        let Some(Operation::Create {
-            entity: Some(id), ..
-        }) = created
+        let created = log.edits().nth(3);
+        let Some(
+            [
+                Operation::Create {
+                    entity: Some(id), ..
+                },
+            ],
+        ) = created
         else {
             panic!("{created:?}");
         };
         assert!(x.world.entity(*id).is_some(), "{id}");
-        assert_eq!(log.operations().len(), 5);
+        assert_eq!(log.edits().len(), 5);
         for state in states.iter().rev().skip(1) {
             assert!(log.undo(&mut x.world).expect("undone"));
             assert!(same_snapshots(&sorted(&x.world), state));
@@ -284,9 +392,13 @@ pub(super) mod tests {
         let mut log = Log::default();
         let f = x.id(x.f);
         log.apply(&mut x.world, EMPTY).expect("created");
-        let Some(&Operation::Create {
-            entity: Some(id), ..
-        }) = log.undoable()
+        let Some(
+            &[
+                Operation::Create {
+                    entity: Some(id), ..
+                },
+            ],
+        ) = log.undoable()
         else {
             panic!("{:?}", log.undoable());
         };
@@ -329,9 +441,13 @@ pub(super) mod tests {
         // Undone and redone, so that the redo's undo is checked as the first was.
         let under_b = create(x.id(x.b));
         log.apply(&mut x.world, under_b).expect("created");
-        let Some(&Operation::Create {
-            entity: Some(made), ..
-        }) = log.undoable()
+        let Some(
+            &[
+                Operation::Create {
+                    entity: Some(made), ..
+                },
+            ],
+        ) = log.undoable()
         else {
             panic!("{:?}", log.undoable());
         };
@@ -431,15 +547,15 @@ pub(super) mod tests {
         for n in [1, 2, 3] {
             log.amend(&mut x.world, count(f, n)).expect("set");
         }
-        assert_eq!(log.operations().len(), 1, "one field, one gesture");
-        assert_eq!(log.undoable(), Some(&count(f, 3)));
+        assert_eq!(log.edits().len(), 1, "one field, one gesture");
+        assert_eq!(log.undoable(), Some(&[count(f, 3)][..]));
         log.amend(&mut x.world, set(f, "byte", Value::UInt(9)))
             .expect("set");
-        assert_eq!(log.operations().len(), 2, "another field");
+        assert_eq!(log.edits().len(), 2, "another field");
         log.seal();
         log.amend(&mut x.world, set(f, "byte", Value::UInt(10)))
             .expect("set");
-        assert_eq!(log.operations().len(), 3, "another gesture");
+        assert_eq!(log.edits().len(), 3, "another gesture");
         let scale = |entity| Operation::Set {
             entity,
             component: "Transform".into(),
@@ -453,7 +569,7 @@ pub(super) mod tests {
         log.apply(&mut x.world, count(f, 5)).expect("set");
         log.amend(&mut x.world, count(f, 6)).expect("set");
         assert_eq!(
-            log.operations().len(),
+            log.edits().len(),
             8,
             "another component's, another entity's, and one applied"
         );
@@ -483,7 +599,7 @@ pub(super) mod tests {
         assert_eq!(error.code(), "ecs.no_entity", "{error}");
         let says = format!("can't undo set `Transform.scale.x` of {}: ", x.id(x.s));
         assert!(error.to_string().starts_with(&says), "{error}");
-        assert_eq!(log.undoable(), Some(&count(f, 1)));
+        assert_eq!(log.undoable(), Some(&[count(f, 1)][..]));
         assert_eq!(log.redoable(), None);
         assert!(log.undo(&mut x.world).expect("undone"));
         let all = x.world.get::<Everything>(x.f).expect("everything");
@@ -496,6 +612,53 @@ pub(super) mod tests {
         assert_eq!(undone, Err("ecs.no_entity"));
         assert_eq!((log.kept(), vacated(&x.world)), (0, 0));
         check_ids(&x.world);
+    }
+
+    /// An edit of several operations applies all of them or none, and undoes and redoes whole; an
+    /// undo refused partway turns back what it had undone.
+    #[test]
+    fn an_edits_operations_go_together() {
+        let mut x = fixture();
+        let mut log = Log::default();
+        let f = x.id(x.f);
+        let scale = Operation::Set {
+            entity: x.id(x.s),
+            component: "Transform".into(),
+            path: "scale.x".to_owned(),
+            value: Value::F32(2.0),
+        };
+        let before = sorted(&x.world);
+        let refused = log.apply_all(
+            &mut x.world,
+            vec![count(f, 5), scale.clone(), count(f, 200)],
+        );
+        let error = refused.expect_err("above its max");
+        assert!(
+            error.to_string().starts_with("operation 3, set "),
+            "{error}"
+        );
+        assert!(same_snapshots(&sorted(&x.world), &before), "none applied");
+        assert_eq!(log.edits().len(), 0);
+        let delete = Operation::Delete { entity: x.id(x.c) };
+        let edit = vec![count(f, 5), scale, delete];
+        log.apply_all(&mut x.world, edit.clone()).expect("applied");
+        assert_eq!(log.undoable(), Some(edit.as_slice()));
+        let after = sorted(&x.world);
+        assert!(log.undo(&mut x.world).expect("undone"));
+        assert!(same_snapshots(&sorted(&x.world), &before));
+        assert!(log.redo(&mut x.world).expect("redone"));
+        assert!(same_snapshots(&sorted(&x.world), &after));
+        // The scale's entity gone, its undo is refused after the delete's, which comes back out.
+        x.world.despawn(x.s).expect("alive");
+        let error = log.undo(&mut x.world).expect_err("s is gone");
+        assert_eq!(error.code(), "ecs.no_entity", "{error}");
+        assert!(!x.world.contains(x.c), "deleted again");
+        let all = x.world.get::<Everything>(x.f).expect("everything");
+        assert_eq!(all.count, 5);
+        assert_eq!(log.undoable(), None, "dropped");
+        assert_eq!((log.kept(), vacated(&x.world)), (0, 0));
+        check_ids(&x.world);
+        check_links(&x.world);
     }
 
     #[test]

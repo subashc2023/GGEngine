@@ -7,6 +7,7 @@ mod build;
 mod classify;
 mod dx;
 mod game;
+mod mcp;
 mod patch;
 mod run;
 
@@ -69,9 +70,24 @@ Talk to a running game, through its tool API:
   entity <ID>                    An entity and its components' values
   get <ID> <COMPONENT> [PATH]    A component's value, or its field at PATH, such as `translation.x`
   hash                           Its world's hash
+  apply <OPERATIONS>             Apply OPERATIONS, a JSON array of the API's operations, as one edit:
+                                 all or none, between ticks, which `undo` takes back
+  set <ID> <COMPONENT> <PATH> <VALUE>
+                                 Set a field, such as `translation.x`, or a whole component for an
+                                 empty PATH, to VALUE: JSON, or else a string, as one edit
+  undo [--author <NAME>]         Undo gg's last edit, or author NAME's, such as a scene file's path,
+                                 `scenes/grid.ron`, printing it, or `null` if there's none
+  redo [--author <NAME>]         Redo the last edit gg, or NAME, undid
+  edits [--author <NAME>]        Each author's edits, or NAME's, those to undo and those to redo
   logs [--level <LEVEL>]         Its log's events at LEVEL (`warn`) and above
   quit                           End it cleanly, as closing its window does, unasked
   call <METHOD> [<PARAMS>]       Send METHOD with PARAMS, as JSON, and print what it answers
+
+Serve agents:
+  mcp                            Serve the tool API to an agent that speaks MCP, on stdin and stdout:
+                                 a tool for each command above but `quit`, `call` and the PATHs of
+                                 `capture` and `snapshot`, which reaches the game the options pick at each call, as the
+                                 agent, its MCP client's name, the author of the edits it applies
 
 Options for talking to a game:
   --pid <PID>           The game in process PID, when more than one runs
@@ -98,6 +114,7 @@ enum Command {
         method: String,
         params: Value,
     },
+    Mcp(Pick),
 }
 
 fn main() -> ExitCode {
@@ -133,6 +150,7 @@ fn main() -> ExitCode {
             print(result.get());
             true
         }),
+        Command::Mcp(pick) => mcp::serve(pick).map(|()| true),
     };
     match done {
         Ok(true) => ExitCode::SUCCESS,
@@ -163,7 +181,8 @@ fn bad(message: String) -> Failure {
 }
 
 /// The flags that take a value: `--name value` or `--name=value`.
-const VALUED: [&str; 10] = [
+const VALUED: [&str; 11] = [
+    "--author",
     "--pid",
     "--app",
     "--timeout",
@@ -258,6 +277,7 @@ impl Parsed {
                 .map_err(|_| bad("`--pid` takes a process's ID, a whole number".to_owned()))?,
             app: self.value("--app"),
             timeout: self.seconds("--timeout", 30)?,
+            client: "gg".to_owned(),
         })
     }
 
@@ -400,6 +420,37 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
                 "get",
                 json!({"id": id, "component": component, "path": path}),
             )?
+        }
+        "apply" => {
+            let given = parsed.positional(1, 1, "apply <OPERATIONS>")?;
+            let operations: Value = serde_json::from_str(&given[0])
+                .map_err(|error| bad(format!("OPERATIONS isn't JSON: {error}")))?;
+            if !operations.is_array() {
+                return Err(bad("OPERATIONS is a JSON array of operations".to_owned()));
+            }
+            call(&mut parsed, "apply", json!({"operations": operations}))?
+        }
+        "set" => {
+            let given = parsed.positional(4, 4, "set <ID> <COMPONENT> <PATH> <VALUE>")?;
+            let value =
+                serde_json::from_str(&given[3]).unwrap_or_else(|_| Value::String(given[3].clone()));
+            let set =
+                json!({"id": given[0], "component": given[1], "path": given[2], "value": value});
+            call(&mut parsed, "apply", json!({"operations": [{"set": set}]}))?
+        }
+        method @ ("undo" | "redo" | "edits") => {
+            parsed.positional(0, 0, &format!("{method} [--author <NAME>]"))?;
+            let author = parsed.value("--author");
+            call(&mut parsed, method, json!({"author": author}))?
+        }
+        "mcp" => {
+            parsed.positional(0, 0, "mcp")?;
+            // Its MCP client's name, once it says, and else its own.
+            let pick = parsed.pick()?;
+            Command::Mcp(Pick {
+                client: "mcp".to_owned(),
+                ..pick
+            })
         }
         "call" => {
             let mut given = parsed.positional(1, 2, "call <METHOD> [<PARAMS>]")?;

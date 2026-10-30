@@ -248,7 +248,12 @@ impl Handler<'_> {
             let _ = dispatch(&mut app.stack, cx, &event);
         });
         self.take_pause();
-        if api::serve(&mut self.api, &self.cx, &self.app.stack, &mut self.stepper) {
+        if api::serve(
+            &mut self.api,
+            &mut self.cx,
+            &mut self.app.stack,
+            &mut self.stepper,
+        ) {
             debug!("A tool asked the run to end");
             event_loop.exit();
             return;
@@ -622,7 +627,12 @@ impl ApplicationHandler for Handler<'_> {
     /// window is minimized, and no frames run, it's answered here, unless it needs a frame.
     fn user_event(&mut self, event_loop: &ActiveEventLoop, (): ()) {
         if self.minimized
-            && api::serve_paused(&mut self.api, &self.cx, &self.app.stack, &mut self.stepper)
+            && api::serve_paused(
+                &mut self.api,
+                &mut self.cx,
+                &mut self.app.stack,
+                &mut self.stepper,
+            )
         {
             debug!("A tool asked the run to end");
             event_loop.exit();

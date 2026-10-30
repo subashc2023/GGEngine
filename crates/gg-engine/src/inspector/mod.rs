@@ -313,8 +313,18 @@ impl Inspector {
     /// clicked.
     fn edit_menu(&self, ui: &mut egui::Ui) -> Option<Step> {
         let items = [
-            (Step::Undo, "Undo", self.log.undoable(), UNDO),
-            (Step::Redo, "Redo", self.log.redoable(), REDO[0]),
+            (
+                Step::Undo,
+                "Undo",
+                self.log.undoable().and_then(<[_]>::first),
+                UNDO,
+            ),
+            (
+                Step::Redo,
+                "Redo",
+                self.log.redoable().and_then(<[_]>::first),
+                REDO[0],
+            ),
         ];
         let mut chosen = None;
         for (step, name, edit, shortcut) in items {
@@ -494,7 +504,8 @@ impl Inspector {
             return;
         }
         self.not_done = None;
-        let made = self.log.undoable().and_then(|done| match done {
+        let made = self.log.undoable().and_then(<[_]>::first);
+        let made = made.and_then(|done| match done {
             Operation::Create { .. } | Operation::Duplicate { .. } => done.entity(),
             _ => None,
         });

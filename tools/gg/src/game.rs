@@ -15,11 +15,14 @@ use crate::build;
 /// takes any time, refusing it.
 const CONNECT: Duration = Duration::from_secs(2);
 
-/// Which running game to talk to, and how long to wait for its answers.
+/// Which running game to talk to, how long to wait for its answers, and the client to say hello as,
+/// the author of the edits it applies.
+#[derive(Clone)]
 pub(crate) struct Pick {
     pub(crate) pid: Option<u32>,
     pub(crate) app: Option<String>,
     pub(crate) timeout: Duration,
+    pub(crate) client: String,
 }
 
 /// The session files of the games built in the workspace, as [`sessions_in`] its target directory
@@ -41,10 +44,10 @@ fn sessions_in(target: &Path) -> Vec<(PathBuf, Session)> {
     sessions.collect()
 }
 
-/// Connects to the game that `session`, read from the file at `path`, names, removing the file if
-/// the game has ended, which a crash or a kill leaves it behind for.
-fn connect_to(path: &Path, session: &Session) -> Result<Option<Client>, Failure> {
-    match Client::connect(session, CONNECT) {
+/// Connects to the game that `session`, read from the file at `path`, names, as `client`, removing
+/// the file if the game has ended, which a crash or a kill leaves it behind for.
+fn connect_to(path: &Path, session: &Session, client: &str) -> Result<Option<Client>, Failure> {
+    match Client::connect(session, client, CONNECT) {
         Ok(client) => Ok(Some(client)),
         Err(failure) if failure.code == "api.connect" => {
             let _ = fs::remove_file(path);
@@ -64,7 +67,7 @@ pub(crate) fn connect(pick: &Pick) -> Result<Client, Failure> {
     });
     let mut running = Vec::new();
     for (path, session) in picked {
-        running.extend(connect_to(&path, &session)?);
+        running.extend(connect_to(&path, &session, &pick.client)?);
     }
     let mut client = match running.len() {
         0 => {
@@ -107,7 +110,7 @@ pub(crate) fn call(pick: &Pick, method: &str, params: Value) -> Result<Box<RawVa
 pub(crate) fn sessions() -> Result<Value, Failure> {
     let mut games = Vec::new();
     for (path, session) in session_files()? {
-        let Some(mut client) = connect_to(&path, &session)? else {
+        let Some(mut client) = connect_to(&path, &session, "gg")? else {
             continue;
         };
         let pulse: Pulse = client.call_as("ping", Value::Null)?;
@@ -125,10 +128,21 @@ pub(crate) fn sessions() -> Result<Value, Failure> {
 }
 
 /// Prints the lines of the log of the game `pick` picks whose events are at `level` or above, as
-/// [`rank`] ranks them.
+/// [`log_lines`] gives them.
+///
+/// Fails as `log_lines` does.
+pub(crate) fn logs(pick: &Pick, level: u8) -> Result<(), Failure> {
+    for line in log_lines(pick, level)? {
+        crate::print(&line);
+    }
+    Ok(())
+}
+
+/// The lines of the log of the game `pick` picks whose events are at `level` or above, as [`rank`]
+/// ranks them.
 ///
 /// Fails with `gg.no_log` if the game has no log, or it can't be read.
-pub(crate) fn logs(pick: &Pick, level: u8) -> Result<(), Failure> {
+pub(crate) fn log_lines(pick: &Pick, level: u8) -> Result<Vec<String>, Failure> {
     let client = connect(pick)?;
     let Some(log) = client.welcome().log.clone() else {
         return Err(Failure::new("gg.no_log", "the game writes no JSON log"));
@@ -139,16 +153,14 @@ pub(crate) fn logs(pick: &Pick, level: u8) -> Result<(), Failure> {
             format!("can't read the log {}: {error}", log.display()),
         )
     })?;
-    for line in whole_lines(&text) {
+    let lines = whole_lines(&text).filter(|line| {
         let event: Option<Map<String, Value>> = serde_json::from_str(line).ok();
         let ranked = event
             .as_ref()
             .and_then(|event| rank(event.get("level")?.as_str()?));
-        if ranked.is_some_and(|ranked| ranked >= level) {
-            crate::print(line);
-        }
-    }
-    Ok(())
+        ranked.is_some_and(|ranked| ranked >= level)
+    });
+    Ok(lines.map(str::to_owned).collect())
 }
 
 /// The lines of `text` that end in a line break: a log's, but for a last line still being written.

@@ -32,6 +32,7 @@ mod dirs;
 mod dock;
 mod draw;
 mod ecs;
+mod edits;
 mod event;
 mod gltf;
 // In development builds alone, as `dev` has it.
@@ -59,6 +60,7 @@ mod recording;
 pub mod reflect;
 mod render_thread;
 mod renderer_components;
+mod scene_files;
 mod script;
 mod snapshot;
 // What the UI's tests share, in tests alone.

@@ -1,8 +1,10 @@
 //! Snapshot files: a run's world saved whole as text, which a run given `--restore` starts from, in
 //! another process, after a crash or a rebuild, so that it goes on where the world was: its app,
 //! its engine and build, its layers from the bottom up, the ticks the simulation had run, the
-//! world's hash, the assets the layers had added, which name what's opaque in the world, and the
-//! world, as [`World::save_whole`] writes it, then `end`.
+//! world's hash, the assets the layers had added, which name what's opaque in the world, the scene
+//! files the layers had loaded, each its path, its author and its text as last applied, as a
+//! recording's values write them, which the restored run watches, and the world, as
+//! [`World::save_whole`] writes it, then `end`.
 //!
 //! ```text
 //! gg-snapshot 1
@@ -12,6 +14,7 @@
 //! ticks 1234
 //! hash 58183b6352a09a44 fb695ce29daa8479
 //! asset texture 1 1 2 assets/checkerboard.png
+//! scene List([String("/game/scenes/grid.ron"), String("scenes/grid.ron"), String("(entities: ...")])
 //! stream 3f8a6c2e9b1d4057
 //! slots 10530
 //! free 12 7
@@ -28,6 +31,9 @@ use std::path::{Path, PathBuf};
 use gg_core::{Error, Result};
 use tracing::{info, warn};
 
+use crate::recording::text::Text;
+use crate::reflect::Value;
+use crate::scene_files::SceneFile;
 use crate::{World, WorldHash};
 
 /// A snapshot file's first line: its format, and the format's version, which a change to its lines
@@ -39,22 +45,38 @@ const FORMAT: &str = "gg-snapshot 1";
 ///
 /// Fails as [`World::save_whole`] does.
 #[cfg(feature = "dev")]
-pub(crate) fn write(world: &World, app: &str, layers: &[&str], ticks: u64) -> Result<String> {
+pub(crate) fn write(
+    world: &World,
+    scenes: &[SceneFile],
+    app: &str,
+    layers: &[&str],
+    ticks: u64,
+) -> Result<String> {
     use std::fmt::Write as _;
 
-    use crate::recording::engine;
+    use crate::recording::{engine, text};
 
     let _zone = gg_core::zone!();
     let mut out = String::new();
-    let text = "a string takes any text";
-    writeln!(out, "{FORMAT}").expect(text);
-    writeln!(out, "app {app}").expect(text);
-    writeln!(out, "engine {}", engine()).expect(text);
-    writeln!(out, "layers {}", layers.join(" ")).expect(text);
-    writeln!(out, "ticks {ticks}").expect(text);
-    writeln!(out, "hash {}", world.hash()).expect(text);
+    let written = "a string takes any text";
+    writeln!(out, "{FORMAT}").expect(written);
+    writeln!(out, "app {app}").expect(written);
+    writeln!(out, "engine {}", engine()).expect(written);
+    writeln!(out, "layers {}", layers.join(" ")).expect(written);
+    writeln!(out, "ticks {ticks}").expect(written);
+    writeln!(out, "hash {}", world.hash()).expect(written);
     for added in world.assets().added() {
-        writeln!(out, "asset {added}").expect(text);
+        writeln!(out, "asset {added}").expect(written);
+    }
+    // One whose path isn't Unicode isn't watched after a restore.
+    for scene in scenes {
+        if let Some(path) = scene.path.to_str() {
+            let strings = [path, &scene.author, &scene.text];
+            let strings = strings.map(|string| Value::String(string.to_owned()));
+            out.push_str("scene ");
+            text::write(&mut out, &Value::List(strings.into()), world);
+            out.push('\n');
+        }
     }
     world.save_whole(&mut out)?;
     out.push_str("end\n");
@@ -83,6 +105,8 @@ pub(crate) struct Snapshot {
     hash: WorldHash,
     /// What the layers of the run it was taken from had added, in order.
     assets: Vec<String>,
+    /// The scene files that run's layers had loaded, as last applied.
+    pub(crate) scenes: Vec<SceneFile>,
     /// The index of its world's first line.
     world: usize,
 }
@@ -143,12 +167,43 @@ impl Snapshot {
             assets.push(added.to_owned());
             world += 1;
         }
+        let mut scenes = Vec::new();
+        while let Some(scene) = lines
+            .get(world)
+            .and_then(|line| line.strip_prefix("scene "))
+        {
+            let read = Text::parse(scene, "scene ".len() + 1)
+                .ok()
+                .and_then(|text| {
+                    let Value::List(strings) = text.value(&World::default()) else {
+                        return None;
+                    };
+                    let [
+                        Value::String(path),
+                        Value::String(author),
+                        Value::String(text),
+                    ] = <[Value; 3]>::try_from(strings).ok()?
+                    else {
+                        return None;
+                    };
+                    Some(SceneFile::new(path.into(), author, text))
+                });
+            let scene = read.ok_or_else(|| {
+                refused(format!(
+                    "line {}: a scene file is a list of its path, its author and its text",
+                    world + 1
+                ))
+            })?;
+            scenes.push(scene);
+            world += 1;
+        }
         Ok(Self {
             path: path.to_owned(),
             layers: layers.collect(),
             ticks,
             hash,
             assets,
+            scenes,
             world,
             text,
         })
@@ -231,13 +286,21 @@ mod tests {
         let mut saved = Context::seeded(1);
         let world = saved.world_mut();
         world.spawn((Transform::IDENTITY, Sprite::default()));
-        let text = write(saved.world(), "Tested", &["Tester"], 77).expect("written");
+        // A path and a text that need escapes.
+        let scene = SceneFile::new(
+            "scenes/a \"grid\".ron".into(),
+            "scenes/grid.ron".to_owned(),
+            "(entities: {\n})\n".to_owned(),
+        );
+        let scenes = [scene];
+        let text = write(saved.world(), &scenes, "Tested", &["Tester"], 77).expect("written");
         let thread = std::thread::current().id();
         let dir = Scratch::new(&format!("snapshot-{thread:?}"));
         fs::create_dir_all(&dir.0).expect("a directory");
         let path = dir.0.join("tested.snapshot");
         save(&path, &text).expect("saved");
         let snapshot = Snapshot::read(&path, "Tested").expect("read");
+        assert_eq!(snapshot.scenes, scenes);
         let mut restored = Context::seeded(2);
         let ticks = snapshot.restore(restored.world_mut(), &["Tester"]);
         assert_eq!(ticks.expect("restored"), 77);
@@ -285,7 +348,7 @@ mod tests {
         Drawn::<3>.load(&mut saved);
         let quad = MeshDraw::from_parts(0, 0, false, false, &[]).expect("a draw");
         let drawn = saved.world_mut().spawn((Transform::IDENTITY, quad));
-        let text = write(saved.world(), "Tested", &[], 0).expect("written");
+        let text = write(saved.world(), &[], "Tested", &[], 0).expect("written");
         let thread = std::thread::current().id();
         let dir = Scratch::new(&format!("snapshot-opaque-{thread:?}"));
         fs::create_dir_all(&dir.0).expect("a directory");

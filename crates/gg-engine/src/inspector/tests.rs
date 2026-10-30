@@ -835,7 +835,7 @@ fn an_edit_applies_at_the_next_tick_to_the_entity_picked_as_it_was_made() {
     assert_eq!(counts(&world), [42, 42]);
     Layer::tick(&mut inspector, &mut world, Tick { number: 0 });
     assert_eq!(counts(&world), [7, 42]);
-    assert_eq!(inspector.log.operations().len(), 1);
+    assert_eq!(inspector.log.edits().len(), 1);
     // The refusal, of a field of the entity picked before, isn't shown beside the same field
     // of this one.
     assert!(inspector.refusals.is_empty());
@@ -962,7 +962,7 @@ fn a_drag_is_one_edit_which_the_keys_undo_and_redo() {
     }
     let dragged = weight(&world);
     assert!(sets > 1 && dragged != 2.5, "{sets} sets, to {dragged}");
-    assert_eq!(inspector.log.operations().len(), 1, "one edit");
+    assert_eq!(inspector.log.edits().len(), 1, "one edit");
     for (keys, expected) in [
         (shortcut(egui::Key::Z, false), 2.5),
         (shortcut(egui::Key::Z, true), dragged),
@@ -1003,7 +1003,7 @@ fn frames_that_change_nothing_queue_nothing() {
         }
         assert!(inspector.queued.is_empty(), "idle frames queue nothing");
     }
-    assert_eq!(inspector.log.operations().len(), 2, "two edits");
+    assert_eq!(inspector.log.edits().len(), 2, "two edits");
     for _ in 0..2 {
         run(
             &mut inspector,
@@ -1240,7 +1240,7 @@ fn components_are_added_and_removed_at_the_next_tick() {
     let color = world.get::<Sprite>(entity).expect("a sprite").color;
     assert_eq!(color, sprite.color);
     assert!(inspector.refusals.is_empty());
-    assert_eq!(inspector.log.operations().len(), 2);
+    assert_eq!(inspector.log.edits().len(), 2);
     // Refused, since it has one, and said so above its components.
     let again = operation("Add", "Transform", Some(Transform::IDENTITY.to_value()));
     tick(&mut inspector, &mut world, &[again]);
@@ -1311,7 +1311,7 @@ fn a_number_is_typed(every: u32) {
     // Then a frame with a tick, if that one had none.
     run(&mut inspector, &mut world, Vec::new());
     assert!(sets > 1 && weight(&world) == 0.75, "{sets} sets");
-    assert_eq!(inspector.log.operations().len(), 1, "one edit");
+    assert_eq!(inspector.log.edits().len(), 1, "one edit");
     run(&mut inspector, &mut world, shortcut(egui::Key::Z, false));
     run(&mut inspector, &mut world, Vec::new());
     assert_eq!(weight(&world).to_bits(), 2.5f64.to_bits());
@@ -1423,7 +1423,7 @@ fn a_torn_off_inspector_keeps_its_drags_and_keys() {
     }
     let dragged = weight(&world);
     assert!(sets > 1 && dragged != 2.5, "{sets} sets, to {dragged}");
-    assert_eq!(inspector.log.operations().len(), 1, "one edit");
+    assert_eq!(inspector.log.edits().len(), 1, "one edit");
     // Pressed in that window, the keys step through the edits.
     run(&mut inspector, &mut world, shortcut(egui::Key::Z, false));
     assert_eq!(weight(&world).to_bits(), 2.5f64.to_bits());
@@ -1457,16 +1457,16 @@ fn each_click_is_an_edit_and_a_text_field_keeps_its_keys() {
     run(&mut inspector, &mut world, click(Primary, checkbox));
     run(&mut inspector, &mut world, click(Primary, checkbox));
     assert!(on(&world));
-    assert_eq!(inspector.log.operations().len(), 2);
+    assert_eq!(inspector.log.edits().len(), 2);
     // While the Find field has the keys, they undo its own text, not an edit.
     let field = beside(&texts, find(&texts, "Find", "Find"));
     run(&mut inspector, &mut world, click(Primary, field));
     run(&mut inspector, &mut world, shortcut(egui::Key::Z, false));
-    assert_eq!(inspector.log.operations().len(), 2);
+    assert_eq!(inspector.log.edits().len(), 2);
     let away = click(Primary, egui::pos2(1500.0, 3900.0));
     run(&mut inspector, &mut world, away);
     run(&mut inspector, &mut world, shortcut(egui::Key::Z, false));
-    assert_eq!(inspector.log.operations().len(), 1);
+    assert_eq!(inspector.log.edits().len(), 1);
     assert!(!on(&world));
     // Two drags while the Find field keeps the keys are two edits, a press beginning each.
     run(&mut inspector, &mut world, click(Primary, field));
@@ -1474,7 +1474,7 @@ fn each_click_is_an_edit_and_a_text_field_keeps_its_keys() {
     for events in [slide(weight), slide(weight)].concat() {
         run(&mut inspector, &mut world, events);
     }
-    assert_eq!(inspector.log.operations().len(), 3);
+    assert_eq!(inspector.log.edits().len(), 3);
 }
 
 /// A frame of the Edit and Entity menus' items alone, as the open menus show them, given
@@ -2340,7 +2340,7 @@ fn add_component_adds_a_types_default() {
         primary: false,
     };
     assert_eq!(world.get::<Camera>(entity), Some(&made));
-    assert_eq!(inspector.log.operations().len(), 1);
+    assert_eq!(inspector.log.edits().len(), 1);
     run(&mut inspector, &mut world, shortcut(egui::Key::Z, false));
     assert_eq!(world.get::<Camera>(entity), None);
 }
@@ -2606,7 +2606,7 @@ fn a_variant_that_holds_whats_opaque_shows_disabled() {
     run(&mut inspector, &mut world, click(Primary, held));
     let form = &world.get::<Everything>(entity).expect("everything").form;
     assert_eq!(form, &Form::Point);
-    assert_eq!(inspector.log.operations().len(), 0);
+    assert_eq!(inspector.log.edits().len(), 0);
 }
 
 /// Each axis's button sets its component alone to the default's, a click an edit: a
@@ -2660,7 +2660,7 @@ fn axis_buttons_set_their_component_to_its_default() {
     );
     let rect = world.get::<Sprite>(entity).expect("a sprite").rect;
     assert_eq!(rect, [Vec2::new(0.1, 0.2), Vec2::new(1.0, 0.6)]);
-    assert_eq!(inspector.log.operations().len(), 4);
+    assert_eq!(inspector.log.edits().len(), 4);
 }
 
 /// The axis buttons' labels draw in the family [`crate::BOLD`] names where the context binds
@@ -2744,7 +2744,7 @@ fn an_axis_drag_sets_its_component_alone() {
     let dragged = translation(&world);
     assert!(sets > 1 && dragged.x != 0.0, "{sets} sets, to {dragged}");
     assert_eq!(dragged.y, 5.0);
-    assert_eq!(inspector.log.operations().len(), 1, "one edit");
+    assert_eq!(inspector.log.edits().len(), 1, "one edit");
     run(
         &mut inspector,
         &mut world,
@@ -3012,7 +3012,7 @@ fn a_gesture_of_the_links_is_one_edit_whatever_the_panels_cues() {
     let translation = |world: &World| world.get::<Transform>(entity).map(|at| at.translation);
     assert_eq!(translation(&world), Some(Vec3::new(3.0, 0.0, 0.0)));
     assert_eq!(
-        inspector.log.operations().len(),
+        inspector.log.edits().len(),
         2,
         "the count's, and the link's"
     );

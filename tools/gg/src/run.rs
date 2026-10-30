@@ -451,7 +451,7 @@ impl Supervisor<'_> {
                 }
                 let taken = snapshot(&session, &self.snapshot);
                 self.note(game, taken);
-                if let Ok(mut client) = Client::connect(&session, PULSE) {
+                if let Ok(mut client) = Client::connect(&session, "gg", PULSE) {
                     let _ = client.call("quit", Value::Null);
                 }
             }
@@ -684,14 +684,14 @@ pub(crate) fn retrying(mut what: impl FnMut() -> io::Result<()>) -> io::Result<(
 /// waits as long as a large world's snapshot may take, and returns what it answers.
 fn snapshot(session: &Session, path: &Path) -> Result<Snapshotted, Failure> {
     let path = Some(path.to_owned());
-    Client::connect(session, SNAPSHOT)?.call_as("snapshot", Snapshot { path })
+    Client::connect(session, "gg", SNAPSHOT)?.call_as("snapshot", Snapshot { path })
 }
 
 /// The pulse of the game `session` names, through `client`, which this connects again once it
 /// breaks; `None` if the game doesn't answer in time.
 fn ping(client: &mut Option<Client>, session: &Session) -> Option<Pulse> {
     if client.is_none() {
-        *client = Client::connect(session, PULSE).ok();
+        *client = Client::connect(session, "gg", PULSE).ok();
     }
     let pulse = client.as_mut()?.call_as("ping", Value::Null);
     if pulse.is_err() {

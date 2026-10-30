@@ -62,18 +62,17 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **The tool API and `tools/gg`** (2026-10-29)
 - **Restarting a game from a snapshot** (2026-10-29)
 - **subsecond's patches** (2026-10-29)
+- **Operations through the API** (2026-10-30)
 
 ## Now
 
-**Operations through the API**, Phase 5's fourth milestone. The tool API applies, undoes and
-redoes [operations](../ARCHITECTURE.md#project-state), each client undoing its own, and `gg` gives
-each a command. A scene file a game loaded, saved while it runs, applies as the operations that
-take the world's entities from what the file held to what it holds, which undo together. `gg mcp`
-serves the API to agents that speak MCP, over stdio. The Deferred rows that wait for the API's
-operations, such as clients' capabilities and the log in `Context`, are settled as it starts.
-*Done when* an agent, through MCP alone, finds the sandbox's spinner, sets its speed and undoes
-it, and an edit to the grid's scene file, saved while the sandbox runs under `gg run`, changes the
-running world, which an undo through the API takes back.
+**The first demo**, Phase 5's last milestone: a simple networked game in `games/`, which joins
+the workspace's members with it, a crate of its own as [Game code](../ARCHITECTURE.md#game-code)
+says, with the networking it needs, the engine's first, by the multiplayer model the open question
+below settles, decided as it starts. *Done when* Phase 5's is: the v0.1 loop works on the demo,
+watching it run, the user asks Claude Code for a change, Claude Code edits the game's Rust code or
+applies operations through the API, and the game shows the change with its state intact; and an
+agent runs a headless check through `tools/gg` and acts on its result.
 
 ## Next
 
@@ -142,8 +141,10 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Checking captures in CI, under RenderDoc on Linux with lavapipe: captures are checked by hand, replayed through qrenderdoc's Python for their names and labels | A name or a label is lost unseen, or the tool API checks captures |
 | RenderDoc captures from code or through the tool API, and more than one a run: `--capture` names one frame as the run starts, and the tool API's `capture` writes the view's pixels alone | An agent needs a frame's GPU work as well as its pixels |
 | `gg build` and `gg test`, with their results as data: `run` and `check` build through cargo, passing on its messages about the code as it renders them, and cargo's test harness writes JSON on nightly alone | An agent needs a build's or the tests' results as data, or libtest's JSON output is stable |
-| Capabilities each client of the tool API is granted, as [Agents and tools](../ARCHITECTURE.md#agents-and-tools) describes: a connection that says hello with the session's token reaches everything | Phase 5's operations, which change the world through the API |
+| Capabilities each client of the tool API is granted, as [Agents and tools](../ARCHITECTURE.md#agents-and-tools) describes: a connection that says hello with the session's token reaches everything, which only processes that can read the session file beside the game do | A client the user doesn't run as their own, such as one on another machine or a mod's, or an agent kept to one scene |
 | Diagnostics served by the tool API: `gg logs` reads the JSON log the session file names | A client on another machine, or one that follows a run's events as they come |
+| MCP beyond tools: resources, prompts, progress, cancellation and the client's roots; `gg mcp`'s tools are the API's methods but `quit`, `patch` and the paths of `capture` and `snapshot`, a capture's PNG coming inline | An agent needs one of them |
+| Watching the scene files the editor opens, saves and reloads, which it reads through `World::replace_scene` rather than `Context::load_scene_file` | Phase 9's editor |
 | Steps and captures while the window is minimized, which fail with `api.paused`, and requests while a file dialog or Windows' window menu holds the main thread, which wait; `ping` says which | A tool needs them then |
 | Labels inside passes: each run of draws labeled by what it draws, and the frame pass's view and UI apart; a capture shows a label for each pass | Phase 6, with the render graph |
 | Synchronization validation under RenderDoc, whose layer hides the validation layer's settings: through `VK_EXT_validation_features`, or the validation layer's environment | A synchronization bug shows under RenderDoc alone |
@@ -290,7 +291,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Drawing an entity despawned in a tick on its way there until the next: it vanishes up to a tick before it reaches where it stopped | A game's despawns show it, as bullets vanishing short of what they hit |
 | Copying the world as only the last tick a frame runs starts: a frame that catches up copies it as each of its ticks starts | A profile shows a catching-up frame's copies |
 | Copying the world, and finding what each row draws from, on the job system's threads, or only for the rows that moved: both run on the main thread, for the swarm about 0.19 ms a tick and 0.10 ms a frame that ticked; and blending only the rows that moved, which takes the job threads about 2.6 ms of their time a frame | A profile shows them |
-| Sets that jump: an Inspector set of a moving entity's transform, and its undo, glide there over a tick, as a drag does, rather than reset its interpolation | Phase 5's tool API, whose agents move things by setting them |
+| Sets that jump: an Inspector set of a moving entity's transform, and its undo, glide there over a tick, as a drag does, rather than reset its interpolation, as an agent's set through the tool API does too | Someone wants a set of a moving entity to glide |
 | A flag for headless frames at a fraction of a tick of their own, for captures between ticks and for perf runs that measure blending, which headless frames, drawing their ticks, leave out; tests have them, through `App::headless_step` | A capture between ticks, or a change to blending that needs measuring headless |
 | Interpolation across rollback: a world restored in a tick draws where the tick left it, all of it, so rollback that restores every tick would draw at the tick rate; how rollback restores is decided with it | Rollback |
 | Reparenting that keeps where a child is in the world, by decomposing its matrix, which loses any shear; `set_parent` keeps its own transform | Phase 9's scene tree, or an agent attaching something where it stands |
@@ -298,13 +299,13 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Children in an order that means something: reordering them, and saving their order; an undo puts a child back last | Phase 9's scene tree, or UI laid out by the hierarchy |
 | Each session's seed and count saved with the world and merged with it, so that an ID maps back to its session and when it was drawn, and a load refuses IDs no session drew | The tool API refusing an ID an agent made up |
 | An `EntityId` query term | The first system that reads IDs as it iterates, such as replication |
-| Errors carrying their entity, and a scene's line and column, as fields, not only in their message | The tool API returns errors as data |
+| Errors carrying their entity, and a scene's line and column, as fields, not only in their message, which the tool API gives as its code and message alone | A tool reads an error's entity or place without parsing its message |
 | Drawing rows at one z in ID order for less. Every frame reads them in that order rather than their tables', about 0.9 ms of the swarm's 4.3 ms frame in release; a frame that changes rows or z's, or follows a restore, sorts them by ID again, about 2.5 ms more for 100,000; and 100,000 sprites each at a z of their own, as sorting by y gives them, take about 5 ms, for a group and an item each. Tables kept in ID order would make the reads a sweep, and a radix sort the sort quicker | A game's frames need the time |
 | Linked prefab instances, with overrides, nesting, apply and revert; a placement is a flattened copy, each ID mixed from its instance's and its own, which links will keep | Phase 9's editor, or a game editing a prefab its scenes hold many copies of |
 | Placing a prefab without parsing it again: `World::place_prefab` parses its text each time, which allocates | A game places prefabs as it runs, rather than as it loads |
 | A derive hint for `Component::base`, and opaque values in lists and options, which saving refuses, as does a set's undo (`reflect.opaque`) where the old value holds something opaque in a variant, an option or a list; a type with opaque fields implements `Component` by hand to load, as `Sprite` does | A game's component holds something opaque |
 | Names in scenes beyond ASCII identifiers, which saving refuses (`scene.bad_name`) | A game names a type or a field so |
-| Loading a scene in place of some of a world's entities in one step, as the sandbox's grid reload does in three; a load refuses IDs the world has, and `World::replace_scene` replaces all of its entities | Phase 5's scene files applied as operations |
+| Loading a scene in place of some of a world's entities in one step, as the sandbox's grid reload does in three; a load refuses IDs the world has, and `World::replace_scene` replaces all of its entities; a scene file a game loaded through `Context::load_scene_file`, saved, applies as operations | Another game reloads part of its world from a file of its own |
 | A version in scene files, a file without one reading as the first | The first change to the format that old files can't be read by |
 | Comments in scene files, which a save drops | People annotate scenes |
 | A prompt before the editor's New, Open or Quit, or a scene dropped on its view, discards edits not saved: they discard them | Someone loses work, or Phase 9's editor |
@@ -319,9 +320,8 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Gravity from a scene or a setting: `Physics2D::gravity` is code's, Earth's by default | A game sets its own |
 | Physics steps that allocate nothing: rapier allocates as contacts come and go, and the `ticks` test steps no physics | A game's ticks must allocate nothing with physics |
 | Physics' state in the world's hash, `--dump` and `World::difference`, which read entities alone, as they read no resource: a step that goes another way inside rapier shows in the bodies' transforms a tick later | A replay goes another way inside physics unseen for long |
-| The log in `Context`, every layer's and the tool API's clients each undoing their own, and an undo logged as an operation; the Inspector keeps a log of its own | Phase 5, the tool API |
-| Replaying a log into another world, which maps values' handles to IDs, as a recording's commands are; `set_field` and operations store a dead handle without complaint | Phase 5, the tool API |
-| A delete saying what refers to its entities from outside, or refusing; those references dangle until it's undone, and the world doesn't save in between | An agent deletes through the tool API |
+| Replaying a log into another world, which maps values' handles to IDs, as a recording's commands are; `set_field` and operations store a dead handle without complaint | Edits sent to another world, as a server's or a peer's |
+| A delete saying what refers to its entities from outside, or refusing; those references dangle until it's undone, and the world doesn't save as a scene in between, though snapshots keep them dead | Someone loses a scene's save to a reference a delete left dangling |
 | Undoing a create whose entity has children since that the create didn't make, such as game code gave it, by keeping them where they are; it's refused (`ecs.has_children`), and the log drops it | An agent attaches children to what another's create made, or Phase 9's editor |
 | Layers holding what a restore in place takes back: the sandbox's swarm is in the world, and the Inspector drops its log and pick once the world's serial is another's, but nothing tells a layer that `Context`'s world was restored within a run, as `Layer::restored` does in a run started from a snapshot, so the sandbox doesn't snapshot | Something restores the running world in place, such as rollback |
 | Reparenting from the panels: dragging a row onto another, and taking a `Parent` away, as Remove Component would, making its entity a root; `Parent` is read only, so the Inspector offers neither | Phase 9's scene tree |
@@ -330,7 +330,6 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | A Delete key for the entity picked: keys reach egui even while the view has them, so it would delete as the world plays, its keys driving it, as Ctrl+Z undoes and Ctrl+D duplicates then; the Entity menu and a row's context menu delete | Keys go to the panel under the pointer, or the view takes them from egui |
 | A bound on the log, which keeps a session's entries, a delete's components and slots among them, until it's cleared | A session's memory shows it |
 | A log that outlives a run or a restore: inverses that keep components typed can't be saved, and a restored world refuses every inverse from before, the slots kept when the snapshot was taken staying unused, and freed in a run restored from a file; a snapshot could keep the log's place, which a restore would rewind it to | Someone misses undo across a restart |
-| A depth limit on values set or created by name, as scenes' 64; a deeper one recurses without one | The tool API takes values from outside |
 | Snapshots that copy less, only the tables changed, or on several threads: the swarm's 100,450 entities copy about 20 MB each way, in about 0.5 ms taken again or restored | A game's rollback frames need the time |
 | An app's own tick rate; the simulation runs 64 ticks a second | A game needs another rate |
 | Budgeting a frame's ticks against all of its time: a frame stops its ticks only once they take longer than the time they simulate, so ticks that take nearly their 15.625 ms keep real time at the frame rate's cost, as the debug sandbox's 100,000 drifters do, about 8 a frame at 8 fps; counting the rest of the frame too would slow down the simulation of any game drawn below 64 fps | A game's frame rate falls so |

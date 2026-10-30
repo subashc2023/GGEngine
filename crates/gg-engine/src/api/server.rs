@@ -20,8 +20,8 @@ use std::thread;
 use std::time::Duration;
 
 use gg_api::{
-    Capture, Captured, EntityList, Failure, Field, Hash, Hello, Listed, Patched, Pulse, Request,
-    Session, Snapshotted, Status, Step, Welcome,
+    Applied, Apply, Authored, Capture, Captured, EntityList, Failure, Field, Hash, Hello, History,
+    Listed, Patched, Pulse, Request, Session, Snapshotted, Status, Step, Welcome,
 };
 use gg_core::{Error, Result};
 use serde::Serialize;
@@ -31,16 +31,22 @@ use subsecond::JumpTable;
 use tracing::{debug, info};
 
 use super::{Waiting, json};
+use crate::edits::{Done, Edit};
 use crate::layer::Stack;
 use crate::main_loop::Stepper;
+use crate::reflect::{self, Ident, Type};
 use crate::render_thread::{Extracted, Shot};
-use crate::{Context, Entity, EntityId, Name, World, patch, snapshot};
+use crate::scene_files::SceneFile;
+use crate::{Context, Entity, EntityId, Name, Operation, World, patch, snapshot};
 
 /// The methods, as `api.unknown_method` lists them.
-const METHODS: [&str; 14] = [
+const METHODS: [&str; 18] = [
     "hello", "ping", "status", "pause", "resume", "step", "capture", "entities", "entity", "get",
-    "hash", "snapshot", "patch", "quit",
+    "hash", "snapshot", "patch", "apply", "undo", "redo", "edits", "quit",
 ];
+
+/// The client a connection whose `hello` names none is, the author of its edits.
+const UNNAMED: &str = "api";
 
 /// The most ticks a `step` runs.
 const MOST_STEPS: u64 = 10_000;
@@ -91,9 +97,10 @@ struct Shared {
     waker: Mutex<Option<Box<dyn Fn() + Send>>>,
 }
 
-/// A request for the main loop to answer, and where its answer goes.
+/// A request for the main loop to answer, the client of its connection, and where its answer goes.
 struct Incoming {
     call: Call,
+    client: Arc<str>,
     reply: Reply,
 }
 
@@ -119,6 +126,13 @@ enum Call {
     Hash,
     Snapshot(Option<PathBuf>),
     Patch(JumpTable),
+    Apply(Vec<gg_api::Operation>),
+    /// An undo, or a redo, of the edits of the author named, or else of the client's own.
+    Undo {
+        author: Option<String>,
+        redo: bool,
+    },
+    Edits(Option<String>),
     Quit,
 }
 
@@ -147,6 +161,8 @@ impl Reply {
 /// run as it was taken, where it goes, and where the answer goes.
 struct Taken {
     world: World,
+    /// The scene files the layers loaded, which the restored run watches.
+    scenes: Vec<SceneFile>,
     ticks: u64,
     path: PathBuf,
     reply: Reply,
@@ -273,7 +289,12 @@ impl Api {
     /// run, then the rest in the order they came, `capture`s once a frame has rendered the view, as
     /// [`frame_back`](Self::frame_back) says, and `snapshot`s once their files are written, but
     /// refused before the run's first tick. Returns whether one asked the run to end.
-    pub(crate) fn serve(&mut self, cx: &Context, stack: &Stack, stepper: &mut Stepper) -> bool {
+    pub(crate) fn serve(
+        &mut self,
+        cx: &mut Context,
+        stack: &mut Stack,
+        stepper: &mut Stepper,
+    ) -> bool {
         self.shared.frames.fetch_add(1, Ordering::Relaxed);
         self.answer(cx, stack, stepper, false)
     }
@@ -282,8 +303,8 @@ impl Api {
     /// counting a frame: a `capture` or a `step`, which need frames, fail with `api.paused`.
     pub(crate) fn serve_paused(
         &mut self,
-        cx: &Context,
-        stack: &Stack,
+        cx: &mut Context,
+        stack: &mut Stack,
         stepper: &mut Stepper,
     ) -> bool {
         self.answer(cx, stack, stepper, true)
@@ -291,7 +312,13 @@ impl Api {
 
     /// Answers the requests that have come, as [`serve`](Self::serve) says, `paused` if frames
     /// have paused.
-    fn answer(&mut self, cx: &Context, stack: &Stack, stepper: &mut Stepper, paused: bool) -> bool {
+    fn answer(
+        &mut self,
+        cx: &mut Context,
+        stack: &mut Stack,
+        stepper: &mut Stepper,
+        paused: bool,
+    ) -> bool {
         let ran = self
             .steps
             .extract_if(.., |&mut (_, until)| until <= stepper.ticks);
@@ -299,8 +326,11 @@ impl Api {
             reply.result(&self.status(cx, stepper));
         }
         let mut quit = false;
-        while let Some(Incoming { call, reply }) =
-            (self.held.take()).or_else(|| self.incoming.try_recv().ok())
+        while let Some(Incoming {
+            call,
+            client,
+            reply,
+        }) = (self.held.take()).or_else(|| self.incoming.try_recv().ok())
         {
             let world = cx.world();
             match call {
@@ -358,6 +388,7 @@ impl Api {
                     });
                     let taken = Taken {
                         world: stack.saved_world(cx).clone(),
+                        scenes: cx.scenes.files.clone(),
                         ticks: stepper.ticks,
                         path,
                         reply,
@@ -371,6 +402,62 @@ impl Api {
                     }),
                     Err(error) => reply.send(Err(failure(&error))),
                 },
+                Call::Apply(given) => {
+                    let applied = operations(world, given).and_then(|operations| {
+                        let edit = Edit::Apply {
+                            author: client.to_string(),
+                            operations,
+                        };
+                        match stack.edit(cx, edit) {
+                            Ok(Done::Applied(made)) => Ok(Applied {
+                                ticks: stepper.ticks,
+                                entities: made.iter().map(EntityId::to_string).collect(),
+                            }),
+                            Ok(Done::Stepped(_)) => unreachable!("an apply applies"),
+                            Err(error) => Err(failure(&error)),
+                        }
+                    });
+                    match applied {
+                        Ok(applied) => reply.result(&applied),
+                        Err(failure) => reply.send(Err(failure)),
+                    }
+                }
+                Call::Undo { author, redo } => {
+                    let author = author.unwrap_or_else(|| client.to_string());
+                    let edit = if redo {
+                        Edit::Redo {
+                            author: author.clone(),
+                        }
+                    } else {
+                        Edit::Undo {
+                            author: author.clone(),
+                        }
+                    };
+                    match stack.edit(cx, edit) {
+                        Ok(Done::Stepped(stepped)) => {
+                            let edit = stepped.map(|operations| gg_api::Edit {
+                                author,
+                                operations: words(&operations),
+                            });
+                            reply.result(&edit);
+                        }
+                        Ok(Done::Applied(_)) => unreachable!("an undo or a redo steps"),
+                        Err(error) => reply.send(Err(failure(&error))),
+                    }
+                }
+                Call::Edits(author) => {
+                    let logs = cx.authors.logs(world);
+                    let logs =
+                        logs.filter(|(name, _)| author.as_deref().is_none_or(|a| a == *name));
+                    let authors = logs.map(|(name, log)| Authored {
+                        author: name.to_owned(),
+                        done: log.edits().map(words).collect(),
+                        undone: log.undone().map(words).collect(),
+                    });
+                    reply.result(&History {
+                        authors: authors.collect(),
+                    });
+                }
                 Call::Quit => {
                     reply.send(Ok("{}".to_owned()));
                     quit = true;
@@ -536,6 +623,111 @@ fn field(world: &World, id: EntityId, component: &str, path: &str) -> Result<Str
     Ok(out)
 }
 
+/// The engine's operations `given` asks for, their values read by the types of `world`'s components
+/// and the fields they go in, as [`json::read`] reads them.
+///
+/// Fails, naming the operation, with `ecs.bad_id` for an ID that isn't one, `reflect.unknown_type`
+/// for a component type that isn't registered, as a path to a field it hasn't fails, and as
+/// `json::read` fails for a value.
+fn operations(world: &World, given: Vec<gg_api::Operation>) -> Result<Vec<Operation>, Failure> {
+    let count = given.len();
+    let operations = given.into_iter().enumerate().map(|(i, operation)| {
+        operation_of(world, operation).map_err(|error| {
+            let failure = failure(&error);
+            if count == 1 {
+                return failure;
+            }
+            Failure::new(
+                failure.code,
+                format!("operation {}: {}", i + 1, failure.message),
+            )
+        })
+    });
+    operations.collect()
+}
+
+/// The engine's operation `given` asks for, as [`operations`] reads it.
+fn operation_of(world: &World, given: gg_api::Operation) -> Result<Operation> {
+    use gg_api::Operation as Given;
+
+    let id = |text: &str| text.parse::<EntityId>();
+    let maybe = |text: Option<String>| text.as_deref().map(id).transpose();
+    // The type of `component`'s field at `path`, as its description gives it.
+    let field = |component: &str, path: &str| -> Result<Type> {
+        let types = world.types();
+        let index = types.find(component).ok_or_else(|| {
+            let names = world.component_types().map(|name| format!("`{name}`"));
+            let message = format!(
+                "no component type is named `{component}`; the world's are {}",
+                reflect::list(names)
+            );
+            Error::new("reflect.unknown_type", message)
+        })?;
+        let resolved = reflect::resolve(types, &Type::Named(index), path)?;
+        Ok(resolved.ty)
+    };
+    let value = |component: &str, path: &str, json: &Value| {
+        let ty = field(component, path)?;
+        json::read(json, &ty, world)
+            .map_err(|error| reflect::within(error, &reflect::join(component, path)))
+    };
+    Ok(match given {
+        Given::Create {
+            id: made,
+            parent,
+            components,
+        } => Operation::Create {
+            entity: maybe(made)?,
+            parent: maybe(parent)?,
+            components: components
+                .iter()
+                .map(|(name, json)| Ok((Ident::from(name.clone()), value(name, "", json)?)))
+                .collect::<Result<_>>()?,
+        },
+        Given::Duplicate { id: of, copies } => Operation::Duplicate {
+            entity: id(&of)?,
+            copies: copies.iter().map(|copy| id(copy)).collect::<Result<_>>()?,
+        },
+        Given::Delete { id: of } => Operation::Delete { entity: id(&of)? },
+        Given::Add {
+            id: of,
+            component,
+            value: given,
+        } => Operation::Add {
+            entity: id(&of)?,
+            value: match given {
+                Some(json) => value(&component, "", &json)?,
+                None => world.default_of(&component)?,
+            },
+            component: component.into(),
+        },
+        Given::Remove { id: of, component } => Operation::Remove {
+            entity: id(&of)?,
+            component: component.into(),
+        },
+        Given::Set {
+            id: of,
+            component,
+            path,
+            value: json,
+        } => Operation::Set {
+            entity: id(&of)?,
+            value: value(&component, &path, &json)?,
+            component: component.into(),
+            path,
+        },
+        Given::Reparent { id: of, parent } => Operation::Reparent {
+            entity: id(&of)?,
+            parent: maybe(parent)?,
+        },
+    })
+}
+
+/// `operations` in words, as an edit is reported.
+fn words(operations: &[Operation]) -> Vec<String> {
+    operations.iter().map(ToString::to_string).collect()
+}
+
 /// The living entity of ID `id` in `world`.
 ///
 /// Fails with `ecs.no_entity` if none has it.
@@ -612,15 +804,15 @@ fn connection(
         id: hello.id,
         to: to.clone(),
     };
-    let token_given = (hello.method == "hello")
+    let given = (hello.method == "hello")
         .then(|| serde_json::from_value::<Hello>(hello.params).ok())
-        .flatten()
-        .map(|hello| hello.token);
-    if token_given.as_deref() != Some(token) {
+        .flatten();
+    let Some(Hello { client, .. }) = given.filter(|hello| hello.token == token) else {
         let message = "a connection's first request is `hello`, with the session file's token";
         reply.send(Err(Failure::new("api.unauthorized", message)));
         return;
-    }
+    };
+    let client: Arc<str> = client.as_deref().unwrap_or(UNNAMED).into();
     reply.send(Ok(welcome.to_owned()));
     let _ = reader.get_ref().set_read_timeout(None);
     while let Some(request) = next_request(&mut reader) {
@@ -638,7 +830,13 @@ fn connection(
         }
         match parse(&request) {
             Ok(call) => {
-                if let Err(mpsc::SendError(incoming)) = to_main.send(Incoming { call, reply }) {
+                let client = client.clone();
+                let incoming = Incoming {
+                    call,
+                    client,
+                    reply,
+                };
+                if let Err(mpsc::SendError(incoming)) = to_main.send(incoming) {
                     let message = "the game is ending";
                     incoming
                         .reply
@@ -707,12 +905,13 @@ fn write_snapshots(taken: &Receiver<Taken>, app: &str, layers: &[String]) {
     let layers: Vec<&str> = layers.iter().map(String::as_str).collect();
     for Taken {
         world,
+        scenes,
         ticks,
         path,
         reply,
     } in taken
     {
-        let written = snapshot::write(&world, app, &layers, ticks).and_then(|text| {
+        let written = snapshot::write(&world, &scenes, app, &layers, ticks).and_then(|text| {
             if path.parent() == Some(crate::beside_exe("snapshots").as_path()) {
                 fs::create_dir_all(crate::beside_exe("snapshots")).map_err(|error| {
                     let message = format!("can't make the directory of {}", path.display());
@@ -800,6 +999,15 @@ fn parse(request: &Request) -> Result<Call, Failure> {
             }
             Call::Patch(table)
         }
+        "apply" => {
+            let Apply { operations } = take(method, params)?;
+            Call::Apply(operations)
+        }
+        "undo" | "redo" => Call::Undo {
+            author: take::<gg_api::Undo>(method, params)?.author,
+            redo: method == "redo",
+        },
+        "edits" => Call::Edits(take::<gg_api::Edits>(method, params)?.author),
         "quit" => none(method, params).map(|()| Call::Quit)?,
         "step" => {
             let Step { ticks } = take(method, params)?;
@@ -917,19 +1125,20 @@ mod tests {
     /// `frame`; returns what `client` returns.
     fn serving<T: Send + 'static>(
         api: &mut Api,
-        cx: &Context,
+        cx: &mut Context,
         stepper: &mut Stepper,
         session: Session,
         client: impl FnOnce(Client) -> T + Send + 'static,
         mut frame: impl FnMut(&mut Api, &Stepper),
     ) -> T {
         let client = thread::spawn(move || {
-            client(Client::connect(&session, DEADLINE).expect("it connects"))
+            client(Client::connect(&session, "test", DEADLINE).expect("it connects"))
         });
         let start = Instant::now();
+        let mut stack = Stack::default();
         while !client.is_finished() {
             assert!(start.elapsed() < DEADLINE, "the client never finished");
-            api.serve(cx, &Stack::default(), stepper);
+            api.serve(cx, &mut stack, stepper);
             stepper.step(Tick::DT, |_| {}, || Duration::ZERO);
             frame(api, stepper);
             thread::sleep(Duration::from_millis(1));
@@ -998,7 +1207,7 @@ mod tests {
                     .collect(),
             }
         };
-        let read = serving(&mut api, &cx, &mut stepper, session, client, |_, _| {});
+        let read = serving(&mut api, &mut cx, &mut stepper, session, client, |_, _| {});
         assert!(read.paused.paused);
         assert_eq!(
             read.stepped.ticks,
@@ -1045,10 +1254,10 @@ mod tests {
             token: "0".repeat(32),
             ..session.clone()
         };
-        let refused = Client::connect(&wrong, DEADLINE).err();
+        let refused = Client::connect(&wrong, "test", DEADLINE).err();
         let refused = refused.map(|failure| failure.code);
         assert_eq!(refused.as_deref(), Some("api.unauthorized"));
-        let mut client = Client::connect(&session, DEADLINE).expect("it connects");
+        let mut client = Client::connect(&session, "test", DEADLINE).expect("it connects");
         assert_eq!(client.welcome().app, "Api Hello");
         let pulse: Pulse = client.call_as("ping", ()).expect("a pulse");
         let still = Pulse {
@@ -1062,20 +1271,149 @@ mod tests {
         drop(waiting);
     }
 
+    /// What [`clients_apply_edits_and_each_undoes_its_own`]'s clients get.
+    struct Edited {
+        set: Applied,
+        created: Applied,
+        refused: [Failure; 3],
+        others: Option<gg_api::Edit>,
+        history: History,
+        undone: Option<gg_api::Edit>,
+        redone: Option<gg_api::Edit>,
+        undone_for_them: Option<gg_api::Edit>,
+        nothing: Option<gg_api::Edit>,
+    }
+
+    /// A client applies edits, while the simulation's paused, read by the types of the fields they
+    /// set, all of each or none; another undoes only its own, but for an author it names; and undo
+    /// and redo step through an edit's operations together.
+    #[test]
+    fn clients_apply_edits_and_each_undoes_its_own() {
+        let (mut api, session) = started("Api Edits");
+        let mut cx = Context::seeded(2);
+        let hero = cx
+            .world_mut()
+            .spawn((Transform::IDENTITY, Name("Hero".to_owned())));
+        let hero_id = cx.world().id(hero).expect("alive").to_string();
+        let mut stepper = Stepper::default();
+        stepper.pause();
+        let other = session.clone();
+        let asked = hero_id.clone();
+        let client = move |mut client: Client| {
+            let hero = asked;
+            let apply = |client: &mut Client, operations: Value| {
+                client.call_as::<Applied>("apply", json!({ "operations": operations }))
+            };
+            let set = json!([
+                {"set": {"id": hero, "component": "Transform", "path": "translation.x", "value": 2}},
+                {"set": {"id": hero, "component": "Name", "path": "0", "value": "Ace"}},
+            ]);
+            let set = apply(&mut client, set).expect("set");
+            // Missing fields take their defaults; the parent is the hero.
+            let create = json!([{"create": {"parent": hero, "components": {
+                "Transform": {"scale": [2, 2, 2]},
+                "Name": {"0": "Kid"},
+            }}}]);
+            let created = apply(&mut client, create).expect("created");
+            let refused = [
+                // The first is fine, so the second's refusal undoes it.
+                json!([
+                    {"set": {"id": hero, "component": "Transform", "path": "translation.y", "value": 5}},
+                    {"delete": {"id": "0000000000000001"}},
+                ]),
+                json!([{"set": {"id": hero, "component": "Transform", "path": "translation", "value": 1}}]),
+                json!([{"add": {"id": hero, "component": "Nope"}}]),
+            ]
+            .map(|operations| apply(&mut client, operations).expect_err("refused"));
+            let mut them = Client::connect(&other, "other", DEADLINE).expect("it connects");
+            let others = them.call_as("undo", ()).expect("nothing of theirs");
+            let history = client.call_as("edits", ()).expect("the edits");
+            let undone = client.call_as("undo", ()).expect("the create undone");
+            let redone = client.call_as("redo", ()).expect("redone");
+            let undone_for_them = them
+                .call_as("undo", json!({"author": "test"}))
+                .expect("the create undone for test");
+            client
+                .call_as::<Option<gg_api::Edit>>("undo", ())
+                .expect("the set undone");
+            let nothing = client.call_as("undo", ()).expect("nothing left");
+            Edited {
+                set,
+                created,
+                refused,
+                others,
+                history,
+                undone,
+                redone,
+                undone_for_them,
+                nothing,
+            }
+        };
+        let edited = serving(&mut api, &mut cx, &mut stepper, session, client, |_, _| {});
+        assert_eq!(edited.set.entities, Vec::<String>::new());
+        assert_eq!(edited.created.entities.len(), 1);
+        let kid = &edited.created.entities[0];
+        let codes = edited.refused.map(|failure| failure.code);
+        assert_eq!(
+            codes,
+            [
+                "ecs.no_entity",
+                "reflect.wrong_kind",
+                "reflect.unknown_type"
+            ]
+        );
+        assert_eq!(edited.others, None);
+        let words = |words: &[&str]| {
+            words
+                .iter()
+                .map(|&word| word.to_owned())
+                .collect::<Vec<_>>()
+        };
+        let expected = Authored {
+            author: "test".to_owned(),
+            done: vec![
+                words(&[
+                    &format!("set `Transform.translation.x` of {hero_id}"),
+                    &format!("set `Name.0` of {hero_id}"),
+                ]),
+                words(&[&format!("create {kid}")]),
+            ],
+            undone: Vec::new(),
+        };
+        assert_eq!(edited.history.authors, [expected]);
+        let create = gg_api::Edit {
+            author: "test".to_owned(),
+            operations: words(&[&format!("create {kid}")]),
+        };
+        assert_eq!(edited.undone.as_ref(), Some(&create));
+        assert_eq!(edited.redone.as_ref(), Some(&create));
+        assert_eq!(edited.undone_for_them.as_ref(), Some(&create));
+        assert_eq!(edited.nothing, None);
+        // Every edit undone, and the refused ones never applied.
+        let world = cx.world();
+        assert_eq!(world.entities(None).expect("all").len(), 1);
+        assert_eq!(world.get::<Transform>(hero), Some(&Transform::IDENTITY));
+        assert_eq!(
+            world.get::<Name>(hero).map(|name| name.0.as_str()),
+            Some("Hero")
+        );
+        assert_eq!(stepper.ticks, 0, "paused, edits apply all the same");
+    }
+
     /// `quit` is answered, and ends the run once the frame's served.
     #[test]
     fn quit_is_answered_and_ends_the_run() {
         let (mut api, session) = started("Api Quit");
-        let cx = Context::seeded(3);
+        let mut cx = Context::seeded(3);
         let mut stepper = Stepper::default();
         let client = thread::spawn(move || {
-            let mut client = Client::connect(&session, DEADLINE).expect("it connects");
+            let mut client = Client::connect(&session, "test", DEADLINE).expect("it connects");
             client
                 .call("quit", Value::Null)
                 .map(|result| result.get().to_owned())
         });
         let start = Instant::now();
-        while !api.serve(&cx, &Stack::default(), &mut stepper) {
+        while !api.serve(&mut cx, &mut Stack::default(), &mut stepper) {
             assert!(start.elapsed() < DEADLINE, "no quit came");
             thread::sleep(Duration::from_millis(1));
         }
@@ -1112,7 +1450,7 @@ mod tests {
                 (client.call_as("snapshot", json!({"path": asked}))).expect("a snapshot");
             (refused, taken)
         };
-        let (refused, taken) = serving(&mut api, &cx, &mut stepper, session, client, |_, _| {});
+        let (refused, taken) = serving(&mut api, &mut cx, &mut stepper, session, client, |_, _| {});
         assert_eq!(refused, ["api.bad_params", "api.not_ticked"]);
         assert_eq!((&taken.path, taken.ticks, taken.entities), (&path, 1, 3));
         assert_eq!(taken.bytes, fs::metadata(&path).expect("written").len());
@@ -1132,7 +1470,7 @@ mod tests {
     #[test]
     fn a_patch_that_cant_apply_is_refused() {
         let (mut api, session) = started("Api Patches");
-        let cx = Context::seeded(7);
+        let mut cx = Context::seeded(7);
         let mut stepper = Stepper::default();
         let client = |mut client: Client| {
             let table = json!({
@@ -1145,7 +1483,7 @@ mod tests {
             let call = client.call("patch", json!({ "table": table }));
             call.expect_err("refused")
         };
-        let refused = serving(&mut api, &cx, &mut stepper, session, client, |_, _| {});
+        let refused = serving(&mut api, &mut cx, &mut stepper, session, client, |_, _| {});
         assert_eq!(refused.code, "api.patch", "{}", refused.message);
     }
 
@@ -1154,7 +1492,7 @@ mod tests {
     #[test]
     fn a_capture_rides_with_frames_until_one_brings_the_view_back() {
         let (mut api, session) = started("Api Captures");
-        let cx = Context::seeded(4);
+        let mut cx = Context::seeded(4);
         let mut stepper = Stepper::default();
         let dir = std::env::temp_dir().join(format!("gg-engine-api-{}", std::process::id()));
         fs::create_dir_all(&dir).expect("a directory");
@@ -1170,7 +1508,7 @@ mod tests {
         let mut rides = 0;
         let (refused, captured) = serving(
             &mut api,
-            &cx,
+            &mut cx,
             &mut stepper,
             session,
             client,

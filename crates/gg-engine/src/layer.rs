@@ -21,6 +21,7 @@ use tracing::info;
 use crate::assets::{self, Assets};
 use crate::camera::{self, Camera, Tie};
 use crate::draw::{self, Poses, Scratch};
+use crate::edits::{Authors, Done, Edit};
 use crate::gltf;
 use crate::image::{self, Image};
 use crate::interpolation::Past;
@@ -29,10 +30,11 @@ use crate::physics::{self, CircleCollider2D, Physics2D};
 use crate::recording::Recorder;
 use crate::reflect::{Reflect, Value};
 use crate::render_thread::Extracted;
+use crate::scene_files::{SceneFile, SceneFiles};
 use crate::snapshot::Snapshot;
 use crate::{
-    App, BoxCollider2D, EntityId, Event, Input, MeshDraw, Model, Name, RigidBody2D, Transform, Ui,
-    World,
+    App, BoxCollider2D, Entity, EntityId, Event, Input, MeshDraw, Model, Name, RigidBody2D,
+    Transform, Ui, World,
 };
 
 /// A part of an app that the main loop drives. Every method has a default that does nothing,
@@ -267,6 +269,11 @@ pub struct Context {
     /// file dialog, until the main loop takes it to restart its clock, so that no frame's time
     /// counts the pause.
     pub(crate) paused: bool,
+    /// The edits of the authors outside the layers, the tool API's clients and the scene files a
+    /// game loaded, each undoing its own.
+    pub(crate) authors: Authors,
+    /// The scene files the layers loaded, which development builds watch.
+    pub(crate) scenes: SceneFiles,
 }
 
 impl Context {
@@ -347,6 +354,8 @@ impl Context {
             assets,
             perf: Perf::default(),
             paused: false,
+            authors: Authors::default(),
+            scenes: SceneFiles::default(),
         }
     }
 
@@ -735,6 +744,41 @@ impl Context {
         &mut self.world
     }
 
+    /// Loads the scene file at `path` into the world as the layer attaches, as [`World::load_scene`]
+    /// loads the text [`read_scene`](crate::read_scene) reads, and returns its roots. A development
+    /// build watches the file from then on: saved while the game runs, it applies to the world as
+    /// the operations that take the world's entities from what the file held to what it holds,
+    /// between ticks, which keeps what the file doesn't change, as where the game has moved an
+    /// entity; an edit whose author is the file's path, as the app's root names it, such as
+    /// `scenes/level.ron`, which the tool API's `undo` takes back. A run restored from a snapshot
+    /// watches the files its run had loaded.
+    ///
+    /// Fails as `read_scene` does, and as `load_scene` does, the path beginning its message.
+    ///
+    /// # Panics
+    ///
+    /// Outside the layers' attach and detach, as [`world_mut`](Self::world_mut) does.
+    pub fn load_scene_file(&mut self, path: impl AsRef<Path>) -> Result<Vec<Entity>> {
+        let path = path.as_ref();
+        let text = crate::read_scene(path)?;
+        let roots = self.world_mut().load_scene(&text).map_err(|error| {
+            let message = format!("{}:{error}", path.display());
+            error.with_message(message)
+        })?;
+        let author = assets::name_of(self.root.as_deref(), path).to_string();
+        self.scenes
+            .loaded(SceneFile::new(path.to_owned(), author, text));
+        Ok(roots)
+    }
+
+    /// Applies `edit`, an author's from outside the layers, to the world, between ticks, unrecorded,
+    /// as a replay does: [`Stack::edit`] records it first.
+    ///
+    /// Fails as [`Authors::edit`] does.
+    pub(crate) fn apply_edit(&mut self, edit: Edit) -> Result<Done> {
+        self.authors.edit(&mut self.world, edit)
+    }
+
     /// Shows `dialog`, a file dialog of the OS's own, over the main window, modal, and returns
     /// the path chosen as it closes: `None` if it was cancelled, or if there's no window, as in
     /// headless runs and tests, which show none. For tools' menus, from [`Layer::ui`], as an
@@ -983,6 +1027,7 @@ impl Stack {
         let _zone = gg_core::zone!();
         self.load(cx);
         let ticks = snapshot.restore(&mut cx.world, &self.names)?;
+        cx.scenes.files.clone_from(&snapshot.scenes);
         cx.attached = true;
         for layer in &mut self.layers {
             layer.restored(cx);
@@ -1025,9 +1070,23 @@ impl Stack {
             recorder.end();
         }
         cx.attached = false;
+        cx.authors.clear(&mut cx.world);
         for layer in self.layers.iter_mut().rev() {
             layer.detach(cx);
         }
+    }
+
+    #[cfg(feature = "dev")]
+    /// Applies `edit`, an author's from outside the layers, to `cx`'s world, between ticks, and says
+    /// what it did. A recording gets it first, as it was asked for, before the commands of the tick
+    /// after, so that a replay applies it there, and is refused where the run refused it.
+    ///
+    /// Fails as [`Authors::edit`] does.
+    pub(crate) fn edit(&mut self, cx: &mut Context, edit: Edit) -> Result<Done> {
+        if let Some(recorder) = &mut self.recorder {
+            recorder.edited(&edit.to_value(), &cx.world);
+        }
+        cx.apply_edit(edit)
     }
 
     /// Runs a tick of the simulation: each layer's, from the bottom up, after which the world
