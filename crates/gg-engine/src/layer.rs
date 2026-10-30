@@ -641,7 +641,9 @@ impl Context {
             );
             return None;
         };
+        let waiting = crate::api::waiting(crate::api::Waiting::Dialog);
         let picked = dialog.show(&window.raw);
+        drop(waiting);
         self.paused = true;
         tracing::debug!(
             title = dialog.title,

@@ -180,6 +180,8 @@ pub struct Renderer {
     /// What the game's view renders into, the IDs its draws write beside it, and the depth image
     /// they test, the size it last had, which has an area.
     view_image: Option<(ColorImage, IdImage, DepthImage)>,
+    /// Whether the last frame rendered the view, which [`Renderer::read_back_view`] reads back.
+    viewed: bool,
     /// The picks asked of the view, from asked to answered.
     picks: Picks,
     ui: UiPass,
@@ -279,6 +281,7 @@ impl Renderer {
             meshes: MeshPass::new(device),
             view: ViewPass::new(device, format)?,
             view_image: None,
+            viewed: false,
             picks: Picks::default(),
             ui: UiPass::new(device, format)?,
             instance: instance.clone(),
@@ -381,6 +384,7 @@ impl Renderer {
     ) -> Result<bool> {
         self.waited = Duration::ZERO;
         self.drawn = DrawCounts::default();
+        self.viewed = false;
         self.picks.ask(data.picks);
         if self.failed {
             return Err(Error::new(
@@ -521,6 +525,7 @@ impl Renderer {
         frame.submit()?;
         self.waited = self.frames.waited();
         self.drawn = counts;
+        self.viewed = has_view;
         Ok(true)
     }
 
@@ -573,6 +578,21 @@ impl Renderer {
         match &mut self.output {
             Output::Window(_) => Ok(None),
             Output::Offscreen(image) => image.read_back().map(Some),
+        }
+    }
+
+    /// Copies the game's view as the last [`Renderer::render`] rendered it to the CPU, waiting for
+    /// the GPU to finish that frame, which holds back the next: its width and height, and rows of
+    /// RGBA8 pixels, sRGB-encoded and tightly packed, top row first, without the UI drawn over it.
+    /// `None` if that call rendered no view, as when the view had no area or there was nothing to
+    /// render into.
+    pub fn read_back_view(&mut self) -> Result<Option<([u32; 2], Vec<u8>)>> {
+        match &mut self.view_image {
+            Some((image, ..)) if self.viewed => {
+                let size = image.size();
+                image.read_back().map(|pixels| Some((size, pixels)))
+            }
+            _ => Ok(None),
         }
     }
 

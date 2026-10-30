@@ -20,8 +20,10 @@ are in [AGENTS.md](AGENTS.md).
   agent can perform, and every result is machine-readable.
 - **Any kind of game, at any scale, single-player or multiplayer.** Game code is native Rust,
   and the engine supplies what each multiplayer model needs.
-- **Grown with a flagship game.** The engine grows alongside an in-house game: the game's
-  needs set the engine's priorities, and shipping the game proves the engine.
+- **Grown with games.** The engine grows alongside games of its own: small demos first, each
+  built to exercise part of it, the first a simple networked game that the v0.1 loop is tested on;
+  then a flagship, picked from the demos, whose needs set the engine's priorities and whose
+  shipping proves the engine.
 - Rendering the way current AAA engines do it: bindless resources, a render graph and GPU-driven
   rendering.
 - Simulation and rendering pipelined across threads.
@@ -32,10 +34,10 @@ are in [AGENTS.md](AGENTS.md).
 ## Crates
 
 ```text
-sandbox  editor   player       apps/: executables
-       \    |    /
-        gg-engine - gg-macros  crates/: libraries
-            |
+sandbox  editor   player       apps/: executables          gg  tools/: tools
+       \    |    /                                         |
+        gg-engine - gg-macros  crates/: libraries          |
+            |     \_______________________________________ gg-api
        gg-renderer
             |
           gg-gpu
@@ -57,6 +59,10 @@ sandbox  editor   player       apps/: executables
 - **`gg-macros`:** the derives `gg-engine` re-exports beside its traits of the same names,
   `Reflect` and `Component`. Rust builds a derive as a crate of its own; only `gg-engine`
   depends on it, and games derive through `gg-engine`.
+- **`gg-api`:** the [tool API](#agents-and-tools)'s protocol: its messages, the session file that
+  says where a game serves it, and a client, which tools speak it through. It depends on no `gg-*`
+  crate, so that tools build without the engine, and `gg-engine` uses it in development builds
+  alone.
 - **`sandbox`:** the development playground for engine features.
 - **`editor`:** the editor, one more client of the tool API: a dock that fills its window, with
   the game's view in a panel among the others, and an orbit camera of its own. Its Play and
@@ -65,6 +71,7 @@ sandbox  editor   player       apps/: executables
   Stop are commands, which recordings keep. [main.rs](apps/editor/src/main.rs) describes the rest.
 - **`player`:** the reference player. It runs a cooked scene without game code and shows how a
   game builds its own player.
+- **`tools/gg`:** the command-line tool, a client of the tool API, which `cargo gg` runs.
 
 Games depend on `gg-engine` the same way the apps do; see [Game code](#game-code). Executables are
 named `gg-` and the app, such as `gg-sandbox`: GPU drivers apply per-game settings by executable
@@ -119,8 +126,6 @@ A module becomes its own crate once it has its own responsibility and a second u
 before:
 
 - `gg-assets`: cooked asset formats, shared by the cooker and the runtime.
-- `tools/gg`: the command-line tool; `tools/*` joins the workspace members then. The tool API's
-  message types move into a crate that it and `gg-engine` share.
 - `tools/cook`: the offline asset cooker.
 - `gg-scene`, `gg-physics`, `gg-audio` and the like: when each outgrows a module of `gg-engine`.
 
@@ -129,9 +134,9 @@ before:
 Game code is Rust, as fast and as unrestricted as the engine's own. Each game is a crate that
 depends on `gg-engine` and builds its own player, statically linked and optimized for shipping. Game
 crates forbid `unsafe`, so a bug in game code panics rather than corrupting memory. Games built
-alongside the engine, starting with the flagship, live in `games/` in this workspace, so one change
-can span engine and game, and `games/*` joins the workspace members with the first one; anyone
-else's game depends on the engine from its own repository.
+alongside the engine, the demos and then the flagship, live in `games/` in this workspace, so one
+change can span engine and game, and `games/*` joins the workspace members with the first one;
+anyone else's game depends on the engine from its own repository.
 
 - **The game runs in its own process.** The development tools launch the game's development
   build and work on it through the [tool API](#agents-and-tools). A crash, panic or hang in
@@ -158,13 +163,25 @@ else's game depends on the engine from its own repository.
 Agents work on a game the way people do, through the same interfaces: nothing a person can do
 in the editor is out of an agent's reach.
 
-- **The tool API.** A game's development build serves an API on a local connection: query the
-  world, apply and undo [operations](#project-state), run, pause and step, capture frames, and
-  read [diagnostics](#diagnostics). Each client gets only the capabilities it is granted, such
-  as reading the world or editing one scene.
-- **Clients.** The command-line tool builds, runs and tests projects with machine-readable
-  results and talks to running games; an MCP server gives agents that speak MCP the same
-  reach; the editor is one more client, with no ability an agent lacks.
+- **The tool API.** A game's development build serves an API on the machine's loopback, at a port
+  the OS picks, which it writes with a token in a session file in `sessions` beside its
+  executable, removed as the run ends: query the world, apply and undo
+  [operations](#project-state), run, pause and step, capture frames, and read
+  [diagnostics](#diagnostics). Requests and their answers are lines of JSON, as
+  [gg-api](crates/gg-api/src/lib.rs) describes, and a connection's first request says hello with
+  the token, so that only processes that can read the file reach the game. A thread of the API's
+  reads each connection and answers its pings itself, from the frames the main loop counts, so
+  that a tool tells a hung game from a busy one, and from one whose frames have paused for the
+  user, as for a minimized window or a file dialog. The main loop answers the rest as each frame
+  starts, before its ticks: a step once its ticks have run, and a capture once the render thread
+  has read the frame's view back, without the UI, which a thread of the API's writes as a PNG.
+  Paused, frames run no ticks but those a step asks for, and draw the world as the last tick left
+  it, so that a capture shows what a query reads. Each client gets only the capabilities it is
+  granted, such as reading the world or editing one scene.
+- **Clients.** The command-line tool, `tools/gg`, builds and runs games, supervising them and
+  telling when one crashes or hangs, runs headless checks, and talks to running games, all with
+  machine-readable results; an MCP server gives agents that speak MCP the same reach; the editor
+  is one more client, with no ability an agent lacks.
 - **Headless runs.** Every app runs without a window (`--headless`) and can run a set number
   of frames, then exit with a status (`--frames N`): 0 for a clean run, 1 after an error or any
   validation message, and 2 for bad arguments. Dedicated servers, CI and agents checking their

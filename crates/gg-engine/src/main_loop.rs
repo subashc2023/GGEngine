@@ -11,6 +11,7 @@ use gg_core::Result;
 use gg_renderer::{MAX_TEXTURE_SIZE, Renderer, Settings, Validation, Viewport};
 use tracing::{debug, error, info, warn};
 
+use crate::api::{self, Api};
 use crate::args::Args;
 use crate::chrome::Chrome;
 use crate::dock::{Dock, Ui};
@@ -22,8 +23,10 @@ use crate::{App, BUILD, egui_context};
 
 /// Renders offscreen, without a window, as fast as the GPU allows, with a tick of the simulation
 /// each frame, so that a run of a set number of frames runs as many ticks on any machine. Frames
-/// render on the render thread, as a windowed run's do, the last as the run ends.
-pub(crate) fn run_headless(app: &mut App, args: &Args) -> Result<Ran> {
+/// render on the render thread, as a windowed run's do, the last as the run ends. `api` serves
+/// tools as each frame starts; while it has paused the simulation with nothing asked of the
+/// frames, each waits up to a tick's time for a request, rather than spinning.
+pub(crate) fn run_headless(app: &mut App, args: &Args, mut api: Option<Api>) -> Result<Ran> {
     let (width, height) = (1280, 720);
     let renderer = Renderer::headless(&settings(app, args), width, height)?;
     let mut render = RenderThread::start(renderer)?;
@@ -49,6 +52,11 @@ pub(crate) fn run_headless(app: &mut App, args: &Args) -> Result<Ran> {
     app.stack.attach(&mut cx);
     let rendered = (|| -> Result<()> {
         while args.frames.is_none_or(|limit| handed < limit) {
+            api::idle(&mut api, &stepper);
+            if api::serve(&mut api, &cx, &mut stepper) {
+                debug!("A tool asked the run to end");
+                break;
+            }
             // One point is one pixel, as on a display without scaling.
             let input = egui_runs.then(|| egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
@@ -87,6 +95,7 @@ pub(crate) fn run_headless(app: &mut App, args: &Args) -> Result<Ran> {
             if take_back(&mut render, &mut cx, tessellated)?.is_some() {
                 frames += 1;
             }
+            api::frame_back(&mut api, &mut render, stepper.ticks);
             hand_off(&mut render, &mut cx, view, ui, Vec::new());
             handed += 1;
             app.stack.recorded()?;
@@ -304,7 +313,7 @@ impl Clock {
 const MOST_TICKS: u64 = 8;
 
 /// Turns frames' time into the simulation's ticks, as many as the time owed holds, so that the
-/// simulation steps at its fixed rate whatever the frame rate.
+/// simulation steps at its fixed rate whatever the frame rate; or, paused, as the tool API asks.
 #[derive(Default)]
 pub(crate) struct Stepper {
     /// The time not yet simulated: less than a tick, between frames.
@@ -315,6 +324,11 @@ pub(crate) struct Stepper {
     dropped: u64,
     /// One tick every frame, whatever its time.
     lockstep: bool,
+    /// Set while the tool API has paused the simulation, whose frames then run only the ticks
+    /// `steps` asks for, and draw the world as the last tick left it.
+    paused: bool,
+    /// The ticks still to run while paused, at most [`MOST_TICKS`] a frame.
+    steps: u64,
 }
 
 impl Stepper {
@@ -332,14 +346,18 @@ impl Stepper {
     /// `took`, the time the frame's ticks have taken so far, is longer than the time they've
     /// simulated, so that a simulation slower than real time slows down rather than spending every
     /// frame catching up. The whole ticks not run are dropped, and the fraction of one left over
-    /// carries to the next frame. In lockstep, exactly one. Returns how many ran.
+    /// carries to the next frame. In lockstep, exactly one. Paused, those the steps asked for,
+    /// whatever the time, as many as the time they take allows, the rest left for the next frame.
+    /// Returns how many ran.
     pub(crate) fn step(
         &mut self,
         dt: Duration,
         mut tick: impl FnMut(Tick),
         took: impl Fn() -> Duration,
     ) -> u64 {
-        let due = if self.lockstep {
+        let due = if self.paused {
+            self.steps
+        } else if self.lockstep {
             1
         } else {
             self.owed += dt;
@@ -358,18 +376,61 @@ impl Stepper {
                 break;
             }
         }
-        self.dropped += due - ran;
+        if self.paused {
+            self.steps -= ran;
+        } else {
+            self.dropped += due - ran;
+        }
         ran
     }
 
     /// How far the frame is past its last tick, as a fraction of a tick, from 0 to less than 1,
     /// which the world draws that far on from where the tick found it to where it left it; 1 in
-    /// lockstep, so that a headless frame draws its tick as it leaves the world.
+    /// lockstep, so that a headless frame draws its tick as it leaves the world, and while paused,
+    /// so that a frame draws the world as the tool API reads it.
     fn alpha(&self) -> f32 {
-        if self.lockstep {
+        if self.lockstep || self.paused {
             return 1.0;
         }
         (self.owed.as_nanos() as f64 / Tick::DT.as_nanos() as f64) as f32
+    }
+
+    /// Pauses the simulation, as the tool API's `pause` asks: frames run no ticks but those
+    /// [`step_by`](Self::step_by) asks for, and the time they take isn't owed.
+    #[cfg(feature = "dev")]
+    pub(crate) fn pause(&mut self) {
+        self.paused = true;
+        self.owed = Duration::ZERO;
+    }
+
+    /// Runs the simulation in real time again, dropping the steps not yet run, as the tool API's
+    /// `resume` asks. The first frame after owes only its own time, so that the simulation doesn't
+    /// catch up with the pause.
+    #[cfg(feature = "dev")]
+    pub(crate) fn resume(&mut self) {
+        self.paused = false;
+        self.steps = 0;
+        self.owed = Duration::ZERO;
+    }
+
+    /// Pauses the simulation, and has the frames from the next run `ticks` more ticks, as the tool
+    /// API's `step` asks.
+    #[cfg(feature = "dev")]
+    pub(crate) fn step_by(&mut self, ticks: u64) {
+        self.pause();
+        self.steps += ticks;
+    }
+
+    /// Whether the simulation is paused.
+    #[cfg(feature = "dev")]
+    pub(crate) fn paused(&self) -> bool {
+        self.paused
+    }
+
+    /// The ticks still to run while paused.
+    #[cfg(feature = "dev")]
+    pub(crate) fn steps(&self) -> u64 {
+        self.steps
     }
 }
 
@@ -736,6 +797,36 @@ pub(crate) mod tests {
         }
         assert_eq!(numbers, [0, 1]);
         assert_eq!(stepper.dropped, 2 * (MOST_TICKS - 1));
+    }
+
+    /// Paused, frames run only the ticks asked for, at most 8 a frame, whatever their time, and
+    /// draw the world as the last tick left it; resumed, the pause is owed nothing, and the steps
+    /// not yet run are dropped.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_paused_simulation_runs_only_the_steps_asked_for() {
+        let mut stepper = Stepper::default();
+        let fast = || Duration::ZERO;
+        assert_eq!(stepper.step(Tick::DT / 2, |_| {}, fast), 0);
+        stepper.pause();
+        assert_eq!(stepper.step(Tick::DT * 3, |_| {}, fast), 0);
+        assert_eq!(stepper.alpha(), 1.0);
+        stepper.step_by(10);
+        let mut numbers = Vec::new();
+        for ran in [MOST_TICKS, 2, 0] {
+            let tick = |tick: Tick| numbers.push(tick.number);
+            assert_eq!(stepper.step(Duration::ZERO, tick, fast), ran);
+        }
+        assert_eq!(numbers, (0..10).collect::<Vec<_>>());
+        assert_eq!(
+            (stepper.ticks, stepper.dropped, stepper.steps()),
+            (10, 0, 0)
+        );
+        stepper.step_by(5);
+        stepper.resume();
+        assert_eq!((stepper.paused(), stepper.steps()), (false, 0));
+        assert_eq!(stepper.step(Tick::DT, |_| {}, fast), 1);
+        assert_eq!(stepper.alpha(), 0.0);
     }
 
     #[test]

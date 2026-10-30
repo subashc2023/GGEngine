@@ -1,0 +1,3 @@
+[alias]
+# `cargo gg <command>` builds and runs tools/gg, the command-line tool: `cargo gg help`.
+gg = "run --quiet --package gg --"

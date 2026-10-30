@@ -20,6 +20,7 @@
 extern crate self as gg_engine;
 
 mod actions;
+mod api;
 mod args;
 mod camera;
 mod chrome;
@@ -313,7 +314,7 @@ fn run_args(
         }
     };
 
-    let log = gg_core::log::init(app.name, &log_dir());
+    let log = gg_core::log::init(app.name, &beside_exe("logs"));
     info!(
         version = env!("CARGO_PKG_VERSION"),
         app = app.name,
@@ -325,7 +326,7 @@ fn run_args(
         pid = std::process::id(),
         "Starting GGEngine"
     );
-    if let Some(path) = log {
+    if let Some(path) = &log {
         info!(path = %path.display(), "Writing the JSON log");
     }
     debug!(
@@ -357,10 +358,12 @@ fn run_args(
         if let Some(recorder) = recorder {
             app.stack.record(recorder);
         }
+        // Before the renderer starts, so that tools find a run that hangs as it starts.
+        let api = api::start(app.name, log.as_deref(), args.api);
         if args.headless {
-            run_headless(&mut app, &args)
+            run_headless(&mut app, &args, api)
         } else {
-            window::run(&mut app, &args)
+            window::run(&mut app, &args, api)
         }
     });
     match ran {
@@ -432,12 +435,14 @@ pub(crate) fn menu_style(style: &mut egui::Style) {
     }
 }
 
-/// Logs go in `logs` beside the executable, such as `target/debug/logs` for `cargo run`.
-fn log_dir() -> PathBuf {
+/// The directory `name` beside the executable, such as `target/debug/logs` for `cargo run`'s
+/// logs, or in the working directory if the executable's path isn't known: where runs write their
+/// logs, and development builds the tool API's session files and captures.
+pub(crate) fn beside_exe(name: &str) -> PathBuf {
     std::env::current_exe()
         .ok()
-        .and_then(|exe| Some(exe.parent()?.join("logs")))
-        .unwrap_or_else(|| PathBuf::from("logs"))
+        .and_then(|exe| Some(exe.parent()?.join(name)))
+        .unwrap_or_else(|| PathBuf::from(name))
 }
 
 #[cfg(test)]

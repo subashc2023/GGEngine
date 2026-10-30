@@ -44,8 +44,9 @@ use text::Text;
 /// to its values' text takes to the next.
 const FORMAT: &str = "gg-recording 1";
 
-/// The engine, as a recording's `engine` line names it: its version and its build.
-fn engine() -> String {
+/// The engine, as a recording's `engine` line names it, and the tool API's session file: its
+/// version and its build.
+pub(crate) fn engine() -> String {
     format!("{} {BUILD}", env!("CARGO_PKG_VERSION"))
 }
 

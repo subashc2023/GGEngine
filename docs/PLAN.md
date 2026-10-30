@@ -59,11 +59,17 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Title bar, menus and the Inspector's numbers** (2026-10-28)
 - **Simulate and the pick's outline** (2026-10-28)
 - **Spring cleaning** (2026-10-29)
+- **The tool API and `tools/gg`** (2026-10-29)
 
 ## Now
 
-The next milestone waits on the first [open question](#open-questions): what comes after the
-cleaning.
+**Restarting a game from a snapshot**, Phase 5's second milestone. A world saved whole to a file
+and loaded back: its entities, its resources, physics' state among them, its ticks and the stream
+its IDs are drawn from; assets named by their paths, which scenes save; layers' `attach` split, so
+that a restart makes the GPU's resources without building the world again; and `gg run` restarting
+a game that crashed, hung or was rebuilt from its last snapshot, matching each changed component to
+its new layout by field name. *Done when* the sandbox, killed, or rebuilt with a field added to a
+component, comes back under `gg run` where it was, its world as it was but for the new field.
 
 ## Next
 
@@ -80,10 +86,14 @@ Each phase ends in something you can run and check.
    calls each layer's methods through its `HotFn` and applies patches between ticks, as
    [Game code](../ARCHITECTURE.md#game-code) describes. Any other change rebuilds the game and
    restarts it from a snapshot, matching each changed component to its new layout by field name.
-   *Done when* the v0.1 loop works: watching the running game, the user asks Claude Code for a
-   change, Claude Code edits the game's Rust code or applies operations through the API, and the
-   game shows the change with its state intact; and an agent runs a headless check through
-   `tools/gg` and acts on its result.
+   Its milestones, in order: the tool API and `tools/gg`; restarting a game from a snapshot after a
+   crash, a hang or a rebuild; subsecond's patches; operations through the API, with undo, scene
+   files applied as operations, and the MCP server; and the first demo, a simple networked game in
+   `games/`, with the networking it needs, the first of the engine's. *Done when* the v0.1 loop
+   works on that demo: watching the running game, the user asks Claude Code for a change, Claude
+   Code edits the game's Rust code or applies operations through the API, and the game shows the
+   change with its state intact; and an agent runs a headless check through `tools/gg` and acts on
+   its result.
 6. **Render graph and PBR.** Passes declare the resources they read and write; the graph
    places barriers and layout transitions, aliases transient memory and schedules async
    compute. Physically based shading (glTF metallic-roughness), image-based lighting, cascaded
@@ -126,7 +136,11 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | GPU tests in Windows and macOS CI, which skip them for the reason [AGENTS.md](../AGENTS.md#commands) gives | A self-hosted runner with a GPU, or a Vulkan driver that runs on those runners without one |
 | Checking windowed frames' allocations in CI, under Xvfb on Linux, with lavapipe presenting and input through XTest; they're checked by hand, as [AGENTS.md](../AGENTS.md#engine-rules) says | A change to the windowed loop allocates where the check by hand didn't look |
 | Checking captures in CI, under RenderDoc on Linux with lavapipe: captures are checked by hand, replayed through qrenderdoc's Python for their names and labels | A name or a label is lost unseen, or the tool API checks captures |
-| Capturing from code or through the tool API, and more than one frame a run: `--capture` names one frame as the run starts | Phase 5, the tool API |
+| RenderDoc captures from code or through the tool API, and more than one a run: `--capture` names one frame as the run starts, and the tool API's `capture` writes the view's pixels alone | An agent needs a frame's GPU work as well as its pixels |
+| `gg build` and `gg test`, with their results as data: `run` and `check` build through cargo, passing on its messages about the code as it renders them, and cargo's test harness writes JSON on nightly alone | An agent needs a build's or the tests' results as data, or libtest's JSON output is stable |
+| Capabilities each client of the tool API is granted, as [Agents and tools](../ARCHITECTURE.md#agents-and-tools) describes: a connection that says hello with the session's token reaches everything | Phase 5's operations, which change the world through the API |
+| Diagnostics served by the tool API: `gg logs` reads the JSON log the session file names | A client on another machine, or one that follows a run's events as they come |
+| Steps and captures while the window is minimized, which fail with `api.paused`, and requests while a file dialog or Windows' window menu holds the main thread, which wait; `ping` says which | A tool needs them then |
 | Labels inside passes: each run of draws labeled by what it draws, and the frame pass's view and UI apart; a capture shows a label for each pass | Phase 6, with the render graph |
 | Synchronization validation under RenderDoc, whose layer hides the validation layer's settings: through `VK_EXT_validation_features`, or the validation layer's environment | A synchronization bug shows under RenderDoc alone |
 | Captures on macOS, where RenderDoc doesn't run, so `--capture` is refused | Someone needs a capture of a Mac's frames |
@@ -151,7 +165,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Joins where lines meet: lines end squared off, so a rectangle's sides overlap at its corners, which a translucent one shows darker, and a thick polyline's segments overlap at each bend | A game draws translucent outlines or thick polylines |
 | Circle colliders' outlines of as many lines as their size on screen needs: each is 64, round to within a pixel up to some 800 pixels across, so a larger one shows its sides and a smaller one draws more lines than it needs | A game shows the outlines of many circle colliders, or a large one shows its sides |
 | A far plane for perspective, as glTF's `zfar` gives; it sees out to infinity | A glTF camera with one, or Phase 8's culling |
-| Keeping the view's depth past its pass, to sample: each frame clears it and doesn't store it | Post-processing, finding the point under the cursor, or the tool API's captures |
+| Keeping the view's depth past its pass, to sample: each frame clears it and doesn't store it | Post-processing, finding the point under the cursor, or captures of depth |
 | Rendering the view's IDs only in frames that pick or outline: every frame renders them, for the reason [Rendering](../ARCHITECTURE.md#rendering) gives | A profile shows them |
 | Answering picks sooner than [Rendering](../ARCHITECTURE.md#rendering) says they come: reading them as soon as the timeline says the GPU has rendered them would win a frame or so | Picking that the latency shows in, such as highlighting what's under the cursor |
 | More than 64 picks a frame: `Context::pick` gives none past them, as many as a frame reads back | A layer picks more at once, such as many cursors or touches |
@@ -273,7 +287,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Copying the world as only the last tick a frame runs starts: a frame that catches up copies it as each of its ticks starts | A profile shows a catching-up frame's copies |
 | Copying the world, and finding what each row draws from, on the job system's threads, or only for the rows that moved: both run on the main thread, for the swarm about 0.19 ms a tick and 0.10 ms a frame that ticked; and blending only the rows that moved, which takes the job threads about 2.6 ms of their time a frame | A profile shows them |
 | Sets that jump: an Inspector set of a moving entity's transform, and its undo, glide there over a tick, as a drag does, rather than reset its interpolation | Phase 5's tool API, whose agents move things by setting them |
-| A flag for headless frames at a fraction of a tick of their own, for captures between ticks and for perf runs that measure blending, which headless frames, drawing their ticks, leave out; tests have them, through `App::headless_step` | Phase 5's headless captures, or a change to blending that needs measuring headless |
+| A flag for headless frames at a fraction of a tick of their own, for captures between ticks and for perf runs that measure blending, which headless frames, drawing their ticks, leave out; tests have them, through `App::headless_step` | A capture between ticks, or a change to blending that needs measuring headless |
 | Interpolation across rollback: a world restored in a tick draws where the tick left it, all of it, so rollback that restores every tick would draw at the tick rate; how rollback restores is decided with it | Rollback |
 | Reparenting that keeps where a child is in the world, by decomposing its matrix, which loses any shear; `set_parent` keeps its own transform | Phase 9's scene tree, or an agent attaching something where it stands |
 | Spawning a child into its table at once from code: `spawn`, then `set_parent`, moves it to another table; a load and a create operation spawn one there | A profile |
@@ -330,16 +344,16 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 
 ## Open questions
 
-- After the cleaning: Phase 5 or Luau scripting? Recommendation: Phase 5 first, since v0.1's goal,
-  changing a running game by asking, runs through its tool API, and Luau already comes after v0.1
-  in [ARCHITECTURE.md](../ARCHITECTURE.md#game-code). Decide next: it picks the next milestone.
 - A sixth gate, `cargo doc --workspace --no-deps --document-private-items` with
   `RUSTDOCFLAGS=-D warnings`? Without one, broken doc links come back unseen, as nine had before
   the cleaning cleared them; it takes 15 to 40 s here. Recommendation: yes, and in CI on Linux
   x86-64 alone, as the shipping gate is. Decide before the next milestone's first commit.
-- Which game is the flagship? Recommendation: a networked game whose design depends on
-  determinism, so the simulation core, the tool API and multiplayer are exercised from the
-  start. Decide before Phase 5, v0.1.
+- Which multiplayer model does the first demo, a simple networked game, use? Recommendation:
+  deterministic lockstep between two peers, on one machine or a LAN: each sends its commands for a
+  tick ahead, as recordings write them, with the world's hash after the tick, so that a desync names
+  its tick; commands, hashes and replays already do most of it, and the loop then has to patch or
+  restart both peers at the same tick. Rollback and replication come later. Decide before Phase 5's
+  demo milestone.
 - Which license? Recommendation: MIT OR Apache-2.0, the Rust convention, chosen once; until
   then, `publish = false` keeps the crates off crates.io. Decide before anyone outside the
   project contributes.

@@ -9,6 +9,7 @@ bytemuck.workspace = true
 egui.workspace = true
 egui-winit.workspace = true
 gilrs.workspace = true
+gg-api = { workspace = true, optional = true }
 gg-core.workspace = true
 gg-macros.workspace = true
 gg-renderer.workspace = true
@@ -31,9 +32,9 @@ tracing-subscriber.workspace = true
 [features]
 # The engine's zones for Tracy, through gg-core's profile module.
 tracy = ["gg-core/tracy"]
-# Development tooling, which development builds turn on and shipping builds never do: hot reload of
-# games' shaders, and the OS's file dialogs, for now.
-dev = ["dep:rfd"]
+# Development tooling, which development builds turn on and shipping builds never do: the tool API,
+# hot reload of games' shaders, and the OS's file dialogs, for now.
+dev = ["dep:gg-api", "dep:rfd"]
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { workspace = true, features = [

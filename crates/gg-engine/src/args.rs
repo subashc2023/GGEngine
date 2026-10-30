@@ -23,6 +23,8 @@ pub(crate) struct Args {
     pub(crate) replay: Option<PathBuf>,
     /// Where the replay stops, to write the world as it is there.
     pub(crate) dump: Option<Dump>,
+    /// Whether a development build serves the tool API.
+    pub(crate) api: bool,
 }
 
 /// Where a replay stops to write the world: once its layers have attached, or after a tick.
@@ -32,8 +34,9 @@ pub(crate) enum Dump {
     Tick(u64),
 }
 
-/// The flags of a run that a replay, which renders nothing and records nothing, refuses.
-const NOT_REPLAYED: [&str; 8] = [
+/// The flags of a run that a replay, which renders nothing, records nothing and serves no tools,
+/// refuses.
+const NOT_REPLAYED: [&str; 9] = [
     "--record",
     "--headless",
     "--frames",
@@ -42,6 +45,7 @@ const NOT_REPLAYED: [&str; 8] = [
     "--validation",
     "--no-validation",
     "--vsync",
+    "--no-api",
 ];
 
 /// The help text, for the program called `program`.
@@ -62,6 +66,7 @@ Options:
   --record <PATH>   Record the run to PATH: its seed, its layers' commands and its hash each tick
   --replay <PATH>   Replay the recording at PATH without a window or a GPU, checking each hash
   --dump <TICK>     With --replay, stop after tick TICK, or at `attach`, and print the world
+  --no-api          Serve no tool API, which development builds serve for tools such as `gg`
   -h, --help        Print this help
 
 Environment:
@@ -90,6 +95,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
         record: None,
         replay: None,
         dump: None,
+        api: true,
     };
     // The first flag given that a replay refuses.
     let mut not_replayed = None;
@@ -118,6 +124,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
             "--validation" => parsed.validation = true,
             "--no-validation" => parsed.validation = false,
             "--vsync" => parsed.vsync = true,
+            "--no-api" => parsed.api = false,
             "--frames" => {
                 let frames = value_of(flag)?;
                 let frames = frames.parse().map_err(|_| {
@@ -244,6 +251,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(args.record, Some(PathBuf::from("run.recording")));
+        // Development builds serve the tool API unless told not to.
+        assert!(args.api);
+        assert!(!parse_strs(&["--no-api"]).unwrap().unwrap().api);
         for (dump, at) in [("attach", Dump::Attach), ("300", Dump::Tick(300))] {
             let args = parse_strs(&["--replay", "run.recording", "--dump", dump]);
             let args = args.unwrap().unwrap();

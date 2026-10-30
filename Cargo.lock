@@ -834,6 +834,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "gg"
+version = "0.1.0"
+dependencies = [
+ "gg-api",
+ "serde_json",
+]
+
+[[package]]
+name = "gg-api"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "gg-core"
 version = "0.1.0"
 dependencies = [
@@ -853,6 +869,7 @@ dependencies = [
  "bytemuck",
  "egui",
  "egui-winit",
+ "gg-api",
  "gg-core",
  "gg-macros",
  "gg-renderer",

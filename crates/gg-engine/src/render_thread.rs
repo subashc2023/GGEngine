@@ -44,6 +44,21 @@ pub(crate) struct Extracted {
     pub(crate) pixels_per_point: f32,
     /// What the windows of their own drew, in the order their passes ran.
     pub(crate) windows: Vec<Drawn>,
+    /// Whether the frame reads the game's view back once it has rendered it, for the tool API's
+    /// captures.
+    #[cfg(feature = "dev")]
+    pub(crate) capture: bool,
+    /// The view it read back, if it was to and it rendered.
+    #[cfg(feature = "dev")]
+    pub(crate) captured: Option<Result<Shot>>,
+}
+
+/// The game's view as a frame rendered it, which the tool API's captures read back: rows of RGBA8
+/// pixels, sRGB-encoded, the top row first.
+#[cfg(feature = "dev")]
+pub(crate) struct Shot {
+    pub(crate) size: [u32; 2],
+    pub(crate) pixels: Vec<u8>,
 }
 
 impl Default for Extracted {
@@ -64,6 +79,10 @@ impl Default for Extracted {
             textures: TextureChanges::default(),
             pixels_per_point: 1.0,
             windows: Vec::new(),
+            #[cfg(feature = "dev")]
+            capture: false,
+            #[cfg(feature = "dev")]
+            captured: None,
         }
     }
 }
@@ -121,6 +140,18 @@ impl Render for Renderer {
         let presented = Renderer::render(self, data, ui, &mut windows);
         frame.picked.clear();
         frame.picked.extend_from_slice(self.picked());
+        #[cfg(feature = "dev")]
+        if frame.capture && matches!(presented, Ok(true)) {
+            let read = self.read_back_view().and_then(|view| {
+                let (size, pixels) = view.ok_or_else(|| {
+                    let message = "the game's view has no area, as while another panel's tab shows \
+                                   over it";
+                    Error::new("api.no_view", message)
+                })?;
+                Ok(Shot { size, pixels })
+            });
+            frame.captured = Some(read);
+        }
         let drawn = self.drawn();
         gg_core::plot!("draws", drawn.draws as f64);
         gg_core::plot!("instances", drawn.instances as f64);
@@ -198,6 +229,18 @@ impl<R: Render> RenderThread<R> {
     pub(crate) fn frame(&self) -> &Extracted {
         let trip = (self.home.as_ref()).expect("the frame is back between frames");
         &trip.frame
+    }
+
+    /// The frame the renderer last rendered, while it's back, to take from it what it brought back
+    /// and set what the next frame handed over is to do, which fills in the same one.
+    ///
+    /// # Panics
+    ///
+    /// If it's away, rendering a frame.
+    #[cfg(feature = "dev")]
+    pub(crate) fn frame_mut(&mut self) -> &mut Extracted {
+        let trip = (self.home.as_mut()).expect("the frame is back between frames");
+        &mut trip.frame
     }
 
     /// Hands the renderer over, to render the frame `fill` fills in from what the frame handed

@@ -21,6 +21,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
+use crate::api::{self, Api, Waited, Waiting};
 use crate::args::Args;
 use crate::chrome::{self, Chrome};
 use crate::dock::{self, Dock, Under};
@@ -39,7 +40,9 @@ use crate::viewports::{self, Viewports, WindowInput};
 use crate::windows_frame::Frame;
 use crate::{App, Context, Event, egui_context, event};
 
-pub(crate) fn run(app: &mut App, args: &Args) -> Result<Ran> {
+/// Runs `app` in a window until it closes, `api` serving tools as each frame starts, and between
+/// frames while the window is minimized, woken by each request.
+pub(crate) fn run(app: &mut App, args: &Args, mut api: Option<Api>) -> Result<Ran> {
     let event_loop = EventLoop::new().map_err(|error| {
         Error::new(
             "engine.window",
@@ -47,6 +50,11 @@ pub(crate) fn run(app: &mut App, args: &Args) -> Result<Ran> {
         )
         .with_source(error)
     })?;
+    let proxy = event_loop.create_proxy();
+    api::set_waker(&mut api, move || {
+        // Only once the loop has ended, as the run does.
+        let _ = proxy.send_event(());
+    });
     let layout = dock::path(app.name, std::env::consts::OS, |name| {
         std::env::var_os(name)
     });
@@ -83,8 +91,10 @@ pub(crate) fn run(app: &mut App, args: &Args) -> Result<Ran> {
         cx: Context::new(None),
         clock: Clock::default(),
         stepper: Stepper::default(),
+        api,
         frames: 0,
         minimized: false,
+        waiting: None,
         error: None,
         ran: None,
         panic: None,
@@ -143,11 +153,15 @@ struct Handler<'a> {
     dock: Dock,
     cx: Context,
     clock: Clock,
-    /// Steps the simulation in real time.
+    /// Steps the simulation in real time, or as the tool API asks.
     stepper: Stepper,
+    /// Serves tools, in development builds.
+    api: Option<Api>,
     frames: u64,
     /// Set while the window has no area to render into.
     minimized: bool,
+    /// Tells `ping` that frames have paused while the window is minimized.
+    waiting: Option<Waited>,
     error: Option<Error>,
     ran: Option<Ran>,
     /// A panic rendering the frame that renders as the loop ends, which resumes once it has:
@@ -218,6 +232,11 @@ impl Handler<'_> {
             let _ = dispatch(&mut app.stack, cx, &event);
         });
         self.take_pause();
+        if api::serve(&mut self.api, &self.cx, &mut self.stepper) {
+            debug!("A tool asked the run to end");
+            event_loop.exit();
+            return;
+        }
         let (Some(window), Some(render), Some(egui_winit), Some(viewports)) = (
             &self.window,
             &mut self.render,
@@ -275,6 +294,7 @@ impl Handler<'_> {
                 event_loop.exit();
             }
         }
+        api::frame_back(&mut self.api, render, self.stepper.ticks);
         // A run that's ending hands over no more frames: one past `--frames` would present.
         let mut close = false;
         if !event_loop.exiting() {
@@ -347,7 +367,9 @@ impl Handler<'_> {
             .map(Position::from)
             .or(at);
         if let Some(at) = at {
+            let waiting = api::waiting(Waiting::Menu);
             window.show_window_menu(at);
+            drop(waiting);
             #[cfg(target_os = "windows")]
             self.clock.resume();
         }
@@ -382,6 +404,7 @@ impl Handler<'_> {
             return;
         }
         self.minimized = minimized;
+        self.waiting = minimized.then(|| api::waiting(Waiting::Minimized));
         self.clock.resume();
         if minimized {
             debug!("Window minimized; rendering pauses until it's restored");
@@ -577,6 +600,15 @@ impl ApplicationHandler for Handler<'_> {
         // Frames run back to back, paced by the render thread, which presentation paces: mailbox's
         // to the GPU, FIFO's (`--vsync`) to the display.
         self.request_frame(event_loop);
+    }
+
+    /// A request has come to the tool API: frames answer requests as they start, but while the
+    /// window is minimized, and no frames run, it's answered here, unless it needs a frame.
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, (): ()) {
+        if self.minimized && api::serve_paused(&mut self.api, &self.cx, &mut self.stepper) {
+            debug!("A tool asked the run to end");
+            event_loop.exit();
+        }
     }
 
     fn exiting(&mut self, _: &ActiveEventLoop) {

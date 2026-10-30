@@ -18,12 +18,14 @@ crates/           libraries
   gg-gpu/         Vulkan through ash: the only crate that touches Vulkan
   gg-renderer/    passes, materials, render graph (to come); gets plain render data, never the scene
   gg-engine/      what games use: main loop, window, input, scene, image and glTF loading,
-                  hot reload, tool API (to come)
+                  hot reload, the tool API
   gg-macros/      the derives gg-engine re-exports
+  gg-api/         the tool API's protocol, which gg-engine and tools share
 apps/             executables
   sandbox/        development playground
   editor/         the editor: the game's view in a panel among dockable panels
   player/         reference player, with no layers; runs cooked scenes without game code (to come)
+tools/gg/         the command-line tool, which `cargo gg` runs
 docs/PLAN.md      the roadmap (see Workflow)
 docs/DEFECTS.md   known defects of the code that exists (see Workflow)
 ```
@@ -45,8 +47,9 @@ cargo run -p sandbox -- --headless --frames 60   # does the engine run? 0 means 
 cargo run -p sandbox -- --record target/run.recording   # a run's seed, commands and hashes
 cargo run -p sandbox -- --replay target/run.recording   # without a GPU: 0 means every hash matched
 cargo run -p sandbox --release --features tracy   # with zones for Tracy
-cargo build -p player --release   # shipping: the player alone
+cargo build -p player --release   # shipping: the player alone, as wider builds merge in dev
 cargo test -p gg-renderer --test gpu -- picks   # the GPU tests whose names contain picks
+cargo gg run sandbox              # supervised, serving the tool API: `cargo gg help`
 ```
 
 Building needs a C++ compiler, for the Vulkan Memory Allocator, and `slangc` for the shaders: the
@@ -80,14 +83,12 @@ there. renderdoccmd exits 0 whatever the run does, so read the run's log. `rende
 <capture> -c xml -o <capture>.xml` writes the capture as XML, every object's name
 (`vkSetDebugUtilsObjectNameEXT`) and pass's label (`vkCmdBeginDebugUtilsLabelEXT`) among it.
 
-Build and check shipping configurations with `-p player` alone, since a wider build merges the
-sandbox's features into the player ([Builds](ARCHITECTURE.md#builds)).
-
-A windowed sandbox compiles a game's shader again as its file or one it includes changes, logging
-`Shader reloaded`, and draws with it from the next frame; one that doesn't compile or breaks the
-shader contract warns, and the shader keeps drawing as it did. gg-engine's tests of it build only
-with its `dev` feature, which the sandbox turns on: `cargo test --workspace` runs them, and
-`cargo test -p gg-engine` needs `--features dev`.
+Development builds, with gg-engine's `dev` feature, as the sandbox and the editor are, serve the
+tool API, and windowed, compile a game's shader again as its files change, logging `Shader
+reloaded`, or warning and drawing on as it did at a change that doesn't compile or breaks the shader
+contract. Run a game under `cargo gg run` in the background and talk to it beside it: `cargo gg
+status`, `capture` (its view as a PNG, in place of a screenshot), `step` and the rest each answer a
+line of JSON. `dev`'s tests need `--features dev` with `-p gg-engine`; `--workspace` merges it in.
 
 A change is done when all five pass:
 
