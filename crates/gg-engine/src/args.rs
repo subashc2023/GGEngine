@@ -95,8 +95,9 @@ Options:
                     its world was, rather than building the world afresh
   --no-api          Serve no tool API, which development builds serve for tools such as `gg`
   --stopped         Start stopped: the world the layers attach is the world as edited, which only
-                    the tool API's edits and scene files' saves change, until its `play`. A run
-                    given `--restore` goes on stopped or playing, as the snapshot's run was
+                    the tool API's edits, its `scene open` and `scene new`, and scene files' saves
+                    change, until its `play`. A run given `--restore` goes on stopped or playing,
+                    as the snapshot's run was
   --host <ADDRESS>  Host a lockstep session at ADDRESS, such as `0.0.0.0:7700`, as player 0
   --join <ADDRESS>  Join the lockstep session at ADDRESS as player 1, from the host's world
   -h, --help        Print this help

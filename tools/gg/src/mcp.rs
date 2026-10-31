@@ -30,11 +30,13 @@ components' values. An edit, `apply` or `set`, applies between ticks, paused or 
 takes back your last; a scene file saved while the game runs is an edit too, its author the file's \
 path, which `undo` with that author takes back. While the game plays a copy of its world as \
 edited, as after the editor's Play, an edit goes with the copy at `stop`; a scene file's save \
-lasts. `edits` lists each author's edits. `look` sets parts of the view's look, its viewpoint, an \
-outline round an entity, a grid, and whether colliders' outlines show, which the editor and any \
-other client set too, the last to set a part winning; give back, as null, what you set when you're \
-done. `capture` shows the view with the look, and `pick` names the entity at a pixel of it, as a \
-capture's PNG has it.";
+lasts. `edits` lists each author's edits. `scene` saves the open scene, the scene file `status` \
+names, whose `unsaved` says whether it differs from the file, writing its entities, never those \
+the game's code made; or opens another scene file in its place, or empties it, neither of which \
+can be undone. `look` sets parts of the view's look, its viewpoint, an outline round an entity, a \
+grid, and whether colliders' outlines show, which the editor and any other client set too, the \
+last to set a part winning; give back, as null, what you set when you're done. `capture` shows \
+the view with the look, and `pick` names the entity at a pixel of it, as a capture's PNG has it.";
 
 /// Serves MCP on stdin and stdout until stdin ends, reaching the game `pick` picks.
 ///
@@ -154,7 +156,8 @@ fn tools() -> Value {
         tool(
             "status",
             "The game's ticks, whether it's paused, whether it's stopped, its frames, its \
-             entities, and its view's size.",
+             entities, its view's size, its open scene's file, as `scene` names it, and whether \
+             the open scene is unsaved.",
             json!({}),
             &[],
         ),
@@ -174,10 +177,11 @@ fn tools() -> Value {
         ),
         tool(
             "stop",
-            "Stops the game: no tick runs, and its world is the world as edited, which only edits \
-             change; while a copy plays, brings the world as edited back, what the copy did, its \
-             edits among them, going. IDs learned while the copy played don't outlive it: they're \
-             drawn again. Recorded runs and lockstep peers refuse it.",
+            "Stops the game: no tick runs, and its world is the world as edited, which only edits, \
+             scene files' saves and `scene`'s `open` and `new` change; while a copy plays, brings \
+             the world as edited back, what the copy did, its edits among them, going. IDs learned \
+             while the copy played don't outlive it: they're drawn again. Recorded runs and \
+             lockstep peers refuse it.",
             json!({}),
             &[],
         ),
@@ -187,6 +191,36 @@ fn tools() -> Value {
              refused while the game is stopped: `play` first.",
             json!({"ticks": {"type": "integer", "minimum": 1, "maximum": 10000, "default": 1}}),
             &[],
+        ),
+        tool(
+            "scene",
+            "Saves, opens or empties the open scene, the project's scene file the game started in \
+             or one opened since, and answers the status, whose `scene` names it and whose \
+             `unsaved` says whether it differs from its file. The open scene owns the entities its \
+             file held and those clients' edits have made since it opened, their creates and \
+             duplicates, never those the game's code made. `save` writes them to its file, or to \
+             `path`, its file from then on; `open` puts the file at `path`'s entities in place of \
+             them, keeping the game's own; `new` deletes them, leaving the scene untitled. `open` \
+             and `new` can't be undone, every author's edits starting afresh, stop a copy that \
+             plays, and are refused while the scene has unsaved edits (`scene.unsaved`), unless \
+             `discard`.",
+            json!({
+                "action": {"type": "string", "enum": ["save", "open", "new"]},
+                "path": {
+                    "type": "string",
+                    "description": "The scene file to open, or to save as: from the game's asset \
+                                    root, as `status` names the open scene, such as \
+                                    `scenes/level2.ron`, or absolute; in one of the project's \
+                                    scenes folders, ending in `.ron`",
+                },
+                "discard": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "For `open` and `new`: whether to discard the open scene's \
+                                    unsaved edits",
+                },
+            }),
+            &["action"],
         ),
         tool(
             "capture",
@@ -429,8 +463,9 @@ fn run(pick: &Pick, name: &str, mut arguments: Map<String, Value>) -> Result<Ran
         "status" | "pause" | "resume" | "play" | "stop" | "hash" | "snapshot" => {
             call(name, Value::Null)
         }
-        "step" | "look" | "pick" | "entities" | "entity" | "get" | "apply" | "undo" | "redo"
-        | "edits" => call(name, Value::Object(arguments)),
+        // `scene`'s path as given, from the game's asset root, as its status names scene files.
+        "step" | "scene" | "look" | "pick" | "entities" | "entity" | "get" | "apply" | "undo"
+        | "redo" | "edits" => call(name, Value::Object(arguments)),
         "set" => {
             arguments.entry("path").or_insert_with(|| json!(""));
             call("apply", json!({"operations": [{"set": arguments}]}))

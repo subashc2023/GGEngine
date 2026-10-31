@@ -1,5 +1,5 @@
 //! What tests share: the shapes a pass of egui paints, among which the UI's tests find what they
-//! drew; and the codes of the events logged, which tests of what warns read.
+//! drew; and the codes of the events logged, which tests of what warns, or logs what it did, read.
 
 use std::fmt;
 use std::sync::mpsc::Sender;
@@ -53,4 +53,33 @@ impl Visit for Code {
     }
 
     fn record_debug(&mut self, _: &Field, _: &dyn fmt::Debug) {}
+}
+
+/// The codes of the events logged on a thread while it's kept, as [`logged`] starts it: the
+/// receiver first, so that the guards drop after it, the later set first.
+#[cfg(feature = "dev")]
+pub(crate) struct Logged {
+    pub(crate) codes: std::sync::mpsc::Receiver<String>,
+    _codes: tracing::subscriber::DefaultGuard,
+    _other: tracing::subscriber::DefaultGuard,
+}
+
+/// Has the code of each event logged on this thread go to the [`Logged`] it returns, while that's
+/// kept, whichever other tests log the same events from their threads meanwhile. Two dispatchers
+/// stay registered, so that tracing-core combines every live one's interest in a callsite another
+/// thread registers first, where with one registered it would ask that thread's alone, which has
+/// none, and keep the callsite off for good (tracing-core 0.1.36's `has_just_one`).
+#[cfg(feature = "dev")]
+pub(crate) fn logged() -> Logged {
+    use tracing_subscriber::layer::SubscriberExt;
+
+    let other = tracing::subscriber::set_default(tracing_subscriber::registry());
+    let (sender, codes) = std::sync::mpsc::channel();
+    let subscriber = tracing_subscriber::registry().with(Codes(sender));
+    let set = tracing::subscriber::set_default(subscriber);
+    Logged {
+        codes,
+        _codes: set,
+        _other: other,
+    }
 }

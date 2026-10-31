@@ -3,11 +3,11 @@
 //! connections, and each has a thread that reads its requests, answering `hello`, `ping` and `logs`
 //! itself, `logs` from the events the run's log keeps, and passing the rest on to the main loop,
 //! and one that writes its answers. The main loop answers them as a frame starts, before its ticks,
-//! so that a `patch` applies between ticks, a `play` or a `stop` holds from the frame's ticks, and
-//! a `look` reaches the frame; a `step` once its ticks have run; a `capture` once a frame that
-//! rendered brings its view back, whose PNG a thread of its own writes; a `pick` once the frame
-//! that read it brings its answer back; and a `snapshot` once a thread of its own has written the
-//! copy of the world the main thread took.
+//! so that a `patch` applies between ticks, a `play`, a `stop` or a `scene` holds from the frame's
+//! ticks, and a `look` reaches the frame; a `step` once its ticks have run; a `capture` once a
+//! frame that rendered brings its view back, whose PNG a thread of its own writes; a `pick` once
+//! the frame that read it brings its answer back; and a `snapshot` once a thread of its own has
+//! written the copy of the world the main thread took.
 //!
 //! A capture of the game's own view rides with a bare frame, which draws without the look, as the
 //! game would on its own; isn't published to a view's memory; and leaves the picks to the next
@@ -30,8 +30,8 @@ use std::time::{Duration, Instant};
 use gg_api::view::{Pacer, Writer};
 use gg_api::{
     Applied, Apply, Authored, Button, By, Capture, Captured, EntityList, Failure, Field, Hash,
-    Hello, History, Input, InputEvent, Listed, Looked, Patched, Picked, Pulse, Request, Session,
-    Snapshotted, Status, Step, View, Welcome,
+    Hello, History, Input, InputEvent, Listed, Looked, Patched, Picked, Pulse, Request, Scene,
+    SceneAction, Session, Snapshotted, Status, Step, View, Welcome,
 };
 use gg_core::log::Events;
 use gg_core::math::{Quat, Vec3, Vec4};
@@ -51,7 +51,7 @@ use crate::main_loop::Stepper;
 use crate::net::Ticket;
 use crate::reflect::{self, Ident, Type};
 use crate::render_thread::{Extracted, Publish, Shot};
-use crate::scene_files::SceneFile;
+use crate::scene_files::{self, Open, SceneFile};
 use crate::snapshot::Run;
 use crate::{
     Context, Entity, EntityId, Event, Key, MouseButton, Name, Operation, Pose, Scroll, World,
@@ -59,10 +59,10 @@ use crate::{
 };
 
 /// The methods, as `api.unknown_method` lists them.
-const METHODS: [&str; 26] = [
-    "hello", "ping", "status", "pause", "resume", "play", "stop", "step", "capture", "view",
-    "input", "look", "pick", "entities", "entity", "get", "types", "hash", "snapshot", "patch",
-    "apply", "undo", "redo", "edits", "logs", "quit",
+const METHODS: [&str; 27] = [
+    "hello", "ping", "status", "pause", "resume", "play", "stop", "step", "scene", "capture",
+    "view", "input", "look", "pick", "entities", "entity", "get", "types", "hash", "snapshot",
+    "patch", "apply", "undo", "redo", "edits", "logs", "quit",
 ];
 
 /// The most of the clients' picks a frame asks: half as many as a frame reads back, so that the
@@ -189,6 +189,9 @@ enum Call {
     Play,
     Stop,
     Step(u64),
+    /// What to do to the open scene, with the path to open or save it as, as given, checked to be
+    /// a `.ron` file's, and whether to discard its unsaved edits.
+    Scene(Scene),
     Capture {
         path: Option<PathBuf>,
         own: bool,
@@ -252,8 +255,9 @@ impl Reply {
 /// run as it was taken, where it goes, and where the answer goes.
 struct Taken {
     world: World,
-    /// The scene files the layers loaded, which the restored run watches.
+    /// The scene files the layers loaded, which the restored run watches, and its open scene.
     scenes: Vec<SceneFile>,
+    open: Open,
     /// What the run was doing, with a copy of the world as edited it held, if any, which the
     /// restored run goes on doing.
     run: Run,
@@ -529,18 +533,14 @@ impl Api {
                     }
                     None => {
                         if !stepper.stopped() {
-                            if let Some(ticks) = stack.stop(cx) {
-                                stepper.jump_to(ticks);
-                            }
-                            stepper.stop();
-                            let message = "the game stopped before the ticks ran: its world is \
-                                           the world as edited";
-                            for (waiting, _) in self.steps.drain(..) {
-                                waiting.send(Err(Failure::new("api.stopped", message)));
-                            }
+                            self.stop(cx, stack, stepper);
                         }
                         reply.result(&self.status(cx, stepper));
                     }
+                },
+                Call::Scene(scene) => match self.scene(cx, stack, stepper, scene) {
+                    Ok(()) => reply.result(&self.status(cx, stepper)),
+                    Err(error) => reply.send(Err(failure(&error))),
                 },
                 Call::Step(ticks) => {
                     stepper.step_by(ticks);
@@ -625,6 +625,7 @@ impl Api {
                         Some(edited) => Run::Held {
                             world: Box::new(edited.world.clone()),
                             scenes: edited.scenes.clone(),
+                            open: edited.open.clone(),
                             ticks: edited.ticks,
                         },
                         None if stepper.stopped() => Run::Stopped,
@@ -633,6 +634,7 @@ impl Api {
                     let taken = Taken {
                         world: world.clone(),
                         scenes: cx.scenes.files.clone(),
+                        open: cx.scenes.open.clone(),
                         run,
                         ticks: stepper.ticks,
                         path,
@@ -701,6 +703,79 @@ impl Api {
         quit
     }
 
+    /// Stops the game, which plays, as `stop` asks of a run that can stop: brings back the world as
+    /// edited, if a copy of it plays, at its ticks, as [`Stack::stop`] says; runs no ticks from
+    /// then on; and fails the `step`s waiting with `api.stopped`.
+    fn stop(&mut self, cx: &mut Context, stack: &mut Stack, stepper: &mut Stepper) {
+        if let Some(ticks) = stack.stop(cx) {
+            stepper.jump_to(ticks);
+        }
+        stepper.stop();
+        let message = "the game stopped before the ticks ran: its world is the world as edited";
+        for (waiting, _) in self.steps.drain(..) {
+            waiting.send(Err(Failure::new("api.stopped", message)));
+        }
+    }
+
+    /// Does to the open scene what `scene` asks, as gg-api's docs say: in a project's game, with
+    /// its path resolved, as [`scene_files::resolve`] does, saves the open scene of the world as
+    /// edited, as [`scene_files::save`] does; or, once [`scene_files::check_open`] or
+    /// [`scene_files::check_unsaved`] passes, stops a copy that plays, as `stop` does, and opens a
+    /// scene file in its place or empties it, as [`scene_files::open`] and [`scene_files::new`] do.
+    ///
+    /// Fails with `engine.no_project` in a game that isn't a project's; with `api.no_scene` for a
+    /// save in a lockstep peer, whose scene files the other's must stay as, and for an open or a
+    /// new in a run that can't stop, as [`Stack::refuses_stop`] says, since neither the history
+    /// they restart nor a copy's stopping is recorded or sent to a peer; and as those calls do.
+    fn scene(
+        &mut self,
+        cx: &mut Context,
+        stack: &mut Stack,
+        stepper: &mut Stepper,
+        scene: Scene,
+    ) -> Result<()> {
+        if cx.start.is_none() {
+            return Err(scene_files::no_project());
+        }
+        let existing = scene.action == SceneAction::Open;
+        let resolve = |path: &Path| scene_files::resolve(cx, path, existing);
+        let file = scene.path.as_deref().map(resolve).transpose()?;
+        if scene.action == SceneAction::Save {
+            if stack.is_peer() {
+                let message = "the game can't save the open scene: the run is a lockstep peer, \
+                               whose scene files would part from the other peer's";
+                return Err(Error::new("api.no_scene", message));
+            }
+            return scene_files::save(cx, file);
+        }
+        if let Some(why) = stack.refuses_stop() {
+            let what = match scene.action {
+                SceneAction::Open => "open a scene file in place of",
+                SceneAction::New | SceneAction::Save => "empty",
+            };
+            let message = format!(
+                "the game can't {what} the open scene, which starts every author's edits afresh \
+                 and stops a copy that plays, as this run can't: {why}"
+            );
+            return Err(Error::new("api.no_scene", message));
+        }
+        let (ticks, discard) = (stepper.ticks, scene.discard);
+        let opening = match file {
+            Some(file) => Some(scene_files::check_open(cx, file, ticks, discard)?),
+            None => {
+                scene_files::check_unsaved(cx, ticks, discard)?;
+                None
+            }
+        };
+        if cx.edited.is_some() {
+            self.stop(cx, stack, stepper);
+        }
+        match opening {
+            Some(opening) => scene_files::open(cx, stack, opening),
+            None => scene_files::new(cx, stack),
+        }
+    }
+
     /// Answers `reply`, asked as `offer`, with what an edit did, if it applied now, the next tick
     /// to run being `ticks`; or keeps it until the tick it applies before in a lockstep session.
     fn answer_offered(&mut self, reply: Reply, offered: Offered, offer: Offer, ticks: u64) {
@@ -749,8 +824,10 @@ impl Api {
         look.revision = *revision;
     }
 
-    /// The game as the frame that answers starts.
-    fn status(&self, cx: &Context, stepper: &Stepper) -> Status {
+    /// The game as the frame that answers starts, among it the open scene of the world as edited
+    /// and whether it's unsaved, as [`scene_files::unsaved`] finds it.
+    fn status(&self, cx: &mut Context, stepper: &Stepper) -> Status {
+        let unsaved = scene_files::unsaved(cx, stepper.ticks);
         let entities = cx.world().entities(None);
         Status {
             ticks: stepper.ticks,
@@ -759,6 +836,8 @@ impl Api {
             frames: self.shared.frames.load(Ordering::Relaxed),
             entities: entities.map_or(0, |entities| entities.len()),
             view: cx.view().map(|view| view.size),
+            scene: scene_files::title(cx).map(str::to_owned),
+            unsaved,
         }
     }
 
@@ -1397,13 +1476,14 @@ fn write_snapshots(taken: &Receiver<Taken>, app: &str, layers: &[String]) {
     for Taken {
         world,
         scenes,
+        open,
         run,
         ticks,
         path,
         reply,
     } in taken
     {
-        let written = snapshot::write(&world, &scenes, &run, app, &layers, ticks);
+        let written = snapshot::write(&world, &scenes, &open, &run, app, &layers, ticks);
         let written = written.and_then(|text| {
             if path.parent() == Some(crate::beside_exe("snapshots").as_path()) {
                 fs::create_dir_all(crate::beside_exe("snapshots")).map_err(|error| {
@@ -1506,8 +1586,9 @@ fn look(method: &str, mut given: gg_api::Look) -> Result<gg_api::Look, Failure> 
 /// The call `request` makes of the main loop.
 ///
 /// Fails with `api.unknown_method` for a method there's none of, `api.bad_params` for parameters
-/// it doesn't take, or a `look` that can't be, as [`look`] says, `api.bad_request` for a `hello`
-/// after the first, and `ecs.bad_id` for an ID that isn't one.
+/// it doesn't take, a `look` that can't be, as [`look`] says, or a `scene` whose path is missing,
+/// given where it's none, or not a `.ron` file's, or whose `discard` is given to `save`,
+/// `api.bad_request` for a `hello` after the first, and `ecs.bad_id` for an ID that isn't one.
 fn parse(request: &Request) -> Result<Call, Failure> {
     let method = request.method.as_str();
     let params = &request.params;
@@ -1556,6 +1637,30 @@ fn parse(request: &Request) -> Result<Call, Failure> {
             redo: method == "redo",
         },
         "edits" => Call::Edits(take::<gg_api::Edits>(method, params)?.author),
+        "scene" => {
+            let scene: Scene = take(method, params)?;
+            let what = match (scene.action, &scene.path) {
+                (SceneAction::Open, None) => Some("takes a `path` to open"),
+                (SceneAction::New, Some(_)) => Some("takes no `path` to empty the open scene"),
+                (SceneAction::Save, _) if scene.discard => {
+                    Some("takes `discard` to open a file or empty the open scene alone")
+                }
+                _ => None,
+            };
+            if let Some(what) = what {
+                return Err(bad_params(method, what));
+            }
+            let ron = |ext: &std::ffi::OsStr| ext.eq_ignore_ascii_case("ron");
+            if scene
+                .path
+                .as_deref()
+                .is_some_and(|path| !path.extension().is_some_and(ron))
+            {
+                let what = "takes the path of a scene's `.ron` file";
+                return Err(bad_params(method, what));
+            }
+            Call::Scene(scene)
+        }
         "quit" => none(method, params).map(|()| Call::Quit)?,
         "step" => {
             let Step { ticks } = take(method, params)?;
@@ -1715,7 +1820,11 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::args::Net;
     use crate::dirs::tests::Scratch;
+    use crate::net::Lockstep;
+    use crate::recording::Recorder;
+    use crate::scene_files::tests as scenes;
     use crate::{BoxCollider2D, Sprite, Tick, Transform, Viewport};
 
     /// How long a test waits for what should come at once, past which it fails rather than hangs.
@@ -1742,11 +1851,13 @@ mod tests {
     }
 
     /// Runs `client` on a thread of its own, connected to `session`'s API, while this thread serves
-    /// `api` from `cx` as frames would, each a tick's time, stepping `stepper` and then doing
-    /// `frame`; returns what `client` returns.
+    /// `api` from `cx`, whose layers are `stack`'s, as frames would, each a tick's time, looking at
+    /// the scene files first, as a frame does, then stepping `stepper` and doing `frame`; returns
+    /// what `client` returns.
     fn serving<T: Send + 'static>(
         api: &mut Api,
         cx: &mut Context,
+        stack: &mut Stack,
         stepper: &mut Stepper,
         session: Session,
         client: impl FnOnce(Client) -> T + Send + 'static,
@@ -1756,10 +1867,10 @@ mod tests {
             client(Client::connect(&session, "test", DEADLINE).expect("it connects"))
         });
         let start = Instant::now();
-        let mut stack = Stack::default();
         while !client.is_finished() {
             assert!(start.elapsed() < DEADLINE, "the client never finished");
-            api.serve(cx, &mut stack, stepper);
+            crate::scene_files::look(cx, stack);
+            api.serve(cx, stack, stepper);
             stepper.step(Tick::DT, |_| true, || Duration::ZERO);
             frame(api, cx, stepper);
             thread::sleep(Duration::from_millis(1));
@@ -1841,6 +1952,7 @@ mod tests {
         let read = serving(
             &mut api,
             &mut cx,
+            &mut Stack::default(),
             &mut stepper,
             session,
             client,
@@ -2034,6 +2146,7 @@ mod tests {
         let (refused, history, undone) = serving(
             &mut api,
             &mut cx,
+            &mut Stack::default(),
             &mut stepper,
             session,
             client,
@@ -2132,6 +2245,7 @@ mod tests {
         let edited = serving(
             &mut api,
             &mut cx,
+            &mut Stack::default(),
             &mut stepper,
             session,
             client,
@@ -2240,6 +2354,7 @@ mod tests {
         let (refused, taken) = serving(
             &mut api,
             &mut cx,
+            &mut Stack::default(),
             &mut stepper,
             session,
             client,
@@ -2351,6 +2466,7 @@ mod tests {
         let got = serving(
             &mut api,
             &mut cx,
+            &mut Stack::default(),
             &mut stepper,
             session,
             client,
@@ -2381,6 +2497,161 @@ mod tests {
         assert!(cx.edited.is_none());
     }
 
+    /// A client saves the open scene, which the watch's next look applies nothing of, then saves it
+    /// as another file, opens one in its place, unsaved edits discarded once refused, and empties
+    /// it, each answered with the status, which names the open scene and says whether it's
+    /// unsaved; and is refused, with a code, what can't be.
+    #[test]
+    fn a_client_saves_opens_and_empties_the_open_scene() {
+        let logged = crate::testing::logged();
+        let (mut api, session) = started("Api Scenes");
+        let dir = Scratch::new("api-scenes");
+        let (_, ids) = scenes::project(&dir.0, 1);
+        let scenes_dir = dir.0.join("scenes");
+        scenes::save(&scenes_dir.join("level2.ron"), "(entities: {})\n", 0);
+        fs::write(dir.0.join("outside.ron"), "(entities: {})\n").expect("written");
+        let mut cx = scenes::started(&dir.0);
+        let mut stack = Stack::default();
+        let mut stepper = Stepper::default();
+        stepper.pause();
+        let scene = |client: &mut Client, params: Value| client.call_as::<Status>("scene", params);
+        let create = json!({"operations": [{"create": {"components": {"Transform": {}}}}]});
+        let client = move |mut client: Client| {
+            let loaded = client.call_as("status", ()).expect("a status");
+            client.call_as::<Applied>("apply", create).expect("created");
+            let edited = client.call_as("status", ()).expect("a status");
+            let saved = scene(&mut client, json!({"action": "save"})).expect("saved");
+            (loaded, edited, saved)
+        };
+        let (loaded, edited, saved): (Status, Status, Status) = serving(
+            &mut api,
+            &mut cx,
+            &mut stack,
+            &mut stepper,
+            session.clone(),
+            client,
+            |_, _, _| {},
+        );
+        scenes::look_now(&mut cx, &mut stack);
+        let codes: Vec<String> = logged.codes.try_iter().collect();
+        assert!(
+            !codes.iter().any(|code| code == "scene.applied"),
+            "{codes:?}"
+        );
+        let logs = cx
+            .authors
+            .logs(cx.world())
+            .map(|(author, _)| author.to_owned());
+        assert_eq!(logs.collect::<Vec<_>>(), ["test"], "no edit of the file's");
+        let id = ids[0].to_string();
+        let set = json!({"operations": [{"set": {"id": id, "component": "Transform",
+            "path": "translation.x", "value": 2}}]});
+        let client = move |mut client: Client| {
+            let saved_as = (scene(
+                &mut client,
+                json!({"action": "save", "path": "scenes/copy.ron"}),
+            ))
+            .expect("saved as");
+            let open = json!({"action": "open", "path": "scenes/level2.ron"});
+            client.call_as::<Applied>("apply", set).expect("set");
+            let unsaved = scene(&mut client, open.clone()).expect_err("unsaved").code;
+            let mut discarded = open;
+            discarded["discard"] = json!(true);
+            let opened = scene(&mut client, discarded).expect("opened");
+            let emptied = scene(&mut client, json!({"action": "new"})).expect("emptied");
+            let refused = [
+                json!({"action": "save"}),
+                json!({"action": "open", "path": "outside.ron"}),
+                json!({"action": "open", "path": "scenes/none.ron"}),
+            ];
+            let refused =
+                refused.map(|params| scene(&mut client, params).expect_err("refused").code);
+            (saved_as, unsaved, opened, emptied, refused.to_vec())
+        };
+        let (saved_as, unsaved, opened, emptied, refused) = serving(
+            &mut api,
+            &mut cx,
+            &mut stack,
+            &mut stepper,
+            session,
+            client,
+            |_, _, _| {},
+        );
+        let named = |status: &Status| (status.scene.clone(), status.unsaved);
+        let title = |name: &str| Some(name.to_owned());
+        assert_eq!(named(&loaded), (title("scenes/main.ron"), false));
+        assert_eq!(named(&edited), (title("scenes/main.ron"), true));
+        assert_eq!(named(&saved), (title("scenes/main.ron"), false));
+        assert_eq!(named(&saved_as), (title("scenes/copy.ron"), false));
+        assert_eq!(unsaved, "scene.unsaved");
+        assert_eq!(named(&opened), (title("scenes/level2.ron"), false));
+        assert_eq!((named(&emptied), emptied.entities), ((None, false), 0));
+        assert_eq!(refused, ["scene.untitled", "scene.bad_path", "scene.file"]);
+        assert!(scenes_dir.join("copy.ron").is_file());
+    }
+
+    /// `scene` is refused with `api.no_scene` where it can't be: `open` and `new` in a recorded
+    /// run, which saves, and all of it in a lockstep peer; and with `engine.no_project` in a game
+    /// that isn't a project's.
+    #[test]
+    fn scenes_are_refused_where_the_run_cant_have_them() {
+        let (mut api, session) = started("Api No Scenes");
+        let dir = Scratch::new("api-no-scenes");
+        scenes::project(&dir.0, 1);
+        let mut stepper = Stepper::default();
+        stepper.pause();
+        let asked = [
+            json!({"action": "new", "discard": true}),
+            json!({"action": "open", "path": "scenes/main.ron", "discard": true}),
+            json!({"action": "save"}),
+        ];
+        let ask = move |mut client: Client| {
+            let asked = asked.map(|params| client.call("scene", params).err().map(|f| f.code));
+            asked.to_vec()
+        };
+        let mut recorded = Stack::default();
+        let recorder = Recorder::create(&dir.0.join("run.recording"), "Tested");
+        recorded.record(recorder.expect("created"));
+        let mut peer = Stack::default();
+        let net = Net::Host("127.0.0.1:0".to_owned());
+        peer.lockstep(Lockstep::start(&net, "Tested", &[]).expect("hosting"));
+        let no_scene = Some("api.no_scene".to_owned());
+        let no_project = Some("engine.no_project".to_owned());
+        for (stack, project, codes) in [
+            (
+                &mut recorded,
+                true,
+                [no_scene.clone(), no_scene.clone(), None],
+            ),
+            (
+                &mut peer,
+                true,
+                [no_scene.clone(), no_scene.clone(), no_scene],
+            ),
+            (
+                &mut Stack::default(),
+                false,
+                [no_project.clone(), no_project.clone(), no_project],
+            ),
+        ] {
+            let mut cx = if project {
+                scenes::started(&dir.0)
+            } else {
+                Context::seeded(4)
+            };
+            let got = serving(
+                &mut api,
+                &mut cx,
+                stack,
+                &mut stepper,
+                session.clone(),
+                ask.clone(),
+                |_, _, _| {},
+            );
+            assert_eq!(got, codes, "project: {project}");
+        }
+    }
+
     /// A patch that can't apply is answered with `api.patch`: here, one whose table's reference is
     /// past where any process's `main` is, which a test's build refuses whether its executable
     /// exports `main` or not, as `patch`'s own tests say.
@@ -2403,6 +2674,7 @@ mod tests {
         let refused = serving(
             &mut api,
             &mut cx,
+            &mut Stack::default(),
             &mut stepper,
             session,
             client,
@@ -2433,6 +2705,7 @@ mod tests {
         let (refused, captured) = serving(
             &mut api,
             &mut cx,
+            &mut Stack::default(),
             &mut stepper,
             session,
             client,
@@ -2493,6 +2766,7 @@ mod tests {
         serving(
             &mut api,
             &mut cx,
+            &mut Stack::default(),
             &mut stepper,
             session,
             client,
@@ -2535,6 +2809,7 @@ mod tests {
         let (reader, refused) = serving(
             &mut api,
             &mut cx,
+            &mut Stack::default(),
             &mut stepper,
             session.clone(),
             client,
@@ -2556,7 +2831,15 @@ mod tests {
         let back = |api: &mut Api, cx: &mut Context, stepper: &Stepper| {
             api.frame_back(&mut frame, cx, stepper.ticks);
         };
-        serving(&mut api, &mut cx, &mut stepper, session, client, back);
+        serving(
+            &mut api,
+            &mut cx,
+            &mut Stack::default(),
+            &mut stepper,
+            session,
+            client,
+            back,
+        );
         assert!(frame.publish.is_none());
         assert_eq!(api.handing(), None);
         drop(reader);
@@ -2602,6 +2885,7 @@ mod tests {
         let looks = serving(
             &mut api,
             &mut cx,
+            &mut Stack::default(),
             &mut stepper,
             session,
             client,
@@ -2711,6 +2995,7 @@ mod tests {
         serving(
             &mut api,
             &mut cx,
+            &mut Stack::default(),
             &mut stepper,
             session,
             client,
@@ -2777,7 +3062,15 @@ mod tests {
         let back = |api: &mut Api, cx: &mut Context, stepper: &Stepper| {
             api.frame_back(&mut frame, cx, stepper.ticks);
         };
-        let reader = serving(&mut api, &mut cx, &mut stepper, session, client, back);
+        let reader = serving(
+            &mut api,
+            &mut cx,
+            &mut Stack::default(),
+            &mut stepper,
+            session,
+            client,
+            back,
+        );
         let dir = Scratch::new("api-bare-capture");
         fs::create_dir_all(&dir.0).expect("a directory");
         let (to, answers) = mpsc::channel();
@@ -2880,7 +3173,15 @@ mod tests {
                 (pick.tag, id)
             }));
         };
-        let picked = serving(&mut api, &mut cx, &mut stepper, session, client, back);
+        let picked = serving(
+            &mut api,
+            &mut cx,
+            &mut Stack::default(),
+            &mut stepper,
+            session,
+            client,
+            back,
+        );
         let picked = picked.map(|picked| (picked.id, picked.name));
         let expected = [
             (Some(hero.to_string()), Some("Hero".to_owned())),
@@ -2935,6 +3236,38 @@ mod tests {
         assert_eq!(parse(&request("capture", json!({"own": true}))), Ok(own));
         let pick = parse(&request("pick", json!({"at": [3, 4.5]})));
         assert_eq!(pick, Ok(Call::Pick([3.0, 4.5])));
+        let scene = |action, path: Option<&str>, discard| {
+            let path = path.map(PathBuf::from);
+            Ok(Call::Scene(Scene {
+                action,
+                path,
+                discard,
+            }))
+        };
+        for (params, call) in [
+            (
+                json!({"action": "new"}),
+                scene(SceneAction::New, None, false),
+            ),
+            (
+                json!({"action": "new", "discard": true}),
+                scene(SceneAction::New, None, true),
+            ),
+            (
+                json!({"action": "open", "path": "scenes/Level2.RON", "discard": true}),
+                scene(SceneAction::Open, Some("scenes/Level2.RON"), true),
+            ),
+            (
+                json!({"action": "save"}),
+                scene(SceneAction::Save, None, false),
+            ),
+            (
+                json!({"action": "save", "path": "scenes/level2.ron"}),
+                scene(SceneAction::Save, Some("scenes/level2.ron"), false),
+            ),
+        ] {
+            assert_eq!(parse(&request("scene", params.clone())), call, "{params}");
+        }
         assert_eq!(
             parse(&request("look", Value::Null)),
             Ok(Call::Look(gg_api::Look::default())),
@@ -2965,6 +3298,29 @@ mod tests {
             ("step", json!({"tick": 2}), "api.bad_params"),
             ("capture", json!({"path": "relative.png"}), "api.bad_params"),
             ("capture", json!({"bare": true}), "api.bad_params"),
+            ("scene", Value::Null, "api.bad_params"),
+            ("scene", json!({"action": "close"}), "api.bad_params"),
+            ("scene", json!({"action": "open"}), "api.bad_params"),
+            (
+                "scene",
+                json!({"action": "new", "path": "scenes/a.ron"}),
+                "api.bad_params",
+            ),
+            (
+                "scene",
+                json!({"action": "save", "discard": true}),
+                "api.bad_params",
+            ),
+            (
+                "scene",
+                json!({"action": "open", "path": "scenes/a.txt"}),
+                "api.bad_params",
+            ),
+            (
+                "scene",
+                json!({"action": "save", "path": "scenes/ron"}),
+                "api.bad_params",
+            ),
             ("view", json!({"memory": 3}), "api.bad_params"),
             // A viewpoint whose rotation has no length, too far for an `f32`, or that can't
             // project; an outline of no entity's ID, of a color that isn't finite, or of no width.

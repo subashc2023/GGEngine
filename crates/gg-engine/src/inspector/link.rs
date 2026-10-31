@@ -32,6 +32,9 @@ pub(super) struct Linked {
     pub(super) pending: Vec<Linking>,
     /// Whether sets the Inspector has queued wait for its next tick.
     pub(super) queued: bool,
+    /// Whether a remote Inspector, as of its last pass, has edits it hasn't sent its game, or one
+    /// whose answer hasn't come: sets, operations, undos and redos alike.
+    pub(super) unanswered: bool,
     /// The entity picked, as of the Inspector's last pass or tick.
     pub(super) picked: Option<EntityId>,
     /// How many undos and redos the Inspector's passes have asked for.
@@ -168,6 +171,20 @@ impl InspectorLink {
         let linked = self.0.borrow();
         let set = |linking: &Linking| matches!(linking, Linking::Set(..));
         linked.queued || linked.pending.iter().any(set)
+    }
+
+    /// Whether nothing made through the link, or the panels, waits for the game, for a remote
+    /// Inspector: no set made through the link since its last pass, and, as of that pass, no edit
+    /// it hasn't sent its game, nor one whose answer hasn't come, sets, operations, undos and redos
+    /// alike, while it's connected. So a request that another connection to the game sends from
+    /// then on reaches the game after all of them, as a save of what they edited must. Unlike
+    /// [`waiting`](Self::waiting), it doesn't wait for a read to show what the game has answered.
+    /// The local Inspector, whose edits wait for its tick rather than for a game, has none
+    /// unanswered: it says only whether a set made through the link waits for its next pass.
+    pub fn idle(&self) -> bool {
+        let linked = self.0.borrow();
+        let set = |linking: &Linking| matches!(linking, Linking::Set(..));
+        !linked.unanswered && !linked.pending.iter().any(set)
     }
 
     /// Where the entity picked is, for a remote Inspector, as the game's last read of it gave it,

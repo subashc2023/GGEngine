@@ -19,8 +19,9 @@ const WORDS: [&str; 10] = [
     "true", "false", "Some", "None", "inf", "inff32", "inff64", "NaN", "NaNf32", "NaNf64",
 ];
 
-/// `roots` and their descendants as a scene's text, as [`World::save_scene`] says.
-pub(super) fn save(world: &World, roots: &[Entity]) -> Result<String> {
+/// `roots`, and their descendants if `descendants`, as a scene's text, as [`World::save_scene`]
+/// says.
+pub(super) fn save(world: &World, roots: &[Entity], descendants: bool) -> Result<String> {
     for &root in roots {
         world.locate(root)?;
     }
@@ -31,7 +32,9 @@ pub(super) fn save(world: &World, roots: &[Entity]) -> Result<String> {
     while let Some(entity) = next.pop() {
         if seen.insert(entity) {
             saved.push((world.id(entity).expect("a saved entity is alive"), entity));
-            next.extend(world.children(entity).expect("a saved entity is alive"));
+            if descendants {
+                next.extend(world.children(entity).expect("a saved entity is alive"));
+            }
         }
     }
     saved.sort_unstable_by_key(|&(id, _)| id);

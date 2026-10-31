@@ -233,6 +233,19 @@ impl World {
         self.emptied().load_scene(text).map(drop)
     }
 
+    /// The scene `text` in its canonical form: loaded into this world without its entities, as
+    /// [`scene_loads`](Self::scene_loads) checks it would, and saved again, as
+    /// [`save_scene`](Self::save_scene) writes it, so that a text written by hand compares with
+    /// one the engine saves.
+    ///
+    /// Fails as `scene_loads` does, and as `save_scene` does.
+    #[cfg(feature = "dev")]
+    pub(crate) fn scene_canonical(&self, text: &str) -> Result<String> {
+        let mut loaded = self.emptied();
+        let roots = loaded.load_scene(text)?;
+        loaded.save_scene(&roots)
+    }
+
     /// The world's content as text, a line for each field, as [`difference`](Self::difference)
     /// walks them: the entity's ID, the component's type and the field's path, joined as an error
     /// names them, such as `Sprite.color.x`, and the value, as a recording writes it, with every NaN

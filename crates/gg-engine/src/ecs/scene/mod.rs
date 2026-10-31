@@ -80,7 +80,29 @@ impl World {
     /// it refuses. Every error names the entity, the component and the path.
     pub fn save_scene(&self, roots: &[Entity]) -> Result<String> {
         let _zone = gg_core::zone!();
-        write::save(self, roots)
+        write::save(self, roots, true)
+    }
+
+    /// Exactly `entities` as a scene's canonical text, as [`save_scene`](Self::save_scene) writes
+    /// roots but without their descendants: each whose parent isn't among them is written as a
+    /// root, so that a child the game made under one of them isn't saved.
+    ///
+    /// Fails as `save_scene` does.
+    #[cfg(feature = "dev")]
+    pub(crate) fn save_entities(&self, entities: &[Entity]) -> Result<String> {
+        let _zone = gg_core::zone!();
+        write::save(self, entities, false)
+    }
+
+    /// The IDs the scene `text` gives its entities, as its syntax alone has them, which says what a
+    /// text holds that no longer loads, as after a rebuild took away a field it holds.
+    ///
+    /// Fails with `scene.syntax` for text that isn't a scene's RON, and with `ecs.bad_id` for a key
+    /// that isn't an ID.
+    #[cfg(feature = "dev")]
+    pub(crate) fn scene_ids(text: &str) -> Result<Vec<EntityId>> {
+        let _zone = gg_core::zone!();
+        read::ids(text)
     }
 
     /// Spawns the scene `text`'s entities, with the IDs it gives them, and returns its roots, in

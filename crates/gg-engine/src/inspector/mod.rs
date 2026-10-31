@@ -58,14 +58,15 @@ use crate::{
 /// them, a drag, or a number typed, as one edit. The panels queue each frame's edits,
 /// operations, undos and redos, which the Inspector's next tick makes, so that the world changes
 /// only at ticks; until then, a field set is drawn as the set will make it, and a refusal, and the
-/// Edit menu's names, show from the tick. A world cleared, replaced or restored, which is another,
-/// as [`World::serial`] says, unpicks and closes every row, which drops the edits made to the world
-/// before, and those queued for it: at the next tick, or at once as the run puts a world in place
-/// and calls [`restored`](Layer::restored), as a snapshot's restore, a lockstep joiner's and the
-/// tool API's `stop` do. But the very world it left coming back, as an app that swaps one world for
-/// another and back has it, or as `stop` brings back the world as edited, finds its edits, pick and
-/// open rows as they were. Another layer picks and edits as the panels do through the
-/// [`InspectorLink`] that [`link`](Self::link) gives it.
+/// Edit menu's names, show from the tick. A world cleared, replaced, restored or renewed, which is
+/// another, as [`World::serial`] says, unpicks and closes every row, which drops the edits made to
+/// the world before, and those queued for it: at the next tick, or at once as the run calls
+/// [`restored`](Layer::restored), having put a world in place, as a snapshot's restore, a lockstep
+/// joiner's and the tool API's `stop` do, or renewed it, as its `scene new` and `scene open` do.
+/// But the very world it left coming back, as an app that swaps one world for another and back has
+/// it, or as `stop` brings back the world as edited, finds its edits, pick and open rows as they
+/// were. Another layer picks and edits as the panels do through the [`InspectorLink`] that
+/// [`link`](Self::link) gives it.
 ///
 /// A remote Inspector, which [`remote`](Self::remote) makes, shows the world of the game its link
 /// reaches, as [`InspectorLink::reach`] says, in place of the app's own, as the tool API gives it,
@@ -225,8 +226,8 @@ impl Layer for Inspector {
     /// Goes to the world now in place, if it's another, at once rather than at the next tick: as
     /// the tool API's `stop` brings back the world as edited, whose log, pick and open rows come
     /// back, since the next tick may be the next copy's, which would drop them as those of a world
-    /// left before; as a run restored from a snapshot starts; and as a lockstep joiner's world
-    /// gives way to its host's.
+    /// left before; as the API's `scene new` and `scene open` renew the world; as a run restored
+    /// from a snapshot starts; and as a lockstep joiner's world gives way to its host's.
     fn restored(&mut self, cx: &mut Context) {
         let serial = cx.world().serial();
         if self.remote.is_none() && self.world != Some(serial) {

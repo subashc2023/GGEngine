@@ -161,6 +161,11 @@ impl Project {
     pub fn start_path(&self, dir: &Path) -> PathBuf {
         under(dir, &self.start)
     }
+
+    /// The scenes folders' paths, for the project whose manifest is in `dir`.
+    pub fn scene_dirs(&self, dir: &Path) -> Vec<PathBuf> {
+        self.scenes.iter().map(|scene| under(dir, scene)).collect()
+    }
 }
 
 /// Checks that `path`, field `field`'s, is relative, its parts named, neither `.` nor `..`, with
@@ -287,6 +292,7 @@ mod tests {
             project.start_path(&game),
             game.join("scenes").join("arena.ron")
         );
+        assert_eq!(project.scene_dirs(&game), [game.join("scenes")]);
         let missing = Project::read(&stray.join("none"))
             .err()
             .map(|failure| failure.code);

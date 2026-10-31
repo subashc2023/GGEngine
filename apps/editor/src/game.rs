@@ -2,16 +2,17 @@
 //! --embedded` in the project's directory, which builds it, patches it as its code changes and
 //! restarts it after any other change, and which ends, with the game, as the editor ends, closing
 //! its stdin. The game starts stopped, as `--stopped` has it: its world is the world as edited,
-//! which only edits change, until Play. It renders offscreen for the editor, which shows its view
-//! in the Viewport from memory the two share, as the tool API's `view` asks. The Entities and
-//! Inspector panels show the game's world, and edit it, through the API, as a remote [`Inspector`]
-//! does; the Logs panel shows `gg run`'s events, the build's errors among them, the game's events
-//! as it logs them, which the tool API's `logs` follows, and what the game and the build print;
-//! the Assets panel, the files in the project's asset root; and the title bar, how the run goes,
-//! or while a game serves, whether it's stopped, playing or simulating, and whether it's paused,
-//! as the game answers the editor's requests and the `status` it asks for every quarter second,
-//! which catches another client's; with Play, Simulate, pause and step. Started outside a project,
-//! the editor runs no game, and says why.
+//! which only edits, scene files' saves and the File menu's New and Open change, until Play. It
+//! renders offscreen for the editor, which shows its view in the Viewport from memory the two
+//! share, as the tool API's `view` asks. The Entities and Inspector panels show the game's world,
+//! and edit it, through the API, as a remote [`Inspector`] does; the Logs panel shows `gg run`'s
+//! events, the build's errors among them, the game's events as it logs them, which the tool API's
+//! `logs` follows, and what the game and the build print; the Assets panel, the files in the
+//! project's asset root; and the title bar, how the run goes, or while a game serves, whether it's
+//! stopped, playing or simulating, and whether it's paused, as the game answers the editor's
+//! requests and the `status` it asks for every quarter second, which catches another client's; with
+//! Play, Simulate, pause and step. Started outside a project, the editor runs no game, and says
+//! why.
 //!
 //! Play has a copy of the world as edited play in its place, as the API's `play` does, the view
 //! seeing through the game's own camera, which gets all the input the view gets, the view's tools
@@ -32,8 +33,19 @@
 //! The editor's camera, the outline round what's picked, the grid and the colliders' switch reach
 //! the game as parts of its look, as [`look`](crate::look) says: each as the user changes it, the
 //! editor taking the parts another client, such as an agent, sets.
+//!
+//! The File menu acts on the game's open scene through the API's `scene`, never reading or writing
+//! a scene file itself: New empties it, Open opens a scene the OS's dialog picks in its place, and
+//! Save and Save As save the world as edited to its file, or to one the dialog picks, which is then
+//! its file; each request, and a close's status, sent once the Inspector has nothing waiting for
+//! the game, so that the game has its edits first. The title bar names the open scene's file,
+//! marked while the game says it has unsaved edits, which New, Open, Quit and the window's close
+//! button ask whether to save first, discard or keep, cancelling; a close asks the game for a
+//! status first, while one serves, and otherwise goes by the last. A refusal shows in a message,
+//! and in the Logs.
 
 use std::collections::VecDeque;
+use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read};
 use std::mem;
@@ -45,18 +57,19 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gg_api::view::Reader;
-use gg_api::{Client, Failure, InputEvent, LogEvents, Looked, Session, Status};
-use gg_engine::egui::{self, Color32, RichText, ScrollArea};
+use gg_api::{Client, Failure, InputEvent, LogEvents, Looked, Scene, SceneAction, Session, Status};
+use gg_engine::egui::{self, Color32, RichText, ScrollArea, ViewportCommand, ViewportId};
 use gg_engine::grid::Plane;
 use gg_engine::math::{Quat, Vec3};
 use gg_engine::{
-    App, Context, Docked, EntityId, Event, Inspector, InspectorLink, Layer, MouseButton, PerfPanel,
-    Projection, Scroll, Ui, Viewpoint, Viewport,
+    App, Context, Docked, EntityId, Event, FileDialog, Inspector, InspectorLink, Key, Layer,
+    MouseButton, PerfPanel, Projection, Scroll, Ui, Viewpoint, Viewport,
 };
 use serde_json::{Value, json};
 use tracing::{info, warn};
 
 use crate::assets::Assets;
+use crate::file::{self, Choice, Item, Message};
 use crate::handles::{Picked, Reading, Sight};
 use crate::look::{Looking, Part, Parts};
 use crate::overlay::{self, Mode, Toolbar};
@@ -113,8 +126,9 @@ const CLIENT: &str = "editor";
 
 /// The editor's layer: the `gg run` of the project's game, the connection to the game that serves,
 /// the memory its view is shared through, how the game runs, and what the Logs and Assets panels
-/// and the title bar show; and the view's tools, the picks they ask of the game and the look they
-/// keep with it.
+/// and the title bar show; the game's open scene, what the File menu asks of it, and how far a
+/// close has got; and the view's tools, the picks they ask of the game and the look they keep with
+/// it.
 struct Game {
     /// The project's directory, if the editor was started in one.
     dir: Option<PathBuf>,
@@ -176,9 +190,87 @@ struct Game {
     statusing: bool,
     polled: Option<Instant>,
     logs: VecDeque<Logged>,
-    /// The Assets panel, at the project's asset root; none outside a project.
+    /// The Assets panel, at the project's asset root, and the project's folders; none outside a
+    /// project.
     assets: Option<Assets>,
+    folders: Option<Folders>,
+    /// Whether a game has served since the editor started, from when a close asks whether to save.
+    served: bool,
+    /// The open scene's file, as the asset root names it, `None` while it's untitled, and whether
+    /// it has unsaved edits, as the game last answered: kept while no game serves, as `gg run`
+    /// restarts it.
+    scene: Option<String>,
+    unsaved: bool,
+    /// The File menu's `scene` request, until the game answers it.
+    request: Option<Request>,
+    /// What the prompt asks whether to save the open scene's unsaved edits before, while it shows;
+    /// what the save its Save chose goes on to once the game has saved them; and the File menu's
+    /// item that the next UI chooses, as Save As for a Save the game refused for an untitled
+    /// scene, since its dialog shows from the UI.
+    prompt: Option<Action>,
+    then: Option<Action>,
+    due: Option<Item>,
+    closing: Closing,
+    /// Why the game, or the editor, refused the File menu's last request, until it's dismissed.
+    message: Option<Message>,
     measures: Measures,
+}
+
+/// The project's folders, as its manifest names them: its asset root, which the open scene's file
+/// is named from, and its scene folders, where the dialogs start without an open scene's file.
+struct Folders {
+    root: PathBuf,
+    scenes: Vec<PathBuf>,
+}
+
+/// A `scene` request of the File menu's, and whether it's sent: once the Inspector has nothing
+/// waiting for the game, as [`InspectorLink::idle`] says, so that the game has its edits first.
+struct Request {
+    scene: Scene,
+    sent: bool,
+}
+
+/// What asks whether to save the open scene's unsaved edits first: New and Open, which the game
+/// refuses while it has some, unless it's to discard them, and a close of the editor.
+#[derive(Clone, Debug, PartialEq)]
+enum Action {
+    New,
+    /// Opens the scene at this path, as the dialog picked it, which a prompt keeps, so that the
+    /// dialog doesn't show again.
+    Open(PathBuf),
+    Close,
+}
+
+impl Action {
+    /// The `scene` request that does it, discarding the unsaved edits if `discard`: none for a
+    /// close.
+    fn scene(&self, discard: bool) -> Option<Scene> {
+        let (action, path) = match self {
+            Self::New => (SceneAction::New, None),
+            Self::Open(path) => (SceneAction::Open, Some(path.clone())),
+            Self::Close => return None,
+        };
+        Some(Scene {
+            action,
+            path,
+            discard,
+        })
+    }
+}
+
+/// How far a close of the editor, by Quit or the window's close button, has got, as
+/// [`Game::close`] says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Closing {
+    /// None asked for, or the last cancelled.
+    No,
+    /// Vetoed, until the answer to a status asked after it says whether the open scene has unsaved
+    /// edits: `true` once that's asked.
+    Checking(bool),
+    /// Vetoed, until the prompt is answered, or the save its Save chose is done.
+    Prompting,
+    /// Granted: the UI asks the main window to close, and the close that makes goes ahead.
+    Granted,
 }
 
 /// What a pick of the game's view found: an entity, by its ID, and what the view's bottom left
@@ -259,7 +351,8 @@ impl Game {
         };
         let view = ViewTools::new(inspector, toolbar);
         let wants = wants(&view);
-        let assets = dir.as_deref().map(|dir| Assets::new(asset_root(dir)));
+        let folders = dir.as_deref().map(folders);
+        let assets = (folders.as_ref()).map(|folders| Assets::new(folders.root.clone()));
         Self {
             dir,
             run: None,
@@ -290,6 +383,16 @@ impl Game {
             polled: None,
             logs: VecDeque::new(),
             assets,
+            folders,
+            served: false,
+            scene: None,
+            unsaved: false,
+            request: None,
+            prompt: None,
+            then: None,
+            due: None,
+            closing: Closing::No,
+            message: None,
             measures: Measures::default(),
         }
     }
@@ -449,8 +552,19 @@ impl Game {
 
     /// Lets go of the connection to the game, which has gone, of the input it didn't get, of the
     /// picks it didn't answer, of its look and of how it ran, which the next to serve answers anew;
-    /// and the Inspector, of its world.
+    /// and the Inspector, of its world. The File menu's request goes, unanswered, with what was to
+    /// follow it, and a prompt for New or Open; a close being checked or prompted for goes by the
+    /// last status, as [`close`](Self::close) says of one while no game serves.
     fn disconnect(&mut self) {
+        self.request = None;
+        self.then = None;
+        self.due = None;
+        if self.prompt != Some(Action::Close) {
+            self.prompt = None;
+        }
+        if matches!(self.closing, Closing::Checking(_) | Closing::Prompting) {
+            self.settle_close();
+        }
         self.talker = None;
         self.view.link.reach(None);
         self.input.clear();
@@ -484,6 +598,7 @@ impl Game {
         self.disconnect();
         self.view.link.reach(Some(session.clone()));
         self.talker = Some(Talker::connect(session));
+        self.served = true;
         // The game before's memory, which this one makes anew; the view shows its last frame
         // until this one's first.
         self.reader = None;
@@ -494,21 +609,25 @@ impl Game {
     }
 
     /// Takes the game's answers since: to `view`, which puts the memory it asked for in place of
-    /// the one before; to `status`, `play`, `stop`, `pause`, `resume` and `step`, which say how it
-    /// runs, as [`take_status`](Self::take_status) takes it; to `look`, what the editor takes of
-    /// which it takes; and errors, which it logs.
+    /// the one before; to `status`, `play`, `stop`, `pause`, `resume`, `step` and `scene`, which
+    /// say how it runs, as [`take_status`](Self::take_status) takes it, a `scene` going on as
+    /// [`scene_done`](Self::scene_done) says, and a status asked after a close settling it; to
+    /// `look`, what the editor takes of which it takes; and errors, which it logs, a `scene`'s as
+    /// [`scene_refused`](Self::scene_refused) says.
     fn take_answers(&mut self) {
         let Some(talker) = &self.talker else {
             return;
         };
         let answers: Vec<_> = talker.answers.try_iter().collect();
         for (method, answer) in answers {
+            let mut scene = None;
             match method.as_str() {
                 "input" => self.inputting = false,
                 "status" => self.statusing = false,
                 // Whether it stopped or refused to.
                 "stop" => self.stopping = false,
                 "play" => self.playing = self.playing.saturating_sub(1),
+                "scene" => scene = self.request.take().map(|request| request.scene),
                 _ => {}
             }
             match (method.as_str(), answer) {
@@ -518,9 +637,15 @@ impl Game {
                         self.reader = Some(asked);
                     }
                 }
-                ("status" | "play" | "stop" | "pause" | "resume" | "step", Ok(status)) => {
+                (
+                    "status" | "play" | "stop" | "pause" | "resume" | "step" | "scene",
+                    Ok(status),
+                ) => {
                     if let Ok(status) = serde_json::from_value::<Status>(status) {
                         self.take_status(&status);
+                        if let Some(scene) = &scene {
+                            self.scene_done(scene);
+                        }
                     }
                 }
                 ("look", Ok(looked)) => match serde_json::from_value::<Looked>(looked) {
@@ -545,27 +670,46 @@ impl Game {
                     if method == "look" {
                         self.looking.failed();
                     }
-                    let Failure { code, message } = failure;
-                    self.log(Level::Error, format!("`{method}`: [{code}] {message}"));
+                    // What the File menu goes on from, rather than refusals to show.
+                    let goes_on =
+                        matches!(failure.code.as_str(), "scene.unsaved" | "scene.untitled");
+                    let level = if scene.is_some() && goes_on {
+                        Level::Info
+                    } else {
+                        Level::Error
+                    };
+                    let Failure { code, message } = &failure;
+                    self.log(level, format!("`{method}`: [{code}] {message}"));
                     // A connection that didn't open, broke or gave up on an answer takes no more
                     // requests.
                     if method == "hello" || matches!(code.as_str(), "api.closed" | "api.timeout") {
                         self.disconnect();
                         return;
                     }
+                    if let Some(scene) = scene {
+                        self.scene_refused(scene, failure);
+                    }
                 }
+            }
+            // The answer to the status asked after a close, statuses being asked one at a time:
+            // what it says, as `take_status` took it, or, failed, what the last said.
+            if method == "status" && self.closing == Closing::Checking(true) {
+                self.settle_close();
             }
         }
     }
 
-    /// Takes `status`, how the game runs as it answered: whether it's paused, and whether it's
-    /// stopped. As it stops, at the editor's Stop or another client's `stop`, the input meant for
-    /// it that wasn't sent goes, but its letting go, and the view turns to the editor's camera, if
-    /// it was through the game's, whose viewpoint goes to the game with the grid, as the user's
-    /// turn would; but neither while a Play or Simulate clicked since waits for its answer, the
-    /// input then going to the copy it plays.
+    /// Takes `status`, how the game runs as it answered: whether it's paused, whether it's
+    /// stopped, and its open scene's file, and whether it has unsaved edits. As it stops, at the
+    /// editor's Stop, another client's `stop`, or a New or Open of the File menu's that stopped a
+    /// copy playing, the input meant for it that wasn't sent goes, but its letting go, and the view
+    /// turns to the editor's camera, if it was through the game's, whose viewpoint goes to the game
+    /// with the grid, as the user's turn would; but neither while a Play or Simulate clicked since
+    /// waits for its answer, the input then going to the copy it plays.
     fn take_status(&mut self, status: &Status) {
         self.paused = status.paused;
+        self.scene.clone_from(&status.scene);
+        self.unsaved = status.unsaved;
         if status.stopped && !self.stopped && self.playing == 0 {
             self.drop_unsent();
             let toolbar = &mut self.view.toolbar;
@@ -643,6 +787,297 @@ impl Game {
             RunState::Restarting => "Restarting…".to_owned(),
             RunState::Waiting => "Waiting for a rebuild".to_owned(),
             RunState::Ended(why) => format!("Ended: {why}"),
+        }
+    }
+
+    /// What the title bar says of the open scene, once a game has served: its file's name, or
+    /// Untitled, with a `*` after it while it has unsaved edits.
+    fn scene_label(&self) -> Option<String> {
+        let name = self.scene_name().unwrap_or("Untitled");
+        let mark = if self.unsaved { "*" } else { "" };
+        self.served.then(|| format!("{name}{mark}"))
+    }
+
+    /// The name of the open scene's file, such as `arena.ron`; `None` while it's untitled.
+    fn scene_name(&self) -> Option<&str> {
+        let scene = self.scene.as_deref()?;
+        scene.rsplit('/').next()
+    }
+
+    /// Whether the File menu's items but Quit, and their shortcuts, do anything: while a game
+    /// serves, which needs a project, and neither a prompt, a request of theirs nor a close waits.
+    fn files(&self) -> bool {
+        let waits = self.prompt.is_some() || self.request.is_some() || self.due.is_some();
+        self.talker.is_some() && !waits && self.closing == Closing::No
+    }
+
+    /// Does what the File menu's `item` does, from [`Layer::ui`], as the menu, a shortcut or a
+    /// refusal chooses it: Open and Save As show the OS's dialog, which blocks the frame until it
+    /// closes, and then do as [`open`](Self::open) and [`save_as`](Self::save_as) do with the file
+    /// it picked; New prompts or asks the game, as [`act`](Self::act) says; and Save has the game
+    /// save the open scene to its file, or, without one, does as Save As does. A Save As cancelled
+    /// cancels what was to follow it.
+    fn choose(&mut self, cx: &mut Context, item: Item) {
+        match item {
+            Item::New => self.act(Action::New),
+            Item::Open => {
+                if let Some(path) = self.pick(cx, false) {
+                    self.open(path);
+                }
+            }
+            Item::Save if self.scene.is_some() => self.save(),
+            Item::Save | Item::SaveAs => match self.pick(cx, true) {
+                Some(path) => self.save_as(path),
+                None => self.cancel_then(),
+            },
+        }
+    }
+
+    /// Shows the dialog that picks a scene to open, or, if `save`, a file to save the open scene
+    /// as, and returns its path, absolute, as the game takes it: one that shows scenes, in the open
+    /// scene's folder, or without its file, the project's first scene folder, and suggests its
+    /// file's name to save as.
+    fn pick(&self, cx: &mut Context, save: bool) -> Option<PathBuf> {
+        let folders = self.folders.as_ref()?;
+        let file = (self.scene.as_deref()).map(|scene| under(&folders.root, scene));
+        let directory = file.as_deref().and_then(Path::parent);
+        let file_name = file.as_deref().filter(|_| save).and_then(Path::file_name);
+        cx.pick_file(&FileDialog {
+            title: if save {
+                "Save the scene as"
+            } else {
+                "Open a scene"
+            },
+            save,
+            filter: Some(("Scenes", &["ron"])),
+            directory: directory.or(folders.scenes.first().map(PathBuf::as_path)),
+            file_name: file_name.and_then(OsStr::to_str),
+        })
+    }
+
+    /// Has the game open the scene at `path` in place of the open one, as [`act`](Self::act) says.
+    fn open(&mut self, path: PathBuf) {
+        self.act(Action::Open(path));
+    }
+
+    /// Has the game save the open scene to `picked`, the file Save As's dialog picked, with `.ron`
+    /// after its name unless it ends in it, in any case, as the XDG portal's dialog may leave it. A
+    /// file there at the name with `.ron` after is one the dialog didn't ask about replacing, so it
+    /// isn't replaced: the editor says so, `editor.scene_exists`, and what was to follow the save
+    /// is cancelled.
+    fn save_as(&mut self, mut picked: PathBuf) {
+        let extension = picked.extension();
+        if !extension.is_some_and(|extension| extension.eq_ignore_ascii_case("ron")) {
+            picked.as_mut_os_string().push(".ron");
+            if picked.exists() {
+                let code = "editor.scene_exists";
+                let shown = picked.display();
+                let message =
+                    format!("{shown} is there already: pick it in the dialog to replace it");
+                warn!(code, path = %shown, "{message}");
+                self.log(Level::Warn, format!("[{code}] {message}"));
+                let name = picked.file_name().map(OsStr::to_string_lossy);
+                self.message = Some(Message {
+                    title: format!("Can't save {}", name.unwrap_or_default()),
+                    text: format!("[{code}] {message}"),
+                });
+                self.cancel_then();
+                return;
+            }
+        }
+        self.request(Scene {
+            action: SceneAction::Save,
+            path: Some(picked),
+            discard: false,
+        });
+    }
+
+    /// Has the game save the open scene to its file, or, without one as the last status said, has
+    /// the next UI choose Save As.
+    fn save(&mut self) {
+        if self.scene.is_none() {
+            self.due = Some(Item::SaveAs);
+            return;
+        }
+        self.request(Scene {
+            action: SceneAction::Save,
+            path: None,
+            discard: false,
+        });
+    }
+
+    /// Does `action`, a New or an Open: prompts first, if the last status said the open scene has
+    /// unsaved edits; otherwise asks the game, which refuses if it has some by then.
+    fn act(&mut self, action: Action) {
+        if self.unsaved {
+            self.prompt = Some(action);
+        } else if let Some(scene) = action.scene(false) {
+            self.request(scene);
+        }
+    }
+
+    /// Has the File menu's request, `scene`, sent to the game, as [`Request`] says.
+    fn request(&mut self, scene: Scene) {
+        self.request = Some(Request { scene, sent: false });
+    }
+
+    /// Does what `choice` answers the prompt with, for what it asks about: Save saves the open
+    /// scene, or saves it as, then does it once the game has saved, a New or an Open again and a
+    /// close going ahead, but does nothing while no game serves; Don't Save does it, discarding the
+    /// unsaved edits, as a close going ahead does; Cancel does nothing, and a close goes back to
+    /// none.
+    fn answer(&mut self, choice: Choice) {
+        let Some(action) = self.prompt.take() else {
+            return;
+        };
+        match choice {
+            Choice::Save if self.talker.is_none() => self.prompt = Some(action),
+            Choice::Save => {
+                self.then = Some(action);
+                self.save();
+            }
+            Choice::DontSave => match action.scene(true) {
+                Some(scene) => self.request(scene),
+                None => self.closing = Closing::Granted,
+            },
+            Choice::Cancel if action == Action::Close => self.closing = Closing::No,
+            Choice::Cancel => {}
+        }
+    }
+
+    /// Cancels what was to follow a save that won't be made: a close going back to none.
+    fn cancel_then(&mut self) {
+        if self.then.take() == Some(Action::Close) {
+            self.closing = Closing::No;
+        }
+    }
+
+    /// Goes on from the File menu's request, `scene`, that the game did: from a save, to what was
+    /// to follow it.
+    fn scene_done(&mut self, scene: &Scene) {
+        if scene.action != SceneAction::Save {
+            return;
+        }
+        match self.then.take() {
+            Some(Action::Close) => self.closing = Closing::Granted,
+            Some(action) => self.act(action),
+            None => {}
+        }
+    }
+
+    /// Goes on from the File menu's request, `scene`, that the game refused with `failure`: a New
+    /// or an Open refused for unsaved edits the last status didn't know of prompts, but while a
+    /// close goes on; a Save refused for an untitled scene has the next UI choose Save As, but
+    /// while a close goes on, unless it's the close prompt's own Save, the refusal logged alone;
+    /// any other refusal cancels what was to follow, and shows in a message.
+    fn scene_refused(&mut self, scene: Scene, failure: Failure) {
+        let action = match (scene.action, scene.path) {
+            (SceneAction::New, _) => Action::New,
+            (SceneAction::Open, Some(path)) => Action::Open(path),
+            (SceneAction::Save, path) => {
+                if failure.code == "scene.untitled" && path.is_none() {
+                    // A close clears what was to follow, so a Save followed by one is its prompt's.
+                    if self.closing == Closing::No || self.then == Some(Action::Close) {
+                        self.due = Some(Item::SaveAs);
+                    }
+                    return;
+                }
+                let name = path.as_deref().and_then(Path::file_name);
+                let name = name.and_then(OsStr::to_str).or(self.scene_name());
+                self.refused(
+                    format!("Can't save {}", name.unwrap_or("the scene")),
+                    failure,
+                );
+                return;
+            }
+            (SceneAction::Open, None) => unreachable!("the File menu opens a file"),
+        };
+        if failure.code == "scene.unsaved" {
+            if self.closing == Closing::No {
+                self.prompt = Some(action);
+            }
+            return;
+        }
+        let title = match &action {
+            Action::Open(path) => {
+                let name = path.file_name().map(OsStr::to_string_lossy);
+                format!("Can't open {}", name.unwrap_or_default())
+            }
+            _ => "Can't make a new scene".to_owned(),
+        };
+        self.refused(title, failure);
+    }
+
+    /// Shows `failure`, a refusal of the File menu's request, in a message titled `title`,
+    /// cancelling what was to follow it.
+    fn refused(&mut self, title: String, failure: Failure) {
+        let Failure { code, message } = failure;
+        self.message = Some(Message {
+            title,
+            text: format!("[{code}] {message}"),
+        });
+        self.cancel_then();
+    }
+
+    /// What the prompt asks about `action`, and says of it: whether to save the open scene's
+    /// unsaved edits first.
+    fn asks(&self, action: &Action) -> (String, String) {
+        let title = match self.scene_name() {
+            Some(name) => format!("Save the edits to {name}?"),
+            None => "Save the untitled scene?".to_owned(),
+        };
+        let then = match action {
+            Action::New => "a new scene".to_owned(),
+            Action::Open(path) => {
+                let name = path.file_name().map(OsStr::to_string_lossy);
+                format!("{} opens", name.unwrap_or_default())
+            }
+            Action::Close => "the editor closes".to_owned(),
+        };
+        let text = format!("Its unsaved edits are lost unless they're saved before {then}.");
+        (title, text)
+    }
+
+    /// Whether a close of the editor, by Quit or the window's close button, goes ahead, as
+    /// [`Event::CloseRequested`] asks: at once outside a project and before any game has served,
+    /// and once it's granted. Otherwise it's vetoed, `Break`, while the editor checks whether the
+    /// open scene has unsaved edits, asking the game for a status once the Inspector has nothing
+    /// waiting for it; granted if it has none, and prompted for if it has, a prompt for a New or an
+    /// Open giving way to it. While no game serves after one has, as `gg run` restarts it, waits
+    /// for a rebuild or the game crashed, only the last status answers: granted if it said none,
+    /// and otherwise prompted for without Save, which no game would do; and a close being checked,
+    /// or prompted for, as the game goes goes the same way. A close while the window is minimized
+    /// waits until it's restored, since no frames run meanwhile.
+    fn close(&mut self) -> ControlFlow<()> {
+        match self.closing {
+            Closing::Granted => return ControlFlow::Continue(()),
+            Closing::Checking(_) | Closing::Prompting => return ControlFlow::Break(()),
+            Closing::No if !self.served => return ControlFlow::Continue(()),
+            Closing::No => {}
+        }
+        self.prompt = None;
+        self.then = None;
+        self.due = None;
+        self.closing = Closing::Checking(false);
+        if self.talker.is_none() {
+            self.settle_close();
+        }
+        if self.closing == Closing::Granted {
+            ControlFlow::Continue(())
+        } else {
+            ControlFlow::Break(())
+        }
+    }
+
+    /// Settles a close by whether the open scene has unsaved edits, as the last status said: it's
+    /// prompted for if it has some, and granted otherwise.
+    fn settle_close(&mut self) {
+        if self.unsaved {
+            self.prompt = Some(Action::Close);
+            self.closing = Closing::Prompting;
+        } else {
+            self.prompt = None;
+            self.closing = Closing::Granted;
         }
     }
 
@@ -837,8 +1272,9 @@ impl Game {
     /// the view at `view`: in Play, it goes to the game, in the view's pixels, and to the view's
     /// tools only if it lets go of what's held, so that no click picks, and no wheel or button
     /// turns the view to the editor's camera; otherwise the tools take it, the game getting
-    /// nothing, and a press off the handles asks the game for a pick. `Break` for what the tools
-    /// took.
+    /// nothing, and a press off the handles asks the game for a pick. In every mode, neither gets
+    /// a key of the File menu's shortcuts, the key at N, O or S's position, as [`shortcuts_key`]
+    /// says. `Break` for what the tools took.
     fn route(
         &mut self,
         event: &Event<'_>,
@@ -847,12 +1283,14 @@ impl Game {
     ) -> ControlFlow<()> {
         let origin = view.map_or([0, 0], |view| view.origin);
         let through = self.through();
-        let handled = if through && !lets_go(event) {
+        let shortcut = shortcuts_key(event, reading.command);
+        let handled = if shortcut || (through && !lets_go(event)) {
             ControlFlow::Continue(())
         } else {
             self.view.take(event, reading, picked(&self.view.link))
         };
         if through
+            && !shortcut
             && self.talker.is_some()
             && let Some(input) = forwarded(event, origin)
         {
@@ -898,13 +1336,44 @@ impl Game {
     }
 }
 
-/// The asset root of the project in directory `dir`, as its manifest names it, or `dir` if the
-/// manifest doesn't read, which `gg run` says why of.
-fn asset_root(dir: &Path) -> PathBuf {
+/// The folders of the project in directory `dir`, as its manifest names them; or if the manifest
+/// doesn't read, which `gg run` says why of, `dir` as the asset root, and no scene folders.
+fn folders(dir: &Path) -> Folders {
     match gg_api::Project::read(dir) {
-        Ok(project) => project.assets_dir(dir),
-        Err(_) => dir.to_owned(),
+        Ok(project) => Folders {
+            root: project.assets_dir(dir),
+            scenes: (project.scenes.iter())
+                .map(|scenes| under(dir, scenes))
+                .collect(),
+        },
+        Err(_) => Folders {
+            root: dir.to_owned(),
+            scenes: Vec::new(),
+        },
     }
+}
+
+/// `path`, relative, with `/` between its parts, as manifests and the API name files, joined to
+/// `dir` a part at a time, so that its separators are the OS's.
+fn under(dir: &Path, path: &str) -> PathBuf {
+    path.split('/')
+        .fold(dir.to_owned(), |under, part| under.join(part))
+}
+
+/// Whether `event` is a press, or a repeat, of a key of the File menu's shortcuts, the key at N, O
+/// or S's position, whatever the layout calls it, as the menu matches it, with `command` held,
+/// Ctrl, or Cmd on macOS, which the menu takes from egui: neither the game nor the view's tools
+/// get it. Its release does, which changes nothing without its press.
+fn shortcuts_key(event: &Event<'_>, command: bool) -> bool {
+    let key = matches!(
+        *event,
+        Event::Key {
+            key: Key::KeyN | Key::KeyO | Key::KeyS,
+            pressed: true,
+            ..
+        }
+    );
+    command && key
 }
 
 /// Whether `event` lets go of what's held: a key's or a button's release, or the loss of the
@@ -1036,30 +1505,92 @@ impl Layer for Game {
             talker.ask("input", json!({ "events": events }));
             self.inputting = true;
         }
+        // The File menu's request, and a close's status, once the game has answered the Inspector's
+        // edits, which go on a connection of their own: so that the game has them first.
+        let idle = self.view.link.idle();
+        if let Some(talker) = &self.talker
+            && let Some(request) = &mut self.request
+            && !request.sent
+            && idle
+        {
+            talker.ask("scene", json!(request.scene));
+            request.sent = true;
+        }
+        let checking = self.closing == Closing::Checking(false) && idle;
         if let Some(talker) = &self.talker
             && !self.statusing
-            && self
-                .polled
-                .is_none_or(|asked| asked.elapsed() >= STATUS_EVERY)
+            && (checking
+                || self
+                    .polled
+                    .is_none_or(|asked| asked.elapsed() >= STATUS_EVERY))
         {
             talker.ask("status", Value::Null);
             self.statusing = true;
             self.polled = Some(Instant::now());
+            if checking {
+                self.closing = Closing::Checking(true);
+            }
         }
     }
 
     /// Has the view's tools see what the view gets, or in Play the game, as [`route`](Game::route)
-    /// says.
+    /// says; and vetoes a close of the editor until it's granted, as [`close`](Game::close) says.
     fn event(&mut self, cx: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
+        if *event == Event::CloseRequested {
+            return self.close();
+        }
         let reading = view::reading(cx, self.screen(cx.view()));
         self.route(event, &reading, cx.view())
     }
 
     fn ui(&mut self, cx: &mut Context, ui: &mut Ui<'_>) {
+        let files = self.files();
+        let mut clicked = None;
+        ui.menu("File", |ui| {
+            ui.add_enabled_ui(files, |ui| {
+                for item in Item::MENU {
+                    let shortcut = ui.ctx().format_shortcut(&item.shortcut());
+                    let button = egui::Button::new(item.label()).shortcut_text(shortcut);
+                    if ui.add(button).clicked() {
+                        clicked = Some(item);
+                    }
+                }
+            });
+            ui.separator();
+            if ui.button("Quit").clicked() {
+                ui.ctx()
+                    .send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Close);
+            }
+        });
+        // The shortcuts, whichever panel of the main window has the keys. What's chosen is done
+        // once the menu is drawn, since Open and Save As show a dialog, which takes the context
+        // and blocks the frame.
+        let pressed = ui
+            .egui()
+            .input_mut(|input| file::shortcut(&mut input.events));
+        let chosen = clicked.or(pressed.filter(|_| files));
+        if let Some(item) = self.due.take().or(chosen) {
+            self.choose(cx, item);
+        }
         let (label, mode) = (self.label(), self.mode());
+        let unsaved = if self.unsaved {
+            ", with unsaved edits"
+        } else {
+            ""
+        };
+        let scene = self.scene_label().map(|scene| {
+            let tip = match &self.scene {
+                Some(file) => format!("The open scene, {file}{unsaved}"),
+                None => format!("The open scene, which has no file yet{unsaved}"),
+            };
+            (scene, tip)
+        });
         let paused = self.paused;
         let talker = self.talker.as_ref();
         let clicked = ui.title_bar(|ui| {
+            if let Some((scene, tip)) = scene {
+                ui.label(scene).on_hover_text(tip);
+            }
             ui.label(label);
             let serves = talker.is_some();
             let clicked = ui.add_enabled_ui(serves, |ui| overlay::show_run(ui, mode));
@@ -1150,6 +1681,23 @@ impl Layer for Game {
         self.view.overlay(ui, self.screen(cx.view()));
         // As Play, Simulate, Stop and the toolbar's switch went.
         self.tell(cx.input().cursor(), cx.view());
+        if let Some(action) = &self.prompt {
+            let (title, text) = self.asks(action);
+            let saves = self.talker.is_some();
+            if let Some(choice) = file::prompt(ui.egui(), &title, &text, saves) {
+                self.answer(choice);
+            }
+        }
+        if let Some(message) = &self.message
+            && message.show(ui.egui())
+        {
+            self.message = None;
+        }
+        // A close granted, which the main window's close makes again, to go ahead.
+        if self.closing == Closing::Granted {
+            ui.egui()
+                .send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Close);
+        }
     }
 
     /// Closes `gg run`'s stdin, which ends the game and the run, and, while a game serves, waits for
@@ -1501,7 +2049,7 @@ mod tests {
             picked,
         });
         game.run_state = RunState::Running;
-        (game.stopped, game.told) = (false, true);
+        (game.stopped, game.told, game.served) = (false, true, true);
         let ends = Ends {
             asked,
             answer,
@@ -1520,8 +2068,45 @@ mod tests {
             frames: 1,
             entities: 0,
             view: None,
+            scene: None,
+            unsaved: false,
         };
         Ok(json!(status))
+    }
+
+    /// The game's answer to a `status` or a `scene`, stopped, its open scene's file `scene`, with
+    /// unsaved edits or not.
+    fn scene_status(scene: Option<&str>, unsaved: bool) -> Result<Value, Failure> {
+        let status = Status {
+            ticks: 0,
+            paused: false,
+            stopped: true,
+            frames: 1,
+            entities: 0,
+            view: None,
+            scene: scene.map(str::to_owned),
+            unsaved,
+        };
+        Ok(json!(status))
+    }
+
+    /// The `scene` requests the layer whose ends are `ends` sent since.
+    fn scenes(ends: &Ends) -> Vec<Scene> {
+        let asked = ends
+            .asked
+            .try_iter()
+            .filter(|(method, _)| method == "scene");
+        let scenes = asked.map(|(_, scene)| serde_json::from_value(scene).expect("a scene"));
+        scenes.collect()
+    }
+
+    /// The `scene` request that saves the open scene, to `path`, or to its file.
+    fn save(path: Option<PathBuf>) -> Scene {
+        Scene {
+            action: SceneAction::Save,
+            path,
+            discard: false,
+        }
     }
 
     /// The methods of the requests the layer whose ends are `ends` sent since.
@@ -1866,6 +2451,388 @@ mod tests {
         assert_eq!(asks(&mut game), 0, "until a quarter second on");
         ago(&mut game);
         assert_eq!(asks(&mut game), 1);
+    }
+
+    /// An Open goes to the game at once while the last status said the open scene has no unsaved
+    /// edits; refused for edits made since, it prompts, logged but in no message, and Don't Save
+    /// asks again, discarding them, with the path the dialog picked.
+    #[test]
+    fn a_refusal_for_unsaved_edits_prompts_and_dont_save_discards_them() {
+        let (mut game, ends) = serving();
+        let mut cx = Context::seeded(1);
+        let arena = (
+            "status".to_owned(),
+            scene_status(Some("scenes/arena.ron"), false),
+        );
+        ends.answer.send(arena).expect("sent");
+        game.update(&mut cx, Duration::ZERO);
+        let level = PathBuf::from("scenes/level2.ron");
+        game.open(level.clone());
+        assert_eq!(game.prompt, None, "as the status said");
+        game.update(&mut cx, Duration::ZERO);
+        let open = |discard| Scene {
+            action: SceneAction::Open,
+            path: Some(level.clone()),
+            discard,
+        };
+        assert_eq!(scenes(&ends), [open(false)]);
+        let unsaved = Failure::new("scene.unsaved", "the open scene has unsaved edits");
+        ends.answer
+            .send(("scene".to_owned(), Err(unsaved)))
+            .expect("sent");
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(game.prompt, Some(Action::Open(level.clone())));
+        assert!(game.message.is_none());
+        assert_eq!(
+            game.logs.back().map(|logged| logged.level),
+            Some(Level::Info)
+        );
+        assert!(!game.files(), "while it prompts");
+        game.answer(Choice::DontSave);
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(scenes(&ends), [open(true)]);
+    }
+
+    /// The prompt's Save has the game save the open scene, then does what it asked about again,
+    /// an Open with the path the dialog picked; a save refused does nothing more, saying why in a
+    /// message.
+    #[test]
+    fn the_prompts_save_saves_then_does_it_again() {
+        let (mut game, ends) = serving();
+        let mut cx = Context::seeded(1);
+        let (arena, level2) = (Some("scenes/arena.ron"), Some("scenes/level2.ron"));
+        let status = |scene, unsaved| ("status".to_owned(), scene_status(scene, unsaved));
+        ends.answer.send(status(arena, true)).expect("sent");
+        game.update(&mut cx, Duration::ZERO);
+        let level = PathBuf::from("scenes/level2.ron");
+        game.open(level.clone());
+        assert_eq!(
+            game.prompt,
+            Some(Action::Open(level.clone())),
+            "as the status said"
+        );
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(scenes(&ends), [], "until it's answered");
+        game.answer(Choice::Save);
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(scenes(&ends), [save(None)]);
+        let saved = ("scene".to_owned(), scene_status(arena, false));
+        ends.answer.send(saved).expect("sent");
+        game.update(&mut cx, Duration::ZERO);
+        let open = Scene {
+            action: SceneAction::Open,
+            path: Some(level.clone()),
+            discard: false,
+        };
+        assert_eq!(scenes(&ends), [open]);
+        let opened = ("scene".to_owned(), scene_status(level2, false));
+        ends.answer.send(opened).expect("sent");
+        game.update(&mut cx, Duration::ZERO);
+        // Edited, and opened again, the save refused.
+        ends.answer.send(status(level2, true)).expect("sent");
+        game.update(&mut cx, Duration::ZERO);
+        game.open(level.clone());
+        game.answer(Choice::Save);
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(scenes(&ends), [save(None)]);
+        let changed = Failure::new("scene.changed", "scenes/level2.ron changed since");
+        ends.answer
+            .send(("scene".to_owned(), Err(changed)))
+            .expect("sent");
+        game.update(&mut cx, Duration::ZERO);
+        let message = game.message.take().expect("refused");
+        assert_eq!(message.title, "Can't save level2.ron");
+        assert_eq!(
+            message.text,
+            "[scene.changed] scenes/level2.ron changed since"
+        );
+        assert_eq!(scenes(&ends), [], "nothing more");
+        assert!(game.files());
+    }
+
+    /// Save As has the game save to the file the dialog picked, with `.ron` after its name unless
+    /// it ends in it, in any case, as the XDG portal's dialog may leave it; and refuses a name
+    /// with `.ron` after it that a file has already, which the dialog didn't ask about replacing,
+    /// saying so.
+    #[test]
+    fn save_as_ends_the_name_in_ron_and_replaces_no_file_unasked() {
+        let dir = std::env::temp_dir().join(format!("gg-editor-save-as-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).expect("made");
+        let (mut game, ends) = serving();
+        let mut cx = Context::seeded(1);
+        for (picked, saved) in [
+            ("level", "level.ron"),
+            ("level.1", "level.1.ron"),
+            ("Boss.RON", "Boss.RON"),
+        ] {
+            game.save_as(dir.join(picked));
+            game.update(&mut cx, Duration::ZERO);
+            assert_eq!(scenes(&ends), [save(Some(dir.join(saved)))], "{picked}");
+            let answer = ("scene".to_owned(), scene_status(Some(saved), false));
+            ends.answer.send(answer).expect("sent");
+            game.update(&mut cx, Duration::ZERO);
+        }
+        std::fs::write(dir.join("kept.ron"), "kept").expect("written");
+        game.save_as(dir.join("kept"));
+        let message = game.message.take().expect("refused");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(message.title, "Can't save kept.ron");
+        assert!(
+            message.text.starts_with("[editor.scene_exists]"),
+            "{message:?}"
+        );
+        assert!(game.request.is_none());
+    }
+
+    /// Save has the game save the open scene to its file, as the last status named one; refused as
+    /// untitled, as after another client's `new`, it goes to Save As, whose dialog the next UI
+    /// shows, with no message.
+    #[test]
+    fn a_save_refused_as_untitled_goes_to_save_as() {
+        let (mut game, ends) = serving();
+        let mut cx = Context::seeded(1);
+        let arena = (
+            "status".to_owned(),
+            scene_status(Some("scenes/arena.ron"), true),
+        );
+        ends.answer.send(arena).expect("sent");
+        game.update(&mut cx, Duration::ZERO);
+        game.choose(&mut cx, Item::Save);
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(scenes(&ends), [save(None)]);
+        let untitled = Failure::new("scene.untitled", "the open scene has no file");
+        ends.answer
+            .send(("scene".to_owned(), Err(untitled)))
+            .expect("sent");
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(game.due, Some(Item::SaveAs));
+        assert!(game.message.is_none());
+        assert!(!game.files(), "until the dialog shows");
+    }
+
+    /// A Save refused as untitled while a close is checked goes to no Save As, which would open in
+    /// the close's way; the close prompt's own Save, refused so, goes to Save As.
+    #[test]
+    fn a_save_refused_as_untitled_mid_close_goes_to_save_as_from_the_prompt_alone() {
+        let (mut game, ends) = serving();
+        let mut cx = Context::seeded(1);
+        let status = |unsaved| {
+            let scene = scene_status(Some("scenes/arena.ron"), unsaved);
+            ("status".to_owned(), scene)
+        };
+        let untitled = || {
+            let untitled = Failure::new("scene.untitled", "the open scene has no file");
+            ("scene".to_owned(), Err(untitled))
+        };
+        ends.answer.send(status(true)).expect("sent");
+        game.update(&mut cx, Duration::ZERO);
+        game.choose(&mut cx, Item::Save);
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(scenes(&ends), [save(None)]);
+        let close = Event::CloseRequested;
+        assert_eq!(game.event(&mut cx, &close), ControlFlow::Break(()));
+        ends.answer.send(untitled()).expect("sent");
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(game.due, None, "while the close is checked");
+        // The poll's answer, then the close's status's.
+        for _ in 0..2 {
+            ends.answer.send(status(true)).expect("sent");
+            game.update(&mut cx, Duration::ZERO);
+        }
+        assert_eq!(game.prompt, Some(Action::Close));
+        game.answer(Choice::Save);
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(scenes(&ends), [save(None)]);
+        ends.answer.send(untitled()).expect("sent");
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(game.due, Some(Item::SaveAs), "the prompt's own Save");
+    }
+
+    /// A close is vetoed while a game serves, until the answer to a status asked after it says
+    /// whether the open scene has unsaved edits, the answer to one asked before not counting: then
+    /// it's prompted for, Cancel going back to none, and Don't Save granting it, which lets the
+    /// next close through.
+    #[test]
+    fn a_close_asks_a_fresh_status_and_prompts_for_unsaved_edits() {
+        let (mut game, ends) = serving();
+        // Stopped, as it starts, so that it asks for statuses alone.
+        (game.stopped, game.told) = (true, false);
+        let mut cx = Context::seeded(1);
+        let close = Event::CloseRequested;
+        let status = |unsaved| {
+            let scene = scene_status(Some("scenes/arena.ron"), unsaved);
+            ("status".to_owned(), scene)
+        };
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(methods(&ends), ["status"], "a poll");
+        assert_eq!(game.event(&mut cx, &close), ControlFlow::Break(()));
+        game.update(&mut cx, Duration::ZERO);
+        assert!(methods(&ends).is_empty(), "a status at a time");
+        ends.answer.send(status(false)).expect("sent");
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(game.closing, Closing::Checking(true), "the poll's skipped");
+        assert_eq!(methods(&ends), ["status"]);
+        assert_eq!(game.event(&mut cx, &close), ControlFlow::Break(()));
+        ends.answer.send(status(true)).expect("sent");
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(game.prompt, Some(Action::Close));
+        game.answer(Choice::Cancel);
+        assert_eq!(game.closing, Closing::No);
+        assert_eq!(game.event(&mut cx, &close), ControlFlow::Break(()));
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(methods(&ends), ["status"]);
+        ends.answer.send(status(true)).expect("sent");
+        game.update(&mut cx, Duration::ZERO);
+        game.answer(Choice::DontSave);
+        assert_eq!(game.closing, Closing::Granted);
+        assert_eq!(game.event(&mut cx, &close), ControlFlow::Continue(()));
+    }
+
+    /// While no game serves after one has, a close goes by the last status: at once if it said
+    /// the open scene has no unsaved edits, and otherwise prompted for without Save, which does
+    /// nothing, Don't Save granting it; as a close being checked as the game goes does. Before any
+    /// game serves, it goes at once.
+    #[test]
+    fn a_close_while_no_game_serves_goes_by_the_last_status() {
+        let mut cx = Context::seeded(1);
+        let close = Event::CloseRequested;
+        let mut game = Game::new(Some(PathBuf::from(".")), Inspector::remote(CLIENT).link());
+        assert_eq!(game.event(&mut cx, &close), ControlFlow::Continue(()));
+        for checking in [false, true] {
+            let (mut game, ends) = serving();
+            let unsaved = scene_status(Some("scenes/arena.ron"), true);
+            ends.answer
+                .send(("status".to_owned(), unsaved))
+                .expect("sent");
+            game.update(&mut cx, Duration::ZERO);
+            if checking {
+                assert_eq!(game.event(&mut cx, &close), ControlFlow::Break(()));
+            }
+            // As `gg run` restarts the game.
+            game.disconnect();
+            if !checking {
+                assert_eq!(game.event(&mut cx, &close), ControlFlow::Break(()));
+            }
+            assert_eq!(game.prompt, Some(Action::Close), "checking: {checking}");
+            game.answer(Choice::Save);
+            assert_eq!(game.prompt, Some(Action::Close), "no game to save");
+            game.answer(Choice::DontSave);
+            assert_eq!(game.event(&mut cx, &close), ControlFlow::Continue(()));
+        }
+        let (mut game, _ends) = serving();
+        game.disconnect();
+        assert_eq!(game.event(&mut cx, &close), ControlFlow::Continue(()));
+    }
+
+    /// Neither the File menu's request nor a close's status goes to the game while the Inspector
+    /// has an edit waiting for it, which goes on a connection of its own; once it has none, both
+    /// go, the request first.
+    #[test]
+    fn nothing_goes_while_the_inspector_has_edits_waiting() {
+        let (mut game, ends) = serving();
+        // Stopped, as it starts, so that it asks for statuses alone.
+        (game.stopped, game.told) = (true, false);
+        let mut cx = Context::seeded(1);
+        game.update(&mut cx, Duration::ZERO);
+        let arena = (
+            "status".to_owned(),
+            scene_status(Some("scenes/arena.ron"), false),
+        );
+        ends.answer.send(arena).expect("sent");
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(methods(&ends), ["status"], "a poll");
+        let id: EntityId = "0123456789abcdef".parse().expect("an ID");
+        let x = gg_engine::reflect::Value::F32(1.0);
+        game.view.link.set(id, "Transform", "translation.x", x);
+        game.choose(&mut cx, Item::Save);
+        assert_eq!(
+            game.event(&mut cx, &Event::CloseRequested),
+            ControlFlow::Break(())
+        );
+        game.update(&mut cx, Duration::ZERO);
+        assert!(methods(&ends).is_empty(), "the edit first");
+        assert_eq!(game.closing, Closing::Checking(false));
+        // The Inspector's pass sends the set, and the game answers it, for which a test gives the
+        // layer a link with nothing waiting.
+        game.view.link = Inspector::remote(CLIENT).link();
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(methods(&ends), ["scene", "status"]);
+        assert_eq!(game.closing, Closing::Checking(true));
+    }
+
+    /// A New, or an Open, that stopped a copy playing turns the view to the editor's camera, as
+    /// another client's `stop` does; and the title bar names the open scene's file once a game has
+    /// served, Untitled after a New, marked while it has unsaved edits.
+    #[test]
+    fn a_scene_answer_that_says_stopped_turns_the_view() {
+        let game = Game::new(Some(PathBuf::from(".")), Inspector::remote(CLIENT).link());
+        assert_eq!(game.scene_label(), None, "before a game serves");
+        // Playing, through the game's camera.
+        let (mut game, ends) = serving();
+        let mut cx = Context::seeded(1);
+        let arena = scene_status(Some("scenes/arena.ron"), true);
+        let playing = arena.map(|mut status| {
+            status["stopped"] = json!(false);
+            status
+        });
+        ends.answer
+            .send(("status".to_owned(), playing))
+            .expect("sent");
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(game.scene_label().as_deref(), Some("arena.ron*"));
+        assert_eq!(game.mode(), Mode::Play);
+        game.act(Action::New);
+        game.answer(Choice::DontSave);
+        game.update(&mut cx, Duration::ZERO);
+        let new = Scene {
+            action: SceneAction::New,
+            path: None,
+            discard: true,
+        };
+        assert_eq!(scenes(&ends), [new]);
+        let emptied = ("scene".to_owned(), scene_status(None, false));
+        ends.answer.send(emptied).expect("sent");
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(game.mode(), Mode::Edit);
+        assert!(!game.view.toolbar.world_camera, "the editor's camera");
+        assert_eq!(game.scene_label().as_deref(), Some("Untitled"));
+    }
+
+    /// In Play, a press or a repeat of N, O or S with the command key held, a key of the File
+    /// menu's shortcuts, goes neither to the game nor to the view's tools; its release does, and so
+    /// do other keys with it, and those keys without it.
+    #[test]
+    fn the_file_menus_shortcuts_keys_dont_reach_the_game() {
+        let (mut game, _ends) = serving();
+        let at = [300.0, 200.0];
+        let mut command = reading(at);
+        command.command = true;
+        let key = |key, pressed, repeat| Event::Key {
+            key,
+            pressed,
+            repeat,
+        };
+        for event in [
+            key(Key::KeyS, true, false),
+            key(Key::KeyS, true, true),
+            key(Key::KeyN, true, false),
+            key(Key::KeyO, true, false),
+        ] {
+            let routed = game.route(&event, &command, Some(VIEW));
+            assert_eq!(routed, ControlFlow::Continue(()), "{event:?}");
+        }
+        assert_eq!(game.input, []);
+        let _ = game.route(&key(Key::KeyS, false, false), &command, Some(VIEW));
+        let _ = game.route(&key(Key::KeyW, true, false), &command, Some(VIEW));
+        let _ = game.route(&key(Key::KeyS, true, false), &reading(at), Some(VIEW));
+        let sent = |key: &str, pressed| InputEvent::Key {
+            key: key.to_owned(),
+            pressed,
+            repeat: false,
+        };
+        let expected = [sent("KeyS", false), sent("KeyW", true), sent("KeyS", true)];
+        assert_eq!(game.input, expected);
     }
 
     /// Started outside a project, the layer runs nothing, and says why, in the Logs and the title

@@ -82,15 +82,18 @@ The editor uses `gg-api` too, beside `gg-engine`, as a client of the tool API, a
   colliders' outlines going to the game as the API's look, which it takes up from other clients
   too; the game's events in its Logs as the game logs them; and the project's assets in its Assets
   panel. Its Play and Simulate are the API's `play`, and Stop its `stop`, which brings back the
-  world as edited. Play sees through the game's camera, which gets all of the view's input. For a
-  game whose ticks are all its own code, Simulate plays the game as Play does, but through the
-  editor's orbit camera, the game getting no input, as Unreal's Simulate In Editor does; switching
-  between them carries on, moving the camera and the input over, as Unreal's Possess and Eject do.
-  The toolbar's camera switch is that switch while the game plays; stopped, it shows what the
-  game's camera sees, the input staying the editor's, until the editor's camera takes some. A Stop
-  turns the view to the editor's camera, which carries on from where the view was, as it does
-  whenever it takes the view over. The editor has no world of its own: started elsewhere, it runs
-  no game, and says it needs a project. [game.rs](apps/editor/src/game.rs) describes the rest.
+  world as edited. Its File menu's New, Open and Save are the API's `scene`, on the game's open
+  scene, which its title bar names, marked while unsaved; and since closing it ends the game, it
+  asks before New, Open or closing loses unsaved edits. Play sees through the game's camera, which
+  gets all of the view's input. For a game whose ticks are all its own code, Simulate plays the
+  game as Play does, but through the editor's orbit camera, the game getting no input, as Unreal's
+  Simulate In Editor does; switching between them carries on, moving the camera and the input over,
+  as Unreal's Possess and Eject do. The toolbar's camera switch is that switch while the game
+  plays; stopped, it shows what the game's camera sees, the input staying the editor's, until the
+  editor's camera takes some. A Stop turns the view to the editor's camera, which carries on from
+  where the view was, as it does whenever it takes the view over. The editor has no world of its
+  own: started elsewhere, it runs no game, and says it needs a project.
+  [game.rs](apps/editor/src/game.rs) describes the rest.
 - **`player`:** the reference player. It runs a cooked scene without game code and shows how a
   game builds its own player.
 - **`tools/gg`:** the command-line tool, a client of the tool API, which `cargo gg` runs.
@@ -201,32 +204,33 @@ in the editor is out of an agent's reach.
 - **The tool API.** A game's development build serves an API on the machine's loopback, at a port
   the OS picks, which it writes with a token, and its project's manifest's path, in a session file
   in `sessions` beside its executable, removed as the run ends: query the world, apply and undo
-  [operations](#project-state), play and stop, pause and step, capture frames, share the view as
-  frames render it, set how it looks and pick what it shows, hand the layers input as the window
-  would, save the world whole as a snapshot file, as [ECS](#ecs) describes, which a run given
-  `--restore` starts from, apply patches of the game's code, as [Game code](#game-code) describes,
-  and read [diagnostics](#diagnostics). Requests and their answers are lines of JSON, as
-  [gg-api](crates/gg-api/src/lib.rs) describes, and a connection's first request says hello with the
-  token, so that only processes that can read the file reach the game. A thread of the API's reads
-  each connection and answers its pings itself, from the frames the main loop counts, so that a tool
-  tells a hung game from a busy one, and from one whose frames have paused for the user, as for a
-  minimized window or a file dialog; and its reads of the log, from the events the run keeps in
-  memory as it logs them, its last 10,000, each numbered, which `logs` serves as they come, waiting
-  for one if none has, so that a client follows them from the number it left off at, and, by the
-  run's own number, which a restart changes, misses none across a restart that the new run kept. The
-  main loop answers the rest as each frame starts, before its ticks: a step once its ticks have run,
-  a capture once the render thread has read the frame's view back, without the UI, which a thread of
-  the API's writes as a PNG, and a snapshot once a thread of the API's has written the copy of the
-  world the main loop took, but none before the first tick of a game playing from its start, which
-  applies what the layers queued as they started. Paused, frames run no ticks but those a step asks
-  for, and draw the world as the last tick left it, so that a capture shows what a query reads. A
-  game plays or is stopped, as `play` and `stop` set it, any client's request the last word, and a
-  pause lasts across both. Stopped, frames run no ticks, and draw the world as edits leave it: the
-  world as edited, which only edits and scene files' saves change. `play` has a copy of it play in
-  its place, from its ticks, the engine holding the world as edited aside, with its scene files as
-  last applied and the authors' logs, until `stop` brings them back, the copy and all done to it
-  going but a scene file's save, which applies to the world as edited too as it comes back; and the
-  ticks go back to that world's, so that two plays of one world as edited, given the same inputs, go
+  [operations](#project-state), play and stop, pause and step, open, save and empty the [open
+  scene](#project-state), capture frames, share the view as frames render it, set how it looks and
+  pick what it shows, hand the layers input as the window would, save the world whole as a snapshot
+  file, as [ECS](#ecs) describes, which a run given `--restore` starts from, apply patches of the
+  game's code, as [Game code](#game-code) describes, and read [diagnostics](#diagnostics). Requests
+  and their answers are lines of JSON, as [gg-api](crates/gg-api/src/lib.rs) describes, and a
+  connection's first request says hello with the token, so that only processes that can read the
+  file reach the game. A thread of the API's reads each connection and answers its pings itself,
+  from the frames the main loop counts, so that a tool tells a hung game from a busy one, and from
+  one whose frames have paused for the user, as for a minimized window or a file dialog; and its
+  reads of the log, from the events the run keeps in memory as it logs them, its last 10,000, each
+  numbered, which `logs` serves as they come, waiting for one if none has, so that a client follows
+  them from the number it left off at, and, by the run's own number, which a restart changes, misses
+  none across a restart that the new run kept. The main loop answers the rest as each frame starts,
+  before its ticks: a step once its ticks have run, a capture once the render thread has read the
+  frame's view back, without the UI, which a thread of the API's writes as a PNG, and a snapshot
+  once a thread of the API's has written the copy of the world the main loop took, but none before
+  the first tick of a game playing from its start, which applies what the layers queued as they
+  started. Paused, frames run no ticks but those a step asks for, and draw the world as the last
+  tick left it, so that a capture shows what a query reads. A game plays or is stopped, as `play`
+  and `stop` set it, any client's request the last word, and a pause lasts across both. Stopped,
+  frames run no ticks, and draw the world as edits leave it: the world as edited, which only edits,
+  scene files' saves and the open scene's New and Open change. `play` has a copy of it play in its
+  place, from its ticks, the engine holding the world as edited aside, with its scene files as last
+  applied and the authors' logs, until `stop` brings them back, the copy and all done to it going
+  but a scene file's save, which applies to the world as edited too as it comes back; and the ticks
+  go back to that world's, so that two plays of one world as edited, given the same inputs, go
   alike. The IDs the copy drew are drawn again, so a client keeps none it learned across a `stop`. A
   game playing from its start, as every run but one given `--stopped` starts, holds no world as
   edited: `stop` stops it where it is, and that world is the world as edited from then on. Recorded
@@ -347,6 +351,25 @@ A project's state is text that people and agents edit, diff and merge with ordin
   [ops.rs](crates/gg-engine/src/ecs/ops.rs), `World::undo` among it,
   [log.rs](crates/gg-engine/src/ecs/log.rs), [edits.rs](crates/gg-engine/src/edits.rs) and
   [scene_files.rs](crates/gg-engine/src/scene_files.rs) have the rest.
+- **The open scene.** A project's game has one scene open: the scene file it started in, or one
+  opened since. The tool API's `scene` opens, saves and empties it, and so does the editor's File
+  menu through it.
+  - What a scene owns: the entities its file held as last applied, and those edits have made into
+    it while it's open, a client's creates and duplicates. Never those the game's code made, so a
+    game whose attach builds entities beside its scene, as Shards' players are, saves none of them
+    into it.
+  - Save writes exactly the open scene's entities, of the world as edited even while a copy plays,
+    to its file or to another, which then becomes its file. The game's watch then applies nothing,
+    since the file holds what the watch last applied. Save refuses a file changed since then
+    (`scene.changed`), so an edit to it isn't lost.
+  - New deletes the open scene's entities, and Open puts a file's in their place. Each stops a copy
+    first and keeps the game's own entities, including a child of a scene entity.
+  - Neither New nor Open can be undone: the world goes on as another (`World::renew`), so every
+    author's log, and the Inspector's, starts afresh, as after a restore.
+  - The open scene is unsaved when its entities, as Save would write them, differ from its file. A
+    snapshot keeps which scene is open and what edits made into it.
+  - Recorded runs and lockstep peers refuse New and Open, and lockstep peers refuse Save too
+    (`api.no_scene`): neither a replay nor the other peer could follow them.
 
 ## ECS
 
@@ -501,7 +524,9 @@ an operation applied before, which is what makes freeing the slots a log kept sa
 state of a world keeps it by its serial, as the Inspector keeps its log, its pick and its open
 rows, so that it comes back only with the very world it's of, as when the tool API's `stop` brings
 back the world a copy played in place of, with the authors' logs held beside it, the Inspector
-taking back its own as `stop` calls `restored`.
+taking back its own as `stop` calls `restored`. A world can also go on as another with its entities
+kept (`World::renew`), as a scene's New and Open leave it, so that no edit from before them undoes:
+it frees the slots logs kept, as `clear` does.
 
 A world's hash has two parts: its content, what it holds, each entity's components under its ID
 and their types' names, summed, so that where the world holds them doesn't count; and its layout,
@@ -622,22 +647,22 @@ As the app starts, each layer loads, making what it draws with and registering i
 then attaches, building the world; in a run restored from a snapshot, whose world comes from the
 file, each loads, then picks up from the world in place of attaching (`Layer::restored`), such as
 the values its panels show, as each does again as the tool API's `stop` brings back the world as
-edited, its queue emptied first, and as a lockstep joiner's world gives way to its host's. A layer
-that spawns as it loads panics, since a restored run would spawn it again. Each detaches when the
-app ends, ticks with the simulation, as [ECS](#ecs) describes, updates every frame with the time
-since the last, for what's presented, handles events and draws UI. Frames pause while the main
-window is minimized, while a file dialog is open, and on Windows while the window menu that the UI's
-title bar opens is open, which the OS runs in a loop of its own; the clock restarts after each, so
-that neither the frame times nor the next update count the pause. An event goes down the stack from
-the top overlay until a layer handles it, but for a key's or a button's release, a gamepad's stick
-or trigger back at rest and the loss of focus, which go to every layer, so that none is left holding
-what it saw pressed; a stick or a trigger that a layer handles away from rest stays, for the layers
-below, as they last saw it until it rests. Ticks, updates and UI go up from the bottom. Headless
-runs have no window or gamepad events, but their layers tick, update and draw UI all the same. A
-layer that keeps `Layer::ui`'s default draws none, and an app none of whose layers draw UI, whose
-windows the OS frames, and which has no view panel, runs without egui from its second frame: its
-frames collect no input for egui and run no pass, egui sees no events, and the game's view fills the
-window.
+edited, its queue emptied first, as a lockstep joiner's world gives way to its host's, and as a
+scene's New and Open renew the world, its queue kept. A layer that spawns as it loads panics, since
+a restored run would spawn it again. Each detaches when the app ends, ticks with the simulation, as
+[ECS](#ecs) describes, updates every frame with the time since the last, for what's presented,
+handles events and draws UI. Frames pause while the main window is minimized, while a file dialog is
+open, and on Windows while the window menu that the UI's title bar opens is open, which the OS runs
+in a loop of its own; the clock restarts after each, so that neither the frame times nor the next
+update count the pause. An event goes down the stack from the top overlay until a layer handles it,
+but for a key's or a button's release, a gamepad's stick or trigger back at rest and the loss of
+focus, which go to every layer, so that none is left holding what it saw pressed; a stick or a
+trigger that a layer handles away from rest stays, for the layers below, as they last saw it until
+it rests. Ticks, updates and UI go up from the bottom. Headless runs have no window or gamepad
+events, but their layers tick, update and draw UI all the same. A layer that keeps `Layer::ui`'s
+default draws none, and an app none of whose layers draw UI, whose windows the OS frames, and which
+has no view panel, runs without egui from its second frame: its frames collect no input for egui and
+run no pass, egui sees no events, and the game's view fills the window.
 
 egui, the engine's immediate-mode UI, is the top overlay: it sees every event first and keeps those
 it wants, such as a click on one of its panels, but no key's or button's release, and `gg-renderer`

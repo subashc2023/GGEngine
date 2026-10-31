@@ -16,11 +16,12 @@
 //! - `status`, `pause`, `resume`, `play` and `stop`: answer [`Status`].
 //!
 //!   `stop` stops the game: frames run no ticks, and its world is the world as edited, which only
-//!   edits and scene files' saves change, until `play`. While a copy plays, `stop` brings back the
-//!   world as edited as it was when the copy started: at its ticks; with its scene files as last
-//!   applied, to which a save made since applies; and with the authors' edits, which `undo` steps
-//!   back through again. What the copy did goes with it, edits and entities. The IDs it drew are
-//!   drawn again, so a client keeps no ID learned while it played across a `stop`.
+//!   edits, scene files' saves and `scene`'s `open` and `new` change, until `play`. While a copy
+//!   plays, `stop` brings back the world as edited as it was when the copy started: at its ticks;
+//!   with its scene files as last applied, to which a save made since applies; and with the
+//!   authors' edits, which `undo` steps back through again. What the copy did goes with it, edits
+//!   and entities. The IDs it drew are drawn again, so a client keeps no ID learned while it
+//!   played across a `stop`.
 //!
 //!   A game playing from its start, which no `play` started, holds no world as edited: `stop` stops
 //!   it where it is, and that world is the world as edited from then on.
@@ -33,6 +34,33 @@
 //!   Neither does anything in a state the game is already in.
 //! - `step`, [`Step`]: runs ticks, pausing the simulation, and answers [`Status`] once they've run;
 //!   fails with `api.stopped` while the game is stopped: `play` first.
+//! - `scene`, [`Scene`]: opens, saves or empties the open scene, the project's scene file the game
+//!   started in or one opened since, and answers [`Status`], which names it.
+//!
+//!   The open scene owns the entities its file held as last applied and those clients' edits have
+//!   made since it opened, their creates and duplicates, never those the game's code made. `open`
+//!   puts a scene file's entities in place of the open scene's, the game watching the file from
+//!   then on. `new` deletes the open scene's entities and leaves it untitled. `save` writes them to
+//!   its file, or to `path`, which becomes its file, and the game's watch applies nothing for it.
+//!
+//!   Each acts on the world as edited: `save` writes it while a copy plays, and `open` and `new`
+//!   stop the copy first. Neither `open` nor `new` can be undone: every author's edits start
+//!   afresh, as after a restore.
+//!
+//!   A path is absolute, or relative to the asset root, as [`Status::scene`] names files; it is in
+//!   one of the project's scene folders and ends in `.ron`.
+//!
+//!   It fails with:
+//!   - `engine.no_project`, in a game that isn't a project's;
+//!   - `scene.bad_path`, for a path outside the scene folders;
+//!   - `scene.unsaved`, for `open` or `new` while the open scene has unsaved edits, unless
+//!     `discard`;
+//!   - `scene.untitled`, for `save` of an untitled scene without a path;
+//!   - `scene.watched`, for a path another scene file the game loaded has;
+//!   - `scene.changed`, for `save` while the file differs from what the game last applied, so that
+//!     an edit to it isn't lost;
+//!   - `api.no_scene`, in a lockstep peer, and for `open` and `new` in a recorded run;
+//!   - and as loading or saving a scene fails, such as with `scene.file` or `scene.outside`.
 //! - `capture`, [`Capture`]: writes the game's view as a PNG once a frame renders it, as it's
 //!   shown, the look among it, or as the game shows it on its own, and answers [`Captured`].
 //! - `view`, [`View`]: has the game publish each frame's view, from the next, into the memory a
@@ -366,6 +394,36 @@ pub struct Status {
     /// The game's view's width and height in pixels, as the last frame handed it to the renderer;
     /// `None` while it had no area.
     pub view: Option<[u32; 2]>,
+    /// The open scene's file, as the asset root names it, such as `scenes/arena.ron`: the scene
+    /// that `scene` acts on, of the world as edited. `None` while it's untitled, as after `new`; in
+    /// a game that isn't a project's; and from an engine older than `scene`.
+    #[serde(default)]
+    pub scene: Option<String>,
+    /// Whether the open scene, in the world as edited, differs from its file, as `save` would
+    /// write it, or, untitled, holds entities. False from an engine older than `scene`.
+    #[serde(default)]
+    pub unsaved: bool,
+}
+
+/// What `scene` takes: what to do to the open scene; the file to open, or to save it as, absolute
+/// or relative to the asset root; and, for `open` and `new`, whether to discard its unsaved edits.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Scene {
+    pub action: SceneAction,
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+    #[serde(default)]
+    pub discard: bool,
+}
+
+/// What `scene` does to the open scene.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SceneAction {
+    Open,
+    Save,
+    New,
 }
 
 /// What `step` takes: how many ticks to run, 1 by default and at most 10,000, a frame's worth
@@ -1428,6 +1486,34 @@ mod tests {
         let capture: Capture = serde_json::from_str(r#"{"own": true}"#).unwrap();
         assert!(capture.own);
         assert!(serde_json::from_str::<Capture>(r#"{"bare": true}"#).is_err());
+    }
+
+    /// A scene request says what to do, with a path and whether to discard, when given; a status
+    /// from an engine older than `scene` names none, and has nothing unsaved.
+    #[test]
+    fn scenes_read_as_their_docs_say() {
+        let scene: Scene = serde_json::from_str(r#"{"action": "new"}"#).unwrap();
+        assert_eq!(
+            (scene.action, scene.path, scene.discard),
+            (SceneAction::New, None, false)
+        );
+        let open = r#"{"action": "open", "path": "scenes/arena.ron", "discard": true}"#;
+        let scene: Scene = serde_json::from_str(open).unwrap();
+        let path = Some(PathBuf::from("scenes/arena.ron"));
+        assert_eq!(
+            (scene.action, scene.path, scene.discard),
+            (SceneAction::Open, path, true)
+        );
+        for refused in [
+            "{}",
+            r#"{"action": "close"}"#,
+            r#"{"action": "save", "as": "a.ron"}"#,
+        ] {
+            assert!(serde_json::from_str::<Scene>(refused).is_err(), "{refused}");
+        }
+        let older = r#"{"ticks": 1, "paused": false, "frames": 2, "entities": 3, "view": null}"#;
+        let status: Status = serde_json::from_str(older).unwrap();
+        assert_eq!((status.scene, status.unsaved), (None, false));
     }
 
     #[test]

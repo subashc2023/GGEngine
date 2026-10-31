@@ -3,11 +3,13 @@
 //! its engine and build, its layers from the bottom up, the ticks the simulation had run, the
 //! world's hash, the assets the layers had added, which name what's opaque in the world, the scene
 //! files the layers had loaded, each its path, its author and its text as last applied, as a
-//! recording's values write them, which the restored run watches, and the world, as
-//! [`World::save_whole`] writes it; then, of a run the tool API had stopped, `stopped`, or of one
-//! playing a copy of the world as edited, which it held aside, `edited`, the ticks that world was
-//! at and its hash, followed by its scene files and that world, written as the run's are; then
-//! `end`.
+//! recording's values write them, which the restored run watches, the open scene, its file's
+//! author or none and the IDs it made, written so too, and the world, as [`World::save_whole`]
+//! writes it; then, of a run the tool API had stopped, `stopped`, or of one playing a copy of the
+//! world as edited, which it held aside, `edited`, the ticks that world was at and its hash,
+//! followed by its scene files, its open scene and that world, written as the run's are; then
+//! `end`. A snapshot written before the open scene was holds no `open` line: the start scene's
+//! file is open, if its scene files hold it.
 //!
 //! ```text
 //! gg-snapshot 1
@@ -18,6 +20,7 @@
 //! hash 58183b6352a09a44 fb695ce29daa8479
 //! asset texture 1 1 2 assets/checkerboard.png
 //! scene List([String("/game/scenes/grid.ron"), String("scenes/grid.ron"), String("(entities: ...")])
+//! open List([Some(String("scenes/grid.ron")), List([String("1a2b3c4d5e6f7081")])])
 //! stream 3f8a6c2e9b1d4057
 //! slots 10530
 //! free 12 7
@@ -37,7 +40,7 @@ use tracing::{info, warn};
 
 use crate::recording::text::Text;
 use crate::reflect::Value;
-use crate::scene_files::SceneFile;
+use crate::scene_files::{Open, SceneFile};
 use crate::{World, WorldHash};
 
 /// A snapshot file's first line: its format, and the format's version, which a change to its lines
@@ -52,23 +55,26 @@ pub(crate) enum Run {
     #[cfg(feature = "dev")]
     Stopped,
     /// Playing a copy of the world as edited, which it holds aside, as the tool API's `play` has
-    /// it: a copy of that world, its scene files as last applied, and the ticks it's at.
+    /// it: a copy of that world, its scene files as last applied, its open scene, and the ticks
+    /// it's at.
     #[cfg(feature = "dev")]
     Held {
         world: Box<World>,
         scenes: Vec<SceneFile>,
+        open: Open,
         ticks: u64,
     },
 }
 
 /// The text of the snapshot file of `world`, app `app`'s, whose layers are `layers`, from the bottom
-/// up, as the simulation had run `ticks` ticks, with the scene files `scenes` as last applied, as
-/// its run does what `run` says.
+/// up, as the simulation had run `ticks` ticks, with the scene files `scenes` as last applied and
+/// the open scene `open`, as its run does what `run` says.
 ///
 /// Fails as [`World::save_whole`] does.
 pub(crate) fn write(
     world: &World,
     scenes: &[SceneFile],
+    open: &Open,
     run: &Run,
     app: &str,
     layers: &[&str],
@@ -90,7 +96,7 @@ pub(crate) fn write(
     for added in world.assets().added() {
         writeln!(out, "asset {added}").expect(written);
     }
-    write_scenes(&mut out, scenes, world);
+    write_scenes(&mut out, scenes, open, world);
     world.save_whole(&mut out)?;
     match run {
         Run::Playing => {}
@@ -100,10 +106,11 @@ pub(crate) fn write(
         Run::Held {
             world,
             scenes,
+            open,
             ticks,
         } => {
             writeln!(out, "edited {ticks} {}", world.hash()).expect(written);
-            write_scenes(&mut out, scenes, world);
+            write_scenes(&mut out, scenes, open, world);
             world.save_whole(&mut out)?;
         }
     }
@@ -112,8 +119,11 @@ pub(crate) fn write(
 }
 
 /// Writes a `scene` line after `out` for each of `scenes`, the scene files of `world`, but one
-/// whose path isn't Unicode, which isn't watched after a restore.
-fn write_scenes(out: &mut String, scenes: &[SceneFile], world: &World) {
+/// whose path isn't Unicode, which isn't watched after a restore; and the `open` line of `open`,
+/// its open scene: untitled, if its file is one left out, which the restored run doesn't hold,
+/// owning what the file's text holds as it owns what it made, in a development build, which alone
+/// saves it.
+fn write_scenes(out: &mut String, scenes: &[SceneFile], open: &Open, world: &World) {
     use crate::recording::text;
 
     for scene in scenes {
@@ -125,6 +135,53 @@ fn write_scenes(out: &mut String, scenes: &[SceneFile], world: &World) {
             out.push('\n');
         }
     }
+    let left_out = (open.author.as_ref())
+        .and_then(|author| scenes.iter().find(|scene| scene.author == *author))
+        .filter(|scene| scene.path.to_str().is_none());
+    #[cfg_attr(
+        not(feature = "dev"),
+        allow(unused_mut, reason = "only development builds add to it")
+    )]
+    let mut made = open.made.clone();
+    #[cfg(feature = "dev")]
+    if let Some(file) = left_out {
+        // A text as last applied loaded then, so it reads as a scene's RON.
+        made.extend(World::scene_ids(&file.text).unwrap_or_default());
+        made.sort_unstable();
+        made.dedup();
+    }
+    let author = open.author.as_ref().filter(|_| left_out.is_none());
+    let author = author.map(|author| Box::new(Value::String(author.clone())));
+    let made = made.iter().map(|id| Value::String(id.to_string()));
+    let open = Value::List(vec![Value::Option(author), Value::List(made.collect())]);
+    out.push_str("open ");
+    text::write(out, &open, world);
+    out.push('\n');
+}
+
+/// The open scene that `line`, the text after an `open` line's `open `, gives: its file's author,
+/// or none, and the IDs it made, as [`write_scenes`] writes them.
+fn read_open(line: &str) -> Option<Open> {
+    let text = Text::parse(line, "open ".len() + 1).ok()?;
+    let Value::List(parts) = text.value(&World::default()) else {
+        return None;
+    };
+    let [Value::Option(author), Value::List(made)] = <[Value; 2]>::try_from(parts).ok()? else {
+        return None;
+    };
+    let author = match author.map(|author| *author) {
+        Some(Value::String(author)) => Some(author),
+        Some(_) => return None,
+        None => None,
+    };
+    let made = made.into_iter().map(|id| match id {
+        Value::String(id) => id.parse().ok(),
+        _ => None,
+    });
+    Some(Open {
+        author,
+        made: made.collect::<Option<_>>()?,
+    })
 }
 
 /// The world's hash `text` gives: its content's and its layout's, in hex, as [`WorldHash`] writes
@@ -163,6 +220,8 @@ pub(crate) struct Snapshot {
     assets: Vec<String>,
     /// The scene files that run's layers had loaded, as last applied.
     pub(crate) scenes: Vec<SceneFile>,
+    /// That run's open scene; `None` for a snapshot written before the open scene was.
+    pub(crate) open: Option<Open>,
     /// The indexes of its world's lines.
     world: Range<usize>,
     /// Whether the run it was taken of was stopped.
@@ -172,7 +231,8 @@ pub(crate) struct Snapshot {
 }
 
 /// The world as edited that a snapshot taken while a copy of it played holds: the ticks it was at,
-/// its hash, its scene files as last applied, and the indexes of its lines.
+/// its hash, its scene files as last applied, its open scene, if the snapshot holds it, and the
+/// indexes of its lines.
 #[cfg_attr(
     not(feature = "dev"),
     allow(dead_code, reason = "only development builds hold one")
@@ -181,6 +241,7 @@ pub(crate) struct Held {
     pub(crate) ticks: u64,
     hash: WorldHash,
     pub(crate) scenes: Vec<SceneFile>,
+    pub(crate) open: Option<Open>,
     world: Range<usize>,
 }
 
@@ -199,11 +260,12 @@ impl Snapshot {
 
     /// Reads `text`, a snapshot file's, from where `from` names, for app `app`, checking its header
     /// and what follows its world: `stopped`, followed by `end` alone, or `edited`, the ticks and
-    /// the hash of the world as edited, followed by its scene files and its lines, the file holding
-    /// no `stopped` or other `edited` after it; or `end`, of a run playing from its start.
+    /// the hash of the world as edited, followed by its scene files, its open scene and its lines,
+    /// the file holding no `stopped` or other `edited` after it; or `end`, of a run playing from
+    /// its start.
     ///
-    /// Fails with `snapshot.format` as [`read`](Self::read) does, and for what follows its world
-    /// otherwise.
+    /// Fails with `snapshot.format` as [`read`](Self::read) does, for a scene file's or the open
+    /// scene's line that isn't one, and for what follows its world otherwise.
     pub(crate) fn parse(text: String, from: String, app: &str) -> Result<Self> {
         let refused = |what: String| Error::new("snapshot.format", format!("{from}: {what}"));
         let lines: Vec<&str> = text.lines().collect();
@@ -244,7 +306,8 @@ impl Snapshot {
             assets.push(added.to_owned());
             world += 1;
         }
-        // The scene lines from line `at` on, and the index of the line after them.
+        // The scene lines from line `at` on, then the open scene's line, if there's one, and the
+        // index of the line after them.
         let read_scenes = |mut at: usize| {
             let mut scenes = Vec::new();
             while let Some(scene) = lines.get(at).and_then(|line| line.strip_prefix("scene ")) {
@@ -273,9 +336,20 @@ impl Snapshot {
                 scenes.push(scene);
                 at += 1;
             }
-            Ok((scenes, at))
+            let mut open = None;
+            if let Some(line) = lines.get(at).and_then(|line| line.strip_prefix("open ")) {
+                open = Some(read_open(line).ok_or_else(|| {
+                    refused(format!(
+                        "line {}: the open scene is a list of its file's author, or none, and the \
+                         IDs it made",
+                        at + 1
+                    ))
+                })?);
+                at += 1;
+            }
+            Ok((scenes, open, at))
         };
-        let (scenes, world) = read_scenes(world)?;
+        let (scenes, open, world) = read_scenes(world)?;
         // The world's lines end at `end`, `stopped` or `edited`, which none of them is or starts
         // with.
         let tails = |line: &str| line == "stopped" || line.starts_with("edited ");
@@ -300,7 +374,7 @@ impl Snapshot {
                     end + 1
                 ))
             })?;
-            let (scenes, first) = read_scenes(end + 1)?;
+            let (scenes, open, first) = read_scenes(end + 1)?;
             let last = lines.len() - 1;
             if let Some(at) = (first..last).find(|&at| tails(lines[at])) {
                 return Err(refused(format!(
@@ -312,6 +386,7 @@ impl Snapshot {
                 ticks,
                 hash,
                 scenes,
+                open,
                 world: first..last,
             });
         }
@@ -322,6 +397,7 @@ impl Snapshot {
             hash,
             assets,
             scenes,
+            open,
             world: world..end,
             stopped,
             held,
@@ -434,12 +510,14 @@ mod tests {
     use crate::{Context, Layer, MeshDraw, Sprite, Transform};
 
     /// A snapshot written and read back restores the world it was taken of, at its ticks, into a
-    /// world its layers loaded; one of another app, of another format or cut short is refused.
+    /// world its layers loaded, with its scene files and its open scene; one written before the
+    /// open scene was holds none; and one of another app, of another format, cut short, or whose
+    /// open scene's line isn't one, is refused.
     #[test]
     fn a_snapshot_restores_the_world_it_was_taken_of() {
         let mut saved = Context::seeded(1);
         let world = saved.world_mut();
-        world.spawn((Transform::IDENTITY, Sprite::default()));
+        let made = world.spawn((Transform::IDENTITY, Sprite::default()));
         // A path and a text that need escapes.
         let scene = SceneFile::new(
             "scenes/a \"grid\".ron".into(),
@@ -447,9 +525,14 @@ mod tests {
             "(entities: {\n})\n".to_owned(),
         );
         let scenes = [scene];
+        let open = Open {
+            author: Some("scenes/grid.ron".to_owned()),
+            made: vec![saved.world().id(made).expect("alive")],
+        };
         let text = write(
             saved.world(),
             &scenes,
+            &open,
             &Run::Playing,
             "Tested",
             &["Tester"],
@@ -462,7 +545,15 @@ mod tests {
         let path = dir.0.join("tested.snapshot");
         save(&path, &text).expect("saved");
         let snapshot = Snapshot::read(&path, "Tested").expect("read");
-        assert_eq!(snapshot.scenes, scenes);
+        assert_eq!(
+            (&snapshot.scenes[..], &snapshot.open),
+            (&scenes[..], &Some(open))
+        );
+        let open_line = text.lines().find(|line| line.starts_with("open "));
+        let open_line = format!("{}\n", open_line.expect("an open line"));
+        let older = text.replace(&open_line, "");
+        let older = Snapshot::parse(older, "older".to_owned(), "Tested").expect("read");
+        assert_eq!(older.open, None);
         let mut restored = Context::seeded(2);
         let ticks = snapshot.restore(restored.world_mut(), &["Tester"]);
         assert_eq!(ticks.expect("restored"), 77);
@@ -474,6 +565,8 @@ mod tests {
         for broken in [
             text.replace(FORMAT, "gg-snapshot 0"),
             text.replace("\nend\n", "\n"),
+            text.replace(&open_line, "open List([None])\n"),
+            text.replace(&open_line, "open List([None, List([String(\"nope\")])])\n"),
         ] {
             save(&path, &broken).expect("saved");
             let refused = Snapshot::read(&path, "Tested")
@@ -489,6 +582,40 @@ mod tests {
                 .as_deref(),
             Some("snapshot.file")
         );
+    }
+
+    /// The open scene of a file whose path isn't Unicode, which a snapshot leaves out, is written
+    /// untitled, owning what the file's text holds as it owns what it made.
+    #[cfg(any(windows, unix))]
+    #[test]
+    fn the_open_scene_of_a_file_left_out_is_written_untitled() {
+        // A path that isn't Unicode, as one on disk may be.
+        #[cfg(windows)]
+        let path = {
+            use std::os::windows::ffi::OsStringExt;
+            std::ffi::OsString::from_wide(&[0x61, 0xD800, 0x2E, 0x72, 0x6F, 0x6E])
+        };
+        #[cfg(unix)]
+        let path = {
+            use std::os::unix::ffi::OsStringExt;
+            std::ffi::OsString::from_vec(b"a\xFF.ron".to_vec())
+        };
+        let mut world = World::seeded(1);
+        let [a, b] = [0, 1].map(|_| world.spawn(Transform::IDENTITY));
+        let text = world.save_scene(&[a]).expect("saved");
+        let [a, b] = [a, b].map(|entity| world.id(entity).expect("alive"));
+        let scenes = [SceneFile::new(path.into(), "scenes/a.ron".to_owned(), text)];
+        let open = Open {
+            author: Some("scenes/a.ron".to_owned()),
+            made: vec![b],
+        };
+        let text = write(&world, &scenes, &open, &Run::Playing, "Tested", &[], 0);
+        let snapshot = Snapshot::parse(text.expect("written"), "left".to_owned(), "Tested");
+        let snapshot = snapshot.expect("read");
+        assert!(snapshot.scenes.is_empty());
+        let mut made = vec![a, b];
+        made.sort_unstable();
+        assert_eq!(snapshot.open, Some(Open { author: None, made }));
     }
 
     /// A snapshot taken while a copy of the world as edited played holds that world too, which
@@ -512,26 +639,36 @@ mod tests {
                 "(entities: {\n})\n".to_owned(),
             )
         };
+        let open = |author: &str| Open {
+            author: Some(author.to_owned()),
+            made: Vec::new(),
+        };
         let run = Run::Held {
             world: Box::new(edited.world().clone()),
             scenes: vec![scene("edited")],
+            open: open("edited"),
             ticks: 40,
         };
-        let text = write(&copy, &[scene("copy")], &run, "Tested", &["Tester"], 77);
+        let (scenes, opened) = ([scene("copy")], open("copy"));
+        let text = write(&copy, &scenes, &opened, &run, "Tested", &["Tester"], 77);
         let held_text = text.expect("written");
         let snapshot = Snapshot::parse(held_text.clone(), "held".to_owned(), "Tested");
         let snapshot = snapshot.expect("read");
         assert!(!snapshot.stopped);
         assert_eq!(snapshot.scenes, [scene("copy")]);
+        assert_eq!(snapshot.open, Some(open("copy")));
         let held = snapshot.held.as_ref().expect("the world as edited");
         assert_eq!((held.ticks, &held.scenes[..]), (40, &[scene("edited")][..]));
+        assert_eq!(held.open, Some(open("edited")));
         let [mut running, mut kept] = [2, 3].map(Context::seeded);
         let ticks = snapshot.restore(running.world_mut(), &["Tester"]);
         assert_eq!(ticks.expect("restored"), 77);
         snapshot.restore_held(kept.world_mut()).expect("restored");
         assert_eq!(running.world().hash(), copy.hash());
         assert_eq!(kept.world().hash(), edited.world().hash());
-        let stopped_text = write(&copy, &[], &Run::Stopped, "Tested", &[], 0).expect("written");
+        let none = Open::default();
+        let stopped_text = write(&copy, &[], &none, &Run::Stopped, "Tested", &[], 0);
+        let stopped_text = stopped_text.expect("written");
         let snapshot = Snapshot::parse(stopped_text.clone(), "stopped".to_owned(), "Tested");
         let snapshot = snapshot.expect("read");
         assert!(snapshot.stopped && snapshot.held.is_none());
@@ -540,7 +677,7 @@ mod tests {
             .restore(running.world_mut(), &[])
             .expect("restored");
         assert_eq!(running.world().hash(), copy.hash());
-        let playing = write(&copy, &[], &Run::Playing, "Tested", &[], 0).expect("written");
+        let playing = write(&copy, &[], &none, &Run::Playing, "Tested", &[], 0).expect("written");
         let snapshot = Snapshot::parse(playing, "playing".to_owned(), "Tested").expect("read");
         assert!(!snapshot.stopped && snapshot.held.is_none());
         for broken in [
@@ -573,7 +710,9 @@ mod tests {
         Drawn::<3>.load(&mut saved);
         let quad = MeshDraw::from_parts(0, 0, false, false, &[]).expect("a draw");
         let drawn = saved.world_mut().spawn((Transform::IDENTITY, quad));
-        let text = write(saved.world(), &[], &Run::Playing, "Tested", &[], 0).expect("written");
+        let none = Open::default();
+        let text = write(saved.world(), &[], &none, &Run::Playing, "Tested", &[], 0);
+        let text = text.expect("written");
         let thread = std::thread::current().id();
         let dir = Scratch::new(&format!("snapshot-opaque-{thread:?}"));
         fs::create_dir_all(&dir.0).expect("a directory");

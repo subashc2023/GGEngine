@@ -241,7 +241,7 @@ pub struct World {
     /// where it draws the world's entities on from, the entities a pass of scripts listed in it,
     /// and what undoes an operation applied to it never pass for another's, as when a game
     /// replaces its world; a world copied takes another, as does a world restored from a copy,
-    /// cleared, or whose entities a scene replaced.
+    /// cleared, renewed, or whose entities a scene replaced.
     serial: u64,
     /// How many times entities' rows have changed, as entities are spawned, despawned or moved to
     /// other tables: drawing keeps the order it sorted while it and `serial` stay.
@@ -279,7 +279,8 @@ impl Default for World {
 /// How many worlds the process has made, which numbers each.
 static WORLDS: AtomicU64 = AtomicU64::new(0);
 
-/// A serial no other world has had, for a world made, copied, restored, cleared or replaced.
+/// A serial no other world has had, for a world made, copied, restored, cleared, renewed or
+/// replaced.
 fn next_serial() -> u64 {
     WORLDS.fetch_add(1, Ordering::Relaxed)
 }
@@ -607,6 +608,30 @@ impl World {
         let mut emptied = self.emptied();
         emptied.resources = mem::take(&mut self.resources);
         *self = emptied;
+    }
+
+    /// Lets go of what logs keep for their undos, as [`clear`](Self::clear) does, but keeps the
+    /// entities and everything else: each slot a log kept for an entity a delete took is freed
+    /// under its next generation, as [`free_slot`](Self::free_slot) frees it, its ID let go. The
+    /// world is then another, as `clear` says, which refuses every log's entries from before,
+    /// freeing nothing; so whoever keeps a log of it drops the log, for history that starts
+    /// afresh, as after the tool API's `scene open` and `scene new`.
+    #[cfg(feature = "dev")]
+    pub(crate) fn renew(&mut self) {
+        let mut free = vec![false; self.meta.len()];
+        for &index in &self.free {
+            free[index as usize] = true;
+        }
+        // Vacant or retired; a retired slot stays so.
+        for (index, free) in (0..).zip(free) {
+            if !free && self.meta[index as usize].location.is_none() {
+                self.free_slot(index);
+            }
+        }
+        self.kept.clear();
+        self.serial = next_serial();
+        // Its rows changed, as the serial says too.
+        self.version += 1;
     }
 
     /// The entities with every component `Q` reads, table by table, as `Q` takes them: such as
@@ -1106,6 +1131,42 @@ mod tests {
         }
         check_ids(world);
         check_links(world);
+    }
+
+    /// Renewing the world frees each slot a log kept for an entity a delete took, under its next
+    /// generation, and lets its ID go, keeping the entities as they were; and the world is another,
+    /// whose version has moved on, which refuses the log's entries.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn renewing_the_world_frees_what_logs_kept_and_keeps_the_entities() {
+        let mut x = fixture();
+        let mut log = Log::default();
+        let a = x.id(x.a);
+        log.apply(&mut x.world, Operation::Delete { entity: a })
+            .expect("deleted");
+        assert_eq!(vacated(&x.world), 5, "a and its descendants, kept");
+        let (hash, (serial, version)) = (x.world.hash(), x.world.version());
+        let living = x.world.entities(None).expect("every entity").len();
+        x.world.renew();
+        let world = &mut x.world;
+        assert_eq!((world.hash(), vacated(world)), (hash, 0));
+        assert_eq!(world.entities(None).expect("every entity").len(), living);
+        let (renewed, moved_on) = world.version();
+        assert!(renewed != serial && moved_on > version);
+        check_ids(world);
+        check_links(world);
+        let error = log.undo(world).expect_err("another world's");
+        assert_eq!(error.code(), "ops.other_world", "{error}");
+        assert_eq!(world.entity(a), None);
+        // The slots freed take new entities, under handles of their own.
+        let taken = [x.a, x.b, x.c, x.d, x.e];
+        let spawned: Vec<Entity> = (0..5).map(|i| world.spawn(Index(i))).collect();
+        let mut slots: Vec<u32> = spawned.iter().map(|entity| entity.index).collect();
+        slots.sort_unstable();
+        assert_eq!(slots, taken.map(|entity| entity.index));
+        assert!(spawned.iter().all(|entity| !taken.contains(entity)));
+        log.clear(world);
+        check_ids(world);
     }
 
     /// A reset of an entity's interpolation is its slot's alone, and changes neither the hash nor

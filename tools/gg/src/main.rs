@@ -84,16 +84,25 @@ Make a game:
 Talk to a running game, through its tool API:
   sessions                       List the running games
   status                         Its ticks, whether it's paused or stopped, its frames, entities and
-                                 view
+                                 view, and its open scene's file and whether it has unsaved edits
   pause                          Pause its simulation
   resume                         Run its simulation in real time again
   play                           Play a copy of its world as edited in its place, until `stop`, if
                                  it's stopped
   stop                           Stop it: no tick runs, and its world is the world as edited, which
-                                 only edits change; while a copy plays, bring the world as edited
-                                 back, what the copy did, its edits among them, going; recorded
-                                 runs and lockstep peers refuse it
+                                 only edits, scene files' saves, `scene open` and `scene new`
+                                 change; while a copy plays, bring the world as edited back, what
+                                 the copy did, its edits among them, going; recorded runs and
+                                 lockstep peers refuse it
   step [N]                       Run N ticks (1), and stay paused; refused while it's stopped
+  scene open <PATH> [--discard]  Open the scene file at PATH, in one of the project's scenes
+                                 folders, in place of the open scene: its entities in place of the
+                                 scene's, the game's own kept; refused while the scene has unsaved
+                                 edits, unless `--discard`; every author's edits start afresh
+  scene save [PATH]              Save the open scene's entities, never those the game's code made,
+                                 to its file, or to PATH, its file from then on
+  scene new [--discard]          Delete the open scene's entities, leaving it untitled; refused as
+                                 `scene open` is
   capture [--own] [PATH]         Write its view as a PNG at PATH, or in `captures` beside it: as
                                  it's shown, the look included, or with `--own`, as the game shows
                                  it on its own
@@ -128,9 +137,10 @@ Talk to a running game, through its tool API:
 Serve agents:
   mcp                            Serve the tool API to an agent that speaks MCP, on stdin and stdout:
                                  a tool for each command that talks to a game but `quit`, `call`,
-                                 `logs --follow` and the PATHs of `capture` and `snapshot`, which
-                                 reaches the game the options choose at each call, as the agent, its
-                                 MCP client's name, the author of the edits it applies
+                                 `logs --follow` and the PATHs of `capture` and `snapshot`, with
+                                 `scene`'s PATH from the game's asset root, which reaches the game
+                                 the options choose at each call, as the agent, its MCP client's
+                                 name, the author of the edits it applies
 
 Options for talking to a game:
   --pid <PID>           The game in process PID, when more than one runs
@@ -549,6 +559,21 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
             };
             call(&mut parsed, "step", json!({"ticks": ticks}))?
         }
+        "scene" => {
+            let usage = "scene open <PATH> [--discard] | scene save [PATH] | scene new [--discard]";
+            let given = parsed.positional(1, 2, usage)?;
+            let params = match (given[0].as_str(), given.get(1)) {
+                ("open", Some(path)) => {
+                    let discard = parsed.switch("--discard");
+                    json!({"action": "open", "path": absolute(path)?, "discard": discard})
+                }
+                ("save", None) => json!({"action": "save"}),
+                ("save", Some(path)) => json!({"action": "save", "path": absolute(path)?}),
+                ("new", None) => json!({"action": "new", "discard": parsed.switch("--discard")}),
+                _ => return Err(bad(format!("it's `gg {usage}`"))),
+            };
+            call(&mut parsed, "scene", params)?
+        }
         "capture" => {
             let path = parsed.positional(0, 1, "capture [--own] [PATH]")?;
             let mut params = json!({});
@@ -780,7 +805,29 @@ mod tests {
         assert_eq!(name, "probe");
         let snapshot = std::path::absolute("world.snapshot").unwrap();
         let png = std::path::absolute("view.png").unwrap();
+        let level = std::path::absolute("scenes/level2.ron").unwrap();
         for (args, want) in [
+            (
+                &["scene", "open", "scenes/level2.ron"][..],
+                json!({"action": "open", "path": level, "discard": false}),
+            ),
+            (
+                &["scene", "open", "scenes/level2.ron", "--discard"],
+                json!({"action": "open", "path": level, "discard": true}),
+            ),
+            (&["scene", "save"], json!({"action": "save"})),
+            (
+                &["scene", "save", "scenes/level2.ron"],
+                json!({"action": "save", "path": level}),
+            ),
+            (
+                &["scene", "new"],
+                json!({"action": "new", "discard": false}),
+            ),
+            (
+                &["scene", "new", "--discard"],
+                json!({"action": "new", "discard": true}),
+            ),
             (&["snapshot"][..], json!({})),
             (&["snapshot", "world.snapshot"], json!({"path": snapshot})),
             (&["capture"], json!({})),
@@ -825,6 +872,12 @@ mod tests {
             &["run", "a", "--peers", "2", "--", "--record=run.recording"],
             &["snapshot", "a", "b"],
             &["snapshot", "--own"],
+            &["scene"],
+            &["scene", "open"],
+            &["scene", "close"],
+            &["scene", "new", "a.ron"],
+            &["scene", "save", "--discard"],
+            &["scene", "save", "a.ron", "b.ron"],
             &["capture", "a", "b"],
             &["capture", "--own=yes"],
             &["look", "{not json"],

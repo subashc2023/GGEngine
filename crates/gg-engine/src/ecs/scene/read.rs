@@ -96,6 +96,34 @@ pub(super) fn parse(world: &World, text: &str, prefab: bool) -> Result<Vec<Loade
     Ok(entities)
 }
 
+/// The IDs scene `text` gives its entities, its map of entities' keys, read from its syntax alone,
+/// through `ron`'s own reading of what the keys hold, without the world's types: so that a text
+/// that names a component type or a field the world no longer has still says which entities it
+/// holds.
+///
+/// Fails with `scene.syntax` for text that isn't a scene's RON, or enables RON's extensions, and
+/// with `ecs.bad_id` for a key that isn't an ID.
+#[cfg(feature = "dev")]
+pub(super) fn ids(text: &str) -> Result<Vec<EntityId>> {
+    use std::collections::BTreeMap;
+
+    use serde::Deserialize;
+    use serde::de::IgnoredAny;
+
+    #[derive(Deserialize)]
+    struct Keys {
+        entities: BTreeMap<String, IgnoredAny>,
+    }
+
+    let mut deserializer = deserializer(text)?;
+    let keys = Keys::deserialize(&mut deserializer).and_then(|keys| {
+        deserializer.end()?;
+        Ok(keys)
+    });
+    let keys = keys.map_err(|error| syntax(&deserializer.span_error(error)))?;
+    keys.entities.keys().map(|id| id.parse()).collect()
+}
+
 /// The item of the `Parent` of an entity that would be its own ancestor, if there's one.
 fn cycle(entities: &[Loaded]) -> Option<u32> {
     const NEW: u8 = 0;

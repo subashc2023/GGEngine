@@ -34,7 +34,7 @@ use crate::physics::{self, CircleCollider2D, Physics2D};
 use crate::recording::Recorder;
 use crate::reflect::{Reflect, Value};
 use crate::render_thread::Extracted;
-use crate::scene_files::{SceneFile, SceneFiles};
+use crate::scene_files::{self, SceneFile, SceneFiles};
 use crate::snapshot::{Run, Snapshot};
 use crate::{
     App, BoxCollider2D, Entity, EntityId, Event, Input, MeshDraw, Model, Name, RigidBody2D,
@@ -75,7 +75,8 @@ pub trait Layer {
 
     /// Called as a run restored from a snapshot starts, in place of [`attach`](Self::attach), once
     /// every layer has loaded and the world is back as it was; again as the tool API's `stop`
-    /// brings back the world as edited, each layer's queue emptied first; and as a lockstep
+    /// brings back the world as edited, each layer's queue emptied first; as its `scene new` and
+    /// `scene open` renew the world they changed, each layer's queue kept; and as a lockstep
     /// joiner's world gives way to its host's: the layer picks up from the world, such as the
     /// values its panels show, and queues what its ticks need, such as letting go of what was held
     /// as the world it picks up from was left. The world changes only at ticks from here.
@@ -275,6 +276,9 @@ pub struct Context {
     ///
     /// [`App::project`]: crate::App::project
     pub(crate) start: Option<PathBuf>,
+    /// The project's scenes folders, which the tool API's `scene` opens and saves scene files in.
+    #[cfg(feature = "dev")]
+    pub(crate) folders: Vec<PathBuf>,
     /// The assets the layers added: the world's, which a world that a layer puts in its place
     /// takes again, as [`share_assets`](Self::share_assets) says.
     assets: Arc<Assets>,
@@ -298,13 +302,14 @@ pub struct Context {
 }
 
 /// The world as edited, which the tool API's `play` holds aside while a copy of it plays in its
-/// place, and `stop` brings back: with the ticks it's at, its scene files as last applied and the
-/// authors' edits of it.
+/// place, and `stop` brings back: with the ticks it's at, its scene files as last applied, its open
+/// scene and the authors' edits of it.
 #[cfg(feature = "dev")]
 pub(crate) struct Edited {
     pub(crate) world: World,
     pub(crate) ticks: u64,
     pub(crate) scenes: Vec<SceneFile>,
+    pub(crate) open: scene_files::Open,
     pub(crate) authors: Authors,
 }
 
@@ -320,6 +325,10 @@ impl Context {
         let mut cx = Self::with_world(window, world);
         cx.root.clone_from(&app.root);
         cx.start = app.manifest().map(|manifest| manifest.start.clone());
+        #[cfg(feature = "dev")]
+        if let Some(manifest) = app.manifest() {
+            cx.folders.clone_from(&manifest.scenes);
+        }
         cx
     }
 
@@ -353,6 +362,10 @@ impl Context {
         let manifest = crate::Manifest::read(dir.as_ref())?;
         self.root = Some(manifest.root);
         self.start = Some(manifest.start);
+        #[cfg(feature = "dev")]
+        {
+            self.folders = manifest.scenes;
+        }
         Ok(self)
     }
 
@@ -405,6 +418,8 @@ impl Context {
             attached: false,
             root: None,
             start: None,
+            #[cfg(feature = "dev")]
+            folders: Vec::new(),
             assets,
             perf: Perf::default(),
             paused: false,
@@ -871,7 +886,8 @@ impl Context {
     /// between ticks, which keeps what the file doesn't change, as where the game has moved an
     /// entity; an edit whose author is the file's path, as the app's root names it, such as
     /// `scenes/level.ron`, which the tool API's `undo` takes back. A run restored from a snapshot
-    /// watches the files its run had loaded.
+    /// watches the files its run had loaded. The project's start scene, as
+    /// [`load_start_scene`](Self::load_start_scene) loads it, is the open scene too.
     ///
     /// Fails as `read_scene` does, and as `load_scene` does, the path beginning its message.
     ///
@@ -886,6 +902,10 @@ impl Context {
             error.with_message(message)
         })?;
         let author = assets::name_of(self.root.as_deref(), path).to_string();
+        let start = self.start.as_deref();
+        if start.is_some_and(|start| scene_files::same_file(start, path)) {
+            self.scenes.open.author = Some(author.clone());
+        }
         self.scenes
             .loaded(SceneFile::new(path.to_owned(), author, text));
         Ok(roots)
@@ -894,7 +914,9 @@ impl Context {
     /// Loads the project's start scene as the layer attaches, as
     /// [`load_scene_file`](Self::load_scene_file) loads a scene file, and returns its roots: in a
     /// development build, watched, its edits' author its path from the asset root, such as
-    /// `scenes/arena.ron`.
+    /// `scenes/arena.ron`. It's the open scene, which the tool API's `scene` saves, empties and
+    /// opens another scene file in place of, owning the entities its file holds and those clients'
+    /// edits make into it, never those the game's code makes.
     ///
     /// Fails with `engine.no_project` for a game that isn't a project's, as
     /// [`App::project`](crate::App::project) makes it, and as `load_scene_file` does.
@@ -916,6 +938,8 @@ impl Context {
     ///
     /// Fails as [`Authors::edit`] does.
     pub(crate) fn apply_edit(&mut self, edit: Edit) -> Result<Done> {
+        #[cfg(feature = "dev")]
+        self.scenes.changed();
         self.authors.edit(&mut self.world, edit)
     }
 
@@ -1230,6 +1254,7 @@ impl Stack {
                 let text = crate::snapshot::write(
                     &cx.world,
                     &cx.scenes.files,
+                    &cx.scenes.open,
                     &Run::Playing,
                     net.app(),
                     &self.names,
@@ -1271,6 +1296,13 @@ impl Stack {
         self.net.as_ref().is_none_or(Lockstep::hosts)
     }
 
+    /// Whether the run is a peer of a lockstep session, hosting or joining, whose scene files the
+    /// other peer's must stay as.
+    #[cfg(feature = "dev")]
+    pub(crate) fn is_peer(&self) -> bool {
+        self.net.is_some()
+    }
+
     /// Applies `edit`, an author's from outside the layers, between ticks, as [`edit`](Self::edit)
     /// does; or, in a lockstep session, offers it for the tick both peers apply it before, giving
     /// its ticket.
@@ -1278,13 +1310,16 @@ impl Stack {
     pub(crate) fn offer(&mut self, cx: &mut Context, edit: Edit) -> Offered {
         match &mut self.net {
             Some(net) => Offered::Later(net.offer(edit)),
-            None => Offered::Now(self.edit(cx, edit)),
+            None => {
+                let apply = |cx: &mut Context, edit| self.edit(cx, edit);
+                Offered::Now(scene_files::client_edit(cx, edit, apply))
+            }
         }
     }
 
     /// Applies the save of the scene file whose author is `author`, its text now `text`, between
-    /// ticks, as [`scene_files::apply_save`](crate::scene_files::apply_save) does; or, in a lockstep
-    /// session, offers it for the tick both peers apply it before. Either way it logs what it did.
+    /// ticks, as [`scene_files::apply_save`] does; or, in a lockstep session, offers it for the
+    /// tick both peers apply it before. Either way it logs what it did.
     #[cfg(feature = "dev")]
     pub(crate) fn offer_save(&mut self, cx: &mut Context, author: String, text: String) {
         match &mut self.net {
@@ -1377,10 +1412,14 @@ impl Stack {
             if let Some((held, mut world)) = loaded {
                 snapshot.restore_held(&mut world)?;
                 world.share_assets(&cx.assets);
+                let start = cx.start.as_deref();
+                let open =
+                    (held.open.clone()).unwrap_or_else(|| scene_files::opened(start, &held.scenes));
                 cx.edited = Some(Edited {
                     world,
                     ticks: held.ticks,
                     scenes: held.scenes.clone(),
+                    open,
                     authors: Authors::default(),
                 });
             }
@@ -1425,9 +1464,10 @@ impl Stack {
 
     /// Has a copy of `cx`'s world, the world as edited, which is at `ticks`, play in its place, as
     /// the tool API's `play` asks of a stopped run: holds the world as edited aside, with its
-    /// ticks, its scene files and the authors' edits of it, whose logs the copy starts afresh,
-    /// until [`stop`](Self::stop). The layers are told nothing: what they hold of the world holds
-    /// of the copy, which goes on exactly as the world would.
+    /// ticks, its scene files, its open scene and the authors' edits of it, whose logs the copy
+    /// starts afresh, until [`stop`](Self::stop); the copy's open scene starts as a copy of it.
+    /// The layers are told nothing: what they hold of the world holds of the copy, which goes on
+    /// exactly as the world would.
     #[cfg(feature = "dev")]
     pub(crate) fn play(&self, cx: &mut Context, ticks: u64) {
         let _zone = gg_core::zone!();
@@ -1438,16 +1478,17 @@ impl Stack {
             world,
             ticks,
             scenes: cx.scenes.files.clone(),
+            open: cx.scenes.open.clone(),
             authors: mem::take(&mut cx.authors),
         });
         info!(ticks, entities, "Playing a copy of the world as edited");
     }
 
     /// Brings back the world as edited that [`play`](Self::play) holds aside, if it holds one, as
-    /// the tool API's `stop` asks: the very world, with its scene files and the authors' edits of
-    /// it, the copy and all done to it going; empties each layer's queue, which the copy's ticks
-    /// were to apply; has each layer pick up from the world, from the bottom up, as
-    /// [`Layer::restored`] says; and returns the ticks the world as edited is at. A run playing
+    /// the tool API's `stop` asks: the very world, with its scene files, its open scene and the
+    /// authors' edits of it, the copy and all done to it going; empties each layer's queue, which
+    /// the copy's ticks were to apply; has each layer pick up from the world, from the bottom up,
+    /// as [`Layer::restored`] says; and returns the ticks the world as edited is at. A run playing
     /// from its start holds none: `None`, and nothing changes.
     #[cfg(feature = "dev")]
     pub(crate) fn stop(&mut self, cx: &mut Context) -> Option<u64> {
@@ -1457,6 +1498,7 @@ impl Stack {
         cx.share_assets();
         cx.authors = edited.authors;
         cx.scenes.files = edited.scenes;
+        cx.scenes.open = edited.open;
         for layer in &mut self.layers {
             if let Some(queue) = layer.commands() {
                 queue.clear();
@@ -1469,13 +1511,52 @@ impl Stack {
         Some(edited.ticks)
     }
 
-    /// Puts `snapshot`'s world in `cx`'s place, the layers having loaded, and has each layer pick
-    /// up from it, from the bottom up; returns the ticks the simulation had run as it was taken.
+    /// Has `apply` change `cx`'s world, between ticks, through a log of its own, which no author
+    /// undoes, as the tool API's `scene open` and `scene new` change it; and then starts every
+    /// author's edits afresh, since none of them could undo past it: the world is renewed, as
+    /// [`World::renew`] says, refusing every log's entries from before, the authors' logs go, and
+    /// each layer picks up from the world, from the bottom up, as at [`stop`](Self::stop), so that
+    /// the in-process Inspector lets go of its own. Refused, what `apply` applied comes undone,
+    /// and nothing else changes.
+    ///
+    /// Fails as `apply` does.
+    #[cfg(feature = "dev")]
+    pub(crate) fn rewrite(
+        &mut self,
+        cx: &mut Context,
+        apply: impl FnOnce(&mut World, &mut crate::Log) -> Result<()>,
+    ) -> Result<()> {
+        let mut log = crate::Log::default();
+        if let Err(error) = apply(&mut cx.world, &mut log) {
+            // What applied before the refusal, which a refusal of the log's own undoes already.
+            let _ = log.undo(&mut cx.world);
+            log.clear(&mut cx.world);
+            return Err(error);
+        }
+        // Dropped, as the renewed world lets go of what it kept.
+        drop(log);
+        cx.world.renew();
+        cx.authors = Authors::default();
+        cx.scenes.changed();
+        for layer in &mut self.layers {
+            layer.restored(cx);
+        }
+        Ok(())
+    }
+
+    /// Puts `snapshot`'s world in `cx`'s place, the layers having loaded, with its scene files and
+    /// its open scene, or the start scene's file open for a snapshot that holds none, and has each
+    /// layer pick up from it, from the bottom up; returns the ticks the simulation had run as it
+    /// was taken.
     ///
     /// Fails as [`Snapshot::restore`] does.
     fn restore_in_place(&mut self, cx: &mut Context, snapshot: &Snapshot) -> Result<u64> {
         let ticks = snapshot.restore(&mut cx.world, &self.names)?;
         cx.scenes.files.clone_from(&snapshot.scenes);
+        cx.scenes.open = (snapshot.open.clone())
+            .unwrap_or_else(|| scene_files::opened(cx.start.as_deref(), &snapshot.scenes));
+        #[cfg(feature = "dev")]
+        cx.scenes.changed();
         for layer in &mut self.layers {
             layer.restored(cx);
         }
@@ -1553,11 +1634,15 @@ impl Stack {
                 let merged = net.start_tick(tick.number, queues, &cx.world);
                 for (ticket, input) in &merged.inputs {
                     let done = match input {
+                        // A client's, on either peer.
                         Outside::Edit(edit) => {
-                            if let Some(recorder) = recorder.as_mut() {
-                                recorder.edited(&edit.to_value(), &cx.world);
-                            }
-                            cx.apply_edit(edit.clone())
+                            let apply = |cx: &mut Context, edit: Edit| {
+                                if let Some(recorder) = recorder.as_mut() {
+                                    recorder.edited(&edit.to_value(), &cx.world);
+                                }
+                                cx.apply_edit(edit)
+                            };
+                            scene_files::client_edit(cx, edit.clone(), apply)
                         }
                         #[cfg(feature = "dev")]
                         Outside::Scene { author, text } => {

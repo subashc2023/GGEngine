@@ -3,6 +3,7 @@
 
 mod assets;
 mod camera;
+mod file;
 mod game;
 mod handles;
 mod look;

@@ -285,6 +285,49 @@ fn text_written_by_hand_loads_and_saves_canonically() {
     check_links(&world);
 }
 
+/// Exactly the entities given save, without a child of theirs that isn't given, and one whose
+/// parent isn't given as a root, refused if it refers to an entity that isn't; a text written by
+/// hand is the engine's own in canonical form; and the IDs a text gives read from its syntax alone,
+/// whatever types it names.
+#[cfg(feature = "dev")]
+#[test]
+fn exactly_the_entities_given_save_and_a_texts_ids_read_from_its_syntax() {
+    let mut world = golden_world(3);
+    world.load_scene(GOLDEN).expect("loaded");
+    let [cell, mover] = ["2b7e151628aed2a6", "9f86d081884c7d65"].map(id);
+    let [cell, mover] = [cell, mover].map(|id| world.entity(id).expect("loaded"));
+    let kid = world.spawn(Transform::IDENTITY);
+    world.set_parent(kid, Some(mover)).expect("no cycle");
+    assert_ne!(
+        world.save_scene(&[cell]).expect("saved"),
+        GOLDEN,
+        "with the kid"
+    );
+    assert_eq!(world.save_entities(&[mover, cell]).expect("saved"), GOLDEN);
+    let alone = world.save_entities(&[kid]).expect("saved");
+    assert!(!alone.contains("Parent"), "a root: {alone}");
+    let outside = world
+        .save_entities(&[mover])
+        .expect_err("its target isn't saved");
+    assert_eq!(outside.code(), "scene.outside", "{outside}");
+    let loose = world
+        .scene_canonical(LOOSE)
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(loose, GOLDEN);
+    let ids = [id("2b7e151628aed2a6"), id("9f86d081884c7d65")];
+    for text in [GOLDEN, LOOSE, GOLDEN.replace("GridCell", "Gone").as_str()] {
+        assert_eq!(World::scene_ids(text).expect("read"), ids, "{text}");
+    }
+    for (text, code) in [
+        ("(entities: {", "scene.syntax"),
+        ("#![enable(implicit_some)]\n(entities: {})", "scene.syntax"),
+        ("(entities: {\"nope\": ()})", "ecs.bad_id"),
+    ] {
+        let error = World::scene_ids(text).expect_err(text);
+        assert_eq!(error.code(), code, "{text}: {error}");
+    }
+}
+
 #[test]
 fn a_refused_scene_changes_nothing_and_says_where() {
     let about = |path: &str| format!("can't load `{path}` of entity 9f86d081884c7d65: ");

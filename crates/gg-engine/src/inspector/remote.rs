@@ -676,6 +676,9 @@ mod imp {
             let link = &mut *inspector.link.borrow_mut();
             link.queued = !self.waiting.is_empty();
             self.ask_next(inspector.picked);
+            // Edits it can't send, with no connection, never reach the game.
+            let sent = self.sent.as_ref().is_some_and(Ask::edits);
+            link.unanswered = self.connection.is_some() && (sent || !self.queued.is_empty());
         }
 
         /// Sets the field `edit` changes of the entity of ID `id`, as part of `gesture`'s, which it
@@ -1325,6 +1328,59 @@ mod imp {
             remote.send(Pass::default(), &mut inspector);
             waits.push(inspector.link().waiting());
             assert_eq!(waits, [true, true, false]);
+        }
+
+        /// The link is idle once the game has answered every edit, operations as sets: not while a
+        /// set made through it waits for the pass, nor while an edit waits to be sent, nor while
+        /// its answer hasn't come, but before a read shows it; and edits that can't be sent,
+        /// without a connection, keep nothing waiting.
+        #[test]
+        fn the_link_is_idle_once_the_game_has_answered_every_edit() {
+            let mut remote = Remote::new("editor");
+            let mut inspector = Inspector::default();
+            let link = inspector.link();
+            let (asks, asked) = mpsc::channel();
+            let (hear, heard) = mpsc::channel();
+            remote.connection = Some(Connection { asks, heard });
+            (remote.typed, remote.types_due) = (true, false);
+            let answer = |remote: &mut Remote, inspector: &mut Inspector, result: &str| {
+                hear.send(Heard::Answer(Ok(result.to_owned())))
+                    .expect("heard");
+                remote.update(inspector);
+                remote.send(Pass::default(), inspector);
+            };
+            let methods = || {
+                asked
+                    .try_iter()
+                    .map(|(method, _)| method)
+                    .collect::<Vec<_>>()
+            };
+            let a = id(1);
+            assert!(link.idle(), "nothing made");
+            link.set(a, "Transform", "translation.x", Value::F32(1.0));
+            assert!(!link.idle(), "until the pass");
+            remote.send(Pass::default(), &mut inspector);
+            assert_eq!(methods(), ["apply"]);
+            assert!(!link.idle(), "until its answer");
+            answer(&mut remote, &mut inspector, r#"{"ticks":0,"entities":[]}"#);
+            assert_eq!(methods(), ["entities"]);
+            assert!(link.idle(), "answered");
+            assert!(link.waiting(), "though no read shows it yet");
+            let delete = Pass {
+                operations: vec![Command::Delete(a)],
+                ..Pass::default()
+            };
+            remote.send(delete, &mut inspector);
+            assert!(!link.idle(), "queued behind the list");
+            answer(&mut remote, &mut inspector, &page(0, &[]).expect("a page"));
+            assert_eq!(methods(), ["apply"]);
+            assert!(!link.idle(), "until its answer");
+            answer(&mut remote, &mut inspector, r#"{"ticks":0,"entities":[]}"#);
+            assert!(link.idle(), "answered");
+            remote.connection = None;
+            remote.queued.push_back(Ask::Step(Step::Undo));
+            remote.send(Pass::default(), &mut inspector);
+            assert!(link.idle(), "never to be sent");
         }
     }
 }

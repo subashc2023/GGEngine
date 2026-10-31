@@ -61,7 +61,8 @@ impl Default for Toolbar {
 /// How the game runs, as the title bar's Play, Simulate and Stop set it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
-    /// Stopped: its world is the world as edited, which only edits change.
+    /// Stopped: its world is the world as edited, which only edits, scene files' saves and the
+    /// File menu's New and Open change.
     Edit,
     /// A copy of the world as edited plays in its place, the view seeing through the game's
     /// camera, which gets the view's input.

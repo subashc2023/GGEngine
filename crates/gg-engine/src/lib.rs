@@ -468,11 +468,14 @@ fn run_args(
 }
 
 /// What a run takes from its project's manifest, as [`App::project`] says: the manifest's path, the
-/// project's asset root and its start scene's path.
+/// project's asset root, its start scene's path and its scenes folders' paths, which hold the scene
+/// files the tool API's `scene` opens and saves.
 pub(crate) struct Manifest {
     pub(crate) path: PathBuf,
     pub(crate) root: PathBuf,
     pub(crate) start: PathBuf,
+    #[cfg(feature = "dev")]
+    pub(crate) scenes: Vec<PathBuf>,
 }
 
 impl Manifest {
@@ -495,6 +498,7 @@ impl Manifest {
                 path: dir.join(gg_api::Project::FILE),
                 root: project.assets_dir(dir),
                 start: project.start_path(dir),
+                scenes: project.scene_dirs(dir),
             })
         }
         #[cfg(not(feature = "dev"))]

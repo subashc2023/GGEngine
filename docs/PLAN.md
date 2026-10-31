@@ -70,30 +70,17 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **The game's world and diagnostics in the editor's panels** (2026-10-30)
 - **Editing in the game's view** (2026-10-30)
 - **Play, Simulate and Stop in the game, the editor's own world deleted** (2026-10-31)
+- **Scenes through the API and the File menu** (2026-10-31)
+- **Phase 6, projects and the editor on the tool API** (2026-10-31)
 
 ## Now
 
-**Scenes through the API and the File menu**, Phase 6's last milestone, which waits on the open
-question of which entities a scene file owns. In a project, the editor's File menu, New, Open and
-Save, reaches the game's scenes through the tool API. *Done when*, from `games/shards`, the editor
-opens the arena in the game, saves it as edited to its file, which the game's watch then applies as
-no change, and New empties what the scene owns, each through the API, and Phase 6's done-when holds:
-the editor has no path into the game but the tool API, and the v0.1 loop works from inside it.
+**Phase 7's first milestone**, chosen as [Phase 7](#next) starts; its plan says when it's done.
 
 ## Next
 
 Each phase ends in something you can run and check.
 
-6. **Projects and the editor on the tool API.** A project: a manifest naming its game's crate, its
-   asset root, its scenes and the scene it starts in, which `gg new` makes and every tool reads.
-   `apps/editor` opens a project and works on its game, running in its own process, through the
-   tool API alone: its panels (the scene tree among them), Play, Simulate, Stop, pause and step, and
-   its File menu reaching the game through it; a panel of logs and errors; and the game's view,
-   embedded. *Done when* the editor opens the demo's project, has no path into the game but the
-   tool API, and the v0.1 loop works from inside it. Its milestones, in order: projects and
-   `gg new`; the game's view in the editor; the game's world and diagnostics in the editor's
-   panels; editing in the game's view; Play, Simulate and Stop in the game, the editor's own world
-   deleted; and scenes through the API and the File menu.
 7. **Assets.** An asset database: every asset of a project found by a stable ID kept in a text file
    beside it, which scenes name it by, with its import settings; assets loaded once whoever asks,
    by ID or by path, and reloaded as their files change, textures, meshes and shaders alike; and the
@@ -157,7 +144,6 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | `gg build` and `gg test`, with their results as data: `run` and `check` build through cargo, passing on its messages about the code as it renders them, and cargo's test harness writes JSON on nightly alone | An agent needs a build's or the tests' results as data, or libtest's JSON output is stable |
 | Capabilities each client of the tool API is granted, as [Agents and tools](../ARCHITECTURE.md#agents-and-tools) describes: a connection that says hello with the session's token reaches everything, which only processes that can read the session file beside the game do | A client the user doesn't run as their own, such as one on another machine or a mod's, or an agent kept to one scene |
 | MCP beyond tools: resources, prompts, progress, cancellation and the client's roots; `gg mcp`'s tools are the API's methods but `quit`, `patch` and the paths of `capture` and `snapshot`, a capture's PNG coming inline | An agent needs one of them |
-| Watching the scene files the editor's File menu opens and saves, as the game watches those its layers loaded | Scenes through the API and the File menu |
 | Steps and captures while the window is minimized, which fail with `api.paused`, and requests while a file dialog or Windows' window menu holds the main thread, which wait; `ping` says which | A tool needs them then |
 | Labels inside passes: each run of draws labeled by what it draws, and the frame pass's view and UI apart; a capture shows a label for each pass | Phase 12, with the render graph |
 | Synchronization validation under RenderDoc, whose layer hides the validation layer's settings: through `VK_EXT_validation_features`, or the validation layer's environment | A synchronization bug shows under RenderDoc alone |
@@ -212,9 +198,9 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | A scene or prefab loaded with a primary camera making the world's other cameras not primary, as an operation's does: a load sets fields as they're written, and of several primary, the view sees through the lowest ID's, warning | A prefab brings a camera of its own, as a player's would |
 | Finding the point in the world under the cursor, as `Context::pick` finds the entity there: the editor's camera finds one on a plane itself, but nothing reads the view's depth, and the tool API's `pick` answers the entity alone; and the orthographic camera controller zooms about the view's center | Something places what it adds at the cursor's depth, an agent places something at a pixel, or a game zooms toward the cursor |
 | A dockspace's view in a window of its own: it docks and floats over the main window alone, since only the main window's input reaches the layers, and its image is made at the main window's scale | The editor shows the game on a display of its own |
-| Showing whether keys reach the view, such as an outline around it while they do: from a press on it, or with the cursor over it | Someone misses it, or Phase 6's editor |
+| Showing whether keys reach the view, such as an outline around it while they do: from a press on it, or with the cursor over it | Someone misses it |
 | Gamepads following a dockspace's view: they reach the layers whichever panel has the keys, as they do in games | The editor binds a pad, or a panel takes a pad's input |
-| F framing what's picked, the editor's camera easing to see it whole | Someone frames often, or Phase 6's editor |
+| F framing what's picked, the editor's camera easing to see it whole | Someone frames often |
 | The handles along the world's axes as well as along the entity's own, as other editors' toggles have it: they turn with what's picked | Someone moves things along the world's axes |
 | Snapping steps of one's own: the command key snaps to half units, 45° and halves | Someone needs other steps |
 | The amount a drag of the handles has moved, turned or scaled, shown beside them as it goes | Someone wants exact drags without the Inspector |
@@ -265,13 +251,13 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Beyond textures named by their paths: a library that finds an asset by its path or name, so that a file added twice loads once, where now it loads twice, and that loads one a scene names; `MeshDraw`'s mesh and shader named, as `Sprite.texture` is: opaque until then, shown but not set, saved in scenes or hashed, and carried across a restart by their indices only where the layers added the same assets in the same order; setting them by name, and dropping the Assets panel's images onto a sprite, whose texture the Inspector shows but doesn't set | A game builds its draws from data, or someone edits a sprite's texture in the editor |
 | 8- and 16-bit vertex fields, whose features Vulkan 1.4 guarantees but the device doesn't enable | A mesh packs its vertices, as Phase 10's cooker will |
 | Splits in a torn-off window, which holds one tab group | A tool wants panels side by side outside the main window |
-| Reordering tabs by dragging them along their bar; a drop among the tabs adds one at the end | Phase 6, the editor |
+| Reordering tabs by dragging them along their bar; a drop among the tabs adds one at the end | Someone reorders tabs |
 | A minimum width for each panel, as Hazel keeps its Properties panel 370 pixels wide: a split keeps each side 48 points, and the Inspector's rows of axes clip in a narrower panel | Someone narrows the Inspector past its rows |
 | Checking Windows' frame on Windows 10, whose DWM may draw no border along the top of a window whose inside reaches it | Someone runs the tools on Windows 10 |
 | Checking Windows' frame around torn-off windows as their scale changes, across monitors of different scales | Someone docks across such monitors |
 | A button in the title bar hiding the panels docked above the view, as those left of, below and right of it hide, and keys for the buttons, as VS Code's Ctrl+B, Ctrl+J and Ctrl+Alt+B | Someone docks a panel above the view and wants it out of the way, or reaches for the buttons often |
 | On macOS, the menus in the system's menu bar, and a double-click on the title bar doing what the user's setting says | A tool ships on macOS |
-| Alt and access keys to reach the menus, and layers adding items to one another's menus | Phase 6, the editor |
+| Alt and access keys to reach the menus, and layers adding items to one another's menus | Someone reaches the menus from the keyboard, or a layer adds to another's menu |
 | Windows of their own on Wayland, where groups float over the main window | winit can place windows on Wayland |
 | egui's deferred viewports, which don't open (`engine.viewport_deferred`); immediate ones do | A tool needs a window that repaints apart from the main one |
 | egui's own scopes in Tracy, which egui marks for the `profiling` crate: `profiling` 1.0.18 takes tracy-client 0.18, and two Tracy clients don't link together | `profiling` takes tracy-client 0.19; deny.toml's wrappers for tracy-client then add it |
@@ -294,7 +280,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Generic types deriving `Reflect` or `Component` | A game needs one |
 | Drag speeds as hints; the Inspector picks them from a field's bounds and kind | A field drags too coarsely or too finely |
 | Paths resolved once and kept, for sets made again and again | A profile |
-| Picking an entity for a field, a parent or a child picked by clicking it; the Entities panel scrolling to an entity found or picked in the view, or to a root that an add or a remove moved to the end of another table, and so of the tree's roots | Phase 6's scene tree |
+| Picking an entity for a field, a parent or a child picked by clicking it; the Entities panel scrolling to an entity found or picked in the view, or to a root that an add or a remove moved to the end of another table, and so of the tree's roots | Someone sets an entity's field in the Inspector, or loses an entity in a long Entities panel |
 | Finding an entity by its name: the Find field takes an ID | A world names more entities than the Entities panel shows at once |
 | An icon on each of the Entities panel's rows saying what its entity is, from its components, such as a camera's, a sprite's or a mesh's: a row says its name alone | Names alone stop telling entities apart at a glance |
 | World transforms stored and propagated after the ticks, with change detection; drawing computes each child's from its ancestors, every frame, as the latest tick left them, for its z, and blended between ticks, to draw it | Bodies under a parent, or a profile showing the walks up the hierarchy |
@@ -307,25 +293,25 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Sets that jump: an Inspector set of a moving entity's transform, and its undo, glide there over a tick, as a drag does, rather than reset its interpolation, as an agent's set through the tool API does too | Someone wants a set of a moving entity to glide |
 | A flag for headless frames at a fraction of a tick of their own, for captures between ticks and for perf runs that measure blending, which headless frames, drawing their ticks, leave out; tests have them, through `App::headless_step` | A capture between ticks, or a change to blending that needs measuring headless |
 | Interpolation across rollback: a world restored in a tick draws where the tick left it, all of it, so rollback that restores every tick would draw at the tick rate; how rollback restores is decided with it | Rollback |
-| Reparenting that keeps where a child is in the world, by decomposing its matrix, which loses any shear; `set_parent` keeps its own transform | Phase 6's scene tree, or an agent attaching something where it stands |
+| Reparenting that keeps where a child is in the world, by decomposing its matrix, which loses any shear; `set_parent` keeps its own transform | Someone reparents in the editor's panels, or an agent attaches something where it stands |
 | Spawning a child into its table at once from code: `spawn`, then `set_parent`, moves it to another table; a load and a create operation spawn one there | A profile |
-| Children in an order that means something: reordering them, and saving their order; an undo puts a child back last | Phase 6's scene tree, or UI laid out by the hierarchy |
+| Children in an order that means something: reordering them, and saving their order; an undo puts a child back last | Someone orders children in the editor, or UI laid out by the hierarchy |
 | Each session's seed and count saved with the world and merged with it, so that an ID maps back to its session and when it was drawn, and a load refuses IDs no session drew | The tool API refusing an ID an agent made up |
 | An `EntityId` query term | The first system that reads IDs as it iterates, such as replication |
 | Errors carrying their entity, and a scene's line and column, as fields, not only in their message, which the tool API gives as its code and message alone | A tool reads an error's entity or place without parsing its message |
 | Drawing rows at one z in ID order for less. Every frame reads them in that order rather than their tables', about 0.9 ms of the swarm's 4.3 ms frame in release; a frame that changes rows or z's, or follows a restore, sorts them by ID again, about 2.5 ms more for 100,000; and 100,000 sprites each at a z of their own, as sorting by y gives them, take about 5 ms, for a group and an item each. Tables kept in ID order would make the reads a sweep, and a radix sort the sort quicker | A game's frames need the time |
-| Linked prefab instances, with overrides, nesting, apply and revert; a placement is a flattened copy, each ID mixed from its instance's and its own, which links will keep | Phase 6's editor, or a game editing a prefab its scenes hold many copies of |
+| Linked prefab instances, with overrides, nesting, apply and revert; a placement is a flattened copy, each ID mixed from its instance's and its own, which links will keep | A game editing a prefab its scenes hold many copies of |
 | Placing a prefab without parsing it again: `World::place_prefab` parses its text each time, which allocates | A game places prefabs as it runs, rather than as it loads |
 | A derive hint for `Component::base`, and opaque values in lists and options, which saving refuses, as does a set's undo (`reflect.opaque`) where the old value holds something opaque in a variant, an option or a list; a type with opaque fields implements `Component` by hand to load, as `Sprite` does | A game's component holds something opaque |
 | Names in scenes beyond ASCII identifiers, which saving refuses (`scene.bad_name`), and a project manifest's strings beyond printable ASCII, which reading refuses (`project.bad`) | A game names a type, a field or a folder so |
 | Loading a scene in place of some of a world's entities in one step, as the sandbox's grid reload does in three; a load refuses IDs the world has, and `World::replace_scene` replaces all of its entities; a scene file a game loaded through `Context::load_scene_file`, saved, applies as operations | Another game reloads part of its world from a file of its own |
 | A version in scene files, a file without one reading as the first | The first change to the format that old files can't be read by |
 | Comments in scene files, which a save drops | People annotate scenes |
-| A prompt before the editor's New, Open or Quit discards edits not saved | Someone loses work, or scenes through the API and the File menu |
-| The scene's file named in the editor, whose title bar's middle holds Play, and a list of recent scenes | Scenes through the API and the File menu, or someone loses track of which file Save writes |
+| A list of recent scenes in the editor's File menu | Someone keeps opening the same few scenes |
+| Opening a scene from the editor's Assets panel, by a double click or a drag onto the view, as the drag of the editor's own world did; the File menu's Open opens one | Someone opens scenes often |
 | Listing the Assets panel's folder off the main thread, as a thread watching it would: it's listed on the main thread each second it shows, which a folder of many thousands of files would hold up for milliseconds | A project's asset folder that big |
 | Keeping edits made while a copy plays, which go with it at Stop, as Unity's do, but a scene file's save; and showing that the game plays beyond the lit Play or Simulate, such as a tint round the view | Someone loses an edit made while the world runs, or edits a running world for the scene |
-| Play and Stop in recorded runs and lockstep sessions: kept as lines a replay brings the world as edited back at, and applied by both peers at one tick; `stop` answers `api.no_stop` there, and `--stopped` is refused with `--record`, `--host` and `--join` | Someone records, or plays a lockstep session, in the editor |
+| Play and Stop, and the open scene's New and Open, in recorded runs and lockstep sessions, and its Save in lockstep sessions: kept as lines a replay brings the world as edited back at, or starts history afresh at, and applied by both peers at one tick, a save's text with them; `stop` answers `api.no_stop` there, `scene` answers `api.no_scene`, and `--stopped` is refused with `--record`, `--host` and `--join` | Someone records, or plays a lockstep session, in the editor |
 | Bodies under a parent, moved in the world's space as their ancestors carry them, and colliders on a body's children; a body under a parent isn't moved (`physics.child_body`) | A game builds a body of parts, or nests one |
 | Colliders other than boxes and circles, such as capsules and polygons; joints; sensors; and contacts and queries, such as raycasts, for scripts | Each with its first game use |
 | A restitution threshold, the speed under which a contact doesn't bounce, as Box2D's and Hazel's: rapier has none | rapier gains one, or a game's bouncy bodies won't settle |
@@ -335,9 +321,9 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Physics' state in the world's hash, `--dump` and `World::difference`, which read entities alone, as they read no resource: a step that goes another way inside rapier shows in the bodies' transforms a tick later | A replay goes another way inside physics unseen for long |
 | Replaying a log into another world, which maps values' handles to IDs, as a recording's commands are; `set_field` and operations store a dead handle without complaint | Edits sent to another world, as a server's or a peer's |
 | A delete saying what refers to its entities from outside, or refusing; those references dangle until it's undone, and the world doesn't save as a scene in between, though snapshots keep them dead | Someone loses a scene's save to a reference a delete left dangling |
-| Undoing a create whose entity has children since that the create didn't make, such as game code gave it, by keeping them where they are; it's refused (`ecs.has_children`), and the log drops it | An agent attaches children to what another's create made, or Phase 6's editor |
+| Undoing a create whose entity has children since that the create didn't make, such as game code gave it, by keeping them where they are; it's refused (`ecs.has_children`), and the log drops it | An agent attaches children to what another's create made |
 | Layers holding what a restore inside a tick takes back, as rollback's: `Layer::restored` tells them of a world restored as a run starts from a snapshot, at a lockstep joiner's restore and at the API's `stop`, each between ticks, but nothing of one restored inside a tick; the sandbox doesn't snapshot | Something restores the world inside a tick, such as rollback |
-| Reparenting from the panels: dragging a row onto another, and taking a `Parent` away, as Remove Component would, making its entity a root; `Parent` is read only, so the Inspector offers neither | Phase 6's scene tree |
+| Reparenting from the panels: dragging a row onto another, and taking a `Parent` away, as Remove Component would, making its entity a root; `Parent` is read only, so the Inspector offers neither | Someone reparents in the editor's panels |
 | Picking several entities, to edit or delete them at once | Someone edits many entities alike |
 | A search field in Add Component's menu, which lists every type registered | A game registers more types than the menu shows at once |
 | A Delete key for the entity picked: keys reach egui even while the view has them, so it would delete as the world plays, its keys driving it, as Ctrl+Z undoes and Ctrl+D duplicates then; the Entity menu and a row's context menu delete | Keys go to the panel under the pointer, or the view takes them from egui |
@@ -391,7 +377,3 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 - Which license? Recommendation: MIT OR Apache-2.0, the Rust convention, chosen once; until
   then, `publish = false` keeps the crates off crates.io. Decide before anyone outside the
   project contributes.
-- Which entities does a scene file own, and so what do Save, Open and New do in a game whose attach
-  builds entities beside its scene, as Shards' players are? Recommendation: those its text held as
-  last applied, which the scene watch already tracks, and those made into it while it's the open
-  scene, so that Save writes none the game made itself. Decide before scenes through the API.
