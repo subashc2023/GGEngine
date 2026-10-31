@@ -1,15 +1,12 @@
-//! The grid the editor's view shows: lines a power of ten apart on one of the world's axis planes,
-//! and the plane's two axes in their colors, in either projection. `shaders/grid.slang` draws it on
-//! a unit square that [`quad`] lays in the plane each frame.
+//! The grid a view shows, as [`Context::draw_grid`](crate::Context::draw_grid) draws it: lines a
+//! power of ten apart on one of the world's axis planes, and the plane's two axes in their colors,
+//! in either projection. The renderer's grid shader draws it on a unit square that `quad` lays in
+//! the plane each frame.
 
-use std::mem::offset_of;
-use std::path::Path;
+use gg_core::math::{DVec2, DVec3, Mat4, Vec3, libm};
+use gg_renderer::{Grid, GridLines, Projection, Viewpoint, Viewport};
 
-use bytemuck::NoUninit;
-use gg_engine::math::{DVec2, DVec3, Mat4, Vec2, Vec3, libm};
-use gg_engine::{Blend, Context, Mesh, Projection, Shader, Viewpoint, Viewport};
-
-/// One of the world's axis planes, which the grid lies in: what the toolbar picks.
+/// One of the world's axis planes, which a grid lies in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Plane {
     /// The plane 2D games are in, which the Front and Back views face.
@@ -40,7 +37,8 @@ impl Plane {
     }
 }
 
-/// The colors of the world's axes, linear: X red, Y green and Z blue, as the gizmo shows them too.
+/// The colors of the world's axes, linear: X red, Y green and Z blue, as the grid draws them, and
+/// as a tool's handles and gizmo show them too.
 pub const RED: Vec3 = Vec3::new(0.8, 0.1, 0.1);
 pub const GREEN: Vec3 = Vec3::new(0.1, 0.7, 0.1);
 pub const BLUE: Vec3 = Vec3::new(0.1, 0.3, 0.9);
@@ -50,7 +48,7 @@ pub const BLUE: Vec3 = Vec3::new(0.1, 0.3, 0.9);
 const ALONG_AXIS: f64 = 1e-6;
 
 /// How squarely the camera must see some of the plane, as |n·v| for a direction v it's seen in,
-/// for any of it to show: where `shaders/grid.slang`'s fade toward grazing angles reaches 0.
+/// for any of it to show: where the grid shader's fade toward grazing angles reaches 0.
 const GRAZING: f64 = 0.002;
 
 /// How many times the camera's height above the plane the quad spans in perspective. Its nearest
@@ -63,60 +61,12 @@ const ACROSS: f64 = 1000.0;
 /// may: the projection keeps its height whatever the view's size, and widens with the view.
 const SLACK: f64 = 2.0;
 
-/// How far apart, in pixels, the finest lines that show are at least, as `shaders/grid.slang` has
-/// it.
+/// How far apart, in pixels, the finest lines that show are at least, as the grid shader has it.
 const FINEST: f64 = 8.0;
 
-/// The unit square, about its center: its center, then its corners counterclockwise.
-const SQUARE: [Vec2; 5] = [
-    Vec2::ZERO,
-    Vec2::new(-0.5, -0.5),
-    Vec2::new(0.5, -0.5),
-    Vec2::new(0.5, 0.5),
-    Vec2::new(-0.5, 0.5),
-];
-
-/// The square as four triangles from its center, where perspective puts the camera's foot: the
-/// lines are finest there, and the plane's coordinates are interpolated most precisely near a
-/// vertex.
-const FAN: [u32; 12] = [0, 1, 2, 0, 2, 3, 0, 3, 4, 0, 4, 1];
-
-/// The grid's mesh and shader, which draw it in a plane each frame.
-pub struct Grid {
-    mesh: Mesh<Vec2>,
-    shader: Shader<Vec2, Params>,
-}
-
-impl Grid {
-    /// Adds the grid's mesh and shader.
-    ///
-    /// # Panics
-    ///
-    /// If the shader doesn't compile, or breaks the shader contract, with what went wrong: without
-    /// it the editor's view has no grid.
-    pub fn new(cx: &mut Context) -> Self {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("shaders/grid.slang");
-        let shader = cx.add_shader("grid", path, Blend::Alpha);
-        let mesh = cx.add_mesh("grid", &SQUARE, &FAN);
-        Self {
-            mesh: mesh.expect("the square is four whole triangles"),
-            shader: shader.expect("the grid shader compiles"),
-        }
-    }
-
-    /// Draws the grid this frame as `camera` sees it in `view`, in the plane `pick` unless an
-    /// orthographic view along an axis faces another, as [`shown`] says: `camera` is the one the
-    /// frame renders with, and `view` where [`Context::view`] says the view is.
-    pub fn draw(&self, cx: &mut Context, camera: &Viewpoint, view: Viewport, pick: Plane) {
-        if let Some((transform, params)) = quad(camera, view, shown(camera, pick)) {
-            cx.draw(self.mesh, self.shader, transform, params);
-        }
-    }
-}
-
-/// The plane the grid shows while the toolbar picks `pick`: the one an orthographic view along an
-/// axis faces, XY for Front and Back, XZ for Top and Bottom and YZ for Right and Left; otherwise the
-/// pick.
+/// The plane a grid shows for `pick`, as `camera` sees it: the one an orthographic view along an
+/// axis faces, XY for Front and Back, XZ for Top and Bottom and YZ for Right and Left; otherwise
+/// the pick.
 pub fn shown(camera: &Viewpoint, pick: Plane) -> Plane {
     match camera.projection {
         Projection::Orthographic { .. } => facing(camera).unwrap_or(pick),
@@ -148,60 +98,13 @@ fn facing(camera: &Viewpoint) -> Option<Plane> {
     [Plane::XY, Plane::XZ, Plane::YZ].into_iter().find(along)
 }
 
-/// What the grid's shader gets with its quad, which `Grid` in `shaders/grid.slang` matches byte for
-/// byte.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, NoUninit)]
-struct Params {
-    /// The color of the plane's first axis: X in XY and XZ, Y in YZ.
-    first: Vec3,
-    /// Where the quad's center is along the first axis, modulo the coarsest spacing drawn, and
-    /// within half of it of 0.
-    first_center: f32,
-    /// The color of its second axis: Y in XY, Z in XZ and YZ.
-    second: Vec3,
-    /// Where the quad's center is along the second axis, as `first_center` is along the first.
-    second_center: f32,
-    /// In perspective, where the camera is from the quad's center; orthographically, the way it
-    /// faces.
-    eye: Vec3,
-    /// The power of ten that the coarsest spacing drawn is, which the center is taken modulo.
-    coarsest: f32,
-    /// The plane's normal.
-    normal: Vec3,
-    /// How the shader draws the lines.
-    lines: Lines,
-}
-
-// Each `Vec3` begins a row of 16 bytes, which a 4-byte field ends, so that `Params` is laid out
-// alike in C, as Slang lays out what an address points at, and in std430, which aligns a float3 to
-// 16 bytes.
-const _: () = {
-    assert!(offset_of!(Params, second) == 16);
-    assert!(offset_of!(Params, eye) == 32);
-    assert!(offset_of!(Params, normal) == 48);
-    assert!(size_of::<Params>() == 64);
-};
-
-/// How the grid's shader draws the lines, as the camera sees the plane.
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, NoUninit)]
-enum Lines {
-    /// Anti-aliased, through perspective from a point.
-    Perspective,
-    /// Anti-aliased, orthographically along a direction.
-    Orthographic,
-    /// Crisp, a pixel each, orthographically, for a camera that's [`square`].
-    Crisp,
-}
-
 /// Where the grid's quad goes, as the transform from the unit square to the world, and what its
 /// shader gets, for `camera` seeing `plane` in `view`: in perspective, a square around the camera's
 /// foot on the plane, `ACROSS` times its height above the plane across; orthographically, the
 /// parallelogram where the rays through the view's corners meet the plane, stretched across to
-/// `SLACK` times the view's width. `None` while the plane is too near edge-on for any of it to show
-/// through the fade toward grazing angles.
-fn quad(camera: &Viewpoint, view: Viewport, plane: Plane) -> Option<(Mat4, Params)> {
+/// `SLACK` times the view's width. `None` while the view has no area, or the plane is too near
+/// edge-on for any of it to show through the fade toward grazing angles.
+pub(crate) fn quad(camera: &Viewpoint, view: Viewport, plane: Plane) -> Option<(Mat4, Grid)> {
     if view.size.contains(&0) {
         return None;
     }
@@ -236,7 +139,12 @@ fn quad(camera: &Viewpoint, view: Viewport, plane: Plane) -> Option<(Mat4, Param
             // from the foot, and fade out there, before the quad's edge.
             let coarsest = level(above.abs() * least) + 4;
             let edges = [first * side, second * side];
-            (eye - normal * above, edges, coarsest, Lines::Perspective)
+            (
+                eye - normal * above,
+                edges,
+                coarsest,
+                GridLines::Perspective,
+            )
         }
         Projection::Orthographic { height: tall, .. } => {
             // How squarely the camera looks at the plane, n·F.
@@ -268,9 +176,9 @@ fn quad(camera: &Viewpoint, view: Viewport, plane: Plane) -> Option<(Mat4, Param
                 up * (2.0 + 2.0 * rounding / half),
             ];
             let lines = if square(camera, view) {
-                Lines::Crisp
+                GridLines::Crisp
             } else {
-                Lines::Orthographic
+                GridLines::Orthographic
             };
             (center, edges, coarsest, lines)
         }
@@ -282,14 +190,14 @@ fn quad(camera: &Viewpoint, view: Viewport, plane: Plane) -> Option<(Mat4, Param
     // Within half the modulus of 0, which every spacing drawn divides, so that the lines are where
     // they'd be from the plane's origin.
     let reduce = |along: f64| (along - modulus * (along / modulus).round()) as f32;
-    let params = Params {
+    let grid = Grid {
         first: first_color,
         first_center: reduce(exact.dot(first)),
         second: second_color,
         second_center: reduce(exact.dot(second)),
         eye: match lines {
-            Lines::Perspective => (eye - exact).as_vec3(),
-            Lines::Orthographic | Lines::Crisp => forward.as_vec3(),
+            GridLines::Perspective => (eye - exact).as_vec3(),
+            GridLines::Orthographic | GridLines::Crisp => forward.as_vec3(),
         },
         coarsest: coarsest as f32,
         normal: plane.normal(),
@@ -297,7 +205,7 @@ fn quad(camera: &Viewpoint, view: Viewport, plane: Plane) -> Option<(Mat4, Param
     };
     let [a, b] = edges.map(|edge| edge.as_vec3().extend(0.0));
     let transform = Mat4::from_cols(a, b, plane.normal().extend(0.0), center.extend(1.0));
-    Some((transform, params))
+    Some((transform, grid))
 }
 
 /// The power of ten whose lines are the finest that show where a coordinate changes by `footprint`
@@ -310,7 +218,7 @@ fn level(footprint: f64) -> i32 {
 mod tests {
     use std::f32::consts::{FRAC_PI_3, PI};
 
-    use gg_engine::math::{EulerRot, Quat, Vec4};
+    use gg_core::math::{EulerRot, Quat, Vec2, Vec4};
 
     use super::*;
 
@@ -319,6 +227,14 @@ mod tests {
         origin: [0, 0],
         size: [1600, 827],
     };
+
+    /// The unit square's corners, counterclockwise, as the grid's mesh has them.
+    const CORNERS: [Vec2; 4] = [
+        Vec2::new(-0.5, -0.5),
+        Vec2::new(0.5, -0.5),
+        Vec2::new(0.5, 0.5),
+        Vec2::new(-0.5, 0.5),
+    ];
 
     fn radians(degrees: f32) -> f32 {
         degrees * PI / 180.0
@@ -371,15 +287,10 @@ mod tests {
     fn corners(camera: &Viewpoint, transform: Mat4, wider: f32) -> [Vec2; 4] {
         let clip = camera.view_projection(1600.0 * wider / 827.0);
         let center = clip * transform.w_axis;
-        [1, 2, 3, 4].map(|corner| {
-            let at = center + clip * (transform * SQUARE[corner].extend(0.0).extend(0.0));
+        CORNERS.map(|corner| {
+            let at = center + clip * (transform * corner.extend(0.0).extend(0.0));
             Vec2::new(at.x, at.y) / at.w
         })
-    }
-
-    #[test]
-    fn the_grid_shader_compiles_and_keeps_to_the_contract() {
-        Grid::new(&mut Context::seeded(0));
     }
 
     #[test]
@@ -402,7 +313,7 @@ mod tests {
             // have in the frame the quad is drawn in.
             for wider in [1.0, 2.0] {
                 let corners = corners(&camera, transform, wider);
-                for (corner, at) in SQUARE[1..].iter().zip(corners) {
+                for (corner, at) in CORNERS.iter().zip(corners) {
                     // Each corner of the quad on the view's or past it, by less than a tenth of a
                     // pixel short of it at most, as rounding has it; Vulkan's Y points down.
                     let past = at * Vec2::new(corner.x.signum(), -corner.y.signum());
@@ -438,7 +349,7 @@ mod tests {
             let mut camera = camera(Vec3::new(1.0, 0.0, -2.0), turn, distance, true);
             camera.position.y += 1e-3;
             let height = camera.position.y;
-            let (transform, params) = quad(&camera, VIEW, Plane::XZ).expect("the plane shows");
+            let (transform, grid) = quad(&camera, VIEW, Plane::XZ).expect("the plane shows");
             let foot = Vec3::new(camera.position.x, 0.0, camera.position.z);
             let side = 1000.0 * height.abs();
             let expected = Mat4::from_cols(
@@ -451,11 +362,8 @@ mod tests {
             assert!(close, "{turn:?}: {transform}, not {expected}");
             // The camera straight up from the quad's center.
             let eye = Vec3::new(0.0, height, 0.0);
-            assert!(
-                params.eye.abs_diff_eq(eye, height.abs() * 1e-3),
-                "{params:?}"
-            );
-            assert_eq!(params.lines, Lines::Perspective);
+            assert!(grid.eye.abs_diff_eq(eye, height.abs() * 1e-3), "{grid:?}");
+            assert_eq!(grid.lines, GridLines::Perspective);
         }
     }
 
@@ -478,12 +386,12 @@ mod tests {
         assert!(quad(&level, VIEW, Plane::XZ).is_none());
         // Twelve times the least height that shows past its near plane, 0.0008 away.
         level.position.y = 2e-5;
-        let (transform, params) = quad(&level, VIEW, Plane::XZ).expect("the plane shows");
-        let finite = transform.is_finite() && params.eye.is_finite();
-        let centers = [params.first_center, params.second_center, params.coarsest];
+        let (transform, grid) = quad(&level, VIEW, Plane::XZ).expect("the plane shows");
+        let finite = transform.is_finite() && grid.eye.is_finite();
+        let centers = [grid.first_center, grid.second_center, grid.coarsest];
         assert!(
             finite && centers.iter().all(|at| at.is_finite()),
-            "{params:?}"
+            "{grid:?}"
         );
     }
 
@@ -495,8 +403,8 @@ mod tests {
             camera(far, [0.0; 3], 0.1, false),
             camera(far, [30.0, -20.0, 0.0], 0.1, true),
         ] {
-            let (transform, params) = quad(&camera, VIEW, Plane::XY).expect("the plane shows");
-            let center = Vec2::new(params.first_center, params.second_center);
+            let (transform, grid) = quad(&camera, VIEW, Plane::XY).expect("the plane shows");
+            let center = Vec2::new(grid.first_center, grid.second_center);
             for corner in [
                 [0.0, 0.0],
                 [1e-4, -3e-4],
@@ -514,11 +422,11 @@ mod tests {
                 let pixel = match camera.projection {
                     Projection::Orthographic { height, .. } => f64::from(height) / 827.0,
                     Projection::Perspective { .. } => {
-                        let above = f64::from(params.eye.z.abs());
+                        let above = f64::from(grid.eye.z.abs());
                         5e-4 * offset.truncate().as_dvec3().length().max(above)
                     }
                 };
-                for exponent in params.coarsest as i32 - 4..=params.coarsest as i32 {
+                for exponent in grid.coarsest as i32 - 4..=grid.coarsest as i32 {
                     let spacing = libm::pow(10.0, f64::from(exponent));
                     for (shader, world) in [(shader.x, world.x), (shader.y, world.y)] {
                         let gap = (f64::from(shader) - world).rem_euclid(spacing);
@@ -537,22 +445,25 @@ mod tests {
     fn lines_go_crisp_only_orthographically_with_a_square_basis() {
         let lines = |camera: &Viewpoint| {
             let quad = quad(camera, VIEW, shown(camera, Plane::XY));
-            quad.map(|(_, params)| params.lines)
+            quad.map(|(_, grid)| grid.lines)
         };
         let ortho = |turn| camera(Vec3::ZERO, turn, 8.0, false);
         // The start view, and Top, which faces XZ.
-        assert_eq!(lines(&start()), Some(Lines::Crisp));
-        assert_eq!(lines(&ortho([0.0, -90.0, 0.0])), Some(Lines::Crisp));
+        assert_eq!(lines(&start()), Some(GridLines::Crisp));
+        assert_eq!(lines(&ortho([0.0, -90.0, 0.0])), Some(GridLines::Crisp));
         // Rolled 20°, and Top yawed 30°, which turns the image about the pole: anti-aliased.
-        assert_eq!(lines(&ortho([0.0, 0.0, 20.0])), Some(Lines::Orthographic));
+        assert_eq!(
+            lines(&ortho([0.0, 0.0, 20.0])),
+            Some(GridLines::Orthographic)
+        );
         let yawed = ortho([30.0, -90.0, 0.0]);
         assert_eq!(shown(&yawed, Plane::XY), Plane::XZ);
         assert!(!square(&yawed, VIEW));
-        assert_eq!(lines(&yawed), Some(Lines::Orthographic));
+        assert_eq!(lines(&yawed), Some(GridLines::Orthographic));
         // Square in perspective too, but never crisp.
         let front = camera(Vec3::ZERO, [0.0; 3], 8.0, true);
         assert!(square(&front, VIEW));
-        assert_eq!(lines(&front), Some(Lines::Perspective));
+        assert_eq!(lines(&front), Some(GridLines::Perspective));
         // A roll that strays less than a quarter of a pixel across the view's width is square; a
         // little more isn't, nor in a view as tall as that's wide, whose lines stray furthest
         // down it.

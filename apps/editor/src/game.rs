@@ -2,15 +2,28 @@
 //! --embedded` in the project's directory, which builds it, patches it as its code changes and
 //! restarts it after any other change, and which ends, with the game, as the editor ends, closing
 //! its stdin. The game renders offscreen for the editor, which shows its view in the Viewport from
-//! memory the two share, as the tool API's `view` asks, and forwards it the input the view gets.
-//! The Entities and Inspector panels show the game's world, and edit it, through the API, as a
-//! remote [`Inspector`] does; the Logs panel shows `gg run`'s events, the build's errors among
-//! them, the game's events as it logs them, which the tool API's `logs` follows, and what the game
-//! and the build print; the title bar, how the run goes, with pause and step.
+//! memory the two share, as the tool API's `view` asks. The Entities and Inspector panels show the
+//! game's world, and edit it, through the API, as a remote [`Inspector`] does; the Logs panel shows
+//! `gg run`'s events, the build's errors among them, the game's events as it logs them, which the
+//! tool API's `logs` follows, and what the game and the build print; the title bar, how the run
+//! goes, with pause and step.
+//!
+//! The view's tools edit the game's entities as they do the editor's own world's. The view starts
+//! through the game's own camera, which gets the input the view gets, but what the editor's camera
+//! takes, which turns the view to it, the game letting go of what's held; through the editor's
+//! camera, the game gets none, and the handles show. A click in the view picks what the game's
+//! view shows there, as the API's `pick` finds it, which the panels show picked; the handles move,
+//! turn and scale it through the Inspector's link, each drag one edit of the editor's, which its
+//! Edit menu undoes; and the view's bottom left names what's under the cursor. The editor's camera,
+//! the outline round what's picked, the grid and the colliders' switch reach the game as parts of
+//! its look, as [`look`](crate::look) says: each as the user changes it, the editor taking the parts
+//! another client, such as an agent, sets.
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read};
+use std::mem;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -18,14 +31,21 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gg_api::view::Reader;
-use gg_api::{Client, Failure, InputEvent, LogEvents, Session, Status};
+use gg_api::{Client, Failure, InputEvent, LogEvents, Looked, Session, Status};
 use gg_engine::egui::{self, Color32, RichText, ScrollArea};
+use gg_engine::grid::Plane;
+use gg_engine::math::{Quat, Vec3};
 use gg_engine::{
-    App, Context, Docked, Event, Inspector, InspectorLink, Layer, MouseButton, PerfPanel, Scroll,
-    Ui,
+    App, Context, Docked, EntityId, Event, Inspector, InspectorLink, Layer, MouseButton, PerfPanel,
+    Projection, Scroll, Ui, Viewpoint, Viewport,
 };
 use serde_json::{Value, json};
 use tracing::{info, warn};
+
+use crate::handles::{Picked, Reading, Sight};
+use crate::look::{Looking, Part, Parts};
+use crate::overlay::Toolbar;
+use crate::view::{self, OUTLINE, OUTLINE_WIDTH, ViewTools};
 
 /// The most lines the Logs panel keeps, past which the oldest go.
 const LOGGED: usize = 5000;
@@ -69,7 +89,8 @@ pub(crate) fn app(dir: PathBuf) -> App {
 const CLIENT: &str = "editor";
 
 /// The editor's layer in a project: the `gg run` of its game, the connection to the game that
-/// serves, the memory its view is shared through, and what the Logs panel and the title bar show.
+/// serves, the memory its view is shared through, and what the Logs panel and the title bar show;
+/// and the view's tools, the picks they ask of the game and the look they keep with it.
 struct Game {
     dir: PathBuf,
     /// `gg run`, until it ends, with its stdin, which the editor closes as it ends.
@@ -80,8 +101,29 @@ struct Game {
     send: Option<Sender<Line>>,
     /// The connections to the game that serves, each on a thread of its own.
     talker: Option<Talker>,
-    /// The link to the Inspector, which shows the world of the game that serves.
-    inspector: InspectorLink,
+    /// The view's tools, whose link is the Inspector's, which shows the world of the game that
+    /// serves; each pick's ticket the next of the editor's count, `tickets`, and what one finds the
+    /// entity the game's view showed.
+    view: ViewTools<u64, Found>,
+    tickets: u64,
+    /// The ticket of the pick at the cursor that waits for its answer, if one does: one at a time.
+    hovering: Option<u64>,
+    /// The answers to picks that came back since the last update, each with its ticket.
+    answered: Vec<(u64, Option<Found>)>,
+    /// The game's look, as the editor keeps it.
+    looking: Looking,
+    /// What the editor's wanted parts of the look went by as the last update left them, and the
+    /// pick that update asked the Inspector for as the look's outline, if it asked for one:
+    /// `Some(None)` unpicks.
+    wants: Wants,
+    took_pick: Option<Option<EntityId>>,
+    /// Whether the game's camera drove the view as the game was last told: as the view turns to the
+    /// editor's camera, the game lets go of what's held, and as it turns back, it gets the cursor.
+    told: bool,
+    /// The last frame of the game's view the editor showed: its size, and what it was drawn from,
+    /// if that projects.
+    size: Option<[u32; 2]>,
+    seen: Option<Viewpoint>,
     /// The memory the game's view is shared through, and memory a `view` asked the game to share it
     /// through instead, until the game answers; and whether the game refused a `view`, after which
     /// the editor asks for none until another game serves.
@@ -97,6 +139,37 @@ struct Game {
     paused: bool,
     logs: VecDeque<Logged>,
     measures: Measures,
+}
+
+/// What a pick of the game's view found: an entity, by its ID, and what the view's bottom left
+/// calls it, its name, or without one, its ID.
+#[derive(Clone, Debug, PartialEq)]
+struct Found {
+    id: EntityId,
+    name: String,
+}
+
+impl Found {
+    /// What the game's answer to a pick, `picked`, found: none outside the view, nor where no entity
+    /// draws.
+    fn of(picked: gg_api::Picked) -> Option<Self> {
+        let id: EntityId = picked.id?.parse().ok()?;
+        let name = picked.name.unwrap_or_else(|| id.to_string());
+        Some(Self { id, name })
+    }
+}
+
+/// What the parts of the look the editor wants go by, which between updates only the user changes:
+/// whether the game's camera drives the view, what the editor's camera sees from, what the
+/// Inspector has picked, and the toolbar's grid, its plane and the colliders' switch.
+#[derive(Clone, Copy, PartialEq)]
+struct Wants {
+    through: bool,
+    viewpoint: Viewpoint,
+    picked: Option<EntityId>,
+    grid: bool,
+    plane: Plane,
+    colliders: bool,
 }
 
 /// A line `gg run` printed: on stdout, its events; on stderr, its errors, and what the game and the
@@ -149,15 +222,33 @@ enum Level {
 }
 
 impl Game {
+    /// The layer, through the game's camera at first, whose tools pick and edit through
+    /// `inspector`, the Inspector's link.
     fn new(dir: PathBuf, inspector: InspectorLink) -> Self {
         let (send, lines) = mpsc::channel();
+        let toolbar = Toolbar {
+            world_camera: true,
+            game: true,
+            ..Toolbar::default()
+        };
+        let view = ViewTools::new(inspector, toolbar);
+        let wants = wants(&view);
         Self {
             dir,
             run: None,
             lines,
             send: Some(send),
             talker: None,
-            inspector,
+            view,
+            tickets: 0,
+            hovering: None,
+            answered: Vec::new(),
+            looking: Looking::new(CLIENT),
+            wants,
+            took_pick: None,
+            told: true,
+            size: None,
+            seen: None,
             reader: None,
             asked: None,
             refused: false,
@@ -321,13 +412,17 @@ impl Game {
         }
     }
 
-    /// Lets go of the connection to the game, which has gone, and of the input it didn't get; and
-    /// the Inspector, of its world.
+    /// Lets go of the connection to the game, which has gone, of the input it didn't get, of the
+    /// picks it didn't answer and of its look; and the Inspector, of its world.
     fn disconnect(&mut self) {
         self.talker = None;
-        self.inspector.reach(None);
+        self.view.link.reach(None);
         self.input.clear();
         self.inputting = false;
+        self.view.asked = None;
+        self.hovering = None;
+        self.answered.clear();
+        self.looking.reset();
     }
 
     /// Connects to the game that `serving`, `gg run`'s event, says serves, in place of the one
@@ -345,7 +440,7 @@ impl Game {
             return;
         };
         self.disconnect();
-        self.inspector.reach(Some(session.clone()));
+        self.view.link.reach(Some(session.clone()));
         self.talker = Some(Talker::connect(session));
         // The game before's memory, which this one makes anew; the view shows its last frame
         // until this one's first.
@@ -357,8 +452,8 @@ impl Game {
     }
 
     /// Takes the game's answers since: to `view`, which puts the memory it asked for in place of
-    /// the one before; to `pause`, `resume` and `step`, which say whether it's paused; and errors,
-    /// which it logs.
+    /// the one before; to `pause`, `resume` and `step`, which say whether it's paused; to `look`,
+    /// what the editor takes of which it takes; and errors, which it logs.
     fn take_answers(&mut self) {
         let Some(talker) = &self.talker else {
             return;
@@ -380,11 +475,27 @@ impl Game {
                         self.paused = status.paused;
                     }
                 }
+                ("look", Ok(looked)) => match serde_json::from_value::<Looked>(looked) {
+                    Ok(looked) => {
+                        let taken = self.looking.read(looked);
+                        self.take_look(taken);
+                    }
+                    Err(error) => {
+                        self.looking.failed();
+                        self.log(
+                            Level::Error,
+                            format!("`look`: an answer that isn't one: {error}"),
+                        );
+                    }
+                },
                 (_, Ok(_)) => {}
                 (method, Err(failure)) => {
                     if method == "view" {
                         self.asked = None;
                         self.refused = true;
+                    }
+                    if method == "look" {
+                        self.looking.failed();
                     }
                     let Failure { code, message } = failure;
                     self.log(Level::Error, format!("`{method}`: [{code}] {message}"));
@@ -427,6 +538,303 @@ impl Game {
             }
         }
     }
+
+    /// Takes the parts of the look that `taken` sets, as another client set them: a viewpoint the
+    /// editor's camera adopts, driving the view, and `null` turns the view back to the game's
+    /// camera, either turn taking the grid with it, as the user's does, unless another client set
+    /// the grid; an outline's entity the Inspector picks, and `null` unpicks; and the grid and the
+    /// colliders set the toolbar's switches, and the grid its plane.
+    fn take_look(&mut self, taken: gg_api::Look) {
+        let toolbar = &mut self.view.toolbar;
+        let through = toolbar.world_camera;
+        match taken.viewpoint {
+            Some(Some(viewpoint)) => {
+                self.view.camera.adopt(&engine_viewpoint(&viewpoint));
+                toolbar.world_camera = false;
+            }
+            Some(None) => toolbar.world_camera = true,
+            None => {}
+        }
+        if toolbar.world_camera != through {
+            self.looking.follow(Part::Grid);
+        }
+        if let Some(outline) = taken.outline {
+            let id = outline.and_then(|outline| outline.id.parse().ok());
+            self.view.link.pick(id);
+            self.took_pick = Some(id);
+        }
+        if let Some(grid) = taken.grid {
+            toolbar.grid = grid.is_some();
+            if let Some(plane) = grid {
+                toolbar.plane = engine_plane(plane);
+            }
+        }
+        if let Some(colliders) = taken.colliders {
+            toolbar.colliders = colliders == Some(true);
+        }
+    }
+
+    /// Takes the answers to picks that came back since: the latest click's, which the Inspector
+    /// picks, and all of them for what's under the cursor, which [`ui`](Layer::ui) reads; and
+    /// failures, which it logs.
+    fn take_picks(&mut self) {
+        self.answered.clear();
+        let Some(talker) = &self.talker else {
+            return;
+        };
+        let answers: Vec<_> = talker.picked.try_iter().collect();
+        for (ticket, answer) in answers {
+            if self.hovering == Some(ticket) {
+                self.hovering = None;
+            }
+            match answer {
+                Ok(picked) => self.answered.push((ticket, Found::of(picked))),
+                Err(Failure { code, message }) => {
+                    if self.view.asked == Some(ticket) {
+                        self.view.asked = None;
+                    }
+                    self.log(Level::Error, format!("`pick`: [{code}] {message}"));
+                    // As a request's connection that broke or gave up on an answer.
+                    if matches!(code.as_str(), "api.closed" | "api.timeout") {
+                        self.disconnect();
+                        return;
+                    }
+                }
+            }
+        }
+        if let Some(found) = view::answer(&mut self.view.asked, &self.answered) {
+            self.view.link.pick(found.map(|found| found.id));
+            self.took_pick = None;
+        }
+    }
+
+    /// Shows the game's latest frame, if one came since: what it was drawn from is what the handles
+    /// are hit against, while it projects, and the editor's camera adopts it while the game's
+    /// drives the view; and the look it drew with may have changed since the editor last read it.
+    fn take_frame(&mut self, cx: &mut Context) {
+        let Some(reader) = &mut self.reader else {
+            return;
+        };
+        let Some(frame) = reader.take() else {
+            return;
+        };
+        let copying = Instant::now();
+        cx.show_pixels(frame.size, |pixels| reader.read(pixels));
+        self.measures
+            .add(frame.started, copying.elapsed(), frame.size);
+        let seen = engine_viewpoint(&frame.viewpoint);
+        self.seen = seen.projection.projects().then_some(seen);
+        self.size = Some(frame.size);
+        if self.view.toolbar.world_camera
+            && let Some(seen) = self.seen
+        {
+            self.view.camera.adopt(&seen);
+        }
+        self.looking.drew(frame.look);
+    }
+
+    /// Where the view shows the game's last frame, in the main window's pixels, with the view at
+    /// `view`: from its top left, as large as the frame. What the editor's camera and the handles
+    /// read as the view.
+    fn screen(&self, view: Option<Viewport>) -> Option<Viewport> {
+        let (view, size) = view.zip(self.size)?;
+        Some(Viewport {
+            origin: view.origin,
+            size,
+        })
+    }
+
+    /// Tells the look which of its parts the user changed since the last update, as what the parts
+    /// the editor wants go by changed since, to `now`: the viewpoint, as the editor's camera moved
+    /// while it drives the view, by its input, an ease or flying, or the view turned, to the
+    /// editor's camera or back to the game's; the outline, as the pick changed, but to what the
+    /// Inspector made of the pick the look's outline asked for, its entity, or none for an ID a
+    /// read of the game has found gone; the grid, as the view turned, or the toolbar's grid or its
+    /// plane changed; and the colliders, as their switch did.
+    fn changes(&mut self, now: Wants) {
+        let was = self.wants;
+        let turned = now.through != was.through;
+        if turned || (!now.through && now.viewpoint != was.viewpoint) {
+            self.looking.change(Part::Viewpoint);
+        }
+        // A pick of the user's in the Inspector's pass that made the outline's is theirs; an
+        // unpick of theirs there passes for the outline's.
+        let took = self.took_pick.take();
+        let taken = took.is_some_and(|asked| now.picked == asked || now.picked.is_none());
+        if now.picked != was.picked && !taken {
+            self.looking.change(Part::Outline);
+        }
+        if turned || now.grid != was.grid || now.plane != was.plane {
+            self.looking.change(Part::Grid);
+        }
+        if now.colliders != was.colliders {
+            self.looking.change(Part::Colliders);
+        }
+    }
+
+    /// What the editor wants of the game's look, with the window at `scale` pixels a point: the
+    /// editor's camera's viewpoint while it drives the view; the Inspector's pick outlined; the
+    /// toolbar's grid, while it's on and the editor's camera drives; and the colliders' outlines
+    /// while their switch is on, or else whether the game shows them.
+    fn wanted(&self, scale: f32) -> Parts {
+        let ViewTools {
+            camera,
+            toolbar,
+            link,
+            ..
+        } = &self.view;
+        let driving = !toolbar.world_camera;
+        let outline = |id: EntityId| gg_api::Outline {
+            id: id.to_string(),
+            color: OUTLINE.to_array(),
+            width: OUTLINE_WIDTH * scale,
+        };
+        Parts {
+            viewpoint: driving.then(|| api_viewpoint(&camera.viewpoint())),
+            outline: link.picked().map(outline),
+            grid: (driving && toolbar.grid).then(|| api_plane(toolbar.plane)),
+            colliders: toolbar.colliders.then_some(true),
+        }
+    }
+
+    /// Does what `event` does, which the view got, as the editor reads the window, `reading`, with
+    /// the view at `view`: what the view's tools don't take goes to the game while its camera drives
+    /// the view, in the view's pixels, but what the editor's camera takes, which turns the view to
+    /// it, and nothing does through the editor's camera; and a press off the handles asks the game
+    /// for a pick. `Break` for what the tools took.
+    fn route(
+        &mut self,
+        event: &Event<'_>,
+        reading: &Reading,
+        view: Option<Viewport>,
+    ) -> ControlFlow<()> {
+        let origin = view.map_or([0, 0], |view| view.origin);
+        let through = self.view.toolbar.world_camera;
+        let handled = self.view.take(event, reading, picked(&self.view.link));
+        if through
+            && handled.is_continue()
+            && self.talker.is_some()
+            && let Some(input) = forwarded(event, origin)
+        {
+            self.input.push(input);
+        }
+        if let Some(at) = self.view.picking.take() {
+            self.view.asked = self.ask_pick(at, origin);
+        }
+        self.tell(reading.cursor, view);
+        handled
+    }
+
+    /// Asks the game for the entity its view shows at `at`, in the main window's pixels, with the
+    /// view's top left at `origin`; returns its ticket, while a game serves.
+    fn ask_pick(&mut self, at: [f64; 2], origin: [u32; 2]) -> Option<u64> {
+        let talker = self.talker.as_ref()?;
+        let ticket = self.tickets;
+        self.tickets += 1;
+        talker.pick(ticket, in_view(at, origin));
+        Some(ticket)
+    }
+
+    /// Tells the game the view turned, if it did since it was last told: to the editor's camera, the
+    /// game loses the focus, letting go of what's held, as the input stops coming; back to the
+    /// game's, it gets the cursor, at `cursor`, in the main window's pixels, if it's over the view,
+    /// at `view`.
+    fn tell(&mut self, cursor: Option<[f64; 2]>, view: Option<Viewport>) {
+        let through = self.view.toolbar.world_camera;
+        if through == mem::replace(&mut self.told, through) || self.talker.is_none() {
+            return;
+        }
+        if !through {
+            self.input.push(InputEvent::Focused(false));
+            return;
+        }
+        if let (Some(at), Some(view)) = (cursor, view) {
+            let [x, y] = in_view(at, view.origin);
+            let [width, height] = view.size.map(f64::from);
+            if (0.0..width).contains(&x) && (0.0..height).contains(&y) {
+                self.input.push(InputEvent::Cursor([x, y]));
+            }
+        }
+    }
+}
+
+/// What the parts of the look the editor wants go by, as `view`, the view's tools, has them.
+fn wants<T, F>(view: &ViewTools<T, F>) -> Wants {
+    Wants {
+        through: view.toolbar.world_camera,
+        viewpoint: view.camera.viewpoint(),
+        picked: view.link.picked(),
+        grid: view.toolbar.grid,
+        plane: view.toolbar.plane,
+        colliders: view.toolbar.colliders,
+    }
+}
+
+/// What the Inspector has picked, as the handles see it, as `link`, its link, places it in the
+/// game's world.
+fn picked(link: &InspectorLink) -> Option<Picked> {
+    let placed = link.placed()?;
+    Some(Picked {
+        entity: placed.id,
+        serial: placed.generation,
+        local: placed.local,
+        parent: placed.space,
+        stepped: link.stepped(),
+        waiting: link.waiting(),
+    })
+}
+
+/// `at`, in the main window's pixels, in the game's view's, whose top left is at `origin`.
+fn in_view(at: [f64; 2], origin: [u32; 2]) -> [f64; 2] {
+    [at[0] - f64::from(origin[0]), at[1] - f64::from(origin[1])]
+}
+
+/// `viewpoint` as the tool API gives one.
+fn api_viewpoint(viewpoint: &Viewpoint) -> gg_api::Viewpoint {
+    let projection = match viewpoint.projection {
+        Projection::Orthographic { height, near, far } => {
+            gg_api::Projection::Orthographic { height, near, far }
+        }
+        Projection::Perspective { fov, near } => gg_api::Projection::Perspective { fov, near },
+    };
+    gg_api::Viewpoint {
+        position: viewpoint.position.to_array(),
+        rotation: viewpoint.rotation.to_array(),
+        projection,
+    }
+}
+
+/// The viewpoint the tool API's `given` is.
+fn engine_viewpoint(given: &gg_api::Viewpoint) -> Viewpoint {
+    let projection = match given.projection {
+        gg_api::Projection::Orthographic { height, near, far } => {
+            Projection::Orthographic { height, near, far }
+        }
+        gg_api::Projection::Perspective { fov, near } => Projection::Perspective { fov, near },
+    };
+    Viewpoint {
+        position: Vec3::from_array(given.position),
+        rotation: Quat::from_array(given.rotation),
+        projection,
+    }
+}
+
+/// `plane` as the tool API names it.
+fn api_plane(plane: Plane) -> gg_api::Plane {
+    match plane {
+        Plane::XY => gg_api::Plane::Xy,
+        Plane::XZ => gg_api::Plane::Xz,
+        Plane::YZ => gg_api::Plane::Yz,
+    }
+}
+
+/// The plane the tool API's `given` names.
+fn engine_plane(given: gg_api::Plane) -> Plane {
+    match given {
+        gg_api::Plane::Xy => Plane::XY,
+        gg_api::Plane::Xz => Plane::XZ,
+        gg_api::Plane::Yz => Plane::YZ,
+    }
 }
 
 impl Layer for Game {
@@ -434,44 +842,51 @@ impl Layer for Game {
         self.start();
     }
 
-    fn update(&mut self, cx: &mut Context, _: Duration) {
+    fn update(&mut self, cx: &mut Context, dt: Duration) {
         // Before `gg run`'s lines, which may say the game has gone, letting go of what it logged.
         self.take_logged();
         self.take_lines();
+        // What the user changed since the last update, before what the game answered changes it,
+        // and before the camera settles, which changes nothing the view shows.
+        self.view.camera.update(dt);
+        self.changes(wants(&self.view));
+        self.view.settle();
         self.take_answers();
+        self.take_picks();
         if let Some(view) = cx.view() {
             self.fit(view.size);
         }
-        if let Some(reader) = &mut self.reader
-            && let Some(frame) = reader.take()
-        {
-            let copying = Instant::now();
-            cx.show_pixels(frame.size, |pixels| reader.read(pixels));
-            self.measures
-                .add(frame.started, copying.elapsed(), frame.size);
+        self.take_frame(cx);
+        let driving = !self.view.toolbar.world_camera;
+        self.view.shown = self.seen.filter(|_| driving);
+        let picked = picked(&self.view.link);
+        self.view.hold(picked.as_ref());
+        self.tell(cx.input().cursor(), cx.view());
+        self.wants = wants(&self.view);
+        if let Some(talker) = &self.talker {
+            let wanted = self.wanted(cx.scale() as f32);
+            if let Some(look) = self.looking.ask(&wanted) {
+                talker.ask("look", json!(look));
+            }
         }
         if let Some(talker) = &self.talker
             && !self.input.is_empty()
             && !self.inputting
         {
-            let events = std::mem::take(&mut self.input);
+            let events = mem::take(&mut self.input);
             talker.ask("input", json!({ "events": events }));
             self.inputting = true;
         }
     }
 
-    /// Keeps what the view gets for the game, while one serves.
-    fn event(&mut self, cx: &mut Context, event: &Event<'_>) -> std::ops::ControlFlow<()> {
-        let origin = cx.view().map_or([0, 0], |view| view.origin);
-        if self.talker.is_some()
-            && let Some(input) = forwarded(event, origin)
-        {
-            self.input.push(input);
-        }
-        std::ops::ControlFlow::Continue(())
+    /// Has the view's tools see what the view gets, the game too while its camera drives the view,
+    /// as [`route`](Game::route) says.
+    fn event(&mut self, cx: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
+        let reading = view::reading(cx, self.screen(cx.view()));
+        self.route(event, &reading, cx.view())
     }
 
-    fn ui(&mut self, _: &mut Context, ui: &mut Ui<'_>) {
+    fn ui(&mut self, cx: &mut Context, ui: &mut Ui<'_>) {
         let talker = self.talker.as_ref();
         let paused = self.paused;
         ui.title_bar(|ui| {
@@ -521,6 +936,33 @@ impl Layer for Game {
                     }
                 });
         });
+        // What the game's view shows under the cursor, while the cursor's over it: a pick at the
+        // cursor as each comes back, and what the latest answer found, painted over the handles.
+        let origin = cx.view().map_or([0, 0], |view| view.origin);
+        let over = ui.view().filter(|view| view.hovered());
+        let at = over.and(cx.input().cursor());
+        self.view.hover.see(at.is_some(), &self.answered);
+        if let Some(at) = at
+            && self.hovering.is_none()
+        {
+            self.hovering = self.ask_pick(at, origin);
+            self.view.hover.ask(self.hovering);
+        }
+        let name = self.view.hover.under().map(|found| found.name);
+        // Where the frame shows as this frame renders the view.
+        let pixels = (ui.viewport().zip(self.size)).map(|(view, size)| Viewport {
+            origin: view.origin,
+            size,
+        });
+        let scale = cx.scale() as f32;
+        let sight = (self.view.shown.zip(pixels))
+            .and_then(|(viewpoint, pixels)| Sight::new(viewpoint, pixels, scale));
+        let picked = picked(&self.view.link);
+        let alt = view::alt_down(cx.input());
+        self.view.paint(ui, sight, alt, picked.as_ref(), name);
+        self.view.overlay(ui, true, self.screen(cx.view()));
+        // As the toolbar's switch went.
+        self.tell(cx.input().cursor(), cx.view());
     }
 
     /// Closes `gg run`'s stdin, which ends the game and the run, and, while a game serves, waits for
@@ -658,9 +1100,7 @@ fn forwarded(event: &Event<'_>, origin: [u32; 2]) -> Option<InputEvent> {
             repeat,
         },
         Event::Text(text) => InputEvent::Text(text.to_owned()),
-        Event::CursorMoved { x, y } => {
-            InputEvent::Cursor([x - f64::from(origin[0]), y - f64::from(origin[1])])
-        }
+        Event::CursorMoved { x, y } => InputEvent::Cursor(in_view([x, y], origin)),
         Event::CursorEntered => InputEvent::CursorEntered,
         Event::CursorLeft => InputEvent::CursorLeft,
         Event::MouseButton { button, pressed } => InputEvent::Button {
@@ -684,14 +1124,38 @@ fn forwarded(event: &Event<'_>, origin: [u32; 2]) -> Option<InputEvent> {
     Some(event)
 }
 
+/// Asks the game `session` names, on a connection of its own, as the editor, for the entity its
+/// view shows at each pixel `asks` gives, with its ticket, in turn, sending `send` each answer with
+/// the ticket, or why there's none, until the editor lets go of the game, `asks`' sender dropping.
+fn pick(
+    session: &Session,
+    asks: Receiver<(u64, [f64; 2])>,
+    send: &Sender<(u64, Result<gg_api::Picked, Failure>)>,
+) {
+    let mut connected = Client::connect(session, CLIENT, CONNECT)
+        .and_then(|mut client| client.set_timeout(Some(ANSWER)).map(|()| client));
+    for (ticket, at) in asks {
+        let answer = match &mut connected {
+            Ok(client) => client.call_as("pick", gg_api::Pick { at }),
+            Err(failure) => Err(failure.clone()),
+        };
+        if send.send((ticket, answer)).is_err() {
+            return;
+        }
+    }
+}
+
 /// Connections to the game, each on a thread of its own, so that no frame waits for the game's
-/// answer: one that requests go to in order, their answers coming back in order; and one that
-/// follows the game's log, as [`follow`] does, whose events come back as they're read, each
-/// read's together.
+/// answer: one that requests go to in order, their answers coming back in order; one that follows
+/// the game's log, as [`follow`] does, whose events come back as they're read, each read's
+/// together; and one that picks go to, as [`pick`] does, each of which waits for a frame to read
+/// it, their answers coming back in order, with their tickets.
 struct Talker {
     asks: Sender<(String, Value)>,
     answers: Receiver<(String, Result<Value, Failure>)>,
     logged: Receiver<Vec<Value>>,
+    picks: Sender<(u64, [f64; 2])>,
+    picked: Receiver<(u64, Result<gg_api::Picked, Failure>)>,
 }
 
 impl Talker {
@@ -700,8 +1164,12 @@ impl Talker {
         let (asks, asked) = mpsc::channel::<(String, Value)>();
         let (answer, answers) = mpsc::channel();
         let (log, logged) = mpsc::channel();
+        let (picks, picking) = mpsc::channel();
+        let (found, picked) = mpsc::channel();
         let followed = session.clone();
         thread::spawn(move || follow(&followed, &log));
+        let picker = session.clone();
+        thread::spawn(move || pick(&picker, picking, &found));
         thread::spawn(move || {
             let connected = Client::connect(&session, CLIENT, CONNECT)
                 .and_then(|mut client| client.set_timeout(Some(ANSWER)).map(|()| client));
@@ -725,12 +1193,20 @@ impl Talker {
             asks,
             answers,
             logged,
+            picks,
+            picked,
         }
     }
 
     /// Sends request `method` with `params`, whose answer comes back in `answers`.
     fn ask(&self, method: &str, params: Value) {
         let _ = self.asks.send((method.to_owned(), params));
+    }
+
+    /// Asks for the entity the game's view shows at `at`, in its pixels from its top left, whose
+    /// answer comes back in `picked` with `ticket`.
+    fn pick(&self, ticket: u64, at: [f64; 2]) {
+        let _ = self.picks.send((ticket, at));
     }
 }
 
@@ -804,9 +1280,393 @@ impl Measures {
 
 #[cfg(test)]
 mod tests {
+    use gg_api::view::Writer;
+    use gg_api::{By, Look, Outline};
     use gg_engine::Key;
+    use gg_engine::math::Vec2;
 
     use super::*;
+    use crate::camera::Tool;
+    use crate::tests::{VIEW, reading};
+
+    /// The game's ends of the connections of a layer that [`serving`] gives: the requests the layer
+    /// sends, where their answers go back, and the picks it asks for.
+    struct Ends {
+        asked: Receiver<(String, Value)>,
+        answer: Sender<(String, Result<Value, Failure>)>,
+        picks: Receiver<(u64, [f64; 2])>,
+    }
+
+    /// The layer with a game serving, and the game's ends of its connections.
+    fn serving() -> (Game, Ends) {
+        let mut game = Game::new(PathBuf::from("."), Inspector::remote(CLIENT).link());
+        let (asks, asked) = mpsc::channel();
+        let (answer, answers) = mpsc::channel();
+        let (_, logged) = mpsc::channel();
+        let (picks, picking) = mpsc::channel();
+        let (_, picked) = mpsc::channel();
+        game.talker = Some(Talker {
+            asks,
+            answers,
+            logged,
+            picks,
+            picked,
+        });
+        let ends = Ends {
+            asked,
+            answer,
+            picks: picking,
+        };
+        (game, ends)
+    }
+
+    /// The looks the layer whose ends are `ends` asked the game for since.
+    fn looks(ends: &Ends) -> Vec<Look> {
+        let asked = ends.asked.try_iter().filter(|(method, _)| method == "look");
+        let looks = asked.map(|(_, look)| serde_json::from_value(look).expect("a look"));
+        looks.collect()
+    }
+
+    /// Through the game's camera, what the view gets goes to the game, in the view's pixels, and a
+    /// left press off the handles asks for a pick too; but what the editor's camera takes doesn't,
+    /// which turns the view to it, the game losing the focus. Through the editor's camera, nothing
+    /// goes, and Q, W, E and R pick tools; turning back to the game's camera gives the game the
+    /// cursor, if it's over the view.
+    #[test]
+    fn the_views_input_goes_to_the_game_through_its_camera_alone() {
+        let (mut game, ends) = serving();
+        // [`VIEW`]'s top left is at (100, 50).
+        let (at, in_game) = ([300.0, 200.0], [200.0, 150.0]);
+        let moved = Event::CursorMoved { x: at[0], y: at[1] };
+        let w = Event::Key {
+            key: Key::KeyW,
+            pressed: true,
+            repeat: false,
+        };
+        let press = |button, pressed| Event::MouseButton { button, pressed };
+        let left = [
+            press(MouseButton::Left, true),
+            press(MouseButton::Left, false),
+        ];
+        for event in [moved, w, left[0], left[1]] {
+            let routed = game.route(&event, &reading(at), Some(VIEW));
+            assert_eq!(routed, ControlFlow::Continue(()), "{event:?}");
+        }
+        let button = |pressed| InputEvent::Button {
+            button: gg_api::Button::Left,
+            pressed,
+        };
+        let w_down = InputEvent::Key {
+            key: "KeyW".to_owned(),
+            pressed: true,
+            repeat: false,
+        };
+        let expected = [
+            InputEvent::Cursor(in_game),
+            w_down,
+            button(true),
+            button(false),
+        ];
+        assert_eq!(game.input, expected);
+        assert_eq!(ends.picks.try_iter().collect::<Vec<_>>(), [(0, in_game)]);
+        assert_eq!(game.view.asked, Some(0));
+        assert_eq!(game.view.toolbar.tool, Tool::Select, "the game's W");
+        // What the editor's camera takes: a press of its buttons, Alt with the left, the left
+        // under Pan or Orbit, the wheel and Home.
+        let home = Event::Key {
+            key: Key::Home,
+            pressed: true,
+            repeat: false,
+        };
+        let wheel = Event::Scroll(Scroll::Lines { x: 0.0, y: 1.0 });
+        let mut alt = reading(at);
+        alt.screen.alt = true;
+        for (event, read, tool) in [
+            (press(MouseButton::Middle, true), reading(at), Tool::Select),
+            (press(MouseButton::Right, true), reading(at), Tool::Select),
+            (left[0], alt, Tool::Select),
+            (left[0], reading(at), Tool::Pan),
+            (left[0], reading(at), Tool::Orbit),
+            (wheel, reading(at), Tool::Select),
+            (home, reading(at), Tool::Select),
+        ] {
+            let (mut game, _) = serving();
+            game.view.toolbar.tool = tool;
+            let routed = game.route(&event, &read, Some(VIEW));
+            assert_eq!(routed, ControlFlow::Break(()), "{event:?} with {tool:?}");
+            assert!(!game.view.toolbar.world_camera, "{event:?} with {tool:?}");
+            assert_eq!(game.input, [InputEvent::Focused(false)], "{event:?}");
+        }
+        // Through the editor's camera, nothing goes, but a press off the handles asks for a pick.
+        game.view.toolbar.world_camera = false;
+        game.tell(Some(at), Some(VIEW));
+        game.input.clear();
+        for event in [moved, w, left[0], left[1], wheel] {
+            let _ = game.route(&event, &reading(at), Some(VIEW));
+        }
+        assert_eq!(game.input, []);
+        assert_eq!(game.view.toolbar.tool, Tool::Move, "the editor's W");
+        assert_eq!(ends.picks.try_iter().collect::<Vec<_>>(), [(1, in_game)]);
+        // Back to the game's camera, with the toolbar's switch, for which a test sets the field
+        // and tells the game, since it can't run `ui`: the cursor over the view, and off it.
+        for (cursor, told) in [
+            (at, vec![InputEvent::Cursor(in_game)]),
+            ([20.0, 20.0], vec![]),
+        ] {
+            game.view.toolbar.world_camera = false;
+            game.tell(Some(cursor), Some(VIEW));
+            game.input.clear();
+            game.view.toolbar.world_camera = true;
+            game.tell(Some(cursor), Some(VIEW));
+            assert_eq!(game.input, told, "at {cursor:?}");
+        }
+    }
+
+    /// A part of the look goes to the game only as the user changes it: not as the editor's camera
+    /// adopts the frames' viewpoints through the game's camera, nor as it takes another client's
+    /// viewpoint while it drives, nor as it settles after; nor as the Inspector makes the pick
+    /// another client's outline asks for. A wheel turns the view to the editor's camera, from where
+    /// the frames left it, whose viewpoint goes, with the grid; the switch back to the game's camera
+    /// gives both back; and a pick of the user's goes as the outline, though the Inspector makes it
+    /// in the pass that makes the outline's.
+    #[test]
+    fn the_look_goes_to_the_game_as_the_user_changes_it() {
+        let (mut game, ends) = serving();
+        let reader = Reader::create(4, 4).expect("memory");
+        let mut writer = Writer::open(reader.name()).expect("opened");
+        game.reader = Some(reader);
+        // A viewpoint at `position`, turned as the editor's camera starts, 4 units tall: its pivot
+        // off the grid's plane, onto which the camera settles it.
+        let orthographic = |position| gg_api::Viewpoint {
+            position,
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            projection: gg_api::Projection::Orthographic {
+                height: 4.0,
+                near: -40.0,
+                far: 40.0,
+            },
+        };
+        let mut frame = |viewpoint, look| {
+            let published = writer.publish([4, 4], 0, SystemTime::now(), viewpoint, look, |_| {});
+            published.expect("published");
+        };
+        let mut cx = Context::seeded(1);
+        let mut update = |game: &mut Game| game.update(&mut cx, Duration::ZERO);
+        // The game answers a look with `parts`, each set by the client `by` names, at `revision`.
+        let answer = |parts: Parts, by: [Option<&str>; 3], revision| {
+            let [viewpoint, outline, grid] = by.map(|by| by.map(str::to_owned));
+            let looked = Looked {
+                viewpoint: parts.viewpoint,
+                outline: parts.outline,
+                grid: parts.grid,
+                colliders: None,
+                by: By {
+                    viewpoint,
+                    outline,
+                    grid,
+                    colliders: None,
+                },
+                revision,
+                run: 1,
+                seen: None,
+            };
+            let answer = ("look".to_owned(), Ok(json!(looked)));
+            ends.answer.send(answer).expect("sent");
+        };
+        for _ in 0..2 {
+            frame(orthographic([1.0, 2.0, 5.0]), 0);
+            update(&mut game);
+        }
+        assert_eq!(looks(&ends), [], "the frames' viewpoints");
+        let wheel = Event::Scroll(Scroll::Lines { x: 0.0, y: 1.0 });
+        let _ = game.route(&wheel, &reading([300.0, 200.0]), Some(VIEW));
+        update(&mut game);
+        let seen = game.view.camera.viewpoint();
+        assert_eq!(
+            seen.position.truncate(),
+            Vec2::new(1.0, 2.0),
+            "from the frames'"
+        );
+        let mine = Parts {
+            viewpoint: Some(api_viewpoint(&seen)),
+            grid: Some(gg_api::Plane::Xy),
+            ..Parts::default()
+        };
+        let sent = Look {
+            viewpoint: Some(mine.viewpoint),
+            grid: Some(mine.grid),
+            ..Look::default()
+        };
+        assert_eq!(looks(&ends), [sent]);
+        // An agent sets the viewpoint and an outline, which a frame draws with: the editor reads
+        // the look, and takes them.
+        answer(mine.clone(), [Some(CLIENT), None, Some(CLIENT)], 1);
+        let agents = orthographic([-3.0, 1.0, 4.0]);
+        frame(agents, 2);
+        update(&mut game);
+        assert_eq!(looks(&ends), [Look::default()], "a read");
+        let x: EntityId = "0123456789abcdef".parse().expect("an ID");
+        let outline = Outline {
+            id: x.to_string(),
+            color: [0.0, 1.0, 0.0, 1.0],
+            width: 3.0,
+        };
+        let theirs = Parts {
+            viewpoint: Some(agents),
+            outline: Some(outline.clone()),
+            ..mine
+        };
+        answer(theirs, [Some("agent"), Some("agent"), Some(CLIENT)], 2);
+        for _ in 0..3 {
+            update(&mut game);
+        }
+        let seen = game.view.camera.viewpoint();
+        assert_eq!(seen.position.truncate(), Vec2::new(-3.0, 1.0), "taken");
+        assert_eq!(looks(&ends), [], "taken, and settled");
+        // Back to the game's camera, with the toolbar's switch, for which a test sets the field.
+        game.view.toolbar.world_camera = true;
+        update(&mut game);
+        let back = Look {
+            viewpoint: Some(None),
+            grid: Some(None),
+            ..Look::default()
+        };
+        assert_eq!(looks(&ends), [back]);
+        let outlined = Parts {
+            outline: Some(outline.clone()),
+            ..Parts::default()
+        };
+        answer(outlined, [None, Some("agent"), None], 3);
+        update(&mut game);
+        // The Inspector's pass after the agent's outline is taken, another entity picked before
+        // it: it picks the outline's, or unpicks, for an ID a read of the game has found gone,
+        // neither the user's doing; but a pick of the user's in the same pass is theirs, whose
+        // outline goes.
+        let [before, users]: [EntityId; 2] =
+            ["fedcba9876543210", "00000000000000ff"].map(|id| id.parse().expect("an ID"));
+        let was = Wants {
+            picked: Some(before),
+            ..game.wants
+        };
+        game.wants = was;
+        for (picked, sends) in [(Some(x), false), (None, false), (Some(users), true)] {
+            game.take_look(Look {
+                outline: Some(Some(outline.clone())),
+                ..Look::default()
+            });
+            game.changes(Wants { picked, ..was });
+            let wanted = Parts {
+                outline: picked.map(|id| Outline {
+                    id: id.to_string(),
+                    color: OUTLINE.to_array(),
+                    width: OUTLINE_WIDTH,
+                }),
+                ..Parts::default()
+            };
+            let sent = sends.then(|| Look {
+                outline: Some(wanted.outline.clone()),
+                ..Look::default()
+            });
+            assert_eq!(game.looking.ask(&wanted), sent, "{picked:?}");
+        }
+    }
+
+    /// The toolbar's switch to the editor's camera sends its viewpoint, as it adopted the frames',
+    /// with the grid, though the camera hasn't moved: from then on, the editor's camera drives the
+    /// view.
+    #[test]
+    fn the_switch_to_the_editors_camera_sends_its_viewpoint() {
+        let (mut game, ends) = serving();
+        let reader = Reader::create(4, 4).expect("memory");
+        let mut writer = Writer::open(reader.name()).expect("opened");
+        game.reader = Some(reader);
+        let viewpoint = gg_api::Viewpoint {
+            position: [1.0, 2.0, 5.0],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            projection: gg_api::Projection::Orthographic {
+                height: 4.0,
+                near: -40.0,
+                far: 40.0,
+            },
+        };
+        let published = writer.publish([4, 4], 0, SystemTime::now(), viewpoint, 0, |_| {});
+        published.expect("published");
+        let mut cx = Context::seeded(1);
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(looks(&ends), [], "the frame's viewpoint");
+        // The switch, for which a test sets the field, since it can't run `ui`.
+        game.view.toolbar.world_camera = false;
+        game.update(&mut cx, Duration::ZERO);
+        let seen = game.view.camera.viewpoint();
+        assert_eq!(seen.position.truncate(), Vec2::new(1.0, 2.0), "the frame's");
+        let sent = Look {
+            viewpoint: Some(Some(api_viewpoint(&seen))),
+            grid: Some(Some(gg_api::Plane::Xy)),
+            ..Look::default()
+        };
+        assert_eq!(looks(&ends), [sent]);
+    }
+
+    /// Another client's viewpoint, which turns the view to the editor's camera, sends the
+    /// toolbar's grid, as the user's turn does; giving it back, which turns the view back to the
+    /// game's, gives the grid back; but a grid another client set stays as the view turns.
+    #[test]
+    fn the_grid_follows_a_turn_another_clients_viewpoint_makes() {
+        let (mut game, ends) = serving();
+        let mut cx = Context::seeded(1);
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(looks(&ends), [], "all the game's own");
+        let agents = gg_api::Viewpoint {
+            position: [-3.0, 1.0, 4.0],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            projection: gg_api::Projection::Orthographic {
+                height: 4.0,
+                near: -40.0,
+                far: 40.0,
+            },
+        };
+        // The game answers a look of `viewpoint` and `grid`, each set by the client `by` names, at
+        // `revision`; returns the looks the editor asks for in the update that takes it.
+        let mut answer = |viewpoint, grid, by: [Option<&str>; 2], revision| {
+            let [viewpoint_by, grid_by] = by.map(|by| by.map(str::to_owned));
+            let looked = Looked {
+                viewpoint,
+                outline: None,
+                grid,
+                colliders: None,
+                by: By {
+                    viewpoint: viewpoint_by,
+                    outline: None,
+                    grid: grid_by,
+                    colliders: None,
+                },
+                revision,
+                run: 1,
+                seen: None,
+            };
+            let answer = ("look".to_owned(), Ok(json!(looked)));
+            ends.answer.send(answer).expect("sent");
+            game.update(&mut cx, Duration::ZERO);
+            looks(&ends)
+        };
+        let grid = |grid| Look {
+            grid: Some(grid),
+            ..Look::default()
+        };
+        let (xy, xz) = (gg_api::Plane::Xy, gg_api::Plane::Xz);
+        let agent = Some("agent");
+        let sent = answer(Some(agents), None, [agent, None], 1);
+        assert_eq!(sent, [grid(Some(xy))], "the toolbar's");
+        let sent = answer(Some(agents), Some(xy), [agent, Some(CLIENT)], 2);
+        assert_eq!(sent, []);
+        let sent = answer(None, Some(xy), [None, Some(CLIENT)], 3);
+        assert_eq!(sent, [grid(None)], "given back");
+        assert_eq!(answer(None, None, [None, None], 4), []);
+        let sent = answer(Some(agents), Some(xz), [agent, agent], 5);
+        assert_eq!(sent, [], "the agent's grid");
+        let sent = answer(None, Some(xz), [None, agent], 6);
+        assert_eq!(sent, [], "the agent's grid stays");
+    }
 
     #[test]
     fn the_views_input_reaches_the_game_in_the_views_pixels() {
@@ -884,10 +1744,14 @@ mod tests {
         let (asks, _) = mpsc::channel();
         let (_, answers) = mpsc::channel();
         let (log, logged) = mpsc::channel();
+        let (picks, _) = mpsc::channel();
+        let (_, picked) = mpsc::channel();
         game.talker = Some(Talker {
             asks,
             answers,
             logged,
+            picks,
+            picked,
         });
         let warned = r#"{"timestamp":"2026-10-30T12:00:00.000000Z","level":"WARN",
             "code":"asset.missing","path":"assets/hero sprite.png","tries":2,"empty":"",

@@ -14,7 +14,7 @@ use gg_gpu::{
 use tracing::warn;
 
 use crate::Viewport;
-use crate::view::{Shown, ViewCallback, ViewPass};
+use crate::view::{ViewCallback, ViewPass};
 
 static SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/egui.spv"));
 
@@ -28,10 +28,10 @@ pub struct Ui<'a> {
 }
 
 /// The game's view, for the main window's UI to draw where it paints a [`ViewCallback`]: the pass
-/// that draws it, its image's index this frame and its outline, and its size.
+/// that draws it, its image's index this frame, and its size.
 pub(crate) struct View<'a> {
     pub(crate) pass: &'a ViewPass,
-    pub(crate) shown: Shown,
+    pub(crate) image: u32,
     pub(crate) size: [u32; 2],
 }
 
@@ -208,7 +208,7 @@ impl UiPass {
                             size: view.size,
                             ..Viewport::from_points(callback.rect, ppp)
                         };
-                        view.pass.draw(pass, viewport, view.shown, Some(clip));
+                        view.pass.draw(pass, viewport, view.image, Some(clip));
                         pass.set_viewport([0, 0], [width, height]);
                         pass.set_pipeline(pipeline);
                     }

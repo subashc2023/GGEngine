@@ -68,16 +68,18 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Projects and `gg new`** (2026-10-30)
 - **The game's view in the editor** (2026-10-30)
 - **The game's world and diagnostics in the editor's panels** (2026-10-30)
+- **Editing in the game's view** (2026-10-30)
 
 ## Now
 
-**Editing in the game's view**, Phase 6's fourth milestone, which waits on the open question of who
-owns the game's one view. In a project, the editor edits the game's entities in its view as it
-edits its own world's: a click picks the entity under the cursor, which the view outlines and the
-panels show picked, and the handles move, turn and scale it, through the tool API, each drag one
-edit of the editor's, the game showing it as it moves. *Done when*, from `games/shards`, a click in
-the view picks a shard, which the Entities panel shows picked and the view outlines, and a drag of
-its handles moves it, the view showing it moving, which one Undo takes back.
+**Play, Simulate and Stop in the game, the editor's own world deleted**, Phase 6's fifth milestone,
+which waits on the open question of what Simulate does in a game whose ticks are all its own. In a
+project, the editor's Play, Simulate and Stop reach the game through the tool API, as its pause and
+step do, Stop bringing back the world as it was edited; and the editor's own world goes, the editor
+keeping the view's tools it shares with a project's game. *Done when*, from `games/shards`, Play in
+the editor plays Shards from the arena as edited, Stop brings the arena back as it was, which the
+Entities panel and the view show, and the editor has no world of its own.
+
 ## Next
 
 Each phase ends in something you can run and check.
@@ -203,12 +205,12 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Staging and the frame's arena kept within the device's `maxMemoryAllocationSize` and `maxBufferSize`, each at least 1 GiB: both grow by doubling, each staging buffer an allocation of its own, so a frame that adds more than that at once fails, which ends the run | A frame adds that much at once, or Phase 10, with the GPU's memory budget |
 | Images' sizes checked against the device's `maxImageDimension2D` and `maxFramebufferWidth` and `Height` as they're made; a pass checks its viewport against the device's limits, which an image past those exceeds only if it's past `maxViewportDimensions` too | A device's limits fall below a window's size |
 | Host image copy where a transfer queue exists, or where the driver says it costs the GPU in reading the image, as KosmicKrisp's does, turning off Apple's lossless compression, so that macOS uploads through the graphics queue; and meshes written straight into GPU memory the CPU reaches, as ReBAR and unified memory allow, rather than copied | A measurement shows either is faster |
-| More than one view, such as split screen, or the editor's scene view beside the game's: the view sees through one camera, the world's primary one, or a layer's viewpoint | A game or the editor draws several |
+| More than one view, such as split screen, or the editor's scene view beside the game's: the view sees through one camera, the world's primary one, a layer's viewpoint or the tool API's look's | A game or the editor draws several |
 | A camera's own aspect ratio, kept by letterboxing the view or by a target of its own, as Unreal's cameras can: a camera fits the view's aspect | Cameras render into targets of their own, or a game needs one aspect on every display |
 | The editor drawing the world's cameras in its view, as outlines of what each sees | The editor shows a game's cameras |
 | Moving the world's camera from the editor's view, as Unreal's Pilot and Blender's Lock Camera to View do: a move of the editor's camera goes back to its own | Someone frames a camera's shot from the view |
 | A scene or prefab loaded with a primary camera making the world's other cameras not primary, as an operation's does: a load sets fields as they're written, and of several primary, the view sees through the lowest ID's, warning | A prefab brings a camera of its own, as a player's would |
-| Finding the point in the world under the cursor, as `Context::pick` finds the entity there: the editor's camera finds one on a plane itself, but nothing reads the view's depth; and the orthographic camera controller zooms about the view's center | Something places what it adds at the cursor's depth, or a game zooms toward the cursor |
+| Finding the point in the world under the cursor, as `Context::pick` finds the entity there: the editor's camera finds one on a plane itself, but nothing reads the view's depth, and the tool API's `pick` answers the entity alone; and the orthographic camera controller zooms about the view's center | Something places what it adds at the cursor's depth, an agent places something at a pixel, or a game zooms toward the cursor |
 | A dockspace's view in a window of its own: it docks and floats over the main window alone, since only the main window's input reaches the layers, and its image is made at the main window's scale | The editor shows the game on a display of its own |
 | Showing whether keys reach the view, such as an outline around it while they do: from a press on it, or with the cursor over it | Someone misses it, or Phase 6's editor |
 | Gamepads following a dockspace's view: they reach the layers whichever panel has the keys, as they do in games | The editor binds a pad, or a panel takes a pad's input |
@@ -227,7 +229,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | The wheel setting the editor's fly speed while the right button is held, as Unity's, Unreal's and Godot's do: it dollies then too, and flying goes at the distance a second | Flying wants another speed |
 | Keeping the editor's camera, tool and grid between runs, as the dock keeps its layout | Someone misses them |
 | Easing the editor's switch between projections, which jumps | It jars someone |
-| A slot between the world's opaque and blended draws for the editor's grid, so that it shows over opaque draws behind its plane: it draws first, a backdrop that everything covers, and what blends behind the plane would need the grid sorted among it | The editor shows opaque meshes |
+| A slot between the world's opaque and blended draws for the editor's grid, so that it shows over opaque draws behind its plane: it draws after the layers' draws and before the world's, over a layer's backdrop, as Shards' floor, but under the world's opaque draws behind its plane, and what blends behind the plane would need the grid sorted among it | A world's opaque meshes behind the grid's plane hide it |
 | A rotating cursor for the editor's Orbit tool: egui has none, so it shows a hand | egui adds one, or someone misses it |
 | The lines across the editor's perspective grid reaching the horizon: they fade out some 65 to 200 camera heights away, since its f32 coordinates hold four decades of spacing; the lines toward the horizon go on | Someone misses them |
 | Cameras far from the origin: their matrices are f32, so 12,345 units out a view a tenth of a unit across moves in steps of about 1% | A game's world is that large |
@@ -353,7 +355,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | The ban on std's float methods for games in their own repositories, which the workspace's clippy.toml doesn't reach, though glam's features do, since Cargo merges them; and `gg new` for such a game, which makes games in the workspace's `games/` alone: its own workspace, the engine a pinned dependency, copies of clippy.toml and the toolchain's pin, and gg and dx installed | The first game outside the workspace |
 | Locating a divergence of the layout alone, to the table, row, children or stream of IDs where two worlds part; `World::difference` compares their content, and a replay names the part of the hash | A replay's layout goes another way first |
 | Replaying from a snapshot and the commands after it, and a SyncTest, which runs each tick again from a snapshot and checks its hash, as rollback needs; and recording a run restored from a snapshot, which `--restore` refuses with `--record`, a recording's replay starting from a seed and the layers' attach, so that `gg run` doesn't restart a run that records | Rollback, or a crash `gg run` restarted from is worth replaying |
-| Layers' own state across a restart from a snapshot: the camera controllers' viewpoints, the clear color, and the editor's scene file, tool and camera, which start as a fresh run's do; the world is as it was, and a layer takes back from it what its panels show, as the sandbox's `restored` does, and the editor comes back stopped, with the world as it was edited | Someone misses where they were looking after a restart |
+| Layers' own state across a restart from a snapshot: the camera controllers' viewpoints, the clear color, the editor's scene file, tool and camera, and the tool API's look, which start as a fresh run's do, the editor in a project setting its parts of the look again as the restarted run serves; the world is as it was, and a layer takes back from it what its panels show, as the sandbox's `restored` does, and the editor comes back stopped, with the world as it was edited | Someone misses where they were looking after a restart |
 | What's opaque in a component of a type that isn't opaque as a whole, which a snapshot file leaves out, its component coming back on its type's base: `Component::save_opaque` and `load_opaque` carry types opaque as a whole, as `MeshDraw` | A game's component holds an opaque field |
 | Snapshots that cost the main thread less than a copy of the world, which each takes as a frame starts before a thread of the API's writes it: some 6 MB of text for the debug sandbox's 10,461 entities, taken every 5 seconds under `gg run` | A game's snapshots show as hitches |
 | Removing the snapshot file of a `gg run` that's stopped, or ends in an error, which stays in `snapshots` beside the executable; one whose game exits cleanly removes it | They pile up enough to matter |
@@ -372,7 +374,11 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | An app's name and `gg run`'s defaults for it, such as `--peers 2`, in the project's manifest | A tool needs them |
 | Sharing the game's view without copies on the CPU: the game copies each frame from the GPU's readback into the shared memory, and the editor out of it into the frame's upload arena, about 0.35 ms each at 1920x1080 on the RTX 4090; Vulkan can take the shared memory as the readback buffer itself (`VK_EXT_external_memory_host`), or share the image (external memory), where the driver has either | A view larger than 1080p, or a refresh rate, the copies don't keep up with |
 | Gamepads in an embedded game: windowed runs poll the pads, and the editor forwards keys, the mouse and focus | Someone plays a project's game in the editor with a pad |
-| Captures of a view that shows pixels from elsewhere, as the editor's does a game's: `capture` fails there (`api.no_view`); the game's own capture has the same pixels | A tool captures the editor's view |
+| Captures of a view that shows pixels from elsewhere, as the editor's does a game's: `capture` fails there (`api.no_view`); the game's capture has the same pixels but the editor's handles and overlay | A tool captures the editor's view |
+| The editor's camera taking a perspective viewpoint of another field of view than its 60°, as a game's camera or an agent's look may give: it takes where the viewpoint sees from, and keeps its own field, so the view's widens or narrows as it turns to the editor's camera | A game's camera or an agent sees through another field of view |
+| A game's own wheel, right and middle buttons, Alt with the left, the left under Pan or Orbit, and Home, in the editor's view: the editor's camera takes them, turning the view to itself, and the game gets the rest | A game binds one, or Play in the game settles what reaches it |
+| Handles, and the keys Q, W, E and R, through the game's camera, as through the editor's: the game gets the keys and the left button there, a click picking too | Someone edits a game through its own camera, as a 2D game's fixed one |
+| An embedded game's `Context::scale`, which is 1, so that what it draws in points, as its colliders' outlines, draws thinner in an editor on a display of more pixels to a point; the outline the editor's look sets is in pixels | Someone misses them on such a display |
 | `gg run --embedded` with `--peers 2`, which the editor's one view would show one of: it's refused | The editor shows a lockstep session's peers |
 | Filtering the Logs panel by level or text, and its game's debug events kept out of it: it shows every event the game logs, which it keeps the last 10,000 of, each one's fields in their names' order rather than as logged, and all `gg run` prints | Logs gets too long to read |
 | The editor's panels reading only what they show of a game's world: a remote Inspector reads the game's whole list of entities, their names, parents, children and components' types, every quarter of a second, which costs the game's main thread a few steps an entity, and keeps the list in memory; `entities` by parent, for the rows a panel shows, would bound both by its height | A project's game of tens of thousands of entities |
@@ -385,10 +391,6 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 - Which license? Recommendation: MIT OR Apache-2.0, the Rust convention, chosen once; until
   then, `publish = false` keeps the crates off crates.io. Decide before anyone outside the
   project contributes.
-- Who owns the game's one view while the editor drives it: its viewpoint, outline, grid and
-  colliders? Recommendation: one set for each game, which any client sets, the last setter winning,
-  with `capture` able to ask for the world's own camera, as the engine has one view. Decide before
-  editing in the game's view.
 - What does Simulate do in a game whose ticks are all its own code, as Shards' are?
   Recommendation: run the game as Play does, from the world as edited, seen through the editor's
   camera, with no input forwarded. Decide before Play, Simulate and Stop in the game.

@@ -21,10 +21,10 @@ use std::sync::Arc;
 use bytemuck::NoUninit;
 use gg_core::math::{self, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{
-    AlphaMode, Blend, Circle, DrawCounts, Draws, Line, Material, Mesh, MeshDraw, Meshes, Mipmaps,
-    ModelVertex, Outline, Pick, Pixels, Projection, RenderData, Renderer, Sampler, Settings,
-    Shaders, Sprite, SpriteSheet, Texture, Textures, Ui, UploadPath, Uploads, ViewCallback,
-    Viewpoint, Viewport, Wrap,
+    AlphaMode, Blend, Circle, DrawCounts, Draws, Grid, GridLines, Line, Material, Mesh, MeshDraw,
+    Meshes, Mipmaps, ModelVertex, Outline, Pick, Pixels, Projection, RenderData, Renderer, Sampler,
+    Settings, Shaders, Sprite, SpriteSheet, Texture, Textures, Ui, UploadPath, Uploads,
+    ViewCallback, Viewpoint, Viewport, Wrap,
 };
 
 /// Runs each test through `tests`, by the name it's written with; after `uploading by`, giving
@@ -75,6 +75,7 @@ fn main() -> ExitCode {
         circles_match_their_reference,
         outlines_match_their_reference,
         lines_match_their_reference,
+        grids_match_their_reference,
         views_match_their_reference,
         views_read_back_as_they_render,
         pixels_show_in_the_view,
@@ -86,6 +87,7 @@ fn main() -> ExitCode {
         models_match_their_reference,
         mixed_textures_match_their_reference,
         picks_answer_what_their_frame_drew,
+        picks_wait_through_frames_that_read_none,
     );
     // Once for each way of uploading that the GPU has.
     for path in UploadPath::ALL {
@@ -256,6 +258,7 @@ impl Stores {
             uploads,
             draws,
             picks: &[],
+            read_picks: true,
             outline: None,
             read_view: false,
             pixels: None,
@@ -662,7 +665,8 @@ fn circles_match_their_reference() {
 /// and beside them a square of no entity and one of ID 5, which it leaves alone. First, an outline
 /// of ID 0, and outlines 0 and NaN pixels wide, change no pixel of a frame without one; and the
 /// frames that outline read picks back first, which synchronization validation sees the outline's
-/// reads of the IDs wait for.
+/// reads of the IDs wait for. The outline is drawn into the view, so the view read back shows it
+/// as the frame does.
 fn outlines_match_their_reference() {
     const WIDTH: u32 = 240;
     const HEIGHT: u32 = 160;
@@ -746,11 +750,97 @@ fn outlines_match_their_reference() {
         let data = RenderData {
             picks: &picks,
             outline: Some(outline(7, 3.0)),
+            read_view: true,
             ..stores.data(filling([WIDTH, HEIGHT]), viewpoint, &draws)
         };
         render_without_ui(&mut renderer, data);
     }
+    let read = view_read(&renderer);
+    assert_eq!(read, Some(([WIDTH, HEIGHT], frame_pixels(&mut renderer))));
     check(renderer, "outlines", WIDTH, HEIGHT);
+}
+
+/// Draws grids, each a frame of its own, and compares each with its reference image: on the ground
+/// as a camera with perspective sees it from above, its lines anti-aliased, each power of ten's
+/// fading out into the next's farther off, and all of them toward the horizon, the X axis red and
+/// the Z axis blue; and in XY, facing it orthographically, its lines crisp, a pixel each, a unit
+/// apart, the X axis red, the Y axis green, and the line ten units along X brighter. Each grid's
+/// square and parameters are those the engine's grid gives its camera.
+fn grids_match_their_reference() {
+    const WIDTH: u32 = 240;
+    const HEIGHT: u32 = 160;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores::default();
+    let red = Vec3::new(0.8, 0.1, 0.1);
+    let green = Vec3::new(0.1, 0.7, 0.1);
+    let blue = Vec3::new(0.1, 0.3, 0.9);
+    // 2 over the ground, looking 22.5° down, seeing a sixth of a turn from the view's bottom to its
+    // top, which shows the horizon; on a square around its foot a thousand times that across.
+    let above = Viewpoint {
+        position: Vec3::new(0.3, 2.0, 3.0),
+        rotation: Quat::from_rotation_x(-PI / 8.0),
+        projection: Projection::Perspective {
+            fov: PI / 3.0,
+            near: 0.1,
+        },
+    };
+    let around_foot = Mat4::from_cols(
+        Vec4::new(2000.0, 0.0, 0.0, 0.0),
+        Vec4::new(0.0, 0.0, 2000.0, 0.0),
+        Vec4::Y,
+        Vec4::new(0.3, 0.0, 3.0, 1.0),
+    );
+    let ground = Grid {
+        first: red,
+        first_center: 0.3,
+        second: blue,
+        second_center: 3.0,
+        eye: Vec3::new(0.0, 2.0, 0.0),
+        coarsest: 3.0,
+        normal: Vec3::Y,
+        lines: GridLines::Perspective,
+    };
+    // 10 units from the view's bottom to its top, 16 pixels a unit, over (5, 1.5); on a square
+    // twice the view's width across and its height up.
+    let facing = Viewpoint {
+        position: Vec3::new(5.0, 1.5, 0.0),
+        projection: Projection::Orthographic {
+            height: 10.0,
+            near: -1.0,
+            far: 1.0,
+        },
+        ..Viewpoint::default()
+    };
+    let over_view = Mat4::from_cols(
+        Vec4::new(30.0, 0.0, 0.0, 0.0),
+        Vec4::new(0.0, 10.0, 0.0, 0.0),
+        Vec4::Z,
+        Vec4::new(5.0, 1.5, 0.0, 1.0),
+    );
+    let upright = Grid {
+        first: red,
+        first_center: 5.0,
+        second: green,
+        second_center: 1.5,
+        eye: Vec3::NEG_Z,
+        coarsest: 3.0,
+        normal: Vec3::Z,
+        lines: GridLines::Crisp,
+    };
+    for (name, viewpoint, transform, grid) in [
+        ("grid_perspective", above, around_foot, ground),
+        ("grid_crisp", facing, over_view, upright),
+    ] {
+        let mut draws = Draws::default();
+        draws.push_grid(&mut stores.meshes, &mut stores.shaders, transform, grid);
+        // More frames than are in flight.
+        for _ in 0..3 {
+            let data = stores.data(filling([WIDTH, HEIGHT]), viewpoint, &draws);
+            render_without_ui(&mut renderer, data);
+        }
+        compare(name, WIDTH, HEIGHT, &frame_pixels(&mut renderer));
+    }
+    shut_down(renderer);
 }
 
 /// Draws lines into an offscreen image, as a camera with perspective sees them, and compares it with
@@ -1855,6 +1945,48 @@ fn picks_answer_what_their_frame_drew() {
     shut_down(renderer);
 }
 
+/// Six frames of a square that fills the view, its ID its frame's number. Frame 1 picks inside
+/// the view; frame 2 inside and outside it, reading no picks, nor does frame 3, which still answers
+/// frame 1's; frame 4 reads frame 2's, answering the one outside at once, and frame 6 answers the
+/// other with what frame 4 drew.
+fn picks_wait_through_frames_that_read_none() {
+    let mut renderer = renderer(8, 8);
+    let mut stores = Stores::default();
+    let flat = (stores.shaders)
+        .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+        .expect("a shader");
+    let square = MeshDraw::new(square(&mut stores.meshes), flat, Vec4::ONE);
+    let viewpoint = Viewpoint {
+        projection: Projection::Orthographic {
+            height: 2.0,
+            near: -1.0,
+            far: 1.0,
+        },
+        ..Viewpoint::default()
+    };
+    let pick = |tag, pixel| Pick { tag, pixel };
+    let frames = [
+        (vec![pick(1, [1, 1])], true, vec![]),
+        (vec![pick(2, [3, 3]), pick(3, [8, 1])], false, vec![]),
+        (vec![], false, vec![(1, 1)]),
+        (vec![], true, vec![(3, 0)]),
+        (vec![], true, vec![]),
+        (vec![], true, vec![(2, 4)]),
+    ];
+    for (frame, (picks, read_picks, expected)) in (1..).zip(frames) {
+        let mut draws = Draws::default();
+        draws.push_draw(Mat4::from_scale(Vec3::splat(2.0)), &square, frame);
+        let data = RenderData {
+            picks: &picks,
+            read_picks,
+            ..stores.data(filling([8, 8]), viewpoint, &draws)
+        };
+        render_without_ui(&mut renderer, data);
+        assert_eq!(renderer.picked(), expected, "frame {frame}'s answers");
+    }
+    shut_down(renderer);
+}
+
 /// What `level.slang` takes with each draw.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
@@ -1952,9 +2084,8 @@ fn mipmaps_match_their_reference(path: UploadPath) {
 /// blue square that fills it, under a triangle in red, green and blue, and a yellow square of ID 7
 /// across the clip's right edge, outlined, its outline cut there too. The callback is off
 /// `data.viewport`'s origin, the frame's corner, where the frame shows the view without one, so
-/// that the view shown there too, unclipped, or over the green rect, changes thousands of pixels,
-/// and an outline that read the IDs from the frame's corner rather than the view's would go round
-/// another place. A frame whose view has no area draws the UI alone.
+/// that the view shown there too, unclipped, or over the green rect, changes thousands of pixels.
+/// A frame whose view has no area draws the UI alone.
 fn a_view_in_the_ui_matches_its_reference() {
     const WIDTH: u32 = 320;
     const HEIGHT: u32 = 200;

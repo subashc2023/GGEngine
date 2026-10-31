@@ -10,10 +10,10 @@ use gg_engine::egui::{
     self, Align2, Atom, Button, Color32, CursorIcon, FontId, Frame, Id, Margin, Painter, Pos2,
     Rect, Response, Rgba, Sense, Shape, Stroke, StrokeKind, TextStyle, Visuals, vec2,
 };
+use gg_engine::grid::{self, Plane};
 use gg_engine::math::{self, Quat, libm};
 
 use crate::camera::{OrbitCamera, Side, Tool};
-use crate::grid::{self, Plane};
 
 /// The side of a toolbar icon, in points.
 const ICON: f32 = 16.0;
@@ -47,6 +47,9 @@ pub struct Toolbar {
     /// How the world runs: as it's edited, or a copy of it in its place until it stops, playing
     /// or simulating.
     pub mode: Mode,
+    /// Whether the view is a project's game's, whose own camera is the world's camera, and which
+    /// gets the view's input through it.
+    pub game: bool,
 }
 
 impl Default for Toolbar {
@@ -58,6 +61,7 @@ impl Default for Toolbar {
             world_camera: false,
             colliders: false,
             mode: Mode::Edit,
+            game: false,
         }
     }
 }
@@ -168,13 +172,18 @@ impl Toolbar {
                 let through = ui.add_enabled_ui(has_camera, |ui| {
                     icon_button(ui, Icon::Camera, self.world_camera)
                 });
+                let tip = if self.game {
+                    "Game camera: the view sees through the game's own camera, and the game gets \
+                     the view's input, but what the editor's camera takes; moving the editor's \
+                     camera comes back to it, and the input stays the editor's"
+                } else {
+                    "World camera: the view sees through the world's primary camera, as the game \
+                     does, and while the world plays, W, A, S and D drive the world's cameras; \
+                     moving the editor's camera comes back to it"
+                };
                 let through = through
                     .inner
-                    .on_hover_text(
-                        "World camera: the view sees through the world's primary camera, as the \
-                         game does, and while the world plays, W, A, S and D drive the world's \
-                         cameras; moving the editor's camera comes back to it",
-                    )
+                    .on_hover_text(tip)
                     .on_disabled_hover_text("World camera: the world has no primary camera");
                 if through.clicked() {
                     self.world_camera = !self.world_camera;

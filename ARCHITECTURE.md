@@ -75,10 +75,14 @@ The editor uses `gg-api` too, beside `gg-engine`, as a client of the tool API, a
 - **`editor`:** the editor, one more client of the tool API: a dock that fills its window, with
   the game's view in a panel among the others. Started in a game's project, it runs the project's
   game as an agent does, under `gg run --embedded`, which ends as the editor does, and shows the
-  game's view, forwarding it the view's input, the game's world in its Entities and Inspector
-  panels, a remote Inspector's, which edit it through the API as the editor's own edits, and the
-  game's events in its Logs as the game logs them; elsewhere, until Phase 6 is done, it edits a
-  world of its own, with an orbit camera of its own. Its Play and Simulate run a copy of the world
+  game's view, forwarding it the view's input while the game's camera drives it, until the editor's
+  orbit camera takes it over, carrying on from where the view was; the game's world in its Entities
+  and Inspector panels, a remote Inspector's, which edit it through the API as the editor's own
+  edits, as the handles in the view do, a click picking what the view shows under the cursor
+  through the API; its camera, the pick's outline, its grid and the colliders' outlines going to the
+  game as the API's look, which it takes up from other clients too; and the game's events in its
+  Logs as the game logs them. Elsewhere, until Phase 6 is done, it edits a world of its own with the
+  same view tools. Its Play and Simulate run a copy of the world
   in the world's place, and Stop brings back the very world as it was edited, so that outside them
   the world changes only by edits, which undo. Play, Simulate and Stop are commands, which
   recordings keep. [main.rs](apps/editor/src/main.rs) describes the rest.
@@ -193,7 +197,8 @@ in the editor is out of an agent's reach.
   the OS picks, which it writes with a token, and its project's manifest's path, in a session file
   in `sessions` beside its executable, removed as the run ends: query the world, apply and undo
   [operations](#project-state), run, pause and step, capture frames, share the view as frames
-  render it, hand the layers input as the window would, save the world whole as a snapshot file,
+  render it, set how it looks and pick what it shows, hand the layers input as the window would,
+  save the world whole as a snapshot file,
   as [ECS](#ecs) describes, which a run given `--restore` starts from, apply patches of the game's
   code, as [Game code](#game-code) describes, and read [diagnostics](#diagnostics). Requests and
   their answers are lines of JSON, as [gg-api](crates/gg-api/src/lib.rs) describes, and a
@@ -216,8 +221,20 @@ in the editor is out of an agent's reach.
   a triple buffer that neither end waits on, which the render thread writes each frame's view into
   once the GPU has finished it, and the client reads, as agents can read live frames too. A game run
   `--embedded` renders its view at the size the client asks, and runs each frame once the client has
-  taken the last, rather than rendering frames it never takes. Each client gets only the
-  capabilities it is granted, such as reading the world or editing one scene.
+  taken the last, rather than rendering frames it never takes. The view has one look, as the engine
+  renders one view, which every client sets part by part, the last to set a part winning: the
+  viewpoint it sees from, in place of the game's own; the entity it outlines; a grid on one of the
+  world's axis planes; and whether the colliders' outlines show. A part given back is the game's
+  own again. A look lasts until a client changes it or the run ends, so a restarted run starts
+  without one; it says which client set each part, so that a client takes up what another set, as
+  the editor's camera carries on from a viewpoint an agent set; and each frame shared carries the
+  viewpoint it was drawn from and the revision of the look it drew with, so that what a client draws
+  over a frame matches it. A capture shows the view as it's shown, the look among it, or, asked to,
+  as the game shows it on its own, from a bare frame, which draws without the look, isn't shared and
+  leaves the picks asked to the next frame, so that none reads a view a client isn't shown. A pick
+  answers which entity the view shows at a pixel, and its name, once the frame that read it comes
+  back. Each client gets only the capabilities it is granted, such as reading the world or editing
+  one scene.
 - **Clients.** The command-line tool, `tools/gg`, builds and runs games, supervising them: it
   runs a copy of a game's executable, so that the game builds again meanwhile, removing those runs
   it killed left; patches it as its code changes, and rebuilds it at any other change, as [Game
@@ -231,10 +248,10 @@ in the editor is out of an agent's reach.
   machine-readable results, and makes new games. Inside a game's [project](#project-state), found
   from where it runs or named by `--project`, it runs cargo in the project's directory, builds the
   project's game, and reaches the project's games alone, those whose session files name its
-  manifest; `gg mcp` gives agents that speak MCP the same reach over stdio, a tool for each of the
-  API's methods, connecting at each call to the game it picks, so that a restarted game is the one
-  it reaches, as the agent, by its MCP client's name; the editor is one more client, with no
-  ability an agent lacks.
+  manifest; `gg mcp` gives agents that speak MCP the same reach over stdio, a tool for each of gg's
+  commands that talk to a game but `quit` and `call`, connecting at each call to the game it
+  chooses, so that a restarted game is the one it reaches, as the agent, by its MCP client's name;
+  the editor is one more client, with no ability an agent lacks.
 - **Headless runs.** Every app runs without a window (`--headless`) and can run a set number
   of frames, then exit with a status (`--frames N`): 0 for a clean run, 1 after an error or any
   validation message, and 2 for bad arguments. Dedicated servers, CI and agents checking their
@@ -730,8 +747,9 @@ for each shader, or `VK_EXT_dynamic_rendering_unused_attachments`.
 
 `Context::outline` outlines what the view shows of an entity for a frame, as the editor outlines
 what's picked, from the same IDs: a pass samples the image of IDs, which has a slot in the bindless
-set, and draws over the view, under the UI, round whatever shape the entity shows, its colliders'
-outlines among it, going across what's in front of it rather than round what's hidden.
+set, and draws into the view's image once the view's pass has drawn it, so that captures and the
+view shared show it too, round whatever shape the entity shows, its colliders' outlines among it,
+going across what's in front of it rather than round what's hidden.
 
 Frames draw the world between ticks, so that it moves as smoothly at any frame rate. As each tick
 starts, the engine copies where the world's entities are, outside the world, so that no hash,
@@ -836,6 +854,14 @@ them: as quads, a run of lines of any widths is one instanced draw, as sprites a
 same on every device. Lines go in a list of draws of their own, which the frame draws after
 everything else, the world's draws too, so that they show over all of it but where an opaque mesh is
 nearer, as debugging wants.
+
+`Context::draw_grid` draws a grid on one of the world's axis planes as a viewpoint sees it, as the
+editor's view shows one: lines a power of ten apart, fading as they near each other and toward
+grazing angles, and the plane's two axes in their colors, with a shader and a mesh of the engine's
+own, each added the first time something draws with it, the mesh a fan round the point under the
+eye, which keeps the grid's precision there. It draws in the layers' order, over what's drawn
+before it; the tool API's look's grid draws after the layers' draws and before the world's, so over
+a backdrop a layer draws, as Shards' floor, and under the world's entities.
 
 3D games draw models: `Context::add_model` reads a glTF 2.0 file and adds its meshes and its images,
 as textures, once, all of itself or nothing, and `Model::spawn` places its default scene in a world

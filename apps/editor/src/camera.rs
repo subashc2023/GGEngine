@@ -301,6 +301,32 @@ impl OrbitCamera {
         }
     }
 
+    /// Sees from `viewpoint`, as [`viewpoint`](Self::viewpoint) gives it back: turned as it's
+    /// turned, its yaw, pitch and roll read in the order the camera turns by, which at the poles,
+    /// where a yaw and a roll turn alike, folds the roll into the yaw, the turn still exact; with
+    /// perspective if it has it, the camera's own field of view kept; as far from the pivot as an
+    /// orthographic height makes it, or in perspective, as far as it was, within the distances it
+    /// goes; and the pivot that far in front. An ease stops where it was.
+    pub fn adopt(&mut self, viewpoint: &Viewpoint) {
+        let (yaw, pitch, roll) = viewpoint.rotation.to_euler(EulerRot::YXZ);
+        let distance = match viewpoint.projection {
+            Projection::Orthographic { height, .. } => height / 2.0 / tan_half_fov(),
+            Projection::Perspective { .. } => self.current().2,
+        };
+        let [least, most] = DISTANCES;
+        let mut pose = Pose {
+            pivot: viewpoint.position,
+            yaw,
+            pitch,
+            roll,
+            distance: distance.clamp(least, most),
+        };
+        pose.pivot += pose.forward() * pose.distance;
+        self.pose = pose;
+        self.perspective = matches!(viewpoint.projection, Projection::Perspective { .. });
+        self.ease = None;
+    }
+
     /// What the drag under way does, if one is.
     pub fn moving(&self) -> Option<Move> {
         self.drag.map(|drag| drag.what)
@@ -1102,6 +1128,80 @@ mod tests {
         camera.perspective = true;
         camera.settle(Vec3::Y + Vec3::Z);
         assert_eq!(camera.pose.pivot, pivot);
+    }
+
+    /// Asserts that `seen` sees as `from` does, for `what`: from the same place, turned the same way,
+    /// through the same projection, but how deep an orthographic one sees, which the camera's
+    /// reaches past.
+    fn assert_sees_as(seen: &Viewpoint, from: &Viewpoint, what: &str) {
+        let close = seen.position.abs_diff_eq(from.position, 1e-4);
+        assert!(close, "{what}: at {}, not {}", seen.position, from.position);
+        // By the axes the turns give, which a quaternion and its negation give alike.
+        for axis in [Vec3::X, Vec3::Y] {
+            let (got, want) = (seen.rotation * axis, from.rotation * axis);
+            assert!(
+                got.abs_diff_eq(want, 1e-5),
+                "{what}: {axis} turned to {got}, not {want}"
+            );
+        }
+        match (seen.projection, from.projection) {
+            (
+                Projection::Orthographic { height, .. },
+                Projection::Orthographic { height: want, .. },
+            ) => assert!(
+                (height - want).abs() < want * 1e-5,
+                "{what}: {height}, not {want}"
+            ),
+            (Projection::Perspective { fov, .. }, Projection::Perspective { fov: want, .. }) => {
+                assert_eq!(fov, want, "{what}");
+            }
+            (got, want) => panic!("{what}: {got:?}, not {want:?}"),
+        }
+    }
+
+    #[test]
+    fn adopting_a_viewpoint_sees_from_it() {
+        // Turned every way, rolled, and at both poles, where a roll folds into the yaw.
+        let turns = [
+            (0.4, -0.3, 0.2),
+            (-2.4, 0.9, 2.8),
+            (2.0, FRAC_PI_2, 0.0),
+            (-1.0, -FRAC_PI_2, 0.7),
+        ];
+        for perspective in [false, true] {
+            for (yaw, pitch, roll) in turns {
+                let mut from = turned(perspective);
+                from.pose = Pose {
+                    yaw,
+                    pitch,
+                    roll,
+                    ..from.pose
+                };
+                let from = from.viewpoint();
+                // Easing elsewhere, from the other projection.
+                let mut camera = OrbitCamera::new();
+                camera.perspective = !perspective;
+                camera.snap(Side::Right);
+                camera.adopt(&from);
+                assert!(!camera.eases());
+                assert_eq!(camera.perspective, perspective);
+                let what = format!("({yaw}, {pitch}, {roll}), perspective {perspective}");
+                assert_sees_as(&camera.viewpoint(), &from, &what);
+            }
+        }
+        // A game's own, which sees a depth of its own: rolled, 20 units tall about (3, 1).
+        let game = Viewpoint {
+            position: Vec3::new(3.0, 1.0, 10.0),
+            rotation: Quat::from_rotation_z(0.3),
+            projection: Projection::Orthographic {
+                height: 20.0,
+                near: -1.0,
+                far: 1.0,
+            },
+        };
+        let mut camera = turned(true);
+        camera.adopt(&game);
+        assert_sees_as(&camera.viewpoint(), &game, "a game's");
     }
 
     #[test]

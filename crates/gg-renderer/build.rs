@@ -7,9 +7,10 @@ use std::env;
 use std::path::{self, PathBuf};
 use std::process::Command;
 
-const SHADERS: [&str; 9] = [
+const SHADERS: [&str; 10] = [
     "circle",
     "egui",
+    "grid",
     "line",
     "model",
     "model_masked",

@@ -1,14 +1,16 @@
 //! Turns the render data the engine hands it each frame into images, built on `gg-gpu`: meshes,
-//! sprites, circles and lines drawn in the game's view, as its camera sees them, with games' shaders
-//! and textures and the engine's own, models' unlit materials among them, and the UI over them;
-//! picks, which read back the ID of the draw the view shows at a pixel; an outline round what the
-//! view shows of an ID; and the render graph, lighting, PBR materials and post-processing to come.
+//! sprites, circles, lines and grids drawn in the game's view, as its camera sees them, with games'
+//! shaders and textures and the engine's own, models' unlit materials among them, and the UI over
+//! them; picks, which read back the ID of the draw the view shows at a pixel; an outline round what
+//! the view shows of an ID; and the render graph, lighting, PBR materials and post-processing to
+//! come.
 //!
 //! It knows nothing about the scene, ECS or gameplay. It receives plain data, so rendering
 //! can run on its own thread, a frame behind simulation.
 
 mod circle;
 mod draws;
+mod grid;
 mod line;
 mod mesh;
 mod model;
@@ -37,6 +39,7 @@ pub use draws::Draws;
 pub use gg_gpu::{
     Blend, ImageRead, MAX_TEXTURE_SIZE, Sampler, UploadPath, Validation, Window, Wrap,
 };
+pub use grid::{Grid, GridLines};
 pub use line::Line;
 pub use mesh::{Mesh, MeshDraw, Meshes};
 #[doc(hidden)]
@@ -53,7 +56,7 @@ pub use viewpoint::{Projection, Viewpoint};
 use mesh::MeshPass;
 use pick::Picks;
 use ui::UiPass;
-use view::{Shown, ViewPass};
+use view::{OutlinePass, ViewPass};
 
 /// The debug name of a headless renderer's image.
 const OFFSCREEN: &str = "offscreen color";
@@ -142,13 +145,18 @@ pub struct RenderData<'a> {
     pub draws: &'a Draws,
     /// What the frame asks of the view, at most [`MAX_PICKS`], which [`Renderer::picked`] answers,
     /// as the frame two after the one that reads them begins: the frame reads them as it renders
-    /// the view, after those a frame with nothing to render into left, up to [`MAX_PICKS`] in all,
-    /// and the frames after it the rest.
+    /// the view, after those a frame with nothing to render into, or that read none, left, up to
+    /// [`MAX_PICKS`] in all, and the frames after it the rest.
     pub picks: &'a [Pick],
-    /// What the frame outlines in the view, after reading the picks back, if anything.
+    /// Whether the frame reads picks at all. A frame that doesn't, as one that renders a view other
+    /// than the one they were asked of, leaves those `picks` asks and those waiting already for
+    /// the next frame that does, and answers those the frame two before it read all the same.
+    pub read_picks: bool,
+    /// What the frame outlines in the view, after reading the picks back, if anything: drawn into
+    /// the view's image, so that the view read back shows it too.
     pub outline: Option<Outline>,
-    /// Whether the frame reads the view back as it renders it, which [`Renderer::view_read`] then
-    /// gives.
+    /// Whether the frame reads the view back as it renders it, outline and all, which
+    /// [`Renderer::view_read`] then gives.
     pub read_view: bool,
     /// Pixels the view shows in place of what `draws` would draw, from its top left, each onto one
     /// of the frame's, as far as they reach of it, the rest of it the clear color: the view of
@@ -202,6 +210,7 @@ pub struct Renderer {
     windows: Vec<Swapchain>,
     meshes: MeshPass,
     view: ViewPass,
+    outline: OutlinePass,
     /// What the game's view renders into, the IDs its draws write beside it, and the depth image
     /// they test, the size it last had, which has an area.
     view_image: Option<(ColorImage, IdImage, DepthImage)>,
@@ -311,6 +320,7 @@ impl Renderer {
             windows: Vec::new(),
             meshes: MeshPass::new(device),
             view: ViewPass::new(device, format)?,
+            outline: OutlinePass::new(device)?,
             view_image: None,
             pixels: None,
             view_read: 0,
@@ -391,9 +401,9 @@ impl Renderer {
     /// changes. A window that isn't open, or whose swapchain has no image free yet, is left as it
     /// was.
     ///
-    /// It reads back the IDs at the pixels `data.picks` asks for, and answers, in
-    /// [`Renderer::picked`], those that the frame two before it read; then outlines in the view
-    /// what `data.outline` says, from the view's IDs this frame.
+    /// It reads back the IDs at the pixels `data.picks` asks for, unless `data.read_picks` is
+    /// false, and answers, in [`Renderer::picked`], those that the frame two before it read; then
+    /// outlines in the view what `data.outline` says, from the view's IDs this frame.
     ///
     /// Returns `false` when there was nothing to render into, as when the window is minimized;
     /// the meshes and textures stay in `data.uploads`, and the UIs' texture changes and the picks
@@ -548,37 +558,46 @@ impl Renderer {
                     .meshes
                     .draw(&mut pass, view_projection, size, data.draws)?;
                 drop(pass);
-                let picked = self.picks.take(frame.number(), Some(ids.size()));
+                let picked = if data.read_picks {
+                    self.picks.take(frame.number(), Some(ids.size()))
+                } else {
+                    &[]
+                };
                 frame.read_ids(ids, picked)?;
-                let outline = (data.outline.filter(Outline::shows))
-                    .map(|outline| (frame.begin_sampling_ids(ids), outline));
+                // Into the view's image, from the IDs the picks read, so that wherever the view
+                // shows, and as it's read back, it shows outlined.
+                if let Some(outline) = data.outline.filter(Outline::shows) {
+                    let ids = frame.begin_sampling_ids(ids);
+                    let mut pass = frame
+                        .begin_pass_over(view_target, c"outline")
+                        .expect("an offscreen image is always there");
+                    self.outline.draw(&mut pass, ids, outline);
+                }
                 let image = if data.read_view {
                     self.view_read = frame.number();
                     frame.read_image(view_target)?
                 } else {
                     frame.begin_sampling(view_target)
                 };
-                (counts, Some((Shown { image, outline }, size)))
+                (counts, Some((image, size)))
             }
             (None, Some(Pixels { size, bytes })) => {
-                self.picks.take(frame.number(), None);
+                if data.read_picks {
+                    self.picks.take(frame.number(), None);
+                }
                 let (texture, written) =
                     (self.pixels.as_mut()).expect("the pixels' texture was made");
                 if let Some(bytes) = bytes {
                     frame.write_texture(texture, [0, 0], size, bytes)?;
                     *written = true;
                 }
-                let shown = Shown {
-                    image: texture.index(),
-                    outline: None,
-                };
-                (
-                    DrawCounts::default(),
-                    Some((shown, [size[0].min(width), size[1].min(height)])),
-                )
+                let shown = [size[0].min(width), size[1].min(height)];
+                (DrawCounts::default(), Some((texture.index(), shown)))
             }
             (None, None) => {
-                self.picks.take(frame.number(), None);
+                if data.read_picks {
+                    self.picks.take(frame.number(), None);
+                }
                 (DrawCounts::default(), None)
             }
         };
@@ -586,18 +605,18 @@ impl Renderer {
             .begin_pass(0, c"frame", data.clear_color, None, None)
             .expect("a frame's first target has an image");
         // Under the whole UI, unless it paints the view among its own shapes.
-        if let Some((shown, size)) = view
+        if let Some((image, size)) = view
             && !ui::draws_view(ui.primitives)
         {
             let viewport = Viewport {
                 size,
                 ..data.viewport
             };
-            self.view.draw(&mut pass, viewport, shown, None);
+            self.view.draw(&mut pass, viewport, image, None);
         }
-        let view = view.map(|(shown, size)| ui::View {
+        let view = view.map(|(image, size)| ui::View {
             pass: &self.view,
-            shown,
+            image,
             size,
         });
         self.ui
@@ -637,10 +656,10 @@ impl Renderer {
     /// The answers to picks that came in during the last [`Renderer::render`]: each pick's tag,
     /// with the ID of the draw on top at its pixel, as [`Draws`] gives it, in the frame that read
     /// it, or 0 where none drew. That's the frame that asked it, or for a pick past the 64 a frame
-    /// reads, or asked while frames had nothing to render into, the next that could read it. A
-    /// pick of a pixel outside the view, as the frame that would read it renders it, is answered 0
-    /// there; the rest, as the frame two after the one that read them begins, once the GPU has
-    /// rendered that one.
+    /// reads, or asked while frames had nothing to render into or read no picks, the next that
+    /// could read it. A pick of a pixel outside the view, as the frame that would read it renders
+    /// it, is answered 0 there; the rest, as the frame two after the one that read them begins,
+    /// once the GPU has rendered that one.
     pub fn picked(&self) -> &[(u64, u64)] {
         self.picks.answered()
     }
@@ -675,9 +694,10 @@ impl Renderer {
     }
 
     /// The game's view as the last [`Renderer::render`] rendered it and read it back, as
-    /// [`RenderData::read_view`] asked, without the UI drawn over it, once the GPU has finished
-    /// that frame, which this waits for, holding back the next. `None` if that call read no view
-    /// back, as when the view had no area, showed pixels, or there was nothing to render into.
+    /// [`RenderData::read_view`] asked, with its outline but without the UI drawn over it, once the
+    /// GPU has finished that frame, which this waits for, holding back the next. `None` if that
+    /// call read no view back, as when the view had no area, showed pixels, or there was nothing to
+    /// render into.
     pub fn view_read(&self) -> Result<Option<ImageRead<'_>>> {
         if self.view_read == 0 {
             return Ok(None);

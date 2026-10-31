@@ -62,6 +62,7 @@ fn main() -> ExitCode {
         tests,
         clear_reads_back,
         sampled_images_keep_their_layout,
+        passes_over_keep_what_their_target_holds,
         images_read_back_once_their_frame_has_finished,
         dropped_images_free_their_slots,
         depth_clears_in_every_pass,
@@ -265,6 +266,37 @@ fn sampled_images_keep_their_layout() {
     let pixels = image.read_back().expect("the image's pixels");
     for pixel in pixels.as_chunks::<4>().0 {
         assert_eq!(*pixel, [255, 0, 0, 255]);
+    }
+
+    drop((frames, image, device, instance));
+    check(&validation);
+}
+
+/// Clears an image, then starts a pass over it that draws nothing, and samples it, in more frames
+/// than are in flight, and reads it back as the clear left it: synchronization validation sees the
+/// second pass's load wait for the first's writes. A pass over the image before the frame's clear,
+/// which it was made or sampled before, is refused before anything is recorded.
+fn passes_over_keep_what_their_target_holds() {
+    let instance = instance();
+    let validation = instance.validation();
+    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let mut image = ColorImage::new(&device, 16, 16, "kept test target").expect("an image");
+    let mut frames = Frames::new(&device).expect("frames");
+    for _ in 0..3 {
+        let mut frame = frames
+            .begin([Target::Image(&mut image)])
+            .expect("a frame")
+            .expect("an offscreen image can always be rendered into");
+        let message = panics(|| drop(frame.begin_pass_over(0, c"too soon")));
+        assert!(message.contains("none has since"), "{message}");
+        drop(frame.begin_pass(0, c"clear", [0.0, 0.0, 1.0, 1.0], None, None));
+        drop(frame.begin_pass_over(0, c"kept"));
+        frame.begin_sampling(0);
+        frame.submit().expect("the frame's submission");
+    }
+    let pixels = image.read_back().expect("the image's pixels");
+    for pixel in pixels.as_chunks::<4>().0 {
+        assert_eq!(*pixel, [0, 0, 255, 255]);
     }
 
     drop((frames, image, device, instance));

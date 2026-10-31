@@ -1,8 +1,9 @@
 //! A run embedded in a tool, as the editor embeds a game: once a client has its view published to
 //! memory the client made, a frame comes as the client takes the last, at the size the client asks
-//! for, and the client's input reaches the layers, until it asks the run to end. It renders, so it
-//! needs a GPU and the validation layer, as the GPU tests do; and it runs in a process of its own,
-//! as a run starts the log, which a process starts once.
+//! for, with the viewpoint and the look it drew with, and the client's input reaches the layers,
+//! until it asks the run to end. It renders, so it needs a GPU and the validation layer, as the GPU
+//! tests do; and it runs in a process of its own, as a run starts the log, which a process starts
+//! once.
 #![cfg(feature = "dev")]
 
 use std::panic::{self, AssertUnwindSafe};
@@ -11,7 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use gg_api::view::{Frame, Reader};
-use gg_api::{Client, Session};
+use gg_api::{Captured, Client, Looked, Session};
 use gg_engine::{App, Context, Key, Layer};
 use serde_json::{Value, json};
 
@@ -121,6 +122,20 @@ fn check(client: &mut Client) {
     assert!(reader.ask([32, 16]));
     let (frame, _) = take_until(&mut reader, |frame, _| frame.size == [32, 16]);
     assert!(frame.started <= frame.published);
+
+    // The frames drawn with a look carry its viewpoint and its revision; and a capture of the
+    // game's own view, whose frame isn't published, comes all the same.
+    let viewpoint = json!({"position": [0, 0, 5], "rotation": [0, 0, 0, 1],
+        "projection": {"Perspective": {"fov": 1.0, "near": 0.1}}});
+    let looked: Looked =
+        (client.call_as("look", json!({ "viewpoint": viewpoint }))).expect("the look");
+    let (frame, _) = take_until(&mut reader, |frame, _| frame.look == looked.revision);
+    assert_eq!(Some(frame.viewpoint), looked.viewpoint);
+    let path = std::env::temp_dir().join(format!("gg-embedded-{}.png", std::process::id()));
+    let own = json!({"own": true, "path": path});
+    let captured: Captured = client.call_as("capture", own).expect("a capture");
+    assert_eq!([captured.width, captured.height], [32, 16]);
+    let _ = std::fs::remove_file(path);
 
     let held = json!({"events": [{"key": {"key": "KeyW", "pressed": true}}]});
     client.call("input", held).expect("the input");

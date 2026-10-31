@@ -31,9 +31,10 @@
 mod assets;
 mod camera;
 mod game;
-mod grid;
 mod handles;
+mod look;
 mod overlay;
+mod view;
 
 use std::collections::VecDeque;
 use std::f32::consts::FRAC_PI_3;
@@ -45,23 +46,20 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use gg_engine::egui::{
-    self, Align2, Button, CursorIcon, Id, KeyboardShortcut, Modal, Modifiers, Response,
-    ViewportCommand, ViewportId,
+    self, Button, Id, KeyboardShortcut, Modal, Modifiers, Response, ViewportCommand, ViewportId,
 };
 use gg_engine::math::{Vec2, Vec3, Vec4};
 use gg_engine::{
     Actions, App, Binding, Camera, Change, Commands, Component, Context, Docked, Entity, EntityId,
-    Error, Event, FileDialog, Input, Inspector, InspectorLink, Key, Layer, Name, PerfPanel, Pick,
-    Pose, Projection, Reflect, Script, Sprite, Tick, Transform, Ui, Viewpoint, World, run_scripts,
-    step_physics,
+    Error, Event, FileDialog, Inspector, InspectorLink, Layer, Name, PerfPanel, Pick, Pose,
+    Projection, Reflect, Script, Sprite, Tick, Transform, Ui, World, run_scripts, step_physics,
 };
 use tracing::warn;
 
 use assets::{Assets, DraggedScene};
-use camera::{Move, OrbitCamera, Screen, Side, Tool};
-use grid::Grid;
-use handles::{Aim, Handles, Picked, Reading, Reply, Sight};
+use handles::{Picked, Reading, Sight};
 use overlay::{Mode, Toolbar};
+use view::{OUTLINE, OUTLINE_WIDTH, ViewTools, alt_down, answer};
 
 fn main() -> ExitCode {
     gg_engine::run(app())
@@ -93,31 +91,13 @@ fn own_app() -> App {
     app.overlay(PerfPanel).overlay(inspector)
 }
 
-/// The editor's layer: its camera, the toolbar, the handles, which pick and edit through the
-/// Inspector's link, and the grid; the picks it asks for, and what the view shows under the
-/// cursor; the commands it queues and how the world runs, with the world as it was edited aside
-/// while a copy runs in its place; the scene's file; the Assets panel; and the message it shows.
+/// The editor's layer: the view's tools, and the grid, which it draws through the editor's camera;
+/// the commands it queues and how the world runs, with the world as it was edited aside while a
+/// copy runs in its place; the scene's file; the Assets panel; and the message it shows.
 struct Editor {
-    camera: OrbitCamera,
-    toolbar: Toolbar,
-    handles: Handles,
-    /// The Inspector's, which says what's picked, and takes the handles' edits.
-    link: InspectorLink,
-    /// What the view on screen sees from: what the last update had it see from, while that's the
-    /// editor's camera, which the handles are hit against.
-    shown: Option<Viewpoint>,
-    /// Where the last press over the view off the handles asked to pick, in the main window's
-    /// pixels, until `event` asks the engine, keeping the ticket in `asked`.
-    picking: Option<[f64; 2]>,
-    /// The ticket of the latest pick asked for, until its answer comes back, which `update` has
-    /// the Inspector pick, as [`answer`] says: a later press's takes its place, and a grab of a
-    /// handle drops it, so that it picks nothing else under the drag.
-    asked: Option<Pick>,
-    /// What the view shows under the cursor, from the picks asked at the cursor while it's over the
-    /// view, which the view's bottom left names.
-    hover: Hover<Pick>,
-    /// The grid, once attached.
-    grid: Option<Grid>,
+    /// The view's tools, which pick and edit through the Inspector's link, with the engine's picks:
+    /// what the last update had the view see from is what they hit the handles against.
+    view: ViewTools<Pick, EntityId>,
     /// What drives the world's cameras.
     actions: Actions<Act>,
     /// What changed since the last tick, as the [`Command`]s it applies.
@@ -188,15 +168,7 @@ impl Editor {
         let bound = actions.bind(Act::Move, Binding::WASD);
         bound.expect("W, A, S and D are of one kind");
         Self {
-            camera: OrbitCamera::new(),
-            toolbar: Toolbar::default(),
-            handles: Handles::default(),
-            link,
-            shown: None,
-            picking: None,
-            asked: None,
-            hover: Hover::default(),
-            grid: None,
+            view: ViewTools::new(link, Toolbar::default()),
             actions,
             commands: Vec::new(),
             gated: false,
@@ -223,14 +195,15 @@ impl Editor {
     /// puts aside only the world it last left, and a copy in place of another would have it drop
     /// the world as it was edited for good, as an Open that's refused keeps it.
     fn run(&mut self) {
-        let mode = self.toolbar.mode;
+        let toolbar = &mut self.view.toolbar;
+        let mode = toolbar.mode;
         if mode == self.mode {
             return;
         }
         if self.mode != Mode::Edit {
             self.commands.push(Command::Stop);
             self.mode = Mode::Edit;
-            self.toolbar.world_camera = false;
+            toolbar.world_camera = false;
         }
         let stopping = |queued: &Command| {
             matches!(queued, Command::Stop | Command::New | Command::Open { .. })
@@ -244,17 +217,17 @@ impl Editor {
             Mode::Simulate => self.commands.push(Command::Simulate),
         }
         self.mode = mode;
-        self.toolbar.world_camera = mode == Mode::Play;
+        toolbar.world_camera = mode == Mode::Play;
     }
 
     /// Has the title bar's Play and Simulate off, for a New or an Open, which stops the world at
     /// its tick, and the view see through the editor's camera if the world ran; a switch between
     /// them waiting for its Stop's tick goes too.
     fn stop(&mut self) {
-        self.toolbar.mode = Mode::Edit;
+        self.view.toolbar.mode = Mode::Edit;
         if self.mode != Mode::Edit {
             self.mode = Mode::Edit;
-            self.toolbar.world_camera = false;
+            self.view.toolbar.world_camera = false;
         }
     }
 
@@ -263,7 +236,7 @@ impl Editor {
     /// or stop, so that they move only while the world plays and the view sees through its camera,
     /// from the next tick. Simulating, the world runs no scripts, which the keys would drive.
     fn gate(&mut self) {
-        let through = self.toolbar.world_camera && self.mode == Mode::Play;
+        let through = self.view.toolbar.world_camera && self.mode == Mode::Play;
         if through != self.gated {
             self.gated = through;
             let heading = if through {
@@ -369,36 +342,11 @@ impl Editor {
         });
     }
 
-    /// Has Q, W, E or R pick its tool, Select, Move, Rotate or Scale, for `event`, a press of it,
-    /// not a repeat; but not one with `command` held, Ctrl, or Cmd on macOS, which is a
-    /// shortcut's; nor while the view sees through the world's camera, which shows no handles; nor
-    /// while the editor's camera flies, as its keys steer it; nor during a drag of the handles.
-    fn choose_tool(&mut self, event: &Event<'_>, command: bool) {
-        let Event::Key {
-            key,
-            pressed: true,
-            repeat: false,
-        } = *event
-        else {
-            return;
-        };
-        let busy = self.toolbar.world_camera || self.camera.flies() || self.handles.dragging();
-        if command || busy {
-            return;
-        }
-        self.toolbar.tool = match key {
-            Key::KeyQ => Tool::Select,
-            Key::KeyW => Tool::Move,
-            Key::KeyE => Tool::Rotate,
-            Key::KeyR => Tool::Scale,
-            _ => return,
-        };
-    }
-
     /// What the Inspector has picked, as `world` has it, while it's alive with a transform, as the
     /// handles see it.
     fn picked(&self, world: &World) -> Option<Picked> {
-        let id = self.link.picked()?;
+        let link = &self.view.link;
+        let id = link.picked()?;
         let entity = world.entity(id)?;
         let local = *world.get::<Transform>(entity)?;
         let parent = match world.parent(entity).ok()? {
@@ -410,56 +358,22 @@ impl Editor {
             serial: world.serial(),
             local,
             parent,
-            stepped: self.link.stepped(),
-            waiting: self.link.waiting(),
+            stepped: link.stepped(),
+            waiting: link.waiting(),
         })
     }
 
     /// Does what `event` does, as the editor reads the window, `reading`, with what the Inspector
-    /// has picked, `picked`: first the handles, which take a press that grabs one from the camera,
-    /// and while a drag lasts, every other press, the wheel and Home, setting what the drag gives
-    /// through the link and sealing its edit as it ends, or as the pick, the world or the
-    /// Inspector's steps change; and which have a press off them ask for a pick. Then Q, W, E and
-    /// R, which pick a tool; then the camera, which the view goes back to as it takes a press, the
-    /// wheel or Home; then the keys that drive the world's cameras.
+    /// has picked, `picked`: first the view's tools, as [`ViewTools::take`] says, then the keys that
+    /// drive the world's cameras, W, A, S and D, which nothing the handles take, a press, the wheel
+    /// or Home, is.
     fn take(
         &mut self,
         event: &Event<'_>,
         reading: &Reading,
         picked: Option<Picked>,
     ) -> ControlFlow<()> {
-        if self.handles.hold(picked.as_ref()) {
-            self.link.seal();
-        }
-        let aim = Aim {
-            tool: self.toolbar.tool,
-            viewpoint: self.shown,
-            picked,
-            camera: self.camera.moving().is_some(),
-            easing: self.camera.eases(),
-        };
-        match self.handles.event(event, reading, &aim) {
-            // The drag drops a pick asked for before it, whose answer would pick something else
-            // under it.
-            Reply::Take => {
-                self.asked = None;
-                return ControlFlow::Break(());
-            }
-            Reply::Set(entity, field) => {
-                self.link
-                    .set(entity, "Transform", field.path(), field.value());
-            }
-            Reply::Seal => self.link.seal(),
-            // For `event`, which has the context, to ask of the engine.
-            Reply::Pick(at) => self.picking = Some(at),
-            Reply::Pass => {}
-        }
-        self.choose_tool(event, reading.command);
-        let handled = self.camera.event(event, reading.screen, self.toolbar.tool);
-        // What the editor's camera takes moves it, from where it was: the view goes back to it.
-        if handled.is_break() {
-            self.toolbar.world_camera = false;
-        }
+        let handled = self.view.take(event, reading, picked);
         self.drive(event, reading.command);
         self.gate();
         handled
@@ -632,74 +546,6 @@ fn whole_scene(world: &World) -> Result<String, Error> {
     world.save_scene(&roots)
 }
 
-/// What the answers to picks that came back, `answers`, each a pick's ticket and the entity the
-/// view showed there, if any, pick through the Inspector's link: once the latest pick asked for,
-/// `asked`, has its answer, which forgets it, the entity it found, or none, which unpicks, as an
-/// entity no longer alive does; `None` while it waits. The answers to picks that a later press
-/// superseded pick nothing.
-fn answer<T: Copy + PartialEq>(
-    asked: &mut Option<T>,
-    answers: &[(T, Option<EntityId>)],
-) -> Option<Option<EntityId>> {
-    let ticket = (*asked)?;
-    let &(_, found) = answers.iter().find(|&&(answered, _)| answered == ticket)?;
-    *asked = None;
-    Some(found)
-}
-
-/// What the view shows under the cursor, as the answers to the picks asked at the cursor while it's
-/// over the view come back, each pick's ticket a `T`, a [`Pick`] but in tests: every frame the
-/// cursor is over the view asks one, and the view's bottom left names what the latest answer found,
-/// four frames behind the cursor.
-struct Hover<T> {
-    /// The ticket of the first pick asked since the cursor last came over the view, while it's over
-    /// it: the answers to picks asked before it found what was under the cursor before it left.
-    since: Option<T>,
-    /// The latest answer to a pick asked since then: its ticket, and the entity it found under the
-    /// cursor, if any. Answers can come back out of the order their picks were asked in, as one
-    /// outside the view, answered sooner, does before one inside it asked earlier.
-    latest: Option<(T, Option<EntityId>)>,
-}
-
-impl<T> Default for Hover<T> {
-    fn default() -> Self {
-        Self {
-            since: None,
-            latest: None,
-        }
-    }
-}
-
-impl<T: Copy + Ord> Hover<T> {
-    /// Takes `answers`, those that came back with the frame, with the cursor `over` the view or
-    /// not. Over it, an answer to a pick asked since it came over the view, later than the latest,
-    /// becomes the latest: a press's too, since a press off the handles asks at the cursor as well.
-    /// Off it, the picks asked and their answers are forgotten.
-    fn see(&mut self, over: bool, answers: &[(T, Option<EntityId>)]) {
-        let Some(since) = self.since.filter(|_| over) else {
-            *self = Self::default();
-            return;
-        };
-        for &(pick, found) in answers {
-            let later = self.latest.is_none_or(|(latest, _)| pick > latest);
-            if pick >= since && later {
-                self.latest = Some((pick, found));
-            }
-        }
-    }
-
-    /// Keeps `asked`, the ticket of a pick at the cursor over the view, if the frame had a pick left
-    /// to ask, for [`see`](Self::see) to take its answer and those after it.
-    fn ask(&mut self, asked: Option<T>) {
-        self.since = self.since.or(asked);
-    }
-
-    /// The entity the view shows under the cursor, as the latest answer found it.
-    fn under(&self) -> Option<EntityId> {
-        self.latest.and_then(|(_, found)| found)
-    }
-}
-
 /// What the view's bottom left calls `id`, the entity the view shows under the cursor, while it's
 /// alive in `world`: its name, or, without a [`Name`], its ID.
 fn hovered_name(world: &World, id: EntityId) -> Option<String> {
@@ -789,13 +635,6 @@ fn file_shortcut(events: &mut Vec<egui::Event>) -> Option<FileItem> {
 /// The widest a message gets, in points, so that a long error wraps.
 const MESSAGE_WIDTH: f32 = 400.0;
 
-/// The color of the outline round what's picked, in linear RGBA: an orange, as other editors
-/// outline what's selected in.
-const OUTLINE: Vec4 = Vec4::new(1.0, 0.35, 0.02, 1.0);
-
-/// How wide the outline round what's picked is, in points, as the colliders' outlines are.
-const OUTLINE_WIDTH: f32 = 2.0;
-
 /// Why a file couldn't be read, opened or written, which the editor shows until it's dismissed.
 struct Message {
     /// What couldn't be done, to which file, such as "Can't open grid.ron".
@@ -820,15 +659,9 @@ impl Message {
     }
 }
 
-/// Whether `input` has Alt held, by either of its keys.
-fn alt_down(input: &Input) -> bool {
-    input.key_down(Key::AltLeft) || input.key_down(Key::AltRight)
-}
-
 impl Layer for Editor {
     fn load(&mut self, cx: &mut Context) {
         cx.set_clear_color([0.02, 0.02, 0.025, 1.0]);
-        self.grid = Some(Grid::new(cx));
         // Before any entity has one, so that a world restored from a snapshot finds it by name.
         let registered = cx.world_mut().register::<CameraController>();
         registered.expect("the editor's script describes itself");
@@ -846,7 +679,7 @@ impl Layer for Editor {
 
     fn tick(&mut self, world: &mut World, tick: Tick) {
         let Self {
-            link,
+            view,
             commands,
             gated,
             edited,
@@ -857,6 +690,7 @@ impl Layer for Editor {
             message,
             ..
         } = self;
+        let link = &view.link;
         let mut opened = false;
         for command in commands.drain(..) {
             match command {
@@ -928,74 +762,50 @@ impl Layer for Editor {
     }
 
     fn update(&mut self, cx: &mut Context, dt: Duration) {
-        self.camera.update(dt);
-        let plane = grid::shown(&self.camera.viewpoint(), self.toolbar.plane);
-        self.camera.settle(plane.normal());
+        self.view.camera.update(dt);
+        self.view.settle();
         self.run();
         // Off once the world has no primary camera, as its ticks left it, so that no frame shows
         // the default viewpoint as the last one goes.
-        self.toolbar.world_camera &= has_camera(cx.world());
+        self.view.toolbar.world_camera &= has_camera(cx.world());
         self.gate();
         // The pick, by its ID, in the world that played, simulated or stopped in place of the one
         // it was in, which the Inspector's tick has unpicked.
         if let Some(pick) = self.carried.take() {
-            self.link.pick(pick);
+            self.view.link.pick(pick);
         }
         // What the view showed under the latest press off the handles, once that comes back.
-        if let Some(found) = answer(&mut self.asked, cx.picked()) {
-            self.link.pick(found);
+        if let Some(found) = answer(&mut self.view.asked, cx.picked()) {
+            self.view.link.pick(found);
         }
-        // A drag of the handles ends as the pick changes or dies, the world is another, the
-        // Inspector undoes or redoes, or the view goes to the world's camera.
-        let ended = self.handles.hold(self.picked(cx.world()).as_ref());
-        let left = self.toolbar.world_camera && self.handles.end();
-        if ended || left {
-            self.link.seal();
-        }
+        let picked = self.picked(cx.world());
+        self.view.hold(picked.as_ref());
+        let toolbar = &self.view.toolbar;
         // Through either camera, whether the world runs or not.
-        cx.set_colliders_shown(self.toolbar.colliders);
-        if let Some(id) = self.link.picked() {
+        cx.set_colliders_shown(toolbar.colliders);
+        if let Some(id) = self.view.link.picked() {
             let scale = cx.scale() as f32;
             cx.outline(id, OUTLINE, OUTLINE_WIDTH * scale);
         }
-        if self.toolbar.world_camera {
-            self.shown = None;
+        if toolbar.world_camera {
+            self.view.shown = None;
             return;
         }
-        let camera = self.camera.viewpoint();
+        let camera = self.view.camera.viewpoint();
         cx.set_viewpoint(camera);
-        self.shown = Some(camera);
         // Fitted to the view as the last frame showed it, which has nowhere to fit it at first.
-        if self.toolbar.grid
-            && let (Some(grid), Some(view)) = (&self.grid, cx.view())
-        {
-            grid.draw(cx, &camera, view, self.toolbar.plane);
+        if toolbar.grid {
+            cx.draw_grid(&camera, toolbar.plane);
         }
+        self.view.shown = Some(camera);
     }
 
     fn event(&mut self, cx: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
-        let input = cx.input();
-        let screen = Screen {
-            view: cx.view(),
-            scale: cx.scale() as f32,
-            alt: alt_down(input),
-        };
-        // The key egui's shortcuts take as the command key.
-        let command = if cfg!(target_os = "macos") {
-            [Key::SuperLeft, Key::SuperRight]
-        } else {
-            [Key::ControlLeft, Key::ControlRight]
-        };
-        let command = command.into_iter().any(|key| input.key_down(key));
-        let reading = Reading {
-            screen,
-            command,
-            cursor: input.cursor(),
-        };
+        let reading = view::reading(cx, cx.view());
         let picked = self.picked(cx.world());
         let handled = self.take(event, &reading, picked);
-        if let Some(at) = self.picking.take() {
-            self.asked = cx.pick(at);
+        if let Some(at) = self.view.picking.take() {
+            self.view.asked = cx.pick(at);
         }
         handled
     }
@@ -1034,74 +844,21 @@ impl Layer for Editor {
         // every frame, and the name of what the latest answer found, painted over the handles.
         let over = ui.view().filter(|view| view.hovered());
         let at = over.as_ref().and(cx.input().cursor());
-        self.hover.see(at.is_some(), cx.picked());
+        self.view.hover.see(at.is_some(), cx.picked());
         if let Some(at) = at {
-            self.hover.ask(cx.pick(at));
+            self.view.hover.ask(cx.pick(at));
         }
-        let name = (self.hover.under()).and_then(|id| hovered_name(cx.world(), id));
+        let name = (self.view.hover.under()).and_then(|id| hovered_name(cx.world(), id));
         let picked = self.picked(cx.world());
-        let Self {
-            camera,
-            toolbar,
-            handles,
-            ..
-        } = self;
-        // The handles, on the view's own layer: over the world it shows, and under what's over it,
-        // as the frame renders the view, through the editor's camera.
-        if let (Some(view), Some(pixels), Some(viewpoint)) =
-            (ui.view(), ui.viewport(), cx.viewpoint())
-        {
-            let scale = cx.scale() as f32;
-            if let Some(sight) = Sight::new(viewpoint, pixels, scale) {
-                let egui = ui.egui();
-                let ppp = egui.pixels_per_point();
-                let painter = egui.layer_painter(view.layer_id).with_clip_rect(view.rect);
-                // The one a press would grab: none while the camera drags or eases, nor with Alt
-                // held, which orbits.
-                let alt = alt_down(cx.input());
-                let hover = view.hover_pos().filter(|_| view.hovered());
-                let hover = hover.filter(|_| camera.moving().is_none() && !camera.eases() && !alt);
-                let hover = hover.map(|at| Vec2::new(at.x, at.y) * ppp);
-                handles.paint(&painter, ppp, &sight, toolbar.tool, picked.as_ref(), hover);
-            }
-        }
-        if let (Some(view), Some(name)) = (over, name) {
-            overlay::name_hovered(ui.egui(), &view, name);
-        }
+        // As the frame renders the view, through the editor's camera.
+        let scale = cx.scale() as f32;
+        let sight = (ui.viewport().zip(cx.viewpoint()))
+            .and_then(|(pixels, viewpoint)| Sight::new(viewpoint, pixels, scale));
+        let alt = alt_down(cx.input());
+        self.view.paint(ui, sight, alt, picked.as_ref(), name);
         let has_camera = has_camera(cx.world());
-        ui.title_bar(|ui| toolbar.show_run(ui));
-        ui.over_view("toolbar", Align2::LEFT_TOP, |ui| {
-            toolbar.show(ui, camera, has_camera);
-        });
-        if !toolbar.world_camera {
-            // The side the camera looks squarely from, which the gizmo names.
-            let seen = camera.viewpoint();
-            let square = cx.view().is_some_and(|view| grid::square(&seen, view));
-            let aligned = square
-                .then(|| Side::facing(seen.rotation * Vec3::NEG_Z))
-                .flatten();
-            ui.over_view("gizmo", Align2::RIGHT_TOP, |ui| {
-                overlay::gizmo(ui, camera, aligned);
-            });
-        }
-        // The cursor over the view says what the left button does, and while a drag goes on,
-        // what it does, wherever the cursor is.
-        let hovered = ui.view().is_some_and(|view| view.hovered());
-        let icon = match camera.moving() {
-            Some(Move::Pan) => Some(CursorIcon::Move),
-            Some(Move::Orbit) => Some(CursorIcon::Grabbing),
-            Some(Move::Look) => Some(CursorIcon::Crosshair),
-            Some(Move::Dolly) => Some(CursorIcon::ZoomIn),
-            None if hovered => match toolbar.tool {
-                Tool::Select | Tool::Move | Tool::Rotate | Tool::Scale => None,
-                Tool::Pan => Some(CursorIcon::Move),
-                Tool::Orbit => Some(CursorIcon::Grab),
-            },
-            None => None,
-        };
-        if let Some(icon) = icon {
-            ui.egui().set_cursor_icon(icon);
-        }
+        ui.title_bar(|ui| self.view.toolbar.show_run(ui));
+        self.view.overlay(ui, has_camera, cx.view());
         // As Play, Simulate and the toolbar's switch went.
         self.run();
         self.gate();
@@ -1114,9 +871,10 @@ mod tests {
 
     use gg_engine::math::DVec2;
     use gg_engine::reflect::Value;
-    use gg_engine::{BoxCollider2D, MouseButton, RigidBody2D, Scroll, Viewport};
+    use gg_engine::{BoxCollider2D, Key, MouseButton, RigidBody2D, Scroll, Viewport};
 
     use super::*;
+    use crate::camera::{Move, Screen, Tool};
 
     /// The editor, linked to an Inspector of its own.
     fn fresh() -> Editor {
@@ -1180,11 +938,11 @@ mod tests {
     /// An editor dragging Move's X arrow of `at_the_origin`, through its camera as it starts.
     fn dragging() -> Editor {
         let mut editor = fresh();
-        editor.toolbar.tool = Tool::Move;
-        editor.shown = Some(editor.camera.viewpoint());
+        editor.view.toolbar.tool = Tool::Move;
+        editor.view.shown = Some(editor.view.camera.viewpoint());
         let pressed = press_at(&mut editor, at_the_origin(), ON_X, MouseButton::Left, true);
         assert_eq!(pressed, ControlFlow::Break(()));
-        assert!(editor.handles.dragging());
+        assert!(editor.view.handles.dragging());
         editor
     }
 
@@ -1202,8 +960,8 @@ mod tests {
         }
         let at = [680.0, 360.0];
         let _ = press_at(&mut editor, picked, at, MouseButton::Left, false);
-        assert!(!editor.handles.dragging());
-        let pending = editor.link.pending();
+        assert!(!editor.view.handles.dragging());
+        let pending = editor.view.link.pending();
         let [Some((id, component, path, Value::Vec3(moved))), None] = &pending[..] else {
             panic!("a set and a seal: {pending:?}");
         };
@@ -1215,7 +973,7 @@ mod tests {
             moved.abs_diff_eq(Vec3::new(1.25, 0.0, 0.0), 1e-4),
             "{moved}"
         );
-        assert_eq!(editor.picking, None, "it picked nothing");
+        assert_eq!(editor.view.picking, None, "it picked nothing");
     }
 
     /// While a drag of the handles lasts, the editor takes the other buttons' presses, the wheel
@@ -1226,8 +984,8 @@ mod tests {
         let mut editor = dragging();
         let picked = at_the_origin();
         // Away from where it starts, which Home would ease it back to.
-        editor.camera.orbit(Vec2::new(40.0, 20.0));
-        let seen = editor.camera.viewpoint();
+        editor.view.camera.orbit(Vec2::new(40.0, 20.0));
+        let seen = editor.view.camera.viewpoint();
         let press = |button| Event::MouseButton {
             button,
             pressed: true,
@@ -1247,17 +1005,17 @@ mod tests {
             let handled = editor.take(&event, &reading(ON_X), picked);
             assert_eq!(handled, ControlFlow::Break(()), "{event:?}");
         }
-        editor.camera.update(Duration::from_secs(1));
-        assert_eq!(editor.camera.moving(), None);
-        assert_eq!(editor.camera.viewpoint(), seen);
+        editor.view.camera.update(Duration::from_secs(1));
+        assert_eq!(editor.view.camera.moving(), None);
+        assert_eq!(editor.view.camera.viewpoint(), seen);
         let _ = press_at(&mut editor, picked, ON_X, MouseButton::Left, false);
         let panning = press_at(&mut editor, picked, ON_X, MouseButton::Middle, true);
         assert_eq!(panning, ControlFlow::Break(()));
-        assert_eq!(editor.camera.moving(), Some(Move::Pan));
+        assert_eq!(editor.view.camera.moving(), Some(Move::Pan));
         let left = press_at(&mut editor, picked, ON_X, MouseButton::Left, true);
         assert_eq!(left, ControlFlow::Continue(()));
-        assert!(!editor.handles.dragging());
-        assert_eq!(editor.picking, None);
+        assert!(!editor.view.handles.dragging());
+        assert_eq!(editor.view.picking, None);
     }
 
     /// Q, W, E and R pick Select, Move, Rotate and Scale as they're pressed: not as they repeat,
@@ -1277,35 +1035,39 @@ mod tests {
             (Key::KeyR, Tool::Scale),
             (Key::KeyQ, Tool::Select),
         ] {
-            editor.choose_tool(&key(pressed, false), false);
-            assert_eq!(editor.toolbar.tool, tool);
+            editor.view.choose_tool(&key(pressed, false), false);
+            assert_eq!(editor.view.toolbar.tool, tool);
         }
-        editor.choose_tool(&key(Key::KeyW, true), false);
-        editor.choose_tool(&key(Key::KeyW, false), true);
-        assert_eq!(editor.toolbar.tool, Tool::Select, "repeating, or with Ctrl");
-        editor.toolbar.world_camera = true;
-        editor.choose_tool(&key(Key::KeyW, false), false);
+        editor.view.choose_tool(&key(Key::KeyW, true), false);
+        editor.view.choose_tool(&key(Key::KeyW, false), true);
         assert_eq!(
-            editor.toolbar.tool,
+            editor.view.toolbar.tool,
+            Tool::Select,
+            "repeating, or with Ctrl"
+        );
+        editor.view.toolbar.world_camera = true;
+        editor.view.choose_tool(&key(Key::KeyW, false), false);
+        assert_eq!(
+            editor.view.toolbar.tool,
             Tool::Select,
             "through the world's camera"
         );
-        editor.toolbar.world_camera = false;
+        editor.view.toolbar.world_camera = false;
         let right = |pressed| Event::MouseButton {
             button: MouseButton::Right,
             pressed,
         };
         let screen = reading(ON_X).screen;
-        let _ = editor.camera.event(&right(true), screen, Tool::Select);
-        assert!(editor.camera.flies());
-        editor.choose_tool(&key(Key::KeyE, false), false);
-        assert_eq!(editor.toolbar.tool, Tool::Select, "flying");
+        let _ = editor.view.camera.event(&right(true), screen, Tool::Select);
+        assert!(editor.view.camera.flies());
+        editor.view.choose_tool(&key(Key::KeyE, false), false);
+        assert_eq!(editor.view.toolbar.tool, Tool::Select, "flying");
         let mut editor = dragging();
         let _ = editor.take(&key(Key::KeyR, false), &reading(ON_X), at_the_origin());
-        assert_eq!(editor.toolbar.tool, Tool::Move, "dragging");
+        assert_eq!(editor.view.toolbar.tool, Tool::Move, "dragging");
         let _ = press_at(&mut editor, at_the_origin(), ON_X, MouseButton::Left, false);
         let _ = editor.take(&key(Key::KeyR, false), &reading(ON_X), at_the_origin());
-        assert_eq!(editor.toolbar.tool, Tool::Scale, "let go");
+        assert_eq!(editor.view.toolbar.tool, Tool::Scale, "let go");
     }
 
     /// A press of the left button over the view off the handles asks for a pick at the cursor,
@@ -1318,23 +1080,23 @@ mod tests {
         let off = [200.0, 500.0];
         for tool in [Tool::Select, Tool::Move, Tool::Rotate, Tool::Scale] {
             let mut editor = fresh();
-            editor.toolbar.tool = tool;
-            editor.shown = Some(editor.camera.viewpoint());
+            editor.view.toolbar.tool = tool;
+            editor.view.shown = Some(editor.view.camera.viewpoint());
             let pressed = press_at(&mut editor, at_the_origin(), off, MouseButton::Left, true);
             assert_eq!(pressed, ControlFlow::Continue(()), "{tool:?}");
-            assert_eq!(editor.picking, Some(off), "{tool:?}");
+            assert_eq!(editor.view.picking, Some(off), "{tool:?}");
         }
         let mut editor = fresh();
-        editor.toolbar.world_camera = true;
+        editor.view.toolbar.world_camera = true;
         let pressed = press_at(&mut editor, at_the_origin(), ON_X, MouseButton::Left, true);
         assert_eq!(pressed, ControlFlow::Continue(()));
-        assert_eq!(editor.picking, Some(ON_X));
-        assert!(editor.toolbar.world_camera);
+        assert_eq!(editor.view.picking, Some(ON_X));
+        assert!(editor.view.toolbar.world_camera);
         for tool in [Tool::Pan, Tool::Orbit] {
             let mut editor = fresh();
-            editor.toolbar.tool = tool;
+            editor.view.toolbar.tool = tool;
             let _ = press_at(&mut editor, at_the_origin(), off, MouseButton::Left, true);
-            assert_eq!(editor.picking, None, "{tool:?}");
+            assert_eq!(editor.view.picking, None, "{tool:?}");
         }
         let mut editor = fresh();
         let alt = Event::MouseButton {
@@ -1344,72 +1106,20 @@ mod tests {
         let mut held = reading(off);
         held.screen.alt = true;
         let _ = editor.take(&alt, &held, at_the_origin());
-        assert_eq!(editor.picking, None, "with Alt");
+        assert_eq!(editor.view.picking, None, "with Alt");
         let editor = dragging();
-        assert_eq!(editor.picking, None, "on a handle");
+        assert_eq!(editor.view.picking, None, "on a handle");
         let mut editor = fresh();
-        editor.toolbar.tool = Tool::Move;
-        editor.shown = Some(editor.camera.viewpoint());
-        editor.asked = Context::seeded(0).pick([0.0, 0.0]);
-        assert!(editor.asked.is_some());
+        editor.view.toolbar.tool = Tool::Move;
+        editor.view.shown = Some(editor.view.camera.viewpoint());
+        editor.view.asked = Context::seeded(0).pick([0.0, 0.0]);
+        assert!(editor.view.asked.is_some());
         let grabbed = press_at(&mut editor, at_the_origin(), ON_X, MouseButton::Left, true);
         assert_eq!(grabbed, ControlFlow::Break(()));
-        assert_eq!(editor.asked, None, "a grab drops the pick asked before it");
-    }
-
-    /// The answer to the latest pick asked for picks what it found, or unpicks for none; answers
-    /// to older picks, which a later press superseded, pick nothing; and once answered, a pick is
-    /// forgotten.
-    #[test]
-    fn the_latest_picks_answer_picks() {
-        let [a, b]: [EntityId; 2] =
-            ["0123456789abcdef", "fedcba9876543210"].map(|id| id.parse().expect("an ID"));
-        let mut asked = Some(2_u32);
-        assert_eq!(answer(&mut asked, &[]), None, "until it comes");
-        assert_eq!(answer(&mut asked, &[(1, Some(a))]), None, "an older pick's");
-        assert_eq!(asked, Some(2));
-        let answers = [(1, Some(a)), (2, Some(b))];
-        assert_eq!(answer(&mut asked, &answers), Some(Some(b)));
-        assert_eq!(asked, None);
-        assert_eq!(answer(&mut asked, &answers), None, "answered");
-        let mut asked = Some(3);
-        assert_eq!(answer(&mut asked, &[(3, None)]), Some(None), "unpicks");
-    }
-
-    /// What the view shows under the cursor is what the latest answer found, of those to picks
-    /// asked since the cursor came over the view: nothing until one comes back, nor where it found
-    /// nothing, and an answer that comes back after a later one's says nothing. Off the view,
-    /// nothing is, and back over it, the answers to picks asked before say nothing either.
-    #[test]
-    fn the_latest_pick_since_the_cursor_came_over_the_view_finds_whats_under_it() {
-        let [a, b]: [EntityId; 2] =
-            ["0123456789abcdef", "fedcba9876543210"].map(|id| id.parse().expect("an ID"));
-        let mut hover = Hover::default();
-        hover.see(true, &[(1, Some(a))]);
-        assert_eq!(hover.under(), None, "a pick from before it came over");
-        hover.ask(Some(2_u32));
-        hover.see(true, &[]);
-        assert_eq!(hover.under(), None, "until one comes back");
-        hover.ask(Some(3));
-        hover.see(true, &[(1, Some(a)), (2, Some(b))]);
-        assert_eq!(hover.under(), Some(b));
-        hover.see(true, &[]);
-        assert_eq!(hover.under(), Some(b), "until the next");
-        // A pick outside the view, answered sooner, before one inside it asked earlier.
-        hover.see(true, &[(5, None)]);
-        assert_eq!(hover.under(), None, "nothing there");
-        hover.see(true, &[(3, Some(a)), (4, Some(a))]);
-        assert_eq!(hover.under(), None, "after a later one's");
-        hover.see(true, &[(6, Some(a))]);
-        assert_eq!(hover.under(), Some(a));
-        hover.see(false, &[(7, Some(b))]);
-        assert_eq!(hover.under(), None, "off the view");
-        hover.see(true, &[(7, Some(b))]);
-        hover.ask(Some(9));
-        hover.see(true, &[(8, Some(b))]);
-        assert_eq!(hover.under(), None, "asked before it came back over");
-        hover.see(true, &[(9, Some(b))]);
-        assert_eq!(hover.under(), Some(b));
+        assert_eq!(
+            editor.view.asked, None,
+            "a grab drops the pick asked before it"
+        );
     }
 
     /// The view's bottom left names what's under the cursor by its name, or without one by its ID,
@@ -1451,9 +1161,12 @@ mod tests {
             }
         };
         for spawn in [|_: &mut World| {}, none_primary] {
-            editor.toolbar.world_camera = true;
-            assert_eq!(frame(&mut editor, spawn), Some(editor.camera.viewpoint()));
-            assert!(!editor.toolbar.world_camera);
+            editor.view.toolbar.world_camera = true;
+            assert_eq!(
+                frame(&mut editor, spawn),
+                Some(editor.view.camera.viewpoint())
+            );
+            assert!(!editor.view.toolbar.world_camera);
         }
         let mut cx = Context::seeded(1);
         let press = |button, pressed| Event::MouseButton { button, pressed };
@@ -1469,20 +1182,20 @@ mod tests {
             ),
             (home, None),
         ] {
-            editor.toolbar.world_camera = true;
+            editor.view.toolbar.world_camera = true;
             assert_eq!(frame(&mut editor, spawn_world), None);
             // A left press with the Select tool, which the editor's camera doesn't take.
             let select = press(MouseButton::Left, true);
             assert_eq!(editor.event(&mut cx, &select), ControlFlow::Continue(()));
             let _ = editor.event(&mut cx, &press(MouseButton::Left, false));
-            assert!(editor.toolbar.world_camera);
+            assert!(editor.view.toolbar.world_camera);
             assert_eq!(editor.event(&mut cx, &moves), ControlFlow::Break(()));
-            assert!(!editor.toolbar.world_camera);
+            assert!(!editor.view.toolbar.world_camera);
             if let Some(then) = then {
                 let _ = editor.event(&mut cx, &then);
             }
             let seen = frame(&mut editor, spawn_world);
-            assert_eq!(seen, Some(editor.camera.viewpoint()));
+            assert_eq!(seen, Some(editor.view.camera.viewpoint()));
         }
     }
 
@@ -1495,10 +1208,10 @@ mod tests {
         spawn_world(cx.world_mut());
         for world_camera in [true, false] {
             for colliders in [true, false] {
-                editor.toolbar.world_camera = world_camera;
-                editor.toolbar.colliders = colliders;
+                editor.view.toolbar.world_camera = world_camera;
+                editor.view.toolbar.colliders = colliders;
                 editor.update(&mut cx, Duration::ZERO);
-                assert_eq!(editor.toolbar.world_camera, world_camera);
+                assert_eq!(editor.view.toolbar.world_camera, world_camera);
                 assert_eq!(
                     cx.colliders_shown(),
                     colliders,
@@ -1567,12 +1280,12 @@ mod tests {
         let _ = editor.event(&mut cx, &key(Key::KeyW, true));
         assert!(editor.commands.is_empty());
         assert_eq!(ticks.run(&mut editor, &mut cx, 4), start);
-        editor.toolbar.world_camera = true;
+        editor.view.toolbar.world_camera = true;
         editor.update(&mut cx, Duration::ZERO);
         assert!(editor.commands.is_empty());
         assert_eq!(ticks.run(&mut editor, &mut cx, 4), start);
         // Played, through its camera, they go up with W held, a step a tick.
-        editor.toolbar.mode = Mode::Play;
+        editor.view.toolbar.mode = Mode::Play;
         editor.update(&mut cx, Duration::ZERO);
         assert_eq!(last_move(&editor), Some(Vec2::Y));
         let up = moved(&start, up_a_step, 8);
@@ -1608,7 +1321,7 @@ mod tests {
         assert_eq!(last_move(&editor), Some(Vec2::ZERO));
         assert_eq!(ticks.run(&mut editor, &mut cx, 4), held);
         // Back to the world's camera with D still held: they go right again.
-        editor.toolbar.world_camera = true;
+        editor.view.toolbar.world_camera = true;
         editor.update(&mut cx, Duration::ZERO);
         assert_eq!(last_move(&editor), Some(Vec2::X));
         let held = moved(&held, right_a_step, 2);
@@ -1619,23 +1332,23 @@ mod tests {
         // The frame's ticks after the last one goes, before its update.
         assert_eq!(ticks.run(&mut editor, &mut cx, 2), held);
         editor.update(&mut cx, Duration::ZERO);
-        assert!(!editor.toolbar.world_camera);
+        assert!(!editor.view.toolbar.world_camera);
         assert_eq!(last_move(&editor), Some(Vec2::ZERO));
         assert_eq!(ticks.run(&mut editor, &mut cx, 4), held);
         let primary = cx.world_mut().query_mut::<&mut Camera>().next();
         primary.expect("a camera").primary = true;
-        editor.toolbar.world_camera = true;
+        editor.view.toolbar.world_camera = true;
         editor.update(&mut cx, Duration::ZERO);
         let held = moved(&held, right_a_step, 2);
         assert_eq!(ticks.run(&mut editor, &mut cx, 2), held);
-        editor.toolbar.world_camera = false;
+        editor.view.toolbar.world_camera = false;
         editor.update(&mut cx, Duration::ZERO);
         assert_eq!(last_move(&editor), Some(Vec2::ZERO));
         assert_eq!(ticks.run(&mut editor, &mut cx, 4), held);
         let _ = editor.event(&mut cx, &key(Key::KeyW, true));
         assert!(editor.commands.is_empty());
         // Stopped, the world as it was edited comes back, its cameras where they started.
-        editor.toolbar.mode = Mode::Edit;
+        editor.view.toolbar.mode = Mode::Edit;
         editor.update(&mut cx, Duration::ZERO);
         assert_eq!(ticks.run(&mut editor, &mut cx, 1), start);
     }
@@ -1813,7 +1526,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         // Playing, through the world's camera with W held, they go up, and are saved going up.
-        editor.toolbar.mode = Mode::Play;
+        editor.view.toolbar.mode = Mode::Play;
         editor.update(&mut cx, Duration::ZERO);
         let w = Event::Key {
             key: Key::KeyW,
@@ -1827,8 +1540,8 @@ mod tests {
         let text = whole_scene(cx.world()).expect("saved");
         gg_engine::write_scene(&going_up, &text).expect("written");
         editor.open(going_up);
-        assert_eq!(editor.toolbar.mode, Mode::Edit);
-        assert!(!editor.toolbar.world_camera);
+        assert_eq!(editor.view.toolbar.mode, Mode::Edit);
+        assert!(!editor.view.toolbar.world_camera);
         ticks.run(&mut editor, &mut cx, 1);
         assert!(editor.edited.is_none(), "stopped");
         assert_eq!(headings(cx.world()), [Vec2::ZERO; 2]);
@@ -1836,7 +1549,7 @@ mod tests {
         editor.update(&mut cx, Duration::ZERO);
         assert!(editor.commands.is_empty());
         // Played again, W still held.
-        editor.toolbar.mode = Mode::Play;
+        editor.view.toolbar.mode = Mode::Play;
         editor.update(&mut cx, Duration::ZERO);
         assert_eq!(last_move(&editor), Some(Vec2::Y));
         ticks.run(&mut editor, &mut cx, 1);
@@ -1897,7 +1610,7 @@ mod tests {
         let mut editor = fresh();
         let mut cx = Context::seeded(1);
         spawn_world(cx.world_mut());
-        editor.toolbar.mode = Mode::Play;
+        editor.view.toolbar.mode = Mode::Play;
         editor.update(&mut cx, Duration::ZERO);
         editor.commands.clear();
         let s = |pressed| Event::Key {
@@ -2028,10 +1741,10 @@ mod tests {
         };
         ticks.run(&mut editor, &mut cx, 4);
         assert_eq!(height(&cx), 4.0, "it doesn't play");
-        editor.toolbar.mode = Mode::Play;
+        editor.view.toolbar.mode = Mode::Play;
         editor.update(&mut cx, Duration::ZERO);
         assert!(
-            editor.toolbar.world_camera,
+            editor.view.toolbar.world_camera,
             "it plays through the world's camera"
         );
         assert!(matches!(editor.commands[..], [Command::Play, ..]));
@@ -2051,19 +1764,19 @@ mod tests {
         editor.save(cx.world(), saved.clone());
         let text = gg_engine::read_scene(&saved).expect("written");
         assert_eq!(text, scene);
-        editor.toolbar.mode = Mode::Edit;
+        editor.view.toolbar.mode = Mode::Edit;
         editor.update(&mut cx, Duration::ZERO);
-        assert!(!editor.toolbar.world_camera);
+        assert!(!editor.view.toolbar.world_camera);
         ticks.run(&mut editor, &mut cx, 4);
         assert_eq!(cx.world().serial(), edited, "the very world");
         assert_eq!(whole_scene(cx.world()).expect("saved"), scene);
         assert!(editor.edited.is_none());
         // Played again, then New, which stops it first and empties the world as it was edited.
-        editor.toolbar.mode = Mode::Play;
+        editor.view.toolbar.mode = Mode::Play;
         editor.update(&mut cx, Duration::ZERO);
         ticks.run(&mut editor, &mut cx, 1);
         editor.choose(&mut cx, FileItem::New);
-        assert_eq!(editor.toolbar.mode, Mode::Edit);
+        assert_eq!(editor.view.toolbar.mode, Mode::Edit);
         ticks.run(&mut editor, &mut cx, 1);
         assert!(editor.edited.is_none());
         assert_eq!(ids(cx.world()), []);
@@ -2094,10 +1807,13 @@ mod tests {
             repeat: false,
         };
         let _ = editor.event(&mut cx, &w);
-        editor.toolbar.mode = Mode::Simulate;
+        editor.view.toolbar.mode = Mode::Simulate;
         editor.update(&mut cx, Duration::ZERO);
         assert!(matches!(editor.commands[..], [Command::Simulate]));
-        assert!(!editor.toolbar.world_camera, "through the editor's camera");
+        assert!(
+            !editor.view.toolbar.world_camera,
+            "through the editor's camera"
+        );
         ticks.run(&mut editor, &mut cx, 32);
         assert_ne!(cx.world().serial(), edited, "a copy simulates");
         assert!(height(&cx) < 3.0, "it falls");
@@ -2107,7 +1823,7 @@ mod tests {
         // The world as it was edited at the Stop's tick, then the other at the next: as often as
         // updates come between.
         let switch = |editor: &mut Editor, cx: &mut Context, ticks: &mut Ticks, mode| {
-            editor.toolbar.mode = mode;
+            editor.view.toolbar.mode = mode;
             for _ in 0..2 {
                 editor.update(cx, Duration::ZERO);
                 assert!(matches!(editor.commands[..], [Command::Stop, ..]));
@@ -2123,7 +1839,7 @@ mod tests {
             editor.commands[..],
             [Command::Play, Command::Move(heading)] if heading == Vec2::Y
         ));
-        assert!(editor.toolbar.world_camera);
+        assert!(editor.view.toolbar.world_camera);
         let up_a_step = Vec3::Y * 5.0 / 64.0;
         assert_eq!(
             ticks.run(&mut editor, &mut cx, 1),
@@ -2137,20 +1853,20 @@ mod tests {
         // Simulated, afresh again, the cameras where they started and W driving nothing.
         switch(&mut editor, &mut cx, &mut ticks, Mode::Simulate);
         assert!(matches!(editor.commands[..], [Command::Simulate]));
-        assert!(!editor.toolbar.world_camera);
+        assert!(!editor.view.toolbar.world_camera);
         assert_eq!(ticks.run(&mut editor, &mut cx, 1), start);
         assert_eq!(height(&cx), a_tick_on, "afresh");
-        editor.toolbar.mode = Mode::Edit;
+        editor.view.toolbar.mode = Mode::Edit;
         editor.update(&mut cx, Duration::ZERO);
         assert!(matches!(editor.commands[..], [Command::Stop]));
         ticks.run(&mut editor, &mut cx, 1);
         assert_eq!(cx.world().serial(), edited, "the very world");
         assert_eq!(height(&cx), 4.0);
-        editor.toolbar.mode = Mode::Simulate;
+        editor.view.toolbar.mode = Mode::Simulate;
         editor.update(&mut cx, Duration::ZERO);
         ticks.run(&mut editor, &mut cx, 1);
         editor.choose(&mut cx, FileItem::New);
-        assert_eq!(editor.toolbar.mode, Mode::Edit);
+        assert_eq!(editor.view.toolbar.mode, Mode::Edit);
         ticks.run(&mut editor, &mut cx, 1);
         assert!(editor.edited.is_none());
         assert_eq!(ids(cx.world()), []);
@@ -2167,13 +1883,13 @@ mod tests {
         let mut cx = Context::seeded(1);
         spawn_world(cx.world_mut());
         let mut ticks = Ticks { number: 0 };
-        editor.toolbar.mode = Mode::Play;
+        editor.view.toolbar.mode = Mode::Play;
         editor.update(&mut cx, Duration::ZERO);
         ticks.run(&mut editor, &mut cx, 1);
-        editor.toolbar.mode = Mode::Simulate;
+        editor.view.toolbar.mode = Mode::Simulate;
         editor.update(&mut cx, Duration::ZERO);
         editor.choose(&mut cx, FileItem::New);
-        assert_eq!(editor.toolbar.mode, Mode::Edit);
+        assert_eq!(editor.view.toolbar.mode, Mode::Edit);
         ticks.run(&mut editor, &mut cx, 1);
         editor.update(&mut cx, Duration::ZERO);
         assert!(editor.commands.is_empty(), "nothing runs");
@@ -2181,13 +1897,13 @@ mod tests {
         assert_eq!(ids(cx.world()), []);
         // Played again, then a scene that's refused opened, and Simulate before the Open's tick.
         let edited = cx.world().serial();
-        editor.toolbar.mode = Mode::Play;
+        editor.view.toolbar.mode = Mode::Play;
         editor.update(&mut cx, Duration::ZERO);
         ticks.run(&mut editor, &mut cx, 1);
         let broken = scratch.0.join("broken.ron");
         fs::write(&broken, "(entities: {").expect("written");
         editor.open(broken);
-        editor.toolbar.mode = Mode::Simulate;
+        editor.view.toolbar.mode = Mode::Simulate;
         editor.update(&mut cx, Duration::ZERO);
         assert!(matches!(editor.commands[..], [Command::Open { .. }]));
         ticks.run(&mut editor, &mut cx, 1);
@@ -2207,7 +1923,7 @@ mod tests {
         let mut cx = Context::seeded(1);
         let mut ticks = Ticks { number: 0 };
         for mode in [Mode::Simulate, Mode::Play, Mode::Edit] {
-            editor.toolbar.mode = mode;
+            editor.view.toolbar.mode = mode;
             // Play from Simulate after the tick of the Stop before it.
             for _ in 0..2 {
                 editor.update(&mut cx, Duration::ZERO);
@@ -2215,7 +1931,10 @@ mod tests {
             }
             assert_eq!(editor.edited.is_some(), mode != Mode::Edit, "{mode:?}");
             assert_eq!(ids(cx.world()), [], "{mode:?}");
-            assert!(!editor.toolbar.world_camera, "no camera to see through");
+            assert!(
+                !editor.view.toolbar.world_camera,
+                "no camera to see through"
+            );
         }
     }
 

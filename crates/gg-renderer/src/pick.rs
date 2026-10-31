@@ -40,8 +40,9 @@ pub(crate) struct Picks {
 
 impl Picks {
     /// Starts a render that's asked `picks`: forgets the last render's answers, and has these wait
-    /// after those waiting already, which a frame that didn't begin left, and those past the
-    /// [`MAX_READS`] a frame read after it. A frame asking at most [`MAX_PICKS`] keeps them few.
+    /// after those waiting already, which a frame that didn't begin or read no picks left, and
+    /// those past the [`MAX_READS`] a frame read after it. A frame asking at most [`MAX_PICKS`]
+    /// keeps them few.
     ///
     /// # Panics
     ///

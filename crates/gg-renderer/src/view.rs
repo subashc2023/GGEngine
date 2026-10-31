@@ -1,12 +1,12 @@
-//! The game's view, which the meshes are drawn into, shown in the frame where the view is, and
-//! the outline round what it shows of an ID.
+//! The game's view, which the meshes are drawn into, and the outline round what it shows of an ID
+//! after them, shown in the frame where the view is.
 
 use std::sync::Arc;
 
 use bytemuck::NoUninit;
 use gg_core::Result;
 use gg_core::math::Vec4;
-use gg_gpu::{Blend, Device, Format, GraphicsDesc, Pass, Pipeline};
+use gg_gpu::{Blend, ColorImage, Device, Format, GraphicsDesc, Pass, Pipeline};
 
 use crate::{Viewport, halves};
 
@@ -27,9 +27,10 @@ const MAX_OUTLINE: f32 = 8.0;
 pub struct ViewCallback;
 
 /// An outline round what the game's view shows of the draws of one ID, such as an entity's, drawn
-/// over the view where the frame shows it, under the UI: round whatever shape their pixels make
-/// where they're on top, as the IDs the view writes say, inside it too where a draw of another ID
-/// covers some of it, but not round what's hidden.
+/// into the view over them, so that wherever the view shows, under the UI, and as it's read back,
+/// it shows outlined: round whatever shape their pixels make where they're on top, as the IDs the
+/// view writes say, inside it too where a draw of another ID covers some of it, but not round
+/// what's hidden.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Outline {
     /// The ID; 0, which draws of no entity have, outlines nothing.
@@ -48,19 +49,9 @@ impl Outline {
     }
 }
 
-/// Where the frame shows the view from: its image's index this frame, and if it's outlined, the
-/// index of its IDs this frame, with the outline.
-#[derive(Clone, Copy)]
-pub(crate) struct Shown {
-    pub(crate) image: u32,
-    pub(crate) outline: Option<(u32, Outline)>,
-}
-
-/// Draws the view's image into the frame, each of its pixels onto one of the frame's, and its
-/// outline over it.
+/// Draws the view's image into the frame, each of its pixels onto one of the frame's.
 pub(crate) struct ViewPass {
     pipeline: Pipeline,
-    outline: Pipeline,
 }
 
 impl ViewPass {
@@ -78,25 +69,12 @@ impl ViewPass {
                 depth_write: false,
             },
         )?;
-        let outline = Pipeline::graphics(
-            device,
-            &GraphicsDesc {
-                name: "outline",
-                spirv: OUTLINE_SPIRV,
-                vertex: c"vertex_main",
-                fragment: c"fragment_main",
-                format,
-                blend: Blend::Alpha,
-                depth_write: false,
-            },
-        )?;
-        Ok(Self { pipeline, outline })
+        Ok(Self { pipeline })
     }
 
-    /// Draws the view's image into `viewport` of the pass's target, which is the image's size,
-    /// within `clip` of the target if it's given, and its outline over it, if it has one. `shown`
-    /// holds the indices [`Frame::begin_sampling`](gg_gpu::Frame::begin_sampling) and
-    /// [`Frame::begin_sampling_ids`](gg_gpu::Frame::begin_sampling_ids) gave them this frame.
+    /// Draws the view's image, whose index [`Frame::begin_sampling`](gg_gpu::Frame::begin_sampling)
+    /// gave this frame, into `viewport` of the pass's target, which is the image's size, within
+    /// `clip` of the target if it's given.
     ///
     /// # Panics
     ///
@@ -105,7 +83,7 @@ impl ViewPass {
         &self,
         pass: &mut Pass<'_, '_>,
         viewport: Viewport,
-        shown: Shown,
+        image: u32,
         clip: Option<Viewport>,
     ) {
         pass.set_viewport(viewport.origin, viewport.size);
@@ -116,17 +94,48 @@ impl ViewPass {
         pass.set_pipeline(&self.pipeline);
         let push = ViewPush {
             origin: viewport.origin,
-            image: shown.image,
+            image,
         };
         pass.push_constants(bytemuck::bytes_of(&push));
         pass.draw(3, 1);
-        let Some((ids, outline)) = shown.outline else {
-            return;
-        };
-        pass.set_pipeline(&self.outline);
+    }
+}
+
+/// Draws an outline into the view's image, of [`ColorImage::FORMAT`], over its draws, from the IDs
+/// they wrote beside it.
+pub(crate) struct OutlinePass {
+    pipeline: Pipeline,
+}
+
+impl OutlinePass {
+    /// A pass that draws into the view's image.
+    pub(crate) fn new(device: &Arc<Device>) -> Result<Self> {
+        let pipeline = Pipeline::graphics(
+            device,
+            &GraphicsDesc {
+                name: "outline",
+                spirv: OUTLINE_SPIRV,
+                vertex: c"vertex_main",
+                fragment: c"fragment_main",
+                format: ColorImage::FORMAT,
+                blend: Blend::Alpha,
+                depth_write: false,
+            },
+        )?;
+        Ok(Self { pipeline })
+    }
+
+    /// Draws `outline` over the whole of the pass's target, the view's image, from the view's IDs,
+    /// whose index [`Frame::begin_sampling_ids`](gg_gpu::Frame::begin_sampling_ids) gave this
+    /// frame as `ids`.
+    ///
+    /// # Panics
+    ///
+    /// If the pass's target isn't of [`ColorImage::FORMAT`], without IDs or a depth image.
+    pub(crate) fn draw(&self, pass: &mut Pass<'_, '_>, ids: u32, outline: Outline) {
+        pass.set_pipeline(&self.pipeline);
         let push = OutlinePush {
             color: outline.color.to_array(),
-            origin: viewport.origin,
             id: halves(outline.id),
             image: ids,
             width: outline.width.min(MAX_OUTLINE),
@@ -147,15 +156,13 @@ struct ViewPush {
     image: u32,
 }
 
-/// What the view pass pushes before it draws an outline: `Push` in `shaders/outline.slang`, field
-/// for field.
+/// What the outline pass pushes before it draws an outline: `Push` in `shaders/outline.slang`,
+/// field for field.
 #[repr(C)]
 #[derive(Clone, Copy, NoUninit)]
 struct OutlinePush {
     /// Linear RGBA, alpha not multiplied in.
     color: [f32; 4],
-    /// Where the view's top left is in the target, in pixels.
-    origin: [u32; 2],
     /// The ID's low and high halves.
     id: [u32; 2],
     /// The index of the view's IDs in the bindless set.

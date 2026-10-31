@@ -10,7 +10,6 @@ name = "gg-editor"
 path = "src/main.rs"
 
 [dependencies]
-bytemuck = { workspace = true, features = ["derive"] }
 # The tool API's client, and the memory a game's view is shared through: the editor reaches a
 # project's game as the tools do.
 gg-api.workspace = true

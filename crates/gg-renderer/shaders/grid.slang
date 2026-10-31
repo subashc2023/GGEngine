@@ -1,4 +1,4 @@
-// The editor's grid: lines a power of ten apart on one of the world's axis planes, XY, XZ or YZ,
+// The engine's grid: lines a power of ten apart on one of the world's axis planes, XY, XZ or YZ,
 // and the plane's two axes in their colors, seen through either projection. The mesh is a unit
 // square about its center, `SQUARE` in src/grid.rs, which its transform lays in the plane: around
 // the camera's foot in perspective, and over the view orthographically. `Params` there matches
@@ -9,7 +9,7 @@
 // plane squarely they're crisp, a pixel each; in any other they're anti-aliased, each family of
 // lines by its own footprint, and fade toward grazing angles.
 //
-// The grid is a layer's draw, of no entity, so the ID it writes is 0; and it discards what's fully
+// The grid is a draw of no entity, so the ID it writes is 0; and it discards what's fully
 // transparent, which blending would leave as it was, as a shader that blends does for picks.
 
 // How the lines draw, which `Grid.lines` says: anti-aliased, seen through perspective from a point

@@ -6,8 +6,8 @@ use std::rc::Rc;
 
 use super::Edit;
 use super::fields::AXES;
-use crate::EntityId;
 use crate::reflect::{Shape, Type, Types, Value};
+use crate::{EntityId, Pose, Transform};
 
 /// A link to an [`Inspector`], which [`Inspector::link`] gives, through which another layer picks
 /// and edits as the Inspector's panels do, such as with a tool's handles in the game's view: its
@@ -36,9 +36,31 @@ pub(super) struct Linked {
     pub(super) picked: Option<EntityId>,
     /// How many undos and redos the Inspector's passes have asked for.
     pub(super) stepped: u64,
+    /// Where the entity picked is, as of a remote Inspector's last pass.
+    pub(super) placed: Option<Placed>,
     /// The game a remote Inspector is to show from its next pass, which `Some(None)` leaves.
     #[cfg(feature = "dev")]
     pub(super) reach: Option<Option<gg_api::Session>>,
+}
+
+/// Where a remote Inspector's pick is in the game's world, as the game's last read of it gave it,
+/// which [`InspectorLink::placed`] gives: for a tool's handles, as [`World::pose`] gives where an
+/// entity of a world of the app's own is.
+///
+/// [`World::pose`]: crate::World::pose
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Placed {
+    /// The entity's ID, the pick's.
+    pub id: EntityId,
+    /// Its own transform.
+    pub local: Transform,
+    /// Where the space its transform is in sits in the world: its parent's pose, as the game's
+    /// latest tick left it, or the identity for a root.
+    pub space: Pose,
+    /// How many times the Inspector has been reached, to a game or to none, which goes up at each
+    /// reach, its reads of the game before gone, as a world's
+    /// [`World::serial`](crate::World::serial) changes as it's another.
+    pub generation: u64,
 }
 
 /// A set or a seal made through a link.
@@ -58,9 +80,11 @@ impl InspectorLink {
 
     /// Has the Inspector pick the entity whose ID is `id` as its next pass starts, before its
     /// panels, whether or not they show, opening the rows above its own, as its Find field does;
-    /// or unpick, for `None`, or for an ID no living entity has then. A pick asked for later in the
-    /// frame takes its place. A world cleared, replaced or restored before then, as
-    /// [`World::serial`](crate::World::serial) says, drops it.
+    /// or unpick, for `None`, or for an ID no living entity has then. A remote Inspector, which
+    /// can't know that of an entity its game has just made, picks any ID but one a read of the game
+    /// has found gone, and shows it despawned if the read it makes then finds none. A pick asked
+    /// for later in the frame takes its place. A world cleared, replaced or restored before then,
+    /// as [`World::serial`](crate::World::serial) says, drops it.
     pub fn pick(&self, id: Option<EntityId>) {
         self.0.borrow_mut().pick = Some(id);
     }
@@ -137,11 +161,25 @@ impl InspectorLink {
 
     /// Whether a set made through the link waits for the Inspector's tick: from the set until a
     /// tick has made it, or has dropped it, refused or of a world cleared, replaced or restored
-    /// since. Until then, the value set is what the caller draws the field as.
+    /// since; or, for a remote Inspector, until a read of the game after the game's answer to it
+    /// shows it, or the game refuses it. Until then, the value set is what the caller draws the
+    /// field as.
     pub fn waiting(&self) -> bool {
         let linked = self.0.borrow();
         let set = |linking: &Linking| matches!(linking, Linking::Set(..));
         linked.queued || linked.pending.iter().any(set)
+    }
+
+    /// Where the entity picked is, for a remote Inspector, as the game's last read of it gave it,
+    /// as of the Inspector's last pass: only while that read is of the entity picked, so `None`
+    /// from a change of pick until a read of the new one comes, never the place of the one before;
+    /// and `None` for an entity without a transform, or whose read gave no place, or none that's
+    /// finite. The local Inspector gives `None`: a layer reads the app's own world itself.
+    pub fn placed(&self) -> Option<Placed> {
+        let linked = self.0.borrow();
+        linked
+            .placed
+            .filter(|placed| linked.picked == Some(placed.id))
     }
 
     /// How many undos and redos the Inspector's passes have asked for, from its Edit menu or its

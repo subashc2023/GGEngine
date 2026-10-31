@@ -29,7 +29,7 @@ use tracing::warn;
 use commands::{Command, Queue};
 use fields::{Fields, Slot};
 use inspected::{Inspected, Pending};
-pub use link::InspectorLink;
+pub use link::{InspectorLink, Placed};
 use link::{Linked, Linking, links_field};
 use remote::Remote;
 
@@ -305,7 +305,11 @@ impl Layer for Inspector {
             Some(remote) => remote.send(pass, self),
             None => self.queue(pass),
         }
-        self.link.borrow_mut().picked = self.picked;
+        let linked = &mut *self.link.borrow_mut();
+        linked.picked = self.picked;
+        linked.placed = remote
+            .as_ref()
+            .and_then(|remote| remote.placed(self.picked));
         self.remote = remote;
     }
 }
@@ -357,10 +361,11 @@ impl Inspector {
     }
 
     /// Makes the pick the link asked for since the last pass, before the panels draw: a living
-    /// entity's ID picks it and opens the rows above its own, as Find does, and any other, or
-    /// none, unpicks. A debug build checks the link's sets against the world's types first, which
-    /// the link hasn't, as [`InspectorLink::set`] says, once it shows the world: a game's, once its
-    /// types are read.
+    /// entity's ID picks it and opens the rows above its own, as Find does; an ID whose entity
+    /// isn't known yet to be alive or not, as one a game has just made, picks it too, a remote
+    /// Inspector opening the rows above it as its read comes; any other, or none, unpicks. A debug
+    /// build checks the link's sets against the world's types first, which the link hasn't, as
+    /// [`InspectorLink::set`] says, once it shows the world: a game's, once its types are read.
     fn follow(&mut self, world: &dyn Inspected) {
         if cfg!(debug_assertions) && world.waiting().is_none() {
             for linking in &self.link.borrow().pending {
@@ -379,7 +384,7 @@ impl Inspector {
         let Some(pick) = self.link.borrow_mut().pick.take() else {
             return;
         };
-        match pick.filter(|&id| world.alive(id) == Some(true)) {
+        match pick.filter(|&id| world.alive(id) != Some(false)) {
             Some(id) => {
                 self.pick(id);
                 self.open_ancestors(world, id);

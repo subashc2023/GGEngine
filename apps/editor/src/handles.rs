@@ -7,6 +7,7 @@
 use std::f32::consts::{FRAC_PI_4, PI, TAU};
 
 use gg_engine::egui::{self, Color32, Painter, Pos2, Rgba, Shape, Stroke};
+use gg_engine::grid;
 use gg_engine::math::{DMat3, Mat3, Mat4, Quat, Vec2, Vec3, Vec4, libm};
 use gg_engine::reflect::Value;
 use gg_engine::{
@@ -14,7 +15,6 @@ use gg_engine::{
 };
 
 use crate::camera::{Screen, Tool};
-use crate::grid;
 
 /// How long the handles are, in points: a segment of their length along the camera's right, at
 /// their origin, spans it on screen.

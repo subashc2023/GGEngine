@@ -1,15 +1,13 @@
-// An outline round what the game's view shows of one ID, drawn over the view where the frame shows
-// it, from the view's IDs: each pixel off that ID's pixels is covered as far as it's within `width`
-// pixels of their edge, so that the outline follows whatever shape they make, and its outer edge is
-// smooth.
+// An outline round what the game's view shows of one ID, drawn into the view's image over its
+// draws, from the view's IDs: each pixel off that ID's pixels is covered as far as it's within
+// `width` pixels of their edge, so that the outline follows whatever shape they make, and its outer
+// edge is smooth.
 
 [[vk::binding(0, 0)]] Texture2D<uint2> ids[];
 
 struct Push {
     // Its color, linear RGBA, alpha not multiplied in.
     float4 color;
-    // Where the view's top left is in the target, in pixels.
-    uint2 origin;
     // The ID, its low half first, as draws write theirs.
     uint2 id;
     // The view's IDs in the bindless set.
@@ -30,7 +28,7 @@ float4 vertex_main(uint index: SV_VulkanVertexID) : SV_Position {
 [shader("fragment")]
 float4 fragment_main(float4 position: SV_Position) : SV_Target {
     // A pixel's position is its center, so its whole part is the pixel's.
-    int2 texel = int2(position.xy) - int2(push.origin);
+    int2 texel = int2(position.xy);
     uint width, height;
     ids[push.image].GetDimensions(width, height);
     if (all(ids[push.image].Load(int3(texel, 0)) == push.id)) {

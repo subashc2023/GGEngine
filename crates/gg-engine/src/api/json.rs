@@ -372,8 +372,8 @@ fn object(out: &mut String, fields: &[(Ident, Value)], names: &dyn Names) {
     out.push('}');
 }
 
-/// Writes `xs` as an array of numbers.
-fn floats(out: &mut String, xs: &[f32]) {
+/// Writes `xs` as an array of numbers, as a vector's are, those that aren't finite as strings.
+pub(crate) fn floats(out: &mut String, xs: &[f32]) {
     out.push('[');
     for (i, &x) in xs.iter().enumerate() {
         if i > 0 {

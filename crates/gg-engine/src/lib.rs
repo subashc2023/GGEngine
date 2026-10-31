@@ -9,9 +9,10 @@
 //! text; operations, the authoring changes made to the world, each with its inverse, and their
 //! log, which undoes and redoes them; recordings of runs, the commands their ticks applied, which
 //! replay without a GPU to the same world, naming where one goes another way; and measuring each
-//! frame, for the log and the Performance panel; loading what layers add, images as textures and
-//! glTF models, whose nodes spawn as entities; lockstep between two peers, each tick run on both
-//! peers' inputs; the pipeline cache's file, which windowed runs keep;
+//! frame, for the log and the Performance panel; the grid a tool's view shows in an axis plane;
+//! loading what layers add, images as textures and glTF models, whose nodes spawn as entities;
+//! lockstep between two peers, each tick run on both peers' inputs; the pipeline cache's file,
+//! which windowed runs keep;
 //! and in development builds, behind `dev`, reading a game's project's manifest, compiling games'
 //! shaders again as their files change, and the OS's file dialogs.
 //!
@@ -36,6 +37,7 @@ mod ecs;
 mod edits;
 mod event;
 mod gltf;
+pub mod grid;
 // In development builds alone, as `dev` has it.
 #[cfg(feature = "dev")]
 mod hot_reload;
@@ -127,7 +129,7 @@ pub use gg_renderer::{
     Viewport,
 };
 pub use input::Input;
-pub use inspector::{Inspector, InspectorLink};
+pub use inspector::{Inspector, InspectorLink, Placed};
 #[doc(hidden)]
 pub use jobs::{on_threads, start as start_jobs};
 use layer::Stack;

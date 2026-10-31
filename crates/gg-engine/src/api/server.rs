@@ -3,9 +3,15 @@
 //! connections, and each has a thread that reads its requests, answering `hello`, `ping` and `logs`
 //! itself, `logs` from the events the run's log keeps, and passing the rest on to the main loop,
 //! and one that writes its answers. The main loop answers them as a frame starts, before its ticks,
-//! so that a `patch` applies between ticks; a `step` once its ticks have run; a `capture` once a
-//! frame that rendered brings its view back, whose PNG a thread of its own writes; and a `snapshot`
-//! once a thread of its own has written the copy of the world the main thread took.
+//! so that a `patch` applies between ticks and a `look` reaches the frame; a `step` once its ticks
+//! have run; a `capture` once a frame that rendered brings its view back, whose PNG a thread of its
+//! own writes; a `pick` once the frame that read it brings its answer back; and a `snapshot` once a
+//! thread of its own has written the copy of the world the main thread took.
+//!
+//! A capture of the game's own view rides with a bare frame, which draws without the look, as the
+//! game would on its own; isn't published to a view's memory; and leaves the picks to the next
+//! frame that isn't bare, so that no pick reads a view a client isn't shown. A windowed game shows
+//! its bare frames in its own window, for a frame or two.
 
 use std::fmt::Display;
 use std::fs;
@@ -18,16 +24,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use gg_api::view::{Pacer, Writer};
 use gg_api::{
-    Applied, Apply, Authored, Button, Capture, Captured, EntityList, Failure, Field, Hash, Hello,
-    History, Input, InputEvent, Listed, Patched, Pulse, Request, Session, Snapshotted, Status,
-    Step, View, Welcome,
+    Applied, Apply, Authored, Button, By, Capture, Captured, EntityList, Failure, Field, Hash,
+    Hello, History, Input, InputEvent, Listed, Looked, Patched, Picked, Pulse, Request, Session,
+    Snapshotted, Status, Step, View, Welcome,
 };
 use gg_core::log::Events;
+use gg_core::math::{Quat, Vec3, Vec4};
 use gg_core::{Error, Result};
+use gg_renderer::{MAX_PICKS, Outline, Projection, Viewpoint};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -36,6 +44,7 @@ use tracing::{Level, debug, info, warn};
 
 use super::{Waiting, json};
 use crate::edits::{Done, Edit};
+use crate::grid::Plane;
 use crate::layer::{Offered, Stack};
 use crate::main_loop::Stepper;
 use crate::net::Ticket;
@@ -43,16 +52,20 @@ use crate::reflect::{self, Ident, Type};
 use crate::render_thread::{Extracted, Publish, Shot};
 use crate::scene_files::SceneFile;
 use crate::{
-    Context, Entity, EntityId, Event, Key, MouseButton, Name, Operation, Scroll, World, patch,
-    snapshot,
+    Context, Entity, EntityId, Event, Key, MouseButton, Name, Operation, Pose, Scroll, World,
+    patch, snapshot,
 };
 
 /// The methods, as `api.unknown_method` lists them.
-const METHODS: [&str; 22] = [
-    "hello", "ping", "status", "pause", "resume", "step", "capture", "view", "input", "entities",
-    "entity", "get", "types", "hash", "snapshot", "patch", "apply", "undo", "redo", "edits",
-    "logs", "quit",
+const METHODS: [&str; 24] = [
+    "hello", "ping", "status", "pause", "resume", "step", "capture", "view", "input", "look",
+    "pick", "entities", "entity", "get", "types", "hash", "snapshot", "patch", "apply", "undo",
+    "redo", "edits", "logs", "quit",
 ];
+
+/// The most of the clients' picks a frame asks: half as many as a frame reads back, so that the
+/// clients leave the game's layers the rest.
+const MOST_PICKS: usize = MAX_PICKS / 2;
 
 /// The client a connection whose `hello` names none is, the author of its edits.
 const UNNAMED: &str = "api";
@@ -93,12 +106,22 @@ pub(crate) struct Api {
     shared: Arc<Shared>,
     /// `step`s waiting for the simulation to have run as many ticks as each says.
     steps: Vec<(Reply, u64)>,
-    /// `capture`s waiting for the next frame handed off, each with where it goes.
-    asked: Vec<(Reply, Option<PathBuf>)>,
-    /// `capture`s riding with the frame handed off last, which shows the world after
-    /// `riding_ticks` ticks, until a frame that rendered brings its view back.
-    riding: Vec<(Reply, Option<PathBuf>)>,
+    /// `capture`s waiting for a frame handed off of their kind, bare or not, in the order they
+    /// came.
+    asked: Vec<Capturing>,
+    /// `capture`s riding with the frame handed off last, all of its kind, which shows the world
+    /// after `riding_ticks` ticks, until a frame that rendered brings its view back.
+    riding: Vec<Capturing>,
     riding_ticks: u64,
+    /// Whether the frame being made is bare, as the oldest capture waiting decided as the frame
+    /// started.
+    bare: bool,
+    /// The look as the clients set it, each part `None` where it's the game's own, and the run's
+    /// number; its `seen` is filled in as it's answered.
+    look: Looked,
+    /// `pick`s waiting for their answers: each at a pixel of the view, with the ticket the frame
+    /// that asked it gave, once one has.
+    picks: Vec<([f64; 2], Option<crate::Pick>, Reply)>,
     /// The captures written without a path, which number their files.
     numbered: u64,
     /// The memory a `view` asked for the view to be published to, or `None` to stop, until the
@@ -119,6 +142,14 @@ pub(crate) struct Api {
     taken: Sender<Taken>,
     /// Edits and patches offered to a lockstep session, waiting for the tick they apply before.
     offered: Vec<(Reply, Ticket, Offer)>,
+}
+
+/// A `capture` waiting for its frame: where its answer goes, where its PNG goes, and whether it's
+/// of the game's own view, which a bare frame shows.
+struct Capturing {
+    reply: Reply,
+    path: Option<PathBuf>,
+    own: bool,
 }
 
 /// What an edit or a patch offered to a lockstep session was asked as, which its answer reads as.
@@ -154,11 +185,18 @@ enum Call {
     Pause,
     Resume,
     Step(u64),
-    Capture(Option<PathBuf>),
+    Capture {
+        path: Option<PathBuf>,
+        own: bool,
+    },
     /// The name of the memory to publish the view to, or `None` to stop.
     View(Option<String>),
     /// Events to hand the layers, each of which names a key that's a key's.
     Input(Vec<InputEvent>),
+    /// The parts of the look to set, each checked, its viewpoint's rotation normalized.
+    Look(gg_api::Look),
+    /// The pixel of the view to pick at.
+    Pick([f64; 2]),
     Entities {
         with: Option<String>,
         skip: usize,
@@ -332,6 +370,18 @@ impl Api {
             asked: Vec::new(),
             riding: Vec::new(),
             riding_ticks: 0,
+            bare: false,
+            look: Looked {
+                viewpoint: None,
+                outline: None,
+                grid: None,
+                colliders: None,
+                by: By::default(),
+                revision: 0,
+                run,
+                seen: None,
+            },
+            picks: Vec::new(),
             numbered: 0,
             viewing: None,
             memory: None,
@@ -356,9 +406,14 @@ impl Api {
 
     /// As a frame starts, before its ticks, answers the requests that have come, from `cx`, whose
     /// layers are `stack`'s and whose simulation `stepper` steps: first the `step`s whose ticks have
-    /// run, then the rest in the order they came, `capture`s once a frame has rendered the view, as
+    /// run, then the rest in the order they came, `look`s setting the look the frame draws with,
+    /// `capture`s and `pick`s once a frame has rendered the view, as
     /// [`frame_back`](Self::frame_back) says, and `snapshot`s once their files are written, but
-    /// refused before the run's first tick. Returns whether one asked the run to end.
+    /// refused before the run's first tick. Then makes the frame bare if the oldest capture
+    /// waiting, of those riding, whose frame may not render, then of those asked, is of the game's
+    /// own view; and unless it's bare, which reads no picks, has the frame ask the picks waiting,
+    /// as many as [`MOST_PICKS`], the rest waiting for the frames after. Returns whether a request
+    /// asked the run to end.
     pub(crate) fn serve(
         &mut self,
         cx: &mut Context,
@@ -366,11 +421,30 @@ impl Api {
         stepper: &mut Stepper,
     ) -> bool {
         self.shared.frames.fetch_add(1, Ordering::Relaxed);
-        self.answer(cx, stack, stepper, false)
+        let quit = self.answer(cx, stack, stepper, false);
+        let oldest = self.riding.first().or(self.asked.first());
+        self.bare = oldest.is_some_and(|capturing| capturing.own);
+        cx.look.bare = self.bare;
+        if self.bare {
+            return quit;
+        }
+        let origin = cx.view().map_or([0, 0], |view| view.origin).map(f64::from);
+        let unasked = self
+            .picks
+            .iter_mut()
+            .filter(|(_, ticket, _)| ticket.is_none());
+        for (at, ticket, _) in unasked.take(MOST_PICKS) {
+            *ticket = cx.pick([origin[0] + at[0], origin[1] + at[1]]);
+            if ticket.is_none() {
+                break;
+            }
+        }
+        quit
     }
 
     /// As [`serve`](Self::serve), between frames while they pause for a minimized window, without
-    /// counting a frame: a `capture` or a `step`, which need frames, fail with `api.paused`.
+    /// counting a frame: a `capture`, a `pick` or a `step`, which need frames, fail with
+    /// `api.paused`.
     pub(crate) fn serve_paused(
         &mut self,
         cx: &mut Context,
@@ -412,9 +486,9 @@ impl Api {
         {
             let world = cx.world();
             match call {
-                Call::Step(_) | Call::Capture(_) if paused => {
-                    let message = "frames have paused while the window is minimized, and steps and \
-                                   captures run in frames; restore the window first";
+                Call::Step(_) | Call::Capture { .. } | Call::Pick(_) if paused => {
+                    let message = "frames have paused while the window is minimized, and steps, \
+                                   captures and picks run in frames; restore the window first";
                     reply.send(Err(Failure::new("api.paused", message)));
                 }
                 Call::Status => reply.result(&self.status(cx, stepper)),
@@ -435,7 +509,7 @@ impl Api {
                     let until = stepper.ticks + stepper.steps();
                     self.steps.push((reply, until));
                 }
-                Call::Capture(path) => self.asked.push((reply, path)),
+                Call::Capture { path, own } => self.asked.push(Capturing { reply, path, own }),
                 // A second writer of the memory would write the slot the first holds.
                 Call::View(memory) if memory.is_some() && memory == self.memory => {
                     reply.send(Ok("{}".to_owned()));
@@ -466,6 +540,15 @@ impl Api {
                     }
                     reply.send(Ok("{}".to_owned()));
                 }
+                Call::Look(given) => {
+                    self.set_look(cx, given, &client);
+                    let seen = cx.look.seen.as_ref().map(api_viewpoint);
+                    // The game's own camera may be placed by numbers that aren't finite, which JSON
+                    // has none for, and a client couldn't read back.
+                    self.look.seen = seen.filter(gg_api::Viewpoint::is_finite);
+                    reply.result(&self.look);
+                }
+                Call::Pick(at) => self.picks.push((at, None, reply)),
                 Call::Entities { with, skip, take } => {
                     reply.send(list(world, with.as_deref(), skip, take));
                 }
@@ -574,6 +657,45 @@ impl Api {
         }
     }
 
+    /// Sets the parts of the look `given` sets, as client `client`, a change of any part's value or
+    /// setter counting as a revision; and hands the look to `cx`, for the frames to draw with.
+    fn set_look(&mut self, cx: &mut Context, given: gg_api::Look, client: &str) {
+        let Looked {
+            viewpoint,
+            outline,
+            grid,
+            colliders,
+            by,
+            revision,
+            ..
+        } = &mut self.look;
+        let changed = [
+            set_part(viewpoint, &mut by.viewpoint, given.viewpoint, client),
+            set_part(outline, &mut by.outline, given.outline, client),
+            set_part(grid, &mut by.grid, given.grid, client),
+            set_part(colliders, &mut by.colliders, given.colliders, client),
+        ];
+        if changed.contains(&true) {
+            *revision += 1;
+        }
+        let look = &mut cx.look;
+        look.viewpoint = viewpoint.as_ref().map(engine_viewpoint);
+        look.outline = outline.as_ref().map(|outline| Outline {
+            id: (outline.id.parse::<EntityId>())
+                .expect("checked as it was read")
+                .get(),
+            color: Vec4::from_array(outline.color),
+            width: outline.width,
+        });
+        look.grid = grid.map(|plane| match plane {
+            gg_api::Plane::Xy => Plane::XY,
+            gg_api::Plane::Xz => Plane::XZ,
+            gg_api::Plane::Yz => Plane::YZ,
+        });
+        look.colliders = *colliders;
+        look.revision = *revision;
+    }
+
     /// The game as the frame that answers starts.
     fn status(&self, cx: &Context, stepper: &Stepper) -> Status {
         let entities = cx.world().entities(None);
@@ -588,16 +710,19 @@ impl Api {
 
     /// With the renderer back from a frame, `frame`, takes the view it read back, if it rode with
     /// captures and rendered, for a thread of its own to write each capture's PNG and answer it;
-    /// and has the next frame handed off, which shows the world after `ticks` ticks and started at
-    /// `started`, read its view back for the captures asked since, and for those whose frame had
-    /// nothing to render into, and publish it to the memory a `view` asked for, warning once of a
-    /// frame that wasn't, since the view was asked for.
-    pub(crate) fn frame_back(&mut self, frame: &mut Extracted, ticks: u64, started: SystemTime) {
+    /// answers the picks whose answers came back into `cx`, each naming its entity as `cx`'s world
+    /// does now; and has the next frame handed off, which `cx` made and shows the world after
+    /// `ticks` ticks, read its view back for the captures of its kind, bare or not, asked since,
+    /// and for those whose frame had nothing to render into, and publish it to the memory a `view`
+    /// asked for, unless it's bare, warning once of a frame that wasn't, since the view was asked
+    /// for.
+    pub(crate) fn frame_back(&mut self, frame: &mut Extracted, cx: &Context, ticks: u64) {
         if let Some(viewing) = self.viewing.take() {
             frame.publish = viewing.map(|writer| Publish {
                 writer,
+                skip: false,
                 ticks,
-                started,
+                started: cx.started,
                 failed: None,
             });
         }
@@ -608,13 +733,14 @@ impl Api {
                 let consequence = "frames go unpublished while that lasts";
                 warn!(code = error.code(), "{error:#}; {consequence}");
             }
+            publish.skip = self.bare;
             publish.ticks = ticks;
-            publish.started = started;
+            publish.started = cx.started;
         }
         match frame.captured.take() {
             Some(Ok(shot)) => {
                 let shot = Arc::new(shot);
-                for (reply, path) in self.riding.drain(..) {
+                for Capturing { reply, path, .. } in self.riding.drain(..) {
                     let path = path.unwrap_or_else(|| {
                         self.numbered += 1;
                         let name = format!("{}-{}.png", self.stem, self.numbered);
@@ -632,13 +758,34 @@ impl Api {
             }
             Some(Err(error)) => {
                 let failure = failure(&error);
-                for (reply, _) in self.riding.drain(..) {
-                    reply.send(Err(failure.clone()));
+                for capturing in self.riding.drain(..) {
+                    capturing.reply.send(Err(failure.clone()));
                 }
             }
             None => {}
         }
-        self.riding.append(&mut self.asked);
+        let picked = cx.picked();
+        let answered = |ticket: Option<crate::Pick>| {
+            let ticket = ticket?;
+            picked
+                .iter()
+                .find(|(pick, _)| *pick == ticket)
+                .map(|&(_, id)| id)
+        };
+        let world = cx.world();
+        let back = (self.picks).extract_if(.., |(_, ticket, _)| answered(*ticket).is_some());
+        for (_, ticket, reply) in back {
+            let id = answered(ticket).flatten();
+            let entity = id.and_then(|id| world.entity(id));
+            let name = entity.and_then(|entity| world.get::<Name>(entity));
+            reply.result(&Picked {
+                id: id.map(|id| id.to_string()),
+                name: name.map(|name| name.0.clone()),
+            });
+        }
+        let bare = self.bare;
+        let kind = self.asked.extract_if(.., |capturing| capturing.own == bare);
+        self.riding.extend(kind);
         frame.capture = !self.riding.is_empty();
         if frame.capture {
             self.riding_ticks = ticks;
@@ -646,21 +793,21 @@ impl Api {
     }
 
     /// Whether the simulation is paused with nothing asked of the frames: no ticks to step, no
-    /// capture waiting and no request held.
+    /// capture or pick waiting and no request held.
     pub(crate) fn is_idle(&self, stepper: &Stepper) -> bool {
         stepper.paused()
             && stepper.steps() == 0
             && self.asked.is_empty()
             && self.riding.is_empty()
+            && self.picks.is_empty()
             && self.held.is_none()
     }
 
     /// While the view is published, the number of the frame to be handed off next, as the client
-    /// will take it.
+    /// will take it; `None` while the frame is bare, which isn't published.
     pub(crate) fn handing(&self) -> Option<u64> {
-        self.pacer
-            .as_ref()
-            .map(|pacer| pacer.published().saturating_add(1))
+        let pacer = self.pacer.as_ref().filter(|_| !self.bare)?;
+        Some(pacer.published().saturating_add(1))
     }
 
     /// While the view is published, waits until the client has taken frame `handed`, as
@@ -779,6 +926,15 @@ fn entity(world: &World, id: EntityId) -> Result<String, Failure> {
         let value = world.get_field(entity, name, "").map_err(about)?;
         json::write(&mut out, &value, world);
     }
+    // Where the space its transform is in sits: its parent's pose.
+    let space = match world.parent(entity).map_err(about)? {
+        Some(parent) => world.pose(parent).map_err(about)?,
+        None => Pose::IDENTITY,
+    };
+    out.push_str("},\"space\":{\"matrix\":");
+    json::floats(&mut out, &space.matrix.to_cols_array());
+    out.push_str(",\"rotation\":");
+    json::floats(&mut out, &space.rotation.to_array());
     out.push_str("}}");
     Ok(out)
 }
@@ -913,6 +1069,58 @@ fn found(world: &World, id: EntityId) -> Result<Entity, Failure> {
 /// `error` as the API answers it.
 fn failure(error: &Error) -> Failure {
     Failure::new(error.code(), format!("{error:#}"))
+}
+
+/// Sets a part of the look, `part`, whose setter `by` names, as `change` asks, if it asks, for
+/// client `client`: `null` gives it back to the game, which no client sets. Returns whether its
+/// value or its setter changed.
+fn set_part<T: PartialEq>(
+    part: &mut Option<T>,
+    by: &mut Option<String>,
+    change: Option<Option<T>>,
+    client: &str,
+) -> bool {
+    let Some(value) = change else {
+        return false;
+    };
+    let setter = value.is_some().then(|| client.to_owned());
+    let changed = *part != value || *by != setter;
+    (*part, *by) = (value, setter);
+    changed
+}
+
+/// `viewpoint` as the tool API gives one.
+pub(crate) fn api_viewpoint(viewpoint: &Viewpoint) -> gg_api::Viewpoint {
+    let projection = match viewpoint.projection {
+        Projection::Orthographic { height, near, far } => {
+            gg_api::Projection::Orthographic { height, near, far }
+        }
+        Projection::Perspective { fov, near } => gg_api::Projection::Perspective { fov, near },
+    };
+    gg_api::Viewpoint {
+        position: viewpoint.position.to_array(),
+        rotation: viewpoint.rotation.to_array(),
+        projection,
+    }
+}
+
+/// The viewpoint the tool API's `given` is.
+fn engine_viewpoint(given: &gg_api::Viewpoint) -> Viewpoint {
+    Viewpoint {
+        position: Vec3::from_array(given.position),
+        rotation: Quat::from_array(given.rotation),
+        projection: engine_projection(given.projection),
+    }
+}
+
+/// The projection the tool API's `given` is.
+fn engine_projection(given: gg_api::Projection) -> Projection {
+    match given {
+        gg_api::Projection::Orthographic { height, near, far } => {
+            Projection::Orthographic { height, near, far }
+        }
+        gg_api::Projection::Perspective { fov, near } => Projection::Perspective { fov, near },
+    }
 }
 
 /// Accepts connections on `listener`, serving each on threads of its own, as [`connection`] does,
@@ -1193,11 +1401,57 @@ fn write_png(path: &Path, shot: &Shot) -> Result<()> {
     crate::dirs::write_whole(path, &data).map_err(|error| failed(error.into()))
 }
 
+/// The look `given`, method `method`'s, checked, its viewpoint's rotation normalized.
+///
+/// Fails with `api.bad_params`, saying why, for a viewpoint that isn't finite, whose rotation has
+/// no length, or whose projection can't project, as [`Projection`] says; and for an outline whose
+/// ID isn't an entity's, or whose color isn't finite, or whose width isn't finite and positive.
+fn look(method: &str, mut given: gg_api::Look) -> Result<gg_api::Look, Failure> {
+    if let Some(Some(viewpoint)) = &mut given.viewpoint {
+        if !viewpoint.is_finite() {
+            let what = "takes a viewpoint whose numbers are finite";
+            return Err(bad_params(method, what));
+        }
+        let Some(rotation) = Vec4::from_array(viewpoint.rotation).try_normalize() else {
+            let what = "takes a viewpoint whose rotation is a quaternion with a length, which is \
+                        normalized";
+            return Err(bad_params(method, what));
+        };
+        viewpoint.rotation = rotation.to_array();
+        let projection = engine_projection(viewpoint.projection);
+        if !projection.projects() {
+            let what = format!(
+                "takes a projection that projects: orthographic, of a positive height, between a \
+                 near and a far that differ; or perspective, of a field of view more than 0 and \
+                 less than π, from a positive near; not {projection:?}"
+            );
+            return Err(bad_params(method, what));
+        }
+    }
+    if let Some(Some(outline)) = &given.outline {
+        if let Err(error) = outline.id.parse::<EntityId>() {
+            let what = format!("takes an outline of an entity's ID: {error}");
+            return Err(bad_params(method, what));
+        }
+        if !outline.color.iter().all(|channel| channel.is_finite()) {
+            return Err(bad_params(method, "takes an outline whose color is finite"));
+        }
+        if !(outline.width.is_finite() && outline.width > 0.0) {
+            let what = format!(
+                "takes an outline whose width is finite and positive, not {}",
+                outline.width
+            );
+            return Err(bad_params(method, what));
+        }
+    }
+    Ok(given)
+}
+
 /// The call `request` makes of the main loop.
 ///
 /// Fails with `api.unknown_method` for a method there's none of, `api.bad_params` for parameters
-/// it doesn't take, `api.bad_request` for a `hello` after the first, and `ecs.bad_id` for an ID
-/// that isn't one.
+/// it doesn't take, or a `look` that can't be, as [`look`] says, `api.bad_request` for a `hello`
+/// after the first, and `ecs.bad_id` for an ID that isn't one.
 fn parse(request: &Request) -> Result<Call, Failure> {
     let method = request.method.as_str();
     let params = &request.params;
@@ -1254,13 +1508,18 @@ fn parse(request: &Request) -> Result<Call, Failure> {
             Call::Step(ticks)
         }
         "capture" => {
-            let Capture { path } = take(method, params)?;
+            let Capture { path, own } = take(method, params)?;
             if path.as_deref().is_some_and(|path| !path.is_absolute()) {
                 let what = "takes an absolute path, since the game's working directory may not be \
                             the tool's";
                 return Err(bad_params(method, what));
             }
-            Call::Capture(path)
+            Call::Capture { path, own }
+        }
+        "look" => Call::Look(look(method, take(method, params)?)?),
+        "pick" => {
+            let gg_api::Pick { at } = take(method, params)?;
+            Call::Pick(at)
         }
         "view" => {
             let View { memory } = take(method, params)?;
@@ -1394,12 +1653,12 @@ mod tests {
     use std::time::Instant;
 
     use gg_api::{Client, LogEvents, Session};
-    use gg_core::math::Vec3;
+    use gg_core::math::Mat4;
     use serde_json::json;
 
     use super::*;
     use crate::dirs::tests::Scratch;
-    use crate::{Sprite, Tick, Transform, Viewport};
+    use crate::{BoxCollider2D, Sprite, Tick, Transform, Viewport};
 
     /// How long a test waits for what should come at once, past which it fails rather than hangs.
     const DEADLINE: Duration = Duration::from_secs(20);
@@ -1433,7 +1692,7 @@ mod tests {
         stepper: &mut Stepper,
         session: Session,
         client: impl FnOnce(Client) -> T + Send + 'static,
-        mut frame: impl FnMut(&mut Api, &Stepper),
+        mut frame: impl FnMut(&mut Api, &mut Context, &Stepper),
     ) -> T {
         let client = thread::spawn(move || {
             client(Client::connect(&session, "test", DEADLINE).expect("it connects"))
@@ -1444,7 +1703,7 @@ mod tests {
             assert!(start.elapsed() < DEADLINE, "the client never finished");
             api.serve(cx, &mut stack, stepper);
             stepper.step(Tick::DT, |_| true, || Duration::ZERO);
-            frame(api, stepper);
+            frame(api, cx, stepper);
             thread::sleep(Duration::from_millis(1));
         }
         client.join().expect("the client didn't panic")
@@ -1459,6 +1718,7 @@ mod tests {
         rest: EntityList,
         all: EntityList,
         entity: Value,
+        kid: Value,
         field: f32,
         types: gg_api::Types,
         hash: Hash,
@@ -1466,8 +1726,9 @@ mod tests {
     }
 
     /// A client pauses the simulation, steps it, and reads the world: its status, pages of its
-    /// entities, an entity whole, a field, its types, whose description describes them again as
-    /// they are, and the hash; and is refused, with a code, what's wrong.
+    /// entities, an entity whole, the space a root's and a child's transforms are in among it, a
+    /// field, its types, whose description describes them again as they are, and the hash; and is
+    /// refused, with a code, what's wrong.
     #[test]
     fn a_client_pauses_and_steps_the_simulation_and_reads_the_world() {
         let (mut api, session) = started("Api Reads");
@@ -1485,9 +1746,9 @@ mod tests {
         }
         let [hero, kid] = [hero, kid].map(|entity| world.id(entity).expect("alive").to_string());
         let mut stepper = Stepper::default();
-        let asked = hero.clone();
+        let asked = [hero.clone(), kid.clone()];
         let client = move |mut client: Client| {
-            let hero = asked;
+            let [hero, kid] = asked;
             let field = json!({"id": hero, "component": "Transform", "path": "translation.y"});
             let refused = [
                 ("entity", json!({"id": "0000000000000001"})),
@@ -1508,6 +1769,9 @@ mod tests {
                 entity: client
                     .call_as("entity", json!({"id": hero}))
                     .expect("the hero"),
+                kid: client
+                    .call_as("entity", json!({"id": kid}))
+                    .expect("the kid"),
                 field: client.call_as("get", field).expect("its y"),
                 types: client.call_as("types", ()).expect("the types"),
                 hash: client.call_as("hash", ()).expect("a hash"),
@@ -1516,7 +1780,14 @@ mod tests {
                     .collect(),
             }
         };
-        let read = serving(&mut api, &mut cx, &mut stepper, session, client, |_, _| {});
+        let read = serving(
+            &mut api,
+            &mut cx,
+            &mut stepper,
+            session,
+            client,
+            |_, _, _| {},
+        );
         assert!(read.paused.paused);
         assert_eq!(
             read.stepped.ticks,
@@ -1544,6 +1815,13 @@ mod tests {
         assert_eq!(read.entity["children"], json!([kid]));
         let translation = &read.entity["components"]["Transform"]["translation"];
         assert_eq!(*translation, json!([1.0, 2.0, 3.0]));
+        // A root's transform is in the world's space; the kid's in the hero's, as it's placed.
+        let space = |translation: [f32; 3]| {
+            let matrix = Mat4::from_translation(Vec3::from_array(translation));
+            json!({"matrix": matrix.to_cols_array(), "rotation": [0.0, 0.0, 0.0, 1.0]})
+        };
+        assert_eq!(read.entity["space"], space([0.0; 3]));
+        assert_eq!(read.kid["space"], space([1.0, 2.0, 3.0]));
         assert_eq!(read.field, 2.0);
         let types = cx.world().types();
         let names: Vec<&str> = read
@@ -1695,8 +1973,14 @@ mod tests {
             let undone: Option<gg_api::Edit> = client.call_as("undo", ()).expect("undone");
             (refused, history, undone)
         };
-        let (refused, history, undone) =
-            serving(&mut api, &mut cx, &mut stepper, session, client, |_, _| {});
+        let (refused, history, undone) = serving(
+            &mut api,
+            &mut cx,
+            &mut stepper,
+            session,
+            client,
+            |_, _, _| {},
+        );
         assert_eq!(refused, "api.bad_params");
         assert_eq!(history.authors[0].done.len(), 1, "one edit: {history:?}");
         assert!(undone.is_some());
@@ -1787,7 +2071,14 @@ mod tests {
                 nothing,
             }
         };
-        let edited = serving(&mut api, &mut cx, &mut stepper, session, client, |_, _| {});
+        let edited = serving(
+            &mut api,
+            &mut cx,
+            &mut stepper,
+            session,
+            client,
+            |_, _, _| {},
+        );
         assert_eq!(edited.set.entities, Vec::<String>::new());
         assert_eq!(edited.created.entities.len(), 1);
         let kid = &edited.created.entities[0];
@@ -1888,7 +2179,14 @@ mod tests {
                 (client.call_as("snapshot", json!({"path": asked}))).expect("a snapshot");
             (refused, taken)
         };
-        let (refused, taken) = serving(&mut api, &mut cx, &mut stepper, session, client, |_, _| {});
+        let (refused, taken) = serving(
+            &mut api,
+            &mut cx,
+            &mut stepper,
+            session,
+            client,
+            |_, _, _| {},
+        );
         assert_eq!(refused, ["api.bad_params", "api.not_ticked"]);
         assert_eq!((&taken.path, taken.ticks, taken.entities), (&path, 1, 3));
         assert_eq!(taken.bytes, fs::metadata(&path).expect("written").len());
@@ -1920,7 +2218,14 @@ mod tests {
             let call = client.call("patch", json!({ "table": table }));
             call.expect_err("refused")
         };
-        let refused = serving(&mut api, &mut cx, &mut stepper, session, client, |_, _| {});
+        let refused = serving(
+            &mut api,
+            &mut cx,
+            &mut stepper,
+            session,
+            client,
+            |_, _, _| {},
+        );
         assert_eq!(refused.code, "api.patch", "{}", refused.message);
     }
 
@@ -1949,7 +2254,7 @@ mod tests {
             &mut stepper,
             session,
             client,
-            |api, stepper| {
+            |api, cx, stepper| {
                 // The frame that rode with a capture comes back: the first two that rode with each
                 // had nothing to render into.
                 if frame.capture {
@@ -1963,7 +2268,7 @@ mod tests {
                         _ => None,
                     };
                 }
-                api.frame_back(&mut frame, stepper.ticks, SystemTime::UNIX_EPOCH);
+                api.frame_back(&mut frame, cx, stepper.ticks);
             },
         );
         assert_eq!(refused, "api.no_view");
@@ -2003,7 +2308,14 @@ mod tests {
             ]});
             client.call("input", events).expect("the input");
         };
-        serving(&mut api, &mut cx, &mut stepper, session, client, |_, _| {});
+        serving(
+            &mut api,
+            &mut cx,
+            &mut stepper,
+            session,
+            client,
+            |_, _, _| {},
+        );
         let input = cx.input();
         assert!(input.key_down(Key::KeyW));
         assert!(!input.key_down(Key::KeyA), "released after its press");
@@ -2035,8 +2347,8 @@ mod tests {
             let refused = client.call("view", missing).expect_err("no such memory");
             (reader, refused.code)
         };
-        let back = |api: &mut Api, stepper: &Stepper| {
-            api.frame_back(&mut frame, stepper.ticks, SystemTime::UNIX_EPOCH);
+        let back = |api: &mut Api, cx: &mut Context, stepper: &Stepper| {
+            api.frame_back(&mut frame, cx, stepper.ticks);
         };
         let (reader, refused) = serving(
             &mut api,
@@ -2059,13 +2371,343 @@ mod tests {
                 .call("view", Value::Null)
                 .expect("publishing stopped");
         };
-        let back = |api: &mut Api, stepper: &Stepper| {
-            api.frame_back(&mut frame, stepper.ticks, SystemTime::UNIX_EPOCH);
+        let back = |api: &mut Api, cx: &mut Context, stepper: &Stepper| {
+            api.frame_back(&mut frame, cx, stepper.ticks);
         };
         serving(&mut api, &mut cx, &mut stepper, session, client, back);
         assert!(frame.publish.is_none());
         assert_eq!(api.handing(), None);
         drop(reader);
+    }
+
+    /// What [`clients_set_the_look_part_by_part_the_last_setter_winning`]'s clients get.
+    struct Looks {
+        read: Looked,
+        set: Looked,
+        again: Looked,
+        theirs: Looked,
+        given_back: Looked,
+        run: u64,
+    }
+
+    /// Clients set the look part by part, each kept until a client sets it again, the last setter
+    /// winning, and `null` gives a part back to the game; a `look` that changes no part's value or
+    /// setter counts no revision; and the frames get the look as it's answered.
+    #[test]
+    fn clients_set_the_look_part_by_part_the_last_setter_winning() {
+        let (mut api, session) = started("Api Looks");
+        let mut cx = Context::seeded(8);
+        let mut stepper = Stepper::default();
+        let other = session.clone();
+        let client = move |mut client: Client| {
+            let mut them = Client::connect(&other, "other", DEADLINE).expect("it connects");
+            let viewpoint = json!({"position": [0, 0, 5], "rotation": [0, 0, 0, 2],
+                "projection": {"Orthographic": {"height": 4, "near": -1, "far": 1}}});
+            let look = |client: &mut Client, params: Value| {
+                client.call_as::<Looked>("look", params).expect("the look")
+            };
+            Looks {
+                read: look(&mut client, Value::Null),
+                set: look(&mut client, json!({"viewpoint": viewpoint, "grid": "xz"})),
+                again: look(&mut client, json!({"grid": "xz"})),
+                theirs: look(&mut them, json!({"grid": "xy", "colliders": true})),
+                given_back: look(&mut client, json!({"viewpoint": null, "colliders": null})),
+                run: (client.call_as::<LogEvents>("logs", json!({"last": 0})))
+                    .expect("the logs")
+                    .run,
+            }
+        };
+        let looks = serving(
+            &mut api,
+            &mut cx,
+            &mut stepper,
+            session,
+            client,
+            |_, _, _| {},
+        );
+        let by = |name: &str| Some(name.to_owned());
+        assert_eq!((looks.read.by, looks.read.revision), (By::default(), 0));
+        assert_eq!(
+            looks.read.run, looks.run,
+            "the run's number, as `logs` gives it"
+        );
+        assert_eq!(looks.read.seen, None, "before a frame drew");
+        let viewpoint = gg_api::Viewpoint {
+            position: [0.0, 0.0, 5.0],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            projection: gg_api::Projection::Orthographic {
+                height: 4.0,
+                near: -1.0,
+                far: 1.0,
+            },
+        };
+        let set = &looks.set;
+        assert_eq!(set.viewpoint, Some(viewpoint), "its rotation normalized");
+        assert_eq!((set.grid, set.colliders), (Some(gg_api::Plane::Xz), None));
+        let mine = By {
+            viewpoint: by("test"),
+            grid: by("test"),
+            ..By::default()
+        };
+        assert_eq!((&set.by, set.revision), (&mine, 1));
+        assert_eq!(looks.again, looks.set, "nothing changed, nor counted");
+        let theirs = &looks.theirs;
+        assert_eq!(
+            (theirs.viewpoint, theirs.grid),
+            (Some(viewpoint), Some(gg_api::Plane::Xy))
+        );
+        let both = By {
+            viewpoint: by("test"),
+            grid: by("other"),
+            colliders: by("other"),
+            ..By::default()
+        };
+        assert_eq!(
+            (&theirs.by, theirs.colliders, theirs.revision),
+            (&both, Some(true), 2)
+        );
+        let back = &looks.given_back;
+        assert_eq!(
+            (back.viewpoint, back.grid, back.colliders),
+            (None, Some(gg_api::Plane::Xy), None)
+        );
+        let left = By {
+            grid: by("other"),
+            ..By::default()
+        };
+        assert_eq!((&back.by, back.revision), (&left, 3));
+        let look = &cx.look;
+        assert_eq!(
+            (look.viewpoint, look.grid, look.colliders),
+            (None, Some(Plane::XY), None)
+        );
+        assert_eq!(look.revision, 3);
+    }
+
+    /// The look draws as a layer that set it would: its viewpoint and outline in place of a
+    /// layer's, its colliders' outlines in place of the game's, and its grid before the world,
+    /// which the layers' own calls go on saying they set; and a bare frame draws as the layers set.
+    #[test]
+    fn the_look_draws_over_what_the_layers_set_but_in_a_bare_frame() {
+        let (mut api, session) = started("Api Look Draws");
+        // A sprite with a collider, to draw over the grid, and the colliders' outlines over it.
+        let world = |seed| {
+            let mut cx = Context::seeded(seed);
+            let shown = (
+                Transform::IDENTITY,
+                Sprite::default(),
+                BoxCollider2D::default(),
+            );
+            let hero = cx.world_mut().spawn(shown);
+            let id = cx.world().id(hero).expect("alive");
+            (cx, id)
+        };
+        let (mut cx, hero) = world(9);
+        let view = Viewport {
+            origin: [0, 0],
+            size: [64, 32],
+        };
+        cx.extract(&mut Extracted::default(), view);
+        let mut stepper = Stepper::default();
+        let looked = gg_api::Viewpoint {
+            position: [1.0, 2.0, 10.0],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            projection: gg_api::Projection::Perspective {
+                fov: 1.0,
+                near: 0.1,
+            },
+        };
+        let look = json!({
+            "viewpoint": looked,
+            "outline": {"id": hero.to_string(), "color": [1, 0.5, 0, 1], "width": 3},
+            "grid": "xy",
+            "colliders": true,
+        });
+        let client = move |mut client: Client| {
+            client.call_as::<Looked>("look", look).expect("the look");
+        };
+        serving(
+            &mut api,
+            &mut cx,
+            &mut stepper,
+            session,
+            client,
+            |_, _, _| {},
+        );
+        // What the layers set this frame.
+        let theirs = Viewpoint::default();
+        let set = |cx: &mut Context| {
+            cx.set_viewpoint(theirs);
+            cx.outline(hero, Vec4::ONE, 1.0);
+        };
+        let drawn = |cx: &mut Context| {
+            cx.draw_world(1.0);
+            let mut frame = Extracted::default();
+            cx.extract(&mut frame, view);
+            frame
+        };
+        set(&mut cx);
+        let frame = drawn(&mut cx);
+        // As a layer that set the look's parts itself.
+        let viewpoint = engine_viewpoint(&looked);
+        let (mut twin, _) = world(9);
+        twin.extract(&mut Extracted::default(), view);
+        twin.set_viewpoint(viewpoint);
+        twin.outline(hero, Vec4::new(1.0, 0.5, 0.0, 1.0), 3.0);
+        twin.draw_grid(&viewpoint, Plane::XY);
+        twin.set_colliders_shown(true);
+        let expected = drawn(&mut twin);
+        assert_eq!(frame.draws, expected.draws);
+        assert_eq!(
+            (frame.viewpoint, frame.outline),
+            (viewpoint, expected.outline)
+        );
+        assert_eq!((frame.look, cx.look.seen), (1, Some(viewpoint)));
+        assert!(!cx.colliders_shown(), "as the layers set");
+        // Bare, as the layers set alone.
+        cx.look.bare = true;
+        set(&mut cx);
+        let frame = drawn(&mut cx);
+        let (mut twin, _) = world(9);
+        twin.extract(&mut Extracted::default(), view);
+        set(&mut twin);
+        let expected = drawn(&mut twin);
+        assert_eq!(frame.draws, expected.draws);
+        assert_eq!((frame.viewpoint, frame.outline), (theirs, expected.outline));
+    }
+
+    /// A capture of the game's own view rides with a bare frame, which isn't published nor paced
+    /// for, nor asks a client's pick; a capture of the view as it's shown with one that isn't; and
+    /// of a pair of each asked together, the older goes first, the other with a frame of its kind
+    /// after.
+    #[test]
+    fn captures_ride_with_frames_of_their_kind_and_bare_ones_go_unpublished() {
+        let (mut api, session) = started("Api Bare Captures");
+        let mut cx = Context::seeded(10);
+        let mut stepper = Stepper::default();
+        let mut frame = Extracted::default();
+        let client = |mut client: Client| {
+            let reader = gg_api::view::Reader::create(8, 4).expect("memory for the view");
+            let memory = json!({"memory": reader.name()});
+            client.call("view", memory).expect("the view published");
+            reader
+        };
+        let back = |api: &mut Api, cx: &mut Context, stepper: &Stepper| {
+            api.frame_back(&mut frame, cx, stepper.ticks);
+        };
+        let reader = serving(&mut api, &mut cx, &mut stepper, session, client, back);
+        let dir = Scratch::new("api-bare-capture");
+        fs::create_dir_all(&dir.0).expect("a directory");
+        let (to, answers) = mpsc::channel();
+        for (id, own) in [(1, true), (2, false)] {
+            api.asked.push(Capturing {
+                reply: Reply { id, to: to.clone() },
+                path: Some(dir.0.join(format!("{id}.png"))),
+                own,
+            });
+        }
+        let reply = Reply { id: 3, to };
+        api.picks.push(([0.0, 0.0], None, reply));
+        // Each frame: whether it's bare, rides with captures, is published, is paced for and has
+        // asked the pick.
+        let mut frames = Vec::new();
+        for _ in 0..4 {
+            api.serve(&mut cx, &mut Stack::default(), &mut stepper);
+            let bare = cx.look.bare;
+            let asked = api.picks[0].1.is_some();
+            api.frame_back(&mut frame, &cx, stepper.ticks);
+            let skip = frame.publish.as_ref().expect("published").skip;
+            frames.push((bare, frame.capture, !skip, api.handing().is_some(), asked));
+            // As the renderer reads back the view of a frame that rides with captures, a bare one
+            // 1 pixel wide, another 2.
+            frame.captured = frame.capture.then(|| {
+                let width = if bare { 1 } else { 2 };
+                let pixels = vec![0; width * 4];
+                Ok(Shot {
+                    size: [width as u32, 1],
+                    pixels,
+                })
+            });
+        }
+        let expected = [
+            (true, true, false, false, false),
+            // Bare too, as the capture riding decides, its frame not known to have rendered.
+            (true, false, false, false, false),
+            (false, true, true, true, true),
+            (false, false, true, true, true),
+        ];
+        assert_eq!(frames, expected);
+        let mut widths = [0; 2];
+        for _ in 0..2 {
+            let line = answers.recv_timeout(DEADLINE).expect("an answer");
+            let answer: Value = serde_json::from_str(&line).expect("an answer's JSON");
+            let id = answer["id"].as_u64().expect("its ID") as usize;
+            widths[id - 1] = answer["result"]["width"]
+                .as_u64()
+                .expect("a capture's width");
+        }
+        assert_eq!(
+            widths,
+            [1, 2],
+            "the game's own view bare, the other as it's shown"
+        );
+        drop(reader);
+    }
+
+    /// A client's pick is answered with the entity drawn at its pixel of the view, about as the
+    /// frames that read it come back, named as it's answered; none where nothing is, or outside
+    /// the view; and an entity gone by the answer by its ID alone.
+    #[test]
+    fn a_pick_is_answered_with_the_entity_drawn_there() {
+        let (mut api, session) = started("Api Picks");
+        let mut cx = Context::seeded(11);
+        let world = cx.world_mut();
+        let hero = world.spawn((Transform::IDENTITY, Name("Hero".to_owned())));
+        let ghost = world.spawn((Transform::IDENTITY, Name("Ghost".to_owned())));
+        let [hero, ghost] = [hero, ghost].map(|entity| world.id(entity).expect("alive"));
+        world
+            .despawn(world.entity(ghost).expect("alive"))
+            .expect("despawned");
+        let view = Viewport {
+            origin: [10, 20],
+            size: [100, 50],
+        };
+        let mut frame = Extracted::default();
+        cx.extract(&mut frame, view);
+        let mut stepper = Stepper::default();
+        let client = |mut client: Client| {
+            let mut pick = |at: [f64; 2]| {
+                (client.call_as::<Picked>("pick", json!({ "at": at }))).expect("an answer")
+            };
+            [[3.5, 4.0], [60.0, 4.0], [80.0, 4.0], [-1.0, 4.0]].map(&mut pick)
+        };
+        // As the renderer answers: the hero is drawn at the view's columns up to 50, the ghost's
+        // pixels from 70, and nothing between.
+        let mut answers = Vec::new();
+        let back = |api: &mut Api, cx: &mut Context, stepper: &Stepper| {
+            cx.take_answers(&answers);
+            api.frame_back(&mut frame, cx, stepper.ticks);
+            cx.extract(&mut frame, view);
+            answers.clear();
+            answers.extend(frame.picks.iter().map(|pick| {
+                let id = match pick.pixel[0] {
+                    0..50 => hero.get(),
+                    70.. => ghost.get(),
+                    _ => 0,
+                };
+                (pick.tag, id)
+            }));
+        };
+        let picked = serving(&mut api, &mut cx, &mut stepper, session, client, back);
+        let picked = picked.map(|picked| (picked.id, picked.name));
+        let expected = [
+            (Some(hero.to_string()), Some("Hero".to_owned())),
+            (None, None),
+            (Some(ghost.to_string()), None),
+            (None, None),
+        ];
+        assert_eq!(picked, expected);
+        assert!(api.picks.is_empty());
     }
 
     #[test]
@@ -2102,6 +2744,28 @@ mod tests {
         };
         let given = json!({ "table": table });
         assert_eq!(parse(&request("patch", given)), Ok(Call::Patch(jump)));
+        let own = Call::Capture {
+            path: None,
+            own: true,
+        };
+        assert_eq!(parse(&request("capture", json!({"own": true}))), Ok(own));
+        let pick = parse(&request("pick", json!({"at": [3, 4.5]})));
+        assert_eq!(pick, Ok(Call::Pick([3.0, 4.5])));
+        assert_eq!(
+            parse(&request("look", Value::Null)),
+            Ok(Call::Look(gg_api::Look::default())),
+            "reads"
+        );
+        let viewpoint = |rotation: [f32; 4], projection: Value| json!({"position": [0, 0, 0], "rotation": rotation, "projection": projection});
+        let orthographic = json!({"Orthographic": {"height": 2, "near": -1, "far": 1}});
+        let turned = viewpoint([0.0, 0.0, 3.0, 4.0], orthographic.clone());
+        let Ok(Call::Look(look)) = parse(&request("look", json!({ "viewpoint": turned }))) else {
+            panic!("a look");
+        };
+        let rotation = look.viewpoint.flatten().map(|viewpoint| viewpoint.rotation);
+        assert_eq!(rotation, Some([0.0, 0.0, 0.6, 0.8]), "normalized");
+        let outline = |id: &str, color: [f32; 4], width: f32| json!({"outline": {"id": id, "color": color, "width": width}});
+        let id = "5f3a9c0e12b47d68";
         let half = json!({"table": {"lib": "patch.dll"}});
         let refused = parse(&request("patch", half.clone())).err();
         let message = refused.map(|failure| failure.message).unwrap_or_default();
@@ -2115,7 +2779,41 @@ mod tests {
             ("step", json!({"ticks": 10_001}), "api.bad_params"),
             ("step", json!({"tick": 2}), "api.bad_params"),
             ("capture", json!({"path": "relative.png"}), "api.bad_params"),
+            ("capture", json!({"bare": true}), "api.bad_params"),
             ("view", json!({"memory": 3}), "api.bad_params"),
+            // A viewpoint whose rotation has no length, too far for an `f32`, or that can't
+            // project; an outline of no entity's ID, of a color that isn't finite, or of no width.
+            (
+                "look",
+                json!({"viewpoint": viewpoint([0.0; 4], orthographic.clone())}),
+                "api.bad_params",
+            ),
+            (
+                "look",
+                json!({"viewpoint": {"position": [1e39, 0, 0], "rotation": [0, 0, 0, 1],
+                    "projection": orthographic.clone()}}),
+                "api.bad_params",
+            ),
+            (
+                "look",
+                json!({"viewpoint": viewpoint([0.0, 0.0, 0.0, 1.0],
+                    json!({"Perspective": {"fov": 4, "near": 0.1}}))}),
+                "api.bad_params",
+            ),
+            (
+                "look",
+                outline("5F3A9C0E12B47D68", [1.0; 4], 2.0),
+                "api.bad_params",
+            ),
+            (
+                "look",
+                json!({"outline": {"id": id, "color": [1e39, 0, 0, 1], "width": 2}}),
+                "api.bad_params",
+            ),
+            ("look", outline(id, [1.0; 4], 0.0), "api.bad_params"),
+            ("look", json!({"grid": "xw"}), "api.bad_params"),
+            ("pick", Value::Null, "api.bad_params"),
+            ("pick", json!({"at": [1]}), "api.bad_params"),
             ("input", Value::Null, "api.bad_params"),
             (
                 "input",

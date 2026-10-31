@@ -61,15 +61,25 @@ pub(crate) struct Extracted {
     /// The client the view is published to as frames render it, as the tool API's `view` asked.
     #[cfg(feature = "dev")]
     pub(crate) publish: Option<Publish>,
+    /// The revision of the tool API's look the frame drew with, which a frame published says.
+    #[cfg(feature = "dev")]
+    pub(crate) look: u64,
+    /// Whether the frame is bare, drawn without the look for a capture of the game's own view,
+    /// which then reads no picks, leaving them for the next frame that isn't.
+    #[cfg(feature = "dev")]
+    pub(crate) bare: bool,
 }
 
 /// The client a game's view is published to, as the tool API's `view` asked: the memory it made,
-/// which each frame that renders the view writes it into once the GPU has finished it; the ticks
-/// the simulation had run in the frame handed over, and when that frame started, which the main
-/// thread sets; and why a frame wasn't published, if one wasn't, until the main thread takes it.
+/// which each frame that renders the view writes it into once the GPU has finished it, but one
+/// to skip, as a capture of the game's own view's frame is, the memory staying for the next; the
+/// ticks the simulation had run in the frame handed over, and when that frame started, which the
+/// main thread sets; and why a frame wasn't published, if one wasn't, until the main thread takes
+/// it.
 #[cfg(feature = "dev")]
 pub(crate) struct Publish {
     pub(crate) writer: gg_api::view::Writer,
+    pub(crate) skip: bool,
     pub(crate) ticks: u64,
     pub(crate) started: std::time::SystemTime,
     pub(crate) failed: Option<Error>,
@@ -110,6 +120,10 @@ impl Default for Extracted {
             captured: None,
             #[cfg(feature = "dev")]
             publish: None,
+            #[cfg(feature = "dev")]
+            look: 0,
+            #[cfg(feature = "dev")]
+            bare: false,
         }
     }
 }
@@ -153,9 +167,13 @@ impl Render for Renderer {
     fn render(&mut self, frame: &mut Extracted) -> Rendered {
         let start = Instant::now();
         #[cfg(feature = "dev")]
-        let read_view = frame.capture || frame.publish.is_some();
+        let read_view = frame.capture || frame.publish.as_ref().is_some_and(|p| !p.skip);
         #[cfg(not(feature = "dev"))]
         let read_view = false;
+        #[cfg(feature = "dev")]
+        let read_picks = !frame.bare;
+        #[cfg(not(feature = "dev"))]
+        let read_picks = true;
         let pixels = frame.pixels.map(|size| Pixels {
             size,
             bytes: frame.pixels_new.then_some(&frame.pixel_bytes[..]),
@@ -167,6 +185,7 @@ impl Render for Renderer {
             uploads: &mut frame.uploads,
             draws: &frame.draws,
             picks: &frame.picks,
+            read_picks,
             outline: frame.outline,
             read_view,
             pixels,
@@ -210,8 +229,9 @@ impl Render for Renderer {
 impl Extracted {
     /// Once the frame has rendered and read the view back, waits for the GPU to finish it, and
     /// takes the view: for the captures, a copy, or the error that kept it; and for the client it's
-    /// published to, into its memory, or why it couldn't be. Returns how long it waited for the
-    /// GPU, and how long the copy into the client's memory took.
+    /// published to, unless the frame skips it, into its memory, with the viewpoint and the look it
+    /// drew with, or why it couldn't be. Returns how long it waited for the GPU, and how long the
+    /// copy into the client's memory took.
     fn take_view(&mut self, renderer: &Renderer) -> (Duration, Duration) {
         let start = Instant::now();
         let read = renderer.view_read();
@@ -228,7 +248,7 @@ impl Extracted {
                 return (waited, Duration::ZERO);
             }
             Err(error) => {
-                if let Some(publish) = &mut self.publish {
+                if let Some(publish) = self.publish.as_mut().filter(|publish| !publish.skip) {
                     publish.failed = Some(Error::new("api.view", format!("{error:#}")));
                 }
                 if self.capture {
@@ -242,14 +262,15 @@ impl Extracted {
             let mut pixels = vec![0; size[0] as usize * size[1] as usize * 4];
             self.captured = Some(read.read_into(&mut pixels).map(|()| Shot { size, pixels }));
         }
-        let Some(publish) = &mut self.publish else {
+        let viewpoint = crate::api::api_viewpoint(&self.viewpoint);
+        let Some(publish) = self.publish.as_mut().filter(|publish| !publish.skip) else {
             return (waited, Duration::ZERO);
         };
         let copying = Instant::now();
         let mut copied = Ok(());
-        let published = (publish.writer).publish(size, publish.ticks, publish.started, |pixels| {
-            copied = read.read_into(pixels);
-        });
+        let (ticks, started) = (publish.ticks, publish.started);
+        let fill = |pixels: &mut [u8]| copied = read.read_into(pixels);
+        let published = (publish.writer).publish(size, ticks, started, viewpoint, self.look, fill);
         let failed = match (published, copied) {
             (Err(error), _) => Some(Error::new("api.view", error.to_string())),
             (Ok(_), Err(error)) => Some(error),

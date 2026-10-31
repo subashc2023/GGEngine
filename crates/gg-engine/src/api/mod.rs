@@ -19,11 +19,28 @@ use crate::main_loop::Stepper;
 use crate::render_thread::{Render, RenderThread};
 
 #[cfg(feature = "dev")]
-pub(crate) use server::Api;
+pub(crate) use server::{Api, api_viewpoint};
 
 /// The API, which builds without `dev` have none of.
 #[cfg(not(feature = "dev"))]
 pub(crate) enum Api {}
+
+/// The look the API's clients set, as a frame draws with it, which [`Api`] sets as it answers:
+/// each part in place of the game's own, where one's set; the revision it's at, which a frame
+/// published gives; whether the frame is bare, as a capture of the game's own view asks, which
+/// leaves the look out; and the viewpoint the last frame handed off drew from, the look's or the
+/// game's own.
+#[cfg(feature = "dev")]
+#[derive(Default)]
+pub(crate) struct Look {
+    pub(crate) viewpoint: Option<gg_renderer::Viewpoint>,
+    pub(crate) outline: Option<gg_renderer::Outline>,
+    pub(crate) grid: Option<crate::grid::Plane>,
+    pub(crate) colliders: Option<bool>,
+    pub(crate) revision: u64,
+    pub(crate) bare: bool,
+    pub(crate) seen: Option<gg_renderer::Viewpoint>,
+}
 
 /// Starts serving the tool API for app `app`, whose layers are `layers`, from the bottom up, whose
 /// JSON log is at `log`, if it has one, its last events kept in gg-core's `log::EVENTS`, which
@@ -90,9 +107,9 @@ pub(crate) fn serve_paused(
 }
 
 /// With the renderer back from a frame, takes the view it read back, if it rode with captures and
-/// rendered, and has the next frame handed off, which `cx` made and shows the world after `ticks`
-/// ticks, read its view back if captures wait or a client has it published, as
-/// [`Api::frame_back`] says.
+/// rendered, answers the picks whose answers came back into `cx`, and has the next frame handed
+/// off, which `cx` made and shows the world after `ticks` ticks, read its view back if captures
+/// wait or a client has it published, as [`Api::frame_back`] says.
 pub(crate) fn frame_back<R: Render>(
     api: &mut Option<Api>,
     render: &mut RenderThread<R>,
@@ -101,7 +118,7 @@ pub(crate) fn frame_back<R: Render>(
 ) {
     #[cfg(feature = "dev")]
     if let Some(api) = api {
-        api.frame_back(render.frame_mut(), ticks, cx.started);
+        api.frame_back(render.frame_mut(), cx, ticks);
     }
     let _ = (api, render, cx, ticks);
 }
@@ -124,7 +141,8 @@ pub(crate) fn asked<R: Render>(render: &RenderThread<R>) -> Option<[u32; 2]> {
 const PACED: Duration = Duration::from_millis(100);
 
 /// Before the frame's handed off, while the view is published, the number of the frame, as the
-/// client will take it, which [`pace`] then waits for.
+/// client will take it, which [`pace`] then waits for; `None` for a frame that isn't published, as
+/// a capture of the game's own view's isn't.
 pub(crate) fn handing(api: &Option<Api>) -> Option<u64> {
     #[cfg(feature = "dev")]
     if let Some(api) = api {

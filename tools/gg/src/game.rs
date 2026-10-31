@@ -120,7 +120,7 @@ pub(crate) fn connect(pick: &Pick) -> Result<Client, Failure> {
                 .unwrap_or_default();
             let picks = pick.pid.is_some() || pick.app.is_some();
             let that = if picks {
-                " that `--pid` or `--app` picks"
+                " that `--pid` or `--app` chooses"
             } else {
                 ""
             };
@@ -142,7 +142,7 @@ pub(crate) fn connect(pick: &Pick) -> Result<Client, Failure> {
                 })
                 .collect();
             let message = format!(
-                "{} games are running, {}; `--pid` or `--app` picks one",
+                "{} games are running, {}; `--pid` or `--app` chooses one",
                 games.len(),
                 games.join(", ")
             );

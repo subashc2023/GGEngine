@@ -23,6 +23,7 @@ use crate::camera::{self, Camera, Tie};
 use crate::draw::{self, Poses, Scratch};
 use crate::edits::{Authors, Done, Edit};
 use crate::gltf;
+use crate::grid::{self, Plane};
 use crate::image::{self, Image};
 use crate::interpolation::Past;
 #[cfg(feature = "dev")]
@@ -249,6 +250,9 @@ pub struct Context {
     /// published to a tool say.
     #[cfg(feature = "dev")]
     pub(crate) started: std::time::SystemTime,
+    /// The look the tool API's clients set, which the frames draw with over what the layers set.
+    #[cfg(feature = "dev")]
+    pub(crate) look: crate::api::Look,
     /// The number of the next pick's ticket.
     tickets: u64,
     /// The picks asked this frame, at most [`MAX_PICKS`], each with where, in the main window's
@@ -381,6 +385,8 @@ impl Context {
             shown_new: false,
             #[cfg(feature = "dev")]
             started: std::time::SystemTime::UNIX_EPOCH,
+            #[cfg(feature = "dev")]
+            look: crate::api::Look::default(),
             tickets: 0,
             picks: Vec::new(),
             unseen: Vec::new(),
@@ -507,7 +513,8 @@ impl Context {
     /// circle, a line or a blended model is fully transparent, which their shaders discard, the
     /// pick finds what's behind it. A frame whose rendering had nothing to render into, as when the
     /// window's swapchain had no image to give, leaves its picks to the next that renders, which
-    /// reads them by what it shows. Replays, which render nothing, answer none.
+    /// reads them by what it shows; and so does a development build's frame that a tool's capture
+    /// of the game's own view makes bare. Replays, which render nothing, answer none.
     pub fn pick(&mut self, at: [f64; 2]) -> Option<Pick> {
         if self.picks.len() == MAX_PICKS {
             return None;
@@ -767,6 +774,28 @@ impl Context {
             .push_rect(&mut self.shaders, transform, color, width, 0);
     }
 
+    /// Draws a grid this frame as `viewpoint` sees it, fitted to the game's view as the last frame
+    /// handed it off, which [`view`](Self::view) gives: lines a power of ten apart on the world's
+    /// axis plane `plane`, or on the one an orthographic viewpoint along an axis faces, as
+    /// [`grid::shown`] says, and the plane's two axes in their colors, [`grid::RED`],
+    /// [`grid::GREEN`] and [`grid::BLUE`], as the editor's view shows them. The lines show once
+    /// they're 8 pixels apart, are crisp, a pixel each, through an orthographic viewpoint that's
+    /// [`grid::square`], and fade toward grazing angles. It draws by straight alpha over the meshes
+    /// drawn before it but where an opaque one is nearer, and is of no entity, so drawn before the
+    /// world, which the engine draws after the layers' draws, it leaves picks to what's on top.
+    /// `viewpoint` is the one the frame sees from, as [`set_viewpoint`](Self::set_viewpoint) sets
+    /// it. Nothing draws while the view has no area, as in a dockspace's first frame, or while the
+    /// plane is too near edge-on to show.
+    pub fn draw_grid(&mut self, viewpoint: &Viewpoint, plane: Plane) {
+        let Some(view) = self.view else {
+            return;
+        };
+        if let Some((transform, grid)) = grid::quad(viewpoint, view, grid::shown(viewpoint, plane))
+        {
+            (self.draws).push_grid(&mut self.meshes, &mut self.shaders, transform, grid);
+        }
+    }
+
     /// Outlines what the game's view shows of entity `id` this frame, as the editor outlines what's
     /// picked: round whatever shape the pixels make where its draws are on top, its colliders'
     /// outlines among them, even across something in front of it, but not round what's hidden;
@@ -917,20 +946,38 @@ impl Context {
 
     /// Draws the world's entities, after what the layers drew this frame, each `alpha` of the way
     /// from where it was as the latest tick started to where the tick left it, and their colliders'
-    /// outlines, over the rest, while they're shown; and finds where the world's camera sees from,
-    /// as it draws.
+    /// outlines, over the rest, while they're shown, or the look shows them; and finds where the
+    /// world's camera sees from. Before the entities, a development build draws the look's grid,
+    /// unless the frame is bare, as the viewpoint the frame sees from so far sees it.
     pub(crate) fn draw_world(&mut self, alpha: f32) {
         self.past.resolve(&self.world);
+        self.seen = camera::seen(&self.world, &self.past, alpha, &mut self.tie);
+        #[cfg(feature = "dev")]
+        if let Some(plane) = self.look.grid.filter(|_| !self.look.bare) {
+            let viewpoint = self.look.viewpoint.or(self.viewpoint).or(self.seen);
+            self.draw_grid(&viewpoint.unwrap_or_default(), plane);
+        }
         let (world, past) = (&self.world, &self.past);
         let (draws, shaders) = (&mut self.draws, &mut self.shaders);
         draw::draw_world(world, past, alpha, draws, shaders, &mut self.scratch);
-        self.seen = camera::seen(world, past, alpha, &mut self.tie);
-        if self.colliders
+        if self.colliders_drawn()
             && let Some(poses) = Poses::new(world, past, alpha)
         {
             let scale = self.scale() as f32;
             physics::draw_colliders(world, &poses, scale, &mut self.over, &mut self.shaders);
         }
+    }
+
+    /// Whether the frame draws the colliders' outlines: as the look shows them, where it says, in
+    /// a frame that isn't bare, or else as the layers set.
+    fn colliders_drawn(&self) -> bool {
+        #[cfg(feature = "dev")]
+        if !self.look.bare
+            && let Some(shown) = self.look.colliders
+        {
+            return shown;
+        }
+        self.colliders
     }
 
     /// Fills in `frame` with this frame's render data, with the game's view at `viewport`, which
@@ -941,13 +988,33 @@ impl Context {
     /// if it shows any, swapping new ones for those `frame` had; what's been added since a frame
     /// last took it, after what `frame` still holds; and the picks asked this frame, each at
     /// the pixel of the view under it, the floor of where it was asked less the view's origin, but
-    /// those outside the view, which the next answers to come back answer `None`.
+    /// those outside the view, which the next answers to come back answer `None`. In a development
+    /// build, the look's viewpoint and outline go in place of the layers', and the frame carries
+    /// the look's revision; but a bare frame leaves the look out, and the picks to the next frame
+    /// that isn't bare, both those asked this frame and those the renderer holds, so that none
+    /// reads a view a client isn't shown.
     pub(crate) fn extract(&mut self, frame: &mut Extracted, viewport: Viewport) {
         frame.clear_color = self.clear_color;
         frame.viewport = viewport;
         self.view = (viewport.size[0] > 0 && viewport.size[1] > 0).then_some(viewport);
-        frame.viewpoint = self.viewpoint.take().or(self.seen).unwrap_or_default();
-        frame.outline = self.outline.take();
+        let (viewpoint, outline) = (self.viewpoint.take(), self.outline.take());
+        #[cfg(feature = "dev")]
+        let (viewpoint, outline) = if self.look.bare {
+            (viewpoint, outline)
+        } else {
+            (
+                self.look.viewpoint.or(viewpoint),
+                self.look.outline.or(outline),
+            )
+        };
+        frame.viewpoint = viewpoint.or(self.seen).unwrap_or_default();
+        frame.outline = outline;
+        #[cfg(feature = "dev")]
+        {
+            self.look.seen = Some(frame.viewpoint);
+            frame.look = self.look.revision;
+            frame.bare = self.look.bare;
+        }
         frame.pixels = self.shown;
         if mem::take(&mut self.shown_new) {
             mem::swap(&mut frame.pixel_bytes, &mut self.shown_bytes);
@@ -958,6 +1025,10 @@ impl Context {
         self.draws.clear();
         (frame.uploads).take(&mut self.meshes, &mut self.shaders, &mut self.textures);
         frame.picks.clear();
+        #[cfg(feature = "dev")]
+        if self.look.bare {
+            return;
+        }
         let [left, top] = viewport.origin.map(f64::from);
         let [width, height] = viewport.size.map(f64::from);
         for (pick, [x, y]) in self.picks.drain(..) {

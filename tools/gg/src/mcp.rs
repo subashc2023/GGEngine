@@ -2,7 +2,7 @@
 //! JSON-RPC 2.0 messages, a line each, read on stdin and answered on stdout, as MCP's stdio
 //! transport has them. Each tool is a method of the API, or `gg`'s `sessions`, and answers what
 //! they answer, as JSON text, a capture its PNG too. Each call connects afresh to the game the
-//! options pick, so that one `gg run` restarted is the one it reaches, as the MCP client its
+//! options choose, so that one `gg run` restarted is the one it reaches, as the MCP client its
 //! `initialize` names, the author of the edits it applies; `mcp` if it names none.
 
 use std::fs;
@@ -28,7 +28,11 @@ its tool API: read its world, step and capture it, and edit it. Entities are nam
 16 hex digits, which `entities` lists with their names and components; `entity` shows one's \
 components' values. An edit, `apply` or `set`, applies between ticks, paused or not, and `undo` \
 takes back your last; a scene file saved while the game runs is an edit too, its author the file's \
-path, which `undo` with that author takes back. `edits` lists each author's edits.";
+path, which `undo` with that author takes back. `edits` lists each author's edits. `look` sets \
+parts of the view's look, its viewpoint, an outline round an entity, a grid, and whether colliders' \
+outlines show, which the editor and any other client set too, the last to set a part winning; give \
+back, as null, what you set when you're done. `capture` shows the view with the look, and `pick` \
+names the entity at a pixel of it, as a capture's PNG has it.";
 
 /// Serves MCP on stdin and stdout until stdin ends, reaching the game `pick` picks.
 ///
@@ -121,6 +125,15 @@ fn tools() -> Value {
         "description": "Whose edits: an MCP client's name, `gg`, or a scene file's path, such as \
                         `scenes/grid.ron`; yours without one",
     });
+    let numbers = |count: usize, description: &str| {
+        json!({
+            "type": "array",
+            "items": {"type": "number"},
+            "minItems": count,
+            "maxItems": count,
+            "description": description,
+        })
+    };
     let tool = |name: &str, description: &str, properties: Value, required: &[&str]| {
         json!({
             "name": name,
@@ -157,10 +170,78 @@ fn tools() -> Value {
         ),
         tool(
             "capture",
-            "The game's view, without its UI, as a PNG, once a frame renders it; and where it's \
-             written.",
-            json!({}),
+            "The game's view as a PNG, once a frame renders it, and where it's written: as it's \
+             shown, the look included, but without the game's UI; or with `own`, as the game shows \
+             it on its own, through its own viewpoint, without the look.",
+            json!({"own": {"type": "boolean", "default": false}}),
             &[],
+        ),
+        tool(
+            "look",
+            "Sets parts of the game's look, the view's settings, which any client sets, such as \
+             the editor, the last to set a part winning, and which last until a client changes \
+             them or the game restarts; and answers the look: each part, null where it's the \
+             game's own; `by`, the client that set each; `revision`, how many times it has \
+             changed in the run; `run`; and `seen`, the viewpoint the last frame drew from, null \
+             before the first or while it isn't finite. Leave a part out to keep it; null gives \
+             it back to the game. Give back what you set when you're done. Without parts, it \
+             reads the look.",
+            json!({
+                "viewpoint": {
+                    "type": ["object", "null"],
+                    "description": "Where the view is seen from, in place of the game's camera. \
+                                    World space is right-handed with +Y up, and a viewpoint \
+                                    without rotation looks down -Z",
+                    "properties": {
+                        "position": numbers(3, "[x, y, z]"),
+                        "rotation": numbers(4, "A unit quaternion, [x, y, z, w]"),
+                        "projection": {
+                            "type": "object",
+                            "description": "{\"Orthographic\": {\"height\", \"near\", \"far\"}} \
+                                            or {\"Perspective\": {\"fov\", \"near\"}}, fov \
+                                            vertical, in radians, as `entity` shows a camera's",
+                        },
+                    },
+                    "required": ["position", "rotation", "projection"],
+                },
+                "outline": {
+                    "type": ["object", "null"],
+                    "description": "An outline round what the view shows of an entity, in place \
+                                    of any the game draws",
+                    "properties": {
+                        "id": id,
+                        "color": numbers(4, "Linear RGBA, alpha not multiplied in"),
+                        "width": {
+                            "type": "number",
+                            "exclusiveMinimum": 0,
+                            "description": "In the view's pixels, past 8 drawing 8",
+                        },
+                    },
+                    "required": ["id", "color", "width"],
+                },
+                "grid": {
+                    "type": ["string", "null"],
+                    "enum": ["xy", "xz", "yz", null],
+                    "description": "The plane a grid is drawn in, fitted to the view: `xy`, \
+                                    where 2D games are, or `xz`, the ground",
+                },
+                "colliders": {
+                    "type": ["boolean", "null"],
+                    "description": "Whether colliders' outlines show, in place of whether the \
+                                    game shows them",
+                },
+            }),
+            &[],
+        ),
+        tool(
+            "pick",
+            "The entity the game's view shows at a pixel, as it's shown, the look included: its \
+             ID and name, both null outside the view or where no entity draws. It answers once a \
+             frame reads it, about four frames on, and fails while the game runs no frames, as \
+             while its window is minimized.",
+            json!({"at": numbers(2, "The pixel, [x, y] from the view's top left, as a capture's \
+                                     PNG has it")}),
+            &["at"],
         ),
         tool(
             "entities",
@@ -326,15 +407,18 @@ fn run(pick: &Pick, name: &str, mut arguments: Map<String, Value>) -> Result<Ran
             game::sessions(pick.project.as_deref()).map(|sessions| Ran::Json(sessions.to_string()))
         }
         "status" | "pause" | "resume" | "hash" | "snapshot" => call(name, Value::Null),
-        "step" | "entities" | "entity" | "get" | "apply" | "undo" | "redo" | "edits" => {
-            call(name, Value::Object(arguments))
-        }
+        "step" | "look" | "pick" | "entities" | "entity" | "get" | "apply" | "undo" | "redo"
+        | "edits" => call(name, Value::Object(arguments)),
         "set" => {
             arguments.entry("path").or_insert_with(|| json!(""));
             call("apply", json!({"operations": [{"set": arguments}]}))
         }
         "capture" => {
-            let captured = game::call(pick, "capture", Value::Null)?;
+            let params = match arguments.remove("own") {
+                None | Some(Value::Null) => json!({}),
+                Some(own) => json!({"own": own}),
+            };
+            let captured = game::call(pick, "capture", params)?;
             let result: Value = serde_json::from_str(captured.get()).unwrap_or(Value::Null);
             let path = result
                 .get("path")

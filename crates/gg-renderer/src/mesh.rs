@@ -7,7 +7,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use bytemuck::NoUninit;
-use gg_core::math::Mat4;
+use gg_core::math::{Mat4, Vec2};
 use gg_core::{Error, Result};
 use gg_gpu::{
     ColorImage, Device, Frame, GpuBuffer, GraphicsDesc, Pass, Pipeline, Texture as GpuTexture,
@@ -17,7 +17,7 @@ use tracing::warn;
 
 use crate::shader::{self, Shader};
 use crate::texture::{self, Mipmaps};
-use crate::{DrawCounts, Draws, Uploads, sprite};
+use crate::{DrawCounts, Draws, Uploads, grid, sprite};
 
 /// A mesh that [`Meshes::add`] handed out, of vertex type `V`.
 pub struct Mesh<V> {
@@ -149,6 +149,9 @@ pub struct Meshes {
     pub(crate) added: Vec<Added>,
     /// How many have been added.
     count: u32,
+    /// The handle of the engine's grid mesh, which is added the first time it's asked for, once
+    /// it has been.
+    grid: Option<u32>,
 }
 
 pub(crate) struct Added {
@@ -160,9 +163,25 @@ pub(crate) struct Added {
 }
 
 impl Meshes {
-    /// How many it has handed out, the engine's quad among them: the index of the next.
+    /// How many it has handed out, the engine's quad among them, and its grid mesh once it was
+    /// first asked for: the index of the next.
     pub fn count(&self) -> u32 {
         self.count
+    }
+
+    /// The engine's grid mesh, a unit square as four triangles from its center, added as a game's
+    /// meshes are the first time it's asked for: a renderer draws grids with it, but uploads
+    /// nothing for it without them, and games' handles come where they would have.
+    pub(crate) fn grid(&mut self) -> Mesh<Vec2> {
+        let index = match self.grid {
+            Some(index) => index,
+            None => {
+                let mesh = (self.add("grid", &grid::SQUARE, &grid::FAN))
+                    .expect("the square is four whole triangles of its own corners");
+                *self.grid.insert(mesh.index)
+            }
+        };
+        Mesh::new(index)
     }
 
     /// Adds a mesh of triangles, three of `indices` each, which index `vertices`. `name` names it
@@ -214,6 +233,7 @@ impl Default for Meshes {
         let mut meshes = Self {
             added: Vec::new(),
             count: 0,
+            grid: None,
         };
         let quad = meshes
             .add("quad", &sprite::CORNERS, &sprite::INDICES)

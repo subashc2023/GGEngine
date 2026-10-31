@@ -15,8 +15,8 @@
 //! - `ping`: answers [`Pulse`] at once, even while the game's main thread is busy.
 //! - `status`, `pause` and `resume`: answer [`Status`].
 //! - `step`, [`Step`]: runs ticks, pausing the simulation, and answers [`Status`] once they've run.
-//! - `capture`, [`Capture`]: writes the game's view as a PNG once a frame renders it, and answers
-//!   [`Captured`].
+//! - `capture`, [`Capture`]: writes the game's view as a PNG once a frame renders it, as it's
+//!   shown, the look among it, or as the game shows it on its own, and answers [`Captured`].
 //! - `view`, [`View`]: has the game publish each frame's view, from the next, into the memory a
 //!   client made, as [`view::Reader`] makes it, in place of any it published to before, or stop
 //!   publishing for `null`, and answers `{}`; fails with `api.view` if the memory can't be opened.
@@ -24,9 +24,24 @@
 //!   the client has taken the last; another publishes its view at its own size, while it fits.
 //! - `input`, [`Input`]: hands the game's layers events, in order, as its window would, as the
 //!   frame starts, and answers `{}`.
+//! - `look`, [`Look`]: sets parts of the game's look, its view settings, which any client sets, the
+//!   last to set a part winning, and which last until a client changes them or the run ends: the
+//!   viewpoint the view is seen from, the outline round an entity, a grid, and whether colliders'
+//!   outlines show; and answers [`Looked`], the look once set, or as it is, for `{}` or no params.
+//!   It's set as a frame starts, which draws with it. It fails with `api.bad_params`, saying why,
+//!   for a viewpoint that isn't finite, whose rotation doesn't normalize, or whose projection can't
+//!   project, as [`Projection`] says; or for an outline whose ID isn't 16 hex digits, whose color
+//!   isn't finite, or whose width isn't finite and positive. An outline of an ID no entity has
+//!   outlines nothing, and isn't refused.
+//! - `pick`, [`Pick`]: answers [`Picked`], the entity the view shows at a pixel, as it's shown, the
+//!   look among it, in the frame that reads it, about four frames after it's asked.
 //! - `entities`, [`Entities`]: answers [`EntityList`], a page of the world's entities.
 //! - `entity`, [`Entity`]: answers the entity: `{"id":...,"name":...,"parent":...,"children":[...],
-//!   "components":{"Transform":{...},...}}`, its components in the order their types registered.
+//!   "components":{"Transform":{...},...},"space":{"matrix":[...],"rotation":[...]}}`, its
+//!   components in the order their types registered; and `space`, where the space its `Transform`
+//!   is in sits in the world, as the last tick left it: its parent's pose, as a matrix of 16 floats,
+//!   column by column, and a rotation, `[x, y, z, w]`, without the parent's scales; the identity
+//!   for a root. Its floats are written as a value's are.
 //! - `get`, [`Field`]: answers a component's field, as a value.
 //! - `types`: answers [`Types`], the world's component types and the descriptions of the types
 //!   they hold, which values are read and written by: a client draws and checks values by them, as
@@ -64,8 +79,8 @@
 //!
 //! The methods but `hello`, `ping` and `logs` are answered by the game's main thread, as a frame
 //! starts. While the window is minimized, and no frames run, it answers them between frames, but
-//! `step` and `capture`, which need frames, fail with `api.paused`; while a file dialog or the
-//! window menu Windows runs is open, holding the main thread, they wait. The connection's own
+//! `step`, `capture` and `pick`, which need frames, fail with `api.paused`; while a file dialog or
+//! the window menu Windows runs is open, holding the main thread, they wait. The connection's own
 //! thread answers `hello`, `ping` and `logs` as it reads them, so that a `logs` that waits holds up
 //! the connection's later requests: follow the logs on a connection of their own.
 //!
@@ -348,6 +363,12 @@ fn one() -> u64 {
 pub struct Capture {
     #[serde(default)]
     pub path: Option<PathBuf>,
+    /// Whether to capture the view as the game shows it on its own, through its own viewpoint,
+    /// without the look's outline, grid or colliders, in a frame that isn't published to a view's
+    /// memory, and that a windowed game shows in its window; without it, the capture shows the
+    /// view as it's shown, the look among it.
+    #[serde(default)]
+    pub own: bool,
 }
 
 /// What `capture` answers: where the PNG is, its size, the view's in pixels, and the ticks the
@@ -428,6 +449,153 @@ pub enum Button {
 pub enum Scroll {
     Lines([f32; 2]),
     Pixels([f64; 2]),
+}
+
+/// Where the game's view is seen from, and how: from `position`, facing as `rotation`, a unit
+/// quaternion, turns it, through `projection`. World space is right-handed with +Y up, and a
+/// viewpoint without rotation looks down -Z, with +X to its right and +Y up.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Viewpoint {
+    pub position: [f32; 3],
+    pub rotation: [f32; 4],
+    pub projection: Projection,
+}
+
+impl Viewpoint {
+    /// Whether each of its numbers is finite.
+    pub fn is_finite(&self) -> bool {
+        let projection = match self.projection {
+            Projection::Orthographic { height, near, far } => [height, near, far],
+            Projection::Perspective { fov, near } => [fov, near, 0.0],
+        };
+        (self.position.iter())
+            .chain(&self.rotation)
+            .chain(&projection)
+            .all(|number| number.is_finite())
+    }
+}
+
+/// How a viewpoint projects what's in front of it onto the view, fitted to the view's aspect
+/// ratio: `{"Orthographic":{"height":2.0,"near":-1.0,"far":1.0}}` or
+/// `{"Perspective":{"fov":1.0472,"near":0.01}}`, as `entity` gives a camera's `projection`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum Projection {
+    /// Without perspective, as 2D games draw: the view spans `height` world units from bottom to
+    /// top, and shows what's from `near` to `far` in front of the viewpoint. It projects if
+    /// `height` is a positive normal number, and `near` and `far` are finite and differ.
+    Orthographic { height: f32, near: f32, far: f32 },
+    /// With perspective, as 3D games draw: the view spans `fov` radians from bottom to top, and
+    /// shows what's at least `near` in front of the viewpoint, however far. It projects if `fov` is
+    /// more than 0 and less than π, and `near` is a positive normal number.
+    Perspective { fov: f32, near: f32 },
+}
+
+/// An outline round what the view shows of an entity, by its ID, 16 hex digits: its color, in
+/// linear RGBA, alpha not multiplied in; and its width, how far out it reaches from the entity's
+/// pixels, in the view's pixels, a width past 8 drawing 8.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Outline {
+    pub id: String,
+    pub color: [f32; 4],
+    pub width: f32,
+}
+
+/// One of the world's axis planes, by the two axes it spans: `"xy"`, the plane 2D games are in;
+/// `"xz"`, the ground; or `"yz"`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Plane {
+    Xy,
+    Xz,
+    Yz,
+}
+
+/// What `look` takes: the parts of the game's look to set, each left out to keep it as it is,
+/// `null` to give it back to the game, or its value.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Look {
+    /// The viewpoint the view is seen from, in place of the game's own; its rotation is
+    /// normalized.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub viewpoint: Option<Option<Viewpoint>>,
+    /// The outline round an entity, in place of any the game's layers draw.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub outline: Option<Option<Outline>>,
+    /// The plane a grid is drawn in, fitted to the view, as the editor's own world draws one.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub grid: Option<Option<Plane>>,
+    /// Whether the colliders' outlines show, in place of whether the game shows them.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub colliders: Option<Option<bool>>,
+}
+
+/// What `look` answers: the look once set, each part `None` where it's the game's own.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Looked {
+    pub viewpoint: Option<Viewpoint>,
+    pub outline: Option<Outline>,
+    pub grid: Option<Plane>,
+    pub colliders: Option<bool>,
+    pub by: By,
+    /// How many times the look has changed in the run, which a frame shared gives as the revision
+    /// it drew with ([`view::Frame::look`]): a `look` that changes no part's value or setter
+    /// doesn't count.
+    pub revision: u64,
+    /// The run's number, as `logs` gives it, so that a client tells a restarted game, whose look
+    /// starts afresh, from a look unchanged.
+    pub run: u64,
+    /// The viewpoint the last frame handed to the renderer drew from, the look's or the game's own;
+    /// `None` before the first, and while the viewpoint it drew from has a number that isn't
+    /// finite, which JSON can't carry. A `look` that sets a viewpoint answers before a frame draws
+    /// with it.
+    pub seen: Option<Viewpoint>,
+}
+
+/// Who set each part of the look: the client, by the name it said hello with, or `None` where the
+/// part is the game's own.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct By {
+    pub viewpoint: Option<String>,
+    pub outline: Option<String>,
+    pub grid: Option<String>,
+    pub colliders: Option<String>,
+}
+
+/// What `pick` takes: the pixel of the view to pick at, `[x, y]` from its top left, as `input`'s
+/// cursor is, and as a capture's PNG, the view, has it.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Pick {
+    pub at: [f64; 2],
+}
+
+/// What `pick` answers: the entity the view shows at the pixel, by its ID, and its name, as it's
+/// answered; both `None` outside the view or where no entity draws, and the name for an entity
+/// gone by the answer, whose ID is kept.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Picked {
+    pub id: Option<String>,
+    pub name: Option<String>,
 }
 
 /// What `entities` takes: those with component `with`, or all, in the order queries find them,
@@ -1108,6 +1276,130 @@ mod tests {
         assert_eq!(input.events, expected);
         let refused = r#"{"events": [{"key": {"key": "KeyW", "pressed": true, "held": true}}]}"#;
         assert!(serde_json::from_str::<Input>(refused).is_err());
+    }
+
+    /// A part of the look left out is kept, `null` gives it back to the game, and a value sets it,
+    /// written as it's read; a projection is written as reflection writes a camera's.
+    #[test]
+    fn looks_read_as_their_docs_say() {
+        let json = r#"{"viewpoint": {"position": [0, 1, 2.5], "rotation": [0, 0, 0, 1],
+            "projection": {"Perspective": {"fov": 1.0, "near": 0.01}}}, "outline": null,
+            "grid": "xz"}"#;
+        let look: Look = serde_json::from_str(json).unwrap();
+        let viewpoint = Viewpoint {
+            position: [0.0, 1.0, 2.5],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            projection: Projection::Perspective {
+                fov: 1.0,
+                near: 0.01,
+            },
+        };
+        let expected = Look {
+            viewpoint: Some(Some(viewpoint)),
+            outline: Some(None),
+            grid: Some(Some(Plane::Xz)),
+            colliders: None,
+        };
+        assert_eq!(look, expected);
+        let written = serde_json::to_value(&look).unwrap();
+        assert_eq!(written.get("outline"), Some(&Value::Null), "given back");
+        assert_eq!(written.get("colliders"), None, "kept");
+        assert_eq!(serde_json::from_value::<Look>(written).unwrap(), look);
+        assert_eq!(serde_json::from_str::<Look>("{}").unwrap(), Look::default());
+        let orthographic = Projection::Orthographic {
+            height: 2.0,
+            near: -1.0,
+            far: 1.0,
+        };
+        assert_eq!(
+            serde_json::to_string(&orthographic).unwrap(),
+            r#"{"Orthographic":{"height":2.0,"near":-1.0,"far":1.0}}"#
+        );
+        let set = r#"{"outline": {"id": "2b7e151628aed2a6", "color": [1, 0.5, 0, 1], "width": 2},
+            "colliders": false}"#;
+        let look: Look = serde_json::from_str(set).unwrap();
+        let outline = Outline {
+            id: "2b7e151628aed2a6".to_owned(),
+            color: [1.0, 0.5, 0.0, 1.0],
+            width: 2.0,
+        };
+        assert_eq!(look.outline, Some(Some(outline)));
+        assert_eq!(look.colliders, Some(Some(false)));
+        for refused in [
+            r#"{"grid": "XZ"}"#,
+            r#"{"colliders": true, "camera": null}"#,
+            r#"{"outline": {"id": "2b7e151628aed2a6", "color": [1, 0, 0, 1]}}"#,
+            r#"{"viewpoint": {"position": [0, 0, 0], "rotation": [0, 0, 0, 1],
+                "projection": {"perspective": {"fov": 1.0, "near": 0.01}}}}"#,
+            r#"{"viewpoint": {"position": [0, 0, 0], "rotation": [0, 0, 0, 1],
+                "projection": {"Perspective": {"fov": 1.0, "near": 0.01, "far": 9}}}}"#,
+        ] {
+            assert!(serde_json::from_str::<Look>(refused).is_err(), "{refused}");
+        }
+    }
+
+    /// Each part of the look `null` where it's the game's own, beside who set the others.
+    #[test]
+    fn looked_reads_as_its_docs_say() {
+        let json = r#"{"viewpoint": null, "grid": "xy", "colliders": null,
+            "outline": {"id": "2b7e151628aed2a6", "color": [1, 0.5, 0, 1], "width": 2},
+            "by": {"viewpoint": null, "outline": "editor", "grid": "gg", "colliders": null},
+            "revision": 3, "run": 7, "seen": {"position": [0, 0, 5], "rotation": [0, 0, 0, 1],
+            "projection": {"Orthographic": {"height": 2, "near": -1, "far": 1}}}}"#;
+        let looked: Looked = serde_json::from_str(json).unwrap();
+        let seen = Viewpoint {
+            position: [0.0, 0.0, 5.0],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            projection: Projection::Orthographic {
+                height: 2.0,
+                near: -1.0,
+                far: 1.0,
+            },
+        };
+        let expected = Looked {
+            viewpoint: None,
+            outline: Some(Outline {
+                id: "2b7e151628aed2a6".to_owned(),
+                color: [1.0, 0.5, 0.0, 1.0],
+                width: 2.0,
+            }),
+            grid: Some(Plane::Xy),
+            colliders: None,
+            by: By {
+                viewpoint: None,
+                outline: Some("editor".to_owned()),
+                grid: Some("gg".to_owned()),
+                colliders: None,
+            },
+            revision: 3,
+            run: 7,
+            seen: Some(seen),
+        };
+        assert_eq!(looked, expected);
+        let back: Looked = serde_json::from_str(&serde_json::to_string(&looked).unwrap()).unwrap();
+        assert_eq!(back, looked);
+    }
+
+    /// A pick names a pixel of the view, and its answer an entity, or none; a capture is of the
+    /// view as it's shown, unless it asks for the game's own.
+    #[test]
+    fn picks_and_captures_read_as_their_docs_say() {
+        let pick: Pick = serde_json::from_str(r#"{"at": [3, 4.5]}"#).unwrap();
+        assert_eq!(pick.at, [3.0, 4.5]);
+        for refused in ["{}", r#"{"at": [3]}"#, r#"{"at": [3, 4], "frame": 1}"#] {
+            assert!(serde_json::from_str::<Pick>(refused).is_err(), "{refused}");
+        }
+        let picked = r#"{"id": "2b7e151628aed2a6", "name": null}"#;
+        let expected = Picked {
+            id: Some("2b7e151628aed2a6".to_owned()),
+            name: None,
+        };
+        assert_eq!(serde_json::from_str::<Picked>(picked).unwrap(), expected);
+        let capture: Capture = serde_json::from_str("{}").unwrap();
+        assert_eq!((capture.path, capture.own), (None, false));
+        let capture: Capture = serde_json::from_str(r#"{"own": true}"#).unwrap();
+        assert!(capture.own);
+        assert!(serde_json::from_str::<Capture>(r#"{"bare": true}"#).is_err());
     }
 
     #[test]

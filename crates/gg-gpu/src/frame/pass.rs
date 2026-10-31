@@ -7,6 +7,7 @@
 //!
 //! [`Frames::begin`]: crate::Frames::begin
 
+use std::ffi::CStr;
 use std::marker::PhantomData;
 
 use ash::vk;
@@ -36,13 +37,47 @@ impl<'a> Frame<'a> {
     pub fn begin_pass(
         &mut self,
         target: usize,
-        label: &std::ffi::CStr,
+        label: &CStr,
         color: [f32; 4],
         depth: Option<&DepthImage>,
         ids: Option<&mut IdImage>,
     ) -> Option<Pass<'_, 'a>> {
+        self.open_pass(target, label, Some(color), depth, ids)
+    }
+
+    /// Starts rendering into the `target`th of the targets the frame began with, over what the
+    /// last pass into it rendered, which it keeps for its draws to blend over; without IDs or a
+    /// depth image, so that its draws can sample the IDs an earlier pass wrote beside it, as an
+    /// outline round some of what that pass drew does. `label` names the pass in captures.
+    /// Rendering ends when the pass is dropped. Returns `None` for a swapchain that had no image
+    /// ready this frame.
+    ///
+    /// # Panics
+    ///
+    /// If a forgotten pass is still open, the frame has no `target`th target, or no pass has
+    /// rendered into the target since it was made, sampled or read back, or since the frame
+    /// acquired its swapchain's image.
+    pub fn begin_pass_over(&mut self, target: usize, label: &CStr) -> Option<Pass<'_, 'a>> {
+        self.open_pass(target, label, None, None, None)
+    }
+
+    /// Starts a pass as [`Frame::begin_pass`] does, its target cleared to `clear`; or without it,
+    /// as [`Frame::begin_pass_over`] does.
+    fn open_pass(
+        &mut self,
+        target: usize,
+        label: &CStr,
+        clear: Option<[f32; 4]>,
+        depth: Option<&DepthImage>,
+        ids: Option<&mut IdImage>,
+    ) -> Option<Pass<'_, 'a>> {
         self.outside_pass();
-        let (index, _) = self.frames.images[target]?;
+        let (index, layout) = self.frames.images[target]?;
+        assert!(
+            clear.is_some() || layout == vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            "a pass over target {target} keeps what the last pass into it rendered, but none has \
+             since it was made, sampled or read back, or its swapchain's image acquired"
+        );
         let number = self.number();
         let device = &self.frames.device;
         let commands = self.frames.slots[self.slot].commands;
@@ -68,26 +103,39 @@ impl<'a> Frame<'a> {
         if depth.is_some() {
             format = format.with_depth();
         }
-        // The old contents are discarded. A swapchain image is ready once its acquire semaphore
-        // is signaled, which the submission waits for at the color-attachment stage, and a later
-        // pass into it this frame waits there for the writes of the one before; an offscreen
-        // image must wait for whatever used it before.
-        let (src_stage, src_access) = match self.targets[target] {
-            Target::Swapchain(_) => (
+        // Cleared, the old contents are discarded. A swapchain image is ready once its acquire
+        // semaphore is signaled, which the submission waits for at the color-attachment stage, and
+        // a later pass into it this frame waits there for the writes of the one before; an
+        // offscreen image must wait for whatever used it before. Kept, the last pass into it wrote
+        // it, and nothing used it since: its load and its draws' blending read what that wrote.
+        let (src_stage, src_access) = match (clear, &self.targets[target]) {
+            (None, _) | (Some(_), Target::Swapchain(_)) => (
                 vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
                 vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
             ),
-            Target::Image(_) => (
+            (Some(_), Target::Image(_)) => (
                 vk::PipelineStageFlags2::ALL_COMMANDS,
                 vk::AccessFlags2::MEMORY_WRITE,
+            ),
+        };
+        let (old_layout, dst_access, load_op) = match clear {
+            Some(_) => (
+                vk::ImageLayout::UNDEFINED,
+                vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+                vk::AttachmentLoadOp::CLEAR,
+            ),
+            None => (
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                vk::AccessFlags2::COLOR_ATTACHMENT_READ | vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+                vk::AttachmentLoadOp::LOAD,
             ),
         };
         let barrier = vk::ImageMemoryBarrier2::default()
             .src_stage_mask(src_stage)
             .src_access_mask(src_access)
             .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-            .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
-            .old_layout(vk::ImageLayout::UNDEFINED)
+            .dst_access_mask(dst_access)
+            .old_layout(old_layout)
             .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
             .image(image)
             .subresource_range(COLOR_RANGE);
@@ -136,10 +184,12 @@ impl<'a> Frame<'a> {
         let attachment = vk::RenderingAttachmentInfo::default()
             .image_view(view)
             .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .load_op(load_op)
             .store_op(vk::AttachmentStoreOp::STORE)
             .clear_value(vk::ClearValue {
-                color: vk::ClearColorValue { float32: color },
+                color: vk::ClearColorValue {
+                    float32: clear.unwrap_or_default(),
+                },
             });
         // Stored, for the frame to read back.
         let ids_attachment = id_parts.map(|(_, view)| {

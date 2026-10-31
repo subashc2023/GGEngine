@@ -33,6 +33,7 @@ mod imp {
     use std::time::{Duration, Instant};
 
     use gg_api::{Client, Failure, Session};
+    use gg_core::math::Mat4;
     use serde::Deserialize;
     use serde_json::{Map, Value as JsonValue, json};
     use tracing::field::display;
@@ -40,11 +41,11 @@ mod imp {
 
     use super::super::commands::Command;
     use super::super::inspected::{Inspected, Pending};
-    use super::super::link::Linking;
+    use super::super::link::{Linking, Placed};
     use super::super::{Edit, Gesture, Inspector, Pass, Refusal, Step};
-    use crate::EntityId;
     use crate::api::json::{self, Remote as Names};
-    use crate::reflect::{Type, Types, Value};
+    use crate::reflect::{Reflect, Type, Types, Value};
+    use crate::{EntityId, Pose, Transform};
 
     /// How long the connection waits to connect, and for each answer: as long as gg gives a game
     /// to start, after which the connection is broken.
@@ -76,10 +77,13 @@ mod imp {
         /// The entities as the last list read gave them, and the pages of the one being read.
         list: List,
         reading: Option<Vec<gg_api::Listed>>,
-        /// The picked entity, as the last `entity` answer of it gave it; and the entity the
-        /// panels have picked, as of the last pass, whose answer may not have come.
+        /// The picked entity, as the last `entity` answer of it gave it while it stayed picked; the
+        /// entity the panels have picked, as of the last pass, whose answer may not have come; and
+        /// the one the link asks them to pick, as of this pass's update, which the list may not
+        /// have yet either.
         picked: Option<(EntityId, Option<Known>)>,
         wanted: Option<EntityId>,
+        linking: Option<EntityId>,
         /// The edits to send, in order, and the request waiting for its answer.
         queued: VecDeque<Ask>,
         sent: Option<Ask>,
@@ -109,6 +113,9 @@ mod imp {
         /// words.
         undo: Option<String>,
         redo: Option<String>,
+        /// How many times it has been reached, to a game or to none, as [`Placed::generation`]
+        /// counts them.
+        generation: u64,
     }
 
     /// The connection to the game: the requests going to its thread, and what the thread hears.
@@ -198,7 +205,7 @@ mod imp {
 
     /// An entity as the game gave it: its name, parent and children, and its components' types, in
     /// the order they registered; with, for the picked entity, their values, or why one can't be
-    /// read.
+    /// read, and where the space its transform is in sits, if that was given, and finite.
     struct Known {
         id: EntityId,
         name: Option<String>,
@@ -206,15 +213,19 @@ mod imp {
         children: Vec<EntityId>,
         components: Vec<String>,
         values: Vec<Result<Value, String>>,
+        space: Option<Pose>,
     }
 
-    /// The entity `entity` answers.
+    /// The entity `entity` answers, its `space` as it came, which a game of an older engine
+    /// doesn't give.
     #[derive(Deserialize)]
     struct Answered {
         name: Option<String>,
         parent: Option<String>,
         children: Vec<String>,
         components: Map<String, JsonValue>,
+        #[serde(default)]
+        space: Option<JsonValue>,
     }
 
     impl Remote {
@@ -231,6 +242,7 @@ mod imp {
                 reading: None,
                 picked: None,
                 wanted: None,
+                linking: None,
                 queued: VecDeque::new(),
                 sent: None,
                 edited: false,
@@ -248,16 +260,19 @@ mod imp {
                 made: 0,
                 undo: None,
                 redo: None,
+                generation: 0,
             }
         }
 
         /// Shows the game `session` names, connecting to it, or none: what was known of the game
-        /// before goes, but the gesture's numbers, which go on.
+        /// before goes, but the gesture's numbers, which go on, and the count of reaches, which
+        /// goes up.
         fn reach(&mut self, session: Option<Session>) {
             let fresh = Self::new(&self.client);
-            let gestures = self.gestures;
+            let (gestures, generation) = (self.gestures, self.generation);
             *self = fresh;
             self.gestures = gestures;
+            self.generation = generation + 1;
             if let Some(session) = session {
                 self.connection = Some(connect(session, self.client.clone()));
                 self.state = Some("Reaching the game".to_owned());
@@ -266,11 +281,15 @@ mod imp {
 
         /// Takes in what the game answered since the last pass, changing `inspector`'s pick, open
         /// rows and refusals as it says; and first reaches the game its link names, if it names
-        /// one since.
+        /// one since, and lets go of the read of the entity picked if the pick changed in the last
+        /// pass, so that a read taken before the pick went elsewhere never shows once it's back.
         pub(in super::super) fn update(&mut self, inspector: &mut Inspector) {
             let reach = inspector.link.borrow_mut().reach.take();
             if let Some(session) = reach {
                 self.reach(session);
+            }
+            if inspector.picked != self.wanted {
+                self.picked = None;
             }
             while let Some(connection) = &self.connection {
                 match connection.heard.try_recv() {
@@ -291,6 +310,7 @@ mod imp {
                 }
             }
             self.wanted = inspector.picked;
+            self.linking = inspector.link.borrow().pick.flatten();
         }
 
         /// Takes in `answer`, to `ask`.
@@ -331,7 +351,19 @@ mod imp {
                     }
                 },
                 Ask::List { skip } => self.listed(skip, answer),
-                Ask::Entity(id) => self.entity(id, answer, inspector.picked),
+                Ask::Entity(id) => {
+                    let read = |picked: &Option<(EntityId, Option<Known>)>| {
+                        (picked.as_ref()).is_some_and(|(of, known)| *of == id && known.is_some())
+                    };
+                    let first = !read(&self.picked);
+                    self.entity(id, answer, inspector.picked);
+                    // The rows above the pick, as its first read gives them, which a pick of an
+                    // entity the list hadn't yet, as the link's of one just made, couldn't open;
+                    // and not at the reads after, so that they close.
+                    if first && read(&self.picked) {
+                        inspector.open_ancestors(&*self, id);
+                    }
+                }
                 Ask::Edits => {
                     let history = answer.and_then(|json| read::<gg_api::History>(&json));
                     let authored = history.ok().and_then(|history| {
@@ -486,6 +518,7 @@ mod imp {
                     children: ids(listed.children),
                     components: listed.components,
                     values: Vec::new(),
+                    space: None,
                 });
             }
             let described = |name: &String| self.types.find(name).is_some();
@@ -549,12 +582,38 @@ mod imp {
                 children: ids(answered.children),
                 components: components.into_iter().map(|(name, _)| name).collect(),
                 values,
+                space: answered
+                    .space
+                    .as_ref()
+                    .and_then(|space| space_of(space, &names)),
             };
             self.types_due |= entity
                 .components
                 .iter()
                 .any(|name| self.types.find(name).is_none());
             self.picked = Some((id, Some(entity)));
+        }
+
+        /// Where the entity of ID `picked` is, as the last read of it gave it: if that read was of
+        /// it, and gave its transform and where the space it's in sits.
+        pub(in super::super) fn placed(&self, picked: Option<EntityId>) -> Option<Placed> {
+            let (id, Some(entity)) = self.picked.as_ref()? else {
+                return None;
+            };
+            if picked != Some(*id) {
+                return None;
+            }
+            let at = entity
+                .components
+                .iter()
+                .position(|name| name == "Transform")?;
+            let local = entity.values.get(at)?.as_ref().ok()?;
+            Some(Placed {
+                id: *id,
+                local: Transform::from_value(local).ok()?,
+                space: entity.space?,
+                generation: self.generation,
+            })
         }
 
         /// What waits for the game: the sets of the fields of the entity of ID `picked`, the adds
@@ -612,8 +671,10 @@ mod imp {
                 self.open = None;
                 inspector.link.borrow_mut().stepped += 1;
             }
+            // Until a read shows each, so that a tool drawing a field as it set it doesn't draw it
+            // as the read before had it.
             let link = &mut *inspector.link.borrow_mut();
-            link.queued = self.waiting.iter().any(|set| !set.applied);
+            link.queued = !self.waiting.is_empty();
             self.ask_next(inspector.picked);
         }
 
@@ -851,12 +912,13 @@ mod imp {
 
         /// Alive if the picked entity's answer, or the list, has it, and not if the picked
         /// entity's answer says it's gone, or the list hasn't it; but the entity picked, until its
-        /// answer comes, as one just made, which the list may not have yet, isn't known.
+        /// answer comes, and the one the link asks to pick, as one just made, which the list may
+        /// not have yet, aren't known.
         fn alive(&self, id: EntityId) -> Option<bool> {
             match &self.picked {
                 Some((of, entity)) if *of == id => Some(entity.is_some()),
                 _ if self.list.by_id.contains_key(&id) => Some(true),
-                _ if self.wanted == Some(id) || !self.list.read => None,
+                _ if self.wanted == Some(id) || self.linking == Some(id) || !self.list.read => None,
                 _ => Some(false),
             }
         }
@@ -996,6 +1058,28 @@ mod imp {
         Connection { asks, heard }
     }
 
+    /// The pose `space`, of an `entity` answer, gives, its floats read as a value's are, as `names`
+    /// reads them: if it gives one, finite.
+    fn space_of(space: &JsonValue, names: &Names) -> Option<Pose> {
+        let matrix = space.get("matrix")?;
+        let matrix = json::read(matrix, &Type::Array(Box::new(Type::F32), 16), names).ok()?;
+        let Value::List(columns) = matrix else {
+            return None;
+        };
+        let floats = columns.iter().map(|value| match *value {
+            Value::F32(x) => Some(x),
+            _ => None,
+        });
+        let floats: Vec<f32> = floats.collect::<Option<_>>()?;
+        let matrix = Mat4::from_cols_slice(&floats);
+        let rotation = json::read(space.get("rotation")?, &Type::Quat, names).ok()?;
+        let Value::Quat(rotation) = rotation else {
+            return None;
+        };
+        let finite = matrix.is_finite() && rotation.is_finite();
+        finite.then_some(Pose { matrix, rotation })
+    }
+
     /// `json`, an answer's result, as a `T`.
     ///
     /// Fails with `api.protocol` if it isn't one.
@@ -1007,6 +1091,8 @@ mod imp {
 
     #[cfg(test)]
     mod tests {
+        use gg_core::math::{Quat, Vec3};
+
         use super::*;
 
         fn id(n: u64) -> EntityId {
@@ -1114,6 +1200,132 @@ mod imp {
             remote.entity(a, Err(Failure::new("ecs.no_entity", "gone")), Some(a));
             assert_eq!(remote.alive(a), Some(false), "despawned");
         }
+
+        /// The link's pick of an entity the list hasn't, as one the game has just made, picks it,
+        /// its first read opening the rows above it, and the reads after leaving them be; and once
+        /// a read of it has found it gone, unpicks.
+        #[test]
+        fn the_links_pick_of_an_entity_the_list_hasnt_yet_picks_it() {
+            let mut remote = Remote::new("editor");
+            remote.listed(0, page(1, &[(1, None, &[])]));
+            let mut inspector = Inspector::default();
+            let link = inspector.link();
+            link.pick(Some(id(2)));
+            remote.update(&mut inspector);
+            inspector.follow(&remote);
+            assert_eq!(inspector.picked, Some(id(2)), "not known yet");
+            assert!(inspector.expanded.is_empty(), "its parent not known yet");
+            remote.update(&mut inspector);
+            let child = format!(
+                r#"{{"name":null,"parent":"{}","children":[],"components":{{}}}}"#,
+                id(1)
+            );
+            remote.answer(Ask::Entity(id(2)), Ok(child.clone()), &mut inspector);
+            assert_eq!(inspector.expanded, HashSet::from([id(1)]), "by its read");
+            inspector.expanded.clear();
+            remote.answer(Ask::Entity(id(2)), Ok(child), &mut inspector);
+            assert!(inspector.expanded.is_empty(), "closed, and left so");
+            let gone = Err(Failure::new("ecs.no_entity", "gone"));
+            remote.entity(id(2), gone, Some(id(2)));
+            link.pick(Some(id(2)));
+            remote.update(&mut inspector);
+            inspector.follow(&remote);
+            assert_eq!(inspector.picked, None, "found gone");
+        }
+
+        /// The entity picked is placed by a read of it, while it's picked: its transform and the
+        /// space it's in, whose floats are read as values' are; a read without a space, or with
+        /// one that isn't finite, places nothing; each reach counts a generation; and a read taken
+        /// before the pick went elsewhere doesn't place it once it's back.
+        #[test]
+        fn a_pick_is_placed_by_a_read_of_it_alone() {
+            let mut remote = Remote::new("editor");
+            let types = crate::Context::seeded(0).world().types().clone();
+            remote.types = types.clone();
+            let (a, b) = (id(1), id(2));
+            let answer = |space: &str| {
+                let transform = r#"{"translation":[1,2,3],"rotation":[0,0,0,1],"scale":[1,1,1]}"#;
+                let components = format!(r#""components":{{"Transform":{transform}}}"#);
+                let entity = r#""name":null,"parent":null,"children":[]"#;
+                Ok(format!("{{{entity},{components}{space}}}"))
+            };
+            let matrix = |x: &str| format!("[1,0,0,0,0,1,0,0,0,0,1,0,{x},5,0,1]");
+            let space = |x: &str| {
+                format!(
+                    r#","space":{{"matrix":{},"rotation":[0,0,0,1]}}"#,
+                    matrix(x)
+                )
+            };
+            remote.entity(a, answer(&space("4")), Some(a));
+            let placed = remote.placed(Some(a)).expect("placed");
+            let local = Transform {
+                translation: Vec3::new(1.0, 2.0, 3.0),
+                ..Transform::IDENTITY
+            };
+            let parent = Pose {
+                matrix: Mat4::from_translation(Vec3::new(4.0, 5.0, 0.0)),
+                rotation: Quat::IDENTITY,
+            };
+            let expected = Placed {
+                id: a,
+                local,
+                space: parent,
+                generation: 0,
+            };
+            assert_eq!(placed, expected);
+            assert_eq!(remote.placed(Some(b)), None, "while another is picked");
+            for unplaced in ["", &space(r#""inf""#), r#","space":{"rotation":[0,0,0,1]}"#] {
+                remote.entity(a, answer(unplaced), Some(a));
+                assert_eq!(remote.placed(Some(a)), None, "{unplaced}");
+            }
+            remote.reach(None);
+            remote.types = types;
+            remote.entity(a, answer(&space("4")), Some(a));
+            let generation = remote.placed(Some(a)).map(|placed| placed.generation);
+            assert_eq!(generation, Some(1), "another reach");
+            let mut inspector = Inspector {
+                picked: Some(a),
+                ..Inspector::default()
+            };
+            remote.update(&mut inspector);
+            remote.entity(a, answer(&space("4")), Some(a));
+            remote.update(&mut inspector);
+            assert!(remote.placed(Some(a)).is_some(), "while it stays picked");
+            inspector.picked = Some(b);
+            remote.update(&mut inspector);
+            inspector.picked = Some(a);
+            assert_eq!(remote.placed(Some(a)), None, "back, until a read of it");
+        }
+
+        /// A set through the link waits, as the link says, until a read of its entity after the
+        /// game's answer to it shows it, not only until the answer.
+        #[test]
+        fn the_links_sets_wait_until_a_read_shows_them() {
+            let mut remote = Remote::new("editor");
+            let mut inspector = Inspector::default();
+            let a = id(1);
+            remote.waiting.push(Waiting {
+                number: 1,
+                id: a,
+                edit: Edit {
+                    component: "Transform".to_owned(),
+                    path: "translation.x".to_owned(),
+                    value: Value::F32(1.0),
+                },
+                applied: false,
+            });
+            let mut waits = Vec::new();
+            for applied in [false, true] {
+                remote.waiting[0].applied = applied;
+                remote.send(Pass::default(), &mut inspector);
+                waits.push(inspector.link().waiting());
+            }
+            let answer = r#"{"id":"","name":null,"parent":null,"children":[],"components":{}}"#;
+            remote.entity(a, Ok(answer.to_owned()), Some(a));
+            remote.send(Pass::default(), &mut inspector);
+            waits.push(inspector.link().waiting());
+            assert_eq!(waits, [true, true, false]);
+        }
     }
 }
 
@@ -1123,6 +1335,7 @@ mod none {
     use std::ops::Range;
 
     use super::super::inspected::{Inspected, Pending};
+    use super::super::link::Placed;
     use super::super::{Inspector, Pass};
     use crate::EntityId;
     use crate::reflect::{Types, Value};
@@ -1132,6 +1345,10 @@ mod none {
 
     impl Remote {
         pub(in super::super) fn update(&mut self, _: &mut Inspector) {
+            match *self {}
+        }
+
+        pub(in super::super) fn placed(&self, _: Option<EntityId>) -> Option<Placed> {
             match *self {}
         }
 

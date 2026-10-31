@@ -3338,8 +3338,8 @@ mod remote {
     }
 
     /// A frame of a remote Inspector's panels, side by side as [`panels`] draws them, as its `ui`
-    /// takes in the game's answers before them and sends the pass after them; `give` adds to the
-    /// pass before it's sent. Returns the frame's texts.
+    /// takes in the game's answers before them and sends the pass after them, then tells its link
+    /// the pick and its place; `give` adds to the pass before it's sent. Returns the frame's texts.
     fn frame(
         inspector: &mut Inspector,
         ctx: &egui::Context,
@@ -3372,6 +3372,9 @@ mod remote {
             remote.send(pass, inspector);
         });
         output.textures_delta.clear();
+        let linked = &mut *inspector.link.borrow_mut();
+        linked.picked = inspector.picked;
+        linked.placed = remote.placed(inspector.picked);
         inspector.remote = Some(remote);
         texts_in(&output.shapes)
             .into_iter()
@@ -3464,6 +3467,16 @@ mod remote {
             |texts, _| has(texts, &heading) && has(texts, "Transform"),
         );
         assert!(has(&texts, &format!("Children: {kid_id}")), "{texts:?}");
+        // Placed by the read that shows it, in the space of the world, by the Inspector's first
+        // reach.
+        let placed = inspector.link().placed().expect("placed");
+        let expected = Placed {
+            id: hero_id,
+            local: Transform::IDENTITY,
+            space: crate::Pose::IDENTITY,
+            generation: 1,
+        };
+        assert_eq!(placed, expected);
         let own = game.cx.world().components_of(hero).expect("alive");
         let own: Vec<&str> = own.collect();
         let drawn: Vec<&str> = (texts.iter())

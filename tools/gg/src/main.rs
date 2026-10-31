@@ -87,7 +87,15 @@ Talk to a running game, through its tool API:
   pause                          Pause its simulation
   resume                         Run its simulation in real time again
   step [N]                       Run N ticks (1), and stay paused
-  capture [PATH]                 Write its view as a PNG at PATH, or in `captures` beside it
+  capture [--own] [PATH]         Write its view as a PNG at PATH, or in `captures` beside it: as
+                                 it's shown, the look included, or with `--own`, as the game shows
+                                 it on its own
+  look [<LOOK>]                  Its look, the view's settings any client sets, the last to set a
+                                 part winning; with LOOK, a JSON object of parts as the API's `look`
+                                 takes them, `viewpoint`, `outline`, `grid` or `colliders`, those set
+                                 first, each `null` giving it back to the game
+  pick <X> <Y>                   The ID and name of the entity its view shows at pixel X, Y from its
+                                 top left, as a capture has it, the look included; `null` for none
   snapshot [PATH]                Write its world as a snapshot at PATH, or in `snapshots` beside it
   entities [--with <COMPONENT>] [--skip <N>] [--take <N>]
                                  List its entities, those with COMPONENT, N at a time (100)
@@ -112,9 +120,10 @@ Talk to a running game, through its tool API:
 
 Serve agents:
   mcp                            Serve the tool API to an agent that speaks MCP, on stdin and stdout:
-                                 a tool for each command above but `quit`, `call` and the PATHs of
-                                 `capture` and `snapshot`, which reaches the game the options pick at each call, as the
-                                 agent, its MCP client's name, the author of the edits it applies
+                                 a tool for each command that talks to a game but `quit`, `call`,
+                                 `logs --follow` and the PATHs of `capture` and `snapshot`, which
+                                 reaches the game the options choose at each call, as the agent, its
+                                 MCP client's name, the author of the edits it applies
 
 Options for talking to a game:
   --pid <PID>           The game in process PID, when more than one runs
@@ -233,6 +242,15 @@ fn bad(message: String) -> Failure {
         "gg.args",
         format!("{message}; `gg help` lists the commands"),
     )
+}
+
+/// `path`, given for the game to write at, made absolute, as the game's working directory may not
+/// be gg's.
+///
+/// Fails with `gg.args` if gg can't tell where it is.
+fn absolute(path: &str) -> Result<PathBuf, Failure> {
+    std::path::absolute(Path::new(path))
+        .map_err(|error| bad(format!("can't tell where `{path}` is: {error}")))
 }
 
 /// The flags that take a value: `--name value` or `--name=value`.
@@ -524,18 +542,49 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
             };
             call(&mut parsed, "step", json!({"ticks": ticks}))?
         }
-        method @ ("capture" | "snapshot") => {
-            let path = parsed.positional(0, 1, &format!("{method} [PATH]"))?;
+        "capture" => {
+            let path = parsed.positional(0, 1, "capture [--own] [PATH]")?;
+            let mut params = json!({});
+            if let Some(path) = path.first() {
+                params["path"] = json!(absolute(path)?);
+            }
+            if parsed.switch("--own") {
+                params["own"] = json!(true);
+            }
+            call(&mut parsed, "capture", params)?
+        }
+        "snapshot" => {
+            let path = parsed.positional(0, 1, "snapshot [PATH]")?;
             let params = match path.first() {
-                // The game's working directory may not be this one.
-                Some(path) => {
-                    let path = std::path::absolute(Path::new(path))
-                        .map_err(|error| bad(format!("can't tell where `{path}` is: {error}")))?;
-                    json!({"path": path})
-                }
+                Some(path) => json!({"path": absolute(path)?}),
                 None => json!({}),
             };
-            call(&mut parsed, method, params)?
+            call(&mut parsed, "snapshot", params)?
+        }
+        "look" => {
+            let given = parsed.positional(0, 1, "look [<LOOK>]")?;
+            let look: Value = match given.first() {
+                Some(look) => serde_json::from_str(look)
+                    .map_err(|error| bad(format!("LOOK isn't JSON: {error}")))?,
+                None => json!({}),
+            };
+            if !look.is_object() {
+                return Err(bad("LOOK is a JSON object of the look's parts".to_owned()));
+            }
+            call(&mut parsed, "look", look)?
+        }
+        "pick" => {
+            let given = parsed.positional(2, 2, "pick <X> <Y>")?;
+            let at = given.iter().map(|given| {
+                let at = given.parse::<f64>().ok().filter(|at| at.is_finite());
+                at.ok_or_else(|| {
+                    bad(format!(
+                        "`gg pick` takes a pixel's X and Y, numbers, not `{given}`"
+                    ))
+                })
+            });
+            let at = at.collect::<Result<Vec<f64>, Failure>>()?;
+            call(&mut parsed, "pick", json!({"at": at}))?
         }
         "entities" => {
             parsed.positional(
@@ -722,15 +771,29 @@ mod tests {
             panic!("a new game");
         };
         assert_eq!(name, "probe");
-        let path = std::path::absolute("world.snapshot").unwrap();
+        let snapshot = std::path::absolute("world.snapshot").unwrap();
+        let png = std::path::absolute("view.png").unwrap();
         for (args, want) in [
             (&["snapshot"][..], json!({})),
-            (&["snapshot", "world.snapshot"], json!({"path": path})),
+            (&["snapshot", "world.snapshot"], json!({"path": snapshot})),
+            (&["capture"], json!({})),
+            (&["capture", "--own"], json!({"own": true})),
+            (
+                &["capture", "view.png", "--own"],
+                json!({"path": png, "own": true}),
+            ),
+            (&["look"], json!({})),
+            (
+                &["look", r#"{"grid":"xz","outline":null}"#],
+                json!({"grid": "xz", "outline": null}),
+            ),
+            // A pixel outside the view too, which the game answers with none.
+            (&["pick", "3", "-4.5"], json!({"at": [3.0, -4.5]})),
         ] {
             let Ok(Command::Call { method, params, .. }) = parsed(args) else {
                 panic!("a call");
             };
-            assert_eq!((method.as_str(), params), ("snapshot", want), "{args:?}");
+            assert_eq!((method.as_str(), params), (args[0], want), "{args:?}");
         }
         let Ok(Command::Logs { level, follow, .. }) = parsed(&["logs", "--level", "INFO"]) else {
             panic!("logs");
@@ -754,6 +817,16 @@ mod tests {
             &["run", "a", "--peers", "2", "--", "--host", "0.0.0.0:7700"],
             &["run", "a", "--peers", "2", "--", "--record=run.recording"],
             &["snapshot", "a", "b"],
+            &["snapshot", "--own"],
+            &["capture", "a", "b"],
+            &["capture", "--own=yes"],
+            &["look", "{not json"],
+            &["look", "[]"],
+            &["look", "{}", "{}"],
+            &["pick", "1"],
+            &["pick", "1", "2", "3"],
+            &["pick", "left", "2"],
+            &["pick", "1", "NaN"],
             &["status", "--frames", "2"],
             &["status", "extra"],
             &["step", "many"],

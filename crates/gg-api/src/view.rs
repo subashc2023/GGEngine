@@ -17,11 +17,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::{Projection, Viewpoint};
+
 /// The bytes of a pixel: RGBA8.
 const PIXEL: usize = 4;
 
 /// What the memory begins with: its layout's name and version, in the last byte.
-const MAGIC: u64 = u64::from_le_bytes(*b"ggview\0\x01");
+const MAGIC: u64 = u64::from_le_bytes(*b"ggview\0\x02");
 
 /// Where the slots begin, a page in, past the header.
 const SLOTS_AT: usize = 4096;
@@ -34,6 +36,9 @@ const NEW: u64 = 1 << 32;
 
 /// The longest side a frame may have, the renderer's textures'.
 pub const MAX_SIDE: u32 = 8192;
+
+/// The words a slot holds its frame's viewpoint in, as [`pack_viewpoint`] lays it out.
+const VIEWPOINT_WORDS: usize = 11;
 
 /// The memory's header, at its start. Each field is atomic, as both processes read it while the
 /// other may write it, and each has one writer: the client, which made the memory, or the game.
@@ -64,13 +69,15 @@ struct Slot {
     ticks: AtomicU64,
     started: AtomicU64,
     published: AtomicU64,
+    viewpoint: [AtomicU32; VIEWPOINT_WORDS],
+    look: AtomicU64,
 }
 
 const _: () = assert!(size_of::<Header>() <= SLOTS_AT);
 
 /// A frame of the view in the memory: what the game published of it, beside its pixels, rows of
 /// RGBA8, sRGB-encoded and tightly packed, the top row first.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Frame {
     /// Its width and height in pixels.
     pub size: [u32; 2],
@@ -82,6 +89,11 @@ pub struct Frame {
     /// since the Unix epoch, by the machine's clock, which both processes read alike.
     pub started: u64,
     pub published: u64,
+    /// The viewpoint the frame that rendered it drew the view from, the look's or the game's own.
+    pub viewpoint: Viewpoint,
+    /// The revision of the look it drew with, as [`Looked::revision`](crate::Looked::revision)
+    /// counts them.
+    pub look: u64,
 }
 
 impl Frame {
@@ -159,7 +171,9 @@ impl Reader {
 
     /// Takes the latest frame the game has published, if it's published one since the last taken,
     /// in place of that one, which [`read`](Self::read) then reads: `None` if it hasn't, or if what
-    /// it published doesn't hold together, as a game that wrote over the header wouldn't.
+    /// it published doesn't hold together, as a game that wrote over the header wouldn't: a frame
+    /// that doesn't fit in the memory, or whose viewpoint has a kind of projection there's none of
+    /// or a number that isn't finite, as a game's camera at no finite place would give too.
     pub fn take(&mut self) -> Option<Frame> {
         let header = self.memory.header();
         if header.latest.load(Ordering::Acquire) & NEW == 0 {
@@ -173,16 +187,22 @@ impl Reader {
         self.front = slot;
         header.front.store(slot, Ordering::Relaxed);
         let published = &header.slots[slot as usize];
-        let frame = Frame {
+        let number = published.number.load(Ordering::Relaxed);
+        let words = (published.viewpoint)
+            .each_ref()
+            .map(|word| word.load(Ordering::Relaxed));
+        let frame = unpack_viewpoint(words).map(|viewpoint| Frame {
             size: unpack(published.size.load(Ordering::Relaxed)),
-            number: published.number.load(Ordering::Relaxed),
+            number,
             ticks: published.ticks.load(Ordering::Relaxed),
             started: published.started.load(Ordering::Relaxed),
             published: published.published.load(Ordering::Relaxed),
-        };
-        header.taken.store(frame.number, Ordering::Release);
-        let fits = fits_sides(frame.size) && frame.bytes() <= self.memory.capacity;
-        self.frame = fits.then_some(frame);
+            viewpoint,
+            look: published.look.load(Ordering::Relaxed),
+        });
+        header.taken.store(number, Ordering::Release);
+        let fits = |frame: &Frame| fits_sides(frame.size) && frame.bytes() <= self.memory.capacity;
+        self.frame = frame.filter(fits);
         self.frame
     }
 
@@ -231,7 +251,9 @@ impl Writer {
     /// Opens the memory a client made and named `name`, as [`Reader::name`] gives it.
     ///
     /// Fails with `InvalidInput` for a name that isn't a view's, with `InvalidData` for memory that
-    /// isn't laid out as a view's, and as the OS does if it can't open it, as when it isn't there.
+    /// isn't laid out as a view's, or is laid out as another version of a view's, which it names,
+    /// as a client of another engine's lays it out, and as the OS does if it can't open it, as when
+    /// it isn't there.
     pub fn open(name: &str) -> io::Result<Self> {
         if !is_name(name) {
             let message = format!("{name:?} isn't the name of a view's memory, as gg-view-12-3 is");
@@ -239,8 +261,18 @@ impl Writer {
         }
         let mut memory = Memory::open(name)?;
         let header = memory.header();
+        let magic = header.magic.load(Ordering::Acquire).to_le_bytes();
+        let ours = MAGIC.to_le_bytes();
+        if magic[..7] == ours[..7] && magic[7] != ours[7] {
+            let message = format!(
+                "the memory {name:?} is laid out as version {} of a view's, where this game's \
+                 engine reads version {}",
+                magic[7], ours[7]
+            );
+            return Err(io::Error::new(io::ErrorKind::InvalidData, message));
+        }
         let capacity = header.capacity.load(Ordering::Relaxed);
-        let laid_out = header.magic.load(Ordering::Acquire) == MAGIC
+        let laid_out = magic == ours
             && capacity.is_multiple_of(SLOTS_AT as u64)
             && (capacity.checked_mul(SLOTS))
                 .and_then(|slots| slots.checked_add(SLOTS_AT as u64))
@@ -292,7 +324,8 @@ impl Writer {
 
     /// Publishes a frame of `size`, which `fill` fills in, given its pixels' bytes to fill, as rows
     /// of RGBA8, sRGB-encoded and tightly packed, the top row first, from the frame that started
-    /// at `started` with the simulation having run `ticks` ticks; returns it.
+    /// at `started` with the simulation having run `ticks` ticks, which drew the view from
+    /// `viewpoint` with the look's revision `look`; returns it.
     ///
     /// Fails with `InvalidInput` if it doesn't fit in the memory, and with `InvalidData` if the
     /// slots don't hold together, as when a client writes over the header.
@@ -301,6 +334,8 @@ impl Writer {
         size: [u32; 2],
         ticks: u64,
         started: SystemTime,
+        viewpoint: Viewpoint,
+        look: u64,
         fill: impl FnOnce(&mut [u8]),
     ) -> io::Result<Frame> {
         let header = self.memory.header();
@@ -324,6 +359,8 @@ impl Writer {
             ticks,
             started: nanos(started),
             published: nanos(SystemTime::now()),
+            viewpoint,
+            look,
         };
         let written = &header.slots[self.back as usize];
         written.size.store(pack(size), Ordering::Relaxed);
@@ -331,6 +368,10 @@ impl Writer {
         written.ticks.store(ticks, Ordering::Relaxed);
         written.started.store(frame.started, Ordering::Relaxed);
         written.published.store(frame.published, Ordering::Relaxed);
+        for (word, packed) in written.viewpoint.iter().zip(pack_viewpoint(&viewpoint)) {
+            word.store(packed, Ordering::Relaxed);
+        }
+        written.look.store(look, Ordering::Relaxed);
         let back = header.latest.swap(self.back | NEW, Ordering::AcqRel) & !NEW;
         header.published.store(number, Ordering::Release);
         if back >= SLOTS || back == self.back {
@@ -379,6 +420,46 @@ fn pack([width, height]: [u32; 2]) -> u64 {
 
 fn unpack(packed: u64) -> [u32; 2] {
     [(packed >> 32) as u32, packed as u32]
+}
+
+/// `viewpoint` in words: its projection's kind, 0 orthographic or 1 perspective, then its three
+/// numbers, a perspective one's third 0, its position and its rotation, each a float's bits.
+fn pack_viewpoint(viewpoint: &Viewpoint) -> [u32; VIEWPOINT_WORDS] {
+    let (kind, projection) = match viewpoint.projection {
+        Projection::Orthographic { height, near, far } => (0, [height, near, far]),
+        Projection::Perspective { fov, near } => (1, [fov, near, 0.0]),
+    };
+    let numbers = projection
+        .iter()
+        .chain(&viewpoint.position)
+        .chain(&viewpoint.rotation);
+    let mut words = [kind; VIEWPOINT_WORDS];
+    for (word, number) in words[1..].iter_mut().zip(numbers) {
+        *word = number.to_bits();
+    }
+    words
+}
+
+/// The viewpoint [`pack_viewpoint`] packed into `words`: `None` for a kind of projection there's
+/// none of, or a number that isn't finite.
+fn unpack_viewpoint(words: [u32; VIEWPOINT_WORDS]) -> Option<Viewpoint> {
+    let [kind, numbers @ ..] = words;
+    let [a, b, c, x, y, z, i, j, k, w] = numbers.map(f32::from_bits);
+    let projection = match kind {
+        0 => Projection::Orthographic {
+            height: a,
+            near: b,
+            far: c,
+        },
+        1 => Projection::Perspective { fov: a, near: b },
+        _ => return None,
+    };
+    let viewpoint = Viewpoint {
+        position: [x, y, z],
+        rotation: [i, j, k, w],
+        projection,
+    };
+    viewpoint.is_finite().then_some(viewpoint)
 }
 
 /// `time` in nanoseconds since the Unix epoch; 0 before it.
@@ -688,6 +769,17 @@ mod tests {
         move |pixels| pixels.fill(level)
     }
 
+    /// The engine's default viewpoint.
+    const SEEN: Viewpoint = Viewpoint {
+        position: [0.0; 3],
+        rotation: [0.0, 0.0, 0.0, 1.0],
+        projection: Projection::Orthographic {
+            height: 2.0,
+            near: -1.0,
+            far: 1.0,
+        },
+    };
+
     #[test]
     fn the_client_takes_the_latest_frame_the_game_published() {
         let mut reader = Reader::create(4, 2).expect("memory for a view");
@@ -698,13 +790,13 @@ mod tests {
         assert_eq!((pacer.published(), pacer.taken()), (0, 0));
         assert_eq!(reader.take(), None);
         let started = UNIX_EPOCH + std::time::Duration::from_secs(1);
-        let first = (writer.publish([4, 2], 7, started, gray(10))).expect("a frame that fits");
+        let first = (writer.publish([4, 2], 7, started, SEEN, 0, gray(10))).expect("a frame");
         assert_eq!(
             (first.number, first.ticks, first.started),
             (1, 7, 1_000_000_000)
         );
         assert_eq!((pacer.published(), pacer.taken()), (1, 0));
-        let second = (writer.publish([2, 2], 8, started, gray(20))).expect("a smaller frame");
+        let second = (writer.publish([2, 2], 8, started, SEEN, 0, gray(20))).expect("a smaller");
         assert_eq!(
             reader.take(),
             Some(second),
@@ -718,7 +810,7 @@ mod tests {
         // The game writes into neither the slot read nor the latest, however often it publishes.
         for level in 30..40 {
             writer
-                .publish([4, 2], 9, started, gray(level))
+                .publish([4, 2], 9, started, SEEN, 0, gray(level))
                 .expect("a frame");
         }
         reader.read(&mut pixels);
@@ -736,16 +828,16 @@ mod tests {
         let mut reader = Reader::create(1, 1).expect("memory for a view");
         let mut first = Writer::open(reader.name()).expect("the memory");
         first
-            .publish([1, 1], 0, SystemTime::now(), gray(1))
+            .publish([1, 1], 0, SystemTime::now(), SEEN, 0, gray(1))
             .expect("a frame");
         reader.take().expect("the frame");
         first
-            .publish([1, 1], 0, SystemTime::now(), gray(2))
+            .publish([1, 1], 0, SystemTime::now(), SEEN, 0, gray(2))
             .expect("a frame");
         drop(first);
         let mut again = Writer::open(reader.name()).expect("the memory again");
         again
-            .publish([1, 1], 0, SystemTime::now(), gray(3))
+            .publish([1, 1], 0, SystemTime::now(), SEEN, 0, gray(3))
             .expect("a frame");
         let mut pixel = [0; 4];
         reader.read(&mut pixel);
@@ -771,7 +863,7 @@ mod tests {
         );
         let mut writer = Writer::open(reader.name()).expect("the memory");
         assert_eq!(writer.asked(), Some([32, 128]));
-        let refused = writer.publish([65, 64], 0, SystemTime::now(), gray(0));
+        let refused = writer.publish([65, 64], 0, SystemTime::now(), SEEN, 0, gray(0));
         assert_eq!(
             refused.map_err(|error| error.kind()),
             Err(io::ErrorKind::InvalidInput)
@@ -782,6 +874,66 @@ mod tests {
             asked.store(pack(wrong), Ordering::Relaxed);
             assert_eq!(writer.asked(), None, "{wrong:?}");
         }
+    }
+
+    #[test]
+    fn a_frame_carries_the_viewpoint_it_was_drawn_from_and_its_look() {
+        let mut reader = Reader::create(1, 1).expect("memory for a view");
+        let mut writer = Writer::open(reader.name()).expect("the memory");
+        let perspective = Viewpoint {
+            position: [1.0, -2.5, 3.0],
+            rotation: [0.0, 0.6, 0.0, 0.8],
+            projection: Projection::Perspective {
+                fov: std::f32::consts::FRAC_PI_3,
+                near: 0.01,
+            },
+        };
+        for (viewpoint, look) in [(SEEN, 0), (perspective, 7), (SEEN, u64::MAX)] {
+            let published = writer
+                .publish([1, 1], 0, SystemTime::now(), viewpoint, look, gray(0))
+                .expect("a frame");
+            let taken = reader.take().expect("the frame");
+            assert_eq!((taken.viewpoint, taken.look), (viewpoint, look));
+            assert_eq!(taken, published);
+        }
+    }
+
+    /// As a game that writes over the header, or whose camera is at no finite place, publishes.
+    #[test]
+    fn a_frame_whose_viewpoint_doesnt_hold_together_is_refused() {
+        let mut reader = Reader::create(1, 1).expect("memory for a view");
+        let mut writer = Writer::open(reader.name()).expect("the memory");
+        let now = SystemTime::now();
+        writer
+            .publish([1, 1], 0, now, SEEN, 0, gray(0))
+            .expect("a frame");
+        let header = reader.memory.header();
+        let latest = &header.slots[(header.latest.load(Ordering::Relaxed) & !NEW) as usize];
+        latest.viewpoint[0].store(2, Ordering::Relaxed);
+        assert_eq!(reader.take(), None, "a projection there's none of");
+        assert_eq!(reader.frame(), None);
+        let nowhere = Viewpoint {
+            position: [f32::NAN, 0.0, 0.0],
+            ..SEEN
+        };
+        let unbounded = Viewpoint {
+            projection: Projection::Perspective {
+                fov: 1.0,
+                near: f32::INFINITY,
+            },
+            ..SEEN
+        };
+        for viewpoint in [nowhere, unbounded] {
+            writer
+                .publish([1, 1], 0, now, viewpoint, 0, gray(0))
+                .expect("a frame");
+            assert_eq!(reader.take(), None, "{viewpoint:?}");
+        }
+        writer
+            .publish([1, 1], 0, now, SEEN, 1, gray(0))
+            .expect("a frame");
+        let next = reader.take().map(|frame| frame.look);
+        assert_eq!(next, Some(1), "the next that holds together");
     }
 
     #[test]
@@ -803,5 +955,12 @@ mod tests {
             );
         }
         assert!(Writer::open("gg-view-0-4294967295").is_err(), "not there");
+        // As a client of an engine older than viewpoints in frames makes it.
+        let reader = Reader::create(1, 1).expect("memory for a view");
+        let older = u64::from_le_bytes(*b"ggview\0\x01");
+        reader.memory.header().magic.store(older, Ordering::Release);
+        let refused = Writer::open(reader.name()).map(|_| ()).unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::InvalidData);
+        assert!(refused.to_string().contains("version 1 "), "{refused}");
     }
 }

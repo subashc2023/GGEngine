@@ -7,7 +7,7 @@ use bytemuck::NoUninit;
 use gg_core::math::{Mat3, Mat4, Vec4};
 use gg_gpu::Faces;
 
-use crate::{Circle, Line, Mesh, MeshDraw, Shader, Shaders, Sprite, halves, sprite};
+use crate::{Circle, Grid, Line, Mesh, MeshDraw, Meshes, Shader, Shaders, Sprite, halves, sprite};
 
 /// What a frame draws besides UI, in order, each over those before it, but where an opaque one
 /// before it is nearer: meshes, each with a shader for its vertex type, the parameters that shader
@@ -141,6 +141,22 @@ impl Draws {
         self.push_with_id(sprite::QUAD, shaders.line(), transform, line.params(), id);
     }
 
+    /// Draws `grid` over the meshes drawn before it but where an opaque one is nearer, as [`Grid`]
+    /// describes, with the engine's grid mesh and shader, which `meshes` and `shaders` add the
+    /// first time they're asked for. `transform` takes the grid's own space, where it's a unit
+    /// square around the origin in its XY plane, to the world's: its first two columns are the
+    /// square's sides in the grid's plane, and its translation the square's center. Its ID is 0, of
+    /// no entity.
+    pub fn push_grid(
+        &mut self,
+        meshes: &mut Meshes,
+        shaders: &mut Shaders,
+        transform: Mat4,
+        grid: Grid,
+    ) {
+        self.push(meshes.grid(), shaders.grid(), transform, grid.params());
+    }
+
     /// Draws the outline of the square a unit across around the origin, in its XY plane, as a
     /// sprite is, that `transform` places in the world: its four sides, each a line in `color`,
     /// `width` pixels wide, as [`push_line`](Self::push_line) draws them with the ID `id`, which
@@ -257,7 +273,7 @@ mod tests {
     use gg_core::math::{Vec3, Vec4};
 
     use super::*;
-    use crate::{Material, Meshes, ModelVertex, Texture, circle, line};
+    use crate::{GridLines, Material, ModelVertex, Texture, circle, grid, line};
 
     /// Each run's mesh, shader and draws.
     fn runs(draws: &Draws) -> Vec<(u32, u32, Range<usize>)> {
@@ -382,6 +398,35 @@ mod tests {
         assert_eq!(ends[2] - ends[1], 2 * sizes[2]);
         assert!(over.is_empty());
         assert_eq!([over.transforms.capacity(), over.ids.capacity()], held);
+    }
+
+    /// Grids are runs of a mesh and a shader of the engine's own, which `Meshes` and `Shaders` add
+    /// the first time they're asked for, and then the same.
+    #[test]
+    fn grids_draw_with_a_mesh_and_a_shader_added_once() {
+        let mut meshes = Meshes::default();
+        let mut shaders = Shaders::default();
+        let at = |x: f32| Mat4::from_translation(Vec3::new(x, 0.0, 0.0));
+        let grid = Grid {
+            first: Vec3::X,
+            first_center: 0.0,
+            second: Vec3::Y,
+            second_center: 0.0,
+            eye: Vec3::NEG_Z,
+            coarsest: 3.0,
+            normal: Vec3::Z,
+            lines: GridLines::Crisp,
+        };
+        let mut draws = Draws::default();
+        draws.push_grid(&mut meshes, &mut shaders, at(0.0), grid);
+        draws.push_sprite(at(1.0), Sprite::default());
+        draws.push_grid(&mut meshes, &mut shaders, at(2.0), grid);
+        draws.push_grid(&mut meshes, &mut shaders, at(3.0), grid);
+        // After the engine's quad and sprite shader, which come first.
+        assert_eq!((meshes.count(), shaders.count()), (2, 2));
+        assert_eq!(runs(&draws), [(1, 1, 0..1), (0, 0, 1..2), (1, 1, 2..4)]);
+        let grids = draws.runs[2].params.clone();
+        assert_eq!(grids.len(), 2 * size_of::<grid::Params>());
     }
 
     #[test]
