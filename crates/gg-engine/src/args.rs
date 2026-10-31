@@ -30,6 +30,9 @@ pub(crate) struct Args {
     pub(crate) api: bool,
     /// The snapshot the run starts from, in place of the world its layers would attach.
     pub(crate) restore: Option<PathBuf>,
+    /// Whether a run that doesn't start from a snapshot starts stopped, its world the world as
+    /// edited, until the tool API's `play`.
+    pub(crate) stopped: bool,
     /// The lockstep session the run hosts or joins, if it's networked.
     pub(crate) net: Option<Net>,
 }
@@ -50,7 +53,7 @@ pub(crate) enum Dump {
 
 /// The flags of a run that a replay, which renders nothing, records nothing and serves no tools,
 /// refuses.
-const NOT_REPLAYED: [&str; 13] = [
+const NOT_REPLAYED: [&str; 14] = [
     "--record",
     "--restore",
     "--headless",
@@ -62,6 +65,7 @@ const NOT_REPLAYED: [&str; 13] = [
     "--no-validation",
     "--vsync",
     "--no-api",
+    "--stopped",
     "--host",
     "--join",
 ];
@@ -90,6 +94,9 @@ Options:
   --restore <PATH>  Start from the snapshot at PATH, which the tool API's `snapshot` writes, where
                     its world was, rather than building the world afresh
   --no-api          Serve no tool API, which development builds serve for tools such as `gg`
+  --stopped         Start stopped: the world the layers attach is the world as edited, which only
+                    the tool API's edits and scene files' saves change, until its `play`. A run
+                    given `--restore` goes on stopped or playing, as the snapshot's run was
   --host <ADDRESS>  Host a lockstep session at ADDRESS, such as `0.0.0.0:7700`, as player 0
   --join <ADDRESS>  Join the lockstep session at ADDRESS as player 1, from the host's world
   -h, --help        Print this help
@@ -123,6 +130,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
         dump: None,
         api: true,
         restore: None,
+        stopped: false,
         net: None,
     };
     // The first flag given that a replay refuses.
@@ -154,6 +162,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
             "--no-validation" => parsed.validation = false,
             "--vsync" => parsed.vsync = true,
             "--no-api" => parsed.api = false,
+            "--stopped" => parsed.stopped = true,
             "--frames" => {
                 let frames = value_of(flag)?;
                 let frames = frames.parse().map_err(|_| {
@@ -247,6 +256,28 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
                 .to_owned(),
         ));
     }
+    if parsed.stopped && !(cfg!(feature = "dev") && parsed.api) {
+        return Err(bad(
+            "`--stopped` starts the run stopped until the tool API's `play`, which only \
+             development builds serve, and not with `--no-api`"
+                .to_owned(),
+        ));
+    }
+    if parsed.stopped && parsed.record.is_some() {
+        return Err(bad(
+            "`--stopped` starts the run stopped, and the tool API's `stop` brings back the world \
+             as edited between ticks, taking its ticks back, which a recording's replay can't \
+             follow, so it takes no `--record`"
+                .to_owned(),
+        ));
+    }
+    if parsed.stopped && parsed.net.is_some() {
+        return Err(bad(
+            "`--stopped` starts the run stopped, but a lockstep session's peers play from start to \
+             end, so that their worlds don't part, so it takes no `--host` or `--join`"
+                .to_owned(),
+        ));
+    }
     if parsed.dump.is_some() && parsed.replay.is_none() {
         return Err(bad(
             "`--dump` stops a replay, so it needs `--replay`".to_owned()
@@ -330,6 +361,11 @@ mod tests {
             Err("engine.args")
         };
         assert_eq!(embedded.map_err(|error| error.code()), expected);
+        // So does a run started stopped, which only the API plays; and given a snapshot, as `gg
+        // run` gives one after the game's own arguments, it goes on as the snapshot's run was.
+        let stopped = parse_strs(&["--stopped", "--restore", "a.snapshot"]);
+        let stopped = stopped.map(|args| args.unwrap().stopped);
+        assert_eq!(stopped.map_err(|error| error.code()), expected);
         // The last snapshot given, which `gg run` gives after the game's own arguments.
         let args = parse_strs(&["--restore", "a.snapshot", "--restore=b.snapshot"]);
         let restore = args.unwrap().unwrap().restore;
@@ -395,6 +431,10 @@ mod tests {
             &["--host"],
             &["--embedded", "--headless"],
             &["--embedded", "--no-api"],
+            &["--stopped", "--no-api"],
+            &["--stopped", "--record", "run.recording"],
+            &["--stopped", "--host", "0.0.0.0:7700"],
+            &["--stopped", "--join", "127.0.0.1:7700"],
         ] {
             let error = parse_strs(args).unwrap_err();
             assert_eq!(error.code(), "engine.args", "{args:?}: {error}");

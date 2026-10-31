@@ -1714,6 +1714,71 @@ fn the_world_left_coming_back_finds_its_edits_pick_and_rows() {
     assert_eq!(inspector.picked, None);
 }
 
+/// The very world the Inspector left coming back through `restored`, as the tool API's `stop`
+/// brings back the world as edited, with no tick between, finds its edits, its pick and its open
+/// rows as they were, and its undo undoes in it; and so does it after another copy has played,
+/// and in a run whose world as edited never ticked.
+#[test]
+fn the_world_left_coming_back_through_restored_finds_its_edits_pick_and_rows() {
+    let mut cx = Context::seeded(1);
+    let world = cx.world_mut();
+    let [parent, child] = [(); 2].map(|()| world.spawn(everything()));
+    world.set_parent(child, Some(parent)).expect("no cycle");
+    let [parent, picked] = [parent, child].map(|entity| id(world, entity));
+    let count = |value| Pass {
+        sets: vec![Edit {
+            component: "Everything".to_owned(),
+            path: "count".to_owned(),
+            value: Value::UInt(value),
+        }],
+        ..Pass::default()
+    };
+    let counted = |cx: &Context| cx.world().get::<Everything>(child).expect("alive").count;
+    let mut inspector = Inspector::default();
+    inspector.pick(picked);
+    inspector.expanded.insert(parent);
+    make(&mut inspector, cx.world_mut(), count(7));
+    for play in 1..=2 {
+        // A copy plays in its place, whose first tick puts the world's aside.
+        let copy = cx.world().clone();
+        let edited = mem::replace(cx.world_mut(), copy);
+        Layer::tick(&mut inspector, cx.world_mut(), Tick { number: 1 });
+        assert_eq!(inspector.picked, None, "play {play}");
+        inspector.pick(picked);
+        make(&mut inspector, cx.world_mut(), count(8));
+        *cx.world_mut() = edited;
+        Layer::restored(&mut inspector, &mut cx);
+        assert_eq!(inspector.picked, Some(picked), "play {play}");
+        assert!(inspector.expanded.contains(&parent), "play {play}");
+        assert_eq!(counted(&cx), 7, "play {play}");
+    }
+    inspector.queue(Pass {
+        chosen: Some(Step::Undo),
+        ..Pass::default()
+    });
+    Layer::tick(&mut inspector, cx.world_mut(), Tick { number: 2 });
+    assert_eq!(counted(&cx), 42, "undone in it");
+    // A stopped run's world as edited, which never ticks, picked and opened in after the
+    // Inspector attached, or after it was restored, as a run restored from a snapshot starts.
+    for start in ["attached", "restored"] {
+        let mut inspector = Inspector::default();
+        match start {
+            "attached" => Layer::attach(&mut inspector, &mut cx),
+            _ => Layer::restored(&mut inspector, &mut cx),
+        }
+        inspector.pick(picked);
+        inspector.expanded.insert(parent);
+        let copy = cx.world().clone();
+        let edited = mem::replace(cx.world_mut(), copy);
+        Layer::tick(&mut inspector, cx.world_mut(), Tick { number: 3 });
+        assert_eq!(inspector.picked, None, "{start}: the copy's own");
+        *cx.world_mut() = edited;
+        Layer::restored(&mut inspector, &mut cx);
+        assert_eq!(inspector.picked, Some(picked), "{start}");
+        assert!(inspector.expanded.contains(&parent), "{start}");
+    }
+}
+
 /// Every row of the tree, the naive way: each root in turn, each followed, if its row is open,
 /// by the rows of each of its children in turn.
 fn flatten(world: &World, expanded: &HashSet<EntityId>) -> Vec<(EntityId, usize)> {

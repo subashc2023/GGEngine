@@ -1,23 +1,37 @@
 //! The game of the project the editor is started in, run as an agent runs it: under `cargo gg run
 //! --embedded` in the project's directory, which builds it, patches it as its code changes and
 //! restarts it after any other change, and which ends, with the game, as the editor ends, closing
-//! its stdin. The game renders offscreen for the editor, which shows its view in the Viewport from
-//! memory the two share, as the tool API's `view` asks. The Entities and Inspector panels show the
-//! game's world, and edit it, through the API, as a remote [`Inspector`] does; the Logs panel shows
-//! `gg run`'s events, the build's errors among them, the game's events as it logs them, which the
-//! tool API's `logs` follows, and what the game and the build print; the title bar, how the run
-//! goes, with pause and step.
+//! its stdin. The game starts stopped, as `--stopped` has it: its world is the world as edited,
+//! which only edits change, until Play. It renders offscreen for the editor, which shows its view
+//! in the Viewport from memory the two share, as the tool API's `view` asks. The Entities and
+//! Inspector panels show the game's world, and edit it, through the API, as a remote [`Inspector`]
+//! does; the Logs panel shows `gg run`'s events, the build's errors among them, the game's events
+//! as it logs them, which the tool API's `logs` follows, and what the game and the build print;
+//! the Assets panel, the files in the project's asset root; and the title bar, how the run goes,
+//! or while a game serves, whether it's stopped, playing or simulating, and whether it's paused,
+//! as the game answers the editor's requests and the `status` it asks for every quarter second,
+//! which catches another client's; with Play, Simulate, pause and step. Started outside a project,
+//! the editor runs no game, and says why.
 //!
-//! The view's tools edit the game's entities as they do the editor's own world's. The view starts
-//! through the game's own camera, which gets the input the view gets, but what the editor's camera
-//! takes, which turns the view to it, the game letting go of what's held; through the editor's
-//! camera, the game gets none, and the handles show. A click in the view picks what the game's
-//! view shows there, as the API's `pick` finds it, which the panels show picked; the handles move,
-//! turn and scale it through the Inspector's link, each drag one edit of the editor's, which its
-//! Edit menu undoes; and the view's bottom left names what's under the cursor. The editor's camera,
-//! the outline round what's picked, the grid and the colliders' switch reach the game as parts of
-//! its look, as [`look`](crate::look) says: each as the user changes it, the editor taking the parts
-//! another client, such as an agent, sets.
+//! Play has a copy of the world as edited play in its place, as the API's `play` does, the view
+//! seeing through the game's own camera, which gets all the input the view gets, the view's tools
+//! only what lets go of what they hold; Simulate plays it the same, through the editor's camera,
+//! the game getting no input. Play from Simulate, or Simulate from Play, carries on, moving the
+//! camera and the input over, the game letting go of what's held as the input leaves it, as the
+//! toolbar's camera switch does while the game plays. Stop, lit in place of either, stops the
+//! input at once, and brings back the world as edited, as `stop` does, with its edits' history,
+//! the view going to the editor's camera, as it does at any client's `stop` that no Play clicked
+//! since follows. Stopped, the camera switch has the view show what the game's camera sees, as it
+//! does at first, the input staying the editor's, until the editor's camera takes some, which
+//! turns the view to it.
+//!
+//! Through the editor's camera, the handles show. A click in the view, but in Play, picks what the
+//! game's view shows there, as the API's `pick` finds it, which the panels show picked; the
+//! handles move, turn and scale it through the Inspector's link, each drag one edit of the
+//! editor's, which its Edit menu undoes; and the view's bottom left names what's under the cursor.
+//! The editor's camera, the outline round what's picked, the grid and the colliders' switch reach
+//! the game as parts of its look, as [`look`](crate::look) says: each as the user changes it, the
+//! editor taking the parts another client, such as an agent, sets.
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
@@ -42,9 +56,10 @@ use gg_engine::{
 use serde_json::{Value, json};
 use tracing::{info, warn};
 
+use crate::assets::Assets;
 use crate::handles::{Picked, Reading, Sight};
 use crate::look::{Looking, Part, Parts};
-use crate::overlay::Toolbar;
+use crate::overlay::{self, Mode, Toolbar};
 use crate::view::{self, OUTLINE, OUTLINE_WIDTH, ViewTools};
 
 /// The most lines the Logs panel keeps, past which the oldest go.
@@ -70,16 +85,24 @@ const ENDING: Duration = Duration::from_secs(15);
 /// How many frames the measures of the view's frames keep, from the last; 68 s at 240 fps.
 const MEASURED: usize = 16_384;
 
-/// The editor of the project in directory `dir`: the game's view in the Viewport, its entities
-/// left of it, the one picked right of it, above the Performance panel, and the Logs below it.
-pub(crate) fn app(dir: PathBuf) -> App {
-    let app = App::new("Editor").root(env!("CARGO_MANIFEST_DIR"));
-    let app = app.custom_title_bar().view_panel("Viewport");
+/// How often the editor asks the game how it runs, `status`, which another client, such as an
+/// agent, may change: the title bar lags such a change by as much.
+const STATUS_EVERY: Duration = Duration::from_millis(250);
+
+/// Why the editor, started outside a project, runs no game.
+const NO_PROJECT: &str = "not in a game's project: start the editor in one, such as games/shards";
+
+/// The editor of the project in directory `dir`, if it's started in one: the game's view in the
+/// Viewport, its entities left of it, the one picked right of it, above the Performance panel,
+/// and the Logs below it, the Assets among their tabs.
+pub(crate) fn app(dir: Option<PathBuf>) -> App {
+    let app = App::new("Editor").custom_title_bar().view_panel("Viewport");
     let app = app
         .dock("Inspector", Docked::RightOf("Viewport"))
         .dock("Entities", Docked::LeftOf("Viewport"))
         .dock("Performance", Docked::Below("Inspector"))
-        .dock("Logs", Docked::Below("Viewport"));
+        .dock("Logs", Docked::Below("Viewport"))
+        .dock("Assets", Docked::With("Logs"));
     let inspector = Inspector::remote(CLIENT);
     let game = Game::new(dir, inspector.link());
     app.layer(game).overlay(PerfPanel).overlay(inspector)
@@ -88,11 +111,13 @@ pub(crate) fn app(dir: PathBuf) -> App {
 /// The client the editor is to the game, the author of its edits.
 const CLIENT: &str = "editor";
 
-/// The editor's layer in a project: the `gg run` of its game, the connection to the game that
-/// serves, the memory its view is shared through, and what the Logs panel and the title bar show;
-/// and the view's tools, the picks they ask of the game and the look they keep with it.
+/// The editor's layer: the `gg run` of the project's game, the connection to the game that serves,
+/// the memory its view is shared through, how the game runs, and what the Logs and Assets panels
+/// and the title bar show; and the view's tools, the picks they ask of the game and the look they
+/// keep with it.
 struct Game {
-    dir: PathBuf,
+    /// The project's directory, if the editor was started in one.
+    dir: Option<PathBuf>,
     /// `gg run`, until it ends, with its stdin, which the editor closes as it ends.
     run: Option<(Child, ChildStdin)>,
     /// What `gg run` prints, a line at a time.
@@ -117,8 +142,9 @@ struct Game {
     /// `Some(None)` unpicks.
     wants: Wants,
     took_pick: Option<Option<EntityId>>,
-    /// Whether the game's camera drove the view as the game was last told: as the view turns to the
-    /// editor's camera, the game lets go of what's held, and as it turns back, it gets the cursor.
+    /// Whether the view's input went to the game as the game was last told, as
+    /// [`through`](Self::through) says: as it stops, the game lets go of what's held, and as it
+    /// starts, it gets the cursor.
     told: bool,
     /// The last frame of the game's view the editor showed: its size, and what it was drawn from,
     /// if that projects.
@@ -135,9 +161,23 @@ struct Game {
     input: Vec<InputEvent>,
     inputting: bool,
     run_state: RunState,
-    /// Whether the game's simulation is paused, as it last answered.
+    /// Whether the game's simulation is paused, and whether the game is stopped, as it last
+    /// answered: stopped until a game that serves answers, so that nothing goes to it before.
     paused: bool,
+    stopped: bool,
+    /// Whether the editor's Stop waits for the game's answer, whatever it is: until it comes, the
+    /// view's input doesn't go to the game.
+    stopping: bool,
+    /// The `play`s the editor asked that the game hasn't answered yet: a stop answered meanwhile,
+    /// to a request before them, leaves the view where the last click turned it.
+    playing: u32,
+    /// Whether a `status` waits for its answer, one at a time, and when the last was asked, the
+    /// next waiting until [`STATUS_EVERY`] after.
+    statusing: bool,
+    polled: Option<Instant>,
     logs: VecDeque<Logged>,
+    /// The Assets panel, at the project's asset root; none outside a project.
+    assets: Option<Assets>,
     measures: Measures,
 }
 
@@ -179,7 +219,8 @@ enum Line {
     Err(String),
 }
 
-/// How the run goes, as the title bar says.
+/// How the run goes, as the title bar says, but `Running`, while a game serves, for which it says
+/// how the game runs, as [`Game::label`] has it.
 #[derive(Clone, Debug, PartialEq)]
 enum RunState {
     Building,
@@ -189,20 +230,6 @@ enum RunState {
     Restarting,
     Waiting,
     Ended(String),
-}
-
-impl RunState {
-    fn text(&self) -> String {
-        match self {
-            Self::Building => "Building…".to_owned(),
-            Self::Starting => "Starting…".to_owned(),
-            Self::Running => "Running".to_owned(),
-            Self::Rebuilding => "Rebuilding…".to_owned(),
-            Self::Restarting => "Restarting…".to_owned(),
-            Self::Waiting => "Waiting for a rebuild".to_owned(),
-            Self::Ended(why) => format!("Ended: {why}"),
-        }
-    }
 }
 
 /// A line of the Logs panel.
@@ -222,17 +249,17 @@ enum Level {
 }
 
 impl Game {
-    /// The layer, through the game's camera at first, whose tools pick and edit through
-    /// `inspector`, the Inspector's link.
-    fn new(dir: PathBuf, inspector: InspectorLink) -> Self {
+    /// The layer of the project in directory `dir`, or of none, through the game's camera at
+    /// first, whose tools pick and edit through `inspector`, the Inspector's link.
+    fn new(dir: Option<PathBuf>, inspector: InspectorLink) -> Self {
         let (send, lines) = mpsc::channel();
         let toolbar = Toolbar {
             world_camera: true,
-            game: true,
             ..Toolbar::default()
         };
         let view = ViewTools::new(inspector, toolbar);
         let wants = wants(&view);
+        let assets = dir.as_deref().map(|dir| Assets::new(asset_root(dir)));
         Self {
             dir,
             run: None,
@@ -246,7 +273,7 @@ impl Game {
             looking: Looking::new(CLIENT),
             wants,
             took_pick: None,
-            told: true,
+            told: false,
             size: None,
             seen: None,
             reader: None,
@@ -256,21 +283,34 @@ impl Game {
             inputting: false,
             run_state: RunState::Building,
             paused: false,
+            stopped: true,
+            stopping: false,
+            playing: 0,
+            statusing: false,
+            polled: None,
             logs: VecDeque::new(),
+            assets,
             measures: Measures::default(),
         }
     }
 
-    /// Starts `cargo gg run --embedded` in the project's directory, with threads that read what it
-    /// prints; logs why if it can't.
+    /// Starts `cargo gg run --embedded -- --stopped` in the project's directory, with threads that
+    /// read what it prints; outside a project, starts nothing, and says why, as it does if it
+    /// can't start it.
     fn start(&mut self) {
         let Some(send) = self.send.take() else {
             return;
         };
+        let Some(dir) = &self.dir else {
+            warn!(code = "editor.no_project", "The editor is {NO_PROJECT}");
+            self.log(Level::Warn, NO_PROJECT.to_owned());
+            self.run_state = RunState::Ended(NO_PROJECT.to_owned());
+            return;
+        };
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
         let started = Command::new(cargo)
-            .args(["gg", "run", "--embedded"])
-            .current_dir(&self.dir)
+            .args(["gg", "run", "--embedded", "--", "--stopped"])
+            .current_dir(dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -278,19 +318,14 @@ impl Game {
         let mut child = match started {
             Ok(child) => child,
             Err(error) => {
-                let why = format!(
-                    "can't run `cargo gg run` in {}: {error}",
-                    self.dir.display()
-                );
+                let why = format!("can't run `cargo gg run` in {}: {error}", dir.display());
                 self.log(Level::Error, why.clone());
                 self.run_state = RunState::Ended(why);
                 return;
             }
         };
-        self.log(
-            Level::Info,
-            format!("cargo gg run --embedded, in {}", self.dir.display()),
-        );
+        let started = format!("cargo gg run --embedded -- --stopped, in {}", dir.display());
+        self.log(Level::Info, started);
         let (Some(stdin), Some(stdout), Some(stderr)) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
         else {
@@ -413,16 +448,23 @@ impl Game {
     }
 
     /// Lets go of the connection to the game, which has gone, of the input it didn't get, of the
-    /// picks it didn't answer and of its look; and the Inspector, of its world.
+    /// picks it didn't answer, of its look and of how it ran, which the next to serve answers anew;
+    /// and the Inspector, of its world.
     fn disconnect(&mut self) {
         self.talker = None;
         self.view.link.reach(None);
         self.input.clear();
         self.inputting = false;
+        self.told = false;
         self.view.asked = None;
         self.hovering = None;
         self.answered.clear();
         self.looking.reset();
+        self.stopped = true;
+        self.stopping = false;
+        self.playing = 0;
+        self.statusing = false;
+        self.polled = None;
     }
 
     /// Connects to the game that `serving`, `gg run`'s event, says serves, in place of the one
@@ -452,16 +494,22 @@ impl Game {
     }
 
     /// Takes the game's answers since: to `view`, which puts the memory it asked for in place of
-    /// the one before; to `pause`, `resume` and `step`, which say whether it's paused; to `look`,
-    /// what the editor takes of which it takes; and errors, which it logs.
+    /// the one before; to `status`, `play`, `stop`, `pause`, `resume` and `step`, which say how it
+    /// runs, as [`take_status`](Self::take_status) takes it; to `look`, what the editor takes of
+    /// which it takes; and errors, which it logs.
     fn take_answers(&mut self) {
         let Some(talker) = &self.talker else {
             return;
         };
         let answers: Vec<_> = talker.answers.try_iter().collect();
         for (method, answer) in answers {
-            if method == "input" {
-                self.inputting = false;
+            match method.as_str() {
+                "input" => self.inputting = false,
+                "status" => self.statusing = false,
+                // Whether it stopped or refused to.
+                "stop" => self.stopping = false,
+                "play" => self.playing = self.playing.saturating_sub(1),
+                _ => {}
             }
             match (method.as_str(), answer) {
                 ("view", Ok(_)) => {
@@ -470,9 +518,9 @@ impl Game {
                         self.reader = Some(asked);
                     }
                 }
-                ("pause" | "resume" | "step", Ok(status)) => {
+                ("status" | "play" | "stop" | "pause" | "resume" | "step", Ok(status)) => {
                     if let Ok(status) = serde_json::from_value::<Status>(status) {
-                        self.paused = status.paused;
+                        self.take_status(&status);
                     }
                 }
                 ("look", Ok(looked)) => match serde_json::from_value::<Looked>(looked) {
@@ -507,6 +555,94 @@ impl Game {
                     }
                 }
             }
+        }
+    }
+
+    /// Takes `status`, how the game runs as it answered: whether it's paused, and whether it's
+    /// stopped. As it stops, at the editor's Stop or another client's `stop`, the input meant for
+    /// it that wasn't sent goes, but its letting go, and the view turns to the editor's camera, if
+    /// it was through the game's, whose viewpoint goes to the game with the grid, as the user's
+    /// turn would; but neither while a Play or Simulate clicked since waits for its answer, the
+    /// input then going to the copy it plays.
+    fn take_status(&mut self, status: &Status) {
+        self.paused = status.paused;
+        if status.stopped && !self.stopped && self.playing == 0 {
+            self.drop_unsent();
+            let toolbar = &mut self.view.toolbar;
+            if toolbar.world_camera {
+                toolbar.world_camera = false;
+                // `changes`, which runs before the answers are taken, doesn't see this turn.
+                self.looking.change(Part::Viewpoint);
+                self.looking.follow(Part::Grid);
+            }
+        }
+        self.stopped = status.stopped;
+    }
+
+    /// How the game runs, as the title bar shows it: stopped, or as good as, once the editor's
+    /// Stop is asked; or playing, Play through the game's camera, Simulate through the editor's.
+    fn mode(&self) -> Mode {
+        if self.stopped || self.stopping {
+            Mode::Edit
+        } else if self.view.toolbar.world_camera {
+            Mode::Play
+        } else {
+            Mode::Simulate
+        }
+    }
+
+    /// Whether the view's input goes to the game: in Play alone.
+    fn through(&self) -> bool {
+        self.mode() == Mode::Play
+    }
+
+    /// Does what a click of the title bar's `to` asks, while a game serves, whatever the editor
+    /// last knew of how it runs: Play and Simulate ask the game to play, which changes nothing
+    /// while it plays, so that a switch between them carries on, and turn the view to the game's
+    /// camera or the editor's; Stop asks it to stop, and stops the view's input going to it at
+    /// once, dropping what wasn't sent yet but its letting go, until it answers.
+    fn run(&mut self, to: Mode) {
+        let Some(talker) = &self.talker else {
+            return;
+        };
+        match to {
+            Mode::Play | Mode::Simulate => {
+                talker.ask("play", Value::Null);
+                self.playing += 1;
+                self.view.toolbar.world_camera = to == Mode::Play;
+            }
+            Mode::Edit => {
+                talker.ask("stop", Value::Null);
+                self.stopping = true;
+                self.drop_unsent();
+            }
+        }
+    }
+
+    /// Drops the input meant for the game that wasn't sent, but its letting go of what's held,
+    /// which would stay held through a Stop otherwise, the game's input not being the world's.
+    fn drop_unsent(&mut self) {
+        self.input
+            .retain(|event| *event == InputEvent::Focused(false));
+    }
+
+    /// What the title bar says: while a game serves, how it runs, as [`mode`](Self::mode) says,
+    /// and whether it's paused; otherwise how the run goes.
+    fn label(&self) -> String {
+        let running = match self.mode() {
+            Mode::Edit => "Stopped",
+            Mode::Play => "Playing",
+            Mode::Simulate => "Simulating",
+        };
+        match &self.run_state {
+            RunState::Running if self.paused => format!("{running}, paused"),
+            RunState::Running => running.to_owned(),
+            RunState::Building => "Building…".to_owned(),
+            RunState::Starting => "Starting…".to_owned(),
+            RunState::Rebuilding => "Rebuilding…".to_owned(),
+            RunState::Restarting => "Restarting…".to_owned(),
+            RunState::Waiting => "Waiting for a rebuild".to_owned(),
+            RunState::Ended(why) => format!("Ended: {why}"),
         }
     }
 
@@ -698,10 +834,11 @@ impl Game {
     }
 
     /// Does what `event` does, which the view got, as the editor reads the window, `reading`, with
-    /// the view at `view`: what the view's tools don't take goes to the game while its camera drives
-    /// the view, in the view's pixels, but what the editor's camera takes, which turns the view to
-    /// it, and nothing does through the editor's camera; and a press off the handles asks the game
-    /// for a pick. `Break` for what the tools took.
+    /// the view at `view`: in Play, it goes to the game, in the view's pixels, and to the view's
+    /// tools only if it lets go of what's held, so that no click picks, and no wheel or button
+    /// turns the view to the editor's camera; otherwise the tools take it, the game getting
+    /// nothing, and a press off the handles asks the game for a pick. `Break` for what the tools
+    /// took.
     fn route(
         &mut self,
         event: &Event<'_>,
@@ -709,10 +846,13 @@ impl Game {
         view: Option<Viewport>,
     ) -> ControlFlow<()> {
         let origin = view.map_or([0, 0], |view| view.origin);
-        let through = self.view.toolbar.world_camera;
-        let handled = self.view.take(event, reading, picked(&self.view.link));
+        let through = self.through();
+        let handled = if through && !lets_go(event) {
+            ControlFlow::Continue(())
+        } else {
+            self.view.take(event, reading, picked(&self.view.link))
+        };
         if through
-            && handled.is_continue()
             && self.talker.is_some()
             && let Some(input) = forwarded(event, origin)
         {
@@ -735,12 +875,12 @@ impl Game {
         Some(ticket)
     }
 
-    /// Tells the game the view turned, if it did since it was last told: to the editor's camera, the
-    /// game loses the focus, letting go of what's held, as the input stops coming; back to the
-    /// game's, it gets the cursor, at `cursor`, in the main window's pixels, if it's over the view,
-    /// at `view`.
+    /// Tells the game the view's input started or stopped going to it, as
+    /// [`through`](Self::through) says, if it did since it was last told: as it stops, the game
+    /// loses the focus, letting go of what's held; as it starts, it gets the cursor, at `cursor`,
+    /// in the main window's pixels, if it's over the view, at `view`.
     fn tell(&mut self, cursor: Option<[f64; 2]>, view: Option<Viewport>) {
-        let through = self.view.toolbar.world_camera;
+        let through = self.through();
         if through == mem::replace(&mut self.told, through) || self.talker.is_none() {
             return;
         }
@@ -755,6 +895,25 @@ impl Game {
                 self.input.push(InputEvent::Cursor([x, y]));
             }
         }
+    }
+}
+
+/// The asset root of the project in directory `dir`, as its manifest names it, or `dir` if the
+/// manifest doesn't read, which `gg run` says why of.
+fn asset_root(dir: &Path) -> PathBuf {
+    match gg_api::Project::read(dir) {
+        Ok(project) => project.assets_dir(dir),
+        Err(_) => dir.to_owned(),
+    }
+}
+
+/// Whether `event` lets go of what's held: a key's or a button's release, or the loss of the
+/// focus, as the engine hands each past a layer that takes it.
+fn lets_go(event: &Event<'_>) -> bool {
+    match *event {
+        Event::Key { pressed, .. } | Event::MouseButton { pressed, .. } => !pressed,
+        Event::Focused(focused) => !focused,
+        _ => false,
     }
 }
 
@@ -877,21 +1036,33 @@ impl Layer for Game {
             talker.ask("input", json!({ "events": events }));
             self.inputting = true;
         }
+        if let Some(talker) = &self.talker
+            && !self.statusing
+            && self
+                .polled
+                .is_none_or(|asked| asked.elapsed() >= STATUS_EVERY)
+        {
+            talker.ask("status", Value::Null);
+            self.statusing = true;
+            self.polled = Some(Instant::now());
+        }
     }
 
-    /// Has the view's tools see what the view gets, the game too while its camera drives the view,
-    /// as [`route`](Game::route) says.
+    /// Has the view's tools see what the view gets, or in Play the game, as [`route`](Game::route)
+    /// says.
     fn event(&mut self, cx: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
         let reading = view::reading(cx, self.screen(cx.view()));
         self.route(event, &reading, cx.view())
     }
 
     fn ui(&mut self, cx: &mut Context, ui: &mut Ui<'_>) {
-        let talker = self.talker.as_ref();
+        let (label, mode) = (self.label(), self.mode());
         let paused = self.paused;
-        ui.title_bar(|ui| {
-            ui.label(self.run_state.text());
+        let talker = self.talker.as_ref();
+        let clicked = ui.title_bar(|ui| {
+            ui.label(label);
             let serves = talker.is_some();
+            let clicked = ui.add_enabled_ui(serves, |ui| overlay::show_run(ui, mode));
             let (method, label, tip) = if paused {
                 (
                     "resume",
@@ -909,13 +1080,29 @@ impl Layer for Game {
             {
                 talker.ask(method, Value::Null);
             }
-            let step = ui.add_enabled(serves, egui::Button::new("Step"));
-            if step
-                .on_hover_text("Run a tick of the game's simulation, and pause it")
-                .clicked()
+            let step = ui
+                .add_enabled(serves && mode != Mode::Edit, egui::Button::new("Step"))
+                .on_hover_text("Run a tick of the game's simulation, and pause it");
+            let step = if serves {
+                step.on_disabled_hover_text("Play first: a stopped game runs no ticks")
+            } else {
+                step
+            };
+            if step.clicked()
                 && let Some(talker) = talker
             {
                 talker.ask("step", Value::Null);
+            }
+            clicked.inner
+        });
+        if let Some(to) = clicked.flatten() {
+            self.run(to);
+        }
+        let assets = &mut self.assets;
+        ui.panel("Assets", |ui| match assets {
+            Some(assets) => assets.show(ui),
+            None => {
+                ui.weak("Not in a game's project");
             }
         });
         let logs = &self.logs;
@@ -960,8 +1147,8 @@ impl Layer for Game {
         let picked = picked(&self.view.link);
         let alt = view::alt_down(cx.input());
         self.view.paint(ui, sight, alt, picked.as_ref(), name);
-        self.view.overlay(ui, true, self.screen(cx.view()));
-        // As the toolbar's switch went.
+        self.view.overlay(ui, self.screen(cx.view()));
+        // As Play, Simulate, Stop and the toolbar's switch went.
         self.tell(cx.input().cursor(), cx.view());
     }
 
@@ -1297,9 +1484,10 @@ mod tests {
         picks: Receiver<(u64, [f64; 2])>,
     }
 
-    /// The layer with a game serving, and the game's ends of its connections.
+    /// The layer with a game serving, as `serve` leaves it, that plays, through its camera, as the
+    /// game was told; and the game's ends of its connections.
     fn serving() -> (Game, Ends) {
-        let mut game = Game::new(PathBuf::from("."), Inspector::remote(CLIENT).link());
+        let mut game = Game::new(Some(PathBuf::from(".")), Inspector::remote(CLIENT).link());
         let (asks, asked) = mpsc::channel();
         let (answer, answers) = mpsc::channel();
         let (_, logged) = mpsc::channel();
@@ -1312,12 +1500,33 @@ mod tests {
             picks,
             picked,
         });
+        game.run_state = RunState::Running;
+        (game.stopped, game.told) = (false, true);
         let ends = Ends {
             asked,
             answer,
             picks: picking,
         };
         (game, ends)
+    }
+
+    /// The game's answer to a `status`, `play`, `stop`, `pause`, `resume` or `step`, stopped or
+    /// not, and paused or not.
+    fn status(stopped: bool, paused: bool) -> Result<Value, Failure> {
+        let status = Status {
+            ticks: 0,
+            paused,
+            stopped,
+            frames: 1,
+            entities: 0,
+            view: None,
+        };
+        Ok(json!(status))
+    }
+
+    /// The methods of the requests the layer whose ends are `ends` sent since.
+    fn methods(ends: &Ends) -> Vec<String> {
+        ends.asked.try_iter().map(|(method, _)| method).collect()
     }
 
     /// The looks the layer whose ends are `ends` asked the game for since.
@@ -1327,13 +1536,15 @@ mod tests {
         looks.collect()
     }
 
-    /// Through the game's camera, what the view gets goes to the game, in the view's pixels, and a
-    /// left press off the handles asks for a pick too; but what the editor's camera takes doesn't,
-    /// which turns the view to it, the game losing the focus. Through the editor's camera, nothing
-    /// goes, and Q, W, E and R pick tools; turning back to the game's camera gives the game the
-    /// cursor, if it's over the view.
+    /// In Play, all the view gets goes to the game, in the view's pixels, whatever the tool: what
+    /// the editor's camera takes otherwise among it, a press of its buttons, Alt with the left, the
+    /// left under Pan or Orbit, the wheel and Home, which leave the view on the game's camera; and
+    /// a press asks for no pick. Stopped, through the game's camera, as the game starts, nothing
+    /// goes, but a press off the handles asks for a pick, and what the editor's camera takes turns
+    /// the view to it; in Simulate, nothing goes either, and Q, W, E and R pick tools. Turning back
+    /// to the game's camera while it plays gives the game the cursor, if it's over the view.
     #[test]
-    fn the_views_input_goes_to_the_game_through_its_camera_alone() {
+    fn in_play_the_game_gets_all_the_views_input() {
         let (mut game, ends) = serving();
         // [`VIEW`]'s top left is at (100, 50).
         let (at, in_game) = ([300.0, 200.0], [200.0, 150.0]);
@@ -1368,11 +1579,9 @@ mod tests {
             button(false),
         ];
         assert_eq!(game.input, expected);
-        assert_eq!(ends.picks.try_iter().collect::<Vec<_>>(), [(0, in_game)]);
-        assert_eq!(game.view.asked, Some(0));
+        assert_eq!(ends.picks.try_iter().collect::<Vec<_>>(), [], "no pick");
+        assert_eq!(game.view.asked, None);
         assert_eq!(game.view.toolbar.tool, Tool::Select, "the game's W");
-        // What the editor's camera takes: a press of its buttons, Alt with the left, the left
-        // under Pan or Orbit, the wheel and Home.
         let home = Event::Key {
             key: Key::Home,
             pressed: true,
@@ -1390,23 +1599,40 @@ mod tests {
             (wheel, reading(at), Tool::Select),
             (home, reading(at), Tool::Select),
         ] {
-            let (mut game, _) = serving();
+            let (mut game, ends) = serving();
             game.view.toolbar.tool = tool;
             let routed = game.route(&event, &read, Some(VIEW));
-            assert_eq!(routed, ControlFlow::Break(()), "{event:?} with {tool:?}");
-            assert!(!game.view.toolbar.world_camera, "{event:?} with {tool:?}");
-            assert_eq!(game.input, [InputEvent::Focused(false)], "{event:?}");
+            assert_eq!(routed, ControlFlow::Continue(()), "{event:?} with {tool:?}");
+            assert!(game.view.toolbar.world_camera, "{event:?} with {tool:?}");
+            let sent = forwarded(&event, VIEW.origin).expect("the game gets it");
+            assert_eq!(game.input, [sent], "{event:?}");
+            assert_eq!(ends.picks.try_iter().count(), 0, "{event:?} with {tool:?}");
         }
-        // Through the editor's camera, nothing goes, but a press off the handles asks for a pick.
+        // Stopped, through the game's camera.
+        let (mut game, ends) = serving();
+        (game.stopped, game.told) = (true, false);
+        for event in [moved, w, left[0], left[1]] {
+            let routed = game.route(&event, &reading(at), Some(VIEW));
+            assert_eq!(routed, ControlFlow::Continue(()), "{event:?}");
+        }
+        assert_eq!(ends.picks.try_iter().collect::<Vec<_>>(), [(0, in_game)]);
+        assert!(game.view.toolbar.world_camera);
+        let routed = game.route(&wheel, &reading(at), Some(VIEW));
+        assert_eq!(routed, ControlFlow::Break(()));
+        assert!(!game.view.toolbar.world_camera, "the editor's camera");
+        assert_eq!(game.input, []);
+        // In Simulate, through the editor's camera.
+        let (mut game, ends) = serving();
         game.view.toolbar.world_camera = false;
         game.tell(Some(at), Some(VIEW));
+        assert_eq!(game.input, [InputEvent::Focused(false)], "the game lets go");
         game.input.clear();
         for event in [moved, w, left[0], left[1], wheel] {
             let _ = game.route(&event, &reading(at), Some(VIEW));
         }
         assert_eq!(game.input, []);
         assert_eq!(game.view.toolbar.tool, Tool::Move, "the editor's W");
-        assert_eq!(ends.picks.try_iter().collect::<Vec<_>>(), [(1, in_game)]);
+        assert_eq!(ends.picks.try_iter().collect::<Vec<_>>(), [(0, in_game)]);
         // Back to the game's camera, with the toolbar's switch, for which a test sets the field
         // and tells the game, since it can't run `ui`: the cursor over the view, and off it.
         for (cursor, told) in [
@@ -1422,16 +1648,254 @@ mod tests {
         }
     }
 
+    /// Play and Simulate each ask the game to play, whatever the editor last knew of it, Play
+    /// turning the view to the game's camera and Simulate to the editor's, so that a switch between
+    /// them carries on; Stop asks it to stop, after which none of the view's input goes to the
+    /// game, what wasn't sent yet among it, until it answers, but its letting go. Its answer ends
+    /// that, whether the game refused, playing on, or stopped, the view turning to the editor's
+    /// camera; but not if a Play clicked since waits for its answer.
+    #[test]
+    fn play_and_simulate_ask_the_game_to_play_and_stop_to_stop() {
+        let (mut game, ends) = serving();
+        let at = [300.0, 200.0];
+        let w = Event::Key {
+            key: Key::KeyW,
+            pressed: true,
+            repeat: false,
+        };
+        assert_eq!(game.mode(), Mode::Play);
+        for (to, through) in [
+            (Mode::Simulate, false),
+            (Mode::Play, true),
+            (Mode::Play, true),
+        ] {
+            game.run(to);
+            assert_eq!(methods(&ends), ["play"], "{to:?}");
+            assert_eq!(game.view.toolbar.world_camera, through, "{to:?}");
+            assert_eq!(game.mode(), to);
+            let played = ("play".to_owned(), status(false, false));
+            ends.answer.send(played).expect("sent");
+            game.take_answers();
+        }
+        let _ = game.route(&w, &reading(at), Some(VIEW));
+        assert_eq!(game.input.len(), 1, "W goes to the game");
+        game.run(Mode::Edit);
+        assert_eq!(methods(&ends), ["stop"]);
+        assert_eq!(game.mode(), Mode::Edit, "until it answers");
+        for _ in 0..2 {
+            let _ = game.route(&w, &reading(at), Some(VIEW));
+        }
+        assert_eq!(
+            game.input,
+            [InputEvent::Focused(false)],
+            "its letting go alone"
+        );
+        let refused = Failure::new("api.no_stop", "a recorded run plays from start to end");
+        ends.answer
+            .send(("stop".to_owned(), Err(refused)))
+            .expect("sent");
+        game.take_answers();
+        assert_eq!(game.mode(), Mode::Play, "refused");
+        game.run(Mode::Edit);
+        let stopped = ("stop".to_owned(), status(true, false));
+        ends.answer.send(stopped).expect("sent");
+        game.take_answers();
+        assert!(!game.stopping);
+        assert_eq!(game.mode(), Mode::Edit, "stopped");
+        assert!(!game.view.toolbar.world_camera, "the editor's camera");
+        // Stop, then Play before Stop's answer, which, to the request before, leaves the view
+        // where Play turned it, the play's answer finding it there.
+        game.run(Mode::Play);
+        let played = ("play".to_owned(), status(false, false));
+        ends.answer.send(played).expect("sent");
+        game.take_answers();
+        game.run(Mode::Edit);
+        game.run(Mode::Play);
+        for (method, stopped) in [("stop", true), ("play", false)] {
+            let answer = (method.to_owned(), status(stopped, false));
+            ends.answer.send(answer).expect("sent");
+        }
+        game.take_answers();
+        assert_eq!(game.mode(), Mode::Play, "the last click's");
+        assert!(game.view.toolbar.world_camera, "the game's camera");
+    }
+
+    /// Another client's `play`, `pause` and `stop` reach the editor in the `status` it asks for:
+    /// playing, Play or Simulate lights as the toolbar's switch says, and in Play the view's input
+    /// goes to the game; stopped, the view turns to the editor's camera, the input not sent going
+    /// and the game letting go of what's held, and the next look sets the editor's viewpoint and
+    /// the grid, though the user didn't turn the view. A game that answers stopped as it starts
+    /// leaves the view as it was.
+    #[test]
+    fn another_clients_play_and_stop_reach_the_view() {
+        let (mut game, ends) = serving();
+        (game.stopped, game.told) = (true, false);
+        let mut cx = Context::seeded(1);
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(methods(&ends), ["status"]);
+        ends.answer
+            .send(("status".to_owned(), status(true, false)))
+            .expect("sent");
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(game.label(), "Stopped");
+        assert!(game.view.toolbar.world_camera, "as it starts");
+        ends.answer
+            .send(("status".to_owned(), status(false, true)))
+            .expect("sent");
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(game.mode(), Mode::Play);
+        assert_eq!(game.label(), "Playing, paused");
+        game.view.toolbar.world_camera = false;
+        assert_eq!(game.label(), "Simulating, paused", "by the switch");
+        game.view.toolbar.world_camera = true;
+        let w = Event::Key {
+            key: Key::KeyW,
+            pressed: true,
+            repeat: false,
+        };
+        let _ = game.route(&w, &reading([300.0, 200.0]), Some(VIEW));
+        let w_down = InputEvent::Key {
+            key: "KeyW".to_owned(),
+            pressed: true,
+            repeat: false,
+        };
+        assert_eq!(game.input, std::slice::from_ref(&w_down));
+        ends.answer
+            .send(("status".to_owned(), status(true, false)))
+            .expect("sent");
+        game.update(&mut cx, Duration::ZERO);
+        assert_eq!(game.mode(), Mode::Edit);
+        assert!(!game.view.toolbar.world_camera, "the editor's camera");
+        let sent: Vec<_> = ends.asked.try_iter().collect();
+        let asked = |method: &str| {
+            let request = sent.iter().find(|(asked, _)| asked == method);
+            request
+                .unwrap_or_else(|| panic!("no {method}: {sent:?}"))
+                .1
+                .clone()
+        };
+        let events: Vec<InputEvent> =
+            serde_json::from_value(asked("input")["events"].clone()).expect("events");
+        assert_eq!(events, [InputEvent::Focused(false)], "the W not sent going");
+        let look: Look = serde_json::from_value(asked("look")).expect("a look");
+        let expected = Look {
+            viewpoint: Some(Some(api_viewpoint(&game.view.camera.viewpoint()))),
+            grid: Some(Some(gg_api::Plane::Xy)),
+            ..Look::default()
+        };
+        assert_eq!(look, expected);
+    }
+
+    /// A stop the game answers drops the input meant for it that wasn't sent, but its letting go of
+    /// what's held, which a turn from Play to Simulate queued after it; but none while a Play
+    /// clicked since waits for its answer, the input then going to the copy that Play starts.
+    #[test]
+    fn a_stop_drops_the_input_not_sent_but_the_letting_go() {
+        let at = [300.0, 200.0];
+        let w = Event::Key {
+            key: Key::KeyW,
+            pressed: true,
+            repeat: false,
+        };
+        let w_down = InputEvent::Key {
+            key: "KeyW".to_owned(),
+            pressed: true,
+            repeat: false,
+        };
+        // In Play, W, and the camera switch's turn to Simulate, before either is sent.
+        let (mut game, ends) = serving();
+        let _ = game.route(&w, &reading(at), Some(VIEW));
+        game.view.toolbar.world_camera = false;
+        game.tell(Some(at), Some(VIEW));
+        assert_eq!(game.input, [w_down.clone(), InputEvent::Focused(false)]);
+        ends.answer
+            .send(("status".to_owned(), status(true, false)))
+            .expect("sent");
+        game.take_answers();
+        assert_eq!(
+            game.input,
+            [InputEvent::Focused(false)],
+            "the W not sent going"
+        );
+        // In Simulate, Play, and W, before the answer to a status asked before the play, which
+        // says another client stopped the game.
+        let (mut game, ends) = serving();
+        game.view.toolbar.world_camera = false;
+        game.tell(Some(at), Some(VIEW));
+        game.input.clear();
+        game.run(Mode::Play);
+        game.tell(Some(at), Some(VIEW));
+        let _ = game.route(&w, &reading(at), Some(VIEW));
+        ends.answer
+            .send(("status".to_owned(), status(true, false)))
+            .expect("sent");
+        game.take_answers();
+        assert!(
+            game.input.contains(&w_down),
+            "for the copy: {:?}",
+            game.input
+        );
+        assert!(game.view.toolbar.world_camera, "the game's camera");
+    }
+
+    /// The editor asks the game how it runs as a game serves, and every quarter second after, a
+    /// `status` at a time.
+    #[test]
+    fn the_game_is_asked_how_it_runs_a_status_at_a_time() {
+        let (mut game, ends) = serving();
+        let mut cx = Context::seeded(1);
+        let mut asks = |game: &mut Game| {
+            game.update(&mut cx, Duration::ZERO);
+            let asked = ends
+                .asked
+                .try_iter()
+                .filter(|(method, _)| method == "status");
+            asked.count()
+        };
+        // As though the last was asked a quarter second earlier.
+        let ago = |game: &mut Game| {
+            game.polled = game.polled.and_then(|at| at.checked_sub(STATUS_EVERY));
+        };
+        assert_eq!(asks(&mut game), 1, "at once");
+        ago(&mut game);
+        assert_eq!(asks(&mut game), 0, "until the last is answered");
+        let answered = || ("status".to_owned(), status(false, false));
+        ends.answer.send(answered()).expect("sent");
+        assert_eq!(asks(&mut game), 1, "a quarter second on");
+        ends.answer.send(answered()).expect("sent");
+        assert_eq!(asks(&mut game), 0, "until a quarter second on");
+        ago(&mut game);
+        assert_eq!(asks(&mut game), 1);
+    }
+
+    /// Started outside a project, the layer runs nothing, and says why, in the Logs and the title
+    /// bar, the Assets panel having no folder to show.
+    #[test]
+    fn outside_a_project_it_runs_nothing_and_says_why() {
+        let mut game = Game::new(None, Inspector::remote(CLIENT).link());
+        game.start();
+        assert!(game.run.is_none() && game.talker.is_none());
+        assert_eq!(game.run_state, RunState::Ended(NO_PROJECT.to_owned()));
+        assert_eq!(game.label(), format!("Ended: {NO_PROJECT}"));
+        let logs: Vec<_> = (game.logs.iter())
+            .map(|logged| (logged.level, logged.text.as_str()))
+            .collect();
+        assert_eq!(logs, [(Level::Warn, NO_PROJECT)]);
+        assert!(game.assets.is_none());
+    }
+
     /// A part of the look goes to the game only as the user changes it: not as the editor's camera
     /// adopts the frames' viewpoints through the game's camera, nor as it takes another client's
     /// viewpoint while it drives, nor as it settles after; nor as the Inspector makes the pick
-    /// another client's outline asks for. A wheel turns the view to the editor's camera, from where
-    /// the frames left it, whose viewpoint goes, with the grid; the switch back to the game's camera
-    /// gives both back; and a pick of the user's goes as the outline, though the Inspector makes it
-    /// in the pass that makes the outline's.
+    /// another client's outline asks for. A wheel, while the game is stopped, turns the view to the
+    /// editor's camera, from where the frames left it, whose viewpoint goes, with the grid; the
+    /// switch back to the game's camera gives both back; and a pick of the user's goes as the
+    /// outline, though the Inspector makes it in the pass that makes the outline's.
     #[test]
     fn the_look_goes_to_the_game_as_the_user_changes_it() {
         let (mut game, ends) = serving();
+        // As it starts, so that the wheel is the editor's camera's.
+        (game.stopped, game.told) = (true, false);
         let reader = Reader::create(4, 4).expect("memory");
         let mut writer = Writer::open(reader.name()).expect("opened");
         game.reader = Some(reader);
@@ -1707,7 +2171,7 @@ mod tests {
 
     #[test]
     fn gg_runs_events_say_how_the_run_goes_and_reach_the_logs() {
-        let mut game = Game::new(PathBuf::from("."), Inspector::remote(CLIENT).link());
+        let mut game = Game::new(Some(PathBuf::from(".")), Inspector::remote(CLIENT).link());
         let send = game.send.take().expect("not started");
         let failed = json!({"code": "gg.build", "message": "error[E0308]: mismatched types"});
         let running = json!({"code": "gg.running", "message": "another `gg run` runs shards"});
@@ -1740,7 +2204,7 @@ mod tests {
     /// fields, but where and when it was logged, at its level.
     #[test]
     fn the_games_events_reach_the_logs_with_their_codes_and_fields() {
-        let mut game = Game::new(PathBuf::from("."), Inspector::remote(CLIENT).link());
+        let mut game = Game::new(Some(PathBuf::from(".")), Inspector::remote(CLIENT).link());
         let (asks, _) = mpsc::channel();
         let (_, answers) = mpsc::channel();
         let (log, logged) = mpsc::channel();

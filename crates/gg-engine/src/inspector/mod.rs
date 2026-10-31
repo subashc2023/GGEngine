@@ -59,11 +59,13 @@ use crate::{
 /// operations, undos and redos, which the Inspector's next tick makes, so that the world changes
 /// only at ticks; until then, a field set is drawn as the set will make it, and a refusal, and the
 /// Edit menu's names, show from the tick. A world cleared, replaced or restored, which is another,
-/// as [`World::serial`] says, unpicks and closes every row at the next tick, which drops the edits
-/// made to the world before, and those queued for it; but the very world it left coming back, as
-/// an app that swaps one world for another and back has it, as the editor's Play and Stop do,
-/// finds its edits, pick and open rows as they were. Another layer picks and edits as the panels
-/// do through the [`InspectorLink`] that [`link`](Self::link) gives it.
+/// as [`World::serial`] says, unpicks and closes every row, which drops the edits made to the world
+/// before, and those queued for it: at the next tick, or at once as the run puts a world in place
+/// and calls [`restored`](Layer::restored), as a snapshot's restore, a lockstep joiner's and the
+/// tool API's `stop` do. But the very world it left coming back, as an app that swaps one world for
+/// another and back has it, or as `stop` brings back the world as edited, finds its edits, pick and
+/// open rows as they were. Another layer picks and edits as the panels do through the
+/// [`InspectorLink`] that [`link`](Self::link) gives it.
 ///
 /// A remote Inspector, which [`remote`](Self::remote) makes, shows the world of the game its link
 /// reaches, as [`InspectorLink::reach`] says, in place of the app's own, as the tool API gives it,
@@ -88,8 +90,9 @@ pub struct Inspector {
     refusals: Vec<Refusal>,
     /// The edits made, which undo and redo step through.
     log: Log,
-    /// The serial of the world the log, the pick and the open rows are of, as the last tick found
-    /// it: another, as a world cleared, replaced or restored is, puts them aside at the next.
+    /// The serial of the world the log, the pick and the open rows are of, as the Inspector found
+    /// it as it attached, or as the last tick or restore did: another, as a world cleared, replaced
+    /// or restored is, puts them aside at the next.
     world: Option<u64>,
     /// The log, the pick and the open rows of the world the Inspector left last, which they come
     /// back from if that world comes back.
@@ -211,6 +214,26 @@ struct Pass {
 }
 
 impl Layer for Inspector {
+    /// Knows the world it shows from the start, which a stopped run's may be for its first edits,
+    /// with no tick yet.
+    fn attach(&mut self, cx: &mut Context) {
+        if self.remote.is_none() {
+            self.world = Some(cx.world().serial());
+        }
+    }
+
+    /// Goes to the world now in place, if it's another, at once rather than at the next tick: as
+    /// the tool API's `stop` brings back the world as edited, whose log, pick and open rows come
+    /// back, since the next tick may be the next copy's, which would drop them as those of a world
+    /// left before; as a run restored from a snapshot starts; and as a lockstep joiner's world
+    /// gives way to its host's.
+    fn restored(&mut self, cx: &mut Context) {
+        let serial = cx.world().serial();
+        if self.remote.is_none() && self.world != Some(serial) {
+            self.swap_to(serial);
+        }
+    }
+
     fn detach(&mut self, cx: &mut Context) {
         self.log.clear(cx.world_mut());
     }
@@ -220,35 +243,12 @@ impl Layer for Inspector {
         if self.remote.is_some() {
             return;
         }
-        let mut queued = mem::take(&mut self.queued.0);
-        // Another world's entities aren't those the pick, the rows, the log and the commands
-        // queued name, though they may have their IDs, as a scene reopened gives them back; nor
-        // are those the link asked for since the last pass. A replay drops the commands at the
-        // same tick. The pick, the rows and the log go aside, for the world they're of to find
-        // again if it comes back, and those of the one left before go, whose world never will.
-        if let Some(serial) = self.world.filter(|&serial| serial != world.serial()) {
-            let left = Left {
-                world: serial,
-                log: mem::take(&mut self.log),
-                picked: self.picked,
-                expanded: mem::take(&mut self.expanded),
-            };
-            self.unpick();
-            if let Some(back) = self.left.take().filter(|left| left.world == world.serial()) {
-                self.log = back.log;
-                self.picked = back.picked;
-                self.expanded = back.expanded;
-            }
-            self.left = Some(left);
-            self.not_done = None;
-            self.not_found = None;
-            self.open = None;
-            queued.clear();
-            let linked = &mut *self.link.borrow_mut();
-            linked.pick = None;
-            linked.pending.clear();
+        // What was queued for the world before goes, as a replay drops it at the same tick.
+        if self.world.is_some_and(|serial| serial != world.serial()) {
+            self.swap_to(world.serial());
         }
         self.world = Some(world.serial());
+        let mut queued = mem::take(&mut self.queued.0);
         for command in queued.drain(..) {
             self.run(world, command);
         }
@@ -614,6 +614,36 @@ impl Inspector {
     fn unpick(&mut self) {
         self.picked = None;
         self.refusals.clear();
+    }
+
+    /// Goes from the world it showed to the one whose serial is `serial`, another: another world's
+    /// entities aren't those the pick, the rows, the log and the commands queued name, though they
+    /// may have their IDs, as a scene reopened gives them back; nor are those the link asked for
+    /// since the last pass. The pick, the rows and the log go aside, for the world they're of to
+    /// find again if it comes back; those of the world left before come back if it's that world,
+    /// and go otherwise, since it never will.
+    fn swap_to(&mut self, serial: u64) {
+        let left = self.world.map(|world| Left {
+            world,
+            log: mem::take(&mut self.log),
+            picked: self.picked,
+            expanded: mem::take(&mut self.expanded),
+        });
+        self.unpick();
+        if let Some(back) = self.left.take().filter(|left| left.world == serial) {
+            self.log = back.log;
+            self.picked = back.picked;
+            self.expanded = back.expanded;
+        }
+        self.left = left;
+        self.world = Some(serial);
+        self.not_done = None;
+        self.not_found = None;
+        self.open = None;
+        self.queued.0.clear();
+        let linked = &mut *self.link.borrow_mut();
+        linked.pick = None;
+        linked.pending.clear();
     }
 
     /// Opens the rows of the ancestors of the entity of ID `id`, so that the tree shows its own; up

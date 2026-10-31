@@ -3,10 +3,11 @@
 //! connections, and each has a thread that reads its requests, answering `hello`, `ping` and `logs`
 //! itself, `logs` from the events the run's log keeps, and passing the rest on to the main loop,
 //! and one that writes its answers. The main loop answers them as a frame starts, before its ticks,
-//! so that a `patch` applies between ticks and a `look` reaches the frame; a `step` once its ticks
-//! have run; a `capture` once a frame that rendered brings its view back, whose PNG a thread of its
-//! own writes; a `pick` once the frame that read it brings its answer back; and a `snapshot` once a
-//! thread of its own has written the copy of the world the main thread took.
+//! so that a `patch` applies between ticks, a `play` or a `stop` holds from the frame's ticks, and
+//! a `look` reaches the frame; a `step` once its ticks have run; a `capture` once a frame that
+//! rendered brings its view back, whose PNG a thread of its own writes; a `pick` once the frame
+//! that read it brings its answer back; and a `snapshot` once a thread of its own has written the
+//! copy of the world the main thread took.
 //!
 //! A capture of the game's own view rides with a bare frame, which draws without the look, as the
 //! game would on its own; isn't published to a view's memory; and leaves the picks to the next
@@ -51,16 +52,17 @@ use crate::net::Ticket;
 use crate::reflect::{self, Ident, Type};
 use crate::render_thread::{Extracted, Publish, Shot};
 use crate::scene_files::SceneFile;
+use crate::snapshot::Run;
 use crate::{
     Context, Entity, EntityId, Event, Key, MouseButton, Name, Operation, Pose, Scroll, World,
     patch, snapshot,
 };
 
 /// The methods, as `api.unknown_method` lists them.
-const METHODS: [&str; 24] = [
-    "hello", "ping", "status", "pause", "resume", "step", "capture", "view", "input", "look",
-    "pick", "entities", "entity", "get", "types", "hash", "snapshot", "patch", "apply", "undo",
-    "redo", "edits", "logs", "quit",
+const METHODS: [&str; 26] = [
+    "hello", "ping", "status", "pause", "resume", "play", "stop", "step", "capture", "view",
+    "input", "look", "pick", "entities", "entity", "get", "types", "hash", "snapshot", "patch",
+    "apply", "undo", "redo", "edits", "logs", "quit",
 ];
 
 /// The most of the clients' picks a frame asks: half as many as a frame reads back, so that the
@@ -184,6 +186,8 @@ enum Call {
     Status,
     Pause,
     Resume,
+    Play,
+    Stop,
     Step(u64),
     Capture {
         path: Option<PathBuf>,
@@ -250,6 +254,9 @@ struct Taken {
     world: World,
     /// The scene files the layers loaded, which the restored run watches.
     scenes: Vec<SceneFile>,
+    /// What the run was doing, with a copy of the world as edited it held, if any, which the
+    /// restored run goes on doing.
+    run: Run,
     ticks: u64,
     path: PathBuf,
     reply: Reply,
@@ -409,11 +416,11 @@ impl Api {
     /// run, then the rest in the order they came, `look`s setting the look the frame draws with,
     /// `capture`s and `pick`s once a frame has rendered the view, as
     /// [`frame_back`](Self::frame_back) says, and `snapshot`s once their files are written, but
-    /// refused before the run's first tick. Then makes the frame bare if the oldest capture
-    /// waiting, of those riding, whose frame may not render, then of those asked, is of the game's
-    /// own view; and unless it's bare, which reads no picks, has the frame ask the picks waiting,
-    /// as many as [`MOST_PICKS`], the rest waiting for the frames after. Returns whether a request
-    /// asked the run to end.
+    /// refused before the first tick of a run playing from its start. Then makes the frame bare if
+    /// the oldest capture waiting, of those riding, whose frame may not render, then of those
+    /// asked, is of the game's own view; and unless it's bare, which reads no picks, has the frame
+    /// ask the picks waiting, as many as [`MOST_PICKS`], the rest waiting for the frames after.
+    /// Returns whether a request asked the run to end.
     pub(crate) fn serve(
         &mut self,
         cx: &mut Context,
@@ -491,6 +498,10 @@ impl Api {
                                    captures and picks run in frames; restore the window first";
                     reply.send(Err(Failure::new("api.paused", message)));
                 }
+                Call::Step(_) if stepper.stopped() => {
+                    let message = "the game is stopped, and runs no ticks until `play`";
+                    reply.send(Err(Failure::new("api.stopped", message)));
+                }
                 Call::Status => reply.result(&self.status(cx, stepper)),
                 Call::Pause => {
                     stepper.pause();
@@ -504,6 +515,33 @@ impl Api {
                     }
                     reply.result(&status);
                 }
+                Call::Play => {
+                    if stepper.stopped() {
+                        stack.play(cx, stepper.ticks);
+                        stepper.play();
+                    }
+                    reply.result(&self.status(cx, stepper));
+                }
+                Call::Stop => match stack.refuses_stop() {
+                    Some(why) => {
+                        let message = format!("the game can't stop: {why}");
+                        reply.send(Err(Failure::new("api.no_stop", message)));
+                    }
+                    None => {
+                        if !stepper.stopped() {
+                            if let Some(ticks) = stack.stop(cx) {
+                                stepper.jump_to(ticks);
+                            }
+                            stepper.stop();
+                            let message = "the game stopped before the ticks ran: its world is \
+                                           the world as edited";
+                            for (waiting, _) in self.steps.drain(..) {
+                                waiting.send(Err(Failure::new("api.stopped", message)));
+                            }
+                        }
+                        reply.result(&self.status(cx, stepper));
+                    }
+                },
                 Call::Step(ticks) => {
                     stepper.step_by(ticks);
                     let until = stepper.ticks + stepper.steps();
@@ -566,7 +604,12 @@ impl Api {
                         layout: format!("{:016x}", hash.layout),
                     });
                 }
-                Call::Snapshot(_) if stepper.ran() == 0 => {
+                // A run stopped, or playing a copy, is snapshotted before its first tick too, so
+                // that a restart keeps the world as edited; what the layers queued as they attached
+                // goes, as it does at a `stop` that brings that world back.
+                Call::Snapshot(_)
+                    if stepper.ran() == 0 && !stepper.stopped() && cx.edited.is_none() =>
+                {
                     let message = "the simulation hasn't ticked since the run started, and a \
                                    snapshot before then would miss what the layers queued for its \
                                    first tick; ask once it has";
@@ -578,9 +621,19 @@ impl Api {
                         let name = format!("{}-{}.snapshot", self.stem, self.snapshotted);
                         self.snapshots.join(name)
                     });
+                    let run = match &cx.edited {
+                        Some(edited) => Run::Held {
+                            world: Box::new(edited.world.clone()),
+                            scenes: edited.scenes.clone(),
+                            ticks: edited.ticks,
+                        },
+                        None if stepper.stopped() => Run::Stopped,
+                        None => Run::Playing,
+                    };
                     let taken = Taken {
-                        world: stack.saved_world(cx).clone(),
+                        world: world.clone(),
                         scenes: cx.scenes.files.clone(),
+                        run,
                         ticks: stepper.ticks,
                         path,
                         reply,
@@ -702,6 +755,7 @@ impl Api {
         Status {
             ticks: stepper.ticks,
             paused: stepper.paused(),
+            stopped: stepper.stopped(),
             frames: self.shared.frames.load(Ordering::Relaxed),
             entities: entities.map_or(0, |entities| entities.len()),
             view: cx.view().map(|view| view.size),
@@ -792,10 +846,10 @@ impl Api {
         }
     }
 
-    /// Whether the simulation is paused with nothing asked of the frames: no ticks to step, no
-    /// capture or pick waiting and no request held.
+    /// Whether the simulation is paused or stopped with nothing asked of the frames: no ticks to
+    /// step, no capture or pick waiting and no request held.
     pub(crate) fn is_idle(&self, stepper: &Stepper) -> bool {
-        stepper.paused()
+        (stepper.paused() || stepper.stopped())
             && stepper.steps() == 0
             && self.asked.is_empty()
             && self.riding.is_empty()
@@ -1343,12 +1397,14 @@ fn write_snapshots(taken: &Receiver<Taken>, app: &str, layers: &[String]) {
     for Taken {
         world,
         scenes,
+        run,
         ticks,
         path,
         reply,
     } in taken
     {
-        let written = snapshot::write(&world, &scenes, app, &layers, ticks).and_then(|text| {
+        let written = snapshot::write(&world, &scenes, &run, app, &layers, ticks);
+        let written = written.and_then(|text| {
             if path.parent() == Some(crate::beside_exe("snapshots").as_path()) {
                 fs::create_dir_all(crate::beside_exe("snapshots")).map_err(|error| {
                     let message = format!("can't make the directory of {}", path.display());
@@ -1459,6 +1515,8 @@ fn parse(request: &Request) -> Result<Call, Failure> {
         "status" => none(method, params).map(|()| Call::Status)?,
         "pause" => none(method, params).map(|()| Call::Pause)?,
         "resume" => none(method, params).map(|()| Call::Resume)?,
+        "play" => none(method, params).map(|()| Call::Play)?,
+        "stop" => none(method, params).map(|()| Call::Stop)?,
         "types" => none(method, params).map(|()| Call::Types)?,
         "hash" => none(method, params).map(|()| Call::Hash)?,
         "snapshot" => {
@@ -2199,6 +2257,130 @@ mod tests {
         assert_eq!(restored.world().hash(), cx.world().hash());
     }
 
+    /// What [`stop_brings_back_the_world_as_edited_that_play_copied`]'s client gets.
+    struct Stopped {
+        stopped: Status,
+        still: Status,
+        snapshot: Snapshotted,
+        refused: String,
+        edited: Hash,
+        played: Status,
+        ticking: Status,
+        failed: String,
+        back: Status,
+        hash: Hash,
+        history: History,
+        undone: Option<gg_api::Edit>,
+    }
+
+    /// `stop` stops the game, whose frames then run no ticks, paused or not, which a snapshot may
+    /// be taken of before any, and which refuses `step`; `play` has a copy of the world as edited
+    /// play in its place, whose edits go at the next `stop`, which fails the `step`s waiting,
+    /// leaving the game paused as they did, and brings back the world as edited at its ticks, as it
+    /// hashed, with its edits, which `undo` takes back; and every answer says whether the game is
+    /// stopped.
+    #[test]
+    fn stop_brings_back_the_world_as_edited_that_play_copied() {
+        let (mut api, session) = started("Api Play And Stop");
+        let mut cx = Context::seeded(8);
+        let hero = cx.world_mut().spawn(Transform::IDENTITY);
+        let hero_id = cx.world().id(hero).expect("alive").to_string();
+        // Paused, so that no tick runs before the client asks.
+        let mut stepper = Stepper::default();
+        stepper.pause();
+        let dir = Scratch::new("api-stop");
+        fs::create_dir_all(&dir.0).expect("a directory");
+        let path = dir.0.join("stopped.snapshot");
+        let (asked, other) = (path.clone(), session.clone());
+        let client = move |mut client: Client| {
+            let set = |x: i32| {
+                let path = "translation.x";
+                let set =
+                    json!({"id": hero_id, "component": "Transform", "path": path, "value": x});
+                json!({"operations": [{ "set": set }]})
+            };
+            let status = |client: &mut Client| client.call_as::<Status>("status", ());
+            let stopped: Status = client.call_as("stop", ()).expect("stopped");
+            // Stopped, it runs no ticks, paused or not.
+            client.call_as::<Status>("resume", ()).expect("resumed");
+            let still = loop {
+                let status = status(&mut client).expect("a status");
+                if status.frames > stopped.frames + 2 {
+                    break status;
+                }
+            };
+            let snapshot = (client.call_as("snapshot", json!({ "path": asked })))
+                .expect("a snapshot before any tick");
+            let step = client.call("step", json!({"ticks": 1}));
+            let refused = step.expect_err("refused").code;
+            client.call_as::<Applied>("apply", set(1)).expect("set");
+            let edited = client.call_as("hash", ()).expect("a hash");
+            let played: Status = client.call_as("play", ()).expect("played");
+            let ticking = loop {
+                let status = status(&mut client).expect("a status");
+                if status.ticks > played.ticks {
+                    break status;
+                }
+            };
+            client
+                .call_as::<Applied>("apply", set(2))
+                .expect("set in the copy");
+            // Another client's step, waiting for its ticks, which pauses the game.
+            let stepping = thread::spawn(move || {
+                let mut them = Client::connect(&other, "other", DEADLINE).expect("it connects");
+                let step = them.call("step", json!({"ticks": MOST_STEPS}));
+                step.expect_err("failed").code
+            });
+            while !status(&mut client).expect("a status").paused {}
+            let back: Status = client.call_as("stop", ()).expect("stopped");
+            Stopped {
+                stopped,
+                still,
+                snapshot,
+                refused,
+                edited,
+                played,
+                ticking,
+                failed: stepping.join().expect("the step didn't panic"),
+                back,
+                hash: client.call_as("hash", ()).expect("a hash"),
+                history: client.call_as("edits", ()).expect("the edits"),
+                undone: client.call_as("undo", ()).expect("undone"),
+            }
+        };
+        let got = serving(
+            &mut api,
+            &mut cx,
+            &mut stepper,
+            session,
+            client,
+            |_, _, _| {},
+        );
+        assert!(got.stopped.stopped && got.still.stopped && !got.still.paused);
+        assert_eq!((got.stopped.ticks, got.still.ticks), (0, 0));
+        assert_eq!(
+            (got.snapshot.ticks, got.refused.as_str()),
+            (0, "api.stopped")
+        );
+        let snapshot = crate::snapshot::Snapshot::read(&path, "Api Play And Stop");
+        assert!(snapshot.expect("read").stopped, "it says it's stopped");
+        assert!(!got.played.stopped && !got.ticking.stopped);
+        assert_eq!(got.failed, "api.stopped");
+        assert!(got.back.stopped && got.back.paused);
+        assert_eq!(got.back.ticks, got.played.ticks, "the world as edited's");
+        assert_eq!(got.hash, got.edited);
+        let [authored] = &got.history.authors[..] else {
+            panic!("one author: {:?}", got.history);
+        };
+        assert_eq!(authored.done.len(), 1, "the edit before `play` alone");
+        assert!(got.undone.is_some());
+        assert_eq!(
+            cx.world().get::<Transform>(hero),
+            Some(&Transform::IDENTITY)
+        );
+        assert!(cx.edited.is_none());
+    }
+
     /// A patch that can't apply is answered with `api.patch`: here, one whose table's reference is
     /// past where any process's `main` is, which a test's build refuses whether its executable
     /// exports `main` or not, as `patch`'s own tests say.
@@ -2718,6 +2900,8 @@ mod tests {
             params,
         };
         assert_eq!(parse(&request("step", Value::Null)), Ok(Call::Step(1)));
+        assert_eq!(parse(&request("play", Value::Null)), Ok(Call::Play));
+        assert_eq!(parse(&request("stop", json!({}))), Ok(Call::Stop));
         let entities = Call::Entities {
             with: Some("Sprite".to_owned()),
             skip: 0,
@@ -2775,6 +2959,7 @@ mod tests {
         relative["lib"] = json!("patch.dll");
         for (method, params, code) in [
             ("status", json!({"x": 1}), "api.bad_params"),
+            ("stop", json!({"x": 1}), "api.bad_params"),
             ("step", json!({"ticks": 0}), "api.bad_params"),
             ("step", json!({"ticks": 10_001}), "api.bad_params"),
             ("step", json!({"tick": 2}), "api.bad_params"),

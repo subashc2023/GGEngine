@@ -1,6 +1,6 @@
-//! Snapshots: the world copied whole, which restores it: the editor's Play and Simulate run a
-//! copy, and Stop goes back to the world they copied, as rollback, client-side prediction and hot
-//! reload will restore one. Taken again into a copy kept from before, a snapshot is copied in that
+//! Snapshots: the world copied whole, which restores it: the tool API's `play` runs a copy, and
+//! its `stop` goes back to the world it copied, as rollback, client-side prediction and hot reload
+//! will restore one. Taken again into a copy kept from before, a snapshot is copied in that
 //! copy's memory, which allocates as little as [`World`] says.
 
 use super::{World, next_serial};

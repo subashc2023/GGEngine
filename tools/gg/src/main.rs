@@ -83,10 +83,17 @@ Make a game:
 
 Talk to a running game, through its tool API:
   sessions                       List the running games
-  status                         Its ticks, whether it's paused, its frames, entities and view
+  status                         Its ticks, whether it's paused or stopped, its frames, entities and
+                                 view
   pause                          Pause its simulation
   resume                         Run its simulation in real time again
-  step [N]                       Run N ticks (1), and stay paused
+  play                           Play a copy of its world as edited in its place, until `stop`, if
+                                 it's stopped
+  stop                           Stop it: no tick runs, and its world is the world as edited, which
+                                 only edits change; while a copy plays, bring the world as edited
+                                 back, what the copy did, its edits among them, going; recorded
+                                 runs and lockstep peers refuse it
+  step [N]                       Run N ticks (1), and stay paused; refused while it's stopped
   capture [--own] [PATH]         Write its view as a PNG at PATH, or in `captures` beside it: as
                                  it's shown, the look included, or with `--own`, as the game shows
                                  it on its own
@@ -528,7 +535,7 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
                 follow: parsed.switch("--follow"),
             }
         }
-        method @ ("status" | "pause" | "resume" | "hash" | "quit") => {
+        method @ ("status" | "pause" | "resume" | "play" | "stop" | "hash" | "quit") => {
             parsed.positional(0, 0, method)?;
             call(&mut parsed, method, Value::Null)?
         }

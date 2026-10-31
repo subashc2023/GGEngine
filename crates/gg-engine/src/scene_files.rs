@@ -366,6 +366,48 @@ mod tests {
         );
     }
 
+    /// A scene file saved while a copy of the world as edited plays applies to the copy, and once
+    /// `stop` brings back the world as edited, which holds the file as it was last applied there,
+    /// to that world too, as the file's own edit.
+    #[test]
+    fn a_scene_file_saved_while_a_copy_plays_applies_to_both_worlds() {
+        let dir = Scratch::new("scene-files-play");
+        fs::create_dir_all(dir.0.join("scenes")).expect("a directory");
+        let path = dir.0.join("scenes").join("level.ron");
+        let mut file = crate::World::seeded(1);
+        let a = file.spawn(Transform::IDENTITY);
+        save(&path, &file.save_scene(&[a]).expect("saved"), 0);
+        let mut cx = Context::seeded(2).root(&dir.0);
+        let roots = cx.load_scene_file(&path).expect("loaded");
+        let mut stack = Stack::default();
+        let look = |cx: &mut Context, stack: &mut Stack| {
+            cx.scenes.looked = None;
+            look(cx, stack);
+        };
+        look(&mut cx, &mut stack);
+        stack.play(&mut cx, 0);
+        let moved = Transform {
+            translation: Vec3::new(1.0, 2.0, 3.0),
+            ..Transform::IDENTITY
+        };
+        file.insert(a, moved).expect("alive");
+        save(&path, &file.save_scene(&[a]).expect("saved"), 2);
+        look(&mut cx, &mut stack);
+        let at = |cx: &Context| *cx.world().get::<Transform>(roots[0]).expect("one");
+        assert_eq!(at(&cx), moved, "the copy");
+        assert_eq!(stack.stop(&mut cx), Some(0));
+        assert_eq!(
+            at(&cx),
+            Transform::IDENTITY,
+            "the world as edited, as it was"
+        );
+        look(&mut cx, &mut stack);
+        assert_eq!(at(&cx), moved, "the world as edited");
+        let logs = cx.authors.logs(cx.world());
+        let authors: Vec<&str> = logs.map(|(author, _)| author).collect();
+        assert_eq!(authors, ["scenes/level.ron"]);
+    }
+
     /// In a lockstep session, whose saves apply at a tick to come, a file put back before its
     /// save has applied is a save too, and the world ends as the file does.
     #[test]

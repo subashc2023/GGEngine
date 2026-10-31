@@ -1,8 +1,7 @@
 //! What the editor draws over its view: a toolbar at the view's top left, whose controls
 //! [`Toolbar::show`] lists; a gizmo at its top right, which shows which way the camera faces, and
-//! turns it; at its bottom left, the name of what the view shows under the cursor; and round its
-//! edges, while a scene from the Assets panel is held over it, an outline. And Play and Simulate,
-//! at the middle of the title bar, which run the world and stop it.
+//! turns it; and at its bottom left, the name of what the view shows under the cursor. And Play and
+//! Simulate, at the middle of the title bar, which play the game and stop it.
 
 use std::f32::consts::{PI, TAU};
 
@@ -32,24 +31,19 @@ const LABEL: f32 = 18.0;
 const INSET: f32 = 8.0;
 
 /// What the toolbar sets: what the left button does over the view, whether the grid shows, and in
-/// which plane, whether the view sees through the world's camera, and whether the world's
-/// colliders' outlines show; and how the world runs, which Play and Simulate in the title bar set.
+/// which plane, whether the view sees through the game's camera, and whether the game's colliders'
+/// outlines show.
 pub struct Toolbar {
     pub tool: Tool,
     pub grid: bool,
     pub plane: Plane,
-    /// Whether the view sees through the world's camera, as the game would, rather than the
-    /// editor's, and shows neither the grid nor the gizmo.
+    /// Whether the view sees through the game's own camera rather than the editor's, and shows
+    /// neither the grid nor the gizmo: while the game plays, whether it's Play rather than
+    /// Simulate.
     pub world_camera: bool,
-    /// Whether the world's 2D colliders' outlines show, over the rest of the view but a nearer
+    /// Whether the game's 2D colliders' outlines show, over the rest of the view but a nearer
     /// opaque mesh, through either camera.
     pub colliders: bool,
-    /// How the world runs: as it's edited, or a copy of it in its place until it stops, playing
-    /// or simulating.
-    pub mode: Mode,
-    /// Whether the view is a project's game's, whose own camera is the world's camera, and which
-    /// gets the view's input through it.
-    pub game: bool,
 }
 
 impl Default for Toolbar {
@@ -60,33 +54,31 @@ impl Default for Toolbar {
             plane: Plane::XY,
             world_camera: false,
             colliders: false,
-            mode: Mode::Edit,
-            game: false,
         }
     }
 }
 
-/// How the world runs, as Hazel's scene states have it.
+/// How the game runs, as the title bar's Play, Simulate and Stop set it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
-    /// As it's edited: only edits change it.
+    /// Stopped: its world is the world as edited, which only edits change.
     Edit,
-    /// A copy plays in its place, as the game would, its scripts and physics running, the view
-    /// seeing through its camera.
+    /// A copy of the world as edited plays in its place, the view seeing through the game's
+    /// camera, which gets the view's input.
     Play,
-    /// A copy simulates in its place, its physics running but not its scripts, the view staying on
-    /// the editor's camera, to watch what physics does from anywhere.
+    /// A copy plays as in Play, but the view sees through the editor's camera, to watch from
+    /// anywhere, and the game gets no input.
     Simulate,
 }
 
 impl Toolbar {
     /// Draws the toolbar into `ui`: the tools, whose tooltips name the keys that pick them, the
     /// camera's projection, which a click switches, the grid's switch and its plane, the switch
-    /// that sees through the world's camera, which is off while the world has no primary camera,
-    /// as `has_camera` says, and the colliders' switch, each with a tooltip. While the view sees
-    /// through the world's camera, the projection's and the grid's buttons are off, since what
-    /// they change doesn't show. It opens nothing, since a popup would take the view's keys.
-    pub fn show(&mut self, ui: &mut egui::Ui, camera: &mut OrbitCamera, has_camera: bool) {
+    /// that sees through the game's camera, and the colliders' switch, each with a tooltip. While
+    /// the view sees through the game's camera, the projection's and the grid's buttons are off,
+    /// since what they change doesn't show. It opens nothing, since a popup would take the view's
+    /// keys.
+    pub fn show(&mut self, ui: &mut egui::Ui, camera: &mut OrbitCamera) {
         // The key that snaps a drag of the handles, which egui's shortcuts take as the command key.
         let snaps = if cfg!(target_os = "macos") {
             "Cmd"
@@ -169,29 +161,21 @@ impl Toolbar {
                     }
                 });
                 ui.separator();
-                let through = ui.add_enabled_ui(has_camera, |ui| {
-                    icon_button(ui, Icon::Camera, self.world_camera)
-                });
-                let tip = if self.game {
-                    "Game camera: the view sees through the game's own camera, and the game gets \
-                     the view's input, but what the editor's camera takes; moving the editor's \
-                     camera comes back to it, and the input stays the editor's"
-                } else {
-                    "World camera: the view sees through the world's primary camera, as the game \
-                     does, and while the world plays, W, A, S and D drive the world's cameras; \
-                     moving the editor's camera comes back to it"
-                };
-                let through = through
-                    .inner
-                    .on_hover_text(tip)
-                    .on_disabled_hover_text("World camera: the world has no primary camera");
-                if through.clicked() {
+                if icon_button(ui, Icon::Camera, self.world_camera)
+                    .on_hover_text(
+                        "Game camera: while the game plays, the view sees through its camera, \
+                         which gets the view's input, as Play; the editor's camera is Simulate. \
+                         Stopped, the view shows what the game's camera sees, the input staying \
+                         the editor's; moving the editor's camera comes back to it",
+                    )
+                    .clicked()
+                {
                     self.world_camera = !self.world_camera;
                 }
                 if icon_button(ui, Icon::Colliders, self.colliders)
                     .on_hover_text(
                         "Colliders: outlines each 2D collider where its entity draws, as physics \
-                         shapes it, whether the world plays or not",
+                         shapes it, whether the game plays or not",
                     )
                     .clicked()
                 {
@@ -200,41 +184,41 @@ impl Toolbar {
             });
         });
     }
+}
 
-    /// Draws Play and Simulate into `ui`, the title bar's middle, each with a tooltip: each runs a
-    /// copy of the world as it was edited its way, in place of one the other runs, and, lit, shows
-    /// Stop, which brings back the world as it was edited.
-    pub fn show_run(&mut self, ui: &mut egui::Ui) {
-        for (mode, icon, tip) in [
+/// Draws Play and Simulate into `ui`, the title bar's middle, each with a tooltip, the one
+/// `current`, how the game runs, names lit, showing Stop. Returns the mode a click asks for: Play's
+/// or Simulate's, or `Edit` for the lit one's Stop.
+pub fn show_run(ui: &mut egui::Ui, current: Mode) -> Option<Mode> {
+    let mut clicked = None;
+    for (mode, icon, tip) in [
+        (
+            Mode::Play,
+            Icon::Play,
+            "Play: a copy of the world as edited plays in its place, through the game's camera, \
+             which gets the view's input, until Stop; what's edited meanwhile goes with the copy, \
+             but a scene file's save",
+        ),
+        (
+            Mode::Simulate,
+            Icon::Simulate,
+            "Simulate: the same, through the editor's camera, the game getting no input",
+        ),
+    ] {
+        let lit = current == mode;
+        let (icon, tip) = if lit {
             (
-                Mode::Play,
-                Icon::Play,
-                "Play: a copy of the world as it was edited plays in its place, as the game would, \
-                 its scripts and physics running and the view seeing through its camera, until \
-                 Stop; what's edited meanwhile goes with the copy",
-            ),
-            (
-                Mode::Simulate,
-                Icon::Simulate,
-                "Simulate: a copy of the world as it was edited simulates in its place, its \
-                 physics running but not its scripts, the view staying on the editor's camera, \
-                 until Stop; what's edited meanwhile goes with the copy",
-            ),
-        ] {
-            let lit = self.mode == mode;
-            let (icon, tip) = if lit {
-                (
-                    Icon::Stop,
-                    "Stop: brings back the world as it was edited, with its edits' history",
-                )
-            } else {
-                (icon, tip)
-            };
-            if icon_button(ui, icon, lit).on_hover_text(tip).clicked() {
-                self.mode = if lit { Mode::Edit } else { mode };
-            }
+                Icon::Stop,
+                "Stop: brings back the world as edited, with its edits' history",
+            )
+        } else {
+            (icon, tip)
+        };
+        if icon_button(ui, icon, lit).on_hover_text(tip).clicked() {
+            clicked = Some(if lit { Mode::Edit } else { mode });
         }
     }
+    clicked
 }
 
 /// A frame for what floats over the view, as a window's.
@@ -609,14 +593,6 @@ pub fn name_hovered(egui: &egui::Context, view: &Response, name: String) {
     let inner = outer - margin;
     painter.add(frame.paint(inner));
     painter.galley(inner.min, galley, color);
-}
-
-/// Outlines `view`, where a scene dragged from the Assets panel and let go opens, inside its edges
-/// in the selection's color: painted on the view's own layer, as the name under the cursor is.
-pub fn outline_drop(egui: &egui::Context, view: &Response) {
-    let painter = egui.layer_painter(view.layer_id).with_clip_rect(view.rect);
-    let color = egui.global_style().visuals.selection.stroke.color;
-    painter.rect_stroke(view.rect, 0.0, Stroke::new(2.0, color), StrokeKind::Inside);
 }
 
 #[cfg(test)]

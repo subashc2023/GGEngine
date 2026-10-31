@@ -29,7 +29,8 @@ use crate::dock::{self, Dock, Under};
 use crate::hot_reload::HotReload;
 use crate::layer::Stack;
 use crate::main_loop::{
-    Clock, MainUi, Ran, Stepper, hand_off, keeps_egui, run_frame, settings, take_back, tessellate,
+    Clock, MainUi, Ran, Stepper, hand_off, keeps_egui, run_frame, settings, start, take_back,
+    tessellate,
 };
 use crate::pads::Gamepads;
 use crate::pipeline_cache;
@@ -220,13 +221,15 @@ impl Handler<'_> {
         self.cx = Context::of_run(Some(crate::Window::new(window.clone())), self.app);
         self.gamepads = Gamepads::open(window.has_focus());
         self.window = Some(window);
-        match self.snapshot.take() {
-            Some(snapshot) => {
-                let ticks = self.app.stack.restore(&mut self.cx, &snapshot)?;
-                self.stepper.start_at(ticks);
-            }
-            None => self.app.stack.attach(&mut self.cx),
-        }
+        let snapshot = self.snapshot.take();
+        start(
+            &mut self.app.stack,
+            &mut self.cx,
+            &mut self.stepper,
+            snapshot,
+            self.args.stopped,
+            self.api.is_some(),
+        )?;
         #[cfg(feature = "dev")]
         {
             let started = HotReload::start().inspect_err(|error| {

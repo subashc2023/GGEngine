@@ -28,11 +28,13 @@ its tool API: read its world, step and capture it, and edit it. Entities are nam
 16 hex digits, which `entities` lists with their names and components; `entity` shows one's \
 components' values. An edit, `apply` or `set`, applies between ticks, paused or not, and `undo` \
 takes back your last; a scene file saved while the game runs is an edit too, its author the file's \
-path, which `undo` with that author takes back. `edits` lists each author's edits. `look` sets \
-parts of the view's look, its viewpoint, an outline round an entity, a grid, and whether colliders' \
-outlines show, which the editor and any other client set too, the last to set a part winning; give \
-back, as null, what you set when you're done. `capture` shows the view with the look, and `pick` \
-names the entity at a pixel of it, as a capture's PNG has it.";
+path, which `undo` with that author takes back. While the game plays a copy of its world as \
+edited, as after the editor's Play, an edit goes with the copy at `stop`; a scene file's save \
+lasts. `edits` lists each author's edits. `look` sets parts of the view's look, its viewpoint, an \
+outline round an entity, a grid, and whether colliders' outlines show, which the editor and any \
+other client set too, the last to set a part winning; give back, as null, what you set when you're \
+done. `capture` shows the view with the look, and `pick` names the entity at a pixel of it, as a \
+capture's PNG has it.";
 
 /// Serves MCP on stdin and stdout until stdin ends, reaching the game `pick` picks.
 ///
@@ -151,7 +153,8 @@ fn tools() -> Value {
         ),
         tool(
             "status",
-            "The game's ticks, whether it's paused, its frames, its entities, and its view's size.",
+            "The game's ticks, whether it's paused, whether it's stopped, its frames, its \
+             entities, and its view's size.",
             json!({}),
             &[],
         ),
@@ -163,8 +166,25 @@ fn tools() -> Value {
             &[],
         ),
         tool(
+            "play",
+            "Plays a copy of the game's world as edited in its place, until `stop`, if it's \
+             stopped; a game already playing, as a plain `gg run` starts, gets nothing.",
+            json!({}),
+            &[],
+        ),
+        tool(
+            "stop",
+            "Stops the game: no tick runs, and its world is the world as edited, which only edits \
+             change; while a copy plays, brings the world as edited back, what the copy did, its \
+             edits among them, going. IDs learned while the copy played don't outlive it: they're \
+             drawn again. Recorded runs and lockstep peers refuse it.",
+            json!({}),
+            &[],
+        ),
+        tool(
             "step",
-            "Runs ticks of the simulation, 64 a second, pausing it, and answers once they've run.",
+            "Runs ticks of the simulation, 64 a second, pausing it, and answers once they've run; \
+             refused while the game is stopped: `play` first.",
             json!({"ticks": {"type": "integer", "minimum": 1, "maximum": 10000, "default": 1}}),
             &[],
         ),
@@ -406,7 +426,9 @@ fn run(pick: &Pick, name: &str, mut arguments: Map<String, Value>) -> Result<Ran
         "sessions" => {
             game::sessions(pick.project.as_deref()).map(|sessions| Ran::Json(sessions.to_string()))
         }
-        "status" | "pause" | "resume" | "hash" | "snapshot" => call(name, Value::Null),
+        "status" | "pause" | "resume" | "play" | "stop" | "hash" | "snapshot" => {
+            call(name, Value::Null)
+        }
         "step" | "look" | "pick" | "entities" | "entity" | "get" | "apply" | "undo" | "redo"
         | "edits" => call(name, Value::Object(arguments)),
         "set" => {

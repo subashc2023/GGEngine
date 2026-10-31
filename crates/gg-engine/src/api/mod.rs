@@ -162,9 +162,9 @@ pub(crate) fn pace(api: &Option<Api>, handed: u64) {
     let _ = (api, handed);
 }
 
-/// While the simulation is paused with nothing asked of the frames, waits for a request for at
-/// most a tick's time, so that a headless run, whose frames would otherwise go as fast as the GPU
-/// renders them, doesn't spin.
+/// While the simulation is paused or stopped with nothing asked of the frames, waits for a request
+/// for at most a tick's time, so that a headless run, whose frames would otherwise go as fast as
+/// the GPU renders them, doesn't spin.
 pub(crate) fn idle(api: &mut Option<Api>, stepper: &Stepper) {
     #[cfg(feature = "dev")]
     if let Some(api) = api

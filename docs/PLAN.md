@@ -69,16 +69,16 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **The game's view in the editor** (2026-10-30)
 - **The game's world and diagnostics in the editor's panels** (2026-10-30)
 - **Editing in the game's view** (2026-10-30)
+- **Play, Simulate and Stop in the game, the editor's own world deleted** (2026-10-31)
 
 ## Now
 
-**Play, Simulate and Stop in the game, the editor's own world deleted**, Phase 6's fifth milestone,
-which waits on the open question of what Simulate does in a game whose ticks are all its own. In a
-project, the editor's Play, Simulate and Stop reach the game through the tool API, as its pause and
-step do, Stop bringing back the world as it was edited; and the editor's own world goes, the editor
-keeping the view's tools it shares with a project's game. *Done when*, from `games/shards`, Play in
-the editor plays Shards from the arena as edited, Stop brings the arena back as it was, which the
-Entities panel and the view show, and the editor has no world of its own.
+**Scenes through the API and the File menu**, Phase 6's last milestone, which waits on the open
+question of which entities a scene file owns. In a project, the editor's File menu, New, Open and
+Save, reaches the game's scenes through the tool API. *Done when*, from `games/shards`, the editor
+opens the arena in the game, saves it as edited to its file, which the game's watch then applies as
+no change, and New empties what the scene owns, each through the API, and Phase 6's done-when holds:
+the editor has no path into the game but the tool API, and the v0.1 loop works from inside it.
 
 ## Next
 
@@ -147,7 +147,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Optimized dependencies in dev builds (`[profile.dev.package."*"] opt-level = 3`); zune-jpeg alone is, for the reason the root Cargo.toml gives | Physics or another heavy dependency makes debug builds slow |
 | Compiling trace and debug events out of shipping builds, through `tracing`'s `release_max_level_*` features | Phase 10, with the shipping profile |
 | No console window for shipping builds on Windows (`windows_subsystem = "windows"` on the player); the JSON log still records the run | Phase 10, with the shipping profile |
-| Checking the sandbox by hand on Linux, and on macOS with KosmicKrisp (Vulkan SDK 1.4.363.0 or later, the first conformant build), its gamepads, the editor's file dialogs and the drawn title bars too, with the menu button's inset clear of macOS's traffic lights (72 points) and a torn-off window moving by its tab bar where X11 and macOS move windows asynchronously, and the render thread there: acquiring, presenting and rebuilding swapchains as windows resize off the main thread under KosmicKrisp, and on Wayland a frame in flight presenting at its old size after a maximize; and the `frames` test on macOS, whose CI runner has no GPU to run it: std's mutexes there are boxed as they're first locked, so a mutex made each frame allocates there alone | A Linux machine and an Apple Silicon Mac are at hand |
+| Checking the sandbox by hand on Linux, and on macOS with KosmicKrisp (Vulkan SDK 1.4.363.0 or later, the first conformant build), its gamepads, the file dialogs `Context::pick_file` shows and the drawn title bars too, with the menu button's inset clear of macOS's traffic lights (72 points) and a torn-off window moving by its tab bar where X11 and macOS move windows asynchronously, and the render thread there: acquiring, presenting and rebuilding swapchains as windows resize off the main thread under KosmicKrisp, and on Wayland a frame in flight presenting at its old size after a maximize; and the `frames` test on macOS, whose CI runner has no GPU to run it: std's mutexes there are boxed as they're first locked, so a mutex made each frame allocates there alone | A Linux machine and an Apple Silicon Mac are at hand |
 | Deleting old JSON logs; every run's log is kept | Logs pile up enough to matter |
 | A clean shutdown on Ctrl+C, which now ends the process at once; the JSON log keeps every line written until then, and a recording every whole line but its `end` | A headless run that goes on until it's stopped, such as a dedicated server |
 | GPU tests in Windows and macOS CI, which skip them for the reason [AGENTS.md](../AGENTS.md#commands) gives | A self-hosted runner with a GPU, or a Vulkan driver that runs on those runners without one |
@@ -157,7 +157,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | `gg build` and `gg test`, with their results as data: `run` and `check` build through cargo, passing on its messages about the code as it renders them, and cargo's test harness writes JSON on nightly alone | An agent needs a build's or the tests' results as data, or libtest's JSON output is stable |
 | Capabilities each client of the tool API is granted, as [Agents and tools](../ARCHITECTURE.md#agents-and-tools) describes: a connection that says hello with the session's token reaches everything, which only processes that can read the session file beside the game do | A client the user doesn't run as their own, such as one on another machine or a mod's, or an agent kept to one scene |
 | MCP beyond tools: resources, prompts, progress, cancellation and the client's roots; `gg mcp`'s tools are the API's methods but `quit`, `patch` and the paths of `capture` and `snapshot`, a capture's PNG coming inline | An agent needs one of them |
-| Watching the scene files the editor opens, saves and reloads, which it reads through `World::replace_scene` rather than `Context::load_scene_file` | Phase 6's editor |
+| Watching the scene files the editor's File menu opens and saves, as the game watches those its layers loaded | Scenes through the API and the File menu |
 | Steps and captures while the window is minimized, which fail with `api.paused`, and requests while a file dialog or Windows' window menu holds the main thread, which wait; `ping` says which | A tool needs them then |
 | Labels inside passes: each run of draws labeled by what it draws, and the frame pass's view and UI apart; a capture shows a label for each pass | Phase 12, with the render graph |
 | Synchronization validation under RenderDoc, whose layer hides the validation layer's settings: through `VK_EXT_validation_features`, or the validation layer's environment | A synchronization bug shows under RenderDoc alone |
@@ -238,7 +238,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Chords, modifiers, holds and double taps, such as Ctrl and a key: there's no modifier state, and Ctrl+Z reaches layers as `ControlLeft` and `KeyZ` | A game binds a combination |
 | Keys' and gamepad buttons' labels, for prompts that show a binding: both are positions, and the engine drops what a keyboard's layout makes of a key, and whether a pad is an Xbox or a PlayStation one | A game shows its bindings |
 | A hold of an axis shorter than a tick, which moves nothing: its two changes apply at one tick | A game needs one, as a flag that the tick clears |
-| An engine type for what an action holds in the world, such as a button's held flag and its presses this tick; each game writes its own component | A game other than the sandbox and the editor's own world writes the same |
+| An engine type for what an action holds in the world, such as a button's held flag and its presses this tick; each game writes its own component | A game other than the sandbox and Shards writes the same |
 | Pressing and setting actions from code, ahead of the commands, and listing a game's actions by name, for the tool API and agents | An agent plays a game through the tool API, or a test presses its actions |
 | Gamepads in `Input`, for layers to poll: `Input` holds keys and mouse buttons alone, and actions read the pads | A layer polls a pad |
 | Gamepads connecting and disconnecting as events, and their names, which only the log has | A game prompts as a pad connects |
@@ -321,11 +321,11 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Loading a scene in place of some of a world's entities in one step, as the sandbox's grid reload does in three; a load refuses IDs the world has, and `World::replace_scene` replaces all of its entities; a scene file a game loaded through `Context::load_scene_file`, saved, applies as operations | Another game reloads part of its world from a file of its own |
 | A version in scene files, a file without one reading as the first | The first change to the format that old files can't be read by |
 | Comments in scene files, which a save drops | People annotate scenes |
-| A prompt before the editor's New, Open or Quit, or a scene dropped on its view, discards edits not saved: they discard them | Someone loses work, or Phase 6's editor |
-| The scene's file named in the editor, whose title bar's middle holds Play, and a list of recent scenes: Save writes to the file opened or saved last, which nothing shows | Someone loses track of which file Save writes |
-| Listing the Assets panel's folder off the main thread, as a thread watching it would: it's listed on the main thread each second it shows, which a folder of many thousands of files would hold up for milliseconds | A game's folder that big, once the tool API brings one |
-| Pause and step, as Hazel's later episodes add | Someone steps through a play or a simulation |
-| Keeping edits made as the world plays or simulates, which go with the copy, as Unity's do; and showing that it runs beyond the lit Stop and, as it plays, the view through the world's camera, such as a tint round the view | Someone loses an edit made while the world runs, or edits a running world for the scene |
+| A prompt before the editor's New, Open or Quit discards edits not saved | Someone loses work, or scenes through the API and the File menu |
+| The scene's file named in the editor, whose title bar's middle holds Play, and a list of recent scenes | Scenes through the API and the File menu, or someone loses track of which file Save writes |
+| Listing the Assets panel's folder off the main thread, as a thread watching it would: it's listed on the main thread each second it shows, which a folder of many thousands of files would hold up for milliseconds | A project's asset folder that big |
+| Keeping edits made while a copy plays, which go with it at Stop, as Unity's do, but a scene file's save; and showing that the game plays beyond the lit Play or Simulate, such as a tint round the view | Someone loses an edit made while the world runs, or edits a running world for the scene |
+| Play and Stop in recorded runs and lockstep sessions: kept as lines a replay brings the world as edited back at, and applied by both peers at one tick; `stop` answers `api.no_stop` there, and `--stopped` is refused with `--record`, `--host` and `--join` | Someone records, or plays a lockstep session, in the editor |
 | Bodies under a parent, moved in the world's space as their ancestors carry them, and colliders on a body's children; a body under a parent isn't moved (`physics.child_body`) | A game builds a body of parts, or nests one |
 | Colliders other than boxes and circles, such as capsules and polygons; joints; sensors; and contacts and queries, such as raycasts, for scripts | Each with its first game use |
 | A restitution threshold, the speed under which a contact doesn't bounce, as Box2D's and Hazel's: rapier has none | rapier gains one, or a game's bouncy bodies won't settle |
@@ -336,7 +336,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Replaying a log into another world, which maps values' handles to IDs, as a recording's commands are; `set_field` and operations store a dead handle without complaint | Edits sent to another world, as a server's or a peer's |
 | A delete saying what refers to its entities from outside, or refusing; those references dangle until it's undone, and the world doesn't save as a scene in between, though snapshots keep them dead | Someone loses a scene's save to a reference a delete left dangling |
 | Undoing a create whose entity has children since that the create didn't make, such as game code gave it, by keeping them where they are; it's refused (`ecs.has_children`), and the log drops it | An agent attaches children to what another's create made, or Phase 6's editor |
-| Layers holding what a restore in place takes back: the sandbox's swarm is in the world, and the Inspector drops its log and pick once the world's serial is another's, but nothing tells a layer that `Context`'s world was restored within a run, as `Layer::restored` does in a run started from a snapshot, so the sandbox doesn't snapshot | Something restores the running world in place, such as rollback |
+| Layers holding what a restore inside a tick takes back, as rollback's: `Layer::restored` tells them of a world restored as a run starts from a snapshot, at a lockstep joiner's restore and at the API's `stop`, each between ticks, but nothing of one restored inside a tick; the sandbox doesn't snapshot | Something restores the world inside a tick, such as rollback |
 | Reparenting from the panels: dragging a row onto another, and taking a `Parent` away, as Remove Component would, making its entity a root; `Parent` is read only, so the Inspector offers neither | Phase 6's scene tree |
 | Picking several entities, to edit or delete them at once | Someone edits many entities alike |
 | A search field in Add Component's menu, which lists every type registered | A game registers more types than the menu shows at once |
@@ -355,9 +355,9 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | The ban on std's float methods for games in their own repositories, which the workspace's clippy.toml doesn't reach, though glam's features do, since Cargo merges them; and `gg new` for such a game, which makes games in the workspace's `games/` alone: its own workspace, the engine a pinned dependency, copies of clippy.toml and the toolchain's pin, and gg and dx installed | The first game outside the workspace |
 | Locating a divergence of the layout alone, to the table, row, children or stream of IDs where two worlds part; `World::difference` compares their content, and a replay names the part of the hash | A replay's layout goes another way first |
 | Replaying from a snapshot and the commands after it, and a SyncTest, which runs each tick again from a snapshot and checks its hash, as rollback needs; and recording a run restored from a snapshot, which `--restore` refuses with `--record`, a recording's replay starting from a seed and the layers' attach, so that `gg run` doesn't restart a run that records | Rollback, or a crash `gg run` restarted from is worth replaying |
-| Layers' own state across a restart from a snapshot: the camera controllers' viewpoints, the clear color, the editor's scene file, tool and camera, and the tool API's look, which start as a fresh run's do, the editor in a project setting its parts of the look again as the restarted run serves; the world is as it was, and a layer takes back from it what its panels show, as the sandbox's `restored` does, and the editor comes back stopped, with the world as it was edited | Someone misses where they were looking after a restart |
+| Layers' own state across a restart from a snapshot: the camera controllers' viewpoints, the clear color and the tool API's look, which start as a fresh run's do, the editor in a project setting its parts of the look again as the restarted run serves; the world is as it was, and a layer takes back from it what its panels show, as the sandbox's `restored` does, and a run comes back stopped, or playing a copy with the world as edited held, as it was | Someone misses where they were looking after a restart |
 | What's opaque in a component of a type that isn't opaque as a whole, which a snapshot file leaves out, its component coming back on its type's base: `Component::save_opaque` and `load_opaque` carry types opaque as a whole, as `MeshDraw` | A game's component holds an opaque field |
-| Snapshots that cost the main thread less than a copy of the world, which each takes as a frame starts before a thread of the API's writes it: some 6 MB of text for the debug sandbox's 10,461 entities, taken every 5 seconds under `gg run` | A game's snapshots show as hitches |
+| Snapshots that cost the main thread less than a copy of the world, two while a copy plays, which each takes as a frame starts before a thread of the API's writes it: some 6 MB of text for the debug sandbox's 10,461 entities, taken every 5 seconds under `gg run` | A game's snapshots show as hitches |
 | Removing the snapshot file of a `gg run` that's stopped, or ends in an error, which stays in `snapshots` beside the executable; one whose game exits cleanly removes it | They pile up enough to matter |
 | Starting again a game that waits for a rebuild as its scenes or assets change too: only a rebuild starts it again, as a change to its sources brings one, or without patches, its executable changing | A game crashes for its data rather than its code |
 | Recordings that keep what their attach read, such as the sandbox's grid scene, and the commit they were built from; a file changed since shows as a divergence at the attach, and a recording names its engine's version and build alone | Recordings replayed far from where they were made, such as bug reports from people's runs |
@@ -369,15 +369,15 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Recording a joiner, whose world comes from the host's, which `--join` refuses with `--record`; the host's recording replays the session | A desync is worth replaying from the joiner's side |
 | Rebuilding or restarting a running game as its project's manifest changes, which `gg run` doesn't watch | Someone edits a manifest while its game runs |
 | Builds without `dev` reading their project's manifest: `App::project` ends their runs (`engine.no_project`), as shipping builds start from cooked data | Phase 10, with the cooked start scene |
-| The sandbox and the editor as projects, which name their roots themselves | A tool opens them as projects |
+| The sandbox as a project, which names its root itself | A tool opens it as a project |
+| Opening a project from the editor started outside one, which says it needs one | Someone starts the editor elsewhere and wants to pick a project |
 | The project in `hello`'s answer: tools find a project's games by their session files | A client reaches a game without reading its session file, as one on another machine would |
 | An app's name and `gg run`'s defaults for it, such as `--peers 2`, in the project's manifest | A tool needs them |
 | Sharing the game's view without copies on the CPU: the game copies each frame from the GPU's readback into the shared memory, and the editor out of it into the frame's upload arena, about 0.35 ms each at 1920x1080 on the RTX 4090; Vulkan can take the shared memory as the readback buffer itself (`VK_EXT_external_memory_host`), or share the image (external memory), where the driver has either | A view larger than 1080p, or a refresh rate, the copies don't keep up with |
 | Gamepads in an embedded game: windowed runs poll the pads, and the editor forwards keys, the mouse and focus | Someone plays a project's game in the editor with a pad |
 | Captures of a view that shows pixels from elsewhere, as the editor's does a game's: `capture` fails there (`api.no_view`); the game's capture has the same pixels but the editor's handles and overlay | A tool captures the editor's view |
 | The editor's camera taking a perspective viewpoint of another field of view than its 60°, as a game's camera or an agent's look may give: it takes where the viewpoint sees from, and keeps its own field, so the view's widens or narrows as it turns to the editor's camera | A game's camera or an agent sees through another field of view |
-| A game's own wheel, right and middle buttons, Alt with the left, the left under Pan or Orbit, and Home, in the editor's view: the editor's camera takes them, turning the view to itself, and the game gets the rest | A game binds one, or Play in the game settles what reaches it |
-| Handles, and the keys Q, W, E and R, through the game's camera, as through the editor's: the game gets the keys and the left button there, a click picking too | Someone edits a game through its own camera, as a 2D game's fixed one |
+| Handles, and the keys Q, W, E and R, through the game's camera while it's stopped, as through the editor's: through the game's camera, no handles show, and the keys pick no tool | Someone edits a game through its own camera, as a 2D game's fixed one |
 | An embedded game's `Context::scale`, which is 1, so that what it draws in points, as its colliders' outlines, draws thinner in an editor on a display of more pixels to a point; the outline the editor's look sets is in pixels | Someone misses them on such a display |
 | `gg run --embedded` with `--peers 2`, which the editor's one view would show one of: it's refused | The editor shows a lockstep session's peers |
 | Filtering the Logs panel by level or text, and its game's debug events kept out of it: it shows every event the game logs, which it keeps the last 10,000 of, each one's fields in their names' order rather than as logged, and all `gg run` prints | Logs gets too long to read |
@@ -391,9 +391,6 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 - Which license? Recommendation: MIT OR Apache-2.0, the Rust convention, chosen once; until
   then, `publish = false` keeps the crates off crates.io. Decide before anyone outside the
   project contributes.
-- What does Simulate do in a game whose ticks are all its own code, as Shards' are?
-  Recommendation: run the game as Play does, from the world as edited, seen through the editor's
-  camera, with no input forwarded. Decide before Play, Simulate and Stop in the game.
 - Which entities does a scene file own, and so what do Save, Open and New do in a game whose attach
   builds entities beside its scene, as Shards' players are? Recommendation: those its text held as
   last applied, which the scene watch already tracks, and those made into it while it's the open

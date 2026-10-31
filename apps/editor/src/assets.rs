@@ -1,5 +1,5 @@
-//! The Assets panel: the files in the editor's assets folder, a folder at a time, as a content
-//! browser shows them, from which a scene drags onto the view, which opens it.
+//! The Assets panel: the files in the project's asset root, a folder at a time, as a content
+//! browser shows them.
 
 use std::fs;
 use std::io;
@@ -24,14 +24,10 @@ const BACK: f32 = 16.0;
 /// adds, removes or renames there shows, such as an agent's scene.
 const RELIST: Duration = Duration::from_secs(1);
 
-/// A scene's file, dragged from the Assets panel, which the view opens as it's dropped there.
-pub struct DraggedScene(pub PathBuf);
-
 /// The Assets panel: the files in a folder, its root, and in the folders under it, one folder at a
 /// time, as a content browser shows them: folders first, then files, each by its name, in rows as
 /// many across as fit. A double click on a folder shows it, and Back the folder above, as far up as
-/// the root. A scene, a file whose name ends in `.ron`, drags onto the view, which opens it; other
-/// files show dimmed, and drag nowhere yet.
+/// the root. Files show dimmed, since nothing opens or drags them yet.
 pub struct Assets {
     root: PathBuf,
     /// The folder shown: the root, or a folder under it.
@@ -59,9 +55,6 @@ struct Entry {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
     Folder,
-    /// A file whose name ends in `.ron`, as the File menu's dialogs show scenes.
-    Scene,
-    /// Any other file.
     File,
 }
 
@@ -162,13 +155,7 @@ fn entries(folder: &Path) -> io::Result<Vec<Entry>> {
         } else {
             file_type.is_dir()
         };
-        let kind = if is_folder {
-            Kind::Folder
-        } else if crate::is_scene(&path) {
-            Kind::Scene
-        } else {
-            Kind::File
-        };
+        let kind = if is_folder { Kind::Folder } else { Kind::File };
         let name = entry.file_name().to_string_lossy().into_owned();
         entries.push(Entry { path, name, kind });
     }
@@ -205,23 +192,13 @@ fn cells(ui: &mut egui::Ui, folder: &Path, entries: &[Entry]) -> Option<PathBuf>
     chosen
 }
 
-/// Draws `entry`'s cell into `ui`, and gives its folder if it's a folder double-clicked. A scene's
-/// cell drags its file, and follows the pointer while it's dragged. A name cut short to fit gives
-/// itself whole as the cell's tooltip.
+/// Draws `entry`'s cell into `ui`, and gives its folder if it's a folder double-clicked. A name cut
+/// short to fit gives itself whole as the cell's tooltip.
 fn cell(ui: &mut egui::Ui, entry: &Entry) -> Option<PathBuf> {
     // By its path, so that no two cells share one, however alike they look.
     let id = Id::unique(("gg editor asset", &entry.path));
-    let (response, cut) = match entry.kind {
-        Kind::Scene => {
-            let dragged = DraggedScene(entry.path.clone());
-            let source = ui.dnd_drag_source(id, dragged, |ui| draw(ui, entry).1);
-            (source.response, source.inner)
-        }
-        Kind::Folder | Kind::File => {
-            let (rect, cut) = draw(ui, entry);
-            (ui.interact(rect, id, Sense::CLICK), cut)
-        }
-    };
+    let (rect, cut) = draw(ui, entry);
+    let response = ui.interact(rect, id, Sense::CLICK);
     let response = if cut {
         response.on_hover_text(entry.name.as_str())
     } else {
@@ -252,7 +229,7 @@ fn draw(ui: &mut egui::Ui, entry: &Entry) -> (Rect, bool) {
             painter.rect_filled(rect, lit.corner_radius, lit.weak_bg_fill);
         }
         let color = match entry.kind {
-            Kind::Folder | Kind::Scene => visuals.text_color(),
+            Kind::Folder => visuals.text_color(),
             Kind::File => visuals.weak_text_color(),
         };
         let icon = Rect::from_min_size(
@@ -279,7 +256,7 @@ fn paint(painter: &Painter, rect: Rect, kind: Kind, color: Color32) {
             let body = Rect::from_min_max(at(1.5, 4.0), at(14.5, 13.0));
             painter.rect_filled(body, 0.75 * scale, color);
         }
-        Kind::Scene | Kind::File => {
+        Kind::File => {
             let line = Stroke::new(0.75 * scale, color);
             let page = vec![
                 at(3.5, 1.5),
@@ -313,11 +290,56 @@ mod tests {
     use gg_engine::egui::{Event, Modifiers, PointerButton, Pos2, RawInput};
 
     use super::*;
-    use crate::tests::{Scratch, find, texts};
+
+    /// A directory of a test's own in the OS's temporary directory, made empty, and removed as the
+    /// test ends, failed or not.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("gg-editor-{name}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir(&dir).expect("made");
+            Self(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The text drawn in `shapes`, a frame's output, each with where it was drawn.
+    fn texts(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, Rect)> {
+        fn find(shape: &egui::Shape, texts: &mut Vec<(String, Rect)>) {
+            match shape {
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        find(shape, texts);
+                    }
+                }
+                egui::Shape::Text(text) => {
+                    texts.push((text.galley.text().to_owned(), text.visual_bounding_rect()));
+                }
+                _ => {}
+            }
+        }
+        let mut texts = Vec::new();
+        for clipped in shapes {
+            find(&clipped.shape, &mut texts);
+        }
+        texts
+    }
+
+    /// Where `text` was drawn among `texts`.
+    fn find(texts: &[(String, Rect)], text: &str) -> Rect {
+        let found = texts.iter().find(|(drawn, _)| drawn == text);
+        found.unwrap_or_else(|| panic!("no {text}: {texts:?}")).1
+    }
 
     /// Folders come first, then files, each by its name regardless of case, then as it's spelled,
-    /// names that aren't Latin among them; a file whose name ends in `.ron`, in any case, is a
-    /// scene, and a folder's name never makes one.
+    /// names that aren't Latin among them; a folder's name never makes it a file.
     #[test]
     fn a_folder_lists_its_folders_then_its_files_by_name() {
         let scratch = Scratch::new("assets-listed");
@@ -335,11 +357,11 @@ mod tests {
             ("A", Kind::Folder),
             ("b", Kind::Folder),
             ("maps.ron", Kind::Folder),
-            ("a.RON", Kind::Scene),
-            ("B.ron", Kind::Scene),
+            ("a.RON", Kind::File),
+            ("B.ron", Kind::File),
             ("c.png", Kind::File),
             ("Z.txt", Kind::File),
-            ("уровень.ron", Kind::Scene),
+            ("уровень.ron", Kind::File),
         ];
         assert_eq!(listed, expected);
     }

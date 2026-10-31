@@ -16,7 +16,7 @@ use gg_renderer::{
 };
 #[cfg(feature = "dev")]
 use subsecond::HotFn;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::assets::{self, Assets};
 use crate::camera::{self, Camera, Tie};
@@ -35,7 +35,7 @@ use crate::recording::Recorder;
 use crate::reflect::{Reflect, Value};
 use crate::render_thread::Extracted;
 use crate::scene_files::{SceneFile, SceneFiles};
-use crate::snapshot::Snapshot;
+use crate::snapshot::{Run, Snapshot};
 use crate::{
     App, BoxCollider2D, Entity, EntityId, Event, Input, MeshDraw, Model, Name, RigidBody2D,
     Transform, Ui, World,
@@ -73,19 +73,13 @@ pub trait Layer {
     /// [`restored`](Self::restored) in its place.
     fn attach(&mut self, _cx: &mut Context) {}
 
-    /// Called once as a run restored from a snapshot starts, in place of [`attach`](Self::attach),
-    /// once every layer has loaded and the world is back as it was: the layer picks up from the
-    /// world, such as the values its panels show, and queues what its ticks need, such as letting
-    /// go of what was held as the snapshot was taken. The world changes only at ticks from here.
+    /// Called as a run restored from a snapshot starts, in place of [`attach`](Self::attach), once
+    /// every layer has loaded and the world is back as it was; again as the tool API's `stop`
+    /// brings back the world as edited, each layer's queue emptied first; and as a lockstep
+    /// joiner's world gives way to its host's: the layer picks up from the world, such as the
+    /// values its panels show, and queues what its ticks need, such as letting go of what was held
+    /// as the world it picks up from was left. The world changes only at ticks from here.
     fn restored(&mut self, _cx: &mut Context) {}
-
-    /// The world a snapshot of the run saves in place of the context's while the layer holds aside
-    /// the world the simulation goes back to, as the editor holds the world as it was edited while
-    /// a copy of it plays, so that a restart comes back to that world; `None`, the default,
-    /// otherwise.
-    fn saved_world(&self) -> Option<&World> {
-        None
-    }
 
     /// Called once as the app ends, after the last tick.
     fn detach(&mut self, _cx: &mut Context) {}
@@ -296,8 +290,22 @@ pub struct Context {
     pub(crate) authors: Authors,
     /// The scene files the layers loaded, which development builds watch.
     pub(crate) scenes: SceneFiles,
+    /// The world as edited, while a copy of it plays in its place, as [`Stack::play`] holds it.
+    #[cfg(feature = "dev")]
+    pub(crate) edited: Option<Edited>,
     /// The local player, in a lockstep session.
     player: Option<u8>,
+}
+
+/// The world as edited, which the tool API's `play` holds aside while a copy of it plays in its
+/// place, and `stop` brings back: with the ticks it's at, its scene files as last applied and the
+/// authors' edits of it.
+#[cfg(feature = "dev")]
+pub(crate) struct Edited {
+    pub(crate) world: World,
+    pub(crate) ticks: u64,
+    pub(crate) scenes: Vec<SceneFile>,
+    pub(crate) authors: Authors,
 }
 
 impl Context {
@@ -402,6 +410,8 @@ impl Context {
             paused: false,
             authors: Authors::default(),
             scenes: SceneFiles::default(),
+            #[cfg(feature = "dev")]
+            edited: None,
             player: None,
         }
     }
@@ -1220,6 +1230,7 @@ impl Stack {
                 let text = crate::snapshot::write(
                     &cx.world,
                     &cx.scenes.files,
+                    &Run::Playing,
                     net.app(),
                     &self.names,
                     next,
@@ -1338,15 +1349,124 @@ impl Stack {
 
     /// Loads the layers, then puts `snapshot`'s world in `cx`'s place, as a run restored from it
     /// starts, and has each layer pick up from it, each from the bottom up; returns the ticks the
-    /// simulation had run as it was taken, which the run's go on from.
+    /// simulation had run as it was taken, which the run's go on from, and whether its run was
+    /// stopped, as the run then is. A development build's run that a tool API `serves`, and that
+    /// can stop, as [`refuses_stop`](Self::refuses_stop) says, goes on as the snapshot's run was:
+    /// one taken while a copy played holds the world as edited too, which comes back held aside, as
+    /// [`play`](Self::play) holds it, the authors' edits afresh, as after any restore. Any other
+    /// run plays on with the world that played, warning `snapshot.plays`, with why, of a snapshot
+    /// whose run was stopped or held a world as edited.
     ///
     /// Fails as [`Snapshot::restore`] does.
-    pub(crate) fn restore(&mut self, cx: &mut Context, snapshot: &Snapshot) -> Result<u64> {
+    pub(crate) fn restore(
+        &mut self,
+        cx: &mut Context,
+        snapshot: &Snapshot,
+        serves: bool,
+    ) -> Result<(u64, bool)> {
         let _zone = gg_core::zone!();
         cx.player = self.net.as_ref().map(Lockstep::player);
         self.load(cx);
         cx.attached = true;
-        self.restore_in_place(cx, snapshot)
+        #[cfg(feature = "dev")]
+        if serves && self.refuses_stop().is_none() {
+            // As the layers loaded it, with their types, assets and resources, for the world as
+            // edited to load into.
+            let loaded = snapshot.held.as_ref().map(|held| (held, cx.world.clone()));
+            let ticks = self.restore_in_place(cx, snapshot)?;
+            if let Some((held, mut world)) = loaded {
+                snapshot.restore_held(&mut world)?;
+                world.share_assets(&cx.assets);
+                cx.edited = Some(Edited {
+                    world,
+                    ticks: held.ticks,
+                    scenes: held.scenes.clone(),
+                    authors: Authors::default(),
+                });
+            }
+            return Ok((ticks, snapshot.stopped));
+        }
+        let _ = serves;
+        let ticks = self.restore_in_place(cx, snapshot)?;
+        if snapshot.stopped || snapshot.held.is_some() {
+            #[cfg(feature = "dev")]
+            let why = self
+                .refuses_stop()
+                .unwrap_or("the run serves no tool API, whose `play` alone plays a stopped run");
+            #[cfg(not(feature = "dev"))]
+            let why = "the build serves no tool API, whose `play` alone plays a stopped run";
+            warn!(
+                code = "snapshot.plays",
+                path = %snapshot.from,
+                why,
+                "The snapshot's run was stopped, or held a world as edited, but this run plays \
+                 from start to end: it goes on with the world that played"
+            );
+        }
+        Ok((ticks, false))
+    }
+
+    /// Whether the tool API's `stop` can't stop the run, and if so, why: a recorded run's replay
+    /// couldn't follow a world brought back between ticks, its ticks taken back, and a lockstep
+    /// peer's world would part from the other's. Such a run plays from start to end.
+    #[cfg(feature = "dev")]
+    pub(crate) fn refuses_stop(&self) -> Option<&'static str> {
+        if self.recorder.is_some() {
+            Some(
+                "the run is recorded, and its replay couldn't follow a world brought back between \
+                 ticks, its ticks taken back",
+            )
+        } else if self.net.is_some() {
+            Some("the run is a lockstep peer, whose world would part from the other peer's")
+        } else {
+            None
+        }
+    }
+
+    /// Has a copy of `cx`'s world, the world as edited, which is at `ticks`, play in its place, as
+    /// the tool API's `play` asks of a stopped run: holds the world as edited aside, with its
+    /// ticks, its scene files and the authors' edits of it, whose logs the copy starts afresh,
+    /// until [`stop`](Self::stop). The layers are told nothing: what they hold of the world holds
+    /// of the copy, which goes on exactly as the world would.
+    #[cfg(feature = "dev")]
+    pub(crate) fn play(&self, cx: &mut Context, ticks: u64) {
+        let _zone = gg_core::zone!();
+        let copy = cx.world.clone();
+        let world = mem::replace(&mut cx.world, copy);
+        let entities = world.entities(None).map_or(0, |entities| entities.len());
+        cx.edited = Some(Edited {
+            world,
+            ticks,
+            scenes: cx.scenes.files.clone(),
+            authors: mem::take(&mut cx.authors),
+        });
+        info!(ticks, entities, "Playing a copy of the world as edited");
+    }
+
+    /// Brings back the world as edited that [`play`](Self::play) holds aside, if it holds one, as
+    /// the tool API's `stop` asks: the very world, with its scene files and the authors' edits of
+    /// it, the copy and all done to it going; empties each layer's queue, which the copy's ticks
+    /// were to apply; has each layer pick up from the world, from the bottom up, as
+    /// [`Layer::restored`] says; and returns the ticks the world as edited is at. A run playing
+    /// from its start holds none: `None`, and nothing changes.
+    #[cfg(feature = "dev")]
+    pub(crate) fn stop(&mut self, cx: &mut Context) -> Option<u64> {
+        let edited = cx.edited.take()?;
+        let _zone = gg_core::zone!();
+        cx.world = edited.world;
+        cx.share_assets();
+        cx.authors = edited.authors;
+        cx.scenes.files = edited.scenes;
+        for layer in &mut self.layers {
+            if let Some(queue) = layer.commands() {
+                queue.clear();
+            }
+        }
+        for layer in &mut self.layers {
+            layer.restored(cx);
+        }
+        info!(ticks = edited.ticks, "Stopped: the world as edited is back");
+        Some(edited.ticks)
     }
 
     /// Puts `snapshot`'s world in `cx`'s place, the layers having loaded, and has each layer pick
@@ -1380,14 +1500,6 @@ impl Stack {
                  that a run restored from a snapshot doesn't spawn them again"
             );
         }
-    }
-
-    /// The world a snapshot of the run saves: the one a layer holds aside, as
-    /// [`Layer::saved_world`] says, or else `cx`'s.
-    #[cfg(feature = "dev")]
-    pub(crate) fn saved_world<'w>(&'w self, cx: &'w Context) -> &'w World {
-        let held = self.layers.iter().find_map(|layer| layer.saved_world());
-        held.unwrap_or(&cx.world)
     }
 
     /// Detaches from the top down, the reverse of attaching, once a recording has its end.
@@ -1602,10 +1714,6 @@ impl<L: Layer> Layer for Hot<L> {
 
     fn restored(&mut self, cx: &mut Context) {
         HotFn::current(L::restored).call((&mut self.0, cx));
-    }
-
-    fn saved_world(&self) -> Option<&World> {
-        HotFn::current(L::saved_world).call((&self.0,))
     }
 
     fn detach(&mut self, cx: &mut Context) {
@@ -2053,13 +2161,11 @@ mod tests {
         assert_eq!(cx.view(), None);
     }
 
-    /// Records each call of its methods but `saved_world`, which takes it as it is, and holds a
-    /// world aside and a queued command.
+    /// Records each call of its methods, and holds a queued command.
     #[cfg(feature = "dev")]
     #[derive(Default)]
     struct Keeper {
         calls: Vec<&'static str>,
-        held: World,
         queued: Vec<u32>,
     }
 
@@ -2073,9 +2179,6 @@ mod tests {
         }
         fn restored(&mut self, _: &mut Context) {
             self.calls.push("restored");
-        }
-        fn saved_world(&self) -> Option<&World> {
-            Some(&self.held)
         }
         fn detach(&mut self, _: &mut Context) {
             self.calls.push("detach");
@@ -2115,13 +2218,92 @@ mod tests {
         hot.update(&mut cx, Duration::ZERO);
         let handled = hot.event(&mut cx, &Event::CursorEntered);
         hot.detach(&mut cx);
-        let held = hot.saved_world().expect("the world held aside");
-        assert!(std::ptr::eq(held, &hot.0.held));
         assert_eq!((queued, handled), (Some(1), ControlFlow::Break(())));
         let calls = [
             "load", "attach", "restored", "tick", "commands", "update", "event", "detach",
         ];
         assert_eq!(hot.0.calls, calls);
+    }
+
+    /// Holds a queue of commands, and counts the calls of its `restored`.
+    #[cfg(feature = "dev")]
+    struct Restorable {
+        queued: Vec<u32>,
+        restored: Rc<std::cell::Cell<u32>>,
+    }
+
+    #[cfg(feature = "dev")]
+    impl Layer for Restorable {
+        fn restored(&mut self, _: &mut Context) {
+            self.restored.set(self.restored.get() + 1);
+        }
+        fn commands(&mut self) -> Option<&mut dyn Commands> {
+            Some(&mut self.queued)
+        }
+    }
+
+    /// `play` holds the world as edited aside, with its ticks, its scene files and the authors'
+    /// edits of it, while a copy plays in its place, whose edits start afresh; `stop` brings back
+    /// the very world, with them, empties each layer's queue, has each pick up from the world,
+    /// once, and returns its ticks; a `stop` that finds none held changes nothing; and a recorded
+    /// run refuses `stop`.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn stop_brings_back_the_world_as_edited_that_play_held() {
+        let restored = Rc::default();
+        let mut stack = Stack::default();
+        stack.push_layer(Restorable {
+            queued: Vec::new(),
+            restored: Rc::clone(&restored),
+        });
+        let mut cx = Context::seeded(1);
+        let hero = cx.world_mut().spawn(Transform::IDENTITY);
+        let file = SceneFile::new(
+            "scenes/a.ron".into(),
+            "scenes/a.ron".to_owned(),
+            "(entities: {})\n".to_owned(),
+        );
+        cx.scenes.loaded(file.clone());
+        stack.attach(&mut cx);
+        let id = cx.world().id(hero).expect("alive");
+        let set = |x: f32| Edit::Apply {
+            author: "test".to_owned(),
+            operations: vec![crate::Operation::Set {
+                entity: id,
+                component: "Transform".into(),
+                path: "translation.x".to_owned(),
+                value: Value::F32(x),
+            }],
+        };
+        let queued = |stack: &mut Stack| stack.commands_of(0).expect("a queue").len();
+        cx.apply_edit(set(1.0)).expect("set");
+        let queue = stack.commands_of(0).expect("a queue");
+        queue.push(&Value::UInt(7)).expect("queued");
+        assert_eq!(stack.stop(&mut cx), None, "nothing held");
+        assert_eq!((queued(&mut stack), restored.get()), (1, 0));
+        let (edited, hash) = (cx.world().serial(), cx.world().hash());
+        stack.play(&mut cx, 40);
+        let held = cx.edited.as_ref().expect("the world as edited, held");
+        assert_eq!((held.world.serial(), held.ticks), (edited, 40));
+        assert_eq!(held.scenes, std::slice::from_ref(&file));
+        assert_ne!(cx.world().serial(), edited, "a copy plays");
+        assert_eq!(cx.authors.logs(cx.world()).count(), 0);
+        cx.apply_edit(set(2.0)).expect("set in the copy");
+        cx.scenes.files.clear();
+        assert_eq!(stack.stop(&mut cx), Some(40));
+        assert!(cx.edited.is_none());
+        assert_eq!((cx.world().serial(), cx.world().hash()), (edited, hash));
+        assert_eq!(cx.scenes.files, [file]);
+        let logs = cx.authors.logs(cx.world());
+        let edits: Vec<usize> = logs.map(|(_, log)| log.edits().count()).collect();
+        assert_eq!(edits, [1], "the edit made before `play` alone");
+        assert_eq!((queued(&mut stack), restored.get()), (0, 1));
+        assert_eq!(stack.refuses_stop(), None);
+        let dir = crate::dirs::tests::Scratch::new("stop-recorded");
+        std::fs::create_dir_all(&dir.0).expect("a directory");
+        let recorder = Recorder::create(&dir.0.join("run.recording"), "Tested");
+        stack.record(recorder.expect("created"));
+        assert!(stack.refuses_stop().is_some());
     }
 
     /// Without a window, as in headless runs and tests, a file dialog shows nothing, so it picks

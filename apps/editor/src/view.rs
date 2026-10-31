@@ -1,9 +1,9 @@
-//! The tools of the editor's view, alike in its own world and in a project's game: its camera; the
-//! toolbar; the handles, which pick and edit through the Inspector's link; the pick a press off
-//! them asks for, and what the view shows under the cursor; and what they paint over the view and
-//! show over it. What depends on the world the view shows, the layer gives them: what the Inspector
-//! has picked, as the handles see it; the picks, which it asks for and whose answers it hands
-//! them; whether there's a camera to see through; and what's under the cursor called.
+//! The tools of the editor's view of a project's game: its camera; the toolbar; the handles, which
+//! pick and edit through the Inspector's link; the pick a press off them asks for, and what the
+//! view shows under the cursor; and what they paint over the view and show over it. What depends
+//! on the world the view shows, the layer gives them: what the Inspector has picked, as the handles
+//! see it; the picks, which it asks for and whose answers it hands them; and what's under the
+//! cursor called.
 
 use std::ops::ControlFlow;
 
@@ -121,7 +121,7 @@ impl<T, F> ViewTools<T, F> {
 
     /// Has Q, W, E or R pick its tool, Select, Move, Rotate or Scale, for `event`, a press of it,
     /// not a repeat; but not one with `command` held, Ctrl, or Cmd on macOS, which is a
-    /// shortcut's; nor while the view sees through the world's camera, which shows no handles; nor
+    /// shortcut's; nor while the view sees through the game's camera, which shows no handles; nor
     /// while the editor's camera flies, as its keys steer it; nor during a drag of the handles.
     pub fn choose_tool(&mut self, event: &Event<'_>, command: bool) {
         let Event::Key {
@@ -146,7 +146,7 @@ impl<T, F> ViewTools<T, F> {
     }
 
     /// Ends a drag of the handles as the pick, `picked` as the handles see it, changes or dies, the
-    /// world is another, the Inspector undoes or redoes, or the view goes to the world's camera,
+    /// world is another, the Inspector undoes or redoes, or the view goes to the game's camera,
     /// sealing its edit.
     pub fn hold(&mut self, picked: Option<&Picked>) {
         let ended = self.handles.hold(picked);
@@ -189,17 +189,17 @@ impl<T, F> ViewTools<T, F> {
         }
     }
 
-    /// Shows the toolbar over the view's top left, whose world-camera switch is off unless
-    /// `has_camera`, and while the view is through the editor's camera, the gizmo over its top
-    /// right, naming the side the camera looks squarely from, as [`grid::square`] says, in `view`,
-    /// where the view is in the main window. Then has the cursor over the view say what the left
-    /// button does, and while a drag goes on, what it does, wherever the cursor is.
-    pub fn overlay(&mut self, ui: &mut Ui<'_>, has_camera: bool, view: Option<Viewport>) {
+    /// Shows the toolbar over the view's top left, and while the view is through the editor's
+    /// camera, the gizmo over its top right, naming the side the camera looks squarely from, as
+    /// [`grid::square`] says, in `view`, where the view is in the main window. Then has the cursor
+    /// over the view say what the left button does, and while a drag goes on, what it does,
+    /// wherever the cursor is.
+    pub fn overlay(&mut self, ui: &mut Ui<'_>, view: Option<Viewport>) {
         let Self {
             camera, toolbar, ..
         } = self;
         ui.over_view("toolbar", Align2::LEFT_TOP, |ui| {
-            toolbar.show(ui, camera, has_camera);
+            toolbar.show(ui, camera);
         });
         if !toolbar.world_camera {
             let seen = camera.viewpoint();
@@ -325,9 +325,232 @@ impl<T: Copy + Ord, F: Clone> Hover<T, F> {
 
 #[cfg(test)]
 mod tests {
-    use gg_engine::EntityId;
+    use std::time::Duration;
+
+    use gg_engine::reflect::Value;
+    use gg_engine::{EntityId, Inspector, MouseButton, Pick, Pose, Scroll, Transform};
 
     use super::*;
+    use crate::tests::reading;
+
+    /// The view's tools as a test has them, with the engine's picks.
+    type Tools = ViewTools<Pick, EntityId>;
+
+    /// The tools, linked to an Inspector of their own, the toolbar as it starts.
+    fn fresh() -> Tools {
+        ViewTools::new(Inspector::default().link(), Toolbar::default())
+    }
+
+    /// On Move's X arrow, as the editor's camera starts, for an entity at the origin: 105 of its
+    /// 150 pixels, 70 points, right of the middle.
+    const ON_X: [f64; 2] = [605.0, 350.0];
+
+    /// An entity at the origin, unturned, at its own size, as the Inspector has picked it.
+    fn at_the_origin() -> Option<Picked> {
+        Some(Picked {
+            entity: "0123456789abcdef".parse().expect("an ID"),
+            serial: 1,
+            local: Transform::IDENTITY,
+            parent: Pose::IDENTITY,
+            stepped: 0,
+            waiting: false,
+        })
+    }
+
+    /// What `tools` do with the cursor moved to `at`, and then with `button` pressed or let go
+    /// there, as the editor reads the window there, with `picked` picked.
+    fn press_at(
+        tools: &mut Tools,
+        picked: Option<Picked>,
+        at: [f64; 2],
+        button: MouseButton,
+        pressed: bool,
+    ) -> ControlFlow<()> {
+        let moved = Event::CursorMoved { x: at[0], y: at[1] };
+        let _ = tools.take(&moved, &reading(at), picked);
+        let event = Event::MouseButton { button, pressed };
+        tools.take(&event, &reading(at), picked)
+    }
+
+    /// Tools dragging Move's X arrow of `at_the_origin`, through the editor's camera as it starts.
+    fn dragging() -> Tools {
+        let mut tools = fresh();
+        tools.toolbar.tool = Tool::Move;
+        tools.shown = Some(tools.camera.viewpoint());
+        let pressed = press_at(&mut tools, at_the_origin(), ON_X, MouseButton::Left, true);
+        assert_eq!(pressed, ControlFlow::Break(()));
+        assert!(tools.handles.dragging());
+        tools
+    }
+
+    /// A drag of a handle sets one field of the picked entity through the Inspector's link, the
+    /// latest value of it alone between the Inspector's passes, and seals the edit as it ends; the
+    /// camera sees the moves: here Move's X arrow, dragged right along it, and off it a little.
+    #[test]
+    fn a_drag_of_a_handle_sets_one_field_of_the_pick_and_seals() {
+        let mut tools = dragging();
+        let picked = at_the_origin();
+        for x in [620.0, 650.0, 680.0] {
+            let moved = Event::CursorMoved { x, y: 360.0 };
+            let handled = tools.take(&moved, &reading([x, 360.0]), picked);
+            assert_eq!(handled, ControlFlow::Continue(()));
+        }
+        let at = [680.0, 360.0];
+        let _ = press_at(&mut tools, picked, at, MouseButton::Left, false);
+        assert!(!tools.handles.dragging());
+        let pending = tools.link.pending();
+        let [Some((id, component, path, Value::Vec3(moved))), None] = &pending[..] else {
+            panic!("a set and a seal: {pending:?}");
+        };
+        let entity = picked.expect("picked").entity;
+        let field = (*id, component.as_str(), path.as_str());
+        assert_eq!(field, (entity, "Transform", "translation"));
+        // 75 pixels right, at 60 a unit.
+        assert!(
+            moved.abs_diff_eq(Vec3::new(1.25, 0.0, 0.0), 1e-4),
+            "{moved}"
+        );
+        assert_eq!(tools.picking, None, "it picked nothing");
+    }
+
+    /// While a drag of the handles lasts, the tools take the other buttons' presses, the wheel and
+    /// Home from the editor's camera, which neither drags, dollies nor goes home; and while the
+    /// camera drags, a press on a handle grabs nothing, and asks for no pick.
+    #[test]
+    fn the_handles_and_the_camera_keep_out_of_each_others_drags() {
+        let mut tools = dragging();
+        let picked = at_the_origin();
+        // Away from where it starts, which Home would ease it back to.
+        tools.camera.orbit(Vec2::new(40.0, 20.0));
+        let seen = tools.camera.viewpoint();
+        let press = |button| Event::MouseButton {
+            button,
+            pressed: true,
+        };
+        let home = Event::Key {
+            key: Key::Home,
+            pressed: true,
+            repeat: false,
+        };
+        let wheel = Event::Scroll(Scroll::Lines { x: 0.0, y: 2.0 });
+        for event in [
+            press(MouseButton::Middle),
+            press(MouseButton::Right),
+            wheel,
+            home,
+        ] {
+            let handled = tools.take(&event, &reading(ON_X), picked);
+            assert_eq!(handled, ControlFlow::Break(()), "{event:?}");
+        }
+        tools.camera.update(Duration::from_secs(1));
+        assert_eq!(tools.camera.moving(), None);
+        assert_eq!(tools.camera.viewpoint(), seen);
+        let _ = press_at(&mut tools, picked, ON_X, MouseButton::Left, false);
+        let panning = press_at(&mut tools, picked, ON_X, MouseButton::Middle, true);
+        assert_eq!(panning, ControlFlow::Break(()));
+        assert_eq!(tools.camera.moving(), Some(Move::Pan));
+        let left = press_at(&mut tools, picked, ON_X, MouseButton::Left, true);
+        assert_eq!(left, ControlFlow::Continue(()));
+        assert!(!tools.handles.dragging());
+        assert_eq!(tools.picking, None);
+    }
+
+    /// Q, W, E and R pick Select, Move, Rotate and Scale as they're pressed: not as they repeat,
+    /// with Ctrl held, through the game's camera, while the editor's camera flies, nor during a
+    /// drag of the handles.
+    #[test]
+    fn q_w_e_and_r_pick_the_tools() {
+        let mut tools = fresh();
+        let key = |key, repeat| Event::Key {
+            key,
+            pressed: true,
+            repeat,
+        };
+        for (pressed, tool) in [
+            (Key::KeyW, Tool::Move),
+            (Key::KeyE, Tool::Rotate),
+            (Key::KeyR, Tool::Scale),
+            (Key::KeyQ, Tool::Select),
+        ] {
+            tools.choose_tool(&key(pressed, false), false);
+            assert_eq!(tools.toolbar.tool, tool);
+        }
+        tools.choose_tool(&key(Key::KeyW, true), false);
+        tools.choose_tool(&key(Key::KeyW, false), true);
+        assert_eq!(tools.toolbar.tool, Tool::Select, "repeating, or with Ctrl");
+        tools.toolbar.world_camera = true;
+        tools.choose_tool(&key(Key::KeyW, false), false);
+        assert_eq!(
+            tools.toolbar.tool,
+            Tool::Select,
+            "through the game's camera"
+        );
+        tools.toolbar.world_camera = false;
+        let right = |pressed| Event::MouseButton {
+            button: MouseButton::Right,
+            pressed,
+        };
+        let screen = reading(ON_X).screen;
+        let _ = tools.camera.event(&right(true), screen, Tool::Select);
+        assert!(tools.camera.flies());
+        tools.choose_tool(&key(Key::KeyE, false), false);
+        assert_eq!(tools.toolbar.tool, Tool::Select, "flying");
+        let mut tools = dragging();
+        let _ = tools.take(&key(Key::KeyR, false), &reading(ON_X), at_the_origin());
+        assert_eq!(tools.toolbar.tool, Tool::Move, "dragging");
+        let _ = press_at(&mut tools, at_the_origin(), ON_X, MouseButton::Left, false);
+        let _ = tools.take(&key(Key::KeyR, false), &reading(ON_X), at_the_origin());
+        assert_eq!(tools.toolbar.tool, Tool::Scale, "let go");
+    }
+
+    /// A press of the left button over the view off the handles asks for a pick at the cursor,
+    /// with Select, Move, Rotate and Scale, through the game's camera too, which it leaves the
+    /// view seeing through; but not with Alt, which orbits, with Pan or Orbit, or with nothing
+    /// under it to pick, as a press on a handle has. A grab of a handle drops the pick asked
+    /// before it.
+    #[test]
+    fn a_press_off_the_handles_asks_for_a_pick() {
+        let off = [200.0, 500.0];
+        for tool in [Tool::Select, Tool::Move, Tool::Rotate, Tool::Scale] {
+            let mut tools = fresh();
+            tools.toolbar.tool = tool;
+            tools.shown = Some(tools.camera.viewpoint());
+            let pressed = press_at(&mut tools, at_the_origin(), off, MouseButton::Left, true);
+            assert_eq!(pressed, ControlFlow::Continue(()), "{tool:?}");
+            assert_eq!(tools.picking, Some(off), "{tool:?}");
+        }
+        let mut tools = fresh();
+        tools.toolbar.world_camera = true;
+        let pressed = press_at(&mut tools, at_the_origin(), ON_X, MouseButton::Left, true);
+        assert_eq!(pressed, ControlFlow::Continue(()));
+        assert_eq!(tools.picking, Some(ON_X));
+        assert!(tools.toolbar.world_camera);
+        for tool in [Tool::Pan, Tool::Orbit] {
+            let mut tools = fresh();
+            tools.toolbar.tool = tool;
+            let _ = press_at(&mut tools, at_the_origin(), off, MouseButton::Left, true);
+            assert_eq!(tools.picking, None, "{tool:?}");
+        }
+        let mut tools = fresh();
+        let alt = Event::MouseButton {
+            button: MouseButton::Left,
+            pressed: true,
+        };
+        let mut held = reading(off);
+        held.screen.alt = true;
+        let _ = tools.take(&alt, &held, at_the_origin());
+        assert_eq!(tools.picking, None, "with Alt");
+        let tools = dragging();
+        assert_eq!(tools.picking, None, "on a handle");
+        let mut tools = fresh();
+        tools.toolbar.tool = Tool::Move;
+        tools.shown = Some(tools.camera.viewpoint());
+        tools.asked = Context::seeded(0).pick([0.0, 0.0]);
+        assert!(tools.asked.is_some());
+        let grabbed = press_at(&mut tools, at_the_origin(), ON_X, MouseButton::Left, true);
+        assert_eq!(grabbed, ControlFlow::Break(()));
+        assert_eq!(tools.asked, None, "a grab drops the pick asked before it");
+    }
 
     /// The answer to the latest pick asked for picks what it found, or unpicks for none; answers
     /// to older picks, which a later press superseded, pick nothing; and once answered, a pick is

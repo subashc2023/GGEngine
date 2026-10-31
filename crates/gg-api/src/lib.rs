@@ -13,8 +13,26 @@
 //! - `hello`, [`Hello`]: answers [`Welcome`]; names the client, whose edits the connection's
 //!   `apply`, `undo` and `redo` are.
 //! - `ping`: answers [`Pulse`] at once, even while the game's main thread is busy.
-//! - `status`, `pause` and `resume`: answer [`Status`].
-//! - `step`, [`Step`]: runs ticks, pausing the simulation, and answers [`Status`] once they've run.
+//! - `status`, `pause`, `resume`, `play` and `stop`: answer [`Status`].
+//!
+//!   `stop` stops the game: frames run no ticks, and its world is the world as edited, which only
+//!   edits and scene files' saves change, until `play`. While a copy plays, `stop` brings back the
+//!   world as edited as it was when the copy started: at its ticks; with its scene files as last
+//!   applied, to which a save made since applies; and with the authors' edits, which `undo` steps
+//!   back through again. What the copy did goes with it, edits and entities. The IDs it drew are
+//!   drawn again, so a client keeps no ID learned while it played across a `stop`.
+//!
+//!   A game playing from its start, which no `play` started, holds no world as edited: `stop` stops
+//!   it where it is, and that world is the world as edited from then on.
+//!
+//!   `stop` fails the `step`s waiting with `api.stopped`. It fails itself with `api.no_stop` in a
+//!   recorded run or a lockstep peer, which play from start to end.
+//!
+//!   `play` has a copy of the world as edited play in its place, from its ticks, until `stop`.
+//!
+//!   Neither does anything in a state the game is already in.
+//! - `step`, [`Step`]: runs ticks, pausing the simulation, and answers [`Status`] once they've run;
+//!   fails with `api.stopped` while the game is stopped: `play` first.
 //! - `capture`, [`Capture`]: writes the game's view as a PNG once a frame renders it, as it's
 //!   shown, the look among it, or as the game shows it on its own, and answers [`Captured`].
 //! - `view`, [`View`]: has the game publish each frame's view, from the next, into the memory a
@@ -49,9 +67,10 @@
 //!   game rebuilt may describe its types otherwise.
 //! - `hash`: answers [`struct@Hash`], the world's.
 //! - `snapshot`, [`Snapshot`]: saves the world whole as a file, which a run given `--restore`
-//!   starts from, and answers [`Snapshotted`] once it's written; before the simulation's first tick
-//!   in the run, which applies what the layers queued as they started, it fails with
-//!   `api.not_ticked`.
+//!   starts from, and answers [`Snapshotted`] once it's written: a stopped game's file records that
+//!   it's stopped, and one taken while a copy plays saves the world as edited too, so that a run
+//!   restored from it goes on as it was. Before the first tick of a game playing from its start,
+//!   which applies what the layers queued as they started, it fails with `api.not_ticked`.
 //! - `patch`, [`Patch`]: applies a patch of the game's code, which `dx tools hotpatch` built for the
 //!   game's process, between ticks, and answers [`Patched`]; fails with `api.bad_params` if the
 //!   table's library, `lib`, isn't an absolute path, and with `api.patch` if the build can't take
@@ -326,13 +345,20 @@ pub struct Pulse {
     pub waiting: Option<String>,
 }
 
-/// What `status`, `pause`, `resume` and `step` answer: the game as the frame that answers starts.
+/// What `status`, `pause`, `resume`, `play`, `stop` and `step` answer: the game as the frame that
+/// answers starts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Status {
-    /// The ticks the simulation has run, which number the next.
+    /// The ticks the simulation has run, which number the next: after a `stop` that brings back the
+    /// world as edited, that world's, so that they may go back.
     pub ticks: u64,
-    /// Whether the simulation is paused, as `pause` and `step` leave it.
+    /// Whether the simulation is paused, as `pause` and `step` leave it, which lasts across `stop`
+    /// and `play`.
     pub paused: bool,
+    /// Whether the game is stopped, as `stop` and `--stopped` leave it: its world is the world as
+    /// edited, which no tick changes, until `play`. False from an engine older than `stop`.
+    #[serde(default)]
+    pub stopped: bool,
     /// The frames the game has run.
     pub frames: u64,
     /// The world's living entities.
@@ -344,7 +370,8 @@ pub struct Status {
 
 /// What `step` takes: how many ticks to run, 1 by default and at most 10,000, a frame's worth
 /// each frame. The simulation stays paused after them; `resume` runs it again, and drops the
-/// steps not yet run, answering those waiting.
+/// steps not yet run, answering those waiting; `stop` drops the steps not yet run too, failing
+/// those waiting with `api.stopped`.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Step {
@@ -533,7 +560,7 @@ pub struct Look {
         skip_serializing_if = "Option::is_none"
     )]
     pub outline: Option<Option<Outline>>,
-    /// The plane a grid is drawn in, fitted to the view, as the editor's own world draws one.
+    /// The plane a grid is drawn in, fitted to the view, as the editor draws one.
     #[serde(
         default,
         deserialize_with = "present",
@@ -930,7 +957,8 @@ pub struct Edits {
 
 /// What `edits` answers: each author's log, in the order the authors first edited; each of the
 /// world the game runs, since a world took its place, as one restored from a snapshot does, which
-/// starts the logs afresh.
+/// starts the logs afresh. `play` starts the logs afresh for the copy, and `stop` brings back those
+/// of the world as edited.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct History {
     pub authors: Vec<Authored>,

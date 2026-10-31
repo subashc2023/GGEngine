@@ -442,9 +442,10 @@ fn run_args(
             args.api,
         ) {
             Ok(api) => api,
-            // Its tool reaches it through the API alone, as its console is off: it ends, saying
-            // why, which the tool hears of as the run ends, rather than running unseen.
-            Err(error) if args.embedded => return Err(error),
+            // An embedded run's tool reaches it through the API alone, as its console is off, and
+            // a stopped run plays only as the API's `play` asks: it ends, saying why, which the
+            // tool hears of as the run ends, rather than running unseen or stopped for good.
+            Err(error) if args.embedded || args.stopped => return Err(error),
             Err(error) => {
                 let consequence = "tools can't reach this run";
                 warn!(code = error.code(), "{error:#}; {consequence}");
