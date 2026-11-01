@@ -20,7 +20,7 @@ pub struct Texture {
 
 impl Texture {
     /// The engine's white texture, a pixel across, which a sprite of only a color shows.
-    pub(crate) const WHITE: Self = Self { index: 0 };
+    pub const WHITE: Self = Self { index: 0 };
 
     /// Its index, the order [`Textures::add`] handed it out in, from 0, the engine's white
     /// texture's: what finds its name, where the handle is the renderer's own.

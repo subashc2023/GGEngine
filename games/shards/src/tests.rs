@@ -71,18 +71,18 @@ fn every_asset_has_its_id_file_beside_it() {
     assert!(found.unread.is_empty(), "{:?}", found.unread);
 }
 
-/// The arena's scene loads and saves to its own bytes, so that a type of the game's that changes
-/// under it fails here.
+/// The arena's scene loads, with the textures it names, and saves to its own bytes, so that a type
+/// of the game's that changes under it fails here.
 #[test]
 fn the_arena_saves_as_it_is() {
     let path = scene("arena.ron");
     let text = fs::read_to_string(&path).expect("the arena");
-    let mut cx = Context::seeded(1);
-    let world = cx.world_mut();
-    register(world);
-    let roots = world.load_scene(&text);
-    let roots = roots.unwrap_or_else(|error| panic!("{}:{error}", path.display()));
-    assert_eq!(world.save_scene(&roots).expect("saved"), text);
+    let mut cx = Context::seeded(1).root(env!("CARGO_MANIFEST_DIR"));
+    register(cx.world_mut());
+    let roots = cx
+        .load_scene_file(&path)
+        .unwrap_or_else(|error| panic!("{error:#}"));
+    assert_eq!(cx.world().save_scene(&roots).expect("saved"), text);
 }
 
 /// The game builds the arena, both players at their starts and its shards, apart from the players;

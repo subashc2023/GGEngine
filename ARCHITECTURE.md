@@ -313,8 +313,8 @@ A project's state is text that people and agents edit, diff and merge with ordin
   library's formatting, line endings or Rust release, and `ron` only reads it, through seeds
   that reflection's descriptions drive, never its untyped values. A texture is saved as its name,
   its asset ID or else its path relative to the app's root (`App::root`), as Asset IDs says below,
-  which a load finds it by among the textures the game has loaded, as it finds it by a path to its
-  file, as a scene written by hand may name it; what's opaque, such as a `MeshDraw`, isn't saved:
+  which a load finds it by, as it finds it by a path to its file, as a scene written by hand may
+  name it, loading it where no layer has; what's opaque, such as a `MeshDraw`, isn't saved:
   a load builds each component on its type's `Component::base`, which gives it that, or from the
   scene alone. A field a scene leaves out, as one saved before its type had the field does, takes
   its default, and saves again whole. A child's `Parent` is saved as its parent's ID, and a root's
@@ -369,6 +369,25 @@ A project's state is text that people and agents edit, diff and merge with ordin
     Each is read by a name or by a path to the texture's file. A texture is named as it's added,
     by the ID its run's database holds for its file then, and keeps that name for the run, but in
     a replay or a lockstep joiner, which go by the names they're given, as below.
+  - A texture that a scene, the tool API's edit or `scene open`, or a recorded or a lockstep peer's
+    command or edit names, and no layer has added, loads there, before the text is read, as
+    `Context::add_texture` loads a file, and is named as it names one, its file found by the name:
+    in a run that follows another, a replay or a lockstep joiner, at the path the name was given;
+    else by an ID, as the run's database has it, which a joiner has but a replay, reading no ID
+    file, doesn't; else by a path from the asset root, which mustn't be absolute or lead outside
+    it, as through `..` or a link. A model's image loads with its model alone. A name that doesn't
+    load refuses what names it where it's asked for (`asset.no_texture`, the API's
+    `api.no_texture`), saying why: `asset.model_image`, `asset.unknown_id`, `asset.outside_root`,
+    or the add's own, as `engine.bad_texture`. In a run that follows another, and in a restore, a
+    stand-in of magenta and black squares takes its place instead, named as named, warning
+    `asset.stand_in`, so that the run goes as the other did, its hash reading names alone. What's
+    loaded so is noted among what the layers added, so that a snapshot's `asset` lines list it,
+    and a run restored from one loads each texture its run had, in order, before it reads the
+    world. A lockstep host loads what a scene file's save names before it offers it, so that their
+    names go out first, and offers none naming a texture it can't load; a joiner loads for its
+    tool API only what its host named (`asset.not_given`). Scene text that a layer loads into a
+    world itself, as inside a tick, finds only what's loaded. Each decodes on the main thread as
+    it's named, as a layer's add does.
   - Builds without `dev`, which read no ID file, name every texture by its path, so that a scene,
     a recording or a snapshot naming one by its ID finds none there; cooked data will give them
     IDs.
@@ -552,20 +571,21 @@ after a crash or a rebuild, goes on where the world was: each slot under its gen
 ones in their order; each table in the order it was made, empty ones too, and its rows in theirs,
 each with its entity's ID and its components' values, as a recording's text writes values, by their
 fields' names; each parent's children in their order; the stream of IDs; the resources that save
-themselves; the ticks the simulation had run; the assets the layers had added, and the names their
-textures had, as [Project state](#project-state) says; and, of a game the tool API stopped, that
-it's stopped, or of one playing a copy, the world as edited too, which it held aside, with its
-ticks, its hash and its scene files. Loaded, it's the world saved, hash for hash, but for the slots
-a log kept vacant, which no log in the new process gives back, so that they're freed. A component
-whose type changed since is matched to the type as it is by its fields' names: a field added takes
-its default, one dropped goes, a number of another kind is taken where it's exactly a number of
-the field's, and a component that no longer reads, or whose type is gone, is left out, its entity
-going on without it, each change warned of once, by the type's path rather than by value
-(`snapshot.changed`); a rotation that rounding took off unit length is normalized.
-What's opaque, such as a `MeshDraw`'s mesh and shader, holds indices, so it comes back only into a
-run whose layers added the same assets in the same order, a file added again counting again, of the
-same types, as the file's `asset` lines check, a draw's bytes by its mesh's and shader's types'
-names and sizes, and is left out otherwise. A world no load could read, such as a value nested
+themselves; the ticks the simulation had run; the assets the layers had added, the textures loaded
+where text named them among them, which a run restored from it loads again before its world, and
+the names its textures had, as [Project state](#project-state) says; and, of a game the tool API
+stopped, that it's stopped, or of one playing a copy, the world as edited too, which it held aside,
+with its ticks, its hash and its scene files. Loaded, it's the world saved, hash for hash, but for
+the slots a log kept vacant, which no log in the new process gives back, so that they're freed. A
+component whose type changed since is matched to the type as it is by its fields' names: a field
+added takes its default, one dropped goes, a number of another kind is taken where it's exactly a
+number of the field's, and a component that no longer reads, or whose type is gone, is left out,
+its entity going on without it, each change warned of once, by the type's path rather than by
+value (`snapshot.changed`); a rotation that rounding took off unit length is normalized. What's
+opaque, such as a `MeshDraw`'s mesh and shader, holds indices, so it comes back only into a run
+whose layers added the same assets in the same order, a file added again counting again, and the
+textures loaded where named among them, of the same types, as the file's `asset` lines check, a
+draw's bytes by its mesh's and shader's types' names and sizes, and is left out otherwise. A world no load could read, such as a value nested
 deeper than a scene's may, isn't saved. [ecs/file.rs](crates/gg-engine/src/ecs/file.rs) and
 [snapshot.rs](crates/gg-engine/src/snapshot.rs) have the rest.
 
@@ -913,10 +933,11 @@ the renderer starts and save as it ends, so that pipelines an earlier run made a
 fraction of the time. Headless runs, replays and tests use none, as they keep no layout, so that
 their startup times compare.
 
-A game's texture is a PNG or a JPEG that the engine decodes as a layer adds it, to RGBA8 with colors
-sRGB-encoded and alpha not multiplied into them, as images store them, whatever color profile or
-gamma the file holds, as glTF requires; the next frame that renders copies it into GPU memory, where
-it stays, and shaders sample its colors decoded to linear. The engine reads a texture, a model, a
+A game's texture is a PNG or a JPEG that the engine decodes as a layer adds it, or as text names it,
+as [Project state](#project-state) says, to RGBA8 with colors sRGB-encoded and alpha not multiplied
+into them, as images store them, whatever color profile or gamma the file holds, as glTF requires;
+the next frame that renders copies it into GPU memory, where it stays, and shaders sample its colors
+decoded to linear. The engine reads a texture, a model, a
 scene, a layout or the pipeline cache only from a regular file, so that a FIFO or a device can
 neither hang the read nor fill memory; `--replay` alone reads its recording from whatever it's
 given, so that it can come through a pipe. A texture's handle is its index in the bindless set,

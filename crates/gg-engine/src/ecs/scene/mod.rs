@@ -111,8 +111,9 @@ impl World {
     /// in the order of their IDs. Every component type it names must be registered, since a world
     /// knows a type by name once it has; what's opaque, which scenes leave out, comes from
     /// [`Component::base`](crate::Component::base); a texture is found by its name or a path to its
-    /// file among those the layers loaded; and a field that isn't given, as in a scene saved before
-    /// its type had it, takes its default.
+    /// file among those loaded, as this loads none, where `Context::load_scene_file` loads those a
+    /// scene names first; and a field that isn't given, as in a scene saved before its type had
+    /// it, takes its default.
     ///
     /// Fails, changing nothing, with an error that begins with the line and column where the text
     /// is refused: `scene.syntax` for text that isn't a scene's RON, or enables RON's extensions;
@@ -131,6 +132,16 @@ impl World {
         let entities = read::parse(self, text, false)?;
         let ids = entities.iter().map(|entity| entity.id).collect();
         Ok(self.commit(entities, ids, None))
+    }
+
+    /// The names scene `text` gives textures that none loaded has, each once, in the order it first
+    /// gives them: those [`load_scene`](Self::load_scene) would refuse it for, which the engine
+    /// loads before it loads a scene, as `Context::load_scene_file` does.
+    ///
+    /// Fails as `load_scene` does into the world without its entities, but for those.
+    pub(crate) fn scene_textures(&self, text: &str) -> Result<Vec<String>> {
+        let _zone = gg_core::zone!();
+        read::textures(&self.emptied(), text)
     }
 
     /// Replaces the world's entities with the scene `text`'s, as [`load_scene`](Self::load_scene)

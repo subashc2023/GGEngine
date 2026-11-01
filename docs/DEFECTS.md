@@ -46,6 +46,7 @@ file, under Workflow.
 
 | Defect | Fix | Worth it when |
 |---|---|---|
+| The replay of a run whose layer went on after `Context::load_scene_file` refused a scene, naming a texture that couldn't be loaded, goes another way there (`replay.diverged`): the replay, which follows its run, has a stand-in take the texture's place and loads the scene the run didn't. Both bundled games stop on a scene that doesn't load, so neither records such a run | Record the names the run couldn't load, beside the `named` lines, and have the replay refuse those as its run did | A game goes on after a scene file fails to load |
 | A command nested deeper than 64 levels, the most a replay reads, is recorded, so its replay refuses the whole recording, at that command's line (`replay.syntax`): the recorder ends a recording before a command only as its queue's `check` says, and neither a `Vec`'s, which makes the command, nor the Inspector's, which checks nothing, counts its levels | Count a command's levels as it's recorded, ending the recording before one nested deeper with `record.bad_command`, as before one its queue's `check` refuses | A command nests that deep, or the tool API takes values from outside |
 
 ## Reflection

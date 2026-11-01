@@ -167,10 +167,11 @@
 //! name, whose value is an object of the fields; and what reflection doesn't read, such as a
 //! `MeshDraw`, the string `(opaque)`. A value given, as an operation's, is read the same way, by
 //! the type of the field it goes in, as a component's description gives it: an integer where a
-//! float goes, a texture by its name or a path a layer added it from, an entity by the ID of one
-//! that's alive, or `null` for none alive, and a struct, or a variant's fields, missing a field,
-//! which takes its default, as in a scene; what's opaque is kept as it is, or made as the type's
-//! own is, as an `(opaque)` that a create or an add gives says.
+//! float goes, a texture by its name or a path to its file, which the game loads from the file
+//! under its asset root if it hasn't, an entity by the ID of one that's alive, or `null` for none
+//! alive, and a struct, or a variant's fields, missing a field, which takes its default, as in a
+//! scene; what's opaque is kept as it is, or made as the type's own is, as an `(opaque)` that a
+//! create or an add gives says.
 
 pub mod asset;
 mod project;

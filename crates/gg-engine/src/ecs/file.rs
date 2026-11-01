@@ -596,7 +596,7 @@ fn migrate(
         (Type::Entity, Text::Dead) => Value::Entity(Entity::DEAD),
         (Type::Texture, Text::Texture(at)) => match world.assets().texture(at) {
             Some(texture) => Value::Texture(texture),
-            None => return Err(format!("no texture loaded has the ID or path `{at}`")),
+            None => return Err(world.assets().not_found(at)),
         },
         (Type::Option(_), Text::None) => Value::Option(None),
         (Type::Option(inner), Text::Some(text)) => {

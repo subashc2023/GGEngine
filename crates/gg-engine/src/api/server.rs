@@ -14,6 +14,7 @@
 //! frame that isn't bare, so that no pick reads a view a client isn't shown. A windowed game shows
 //! its bare frames in its own window, for a frame or two.
 
+use std::cell::RefCell;
 use std::fmt::Display;
 use std::fs;
 use std::hash::{BuildHasher, RandomState};
@@ -55,8 +56,8 @@ use crate::render_thread::{Extracted, Publish, Shot};
 use crate::scene_files::{self, Open, SceneFile};
 use crate::snapshot::Run;
 use crate::{
-    Context, Entity, EntityId, Event, Key, MouseButton, Name, Operation, Pose, Scroll, World,
-    patch, snapshot,
+    Context, Entity, EntityId, Event, Key, MouseButton, Name, Operation, Pose, Scroll, Texture,
+    World, patch, snapshot,
 };
 
 /// The methods, as `api.unknown_method` lists them.
@@ -660,22 +661,27 @@ impl Api {
                         answer_done(reply, &Offer::Patch, stepper.ticks, done);
                     }
                 },
-                Call::Apply(given, gesture) => match operations(world, given) {
-                    Ok(mut operations) => {
-                        let author = client.to_string();
-                        let edit = match gesture {
-                            Some(gesture) => Edit::Amend {
-                                author,
-                                gesture,
-                                operation: operations.pop().expect("checked as it was read"),
-                            },
-                            None => Edit::Apply { author, operations },
-                        };
-                        let offered = stack.offer(cx, edit);
-                        self.answer_offered(reply, offered, Offer::Apply, stepper.ticks);
+                Call::Apply(given, gesture) => {
+                    // What its values name that isn't loaded is loaded first, as a scene's is.
+                    let named = textures_named(world, &given);
+                    cx.load_named(named.iter().map(String::as_str), false);
+                    match operations(cx.world(), cx.world(), given) {
+                        Ok(mut operations) => {
+                            let author = client.to_string();
+                            let edit = match gesture {
+                                Some(gesture) => Edit::Amend {
+                                    author,
+                                    gesture,
+                                    operation: operations.pop().expect("checked as it was read"),
+                                },
+                                None => Edit::Apply { author, operations },
+                            };
+                            let offered = stack.offer(cx, edit);
+                            self.answer_offered(reply, offered, Offer::Apply, stepper.ticks);
+                        }
+                        Err(failure) => reply.send(Err(failure)),
                     }
-                    Err(failure) => reply.send(Err(failure)),
-                },
+                }
                 Call::Undo { author, redo } => {
                     let author = author.unwrap_or_else(|| client.to_string());
                     let edit = if redo {
@@ -1149,16 +1155,68 @@ fn field(world: &World, id: EntityId, component: &str, path: &str) -> Result<Str
     Ok(out)
 }
 
+/// The names that the values of the operations `given` asks for give textures that none loaded
+/// has, as [`operations`] reads them in `world`: which a client's edit names, to load before it's
+/// read.
+fn textures_named(world: &World, given: &[gg_api::Operation]) -> Vec<String> {
+    let gathering = Gathering {
+        world,
+        missing: RefCell::default(),
+    };
+    let _ = operations(world, &gathering, given.to_vec());
+    gathering.missing.into_inner()
+}
+
+/// What reads values as a world does, `world`, but for a texture that none loaded has, which it
+/// keeps the name of, reading on as though it were the engine's white texture.
+struct Gathering<'w> {
+    world: &'w World,
+    missing: RefCell<Vec<String>>,
+}
+
+impl json::Names for Gathering<'_> {
+    fn types(&self) -> &reflect::Types {
+        self.world.types()
+    }
+
+    fn id(&self, entity: Entity) -> Option<EntityId> {
+        self.world.id(entity)
+    }
+
+    fn name(&self, texture: Texture) -> Option<&str> {
+        self.world.assets().name(texture)
+    }
+
+    fn entity(&self, id: EntityId) -> Result<reflect::Value> {
+        json::Names::entity(self.world, id)
+    }
+
+    fn texture(&self, name: &str) -> Result<reflect::Value> {
+        if let Some(texture) = self.world.assets().texture(name) {
+            return Ok(reflect::Value::Texture(texture));
+        }
+        let mut missing = self.missing.borrow_mut();
+        if !missing.iter().any(|missed| missed == name) {
+            missing.push(name.to_owned());
+        }
+        Ok(reflect::Value::Texture(Texture::WHITE))
+    }
+}
+
 /// The engine's operations `given` asks for, their values read by the types of `world`'s components
-/// and the fields they go in, as [`json::read`] reads them.
+/// and the fields they go in, as [`json::read`] reads them with `names`.
 ///
 /// Fails, naming the operation, with `ecs.bad_id` for an ID that isn't one, `reflect.unknown_type`
 /// for a component type that isn't registered, as a path to a field it hasn't fails, and as
 /// `json::read` fails for a value.
-fn operations(world: &World, given: Vec<gg_api::Operation>) -> Result<Vec<Operation>, Failure> {
+fn operations(
+    world: &World,
+    names: &dyn json::Names,
+    given: Vec<gg_api::Operation>,
+) -> Result<Vec<Operation>, Failure> {
     let count = given.len();
     let operations = given.into_iter().enumerate().map(|(i, operation)| {
-        operation_of(world, operation).map_err(|error| {
+        operation_of(world, names, operation).map_err(|error| {
             let failure = failure(&error);
             if count == 1 {
                 return failure;
@@ -1173,7 +1231,11 @@ fn operations(world: &World, given: Vec<gg_api::Operation>) -> Result<Vec<Operat
 }
 
 /// The engine's operation `given` asks for, as [`operations`] reads it.
-fn operation_of(world: &World, given: gg_api::Operation) -> Result<Operation> {
+fn operation_of(
+    world: &World,
+    names: &dyn json::Names,
+    given: gg_api::Operation,
+) -> Result<Operation> {
     use gg_api::Operation as Given;
 
     let id = |text: &str| text.parse::<EntityId>();
@@ -1194,7 +1256,7 @@ fn operation_of(world: &World, given: gg_api::Operation) -> Result<Operation> {
     };
     let value = |component: &str, path: &str, json: &Value| {
         let ty = field(component, path)?;
-        json::read(json, &ty, world)
+        json::read(json, &ty, names)
             .map_err(|error| reflect::within(error, &reflect::join(component, path)))
     };
     Ok(match given {
@@ -2237,6 +2299,59 @@ mod tests {
         assert_eq!(x, 0.0, "the gesture undone whole");
     }
 
+    /// A client's edit that names a texture none loaded, by its ID, has it loaded from its file
+    /// under the root before the edit's read; one naming a texture that can't be loaded is
+    /// refused, saying why.
+    #[test]
+    fn an_edit_loads_the_textures_it_names() {
+        let (mut api, session) = started("Api Textures");
+        let dir = Scratch::new("api-textures");
+        fs::create_dir_all(dir.0.join("assets")).expect("a directory");
+        let png =
+            crate::image::tests::png(png::ColorType::Rgba, png::BitDepth::Eight, 1, &[9; 4], None);
+        fs::write(dir.0.join("assets/stone.png"), png).expect("a PNG");
+        let id = "5f3c9a1e07b2d846";
+        let meta = gg_api::asset::Meta {
+            id: id.parse().expect("an ID"),
+        };
+        fs::write(dir.0.join("assets/stone.png.meta"), meta.text()).expect("its ID file");
+        let mut cx = Context::seeded(3).root(dir.0.clone());
+        let hero = cx
+            .world_mut()
+            .spawn((Transform::IDENTITY, Sprite::default()));
+        let hero_id = cx.world().id(hero).expect("alive").to_string();
+        let mut stepper = Stepper::default();
+        stepper.pause();
+        let client = move |mut client: Client| {
+            let set = |texture: &str| {
+                let set = json!({"id": hero_id, "component": "Sprite", "path": "texture", "value": texture});
+                json!({"operations": [{"set": set}]})
+            };
+            let applied = client.call_as::<Applied>("apply", set(id));
+            let refused = client.call("apply", set("assets/none.png"));
+            (applied, refused.expect_err("no file"))
+        };
+        let (applied, refused) = serving(
+            &mut api,
+            &mut cx,
+            &mut Stack::default(),
+            &mut stepper,
+            session,
+            client,
+            |_, _, _| {},
+        );
+        applied.expect("set");
+        assert_eq!(refused.code, "api.no_texture", "{}", refused.message);
+        assert!(
+            refused.message.contains("engine.bad_texture"),
+            "{}",
+            refused.message
+        );
+        let sprite = cx.world().get::<Sprite>(hero).expect("a sprite");
+        let texture = sprite.texture.expect("a texture");
+        assert_eq!(cx.world().assets().path(texture), Some("assets/stone.png"));
+    }
+
     /// What [`clients_apply_edits_and_each_undoes_its_own`]'s clients get.
     struct Edited {
         set: Applied,
@@ -2571,9 +2686,9 @@ mod tests {
     }
 
     /// A client saves the open scene, which the watch's next look applies nothing of, then saves it
-    /// as another file, opens one in its place, unsaved edits discarded once refused, and empties
-    /// it, each answered with the status, which names the open scene and says whether it's
-    /// unsaved; and is refused, with a code, what can't be.
+    /// as another file, opens one in its place, unsaved edits discarded once refused, the textures
+    /// it names loaded, and empties it, each answered with the status, which names the open scene
+    /// and says whether it's unsaved; and is refused, with a code, what can't be.
     #[test]
     fn a_client_saves_opens_and_empties_the_open_scene() {
         let logged = crate::testing::logged();
@@ -2581,7 +2696,14 @@ mod tests {
         let dir = Scratch::new("api-scenes");
         let (_, ids) = scenes::project(&dir.0, 1);
         let scenes_dir = dir.0.join("scenes");
-        scenes::save(&scenes_dir.join("level2.ron"), "(entities: {})\n", 0);
+        fs::create_dir_all(dir.0.join("assets")).expect("a directory");
+        let png =
+            crate::image::tests::png(png::ColorType::Rgba, png::BitDepth::Eight, 1, &[9; 4], None);
+        fs::write(dir.0.join("assets/stone.png"), png).expect("a PNG");
+        // Of a sprite of a texture no layer adds, which opening it loads.
+        let level2 =
+            "(entities: {\"00000000000a5001\": (Sprite: (texture: Some(\"assets/stone.png\")))})\n";
+        scenes::save(&scenes_dir.join("level2.ron"), level2, 0);
         fs::write(dir.0.join("outside.ron"), "(entities: {})\n").expect("written");
         let mut cx = scenes::started(&dir.0);
         let mut stack = Stack::default();
@@ -2658,6 +2780,7 @@ mod tests {
         assert_eq!(named(&saved_as), (title("scenes/copy.ron"), false));
         assert_eq!(unsaved, "scene.unsaved");
         assert_eq!(named(&opened), (title("scenes/level2.ron"), false));
+        assert!(cx.world().assets().texture("assets/stone.png").is_some());
         assert_eq!((named(&emptied), emptied.entities), ((None, false), 0));
         assert_eq!(refused, ["scene.untitled", "scene.bad_path", "scene.file"]);
         assert!(scenes_dir.join("copy.ron").is_file());

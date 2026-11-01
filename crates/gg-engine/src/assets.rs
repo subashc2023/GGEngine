@@ -1,8 +1,9 @@
 //! Assets by their names: what scenes, snapshots, recordings, lockstep inputs, the world's hash and
 //! the tool API name a texture by, where its handle is the renderer's own, so that a restart in
 //! another process, or another machine, finds it again: its asset ID, where it has one, and else
-//! its path; what the layers loaded, by their files as the OS resolves them, so that a file loads
-//! once however a layer writes its path; and, in development builds, the asset database,
+//! its path; what the layers loaded, and what was loaded where text named it, by their files as the
+//! OS resolves them, so that a file loads once however its path is written; and, in development
+//! builds, the asset database,
 //! `Catalog`: the textures and models under the root and the IDs their ID files hold, whose text
 //! and scan are gg-api's.
 
@@ -23,16 +24,18 @@ use tracing::{info, warn};
 
 use crate::Model;
 
-/// The textures a context added, each by its index, with the path of the file it was loaded from:
-/// relative to the app's [root](crate::App::root), with `/` between its parts, or as it was given
-/// for a file outside it; a model's images by the model's path and their order in it, such as
-/// `assets/truck.glb#0`. Each is named, as text names it, by its asset ID, 16 hex digits, or a
-/// model's image by its model's and its order, such as `5f3c9a1e07b2d846#0`, where the context gave
-/// it one as it was added, or since, as a lockstep joiner takes its host's names, and otherwise by
-/// its path. The engine's white texture has none. A
+/// The textures a context added, as its layers added them or where text named them, each by its
+/// index, with the path of the file it was loaded from: relative to the app's
+/// [root](crate::App::root), with `/` between its parts, or as it was given for a file outside it;
+/// a model's images by the model's path and their order in it, such as `assets/truck.glb#0`. Each
+/// is named, as text names it, by its asset ID, 16 hex digits, or a model's image by its model's and
+/// its order, such as `5f3c9a1e07b2d846#0`, where the context gave it one as it was added, or since,
+/// as a lockstep joiner takes its host's names, and otherwise by its path; a stand-in for one that
+/// couldn't be loaded, by the name it stands in for. The engine's white texture has none. A
 /// context's worlds and their copies share it, and what a world loads from text finds its textures
-/// here, by a name or a path, as an entity is found by its ID: text no texture has names none. In
-/// development builds it holds the asset database too, as the last scan left it.
+/// here, by a name or a path, as an entity is found by its ID: text no texture has names none, and
+/// says why it couldn't be loaded, if it was tried. In development builds it holds the asset
+/// database too, as the last scan left it.
 #[derive(Clone, Debug)]
 pub(crate) struct Assets {
     /// Each texture's name and path, by its index.
@@ -40,14 +43,21 @@ pub(crate) struct Assets {
     /// Each texture loaded from a file, by its name and by each path the layers gave its file: the
     /// first added, if two have one.
     by_name: HashMap<Arc<str>, Texture>,
-    /// What the layers added, in order, each with how many meshes, shaders and textures there
-    /// were after it, as `texture 1 1 2 assets/logo.png`: what names the meshes, shaders and
-    /// textures by their indices, so that what's opaque in a snapshot, which holds indices, comes
-    /// back only into a run whose layers added the same. A mesh's, a shader's and a model's give
-    /// the types their draws hold the bytes of too, by their names and sizes, and a shader's its
-    /// blend, as `shader 1 2 1 shaders/colored.slang game::Colored 28 () 0 Opaque`, so that a draw
-    /// comes back only where its bytes mean what they did. A file added again counts again.
+    /// What the layers added, and the textures loaded where text named them, and stand-ins, in
+    /// order, each with how many meshes, shaders and textures there were after it, as
+    /// `texture 1 1 2 assets/logo.png`: what names the meshes, shaders and textures by their
+    /// indices, so that what's opaque in a snapshot, which holds indices, comes back only into a
+    /// run whose layers added the same, those named loaded again as it's restored. A mesh's, a
+    /// shader's and a model's give the types their draws hold the bytes of too, by their names and
+    /// sizes, and a shader's its blend, as
+    /// `shader 1 2 1 shaders/colored.slang game::Colored 28 () 0 Opaque`, so that a draw comes back
+    /// only where its bytes mean what they did. A file added again counts again.
     added: Vec<Arc<str>>,
+    /// Why each texture that text named by a name no texture had couldn't be loaded, as the last
+    /// try at loading such textures found it: its error's code and message, by that name, which a
+    /// refusal of text naming it gives. Only the last try's, as what names them is refused just
+    /// after it, so that names that never load don't pile up.
+    failed: HashMap<Arc<str>, (&'static str, Arc<str>)>,
     /// The asset database, as [`Context::scan_assets`](crate::Context::scan_assets) last left it.
     #[cfg(feature = "dev")]
     catalog: Catalog,
@@ -72,6 +82,7 @@ impl Default for Assets {
             textures: vec![None],
             by_name: HashMap::new(),
             added: Vec::new(),
+            failed: HashMap::new(),
             #[cfg(feature = "dev")]
             catalog: Catalog::default(),
         }
@@ -144,6 +155,35 @@ impl Assets {
         self.by_name.entry(path).or_insert(texture);
     }
 
+    /// What a refusal of text that names a texture `name`, which none has, says of it: that none
+    /// is loaded, and why it couldn't be, if it was tried.
+    pub(crate) fn not_found(&self, name: &str) -> String {
+        match self.failed.get(name) {
+            Some((code, why)) => {
+                format!(
+                    "no texture has the ID or path `{name}`, and it can't be loaded ({code}): {why}"
+                )
+            }
+            None => format!("no texture loaded has the ID or path `{name}`"),
+        }
+    }
+
+    /// Keeps why the last try at loading textures couldn't load each that text names as `failed`
+    /// does, in place of what the tries before kept, for refusals of text naming one to say, as
+    /// [`not_found`](Self::not_found) does.
+    pub(crate) fn failed(&mut self, failed: &[(&str, gg_core::Error)]) {
+        let why = |error: &gg_core::Error| (error.code(), format!("{error:#}").into());
+        let failed = failed
+            .iter()
+            .map(|(name, error)| ((*name).into(), why(error)));
+        self.failed = failed.collect();
+    }
+
+    /// Whether the last try at loading textures couldn't load the one text names `name`.
+    pub(crate) fn has_failed(&self, name: &str) -> bool {
+        self.failed.contains_key(name)
+    }
+
     /// Names each texture as `names` gives its path a name, and every other by its path, in place
     /// of what named it before: as a run takes the names its recording's run, or its lockstep host,
     /// gave its textures.
@@ -177,8 +217,9 @@ impl Assets {
     }
 }
 
-/// What the layers loaded from files, each by its file, as [`file_of`] resolves it, so that a file
-/// added again, by whatever form of its path, isn't loaded again.
+/// What the layers loaded from files, or was loaded where text named it, each by its file, as
+/// [`file_of`] resolves it, so that a file added again, by whatever form of its path, isn't loaded
+/// again.
 #[derive(Default)]
 pub(crate) struct Loaded {
     /// Each texture's or sprite sheet's, which share it: its texture, and its size in pixels, which
@@ -210,6 +251,12 @@ pub(crate) fn name_of(root: Option<&Path>, path: &Path) -> Arc<str> {
 pub(crate) fn file_of(path: &Path) -> Option<PathBuf> {
     let _zone = gg_core::zone!();
     fs::canonicalize(path).ok()
+}
+
+/// Whether text names a texture `name` by an asset ID, 16 lowercase hex digits, rather than by a
+/// path, as ARCHITECTURE.md's Project state says.
+pub(crate) fn is_id(name: &str) -> bool {
+    name.len() == 16 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// The textures and models under the app's root, as the scans found them, and their IDs, from
@@ -276,6 +323,13 @@ impl Catalog {
     /// ID it keeps for the run.
     pub(crate) fn id(&self, path: &str) -> Option<AssetId> {
         self.assets.get(path)?.id
+    }
+
+    /// The path from the root, with `/` between its parts, of the asset whose ID is `id` this run,
+    /// if one's is.
+    pub(crate) fn path(&self, id: AssetId) -> Option<&str> {
+        let path = self.ids.get(&id)?;
+        (self.id(path) == Some(id)).then_some(&**path)
     }
 
     /// The ID files whose assets the last scan didn't find, in the order of their paths.

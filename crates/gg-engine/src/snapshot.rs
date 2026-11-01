@@ -227,7 +227,8 @@ pub(crate) struct Snapshot {
     layers: Vec<String>,
     ticks: u64,
     hash: WorldHash,
-    /// What the layers of the run it was taken from had added, in order.
+    /// What the layers of the run it was taken from had added, in order, and the textures it loaded
+    /// where they were named.
     assets: Vec<String>,
     /// The name that run gave each texture it named otherwise than by its path, by that path,
     /// which its values name textures by.
@@ -441,6 +442,18 @@ impl Snapshot {
         })
     }
 
+    /// The path of each texture the run it was taken from had loaded, as its `asset` lines give
+    /// them, in order: which a run restored from it loads, where its layers haven't, before its
+    /// world, as [`Context::load_restored`](crate::Context::load_restored) does.
+    pub(crate) fn textures(&self) -> impl Iterator<Item = &str> {
+        let textures = self
+            .assets
+            .iter()
+            .filter_map(|line| line.strip_prefix("texture "));
+        // The meshes, shaders and textures there were after it, then its path.
+        textures.filter_map(|line| line.splitn(4, ' ').nth(3))
+    }
+
     /// Loads the snapshot's world into `world`, whose component types and assets the layers,
     /// `layers` from the bottom up, have registered and added as they loaded, in place of its
     /// entities, as [`World::load_whole`] does; what's opaque in it comes back if the layers added
@@ -567,6 +580,7 @@ impl Snapshot {
 mod tests {
     use super::*;
     use crate::dirs::tests::Scratch;
+    use crate::layer::Stack;
     use crate::{Context, Layer, MeshDraw, Sprite, Transform};
 
     /// A snapshot written and read back restores the world it was taken of, at its ticks, into a
@@ -843,5 +857,69 @@ mod tests {
         assert_eq!(world.get::<Sprite>(shown), Some(&sprite));
         assert_eq!(world.assets().name(stone), Some("0a1b2c3d4e5f6071"));
         assert_ne!(world.hash(), saved.world().hash());
+    }
+
+    /// A texture the snapshot's run loaded where text named it, rather than as a layer loaded, is
+    /// loaded again, by the path its `asset` line gives, by a run restored from it, whose layers
+    /// don't load it; or, its file gone, stands in, named as the snapshot names it, so that the
+    /// world restored hashes as the one saved either way, warning of no change. A run that follows
+    /// another finds the file of an ID such a line gives, as a stand-in's does, by its own
+    /// database, the texture named by the ID still.
+    #[test]
+    fn a_texture_loaded_where_named_comes_back_or_stands_in() {
+        let logged = crate::testing::logged();
+        let dir = Scratch::new("snapshot-loaded");
+        let root = dir.0.clone();
+        fs::create_dir_all(root.join("assets")).expect("a directory");
+        let png =
+            crate::image::tests::png(png::ColorType::Rgba, png::BitDepth::Eight, 1, &[9; 4], None);
+        fs::write(root.join("assets/stone.png"), png).expect("a PNG");
+        let id = "5f3c9a1e07b2d846";
+        let meta = gg_api::asset::Meta {
+            id: id.parse().expect("an ID"),
+        };
+        fs::write(root.join("assets/stone.png.meta"), meta.text()).expect("its ID file");
+        let mut saved = Context::seeded(3).root(root.clone());
+        saved.load_named([id], false);
+        let stone = saved.world().assets().texture(id).expect("loaded");
+        let sprite = Sprite {
+            texture: Some(stone),
+            ..Sprite::default()
+        };
+        let shown = saved.world_mut().spawn((Transform::IDENTITY, sprite));
+        let none = Open::default();
+        let text = write(saved.world(), &[], &none, &Run::Playing, "Tested", &[], 0);
+        let snapshot = Snapshot::parse(text.expect("written"), "a test".to_owned(), "Tested");
+        let snapshot = snapshot.expect("read");
+        assert_eq!(
+            snapshot.textures().collect::<Vec<_>>(),
+            ["assets/stone.png"]
+        );
+        // A run that follows another, given no name for the file, finds by its own database an ID
+        // an `asset` line gives, as a stand-in's names one, the texture still named by the ID.
+        let mut following = Context::seeded(3).root(root.clone());
+        following.name_as([]);
+        following.load_restored([id]);
+        let assets = following.world().assets();
+        let found = assets.texture(id).and_then(|texture| assets.name(texture));
+        assert_eq!(found, Some(id));
+
+        for (gone, stood_in) in [(false, 0), (true, 1)] {
+            if gone {
+                fs::remove_file(root.join("assets/stone.png")).expect("removed");
+            }
+            let mut restored = Context::seeded(3).root(root.clone());
+            let _ = logged.codes.try_iter().count();
+            let restoring = Stack::default().restore(&mut restored, &snapshot, false);
+            restoring.expect("restored");
+            let codes: Vec<String> = logged.codes.try_iter().collect();
+            let warned = codes.iter().filter(|code| code.starts_with("snapshot."));
+            assert_eq!(warned.count(), 0, "{codes:?}");
+            let stand_ins = codes.iter().filter(|code| *code == "asset.stand_in");
+            assert_eq!(stand_ins.count(), stood_in, "{codes:?}");
+            let world = restored.world();
+            let texture = world.get::<Sprite>(shown).and_then(|sprite| sprite.texture);
+            assert!(texture.is_some_and(|texture| world.assets().path(texture).is_some()));
+        }
     }
 }

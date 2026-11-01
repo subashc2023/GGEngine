@@ -507,10 +507,12 @@ impl Replay {
         }
         let mut cx = Context::seeded(recording.seed);
         // So that its textures are named as the run's were, by the names the recording gives them
-        // or by their paths from the root, scanning no ID file, and it starts in the run's scene.
+        // or by their paths from the root, scanning no ID file, one that can't be loaded standing
+        // in, and it starts in the run's scene.
         cx.root.clone_from(&app.root);
         #[cfg(feature = "dev")]
         cx.name_as(recording.names.iter().cloned());
+        cx.follows = true;
         cx.start = app.manifest().map(|manifest| manifest.start.clone());
         app.stack.attach(&mut cx);
         Ok(Self {
@@ -547,13 +549,18 @@ impl Replay {
             number: self.ran as u64,
         };
         self.ran += 1;
-        // As the run did, refused where it refused them, which the hash after the tick checks.
+        // As the run did, refused where it refused them, which the hash after the tick checks; each
+        // read once the textures it names are loaded, as the run had them.
         for (edit, line) in &ticked.edits {
+            self.cx.load_followed(edit);
             let edit = Edit::from_value(&edit.value(self.cx.world())).map_err(|error| {
                 let message = format!("line {line}: an edit that isn't one: {error}");
                 Error::new("replay.bad_command", message)
             })?;
             let _ = self.cx.apply_edit(edit);
+        }
+        for command in &ticked.commands {
+            self.cx.load_followed(&command.value);
         }
         let names = &self.recording.layers;
         self.app
@@ -1047,22 +1054,28 @@ mod tests {
 
     /// A run that names a texture by its ID records the name, with its path, before the line that
     /// first names it, and the commands that hold it by it; and its replay names it so, reading no
-    /// ID file, so that it replays to its hashes once the ID file is gone, where, without the
-    /// names, it finds no texture for the command that names it.
+    /// ID file, so that it replays to its hashes once the ID file is gone, loading the texture an
+    /// edit names, which no layer adds, as it reads the edit. Without the names, the replay finds
+    /// no file for the IDs the command and the edit name, so stand-ins take their places, and the
+    /// hashes, which read the names alone, match all the same.
     #[cfg(feature = "dev")]
     #[test]
     fn a_replay_names_textures_as_its_recording_says_reading_no_id_file() {
+        let logged = crate::testing::logged();
         let dir = Scratch::new("recording-named");
         let root = dir.0.clone();
         fs::create_dir_all(root.join("assets")).expect("a directory");
         let png =
             crate::image::tests::png(png::ColorType::Rgba, png::BitDepth::Eight, 1, &[9; 4], None);
-        fs::write(root.join("assets/stone.png"), png).expect("a PNG");
-        let id = "5f3c9a1e07b2d846";
-        let meta = gg_api::asset::Meta {
-            id: id.parse().expect("an ID"),
-        };
-        fs::write(root.join("assets/stone.png.meta"), meta.text()).expect("its ID file");
+        let (id, edited) = ("5f3c9a1e07b2d846", "0a1b2c3d4e5f6071");
+        for (name, id) in [("stone", id), ("edited", edited)] {
+            fs::write(root.join(format!("assets/{name}.png")), &png).expect("a PNG");
+            let meta = gg_api::asset::Meta {
+                id: id.parse().expect("an ID"),
+            };
+            let file = root.join(format!("assets/{name}.png.meta"));
+            fs::write(file, meta.text()).expect("its ID file");
+        }
         let app = || App::new("Named").root(&root).layer(Painter::default());
 
         let path = dir.0.join("run.recording");
@@ -1071,9 +1084,24 @@ mod tests {
             .record(Recorder::create(&path, run.name).expect("created"));
         let mut cx = Context::seeded(1).root(root.clone());
         run.stack.attach(&mut cx);
-        for number in 0..2 {
-            run.stack.tick(&mut cx, Tick { number });
-        }
+        run.stack.tick(&mut cx, Tick { number: 0 });
+        // An edit that names a texture loaded for it, as the tool API loads one.
+        cx.load_named([edited], false);
+        let sprite = Sprite {
+            texture: cx.world().assets().texture(edited),
+            ..Sprite::default()
+        };
+        let create = crate::Operation::Create {
+            entity: None,
+            parent: None,
+            components: vec![("Sprite".into(), sprite.to_value())],
+        };
+        let edit = Edit::Apply {
+            author: "agent".to_owned(),
+            operations: vec![create],
+        };
+        run.stack.edit(&mut cx, edit).expect("applied");
+        run.stack.tick(&mut cx, Tick { number: 1 });
         let ended = cx.world().hash();
         run.stack.detach(&mut cx);
         run.stack.recorded().expect("written");
@@ -1086,13 +1114,24 @@ mod tests {
         let painted = format!("> 0 Struct([(\"0\", Texture(\"{id}\"))])");
         assert!(lines.contains(&&*painted), "{text}");
 
-        fs::remove_file(root.join("assets/stone.png.meta")).expect("removed");
+        for name in ["stone", "edited"] {
+            let file = root.join(format!("assets/{name}.png.meta"));
+            fs::remove_file(file).expect("removed");
+        }
+        let stood_in = || {
+            logged
+                .codes
+                .try_iter()
+                .filter(|code| code == "asset.stand_in")
+                .count()
+        };
+        let _ = stood_in();
         let replayed = replay_all(app(), &text).unwrap_or_else(|(_, error)| panic!("{error}"));
-        assert_eq!(replayed, (2, ended));
+        assert_eq!((replayed, stood_in()), ((2, ended), 0));
         let unnamed = text.lines().filter(|line| !line.starts_with("named "));
         let unnamed: String = unnamed.map(|line| format!("{line}\n")).collect();
-        let (ran, error) = replay_all(app(), &unnamed).expect_err("named by its path");
-        assert_eq!((ran, error.code()), (0, "replay.bad_command"), "{error}");
+        let replayed = replay_all(app(), &unnamed).unwrap_or_else(|(_, error)| panic!("{error}"));
+        assert_eq!((replayed, stood_in()), ((2, ended), 2));
     }
 
     /// A run recorded as it goes at a frame rate of its own, of a layer whose commands its updates

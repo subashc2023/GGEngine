@@ -18,12 +18,12 @@ use serde::de::{
 };
 
 use super::{MAX_DEPTH, NO_HINTS};
-use crate::Reflect;
 use crate::ecs::by_name::about;
 use crate::ecs::id::Named;
 use crate::ecs::table::{AnyColumn, ComponentId, Row};
 use crate::ecs::{Entity, EntityId, Parent, World};
 use crate::reflect::{self, Field, Ident, Meta, Shape, Type, Types, Value, Variant};
+use crate::{Reflect, Texture};
 
 /// A scene's entity, as the parse reads it.
 pub(super) struct Loaded {
@@ -42,15 +42,15 @@ pub(super) struct Loaded {
 /// The scene `text`'s entities, in the order it first names them, with the handles they take in
 /// that order: a prefab's, whose IDs are its own, if `prefab`, and which has one root.
 pub(super) fn parse(world: &World, text: &str, prefab: bool) -> Result<Vec<Loaded>> {
-    let mut load = Load::new(world, prefab, None);
+    let mut load = Load::new(world, prefab, None, false);
     let mut deserializer = deserializer(text)?;
     if let Err(error) = run(&mut load, &mut deserializer) {
         return Err(match load.refused.take() {
-            Some((item, refusal)) => locate(world, text, prefab, item, refusal),
+            Some((item, refusal)) => locate(world, text, prefab, false, item, refusal),
             None => syntax(&error),
         });
     }
-    let refuse = |item, error| Err(locate(world, text, prefab, item, error));
+    let refuse = |item, error| Err(locate(world, text, prefab, false, item, error));
     let entities = load.entities;
     if let Some(unknown) = entities.iter().find(|entity| entity.key.is_none()) {
         let error = Error::new(
@@ -94,6 +94,22 @@ pub(super) fn parse(world: &World, text: &str, prefab: bool) -> Result<Vec<Loade
         }
     }
     Ok(entities)
+}
+
+/// The names scene `text` gives textures that none loaded has, each once, in the order it first
+/// gives them, as [`parse`] reads it into `world`, but on past them.
+///
+/// Fails as the parse does, but for those.
+pub(super) fn textures(world: &World, text: &str) -> Result<Vec<String>> {
+    let mut load = Load::new(world, false, None, true);
+    let mut deserializer = deserializer(text)?;
+    if let Err(error) = run(&mut load, &mut deserializer) {
+        return Err(match load.refused.take() {
+            Some((item, refusal)) => locate(world, text, false, true, item, refusal),
+            None => syntax(&error),
+        });
+    }
+    Ok(load.missing.unwrap_or_default())
 }
 
 /// The IDs scene `text` gives its entities, its map of entities' keys, read from its syntax alone,
@@ -199,11 +215,19 @@ fn syntax(error: &SpannedError) -> Error {
     )
 }
 
-/// `refusal`, at item `item`, saying where it is: the text is parsed again, up to the item, where
-/// the parser is at its first character, and the refusal is carried out from there, gathering the
-/// entity, the component and the path.
-fn locate(world: &World, text: &str, prefab: bool, item: u32, refusal: Error) -> Error {
-    let mut load = Load::new(world, prefab, Some((item, refusal)));
+/// `refusal`, at item `item`, saying where it is: the text is parsed again, as it was, past the
+/// textures none loaded has if `collect`, up to the item, where the parser is at its first
+/// character, and the refusal is carried out from there, gathering the entity, the component and
+/// the path.
+fn locate(
+    world: &World,
+    text: &str,
+    prefab: bool,
+    collect: bool,
+    item: u32,
+    refusal: Error,
+) -> Error {
+    let mut load = Load::new(world, prefab, Some((item, refusal)), collect);
     let mut deserializer = deserializer(text).expect("the text parsed this far before");
     let stopped = run(&mut load, &mut deserializer).expect_err("the parse stops at the item");
     let refusal = load
@@ -238,10 +262,13 @@ struct Load<'w> {
     /// out from there as `carried`.
     stop: Option<(u32, Error)>,
     carried: Option<Error>,
+    /// The names given textures that none loaded has, while the parse reads on past them, as
+    /// [`textures`] does, rather than refusing them.
+    missing: Option<Vec<String>>,
 }
 
 impl<'w> Load<'w> {
-    fn new(world: &'w World, prefab: bool, stop: Option<(u32, Error)>) -> Self {
+    fn new(world: &'w World, prefab: bool, stop: Option<(u32, Error)>, collect: bool) -> Self {
         Self {
             world,
             types: world.types(),
@@ -255,6 +282,7 @@ impl<'w> Load<'w> {
             refused: None,
             stop,
             carried: None,
+            missing: collect.then(Vec::new),
         }
     }
 
@@ -860,20 +888,29 @@ impl Visitor<'_> for Leaf<'_, '_> {
                 let id = id.map_err(|error| self.load.refuse(self.item, error))?;
                 Ok(Value::Entity(self.load.reference(id, self.item)))
             }
-            Type::Texture => match self.load.world.assets().texture(text) {
-                Some(texture) => Ok(Value::Texture(texture)),
-                None => {
-                    let error = Error::new(
-                        "asset.no_texture",
-                        format!(
-                            "no texture loaded has the ID or path `{text}`: a game loads the \
-                             textures its scenes show, with `Context::add_texture` or \
-                             `add_sprite_sheet`, before it loads them"
-                        ),
-                    );
-                    Err(self.load.refuse(self.item, error))
+            Type::Texture => {
+                let assets = self.load.world.assets();
+                match (assets.texture(text), &mut self.load.missing) {
+                    (Some(texture), _) => Ok(Value::Texture(texture)),
+                    (None, Some(missing)) => {
+                        if !missing.iter().any(|name| name == text) {
+                            missing.push(text.to_owned());
+                        }
+                        Ok(Value::Texture(Texture::WHITE))
+                    }
+                    (None, None) => {
+                        let mut message = assets.not_found(text);
+                        if !assets.has_failed(text) {
+                            message += ": a scene that `Context::load_scene_file` or the tool API \
+                                        loads has the textures it names loaded first, but one a \
+                                        layer loads into a world itself finds only those loaded \
+                                        already";
+                        }
+                        let error = Error::new("asset.no_texture", message);
+                        Err(self.load.refuse(self.item, error))
+                    }
                 }
-            },
+            }
             _ => Ok(Value::String(text.to_owned())),
         }
     }

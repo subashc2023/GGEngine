@@ -38,6 +38,7 @@ use crate::net::{Lockstep, Outside, Turn};
 use crate::perf::Perf;
 use crate::physics::{self, CircleCollider2D, Physics2D};
 use crate::recording::Recorder;
+use crate::recording::text::Text;
 use crate::reflect::{Reflect, Value};
 use crate::render_thread::Extracted;
 use crate::scene_files::{self, SceneFile, SceneFiles};
@@ -296,6 +297,10 @@ pub struct Context {
     /// by the database's.
     #[cfg(feature = "dev")]
     given: Option<HashMap<Arc<str>, Arc<str>>>,
+    /// Whether the run goes as another run went, as a replay or a lockstep joiner does, whose texts
+    /// name textures as that run did: a texture they name that can't be loaded then stands in, as
+    /// [`load_named`](Self::load_named) says, rather than refusing what names it.
+    pub(crate) follows: bool,
     /// How long frames take, which the main loop measures and
     /// [`PerfPanel`](crate::PerfPanel) shows.
     pub(crate) perf: Perf,
@@ -442,6 +447,7 @@ impl Context {
             loaded: Loaded::default(),
             #[cfg(feature = "dev")]
             given: None,
+            follows: false,
             perf: Perf::default(),
             paused: false,
             authors: Authors::default(),
@@ -840,6 +846,234 @@ impl Context {
         }
     }
 
+    /// Loads, as [`add_texture`](Self::add_texture) loads a file, the texture that each of `names`
+    /// names, as text names one, that none loaded has: where a scene, the tool API, or a recorded
+    /// or a lockstep peer's command or edit names it, before it's read, as ARCHITECTURE.md's
+    /// Project state says. A name finds its file as [`texture_path`](Self::texture_path) says,
+    /// inside the asset root. In a run that follows another, the texture takes the name its text
+    /// gave it, that run's, and its file is found by the names it was given first.
+    ///
+    /// One that can't be loaded stands in, if `stand_in`, as for a run that follows another, so
+    /// that its texts read as that run's did: a texture of magenta and black squares, named as the
+    /// name, warning `asset.stand_in` with why. Otherwise it stays unloaded, and the refusal of
+    /// what names it says why, as [`Assets::not_found`] does.
+    pub(crate) fn load_named<'n>(
+        &mut self,
+        names: impl IntoIterator<Item = &'n str>,
+        stand_in: bool,
+    ) {
+        let mut tried: Vec<&str> = Vec::new();
+        let mut failed = Vec::new();
+        for name in names {
+            if self.assets.texture(name).is_some() || tried.contains(&name) {
+                continue;
+            }
+            tried.push(name);
+            let (path, loaded) = match self.texture_path(name, stand_in) {
+                Ok(path) => {
+                    let loaded = self.load_path(name, &path);
+                    (Some(path), loaded)
+                }
+                Err(error) => (None, Err(error)),
+            };
+            match loaded {
+                Ok(()) => {}
+                Err(error) if stand_in => self.stand_in(name, path.as_deref(), &error),
+                Err(error) => failed.push((name, error)),
+            }
+        }
+        if !tried.is_empty() {
+            self.add_assets(|assets| assets.failed(&failed));
+        }
+    }
+
+    /// Loads, as [`load_named`](Self::load_named) does with `stand_in`, each texture whose path from
+    /// the asset root `paths` gives that none loaded has: as a run restored from a snapshot loads
+    /// those its `asset` lines say its run had, before it reads the world, so that its values find
+    /// every texture they name, and in the order that run loaded them, so that a texture's index,
+    /// which what's opaque holds, is what it was where the layers added the same before. A path
+    /// outside the root, as only a layer gives one, stands in, as one text names does.
+    pub(crate) fn load_restored<'p>(&mut self, paths: impl IntoIterator<Item = &'p str>) {
+        self.load_named(paths, true);
+    }
+
+    /// Loads each texture scene `text` names that none loaded has, as
+    /// [`load_named`](Self::load_named) does, standing in for what can't be in a run that follows
+    /// another; and returns the names of those still missing.
+    ///
+    /// Fails, loading nothing, as [`World::load_scene`] does but for those.
+    pub(crate) fn load_scene_textures(&mut self, text: &str) -> Result<Vec<String>> {
+        let names = self.world.scene_textures(text)?;
+        self.load_named(names.iter().map(String::as_str), self.follows);
+        let missing = names
+            .into_iter()
+            .filter(|name| self.assets.texture(name).is_none());
+        Ok(missing.collect())
+    }
+
+    /// Loads each texture `text`, a value as a recording writes it, names that none loaded has,
+    /// standing in for what can't be, as [`load_named`](Self::load_named) does: a value that a
+    /// recording or a lockstep peer gives, which names textures as the run that wrote it did.
+    pub(crate) fn load_followed(&mut self, text: &Text) {
+        let mut names = Vec::new();
+        text.textures(&mut names);
+        if !names.is_empty() {
+            self.load_named(names, true);
+        }
+    }
+
+    /// The path from the asset root of the file whose texture text names `name`, as
+    /// [`load_named`](Self::load_named) loads it: in a run that follows another, the path given
+    /// that name, as [`name_as`](Self::name_as) gives them; in a development build, the asset's
+    /// whose ID it is, as the asset database holds it; and else `name` itself, as a path. A run
+    /// that follows another and isn't to stand in for what it can't load, as a lockstep joiner
+    /// asked by the tool API, finds only what it was given, so that it names the texture as its
+    /// host would.
+    ///
+    /// Fails with `asset.model_image` for a model's image, which loads with its model;
+    /// `asset.not_given` for what such a run wasn't given; `asset.unknown_id` for an ID no asset
+    /// has this run, or any ID in a build without `dev`, which reads no ID file; and
+    /// `asset.outside_root` for an absolute path.
+    fn texture_path(&self, name: &str, stand_in: bool) -> Result<Arc<str>> {
+        if let Some((model, image)) = name.rsplit_once('#')
+            && !image.is_empty()
+            && image.bytes().all(|b| b.is_ascii_digit())
+        {
+            let message = format!(
+                "`{name}` names image {image} of model `{model}`, which loads with its model, as a \
+                 layer adds it with `Context::add_model`"
+            );
+            return Err(Error::new("asset.model_image", message));
+        }
+        #[cfg(feature = "dev")]
+        if let Some(given) = &self.given {
+            if let Some((path, _)) = given.iter().find(|(_, given)| ***given == *name) {
+                return Ok(path.clone());
+            }
+            if self.follows && !stand_in && !given.contains_key(name) {
+                let message = format!(
+                    "`{name}` isn't a name or a path that the lockstep host has given a texture, \
+                     and a joiner loads only those, so that both peers name it alike: name it \
+                     through the host"
+                );
+                return Err(Error::new("asset.not_given", message));
+            }
+        }
+        #[cfg(not(feature = "dev"))]
+        let _ = stand_in;
+        if assets::is_id(name) {
+            #[cfg(feature = "dev")]
+            {
+                let id = name.parse::<AssetId>().ok();
+                if let Some(path) = id.and_then(|id| self.assets.catalog().path(id)) {
+                    return Ok(path.into());
+                }
+                let message = format!("no asset under the asset root has the ID {name} this run");
+                return Err(Error::new("asset.unknown_id", message));
+            }
+            #[cfg(not(feature = "dev"))]
+            {
+                let message = format!(
+                    "{name} is an asset ID, but a build without `dev` reads no ID file, so it finds \
+                     a texture by its path alone"
+                );
+                return Err(Error::new("asset.unknown_id", message));
+            }
+        }
+        let path = Path::new(name);
+        let prefixed = matches!(
+            path.components().next(),
+            Some(std::path::Component::Prefix(_))
+        );
+        if path.has_root() || prefixed {
+            let message = format!(
+                "`{name}` is an absolute path, which would name a file on this machine alone: a \
+                 texture is named by its ID or by its path from the asset root"
+            );
+            return Err(Error::new("asset.outside_root", message));
+        }
+        Ok(name.into())
+    }
+
+    /// Loads the texture at `path` from the asset root, which text names `name`, as
+    /// [`add_texture`](Self::add_texture) loads a file, its name `name` too: a run that follows
+    /// another names it so, as that run did.
+    ///
+    /// Fails with `asset.outside_root` for a file outside the root, as through `..` or a link, and
+    /// as `add_texture` does.
+    fn load_path(&mut self, name: &str, path: &str) -> Result<()> {
+        // Before anything can fail, so that a stand-in is named so too.
+        #[cfg(feature = "dev")]
+        if let Some(given) = &mut self.given
+            && name != path
+            && !given.contains_key(path)
+        {
+            given.insert(path.into(), name.into());
+        }
+        let (file, within) = match &self.root {
+            Some(root) => (root.join(path), root.as_path()),
+            None => (PathBuf::from(path), Path::new(".")),
+        };
+        if let (Some(resolved), Some(within)) = (assets::file_of(&file), assets::file_of(within))
+            && !resolved.starts_with(&within)
+        {
+            let message = format!(
+                "`{path}` is outside the asset root, {}: a texture is named by its ID or by its \
+                 path from the asset root",
+                within.display()
+            );
+            return Err(Error::new("asset.outside_root", message));
+        }
+        let texture = self.add_texture(path, &file)?;
+        self.alias(texture, &name.into());
+        Ok(())
+    }
+
+    /// Has a stand-in, a texture of magenta and black squares, take the place of the texture text
+    /// names `name`, of the file at `path` from the asset root, if its name led to one, which
+    /// couldn't be loaded, as `why` says, warning `asset.stand_in`: named as the file would have
+    /// been, or else as `name`.
+    fn stand_in(&mut self, name: &str, path: Option<&str>, why: &Error) {
+        // 8 pixels across and down, in squares of 4.
+        let pixels: Vec<u8> = (0..64)
+            .flat_map(|i| match (i % 8 / 4 + i / 8 / 4) % 2 {
+                0 => [255, 0, 255, 255],
+                _ => [0, 0, 0, 255],
+            })
+            .collect();
+        let texture = match self.textures.add(name, [8, 8], pixels, Mipmaps::None) {
+            Ok(texture) => texture,
+            Err(error) => {
+                warn!(
+                    code = error.code(),
+                    name, "Can't stand in for texture `{name}`: {error:#}"
+                );
+                return;
+            }
+        };
+        let (path, named): (Arc<str>, Arc<str>) = match path {
+            Some(path) => {
+                let file = self
+                    .root
+                    .as_deref()
+                    .map_or(PathBuf::from(path), |root| root.join(path));
+                (path.into(), self.texture_name(path, &file, None, None))
+            }
+            None => (name.into(), name.into()),
+        };
+        self.add_assets(|assets| assets.add_texture(texture, path.clone(), named));
+        self.alias(texture, &name.into());
+        self.added("texture", &path);
+        warn!(
+            code = "asset.stand_in",
+            name,
+            path = &*path,
+            cause = why.code(),
+            "Texture `{name}` can't be loaded, so a stand-in of magenta and black squares takes \
+             its place, as the run follows another, which names it: {why:#}"
+        );
+    }
+
     /// What names the texture loaded from `file`, which a layer gave as `path`, whose path among
     /// assets is `named`, as [`Assets`] says, or with `image`, its image of that place in the
     /// model: in a development build, the name given its path, if the run is given its textures'
@@ -917,14 +1151,22 @@ impl Context {
         self.given = Some(given);
     }
 
-    /// Has `add` change the assets the layers added, which the world shares from then on: the
-    /// context's, so that a world that took the world's place doesn't lose them, and copied only
-    /// where a copy of the world shares them.
+    /// Has `add` change the assets the layers added, which the world, and the world as edited while
+    /// a copy plays, share from then on: the context's, so that a world that took the world's place
+    /// doesn't lose them, and copied only where a copy of the world shares them.
     fn add_assets(&mut self, add: impl FnOnce(&mut Assets)) {
-        // The world lets go of its share for the change.
+        // The worlds let go of their shares for the change.
         self.world.share_assets(&Arc::default());
+        #[cfg(feature = "dev")]
+        if let Some(edited) = &mut self.edited {
+            edited.world.share_assets(&Arc::default());
+        }
         add(Arc::make_mut(&mut self.assets));
         self.world.share_assets(&self.assets);
+        #[cfg(feature = "dev")]
+        if let Some(edited) = &mut self.edited {
+            edited.world.share_assets(&self.assets);
+        }
     }
 
     /// Has the world share the assets the layers added again, if a layer put another world in its
@@ -1114,16 +1356,22 @@ impl Context {
     }
 
     /// Loads the scene file at `path` into the world as the layer attaches, as [`World::load_scene`]
-    /// loads the text [`read_scene`](crate::read_scene) reads, and returns its roots. A development
-    /// build watches the file from then on: saved while the game runs, it applies to the world as
-    /// the operations that take the world's entities from what the file held to what it holds,
-    /// between ticks, which keeps what the file doesn't change, as where the game has moved an
-    /// entity; an edit whose author is the file's path, as the app's root names it, such as
-    /// `scenes/level.ron`, which the tool API's `undo` takes back. A run restored from a snapshot
-    /// watches the files its run had loaded. The project's start scene, as
-    /// [`load_start_scene`](Self::load_start_scene) loads it, is the open scene too.
+    /// loads the text [`read_scene`](crate::read_scene) reads, and returns its roots; first loading
+    /// each texture it names, by its ID or its path from the asset root, that no layer has added,
+    /// as [`add_texture`](Self::add_texture) loads a file. A development build watches the file
+    /// from then on: saved while the game runs, it applies to the world as the operations that take
+    /// the world's entities from what the file held to what it holds, between ticks, which keeps
+    /// what the file doesn't change, as where the game has moved an entity; an edit whose author is
+    /// the file's path, as the app's root names it, such as `scenes/level.ron`, which the tool
+    /// API's `undo` takes back. A run restored from a snapshot watches the files its run had
+    /// loaded. The project's start scene, as [`load_start_scene`](Self::load_start_scene) loads it,
+    /// is the open scene too.
     ///
-    /// Fails as `read_scene` does, and as `load_scene` does, the path beginning its message.
+    /// Fails as `read_scene` does, and as `load_scene` does, the path beginning its message, as for
+    /// a texture that can't be loaded, `asset.no_texture`, with why: a texture of a model, or
+    /// named by an absolute path or one leading outside the asset root, by an ID no asset has, or
+    /// by a path to a file that doesn't load as `add_texture` loads it. In a replay or a lockstep
+    /// joiner, which goes as another run went, such a texture stands in, warning `asset.stand_in`.
     ///
     /// # Panics
     ///
@@ -1131,7 +1379,17 @@ impl Context {
     pub fn load_scene_file(&mut self, path: impl AsRef<Path>) -> Result<Vec<Entity>> {
         let path = path.as_ref();
         let text = crate::read_scene(path)?;
-        let roots = self.world_mut().load_scene(&text).map_err(|error| {
+        let mut loaded = self.world_mut().load_scene(&text);
+        // Read again once what it names that isn't loaded is, which is seldom, so that a scene that
+        // names what's loaded is read once.
+        if loaded
+            .as_ref()
+            .is_err_and(|error| error.code() == "asset.no_texture")
+        {
+            loaded =
+                (self.load_scene_textures(&text)).and_then(|_| self.world_mut().load_scene(&text));
+        }
+        let roots = loaded.map_err(|error| {
             let message = format!("{}:{error}", path.display());
             error.with_message(message)
         })?;
@@ -1524,6 +1782,7 @@ impl Stack {
                     cx.name_as(
                         (snapshot.names.iter()).map(|(path, name)| (name.clone(), path.clone())),
                     );
+                    cx.load_restored(snapshot.textures());
                     self.restore_in_place(cx, &snapshot)
                 });
                 match ticks {
@@ -1553,7 +1812,12 @@ impl Stack {
     /// alone watches scene files.
     #[cfg(feature = "dev")]
     pub(crate) fn watches_scenes(&self) -> bool {
-        self.net.as_ref().is_none_or(Lockstep::hosts)
+        !self.joins()
+    }
+
+    /// Whether the run joins a lockstep session, going as its host goes.
+    fn joins(&self) -> bool {
+        self.net.as_ref().is_some_and(|net| !net.hosts())
     }
 
     /// Whether the run is a peer of a lockstep session, hosting or joining, whose scene files the
@@ -1583,7 +1847,24 @@ impl Stack {
     #[cfg(feature = "dev")]
     pub(crate) fn offer_save(&mut self, cx: &mut Context, author: String, text: String) {
         match &mut self.net {
-            Some(net) => net.offer_save(author, text),
+            Some(net) => {
+                // What it names that isn't loaded is loaded now, so that the names the host gives
+                // those go out before it. One naming a texture that can't be, which the joiner
+                // might stand in for, isn't offered, warning as a save that doesn't load does.
+                if let Ok(missing) = cx.load_scene_textures(&text)
+                    && !missing.is_empty()
+                    && let Err(error) = cx.world().scene_loads(&text)
+                {
+                    warn!(
+                        code = error.code(),
+                        path = author,
+                        "{author}: {error:#}; the world stays as it was, and the file's next save \
+                         is compared with it as last applied"
+                    );
+                    return;
+                }
+                net.offer_save(author, text);
+            }
             None => {
                 let edit = &mut |cx: &mut Context, edit| self.edit(cx, edit);
                 let _ = crate::scene_files::apply_save(cx, edit, &author, text);
@@ -1631,6 +1912,7 @@ impl Stack {
             recorder.start(&self.names, cx.world.stream_state());
         }
         cx.player = self.net.as_ref().map(Lockstep::player);
+        cx.follows |= self.joins();
         self.load(cx);
         for layer in &mut self.layers {
             layer.attach(cx);
@@ -1661,8 +1943,10 @@ impl Stack {
     ) -> Result<(u64, bool)> {
         let _zone = gg_core::zone!();
         cx.player = self.net.as_ref().map(Lockstep::player);
+        cx.follows |= self.joins();
         self.load(cx);
         cx.attached = true;
+        cx.load_restored(snapshot.textures());
         #[cfg(feature = "dev")]
         if serves && self.refuses_stop().is_none() {
             // As the layers loaded it, with their types, assets and resources, for the world as
@@ -1891,7 +2175,7 @@ impl Stack {
             Some(net) => {
                 let queues = layers.iter_mut().enumerate();
                 let queues = queues.filter_map(|(index, layer)| Some((index, layer.commands()?)));
-                let merged = net.start_tick(tick.number, queues, &cx.world);
+                let merged = net.start_tick(tick.number, queues, cx);
                 for (ticket, input) in &merged.inputs {
                     let done = match input {
                         // A client's, on either peer.
@@ -1945,7 +2229,7 @@ impl Stack {
         for (index, layer) in layers.iter_mut().enumerate() {
             if let Some(merged) = &merged
                 && let Some(queue) = layer.commands()
-                && let Err(error) = merged.fill(index, queue, &cx.world)
+                && let Err(error) = merged.fill(index, queue, cx)
             {
                 error!(code = error.code(), layer = names[index], "{error:#}");
             }
@@ -2596,6 +2880,126 @@ mod tests {
         assert_eq!(hash("assets/rock.png"), before, "renamed with its ID file");
         std::fs::remove_file(root.join("assets/rock.png.meta")).expect("removed");
         assert_ne!(hash("assets/rock.png"), before, "by its path, without one");
+    }
+
+    /// A scene file loads the textures it names that no layer added, by an ID or by a path from the
+    /// root, once each, named as a layer's add would name them. One naming a texture that can't be
+    /// loaded is refused where it names it, saying why, spawning nothing: a file that isn't an
+    /// image or isn't there, one outside the root, by an absolute path or through `..`, an ID no
+    /// asset has, and a model's image. A run that follows another loads them, and stands in for
+    /// those, named as named; and asked by the tool API, as a lockstep joiner, loads only what it
+    /// was given.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_scene_loads_the_textures_it_names_and_refuses_those_it_cant() {
+        use gg_api::asset::Meta;
+
+        let logged = crate::testing::logged();
+        let scratch = crate::dirs::tests::Scratch::new("loaded-where-named");
+        let root = scratch.0.join("game");
+        for dir in ["assets", "scenes"] {
+            std::fs::create_dir_all(root.join(dir)).expect("a directory");
+        }
+        let png = image::tests::png(png::ColorType::Rgba, png::BitDepth::Eight, 1, &[9; 4], None);
+        let meta = |id: &str| Meta {
+            id: id.parse().expect("an ID"),
+        };
+        let (stone, model) = ("5f3c9a1e07b2d846", "1d2c3b4a59687f0e");
+        let write = |name: &str, bytes: &[u8]| std::fs::write(root.join(name), bytes);
+        write("assets/stone.png", &png).expect("written");
+        write("assets/stone.png.meta", meta(stone).text().as_bytes()).expect("written");
+        write("assets/plain.png", &png).expect("written");
+        write("assets/bad.png", b"not a PNG").expect("written");
+        write("assets/m.glb", &gltf::tests::model()).expect("written");
+        write("assets/m.glb.meta", meta(model).text().as_bytes()).expect("written");
+        std::fs::write(scratch.0.join("outside.png"), &png).expect("written");
+        // A scene of a sprite of each texture named, their IDs from `first` on.
+        let scene = |first: usize, names: &[&str]| -> PathBuf {
+            let mut text = "(\n    entities: {\n".to_owned();
+            for (i, name) in names.iter().enumerate() {
+                text += &format!(
+                    "        \"{:016x}\": (\n            Sprite: (\n                texture: \
+                     Some(\"{name}\"),\n            ),\n        ),\n",
+                    first + i
+                );
+            }
+            text += "    },\n)\n";
+            let path = root.join("scenes/s.ron");
+            std::fs::write(&path, text).expect("written");
+            path
+        };
+        let shown = |cx: &Context| -> Vec<String> {
+            let sprites = cx.world().query::<&Sprite>();
+            let names = sprites.filter_map(|sprite| cx.assets.name(sprite.texture?));
+            names.map(str::to_owned).collect()
+        };
+
+        let mut cx = Context::seeded(0).root(root.clone());
+        let count = cx.textures.count();
+        let path = scene(0x1000, &[stone, "assets/plain.png", "assets/./stone.png"]);
+        cx.load_scene_file(&path).expect("loaded");
+        assert_eq!(cx.textures.count(), count + 2, "each once");
+        let mut names = shown(&cx);
+        names.sort_unstable();
+        assert_eq!(names, [stone, stone, "assets/plain.png"]);
+
+        let absolute = root
+            .join("assets/plain.png")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let image = format!("{model}#0");
+        let refused = [
+            ("assets/bad.png", "engine.bad_texture"),
+            ("assets/none.png", "engine.bad_texture"),
+            ("../outside.png", "asset.outside_root"),
+            (absolute.as_str(), "asset.outside_root"),
+            ("0a1b2c3d4e5f6071", "asset.unknown_id"),
+            (image.as_str(), "asset.model_image"),
+        ];
+        let entities = cx.world().entities(None).map_or(0, |e| e.len());
+        let count = cx.textures.count();
+        for &(name, why) in &refused {
+            let error = cx
+                .load_scene_file(scene(0x2000, &["assets/plain.png", name]))
+                .expect_err(name);
+            let message = format!("{error:#}");
+            assert_eq!(error.code(), "asset.no_texture", "{message}");
+            assert!(
+                message.contains(why) && message.contains(".ron:"),
+                "{message}"
+            );
+        }
+        assert_eq!(cx.world().entities(None).map_or(0, |e| e.len()), entities);
+        assert_eq!(cx.textures.count(), count, "nothing loaded");
+
+        let mut following = Context::seeded(0).root(root.clone());
+        following.name_as([]);
+        following.follows = true;
+        let _ = logged.codes.try_iter().count();
+        let names: Vec<&str> = refused.iter().map(|&(name, _)| name).collect();
+        following
+            .load_scene_file(scene(0x1000, &names))
+            .expect("stood in");
+        let mut shown = shown(&following);
+        shown.sort_unstable();
+        let mut expected = names.clone();
+        expected.sort_unstable();
+        assert_eq!(shown, expected);
+        let codes = logged
+            .codes
+            .try_iter()
+            .filter(|code| code == "asset.stand_in");
+        assert_eq!(codes.count(), refused.len());
+
+        // Asked by the tool API, it loads what it was given alone.
+        let given = [(Arc::from(stone), Arc::from("assets/stone.png"))];
+        let mut joiner = Context::seeded(0).root(root);
+        joiner.name_as(given);
+        joiner.follows = true;
+        joiner.load_named([stone, "assets/plain.png"], false);
+        assert!(joiner.assets.texture(stone).is_some());
+        let plain = joiner.assets.not_found("assets/plain.png");
+        assert!(plain.contains("asset.not_given"), "{plain}");
     }
 
     /// A model's file added again gives the model it gave first, adding none of its meshes or

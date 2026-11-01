@@ -74,12 +74,13 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Phase 6, projects and the editor on the tool API** (2026-10-31)
 - **Asset IDs beside their files** (2026-10-31)
 - **Textures named by ID** (2026-10-31)
+- **Assets loaded wherever they're named** (2026-11-01)
 
 ## Now
 
-**Assets loaded wherever they're named**, Phase 7's third milestone: a texture that a scene, the
-tool API or a command names, by its ID or its path, loads where no layer has added it, and the
-demo's arena's Pillar gets a small texture, committed; its plan says when it's done.
+**Renames that keep IDs**, Phase 7's fourth milestone: an asset renamed or moved keeps its ID,
+which the running game pairs with it by its content, with a cache for each clone; its plan says
+when it's done.
 
 ## Next
 
@@ -190,7 +191,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | A sprite that samples past its rectangle, so that a seamless texture tiled across sprites side by side blends across their edges under a linear sampler | A game tiles one texture across sprites |
 | A tile map in the engine, which scenes save; the sandbox's map is code of its own, its tiles sprites that snapshots and scenes save each with its texture's name | A game edits its map |
 | glTF that `Context::add_model` refuses or ignores, as it lists: lighting and the material's other textures, skins and animations, morph targets, cameras, models without a scene and scenes other than the default, sparse accessors and accessors without a buffer view, primitives other than triangle lists, samplers that wrap across and down differently, minification filters, texture transforms, quantized or compressed meshes and textures (KHR_mesh_quantization, Draco, meshopt, Basis Universal), and integers written as floats, such as `1.0`, which glTF allows | Each with the first model that needs it; lighting and the other textures in Phase 12, compression with Phase 10's cooker |
-| Decoding images off the main thread; `Context::add_texture` and `add_model` decode before they return | Phase 10, with the streaming loader |
+| Decoding images off the main thread; `Context::add_texture` and `add_model` decode before they return, and a texture loaded where text names it decodes before the text is read, a lockstep peer's tick waiting for it | Phase 10, with the streaming loader |
 | Models that take more than 4 GiB to read, of their buffers, decoded images, vertices and nodes, which `add_model` refuses with `engine.unsupported_model` | Phase 10, with streaming and the GPU's memory budget |
 | Mip levels made on the CPU, on the render thread, as the frame that uploads a model's texture renders: a 2,048 by 2,048 texture's take about 0.3 s of that frame in a debug build | Phase 10, which cooks them; or blits on the GPU, if a hitch shows first |
 | Layers making textures from their own pixels; `Textures::add` takes pixels, but `Context` adds only PNGs and JPEGs | A game makes its own textures |
@@ -260,6 +261,10 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Scanning the asset root on a thread of its own, or not at all: a run's start and each `assets` request walk it whole, read every ID file and flush each ID file written to the disk, on the main thread, so an `assets` after copying in about 1,500 assets without ID files stops frames past `gg run`'s 10 s `--hang`, and the game restarts from its last snapshot | Phase 7's fourth milestone, whose watcher keeps the database |
 | IDs for shaders, scenes, sounds and other kinds, for assets outside the asset root, and for assets reached through links: the scan gives textures and models under the root alone, never through a link | Each kind as something first names it by ID |
 | Builds without `dev` naming textures by their IDs: they read no ID file, so they name every texture by its path, and a scene, a recording or a snapshot that names one by its ID finds none there | Phase 10, whose cooked package gives each asset its ID |
+| Loading the textures that scene text names where a layer loads it into a world itself, as inside a tick, as the sandbox's grid reload does: a world can't reach the renderer's textures, which are the context's, so `World::load_scene` finds only those loaded, while `Context::load_scene_file`, the tool API and the engine's other reads load them | A game loads scene text in a tick that names textures no layer adds |
+| A model's image named in text, as `5f3c9a1e07b2d846#0`, loading its model where no layer added it: it's refused (`asset.model_image`), or stands in where the run follows another | Phase 7's models in scenes by ID |
+| A stand-in giving way to its texture once its file comes, as after a checkout: it stands in for the run | Phase 7's reloading any change |
+| A lockstep joiner loading for its tool API a texture its host hasn't named (`asset.not_given`), whose name could differ from the host's; the host's edits load any | Someone edits a joiner's textures from its own editor |
 | 8- and 16-bit vertex fields, whose features Vulkan 1.4 guarantees but the device doesn't enable | A mesh packs its vertices, as Phase 10's cooker will |
 | Splits in a torn-off window, which holds one tab group | A tool wants panels side by side outside the main window |
 | Reordering tabs by dragging them along their bar; a drop among the tabs adds one at the end | Someone reorders tabs |

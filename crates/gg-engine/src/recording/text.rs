@@ -222,6 +222,22 @@ impl Text {
         }
     }
 
+    /// Adds the name of each texture it holds to `names`, in order.
+    pub(crate) fn textures<'t>(&'t self, names: &mut Vec<&'t str>) {
+        let fields = |given: &'t [(String, Text)], names: &mut Vec<&'t str>| {
+            for (_, text) in given {
+                text.textures(names);
+            }
+        };
+        match self {
+            Self::Texture(name) => names.push(name),
+            Self::Some(text) => text.textures(names),
+            Self::List(items) => items.iter().for_each(|item| item.textures(names)),
+            Self::Struct(given) | Self::Variant(_, given) => fields(given, names),
+            _ => {}
+        }
+    }
+
     /// Reads the value `text` writes, which is all of it, and starts at column `from` of its line.
     /// It may nest as many levels as a scene's values do, 64.
     ///

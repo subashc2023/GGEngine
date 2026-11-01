@@ -55,7 +55,7 @@ use crate::edits::{Done, Edit};
 use crate::layer::Commands;
 use crate::recording::text::{self, Text};
 use crate::reflect::Value;
-use crate::{World, WorldHash};
+use crate::{Context, World, WorldHash};
 
 /// How many ticks ahead a peer sends its inputs: 62.5 ms, so that they reach the other peer before
 /// it needs them across a LAN, at the cost of as long between a press and what it does.
@@ -107,14 +107,23 @@ pub(crate) struct Merged {
 
 impl Merged {
     /// Empties `queue`, layer `layer`'s, and fills it with the layer's commands for the tick, read
-    /// against `world`.
+    /// against `cx`'s world, once the textures they name are loaded, as a run that follows another
+    /// loads them.
     ///
     /// Fails with `net.bad_command` for a command the layer refuses, or that isn't one.
-    pub(crate) fn fill(&self, layer: usize, queue: &mut dyn Commands, world: &World) -> Result<()> {
+    pub(crate) fn fill(
+        &self,
+        layer: usize,
+        queue: &mut dyn Commands,
+        cx: &mut Context,
+    ) -> Result<()> {
         queue.clear();
         let commands = self.commands.iter().filter(|(of, _)| *of == layer);
         for (_, command) in commands {
-            let value = Text::parse(command, 1).map(|text| text.value(world));
+            let value = Text::parse(command, 1).map(|text| {
+                cx.load_followed(&text);
+                text.value(cx.world())
+            });
             value
                 .and_then(|value| queue.push(&value))
                 .map_err(|error| {
@@ -731,14 +740,17 @@ impl Lockstep {
     }
 
     /// As tick `tick` starts, once it's [`ready`](Self::ready): sends this peer's inputs for the
-    /// tick [`DELAY`] on, `queues`' commands, each layer's by its index, written against `world`,
-    /// and what it offered since its last tick, emptying them; and returns what the tick runs on.
+    /// tick [`DELAY`] on, `queues`' commands, each layer's by its index, written against `cx`'s
+    /// world, and what it offered since its last tick, emptying them; and returns what the tick
+    /// runs on, the edits read once the textures they name are loaded, as a run that follows
+    /// another loads them.
     pub(crate) fn start_tick<'q>(
         &mut self,
         tick: u64,
         queues: impl Iterator<Item = (usize, &'q mut dyn Commands)>,
-        world: &World,
+        cx: &mut Context,
     ) -> Merged {
+        let world = cx.world();
         let ahead = tick + DELAY;
         let mut inputs = Inputs {
             whole: true,
@@ -799,8 +811,10 @@ impl Lockstep {
         for peer in [host, joiner] {
             merged.commands.extend(peer.commands);
             for (ticket, edit) in peer.edits {
-                let read =
-                    Text::parse(&edit, 1).and_then(|text| Edit::from_value(&text.value(world)));
+                let read = Text::parse(&edit, 1).and_then(|text| {
+                    cx.load_followed(&text);
+                    Edit::from_value(&text.value(cx.world()))
+                });
                 match read {
                     Ok(edit) => merged.inputs.push((ticket, Outside::Edit(edit))),
                     Err(error) => {
@@ -812,7 +826,7 @@ impl Lockstep {
                 }
             }
             for (ticket, scene) in peer.scenes {
-                let read = Text::parse(&scene, 1).map(|text| text.value(world));
+                let read = Text::parse(&scene, 1).map(|text| text.value(cx.world()));
                 let saved = match &read {
                     Ok(Value::List(strings)) => match &strings[..] {
                         [Value::String(author), Value::String(text)] => {
@@ -1491,8 +1505,9 @@ mod tests {
 
     /// A joiner whose disk holds none of its host's ID files, as another machine's checkout without
     /// those not yet committed, names its textures as its host does: those it loaded, as its host's
-    /// world comes, and one both add after it joined, as the host's line says before the command
-    /// that names it; so the peers' worlds hash alike, and neither parts from the other.
+    /// world comes, one both add after it joined, as the host's line says before the command that
+    /// names it, and one the host alone loaded where text named it, which the joiner loads as it
+    /// reads that command; so the peers' worlds hash alike, and neither parts from the other.
     #[cfg(feature = "dev")]
     #[test]
     fn a_joiner_names_textures_as_its_host_does() {
@@ -1509,12 +1524,12 @@ mod tests {
         let [ours, theirs] = ["host", "joiner"].map(|peer| dir.0.join(peer));
         for root in [&ours, &theirs] {
             fs::create_dir_all(root.join("assets")).expect("a directory");
-            for name in ["stone.png", "late.png"] {
+            for name in ["stone.png", "late.png", "named.png"] {
                 fs::write(root.join("assets").join(name), &png).expect("a PNG");
             }
         }
-        let (stone, late) = ("5f3c9a1e07b2d846", "0a1b2c3d4e5f6071");
-        for (name, id) in [("stone", stone), ("late", late)] {
+        let (stone, late, named) = ("5f3c9a1e07b2d846", "0a1b2c3d4e5f6071", "7e6d5c4b3a291807");
+        for (name, id) in [("stone", stone), ("late", late), ("named", named)] {
             let meta = gg_api::asset::Meta {
                 id: id.parse().expect("an ID"),
             };
@@ -1556,22 +1571,32 @@ mod tests {
             let added = peer.cx.add_texture("late", root.join("assets/late.png"));
             added.expect("a texture")
         };
+        let paint = |peer: &mut Peer, texture| {
+            let queue = peer.stack.commands_of(0);
+            let queue = queue.expect("the painter queues commands");
+            queue
+                .push(&Paint(texture).to_value())
+                .expect("the painter takes its commands");
+        };
         let texture = add(&mut host);
         add(&mut joiner);
         let path = "assets/late.png";
         assert_eq!(textured(&joiner, path).as_deref(), Some(path));
-        let queue = host
-            .stack
-            .commands_of(0)
-            .expect("the painter queues commands");
-        queue
-            .push(&Paint(texture).to_value())
-            .expect("the painter takes its commands");
+        paint(&mut host, texture);
         let at = host.next.max(joiner.next) + DELAY + 1;
         meet(&mut host, &mut joiner, at);
         assert_eq!(textured(&joiner, path).as_deref(), Some(late));
+        // One the host loaded where text named it, as through its tool API, which the joiner's
+        // layers never add, loads there as the command naming it is read.
+        host.cx.load_named([named], false);
+        let texture = host.cx.world().assets().texture(named);
+        paint(&mut host, texture.expect("loaded"));
+        let at = host.next.max(joiner.next) + DELAY + 1;
+        meet(&mut host, &mut joiner, at);
+        let path = "assets/named.png";
+        assert_eq!(textured(&joiner, path).as_deref(), Some(named));
         let sprites = |peer: &Peer| peer.cx.world().query::<&crate::Sprite>().count();
-        assert_eq!((sprites(&host), sprites(&joiner)), (2, 2));
+        assert_eq!((sprites(&host), sprites(&joiner)), (3, 3));
         assert_eq!(host.cx.world().hash(), joiner.cx.world().hash());
         let codes: Vec<String> = logged.try_iter().collect();
         let parted = ["net.desync", "net.bad_command"];
@@ -1579,5 +1604,125 @@ mod tests {
             !codes.iter().any(|code| parted.contains(&code.as_str())),
             "{codes:?}"
         );
+    }
+
+    /// A scene file's save that names textures no layer added has its host load them before it
+    /// offers it, so that their names go out first; the joiner, whose disk holds none of the ID
+    /// files, loads each by the path its host's name gives, or stands in for one it hasn't, and
+    /// the peers hash alike. A save naming a texture the host can't load isn't offered, as the
+    /// joiner might stand in for it. The joiner loads the texture the host's scene named as it
+    /// joined, as the host's world comes, and one an edit of the host's names, as it reads it.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_joiner_loads_the_textures_its_hosts_scene_saves_name() {
+        use std::fs;
+
+        use crate::dirs::tests::Scratch;
+        use crate::scene_files::tests::{look_now, save};
+
+        let (codes, logged) = mpsc::channel();
+        let subscriber = tracing_subscriber::registry().with(Codes(codes));
+        let _logging = tracing::subscriber::set_default(subscriber);
+        let dir = Scratch::new("net-loaded");
+        let png =
+            crate::image::tests::png(png::ColorType::Rgba, png::BitDepth::Eight, 1, &[9; 4], None);
+        let [ours, theirs] = ["host", "joiner"].map(|peer| dir.0.join(peer));
+        let (late, gone, set) = ("0a1b2c3d4e5f6071", "1d2c3b4a59687f0e", "2b3c4d5e6f708192");
+        for (root, names) in [
+            (&ours, &["late", "set", "gone"][..]),
+            (&theirs, &["late", "set"]),
+        ] {
+            fs::create_dir_all(root.join("assets")).expect("a directory");
+            fs::create_dir_all(root.join("scenes")).expect("a directory");
+            for name in names {
+                fs::write(root.join("assets").join(format!("{name}.png")), &png).expect("a PNG");
+            }
+        }
+        for (name, id) in [("late", late), ("gone", gone), ("set", set)] {
+            let meta = gg_api::asset::Meta {
+                id: id.parse().expect("an ID"),
+            };
+            let file = ours.join("assets").join(format!("{name}.png.meta"));
+            fs::write(file, meta.text()).expect("its ID file");
+        }
+        // A scene of an entity of a name, and a sprite of each texture named.
+        let scene = |names: &[&str]| {
+            let mut text = "(\n    entities: {\n".to_owned();
+            text += "        \"0000000000003000\": (\n            Name: (\"a\"),\n        ),\n";
+            for (i, name) in names.iter().enumerate() {
+                text += &format!(
+                    "        \"{:016x}\": (\n            Sprite: (\n                texture: \
+                     Some(\"{name}\"),\n            ),\n        ),\n",
+                    0x3001 + i
+                );
+            }
+            text + "    },\n)\n"
+        };
+        let path = ours.join("scenes/level.ron");
+        fs::write(&path, scene(&[late])).expect("written");
+        let game = Game {
+            scene: Some(path.clone()),
+            ..Game::default()
+        };
+        let mut host = Peer::host(Context::seeded(1).root(&ours), game, 10);
+        let address = host.net().listening.expect("listening").to_string();
+        let mut cx = Context::seeded(2).root(&theirs);
+        cx.name_as([]);
+        let mut joiner = Peer::new(&Net::Join(address), cx, Game::default());
+        join(&mut host, &mut joiner);
+
+        save(&path, &scene(&["assets/none.png"]), 1);
+        look_now(&mut host.cx, &mut host.stack);
+        assert!(
+            host.net().offered.is_empty(),
+            "a texture the host can't load"
+        );
+        save(&path, &scene(&[late, gone]), 2);
+        look_now(&mut host.cx, &mut host.stack);
+        assert_eq!(host.net().offered.len(), 1);
+        let sprites = |peer: &Peer| peer.cx.world().query::<&crate::Sprite>().count();
+        until(&mut host, &mut joiner, |host, joiner| {
+            sprites(host) == 2 && sprites(joiner) == 2
+        });
+        let at = host.next.max(joiner.next) + 1;
+        meet(&mut host, &mut joiner, at);
+        assert_eq!(host.cx.world().hash(), joiner.cx.world().hash());
+
+        // An edit of the host's naming a texture it loaded for it, as its tool API does.
+        host.cx.load_named([set], false);
+        let texture = host.cx.world().assets().texture(set).expect("loaded");
+        let operation = Operation::Set {
+            entity: "0000000000003001".parse().expect("an ID"),
+            component: "Sprite".into(),
+            path: "texture".to_owned(),
+            value: Value::Option(Some(Box::new(Value::Texture(texture)))),
+        };
+        let edit = Edit::Apply {
+            author: "agent".to_owned(),
+            operations: vec![operation],
+        };
+        let ticket = host.net().offer(edit);
+        until(&mut host, &mut joiner, |host, _| host.net().is_done(ticket));
+        let (_, done) = host.net().done(ticket).expect("done");
+        assert!(matches!(done, Ok(Done::Applied(_))), "{done:?}");
+        let at = host.next.max(joiner.next) + 1;
+        meet(&mut host, &mut joiner, at);
+        assert_eq!(host.cx.world().hash(), joiner.cx.world().hash());
+        let assets = joiner.cx.world().assets();
+        let loaded = |name| {
+            assets
+                .texture(name)
+                .and_then(|texture| assets.path(texture))
+        };
+        let paths = (loaded(late), loaded(set));
+        assert_eq!(paths, (Some("assets/late.png"), Some("assets/set.png")));
+        let codes: Vec<String> = logged.try_iter().collect();
+        let parted = ["net.desync", "net.bad_command"];
+        assert!(
+            !codes.iter().any(|code| parted.contains(&code.as_str())),
+            "{codes:?}"
+        );
+        let stood_in = codes.iter().filter(|code| *code == "asset.stand_in");
+        assert_eq!(stood_in.count(), 1, "{codes:?}");
     }
 }

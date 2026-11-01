@@ -58,9 +58,7 @@ impl Names for World {
 
     fn texture(&self, name: &str) -> Result<Value> {
         let texture = self.assets().texture(name).ok_or_else(|| {
-            let message = format!(
-                "no texture added has the ID or path `{name}`, a path as the app's root names it"
-            );
+            let message = self.assets().not_found(name);
             Error::new("api.no_texture", message)
         })?;
         Ok(Value::Texture(texture))
