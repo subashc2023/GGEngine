@@ -13,6 +13,7 @@ mod hash;
 mod hierarchy;
 mod id;
 mod log;
+mod nodes;
 mod ops;
 mod query;
 mod resources;
@@ -44,6 +45,8 @@ use id::IdStream;
 #[cfg(feature = "dev")]
 pub(crate) use id::mix64;
 pub use log::Log;
+#[cfg(test)]
+pub(crate) use nodes::node_id;
 pub use ops::Operation;
 pub use query::{Query, QueryIter, QueryIterMut, ReadOnlyQuery};
 use resources::Resources;
@@ -370,6 +373,12 @@ impl World {
     /// If `components` has a type twice, since an entity has one of each; and if a type of them
     /// fails to [`register`](Self::register).
     pub fn spawn<B: Bundle>(&mut self, components: B) -> Entity {
+        self.spawn_as(None, components)
+    }
+
+    /// As [`spawn`](Self::spawn), the entity's ID `id`, which no living entity has, if it's given,
+    /// as a model's node's is, and else drawn.
+    fn spawn_as<B: Bundle>(&mut self, id: Option<EntityId>, components: B) -> Entity {
         let mut ids = [ComponentId::default(); MOST];
         let ids = &mut ids[..B::COUNT];
         B::ids(&mut self.components, ids);
@@ -385,7 +394,17 @@ impl World {
         }
         let table = self.table(signature);
         let entity = self.take_slot();
-        let id = self.draw_id(entity);
+        let id = match id {
+            Some(id) => {
+                let given = self.find_by_id(id, entity);
+                assert!(
+                    given.is_none(),
+                    "a spawn gives ID {id}, which a living entity has"
+                );
+                id
+            }
+            None => self.draw_id(entity),
+        };
         self.entity_ids[entity.index as usize] = Some(id);
         let into = &mut self.tables[table as usize];
         let row = into.entities.len() as u32;

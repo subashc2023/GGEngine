@@ -128,8 +128,10 @@ Talk to a running game, through its tool API:
                                  new files: commit it with its file. A file renamed or moved alone
                                  keeps its ID, the game moving its ID file after it, unless it's
                                  edited in the same step. A file of a texture or a model the game
-                                 has added, edited, reloads in it, as a shader's does, but for a
-                                 model's nodes and materials, which change as it next starts
+                                 has added, edited, reloads in it, as a shader's does, the nodes
+                                 its `ModelRoot`s spawn with it, but in a recorded run or a lockstep
+                                 session, where a model's nodes and materials change as it next
+                                 starts
   apply <OPERATIONS>             Apply OPERATIONS, a JSON array of the API's operations, as one edit:
                                  all or none, between ticks, which `undo` takes back
   set <ID> <COMPONENT> <PATH> <VALUE>

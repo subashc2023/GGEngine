@@ -11,6 +11,8 @@ use gg_core::Result;
 #[cfg(feature = "dev")]
 use super::ops::Operation;
 use super::{Entity, EntityId, World};
+#[cfg(feature = "dev")]
+use crate::ModelNode;
 use crate::recording::text;
 use crate::reflect::{self, Value};
 
@@ -83,7 +85,7 @@ impl World {
             let parent = world.parent(entity).expect("alive");
             parent.map(|parent| world.id(parent).expect("a parent is alive"))
         };
-        let mut order: Vec<EntityId> = ids(&after).collect();
+        let mut order: Vec<EntityId> = scene_ids(&after).collect();
         // Each parent before its children, then by ID.
         let depth = |id: &EntityId| {
             let mut entity = after.entity(*id).expect("alive");
@@ -192,7 +194,7 @@ impl World {
         }
         // The file's entities no more, but those that will be under another of them, once the
         // reparents before have moved what they move, which goes with it.
-        let mut gone: Vec<EntityId> = ids(&before)
+        let mut gone: Vec<EntityId> = scene_ids(&before)
             .filter(|&id| after.entity(id).is_none() && self.entity(id).is_some())
             .collect();
         gone.sort_unstable();
@@ -292,6 +294,15 @@ const PARENT: &str = "Parent";
 fn ids(world: &World) -> impl Iterator<Item = EntityId> + '_ {
     let ids = world.query::<Entity>().map(|entity| world.id(entity));
     ids.map(|id| id.expect("a living entity has an ID"))
+}
+
+/// The IDs of `world`'s entities that a scene names, in no order: all but models' nodes, which the
+/// world spawns under their roots as it spawns the roots, and edits no other way.
+#[cfg(feature = "dev")]
+fn scene_ids(world: &World) -> impl Iterator<Item = EntityId> + '_ {
+    let entities = world.query::<Entity>();
+    let named = entities.filter(|&entity| world.get::<ModelNode>(entity).is_none());
+    named.map(|entity| world.id(entity).expect("a living entity has an ID"))
 }
 
 /// The paths, from `path`, of the parts where `a`, in `ours`, and `b`, in `theirs`, differ, each
@@ -447,6 +458,9 @@ fn same(a: &Value, ours: &World, b: &Value, theirs: &World) -> bool {
         (&Value::Entity(x), &Value::Entity(y)) => ours.id(x) == theirs.id(y),
         (&Value::Texture(x), &Value::Texture(y)) => {
             ours.assets().name(x) == theirs.assets().name(y)
+        }
+        (&Value::Model(x), &Value::Model(y)) => {
+            ours.assets().model_name(x) == theirs.assets().model_name(y)
         }
         (Value::Option(x), Value::Option(y)) => match (x, y) {
             (Some(x), Some(y)) => same(x, ours, y, theirs),

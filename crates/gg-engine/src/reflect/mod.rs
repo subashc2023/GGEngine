@@ -22,7 +22,7 @@ pub use gg_core::{Error, Result};
 pub use gg_macros::Reflect;
 
 pub use crate::ecs::Digest;
-use crate::{Entity, Texture};
+use crate::{Entity, Model, Texture};
 pub(crate) use path::{reach, reach_mut, reach_opaque, resolve};
 
 /// An identifier: a type's, a field's or a variant's name, borrowed for Rust's types, and owned
@@ -55,6 +55,9 @@ pub enum Value {
     /// didn't: scenes, recordings, snapshots and the tool API name it by its path, which the
     /// world's [assets](crate::App::root) map it to where values cross into them.
     Texture(Texture),
+    /// A model's handle, which only a model added hands out, named where values cross out of the
+    /// process as a texture is.
+    Model(Model),
     Option(Option<Box<Value>>),
     /// A list's elements, or an array's.
     List(Vec<Value>),
@@ -89,6 +92,8 @@ pub enum Type {
     /// A texture, named by its path: it has no default, so a component that shows none, as a
     /// sprite does by default, holds one in an `Option`.
     Texture,
+    /// A model, named as a texture is, which has no default either.
+    Model,
     Option(Box<Type>),
     List(Box<Type>),
     /// This many elements, always.
@@ -427,6 +432,13 @@ impl Types {
                     "a texture has no default, since only a texture loaded from a file has a path \
                      to save; a field that may show none is an `Option<Texture>`, whose default is \
                      `None`",
+                ));
+            }
+            Type::Model => {
+                return Err(Error::new(
+                    "reflect.no_default",
+                    "a model has no default, since only a model loaded from a file has a name to \
+                     save",
                 ));
             }
             Type::Option(_) => Value::Option(None),
@@ -858,6 +870,7 @@ pub(crate) fn kind(value: &Value) -> &'static str {
         Value::Quat(_) => "Quat",
         Value::Entity(_) => "Entity",
         Value::Texture(_) => "Texture",
+        Value::Model(_) => "Model",
         Value::Option(_) => "Option",
         Value::List(_) => "List",
         Value::Struct(_) => "Struct",
@@ -1071,6 +1084,7 @@ fn what_is(types: &Types, ty: &Type) -> String {
         Type::Quat => "a quaternion".to_owned(),
         Type::Entity => "an entity".to_owned(),
         Type::Texture => "a texture".to_owned(),
+        Type::Model => "a model".to_owned(),
         Type::Option(inner) => format!("an option of {}", what_is(types, inner)),
         Type::List(inner) => format!("a list of {}", what_is(types, inner)),
         Type::Array(inner, len) => format!("an array of {len} of {}", what_is(types, inner)),

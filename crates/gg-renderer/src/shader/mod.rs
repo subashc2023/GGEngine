@@ -312,6 +312,21 @@ impl Shaders {
         self.lazy(slot, name, spirv, blend)
     }
 
+    /// Adds the engine's model shader for each alpha mode that none has asked for yet, as
+    /// [`MeshDraw::with_material`](crate::MeshDraw::with_material) adds one the first time a
+    /// material asks for it: so that a material made later, as a model's read again, adds none,
+    /// whose index what's added after it would then follow.
+    pub fn add_model_shaders(&mut self) {
+        let modes = [
+            AlphaMode::Opaque,
+            AlphaMode::Mask { cutoff: 0.5 },
+            AlphaMode::Blend,
+        ];
+        for alpha in modes {
+            self.model(alpha);
+        }
+    }
+
     /// The engine's circle shader, which the build compiled, added as the model shaders are the
     /// first time it's asked for.
     pub(crate) fn circle(&mut self) -> Shader<Corner, circle::Params> {

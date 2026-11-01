@@ -311,10 +311,10 @@ A project's state is text that people and agents edit, diff and merge with ordin
   line and paragraph separators and default-ignorable code points; names ASCII identifiers; at
   most 64 levels deep. The engine writes the text itself, so that the bytes depend on no
   library's formatting, line endings or Rust release, and `ron` only reads it, through seeds
-  that reflection's descriptions drive, never its untyped values. A texture is saved as its name,
-  its asset ID or else its path relative to the app's root (`App::root`), as Asset IDs says below,
-  which a load finds it by, as it finds it by a path to its file, as a scene written by hand may
-  name it, loading it where no layer has; what's opaque, such as a `MeshDraw`, isn't saved:
+  that reflection's descriptions drive, never its untyped values. A texture or a model is saved as
+  its name, its asset ID or else its path relative to the app's root (`App::root`), as Asset IDs
+  says below, which a load finds it by, as it finds it by a path to its file, as a scene written by
+  hand may name it, loading it where no layer has; what's opaque, such as a `MeshDraw`, isn't saved:
   a load builds each component on its type's `Component::base`, which gives it that, or from the
   scene alone. A field a scene leaves out, as one saved before its type had the field does, takes
   its default, and saves again whole. A child's `Parent` is saved as its parent's ID, and a root's
@@ -328,6 +328,27 @@ A project's state is text that people and agents edit, diff and merge with ordin
   that a copy's IDs are as distinct as its prefab's, and two copies' meet only by chance;
   references inside the prefab are to the copy's own entities. A scene saves the copies as
   entities like any others.
+- **Models in scenes.** A model is placed as an entity with a `ModelRoot`, which names it as a
+  texture is named, by its asset ID or else its path; the world spawns the model's nodes under it
+  as it comes with one, whether a scene loads it, a tool's create or add gives it, or code spawns it
+  through `Model::spawn`, and spawns another's in their place as it's given another model, as a set
+  of it does. The nodes are the model's: each node of its default scene an entity, with a
+  `ModelNode` saying which part of the model it is, and a child for each primitive of a mesh with
+  several. Their IDs are mixed from the root's and their parts', as a prefab's copy's are, so that
+  the root's ID alone gives them wherever it's loaded, made or restored, and a scene saves the root
+  alone, refusing an entity code put under a node (`scene.model_node`). The world keeps
+  `ModelRoot` and `ModelNode`, as it keeps `Parent`: code reads them but changes neither; tools'
+  operations refuse to change a node, delete it, copy it, put anything under it or give an entity
+  a `ModelNode` (`ecs.model_node`, `reflect.read_only`), as a scene's text can't give one either,
+  and change a root's model, take it away or copy the root, its nodes following, as one edit, an
+  operation naming the root alone, never its nodes, which go with it however many its model has
+  by its undo; a scene file's save edits roots alone; and the tool API's `pick` gives a node's
+  root. Code may change nodes as the game runs, as snapshots keep them, and a world restored from
+  one has them as it was, but for draws that a run of other assets left out, which come back from
+  the model; as the model's nodes change, as its file's read again, nodes that keep their places
+  in its hierarchy stay, as code left them but for their draws and the transforms the model
+  changed, and the others are spawned again, under the same IDs. Overrides of a node's fields, as
+  linked prefabs will keep them, wait for those.
 - **Stable IDs.** Every entity has a persistent ID, separate from its runtime handle, that
   files, operations, diagnostics and network messages use to name it. IDs are random rather
   than sequential, so entities added on two branches neither collide nor land on the same
@@ -384,48 +405,49 @@ A project's state is text that people and agents edit, diff and merge with ordin
     changed does. A texture loaded from an asset's file before it was renamed is the one its new
     path gives, loaded once.
   - Scenes, the world's hash, recordings, snapshots, lockstep inputs and the tool API name a texture
-    by its name: its asset ID, or a model's image by its model's and its place in it, such as
-    `5f3c9a1e07b2d846#0`, so that a file renamed with its ID file changes none of them; or else its
-    path, as for a texture outside the root, or whose ID file is missing in a run that writes none.
-    Each is read by a name or by a path to the texture's file. A texture is named as it's added,
-    by the ID its run's database holds for its file then, and keeps that name for the run, but in
-    a replay or a lockstep joiner, which go by the names they're given, as below.
-  - A texture that a scene, the tool API's edit or `scene open`, or a recorded or a lockstep peer's
-    command or edit names, and no layer has added, loads there, before the text is read, as
-    `Context::add_texture` loads a file, and is named as it names one, its file found by the name:
-    in a run that follows another, a replay or a lockstep joiner, at the path the name was given;
-    else by an ID, as the run's database has it, which a joiner has but a replay, reading no ID
-    file, doesn't; else by a path from the asset root, which mustn't be absolute or lead outside
-    it, as through `..` or a link. A model's image loads with its model alone. A name that doesn't
-    load refuses what names it where it's asked for (`asset.no_texture`, the API's
-    `api.no_texture`), saying why: `asset.model_image`, `asset.unknown_id`, `asset.outside_root`,
-    or the add's own, as `engine.bad_texture`. In a run that follows another, and in a restore, a
-    stand-in of magenta and black squares takes its place instead, named as named, warning
-    `asset.stand_in`, so that the run goes as the other did, its hash reading names alone. What's
-    loaded so is noted among what the layers added, so that a snapshot's `asset` lines list it,
-    and a run restored from one loads each texture its run had, in order, before it reads the
-    world. A lockstep host loads what a scene file's save names before it offers it, so that their
-    names go out first, and offers none naming a texture it can't load; a joiner loads for its
-    tool API only what its host named (`asset.not_given`). Scene text that a layer loads into a
-    world itself, as inside a tick, finds only what's loaded. Each decodes on the main thread as
-    it's named, as a layer's add does.
-  - Builds without `dev`, which read no ID file, name every texture by its path, so that a scene,
-    a recording or a snapshot naming one by its ID finds none there; cooked data will give them
-    IDs.
+    or a model by its name: its asset ID, or a model's image by its model's and its place in it,
+    such as `5f3c9a1e07b2d846#0`, so that a file renamed with its ID file changes none of them; or
+    else its path, as for an asset outside the root, or whose ID file is missing in a run that
+    writes none. Each is read by a name or by a path to the asset's file. An asset is named as it's
+    added, by the ID its run's database holds for its file then, and keeps that name for the run,
+    but in a replay or a lockstep joiner, which go by the names they're given, as below.
+  - A texture or a model that a scene, the tool API's edit or `scene open`, or a recorded or a
+    lockstep peer's command or edit names, and no layer has added, loads there, before the text is
+    read, as `Context::add_texture` and `add_model` load a file, and is named as they name one, its
+    file found by the name: in a run that follows another, a replay or a lockstep joiner, at the
+    path the name was given; else by an ID, as the run's database has it, which a joiner has but a
+    replay, reading no ID file, doesn't; else by a path from the asset root, which mustn't be
+    absolute or lead outside it, as through `..` or a link. A model's image loads with its model,
+    which a name of the image loads. A name that doesn't load refuses what names it where it's
+    asked for (`asset.no_texture` or `asset.no_model`, the API's `api.no_texture` or
+    `api.no_model`), saying why: `asset.model_image` for an image the model hasn't,
+    `asset.unknown_id`, `asset.outside_root`, or the add's own, as `engine.bad_texture`. In a run
+    that follows another, and in a restore, a stand-in takes its place instead, of magenta and
+    black squares for a texture, of no nodes for a model, named as named, warning `asset.stand_in`,
+    so that the run goes as the other did, its hash reading names alone, but for a model's nodes,
+    which its roots spawn none of then. What's loaded so is noted among what the layers added, so
+    that a snapshot's `asset` lines list it, and a run restored from one loads each texture and
+    model its run had, in order, before it reads the world. A lockstep host loads what a scene
+    file's save names before it offers it, so that their names go out first, and offers none
+    naming an asset it can't load; a joiner loads for its tool API only what its host named
+    (`asset.not_given`). Scene text that a layer loads into a world itself, as inside a tick, finds
+    only what's loaded. Each decodes on the main thread as it's named, as a layer's add does.
+  - Builds without `dev`, which read no ID file, name every asset by its path, so that a scene, a
+    recording or a snapshot naming one by its ID finds none there; cooked data will give them IDs.
   - A run's names travel with what another process reads of it, so that the other goes as it did
     whatever ID files its disk holds, as a checkout without those not yet committed. A recording
-    has a `named` line for each texture named otherwise than by its path, the name and the path,
-    by which its replay, reading no ID file, names its textures. A snapshot file has them too, by
-    which a run restored from it reads its values, a texture whose ID changed since coming back by
-    its path, though the run names it its own way, and one whose file was renamed since, its ID
-    file moved with it, from where the run's database has that ID now, its `asset` line following
-    it, so that what's opaque comes back. A lockstep joiner names every texture as its
-    host does, by its path until the host's world comes with its names, which rename those it has
-    added, as each world the host sends again does, and by the names the host sends of those it
-    adds after, before the inputs that may name them; so a joiner's names may be IDs its own disk
-    holds no ID file for, which its `assets` doesn't list.
+    has a `named` line for each texture and model named otherwise than by its path, the name and
+    the path, by which its replay, reading no ID file, names its assets. A snapshot file has them
+    too, by which a run restored from it reads its values, an asset whose ID changed since coming
+    back by its path, though the run names it its own way, and one whose file was renamed since,
+    its ID file moved with it, from where the run's database has that ID now, its `asset` line
+    following it, so that what's opaque comes back. A lockstep joiner names every asset as its host
+    does, by its path until the host's world comes with its names, which rename those it has added,
+    as each world the host sends again does, and by the names the host sends of those it adds
+    after, before the inputs that may name them; so a joiner's names may be IDs its own disk holds
+    no ID file for, which its `assets` doesn't list.
   - A test's context reads the ID files under the root it's given, writing none, as a run that
-    serves no tool API does, so that a game's reference hashes name its textures as its runs do.
+    serves no tool API does, so that a game's reference hashes name its assets as its runs do.
   [asset.rs](crates/gg-api/src/asset.rs), [assets.rs](crates/gg-engine/src/assets.rs) and
   [asset_watch.rs](crates/gg-engine/src/asset_watch.rs) have the rest.
 - **Operations.** Every authoring change, by a person or an agent, is an operation with an
@@ -956,9 +978,15 @@ in the bindless set once the GPU has finished the frames before, which may sampl
 frame that takes it waits for them, a frame's time at most. A texture takes an image of any size,
 but one cut into a sprite sheet, whose cells a layer has where its size put them, keeps drawing as
 it did rather than take one of another (`asset.sheet_resized`). A model takes each primitive's
-vertices and indices and each image, which its entities draw at once; what else changed, its nodes
-and its materials, which its entities hold, stays as it was until the run starts again
-(`asset.model_changed`), and a model of other numbers of primitives or images takes nothing. A
+vertices and indices and each image, which its entities draw at once, and its nodes and materials,
+which its roots' nodes take, as [Models in scenes](#project-state) says, and other numbers of
+primitives and images, those past what it had added, or given back the meshes and textures of
+their places, which those it has no more keep for them; but in a run
+that's recorded or in a lockstep session, whose world changes only as the run it goes with changed
+it, a model takes its vertices, indices and images alone: its nodes and materials stay as they were
+until the run starts again (`asset.model_changed`), and a model of other numbers of primitives or
+images takes nothing. The engine adds its model shader for every alpha mode with a run's first
+model, so that a material read again adds none. A
 stand-in takes its file's image once the file comes, or the file of the asset whose ID it stands
 for, once one has it, but never a file outside the asset root (`asset.outside_root`); and a texture
 or a model whose file under the root is renamed or moved, as the asset database finds it by the ID
@@ -1038,12 +1066,14 @@ before it; the tool API's look's grid draws after the layers' draws and before t
 a backdrop a layer draws, as Shards' floor, and under the world's entities.
 
 3D games draw models: `Context::add_model` reads a glTF 2.0 file and adds its meshes and its images,
-as textures, once, all of itself or nothing, and `Model::spawn` places its default scene in a world
-as entities, as often as the game likes, under a root where it's placed: a node each, with its
-transform in its parent's space, and a child for each primitive of a mesh with several, since an
-entity holds one `MeshDraw`. The engine reads glTF itself, over serde_json, rather than through the
-`gltf` crate, whose public calls panic on some malformed files. A model's URIs can't name a file
-outside its folder, though a link inside the folder is followed wherever it leads.
+as textures, once, all of itself or nothing, or the engine does as text names it, and a root with a
+`ModelRoot` of it, as `Model::spawn` makes one and a scene loads one, has its default scene spawned
+under it as entities, as often as the game likes, as [Models in scenes](#project-state) says: a node
+each, with its transform in its parent's space, and a child for each primitive of a mesh with
+several, since an entity holds one `MeshDraw`. The engine reads glTF itself, over serde_json,
+rather than through the `gltf` crate, whose public calls panic on some malformed files. A model's
+URIs can't name a file outside its folder, though a link inside the folder is followed wherever it
+leads.
 
 Draws are batched, every mesh and not only quads: each run of consecutive draws of one mesh with one
 shader, drawing the same faces, is a single instanced draw, whose instances are the draws, and the

@@ -18,12 +18,13 @@ use serde::de::{
 };
 
 use super::{MAX_DEPTH, NO_HINTS};
+use crate::assets::Asset;
 use crate::ecs::by_name::about;
 use crate::ecs::id::Named;
 use crate::ecs::table::{AnyColumn, ComponentId, Row};
 use crate::ecs::{Entity, EntityId, Parent, World};
 use crate::reflect::{self, Field, Ident, Meta, Shape, Type, Types, Value, Variant};
-use crate::{Reflect, Texture};
+use crate::{Model, ModelNode, Reflect, Texture};
 
 /// A scene's entity, as the parse reads it.
 pub(super) struct Loaded {
@@ -96,11 +97,11 @@ pub(super) fn parse(world: &World, text: &str, prefab: bool) -> Result<Vec<Loade
     Ok(entities)
 }
 
-/// The names scene `text` gives textures that none loaded has, each once, in the order it first
-/// gives them, as [`parse`] reads it into `world`, but on past them.
+/// The textures and models scene `text` names that none loaded has, each once, in the order it
+/// first names them, as [`parse`] reads it into `world`, but on past them.
 ///
 /// Fails as the parse does, but for those.
-pub(super) fn textures(world: &World, text: &str) -> Result<Vec<String>> {
+pub(super) fn assets(world: &World, text: &str) -> Result<Vec<Asset<String>>> {
     let mut load = Load::new(world, false, None, true);
     let mut deserializer = deserializer(text)?;
     if let Err(error) = run(&mut load, &mut deserializer) {
@@ -216,7 +217,7 @@ fn syntax(error: &SpannedError) -> Error {
 }
 
 /// `refusal`, at item `item`, saying where it is: the text is parsed again, as it was, past the
-/// textures none loaded has if `collect`, up to the item, where the parser is at its first
+/// textures and models none loaded has if `collect`, up to the item, where the parser is at its first
 /// character, and the refusal is carried out from there, gathering the entity, the component and
 /// the path.
 fn locate(
@@ -262,9 +263,9 @@ struct Load<'w> {
     /// out from there as `carried`.
     stop: Option<(u32, Error)>,
     carried: Option<Error>,
-    /// The names given textures that none loaded has, while the parse reads on past them, as
-    /// [`textures`] does, rather than refusing them.
-    missing: Option<Vec<String>>,
+    /// The textures and models named that none loaded has, while the parse reads on past them, as
+    /// [`assets`] does, rather than refusing them.
+    missing: Option<Vec<Asset<String>>>,
 }
 
 impl<'w> Load<'w> {
@@ -606,6 +607,14 @@ impl<'de, 'w> DeserializeSeed<'de> for ComponentKey<'_, 'w> {
                 );
                 return Err(about(error));
             }
+            if Some(component) == world.component::<ModelNode>() {
+                let error = Error::new(
+                    "reflect.read_only",
+                    "the world keeps it, as it spawns a model's nodes under the model's root, \
+                     which a scene names alone",
+                );
+                return Err(about(error));
+            }
             Ok(component)
         }))?;
         let component = found.map_err(|error| self.load.refuse(item, error))?;
@@ -678,7 +687,8 @@ impl<'de> DeserializeSeed<'de> for Read<'_, '_> {
             | Type::F64
             | Type::String
             | Type::Entity
-            | Type::Texture => {
+            | Type::Texture
+            | Type::Model => {
                 let leaf = Leaf {
                     load,
                     item,
@@ -888,25 +898,41 @@ impl Visitor<'_> for Leaf<'_, '_> {
                 let id = id.map_err(|error| self.load.refuse(self.item, error))?;
                 Ok(Value::Entity(self.load.reference(id, self.item)))
             }
-            Type::Texture => {
+            Type::Texture | Type::Model => {
                 let assets = self.load.world.assets();
-                match (assets.texture(text), &mut self.load.missing) {
-                    (Some(texture), _) => Ok(Value::Texture(texture)),
+                let (found, asset, code) = match self.ty {
+                    Type::Texture => {
+                        let found = assets.texture(text).map(Value::Texture);
+                        (found, Asset::Texture(text), "asset.no_texture")
+                    }
+                    _ => {
+                        let found = assets.model(text).map(Value::Model);
+                        (found, Asset::Model(text), "asset.no_model")
+                    }
+                };
+                match (found, &mut self.load.missing) {
+                    (Some(value), _) => Ok(value),
                     (None, Some(missing)) => {
-                        if !missing.iter().any(|name| name == text) {
-                            missing.push(text.to_owned());
+                        if !missing.iter().any(|named| named.as_deref() == asset) {
+                            missing.push(asset.owned());
                         }
-                        Ok(Value::Texture(Texture::WHITE))
+                        // Placeholders, of which a read that gathers names builds nothing.
+                        Ok(match asset {
+                            Asset::Texture(_) => Value::Texture(Texture::WHITE),
+                            Asset::Model(_) => Value::Model(Model::new(0)),
+                        })
                     }
                     (None, None) => {
-                        let mut message = assets.not_found(text);
+                        let kind = asset.kind();
+                        let mut message = assets.not_found(kind, text);
                         if !assets.has_failed(text) {
-                            message += ": a scene that `Context::load_scene_file` or the tool API \
-                                        loads has the textures it names loaded first, but one a \
-                                        layer loads into a world itself finds only those loaded \
-                                        already";
+                            message += &format!(
+                                ": a scene that `Context::load_scene_file` or the tool API loads \
+                                 has the {kind}s it names loaded first, but one a layer loads \
+                                 into a world itself finds only those loaded already"
+                            );
                         }
-                        let error = Error::new("asset.no_texture", message);
+                        let error = Error::new(code, message);
                         Err(self.load.refuse(self.item, error))
                     }
                 }
@@ -917,7 +943,7 @@ impl Visitor<'_> for Leaf<'_, '_> {
 
     fn visit_string<E: de::Error>(self, text: String) -> Result<Value, E> {
         match self.ty {
-            Type::Entity | Type::Texture => self.visit_str(&text),
+            Type::Entity | Type::Texture | Type::Model => self.visit_str(&text),
             _ => Ok(Value::String(text)),
         }
     }

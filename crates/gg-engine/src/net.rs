@@ -51,6 +51,7 @@ use gg_core::{Error, Result};
 use tracing::{error, info, warn};
 
 use crate::args::Net;
+use crate::assets::Counts;
 use crate::edits::{Done, Edit};
 use crate::layer::Commands;
 use crate::recording::text::{self, Text};
@@ -229,10 +230,10 @@ pub(crate) struct Lockstep {
     hashes: [BTreeMap<u64, WorldHash>; 2],
     #[cfg(feature = "dev")]
     patches: Patches,
-    /// The host's: how many textures there were as it last told its joiner their names, the
-    /// engine's white texture among them.
+    /// The host's: how many textures and models there were as it last told its joiner their names,
+    /// the engine's white texture among them.
     #[cfg(feature = "dev")]
-    named: usize,
+    named: Counts,
     /// The joiner's: the names its host gave the textures it added, each with the path it names,
     /// as they came since they were last taken.
     #[cfg(feature = "dev")]
@@ -321,7 +322,7 @@ impl Lockstep {
             #[cfg(feature = "dev")]
             patches: Patches::default(),
             #[cfg(feature = "dev")]
-            named: 0,
+            named: (0, 0),
             #[cfg(feature = "dev")]
             names: Vec::new(),
         })
@@ -588,19 +589,19 @@ impl Lockstep {
     }
 
     /// The host, between ticks, the next to run being `next`: sends the joiner `world`, a snapshot
-    /// file's text, which names its textures as the host does, there being `textures` of them,
+    /// file's text, which names its assets as the host does, there being `assets` of them,
     /// with how many patches its code is on; its inputs for each tick from `next` to the tick
     /// [`DELAY`] on, which it has sent before, or has none of within `DELAY` ticks of its start or
     /// restore; and its patches that are to apply. The joiner's inputs are needed from the tick
     /// `DELAY` on from `next`, the first it can reach.
-    pub(crate) fn send_world(&mut self, world: &str, textures: usize, next: u64) {
+    pub(crate) fn send_world(&mut self, world: &str, assets: Counts, next: u64) {
         self.owed = false;
         #[cfg(feature = "dev")]
         {
-            self.named = textures;
+            self.named = assets;
         }
         #[cfg(not(feature = "dev"))]
-        let _ = textures;
+        let _ = assets;
         #[cfg(feature = "dev")]
         let patches = self.patches.applied;
         #[cfg(not(feature = "dev"))]
@@ -783,7 +784,7 @@ impl Lockstep {
         }
         if self.from.is_some() {
             let mut text = String::new();
-            // The names of the textures the host added since it last told them, before the inputs
+            // The names of the assets the host added since it last told them, before the inputs
             // that may name them.
             #[cfg(feature = "dev")]
             if self.hosts() {
@@ -792,7 +793,7 @@ impl Lockstep {
                     text::write_named(&mut text, name, path);
                     text.push('\n');
                 }
-                self.named = world.assets().count();
+                self.named = world.assets().counts();
             }
             write_inputs(&mut text, ahead, &inputs);
             self.send(&text);
@@ -1588,7 +1589,8 @@ mod tests {
         assert_eq!(textured(&joiner, path).as_deref(), Some(late));
         // One the host loaded where text named it, as through its tool API, which the joiner's
         // layers never add, loads there as the command naming it is read.
-        host.cx.load_named([named], false);
+        host.cx
+            .load_named([crate::assets::Asset::Texture(named)], false);
         let texture = host.cx.world().assets().texture(named);
         paint(&mut host, texture.expect("loaded"));
         let at = host.next.max(joiner.next) + DELAY + 1;
@@ -1689,7 +1691,8 @@ mod tests {
         assert_eq!(host.cx.world().hash(), joiner.cx.world().hash());
 
         // An edit of the host's naming a texture it loaded for it, as its tool API does.
-        host.cx.load_named([set], false);
+        host.cx
+            .load_named([crate::assets::Asset::Texture(set)], false);
         let texture = host.cx.world().assets().texture(set).expect("loaded");
         let operation = Operation::Set {
             entity: "0000000000003001".parse().expect("an ID"),

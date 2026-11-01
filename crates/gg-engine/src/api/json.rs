@@ -16,7 +16,7 @@ use serde_json::{Map, Value as JsonValue};
 
 use crate::ecs::MAX_DEPTH;
 use crate::reflect::{self, Bound, Field, Ident, Meta, Shape, Show, Type, Types, Value, Variant};
-use crate::{Entity, EntityId, Texture, World};
+use crate::{Entity, EntityId, Model, Texture, World};
 
 /// What finds the entities and textures values hold as JSON names them, by their IDs and names,
 /// and names them back: a game's [`World`], or a client's [`Remote`].
@@ -35,6 +35,12 @@ pub(crate) trait Names {
     ///
     /// Fails with `api.no_texture` if none is.
     fn texture(&self, name: &str) -> Result<Value>;
+    /// The name of `model`, as a texture's.
+    fn model_name(&self, model: Model) -> Option<&str>;
+    /// The value of the model `name` names, by its name or a path to its file.
+    ///
+    /// Fails with `api.no_model` if none is.
+    fn model(&self, name: &str) -> Result<Value>;
 }
 
 impl Names for World {
@@ -58,10 +64,22 @@ impl Names for World {
 
     fn texture(&self, name: &str) -> Result<Value> {
         let texture = self.assets().texture(name).ok_or_else(|| {
-            let message = self.assets().not_found(name);
+            let message = self.assets().not_found("texture", name);
             Error::new("api.no_texture", message)
         })?;
         Ok(Value::Texture(texture))
+    }
+
+    fn model_name(&self, model: Model) -> Option<&str> {
+        Some(self.assets().model_name(model))
+    }
+
+    fn model(&self, name: &str) -> Result<Value> {
+        let model = self.assets().model(name).ok_or_else(|| {
+            let message = self.assets().not_found("model", name);
+            Error::new("api.no_model", message)
+        })?;
+        Ok(Value::Model(model))
     }
 }
 
@@ -89,6 +107,14 @@ impl Names for Remote<'_> {
     }
 
     fn texture(&self, name: &str) -> Result<Value> {
+        Ok(Value::String(name.to_owned()))
+    }
+
+    fn model_name(&self, _: Model) -> Option<&str> {
+        None
+    }
+
+    fn model(&self, name: &str) -> Result<Value> {
         Ok(Value::String(name.to_owned()))
     }
 }
@@ -122,6 +148,10 @@ pub(crate) fn write(out: &mut String, value: &Value, names: &dyn Names) {
             Some(name) => string(out, name),
             None => out.push_str("null"),
         },
+        &Value::Model(model) => match names.model_name(model) {
+            Some(name) => string(out, name),
+            None => out.push_str("null"),
+        },
         Value::Option(None) => out.push_str("null"),
         Value::Option(Some(value)) => write(out, value, names),
         Value::List(items) => {
@@ -149,7 +179,8 @@ pub(crate) fn write(out: &mut String, value: &Value, names: &dyn Names) {
 
 /// The value `json` gives a field of type `ty`, as gg-api's docs describe: with the entities it
 /// names by their IDs, alive as `names` finds them, or `null` for a dead one, as one that isn't
-/// alive writes, and the textures by their names or paths to their files, as `names` finds them;
+/// alive writes, and the textures and models by their names or paths to their files, as `names`
+/// finds them;
 /// a struct, or a variant's fields, missing a field takes its default, or is opaque, which keeps
 /// or makes it as its type's own is; and a whole number an `Int` for a signed field, as
 /// reflection reads one, and a `UInt` for an unsigned one, if it can be.
@@ -157,8 +188,8 @@ pub(crate) fn write(out: &mut String, value: &Value, names: &dyn Names) {
 /// Fails, saying where in the value, with `reflect.wrong_kind` for JSON of another kind than the
 /// type's, `reflect.no_variant` and `reflect.no_field` for a variant or a field the type hasn't,
 /// `ecs.bad_id` and `ecs.no_entity` for an ID that isn't one or names no living entity,
-/// `api.no_texture` for a name or path no texture has, and `api.too_deep` for a value nested
-/// more than a scene's values may be.
+/// `api.no_texture` or `api.no_model` for a name or path no texture or model has, and
+/// `api.too_deep` for a value nested more than a scene's values may be.
 pub(crate) fn read(json: &JsonValue, ty: &Type, names: &dyn Names) -> Result<Value> {
     read_at(json, ty, names, 1)
 }
@@ -242,6 +273,10 @@ fn read_at(json: &JsonValue, ty: &Type, names: &dyn Names, depth: u32) -> Result
         Type::Texture => match json {
             JsonValue::String(name) => names.texture(name)?,
             _ => return Err(wrong("a texture's ID or path, a string")),
+        },
+        Type::Model => match json {
+            JsonValue::String(name) => names.model(name)?,
+            _ => return Err(wrong("a model's ID or path, a string")),
         },
         Type::Option(inner) => match json {
             JsonValue::Null => Value::Option(None),
@@ -490,6 +525,7 @@ fn api_type(types: &Types, ty: &Type) -> gg_api::Type {
         Type::Quat => Api::Quat,
         Type::Entity => Api::Entity,
         Type::Texture => Api::Texture,
+        Type::Model => Api::Model,
         Type::Option(of) => Api::Option(inner(of)),
         Type::List(of) => Api::List(inner(of)),
         Type::Array(of, n) => Api::Array(inner(of), *n),
@@ -644,6 +680,7 @@ fn own_type(types: &Types, ty: &gg_api::Type) -> std::result::Result<Type, Strin
         Api::Quat => Type::Quat,
         Api::Entity => Type::Entity,
         Api::Texture => Type::Texture,
+        Api::Model => Type::Model,
         Api::Option(of) => Type::Option(inner(of)?),
         Api::List(of) => Type::List(inner(of)?),
         Api::Array(of, n) => Type::Array(inner(of)?, *n),

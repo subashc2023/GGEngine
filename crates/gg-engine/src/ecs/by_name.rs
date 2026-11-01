@@ -11,6 +11,7 @@ use super::id::Named;
 use super::table::{ComponentId, Table};
 use super::{Component, Entity, Location, Parent, World};
 use crate::reflect::{self, Types, Value};
+use crate::{ModelNode, ModelRoot};
 
 impl World {
     /// Registers component type `T`, describing it to reflection, if it hasn't registered yet: a
@@ -133,13 +134,14 @@ impl World {
     /// value refused changes nothing: its kinds, the bounds of its fields, which it's outside of if
     /// a number isn't finite, and a rotation being a unit quaternion. What's opaque is set only to
     /// [`Value::Opaque`], which keeps it as it is. A [`Parent`] isn't set by name: the world keeps
-    /// it, and [`World::set_parent`] changes it.
+    /// it, and [`World::set_parent`] changes it; nor is a [`ModelNode`], which the world keeps too.
+    /// A [`ModelRoot`] given another model has that model's nodes in place of its own, as it says.
     ///
-    /// Fails as `get_field` does; with `reflect.read_only` for `Parent`, at any path, whether the
-    /// entity has one or not; with `reflect.out_of_range` for a number outside its field's
-    /// bounds or its type's; and as [`Reflect::with_value`](crate::Reflect::with_value) does for
-    /// a value that doesn't fit the field. Every error names the entity, by its ID while it's
-    /// alive, the component and the path, down to the part refused.
+    /// Fails as `get_field` does; with `reflect.read_only` for `Parent` and `ModelNode`, at any
+    /// path, whether the entity has one or not; with `reflect.out_of_range` for a number outside
+    /// its field's bounds or its type's; and as [`Reflect::with_value`](crate::Reflect::with_value)
+    /// does for a value that doesn't fit the field. Every error names the entity, by its ID while
+    /// it's alive, the component and the path, down to the part refused.
     pub fn set_field(
         &mut self,
         entity: Entity,
@@ -158,6 +160,12 @@ impl World {
                  changes it",
             )));
         }
+        if Some(id) == self.components.get(TypeId::of::<ModelNode>()) {
+            return Err(about(Error::new(
+                "reflect.read_only",
+                "the world keeps it, as it spawns a model's nodes under the model's root",
+            )));
+        }
         let column = self.column(at, id, component).map_err(about)?;
         let types = self.components.types();
         let to = reflect::resolve(types, &self.components.ty(id), path).map_err(about)?;
@@ -174,6 +182,11 @@ impl World {
         let field = reflect::reach_mut(row, &to.steps).map_err(about)?;
         let old = field.to_value();
         field.set_value(value).map_err(about)?;
+        // Another model's nodes in place of its own.
+        if Some(id) == self.components.get(TypeId::of::<ModelRoot>()) && old != *value {
+            self.despawn_nodes(entity);
+            self.fit_nodes(entity, None);
+        }
         Ok(old)
     }
 

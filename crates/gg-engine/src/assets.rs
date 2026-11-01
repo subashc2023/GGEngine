@@ -38,6 +38,9 @@ use crate::Model;
 use crate::dirs::{self, Kind};
 #[cfg(feature = "dev")]
 use crate::ecs::mix64;
+#[cfg(feature = "dev")]
+use crate::model::Made;
+use crate::model::Nodes;
 
 /// The textures a context added, as its layers added them or where text named them, each by its
 /// index, with the path of the file it was loaded from: relative to the app's
@@ -58,6 +61,11 @@ pub(crate) struct Assets {
     /// Each texture loaded from a file, by its name and by each path the layers gave its file: the
     /// first added, if two have one.
     by_name: HashMap<Arc<str>, Texture>,
+    /// Each model's name and path, as a texture's, and what its root spawns, by its index.
+    models: Vec<NamedModel>,
+    /// Each model, by its name and by each path the layers gave its file, as a texture by
+    /// `by_name`.
+    model_names: HashMap<Arc<str>, Model>,
     /// What the layers added, and the textures loaded where text named them, and stand-ins, in
     /// order, each with how many meshes, shaders and textures there were after it, as
     /// `texture 1 1 2 assets/logo.png`: what names the meshes, shaders and textures by their
@@ -90,12 +98,66 @@ struct Named {
     path: Arc<str>,
 }
 
+/// A model, as [`Assets`] holds it: named as a texture is, and what its root spawns.
+#[derive(Clone, Debug)]
+struct NamedModel {
+    name: Arc<str>,
+    path: Arc<str>,
+    nodes: Nodes,
+}
+
+/// How many textures and models there are, the engine's white texture among them: the indices the
+/// next added take, from which [`Assets::named_from`] goes on.
+pub(crate) type Counts = (usize, usize);
+
+/// An asset that text names, by its name or a path to its file: a texture, or a model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Asset<S> {
+    Texture(S),
+    Model(S),
+}
+
+impl<S: AsRef<str>> Asset<S> {
+    /// The name or path that names it.
+    pub(crate) fn name(&self) -> &str {
+        match self {
+            Self::Texture(name) | Self::Model(name) => name.as_ref(),
+        }
+    }
+
+    /// It, named by a borrowed name.
+    pub(crate) fn as_deref(&self) -> Asset<&str> {
+        match self {
+            Self::Texture(name) => Asset::Texture(name.as_ref()),
+            Self::Model(name) => Asset::Model(name.as_ref()),
+        }
+    }
+
+    /// It, named by a name of its own.
+    pub(crate) fn owned(&self) -> Asset<String> {
+        match self {
+            Self::Texture(name) => Asset::Texture(name.as_ref().to_owned()),
+            Self::Model(name) => Asset::Model(name.as_ref().to_owned()),
+        }
+    }
+
+    /// What it is, in words, as refusals of what names it say.
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Self::Texture(_) => "texture",
+            Self::Model(_) => "model",
+        }
+    }
+}
+
 impl Default for Assets {
     /// The engine's white texture alone, which every renderer's textures start with.
     fn default() -> Self {
         Self {
             textures: vec![None],
             by_name: HashMap::new(),
+            models: Vec::new(),
+            model_names: HashMap::new(),
             added: Vec::new(),
             failed: HashMap::new(),
             #[cfg(feature = "dev")]
@@ -132,19 +194,67 @@ impl Assets {
         self.by_name.get(name).copied()
     }
 
-    /// How many textures there are, the engine's white texture among them: the index the next
-    /// added takes.
-    pub(crate) fn count(&self) -> usize {
-        self.textures.len()
+    /// How many textures and models there are, as [`Counts`] says.
+    pub(crate) fn counts(&self) -> Counts {
+        (self.textures.len(), self.models.len())
     }
 
-    /// The name and path of each texture from index `from` on that's named otherwise than by its
-    /// path, as by its ID, in the order they were added: what a run that names its textures by IDs
-    /// tells those that follow it, as a recording does its replay and a lockstep host its joiner.
-    pub(crate) fn named_from(&self, from: usize) -> impl Iterator<Item = (&str, &str)> {
-        let textures = self.textures.iter().skip(from).flatten();
-        let named = textures.filter(|named| named.name != named.path);
-        named.map(|named| (&*named.name, &*named.path))
+    /// The name and path of each texture and then each model from `from` on, as [`counts`] gave it,
+    /// that's named otherwise than by its path, as by its ID, in the order they were added: what a
+    /// run that names its assets by IDs tells those that follow it, as a recording does its replay
+    /// and a lockstep host its joiner.
+    ///
+    /// [`counts`]: Self::counts
+    pub(crate) fn named_from(&self, from: Counts) -> impl Iterator<Item = (&str, &str)> {
+        let textures = self.textures.iter().skip(from.0).flatten();
+        let textures = textures.map(|named| (&named.name, &named.path));
+        let models = self.models.iter().skip(from.1);
+        let models = models.map(|model| (&model.name, &model.path));
+        let named = textures.chain(models).filter(|(name, path)| name != path);
+        named.map(|(name, path)| (&**name, &**path))
+    }
+
+    /// The name of `model`, which text names it by.
+    pub(crate) fn model_name(&self, model: Model) -> &str {
+        &self.models[model.index()].name
+    }
+
+    /// The path of `model`'s file: for people, whom a path tells more than an ID.
+    pub(crate) fn model_path(&self, model: Model) -> &str {
+        &self.models[model.index()].path
+    }
+
+    /// The model that `name` names, by its name or a path to its file, if one does.
+    pub(crate) fn model(&self, name: &str) -> Option<Model> {
+        self.model_names.get(name).copied()
+    }
+
+    /// What `model`'s root spawns; `None` for a model these assets don't have, as one another
+    /// context added.
+    pub(crate) fn nodes(&self, model: Model) -> Option<&Nodes> {
+        self.models.get(model.index()).map(|model| &model.nodes)
+    }
+
+    /// Adds the next model, loaded from the file `path` names, named `name`, whose root spawns
+    /// `nodes`, and returns it.
+    pub(crate) fn add_model(&mut self, path: Arc<str>, name: Arc<str>, nodes: Nodes) -> Model {
+        let model = Model::new(self.models.len());
+        self.model_names.entry(name.clone()).or_insert(model);
+        self.model_names.entry(path.clone()).or_insert(model);
+        self.models.push(NamedModel { name, path, nodes });
+        model
+    }
+
+    /// Has `path` name `model` too, added before from another path to its file, unless it names
+    /// one already.
+    pub(crate) fn alias_model(&mut self, model: Model, path: Arc<str>) {
+        self.model_names.entry(path).or_insert(model);
+    }
+
+    /// Has `model`'s root spawn `nodes` from now on, as its file read again gives them.
+    #[cfg(feature = "dev")]
+    pub(crate) fn set_nodes(&mut self, model: Model, nodes: Nodes) {
+        self.models[model.index()].nodes = nodes;
     }
 
     /// Adds `texture`, the next texture added, loaded from the file `path` names, named `name`.
@@ -170,16 +280,16 @@ impl Assets {
         self.by_name.entry(path).or_insert(texture);
     }
 
-    /// What a refusal of text that names a texture `name`, which none has, says of it: that none
-    /// is loaded, and why it couldn't be, if it was tried.
-    pub(crate) fn not_found(&self, name: &str) -> String {
+    /// What a refusal of text that names a texture or a model, as `kind` says, `name`, which none
+    /// has, says of it: that none is loaded, and why it couldn't be, if it was tried.
+    pub(crate) fn not_found(&self, kind: &str, name: &str) -> String {
         match self.failed.get(name) {
             Some((code, why)) => {
                 format!(
-                    "no texture has the ID or path `{name}`, and it can't be loaded ({code}): {why}"
+                    "no {kind} has the ID or path `{name}`, and it can't be loaded ({code}): {why}"
                 )
             }
-            None => format!("no texture loaded has the ID or path `{name}`"),
+            None => format!("no {kind} loaded has the ID or path `{name}`"),
         }
     }
 
@@ -199,14 +309,38 @@ impl Assets {
         self.failed.contains_key(name)
     }
 
-    /// Names each texture as `names` gives its path a name, and every other by its path, in place
-    /// of what named it before: as a run takes the names its recording's run, or its lockstep host,
-    /// gave its textures.
+    /// Whether `asset` names one loaded.
+    pub(crate) fn has<S: AsRef<str>>(&self, asset: &Asset<S>) -> bool {
+        match asset {
+            Asset::Texture(name) => self.texture(name.as_ref()).is_some(),
+            Asset::Model(name) => self.model(name.as_ref()).is_some(),
+        }
+    }
+
+    /// Names each texture and model as `names` gives its path a name, and every other by its path,
+    /// in place of what named it before: as a run takes the names its recording's run, or its
+    /// lockstep host, gave its assets.
     #[cfg(feature = "dev")]
     pub(crate) fn rename(&mut self, names: &HashMap<Arc<str>, Arc<str>>) {
         let Self {
-            textures, by_name, ..
+            textures,
+            by_name,
+            models,
+            model_names,
+            ..
         } = self;
+        for (index, model) in models.iter_mut().enumerate() {
+            let at = Model::new(index);
+            if model.name != model.path && model_names.get(&model.name) == Some(&at) {
+                model_names.remove(&model.name);
+            }
+            model.name = names.get(&model.path).unwrap_or(&model.path).clone();
+        }
+        for (index, model) in models.iter().enumerate() {
+            model_names
+                .entry(model.name.clone())
+                .or_insert(Model::new(index));
+        }
         // Every old name goes before any new one comes, as one texture may take another's.
         for named in textures.iter().flatten() {
             if named.name != named.path && by_name.get(&named.name) == Some(&named.texture) {
@@ -241,6 +375,10 @@ pub(crate) struct Loaded {
     /// a sheet is cut by.
     pub(crate) textures: HashMap<PathBuf, (Texture, [u32; 2])>,
     pub(crate) models: HashMap<PathBuf, Model>,
+    /// What each model is made of on the renderer, by its index, which a reload replaces: a
+    /// stand-in's of nothing.
+    #[cfg(feature = "dev")]
+    pub(crate) made: Vec<Made>,
     /// Each path a shader's file was added by, which the renderer's shaders know it by, with the
     /// file it resolves to.
     pub(crate) shaders: HashMap<PathBuf, PathBuf>,

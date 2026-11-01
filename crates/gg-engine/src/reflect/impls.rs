@@ -8,7 +8,7 @@ use gg_core::math::{Quat, Vec2, Vec3, Vec4};
 use super::{
     Angle, Color, Digest, Error, Ranged, Reflect, Result, Type, Types, Value, within, wrong_kind,
 };
-use crate::{Entity, Texture};
+use crate::{Entity, Model, Texture};
 
 /// `set_value` as all of them have it, and no parts.
 macro_rules! whole {
@@ -117,6 +117,7 @@ plain! {
     f64 => F64 f64,
     Entity => Entity entity,
     Texture => Texture texture,
+    Model => Model model,
 }
 
 impl Reflect for String {

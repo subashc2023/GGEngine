@@ -44,6 +44,7 @@ use std::sync::Arc;
 use gg_core::{Error, Result};
 use tracing::{info, warn};
 
+use crate::assets::Asset;
 use crate::recording::text::{Text, read_named};
 use crate::reflect::Value;
 use crate::scene_files::{Open, SceneFile};
@@ -102,7 +103,7 @@ pub(crate) fn write(
     for added in world.assets().added() {
         writeln!(out, "asset {added}").expect(written);
     }
-    for (name, path) in world.assets().named_from(0) {
+    for (name, path) in world.assets().named_from((0, 0)) {
         out.push_str("named ");
         crate::recording::text::write_named(&mut out, name, path);
         out.push('\n');
@@ -204,6 +205,21 @@ fn world_hash(text: &str) -> Option<WorldHash> {
         content: hex(content)?,
         layout: hex(layout)?,
     })
+}
+
+/// The kind of asset an `asset` line names, `texture` or `model`, and the path of its file, as
+/// `texture 1 1 2 assets/logo.png` and a model's line, its two types' names and sizes after its
+/// path, whatever build wrote them, give them: `None` for a line of another kind, as a mesh's or a
+/// shader's.
+fn asset_path(line: &str) -> Option<(&'static str, &str)> {
+    let (kind, rest) = line.split_once(' ')?;
+    // The meshes, shaders and textures there were after it, then its path.
+    let path = rest.splitn(4, ' ').nth(3)?;
+    match kind {
+        "texture" => Some(("texture", path)),
+        "model" => Some(("model", path.rsplitn(5, ' ').nth(4)?)),
+        _ => None,
+    }
 }
 
 /// Writes `text`, a snapshot file's, at `path`, whole or not at all, so that the last snapshot
@@ -442,26 +458,27 @@ impl Snapshot {
         })
     }
 
-    /// The path of each texture the run it was taken from had loaded, as its `asset` lines give
-    /// them, in order: which a run restored from it loads, where its layers haven't, before its
-    /// world, as [`Context::load_restored`](crate::Context::load_restored) does.
-    pub(crate) fn textures(&self) -> impl Iterator<Item = &str> {
-        let textures = self
-            .assets
+    /// Each texture and model the run it was taken from had loaded, by its path, as its `asset`
+    /// lines give them, in order: which a run restored from it loads, where its layers haven't,
+    /// before its world, as [`Context::load_restored`](crate::Context::load_restored) does.
+    pub(crate) fn assets(&self) -> impl Iterator<Item = Asset<&str>> {
+        self.assets
             .iter()
-            .filter_map(|line| line.strip_prefix("texture "));
-        // The meshes, shaders and textures there were after it, then its path.
-        textures.filter_map(|line| line.splitn(4, ' ').nth(3))
+            .filter_map(|line| match asset_path(line)? {
+                ("texture", path) => Some(Asset::Texture(path)),
+                ("model", path) => Some(Asset::Model(path)),
+                _ => None,
+            })
     }
 
-    /// Has the snapshot name, by the path its file is at now, each texture its run named by an ID
-    /// that `catalog`, the asset database of the run restored from it, holds for an asset at another
-    /// path, its file gone from the path it had, as after a rename that the snapshot's run, or this
-    /// run's start, moved its ID file for: in its `asset` lines and its names, so that the run loads
-    /// the texture from there, and its own `asset` line for it, which then is the snapshot's, keeps
-    /// what's opaque in the world. A texture whose file is where it was keeps its path, though a
-    /// copy took its ID, as its ID changed since. A model's images, which load with their model,
-    /// keep their paths.
+    /// Has the snapshot name, by the path its file is at now, each texture and model its run named
+    /// by an ID that `catalog`, the asset database of the run restored from it, holds for an asset
+    /// at another path, its file gone from the path it had, as after a rename that the snapshot's
+    /// run, or this run's start, moved its ID file for: in its `asset` lines and its names, so that
+    /// the run loads the asset from there, and its own `asset` line for it, which then is the
+    /// snapshot's, keeps what's opaque in the world. An asset whose file is where it was keeps its
+    /// path, though a copy took its ID, as its ID changed since. A model's images, which load with
+    /// their model, keep their paths.
     #[cfg(feature = "dev")]
     pub(crate) fn follow(&mut self, catalog: &crate::assets::Catalog) {
         let moved: HashMap<Arc<str>, Arc<str>> = (self.names.iter())
@@ -474,14 +491,15 @@ impl Snapshot {
             return;
         }
         for line in &mut self.assets {
-            let Some(texture) = line.strip_prefix("texture ") else {
+            let Some((_, path)) = asset_path(line) else {
                 continue;
             };
-            let mut parts = texture.splitn(4, ' ');
-            let counts: Vec<&str> = parts.by_ref().take(3).collect();
-            if let Some(now) = parts.next().and_then(|path| moved.get(path)) {
-                *line = format!("texture {} {now}", counts.join(" "));
-            }
+            let Some(now) = moved.get(path) else {
+                continue;
+            };
+            // Its kind and counts before its path, and a model's types after it.
+            let at = path.as_ptr() as usize - line.as_ptr() as usize;
+            *line = format!("{}{now}{}", &line[..at], &line[at + path.len()..]);
         }
         let names = self.names.drain().map(|(path, name)| {
             let now = moved.get(&path).cloned().unwrap_or(path);
@@ -570,8 +588,8 @@ impl Snapshot {
         #[cfg(feature = "dev")]
         let own = {
             let own = Arc::clone(world.shared_assets());
-            let alike = own.named_from(0).count() == self.names.len()
-                && (own.named_from(0)).all(|(name, path)| {
+            let alike = own.named_from((0, 0)).count() == self.names.len()
+                && (own.named_from((0, 0))).all(|(name, path)| {
                     self.names.get(path).is_some_and(|theirs| **theirs == *name)
                 });
             if !alike {
@@ -618,6 +636,31 @@ mod tests {
     use crate::dirs::tests::Scratch;
     use crate::layer::Stack;
     use crate::{Context, Layer, MeshDraw, Sprite, Transform};
+
+    /// An `asset` line gives a texture's or a model's path, spaces and all, and a model's whatever
+    /// types its run's build gave it; a mesh's or a shader's gives none.
+    #[test]
+    fn asset_lines_give_textures_and_models_paths() {
+        let model = format!(
+            "model 3 4 2 assets/a truck.glb {}",
+            crate::layer::model_types()
+        );
+        let lines = [
+            (
+                "texture 1 1 2 assets/a stone.png",
+                Some(("texture", "assets/a stone.png")),
+            ),
+            (model.as_str(), Some(("model", "assets/a truck.glb"))),
+            (
+                "model 3 4 2 m.glb gg::Vertex 48 gg::Params 64",
+                Some(("model", "m.glb")),
+            ),
+            ("mesh 2 1 1 floor game::Corner 20", None),
+        ];
+        for (line, path) in lines {
+            assert_eq!(asset_path(line), path, "{line}");
+        }
+    }
 
     /// A snapshot written and read back restores the world it was taken of, at its ticks, into a
     /// world its layers loaded, with its scene files and its open scene; one written before the
@@ -916,7 +959,7 @@ mod tests {
         };
         fs::write(root.join("assets/stone.png.meta"), meta.text()).expect("its ID file");
         let mut saved = Context::seeded(3).root(root.clone());
-        saved.load_named([id], false);
+        saved.load_named([Asset::Texture(id)], false);
         let stone = saved.world().assets().texture(id).expect("loaded");
         let sprite = Sprite {
             texture: Some(stone),
@@ -928,14 +971,14 @@ mod tests {
         let snapshot = Snapshot::parse(text.expect("written"), "a test".to_owned(), "Tested");
         let snapshot = snapshot.expect("read");
         assert_eq!(
-            snapshot.textures().collect::<Vec<_>>(),
-            ["assets/stone.png"]
+            snapshot.assets().collect::<Vec<_>>(),
+            [Asset::Texture("assets/stone.png")]
         );
         // A run that follows another, given no name for the file, finds by its own database an ID
         // an `asset` line gives, as a stand-in's names one, the texture still named by the ID.
         let mut following = Context::seeded(3).root(root.clone());
         following.name_as([]);
-        following.load_restored([id]);
+        following.load_restored([Asset::Texture(id)]);
         let assets = following.world().assets();
         let found = assets.texture(id).and_then(|texture| assets.name(texture));
         assert_eq!(found, Some(id));
@@ -979,7 +1022,7 @@ mod tests {
         };
         fs::write(root.join("assets/stone.png.meta"), meta.text()).expect("its ID file");
         let mut saved = Context::seeded(3).root(root.clone());
-        saved.load_named([id], false);
+        saved.load_named([Asset::Texture(id)], false);
         let stone = saved.world().assets().texture(id).expect("loaded");
         let sprite = Sprite {
             texture: Some(stone),
@@ -999,7 +1042,10 @@ mod tests {
         let copied = Context::seeded(3).root(root.clone());
         let mut kept = parsed();
         kept.follow(copied.catalog());
-        assert_eq!(kept.textures().collect::<Vec<_>>(), ["assets/stone.png"]);
+        assert_eq!(
+            kept.assets().collect::<Vec<_>>(),
+            [Asset::Texture("assets/stone.png")]
+        );
         for name in ["a_stone.png", "a_stone.png.meta"] {
             fs::remove_file(assets.join(name)).expect("removed");
         }
@@ -1012,8 +1058,8 @@ mod tests {
         let mut snapshot = parsed();
         snapshot.follow(restored.catalog());
         assert_eq!(
-            snapshot.textures().collect::<Vec<_>>(),
-            ["assets/pillar.png"]
+            snapshot.assets().collect::<Vec<_>>(),
+            [Asset::Texture("assets/pillar.png")]
         );
         let _ = logged.codes.try_iter().count();
         let restoring = Stack::default().restore(&mut restored, &snapshot, false);

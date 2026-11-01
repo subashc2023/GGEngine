@@ -8,6 +8,7 @@ use std::fmt::{self, Write as _};
 use gg_core::{Error, Result};
 
 use super::{MAX_DEPTH, NO_HINTS};
+use crate::ModelNode;
 use crate::ecs::by_name::about;
 use crate::ecs::id::Named;
 use crate::ecs::table::{AnyColumn, ComponentId};
@@ -24,6 +25,7 @@ const WORDS: [&str; 10] = [
 pub(super) fn save(world: &World, roots: &[Entity], descendants: bool) -> Result<String> {
     for &root in roots {
         world.locate(root)?;
+        world.not_a_node(root)?;
     }
     // Each once, in the order of their IDs.
     let mut saved = Vec::new();
@@ -33,7 +35,12 @@ pub(super) fn save(world: &World, roots: &[Entity], descendants: bool) -> Result
         if seen.insert(entity) {
             saved.push((world.id(entity).expect("a saved entity is alive"), entity));
             if descendants {
-                next.extend(world.children(entity).expect("a saved entity is alive"));
+                for child in world.children(entity).expect("a saved entity is alive") {
+                    match world.get::<ModelNode>(child) {
+                        Some(_) => only_nodes(world, child)?,
+                        None => next.push(child),
+                    }
+                }
             }
         }
     }
@@ -47,6 +54,33 @@ pub(super) fn save(world: &World, roots: &[Entity], descendants: bool) -> Result
     };
     writer.scene()?;
     Ok(writer.out)
+}
+
+/// Fails with `scene.model_node` if anything under `node`, a model's node, which the world spawns
+/// under the model's root and scenes don't save, isn't a node of the model too: what a scene can't
+/// save, as its parent isn't saved.
+fn only_nodes(world: &World, node: Entity) -> Result<()> {
+    let mut next = vec![node];
+    while let Some(entity) = next.pop() {
+        for child in world
+            .children(entity)
+            .expect("a saved entity's descendant is alive")
+        {
+            if world.get::<ModelNode>(child).is_none() {
+                let (child, entity) = (world.name_of(child), world.name_of(entity));
+                return Err(Error::new(
+                    "scene.model_node",
+                    format!(
+                        "entity {child} is a child of entity {entity}, a node of a model, which \
+                         the world spawns under the model's root and scenes don't save: make it a \
+                         child of the root, or of another entity"
+                    ),
+                ));
+            }
+            next.push(child);
+        }
+    }
+    Ok(())
 }
 
 struct Writer<'w> {
@@ -167,6 +201,7 @@ impl Writer<'_> {
                 };
                 quote(out, name);
             }
+            (_, &Value::Model(model)) => quote(out, self.world.assets().model_name(model)),
             (Type::Option(_), Value::Option(None)) => out.push_str("None"),
             (Type::Option(inner), Value::Option(Some(value))) => {
                 if **value == Value::Opaque {

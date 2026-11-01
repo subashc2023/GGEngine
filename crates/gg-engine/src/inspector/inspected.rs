@@ -61,8 +61,8 @@ pub(super) trait Inspected {
     /// What a field of an entity holding `value` shows.
     fn entity_label(&self, value: &Value) -> String;
 
-    /// What a field of a texture holding `value` shows.
-    fn texture_label(&self, value: &Value) -> String;
+    /// What a field of a texture or a model holding `value` shows.
+    fn asset_label(&self, value: &Value) -> String;
 
     /// Why the world isn't shown yet, if it isn't, as while another process is reached.
     fn waiting(&self) -> Option<&str> {
@@ -167,13 +167,14 @@ impl Inspected for World {
         }
     }
 
-    fn texture_label(&self, value: &Value) -> String {
-        match value {
+    fn asset_label(&self, value: &Value) -> String {
+        match *value {
             // Shown by its path; picking another comes with the Assets panel's images.
-            &Value::Texture(texture) => match self.assets().path(texture) {
+            Value::Texture(texture) => match self.assets().path(texture) {
                 Some(path) => path.to_owned(),
                 None => format!("texture {}", texture.index()),
             },
+            Value::Model(model) => self.assets().model_path(model).to_owned(),
             _ => "?".to_owned(),
         }
     }

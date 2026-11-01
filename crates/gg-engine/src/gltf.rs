@@ -1780,6 +1780,16 @@ pub(crate) mod tests {
         (gltf, bin.bytes)
     }
 
+    /// A `.gltf` of [`triangle`]'s model, its buffer in a data URI, with `edit` made to its JSON:
+    /// for tests that edit a model's file as people do.
+    pub(crate) fn triangle_gltf(edit: impl FnOnce(&mut Value)) -> String {
+        let (mut gltf, bin) = triangle();
+        let uri = format!("data:application/octet-stream;base64,{}", encode(&bin));
+        gltf["buffers"][0]["uri"] = json!(uri);
+        edit(&mut gltf);
+        gltf.to_string()
+    }
+
     /// Removes `key` from the object `value`.
     fn remove(value: &mut Value, key: &str) {
         value.as_object_mut().expect("an object").remove(key);

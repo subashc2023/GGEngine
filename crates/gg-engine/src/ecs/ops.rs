@@ -9,10 +9,12 @@ use std::{fmt, mem};
 
 use gg_core::{Error, Result};
 
+use super::nodes;
 use super::scene::NO_HINTS;
 use super::table::{AnyColumn, ComponentId, Row};
 use super::{Entity, EntityId, Parent, World};
 use crate::reflect::{self, Ident, Value};
+use crate::{ModelNode, ModelRoot};
 
 /// An authoring change to a world, by a person or an agent, which a [`Log`](super::Log) applies,
 /// and undoes. It names entities by their IDs, and carries values as reflection's, whose entities
@@ -50,7 +52,8 @@ pub enum Operation {
     /// to one of them to its copy, as a prefab's are: the copy of `entity` the last of its parent's
     /// children, or a root, and each descendant's under its parent's copy, in the order of the
     /// originals. The copies' IDs are `copies`, `entity`'s copy's first, each parent's before its
-    /// children's; or ones drawn if it's empty, which applying it writes in.
+    /// children's; or ones drawn if it's empty, which applying it writes in: all but the copies of
+    /// models' nodes, which are their roots' copies' nodes, their IDs mixed from those.
     Duplicate {
         entity: EntityId,
         copies: Vec<EntityId>,
@@ -284,8 +287,15 @@ impl World {
                 self.can_restore(taken)?;
                 let root = taken.last().expect("a delete takes its entity");
                 if *created {
-                    // The root first, which was taken last.
-                    Undo::Uncreate(taken.iter().rev().map(|taken| taken.id).collect())
+                    // The root first, which was taken last; models' nodes go with their roots.
+                    let node = self.component::<ModelNode>();
+                    let made = taken.iter().rev().filter(|taken| {
+                        !taken
+                            .row
+                            .iter()
+                            .any(|&(component, _)| Some(component) == node)
+                    });
+                    Undo::Uncreate(made.map(|taken| taken.id).collect())
                 } else {
                     Undo::Apply(Operation::Delete { entity: root.id })
                 }
@@ -303,6 +313,7 @@ impl World {
                 let entity = self.entity(entity).expect("checked alive");
                 let at = self.location(entity).expect("alive");
                 self.give(entity, at, component, column);
+                self.fit_root(entity, component);
             }
             Undo::Restore { taken, .. } => self.restore(taken),
         }
@@ -419,6 +430,24 @@ impl World {
             let message = format!("can't {operation}: {error}");
             error.with_message(message)
         };
+        // A model's nodes are the model's, which the world changes as their root does, and which
+        // take no children of their own.
+        let touched = match operation {
+            Operation::Create { parent, .. } => [*parent, None],
+            Operation::Reparent { entity, parent } => [Some(*entity), *parent],
+            Operation::Duplicate { entity, .. }
+            | Operation::Delete { entity }
+            | Operation::Add { entity, .. }
+            | Operation::Remove { entity, .. }
+            | Operation::Set { entity, .. } => [Some(*entity), None],
+        };
+        for touched in touched
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.entity(id))
+        {
+            self.not_a_node(touched).map_err(refused)?;
+        }
         Ok(match operation {
             Operation::Create {
                 entity,
@@ -426,6 +455,8 @@ impl World {
                 components,
             } => {
                 let id = self.create(*entity, *parent, components).map_err(refused)?;
+                // Its model's nodes, which its undo takes out with it, whichever it has then.
+                self.fit_nodes(self.entity(id).expect("made"), None);
                 Undo::Uncreate(vec![id])
             }
             Operation::Duplicate { entity, copies } => {
@@ -457,6 +488,7 @@ impl World {
                 }
                 let column = self.build(id, component, value).map_err(refused)?;
                 self.give(handle, at, id, column);
+                self.fit_root(handle, id);
                 Undo::Apply(Operation::Remove {
                     entity: *entity,
                     component: component.clone(),
@@ -468,6 +500,7 @@ impl World {
                 let id = self.writable_type(component).map_err(refused)?;
                 self.column(at, id, component).map_err(refused)?;
                 let column = self.take_out(handle, at, id);
+                self.fit_root(handle, id);
                 Undo::Put {
                     entity: *entity,
                     component: id,
@@ -501,6 +534,14 @@ impl World {
                 })
             }
         })
+    }
+
+    /// Fits `entity`'s nodes to its [`ModelRoot`], as [`fit_nodes`](Self::fit_nodes) does, if
+    /// `component`, which it was given or lost, is that.
+    fn fit_root(&mut self, entity: Entity, component: ComponentId) {
+        if self.component::<ModelRoot>() == Some(component) {
+            self.fit_nodes(entity, None);
+        }
     }
 
     /// Spawns the entity a create makes, and returns its ID.
@@ -573,16 +614,18 @@ impl World {
 
     /// The root of what a create or a duplicate made, `made`, the root's ID first, if undoing it
     /// can take them out again: the root is alive, and its subtree is them alone, every one of
-    /// them, without what the create or the duplicate didn't make.
+    /// them, without what the create or the duplicate didn't make, but models' nodes, which go
+    /// with their roots, whichever their models have now.
     fn can_uncreate(&self, made: &[EntityId]) -> Result<Entity> {
         let root = self.living(made[0])?;
         let subtree = self.subtree(root);
-        let under = &subtree[1..];
+        let under = subtree[1..]
+            .iter()
+            .filter(|&&(entity, _)| self.get::<ModelNode>(entity).is_none());
+        let under: Vec<Entity> = under.map(|&(entity, _)| entity).collect();
         let mut ours = made[1..].to_vec();
         ours.sort_unstable();
-        let theirs = under
-            .iter()
-            .map(|&(entity, _)| self.id(entity).expect("alive"));
+        let theirs = under.iter().map(|&entity| self.id(entity).expect("alive"));
         if let Some(other) = theirs.clone().find(|id| ours.binary_search(id).is_err()) {
             let child = self.living(other).and_then(|other| self.parent(other));
             let place = if child.is_ok_and(|parent| parent == Some(root)) {
@@ -612,19 +655,23 @@ impl World {
     }
 
     /// Spawns a copy of `entity`'s subtree, as [`Operation::Duplicate`] says, under the IDs `ids`,
-    /// or drawn if it's empty; and returns the copies' IDs, `entity`'s copy's first.
+    /// or drawn if it's empty; and returns the copies' IDs, `entity`'s copy's first: all but the
+    /// copies of models' nodes, which are their roots' copies' nodes, their IDs mixed from those.
     fn duplicate(&mut self, entity: EntityId, ids: &[EntityId]) -> Result<Vec<EntityId>> {
         let root = self.living(entity)?;
         let originals = self.subtree(root);
+        let is_node: Vec<bool> = (originals.iter())
+            .map(|&(original, _)| self.get::<ModelNode>(original).is_some())
+            .collect();
+        let named = is_node.iter().filter(|&&node| !node).count();
         if !ids.is_empty() {
-            if ids.len() != originals.len() {
+            if ids.len() != named {
                 return Err(Error::new(
                     "ops.bad_copies",
                     format!(
-                        "it's given {} IDs for {} copies, one for each of the entity and its \
-                         descendants",
+                        "it's given {} IDs for {named} copies, one for each of the entity and its \
+                         descendants but its models' nodes",
                         ids.len(),
-                        originals.len()
                     ),
                 ));
             }
@@ -661,16 +708,33 @@ impl World {
             .collect();
         let root_parent = self.parent(root).expect("alive");
         let mut made: Vec<(Entity, EntityId)> = Vec::with_capacity(rows.len());
-        for (given, (mut row, &(_, under))) in rows.into_iter().zip(&originals).enumerate() {
+        let mut given = ids.iter().copied();
+        for (at, (mut row, &(_, under))) in rows.into_iter().zip(&originals).enumerate() {
             let parent = under.map_or(root_parent, |under| Some(made[under].0));
             if let Some(parent) = parent {
                 let column: Box<dyn AnyColumn> = Box::new(vec![Parent(parent)]);
                 row.push((parent_id, column));
                 row.sort_unstable_by_key(|&(component, _)| component);
             }
+            // A model's node's copy is its root's copy's node, its ID mixed from the copy's.
+            let part = self
+                .get::<ModelNode>(originals[at].0)
+                .map(|&ModelNode(part)| part);
+            let mixed = part.and_then(|part| {
+                let mut up = under;
+                while let Some(above) = up {
+                    if self.get::<ModelRoot>(originals[above].0).is_some() {
+                        let id = nodes::node_id(made[above].1, part as usize);
+                        return id.filter(|&id| !self.reserved(id));
+                    }
+                    up = originals[above].1;
+                }
+                None
+            });
+            let id = if is_node[at] { mixed } else { given.next() };
             let copy = self.take_slot();
-            let id = match ids.get(given) {
-                Some(&id) => {
+            let id = match id {
+                Some(id) => {
                     self.find_by_id(id, copy);
                     id
                 }
@@ -705,7 +769,8 @@ impl World {
                 }
             }
         }
-        Ok(made.into_iter().map(|(_, id)| id).collect())
+        let named = made.into_iter().zip(is_node).filter(|&(_, node)| !node);
+        Ok(named.map(|((_, id), _)| id).collect())
     }
 
     /// Whether the component a remove took, `component`, can go back on `entity`.
@@ -789,7 +854,7 @@ impl World {
             .ok_or_else(|| Error::new("ecs.no_entity", format!("no entity has ID {id}")))
     }
 
-    /// The id of the component type named `name`, which isn't [`Parent`].
+    /// The id of the component type named `name`, which isn't [`Parent`] or [`ModelNode`].
     fn writable_type(&self, name: &str) -> Result<ComponentId> {
         let id = self.named(name)?;
         if Some(id) == self.component::<Parent>() {
@@ -797,6 +862,13 @@ impl World {
                 "reflect.read_only",
                 "the world keeps `Parent`, so that the hierarchy stays whole: a create's parent \
                  and a reparent give it",
+            ));
+        }
+        if Some(id) == self.component::<ModelNode>() {
+            return Err(Error::new(
+                "reflect.read_only",
+                "the world keeps `ModelNode`, which a model's nodes have as it spawns them under \
+                 the model's root: a `ModelRoot` gives them",
             ));
         }
         Ok(id)

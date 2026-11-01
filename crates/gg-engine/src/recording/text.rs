@@ -1,7 +1,7 @@
 //! The text of a recording's values: reflection's [`Value`]s, each on one line, every part tagged
 //! with its kind, so that they read back without their types, with their floats' bits, with the
-//! entities they hold by their IDs and with the textures by their names, their IDs or else their
-//! paths. The engine writes the text itself, and `ron` only reads it.
+//! entities they hold by their IDs and with the textures and models by their names, their IDs or
+//! else their paths. The engine writes the text itself, and `ron` only reads it.
 
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -13,6 +13,7 @@ use ron::extensions::Extensions;
 use serde::Deserialize;
 use serde::de::{self, Deserializer};
 
+use crate::assets::Asset;
 use crate::ecs::{MAX_DEPTH, float, quote};
 use crate::reflect::{Ident, Value};
 use crate::{Entity, EntityId, World};
@@ -99,6 +100,11 @@ fn put(out: &mut String, value: &Value, world: &World, fold: bool) {
             }
             None => out.push_str("Opaque"),
         },
+        &Value::Model(model) => {
+            out.push_str("Model(");
+            quote(out, world.assets().model_name(model));
+            out.push(')');
+        }
         Value::Option(None) => out.push_str("None"),
         Value::Option(Some(value)) => {
             out.push_str("Some(");
@@ -174,6 +180,8 @@ pub(crate) enum Text {
     Dead,
     /// A texture, by its name, or a path to its file.
     Texture(String),
+    /// A model, as a texture.
+    Model(String),
     None,
     Some(Box<Text>),
     List(Vec<Text>),
@@ -213,6 +221,7 @@ impl Text {
             Self::Entity(_) => "Entity",
             Self::Dead => "Dead",
             Self::Texture(_) => "Texture",
+            Self::Model(_) => "Model",
             Self::None => "None",
             Self::Some(_) => "Some",
             Self::List(_) => "List",
@@ -222,17 +231,18 @@ impl Text {
         }
     }
 
-    /// Adds the name of each texture it holds to `names`, in order.
-    pub(crate) fn textures<'t>(&'t self, names: &mut Vec<&'t str>) {
-        let fields = |given: &'t [(String, Text)], names: &mut Vec<&'t str>| {
+    /// Adds each texture and model it holds to `names`, in order.
+    pub(crate) fn assets<'t>(&'t self, names: &mut Vec<Asset<&'t str>>) {
+        let fields = |given: &'t [(String, Text)], names: &mut Vec<Asset<&'t str>>| {
             for (_, text) in given {
-                text.textures(names);
+                text.assets(names);
             }
         };
         match self {
-            Self::Texture(name) => names.push(name),
-            Self::Some(text) => text.textures(names),
-            Self::List(items) => items.iter().for_each(|item| item.textures(names)),
+            Self::Texture(name) => names.push(Asset::Texture(name)),
+            Self::Model(name) => names.push(Asset::Model(name)),
+            Self::Some(text) => text.assets(names),
+            Self::List(items) => items.iter().for_each(|item| item.assets(names)),
             Self::Struct(given) | Self::Variant(_, given) => fields(given, names),
             _ => {}
         }
@@ -293,6 +303,7 @@ impl Text {
             Self::Texture(name) => {
                 (world.assets().texture(name)).map_or(Value::Opaque, Value::Texture)
             }
+            Self::Model(name) => (world.assets().model(name)).map_or(Value::Opaque, Value::Model),
             Self::None => Value::Option(None),
             Self::Some(text) => Value::Option(Some(Box::new(text.value(world)))),
             Self::List(items) => Value::List(items.iter().map(|item| item.value(world)).collect()),

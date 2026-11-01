@@ -997,7 +997,7 @@ mod imp {
             }
         }
 
-        fn texture_label(&self, value: &Value) -> String {
+        fn asset_label(&self, value: &Value) -> String {
             match value {
                 // Its name, its ID or else its path, as the game's values give it.
                 Value::String(name) => name.clone(),
@@ -1479,7 +1479,7 @@ mod none {
             match *self {}
         }
 
-        fn texture_label(&self, _: &Value) -> String {
+        fn asset_label(&self, _: &Value) -> String {
             match *self {}
         }
     }

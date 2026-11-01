@@ -138,7 +138,7 @@ pub use jobs::{on_threads, start as start_jobs};
 use layer::Stack;
 pub use layer::{Commands, Context, Layer, Pick, Tick, Window};
 use main_loop::run_headless;
-pub use model::Model;
+pub use model::{Model, ModelNode, ModelRoot};
 pub use name::Name;
 pub use perf::PerfPanel;
 pub use physics::{

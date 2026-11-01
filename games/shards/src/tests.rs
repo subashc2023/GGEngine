@@ -49,9 +49,11 @@ fn the_project_is_canonical_and_starts_in_the_arena() {
 fn every_asset_has_its_id_file_beside_it() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let project = Project::read(dir).expect("the project reads");
-    // The game has no texture or model yet, so it finds none: it bites once Phase 7's third
-    // milestone gives the arena's Pillar a texture.
     let found = gg_api::asset::scan(&project.assets_dir(dir));
+    assert!(
+        found.assets.len() >= 2,
+        "the Pillar's texture and the crystal"
+    );
     let mut ids = HashSet::new();
     for asset in &found.assets {
         let path = &asset.path;
@@ -71,8 +73,9 @@ fn every_asset_has_its_id_file_beside_it() {
     assert!(found.unread.is_empty(), "{:?}", found.unread);
 }
 
-/// The arena's scene loads, with the textures it names, and saves to its own bytes, so that a type
-/// of the game's that changes under it fails here.
+/// The arena's scene loads, with the textures and the model it names, and saves to its own bytes,
+/// so that a type of the game's that changes under it fails here; its crystal's root spawns the
+/// model's two nodes, which the scene doesn't hold.
 #[test]
 fn the_arena_saves_as_it_is() {
     let path = scene("arena.ron");
@@ -83,6 +86,8 @@ fn the_arena_saves_as_it_is() {
         .load_scene_file(&path)
         .unwrap_or_else(|error| panic!("{error:#}"));
     assert_eq!(cx.world().save_scene(&roots).expect("saved"), text);
+    let nodes = cx.world().query::<&gg_engine::ModelNode>().count();
+    assert_eq!(nodes, 2, "the crystal and its splinter");
 }
 
 /// The game builds the arena, both players at their starts and its shards, apart from the players;

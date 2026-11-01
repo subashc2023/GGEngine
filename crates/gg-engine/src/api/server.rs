@@ -46,6 +46,7 @@ use subsecond::JumpTable;
 use tracing::{Level, debug, info, warn};
 
 use super::{Waiting, json};
+use crate::assets::Asset;
 use crate::edits::{Done, Edit};
 use crate::grid::Plane;
 use crate::layer::{Offered, Stack};
@@ -56,8 +57,8 @@ use crate::render_thread::{Extracted, Publish, Shot};
 use crate::scene_files::{self, Open, SceneFile};
 use crate::snapshot::Run;
 use crate::{
-    Context, Entity, EntityId, Event, Key, MouseButton, Name, Operation, Pose, Scroll, Texture,
-    World, patch, snapshot,
+    Context, Entity, EntityId, Event, Key, Model, MouseButton, Name, Operation, Pose, Scroll,
+    Texture, World, patch, snapshot,
 };
 
 /// The methods, as `api.unknown_method` lists them.
@@ -723,8 +724,8 @@ impl Api {
                 },
                 Call::Apply(given, gesture) => {
                     // What its values name that isn't loaded is loaded first, as a scene's is.
-                    let named = textures_named(world, &given);
-                    cx.load_named(named.iter().map(String::as_str), false);
+                    let named = assets_named(world, &given);
+                    cx.load_named(named, false);
                     match operations(cx.world(), cx.world(), given) {
                         Ok(mut operations) => {
                             let author = client.to_string();
@@ -983,8 +984,11 @@ impl Api {
         let world = cx.world();
         let back = (self.picks).extract_if(.., |(_, ticket, _)| answered(*ticket).is_some());
         for (_, ticket, reply) in back {
-            let id = answered(ticket).flatten();
-            let entity = id.and_then(|id| world.entity(id));
+            let shown = answered(ticket).flatten();
+            // A model's node is its root's, which tools pick and change in its place.
+            let entity = shown.and_then(|id| world.entity(id));
+            let entity = entity.map(|entity| world.node_root(entity));
+            let id = entity.map_or(shown, |entity| world.id(entity));
             let name = entity.and_then(|entity| world.get::<Name>(entity));
             reply.result(&Picked {
                 id: id.map(|id| id.to_string()),
@@ -1212,10 +1216,10 @@ fn field(world: &World, id: EntityId, component: &str, path: &str) -> Result<Str
     Ok(out)
 }
 
-/// The names that the values of the operations `given` asks for give textures that none loaded
-/// has, as [`operations`] reads them in `world`: which a client's edit names, to load before it's
-/// read.
-fn textures_named(world: &World, given: &[gg_api::Operation]) -> Vec<String> {
+/// The textures and models that the values of the operations `given` asks for name that none
+/// loaded has, as [`operations`] reads them in `world`: which a client's edit names, to load before
+/// it's read.
+fn assets_named(world: &World, given: &[gg_api::Operation]) -> Vec<Asset<String>> {
     let gathering = Gathering {
         world,
         missing: RefCell::default(),
@@ -1224,11 +1228,22 @@ fn textures_named(world: &World, given: &[gg_api::Operation]) -> Vec<String> {
     gathering.missing.into_inner()
 }
 
-/// What reads values as a world does, `world`, but for a texture that none loaded has, which it
-/// keeps the name of, reading on as though it were the engine's white texture.
+/// What reads values as a world does, `world`, but for a texture or a model that none loaded has,
+/// which it keeps the name of, reading on as though it were the engine's white texture, or the
+/// first model.
 struct Gathering<'w> {
     world: &'w World,
-    missing: RefCell<Vec<String>>,
+    missing: RefCell<Vec<Asset<String>>>,
+}
+
+impl Gathering<'_> {
+    /// Keeps `asset`, which none loaded has, unless it's kept.
+    fn missed(&self, asset: Asset<&str>) {
+        let mut missing = self.missing.borrow_mut();
+        if !missing.iter().any(|missed| missed.as_deref() == asset) {
+            missing.push(asset.owned());
+        }
+    }
 }
 
 impl json::Names for Gathering<'_> {
@@ -1252,11 +1267,20 @@ impl json::Names for Gathering<'_> {
         if let Some(texture) = self.world.assets().texture(name) {
             return Ok(reflect::Value::Texture(texture));
         }
-        let mut missing = self.missing.borrow_mut();
-        if !missing.iter().any(|missed| missed == name) {
-            missing.push(name.to_owned());
-        }
+        self.missed(Asset::Texture(name));
         Ok(reflect::Value::Texture(Texture::WHITE))
+    }
+
+    fn model_name(&self, model: Model) -> Option<&str> {
+        Some(self.world.assets().model_name(model))
+    }
+
+    fn model(&self, name: &str) -> Result<reflect::Value> {
+        if let Some(model) = self.world.assets().model(name) {
+            return Ok(reflect::Value::Model(model));
+        }
+        self.missed(Asset::Model(name));
+        Ok(reflect::Value::Model(Model::new(0)))
     }
 }
 

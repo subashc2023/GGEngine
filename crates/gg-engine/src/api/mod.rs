@@ -82,7 +82,7 @@ pub(crate) fn serve(
     #[cfg(feature = "dev")]
     {
         cx.take_assets();
-        cx.take_reloaded();
+        cx.take_reloaded(stack.records());
     }
     #[cfg(feature = "dev")]
     crate::scene_files::look(cx, stack);
@@ -106,7 +106,7 @@ pub(crate) fn serve_paused(
     #[cfg(feature = "dev")]
     {
         cx.take_assets();
-        cx.take_reloaded();
+        cx.take_reloaded(stack.records());
     }
     #[cfg(feature = "dev")]
     crate::scene_files::look(cx, stack);

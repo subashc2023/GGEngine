@@ -264,7 +264,7 @@ mod watch {
         let _zone = gg_core::zone!();
         // What it names that isn't loaded is loaded first, as a scene's load loads it; a text that
         // doesn't load is refused below.
-        let _ = cx.load_scene_textures(&text);
+        let _ = cx.load_scene_assets(&text);
         let path = file.path.display();
         let author = || file.author.clone();
         // The file as last applied, unless it no longer loads, as after a rebuild took a field away
@@ -666,7 +666,7 @@ mod open_scene {
         }
         let text = crate::read_scene(&path)?;
         // What it names that isn't loaded is loaded first, as a scene's load loads it.
-        let _ = cx.load_scene_textures(&text);
+        let _ = cx.load_scene_assets(&text);
         let (world, files, open) = as_edited(cx);
         world.scene_loads(&text).map_err(|error| {
             let message = format!("{}:{error}", path.display());

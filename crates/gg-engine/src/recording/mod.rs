@@ -42,6 +42,7 @@ use gg_core::{Error, Result};
 use tracing::{error, info, warn};
 
 use crate::args::Dump;
+use crate::assets::Counts;
 use crate::edits::Edit;
 use crate::layer::Commands;
 use crate::{App, BUILD, Context, Tick, World, WorldHash, perf};
@@ -78,9 +79,9 @@ pub(crate) struct Recorder {
     /// Why the recording stopped, after which nothing more is written: the first write that failed,
     /// or the first command that wouldn't replay.
     failed: Option<Error>,
-    /// How many textures there were as it last wrote their names, the engine's white texture among
-    /// them.
-    named: usize,
+    /// How many textures and models there were as it last wrote their names, the engine's white
+    /// texture among them.
+    named: Counts,
 }
 
 impl Recorder {
@@ -98,7 +99,7 @@ impl Recorder {
             app,
             line: String::new(),
             failed: None,
-            named: 0,
+            named: (0, 0),
         })
     }
 
@@ -131,11 +132,11 @@ impl Recorder {
         self.flush();
     }
 
-    /// Writes a `named` line for each texture of `world`'s that the layers added since it last
-    /// wrote them and that's named otherwise than by its path, before a line that may name it.
+    /// Writes a `named` line for each texture and model of `world`'s that the layers added since it
+    /// last wrote them and that's named otherwise than by its path, before a line that may name it.
     fn names(&mut self, world: &World) {
         let assets = world.assets();
-        if assets.count() == self.named {
+        if assets.counts() == self.named {
             return;
         }
         for (name, path) in assets.named_from(self.named) {
@@ -145,7 +146,7 @@ impl Recorder {
             self.line.push('\n');
             self.flush();
         }
-        self.named = assets.count();
+        self.named = assets.counts();
     }
 
     /// Writes the commands `commands` holds, the queue of the layer at `layer` from the bottom of
@@ -1086,7 +1087,7 @@ mod tests {
         run.stack.attach(&mut cx);
         run.stack.tick(&mut cx, Tick { number: 0 });
         // An edit that names a texture loaded for it, as the tool API loads one.
-        cx.load_named([edited], false);
+        cx.load_named([crate::assets::Asset::Texture(edited)], false);
         let sprite = Sprite {
             texture: cx.world().assets().texture(edited),
             ..Sprite::default()

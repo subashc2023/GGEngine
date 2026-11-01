@@ -1,5 +1,14 @@
 (
     entities: {
+        "0b4310155e2079f1": (
+            ModelRoot: ("ee4245ad5be9c53d"),
+            Name: ("Crystal"),
+            Transform: (
+                translation: (-6.4, 3.0, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.1, 1.1, 0.08),
+            ),
+        ),
         "10b03ba5e0966fcd": (
             BoxCollider2D: (
                 offset: (0.0, 0.0),

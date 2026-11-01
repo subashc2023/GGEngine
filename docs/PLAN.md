@@ -77,11 +77,14 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Assets loaded wherever they're named** (2026-11-01)
 - **Renames that keep IDs** (2026-11-01)
 - **Reloading any change** (2026-11-01)
+- **Models in scenes by ID** (2026-11-01)
 
 ## Now
 
-**Models in scenes by ID**, Phase 7's sixth milestone: a scene names a model by its asset ID, which
-loads where it's named, as a texture does, and spawns its nodes; its plan says when it's done.
+**Dropping from the Assets panel**, Phase 7's seventh and last milestone: the editor's Assets panel
+dropping a texture onto a sprite and a model into the scene, as operations through the tool API
+that name them by their IDs; its plan says when it's done, which Phase 7's *Done when* below
+bounds.
 
 ## Next
 
@@ -167,7 +170,11 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Keeping within the GPU's memory budget (`VK_EXT_memory_budget` through VMA) | Phase 10, with streaming |
 | Removing meshes, shaders and textures, which last until the app ends; a reload replaces them in place | Phase 10, with streaming |
 | Replacing a texture without waiting for the frames before: the frame that takes a reload's image waits for the GPU to finish them, a frame's time at most, as its slot in the bindless set can't change while they may sample it; writing the image in place where its size holds would spare the wait | A reload's hitch shows, as for a texture written many times a second |
-| Reloading a model's nodes and materials, which its entities hold, and a model of other numbers of primitives or images: they keep what they were spawned with until the run starts again (`asset.model_changed`) | Phase 7's models in scenes by ID, which spawns them from the model |
+| Reloading a model's nodes and materials, and a model of other numbers of primitives or images, in a run that's recorded or in a lockstep session: its roots' nodes keep what they were spawned with until the run starts again (`asset.model_changed`), as their world changes only as the run it goes with changed it | Someone edits models during such runs, as a reload kept as a line of the recording or an input both peers apply at one tick would allow |
+| A model's nodes matched by their names as its file changes, rather than by their places: each keeps what code gave it only while every node keeps its place in the model's hierarchy, and else all are spawned again, under the same IDs | A game's code gives nodes state that a model's edit loses |
+| A model's nodes named, as by their glTF names: they have no `Name`, so the Entities panel and the tool API show their IDs | Someone looks for a node by name |
+| A model's nodes as its file changed while its game was down, as between a crash and its restart: a world restored from a snapshot keeps them as the snapshot did, but for the draws a run of other assets left out, until the model's next change; and an undone delete of a model's root, or a redone create, brings back its nodes as they were before its model changed since. Refitting there would undo what code did to them, and lockstep peers would part, without a print of each model's nodes in the snapshot and the undo to tell a model changed since | Someone edits a model while its game is down, or between deleting its root and undoing that |
+| A model standing in for a following run with its nodes, so that the hash still matches: a replay or a joiner that can't load a model stands in with one of no nodes, and its hash parts from its run's where the nodes were | A replay or a joiner runs without a game's model files, as a bug report's might |
 | A sprite sheet's texture reloaded at another size, which keeps drawing as it did (`asset.sheet_resized`): its sprites hold its cells as fractions of its size, which a layer cut it by as it added it | A game's sheets grow as they're drawn, as frames added to an animation's |
 | Following a texture's or a model's file outside the asset root, which has no asset ID, as it's renamed or moved: it's watched where it was, missing there, and reloads no more | Someone moves such files while their game runs |
 | Per-frame data in a buffer: shaders get the camera's view and projection as one matrix, and see the world through each draw's transform, but not the camera's position, the time or the lights | Phase 12, with lighting |
@@ -267,7 +274,6 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | IDs for shaders, scenes, sounds and other kinds, for assets outside the asset root, and for assets reached through links: the scan gives textures and models under the root alone, never through a link | Each kind as something first names it by ID |
 | Builds without `dev` naming textures by their IDs: they read no ID file, so they name every texture by its path, and a scene, a recording or a snapshot that names one by its ID finds none there | Phase 10, whose cooked package gives each asset its ID |
 | Loading the textures that scene text names where a layer loads it into a world itself, as inside a tick, as the sandbox's grid reload does: a world can't reach the renderer's textures, which are the context's, so `World::load_scene` finds only those loaded, while `Context::load_scene_file`, the tool API and the engine's other reads load them | A game loads scene text in a tick that names textures no layer adds |
-| A model's image named in text, as `5f3c9a1e07b2d846#0`, loading its model where no layer added it: it's refused (`asset.model_image`), or stands in where the run follows another | Phase 7's models in scenes by ID |
 | A lockstep joiner loading for its tool API a texture its host hasn't named (`asset.not_given`), whose name could differ from the host's; the host's edits load any | Someone edits a joiner's textures from its own editor |
 | `gg mv` and an MCP `mv`, moving an asset and its ID file in one step: a file renamed alone keeps its ID by what it holds, but not one edited in the same step, nor one renamed in a fresh clone before its first run, which has no cache of prints | An agent's renames lose IDs that pairing by content can't keep |
 | A lockstep joiner that joins after its host's texture was renamed finding its file where it is now: it loads it by the path its host loaded it from, as the host names it, standing in where that's gone, as it is on one machine | Someone renames assets during a lockstep session |
@@ -323,7 +329,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | An `EntityId` query term | The first system that reads IDs as it iterates, such as replication |
 | Errors carrying their entity, and a scene's line and column, as fields, not only in their message, which the tool API gives as its code and message alone | A tool reads an error's entity or place without parsing its message |
 | Drawing rows at one z in ID order for less. Every frame reads them in that order rather than their tables', about 0.9 ms of the swarm's 4.3 ms frame in release; a frame that changes rows or z's, or follows a restore, sorts them by ID again, about 2.5 ms more for 100,000; and 100,000 sprites each at a z of their own, as sorting by y gives them, take about 5 ms, for a group and an item each. Tables kept in ID order would make the reads a sweep, and a radix sort the sort quicker | A game's frames need the time |
-| Linked prefab instances, with overrides, nesting, apply and revert; a placement is a flattened copy, each ID mixed from its instance's and its own, which links will keep | A game editing a prefab its scenes hold many copies of |
+| Linked prefab instances, with overrides, nesting, apply and revert; a placement is a flattened copy, each ID mixed from its instance's and its own, which links will keep; and overrides of a model's nodes, which scenes don't save and tools don't change, as links will keep them | A game editing a prefab its scenes hold many copies of, or a node of a model placed in a scene |
 | Placing a prefab without parsing it again: `World::place_prefab` parses its text each time, which allocates | A game places prefabs as it runs, rather than as it loads |
 | A derive hint for `Component::base`, and opaque values in lists and options, which saving refuses, as does a set's undo (`reflect.opaque`) where the old value holds something opaque in a variant, an option or a list; a type with opaque fields implements `Component` by hand to load, as `Sprite` does | A game's component holds something opaque |
 | Names in scenes beyond ASCII identifiers, which saving refuses (`scene.bad_name`), and a project manifest's strings beyond printable ASCII, which reading refuses (`project.bad`) | A game names a type, a field or a folder so |

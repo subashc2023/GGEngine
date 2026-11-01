@@ -463,6 +463,11 @@ impl World {
             }
         }
         world.resources.keep(std::mem::take(&mut self.resources));
+        // Models' nodes as the snapshot kept them, code's changes among them, but for their draws,
+        // which a run of other assets leaves out, as it leaves out what's opaque.
+        if !opaque {
+            world.redraw_nodes();
+        }
         *self = world;
         Ok(changes)
     }
@@ -596,7 +601,11 @@ fn migrate(
         (Type::Entity, Text::Dead) => Value::Entity(Entity::DEAD),
         (Type::Texture, Text::Texture(at)) => match world.assets().texture(at) {
             Some(texture) => Value::Texture(texture),
-            None => return Err(world.assets().not_found(at)),
+            None => return Err(world.assets().not_found("texture", at)),
+        },
+        (Type::Model, Text::Model(at)) => match world.assets().model(at) {
+            Some(model) => Value::Model(model),
+            None => return Err(world.assets().not_found("model", at)),
         },
         (Type::Option(_), Text::None) => Value::Option(None),
         (Type::Option(inner), Text::Some(text)) => {
