@@ -17,7 +17,8 @@ bytemuck = { workspace = true, features = ["derive"] }
 gg-engine = { workspace = true, features = ["dev"] }
 
 [dev-dependencies]
-# Reads the game's project manifest, as tools do.
+# Reads the game's project manifest, as tools do, and its assets' ID files, as development
+# builds do.
 gg-api.workspace = true
 
 [lints]

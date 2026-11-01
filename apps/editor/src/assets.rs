@@ -1,11 +1,14 @@
 //! The Assets panel: the files in the project's asset root, a folder at a time, as a content
 //! browser shows them.
 
+use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use gg_api::asset::{AssetKind, Meta};
 use gg_engine::egui::{
     self, Atom, Button, Color32, Id, Painter, Rect, ScrollArea, Sense, Shape, Stroke, TextStyle,
     TextWrapMode, Vec2, WidgetText, pos2, vec2,
@@ -27,7 +30,8 @@ const RELIST: Duration = Duration::from_secs(1);
 /// The Assets panel: the files in a folder, its root, and in the folders under it, one folder at a
 /// time, as a content browser shows them: folders first, then files, each by its name, in rows as
 /// many across as fit. A double click on a folder shows it, and Back the folder above, as far up as
-/// the root. Files show dimmed, since nothing opens or drags them yet.
+/// the root. Files show dimmed, since nothing opens or drags them yet. An asset's ID file,
+/// `<file>.meta` beside it, doesn't show.
 pub struct Assets {
     root: PathBuf,
     /// The folder shown: the root, or a folder under it.
@@ -138,13 +142,16 @@ impl Assets {
     }
 }
 
-/// The files and folders in `folder`, folders first, then files, each by its name regardless of
-/// case, then as it's spelled. A link is what it leads to, and one that leads nowhere a file.
+/// The files and folders in `folder`, but each texture's and model's ID file beside it, folders
+/// first, then files, each by its name regardless of case, then as it's spelled. A link is what it
+/// leads to, and one that leads nowhere a file.
 ///
 /// It's listed on the main thread, which a folder of many thousands of files would hold up for
 /// some milliseconds each second it shows; a thread watching the folder wouldn't.
 fn entries(folder: &Path) -> io::Result<Vec<Entry>> {
     let mut entries = Vec::new();
+    // The regular files, links not followed, as the game's scan takes its assets.
+    let mut files = HashSet::new();
     for entry in fs::read_dir(folder)? {
         let entry = entry?;
         let path = entry.path();
@@ -155,10 +162,23 @@ fn entries(folder: &Path) -> io::Result<Vec<Entry>> {
         } else {
             file_type.is_dir()
         };
+        if file_type.is_file() {
+            files.insert(path.clone());
+        }
         let kind = if is_folder { Kind::Folder } else { Kind::File };
         let name = entry.file_name().to_string_lossy().into_owned();
         entries.push(Entry { path, name, kind });
     }
+    // An ID file beside its asset goes with it, which it would only double; one without its asset,
+    // or named for it but for case, or beside a link, which the game warns of, shows. Names match
+    // exactly, as the game's scan matches them, whatever the file system ignores.
+    entries.retain(|entry| {
+        let asset = entry.path.with_extension("");
+        let id_file = entry.kind == Kind::File
+            && entry.path.extension() == Some(OsStr::new(Meta::EXTENSION))
+            && AssetKind::of(&asset).is_some();
+        !(id_file && files.contains(&asset))
+    });
     entries.sort_by_cached_key(|entry| {
         let file = entry.kind != Kind::Folder;
         (file, entry.name.to_lowercase(), entry.name.clone())
@@ -339,14 +359,33 @@ mod tests {
     }
 
     /// Folders come first, then files, each by its name regardless of case, then as it's spelled,
-    /// names that aren't Latin among them; a folder's name never makes it a file.
+    /// names that aren't Latin among them; a folder's name never makes it a file. An asset's ID file
+    /// beside it doesn't show; one named for it but for case does, as the game warns of it, and so
+    /// do one without its asset, a folder at its name and any other `.meta` file, even beside the
+    /// file it's named for, and, where links can be made, one beside a link to a file, which the
+    /// game's scan doesn't take as an asset.
     #[test]
     fn a_folder_lists_its_folders_then_its_files_by_name() {
         let scratch = Scratch::new("assets-listed");
-        for folder in ["b", "A", "maps.ron"] {
+        for folder in ["b", "A", "maps.ron", "old.png.meta"] {
             fs::create_dir(scratch.0.join(folder)).expect("made");
         }
-        for file in ["уровень.ron", "c.png", "B.ron", "a.RON", "Z.txt"] {
+        for file in [
+            "уровень.ron",
+            "c.png",
+            "c.png.meta",
+            "d.png",
+            "d.png.META",
+            "E.png",
+            "e.png.meta",
+            "gone.png.meta",
+            "notes.meta",
+            "old.png",
+            "B.ron",
+            "B.ron.meta",
+            "a.RON",
+            "Z.txt",
+        ] {
             fs::write(scratch.0.join(file), "").expect("written");
         }
         let listed = entries(&scratch.0).expect("listed");
@@ -357,13 +396,32 @@ mod tests {
             ("A", Kind::Folder),
             ("b", Kind::Folder),
             ("maps.ron", Kind::Folder),
+            ("old.png.meta", Kind::Folder),
             ("a.RON", Kind::File),
             ("B.ron", Kind::File),
+            ("B.ron.meta", Kind::File),
             ("c.png", Kind::File),
+            ("d.png", Kind::File),
+            ("d.png.META", Kind::File),
+            ("E.png", Kind::File),
+            ("e.png.meta", Kind::File),
+            ("gone.png.meta", Kind::File),
+            ("notes.meta", Kind::File),
+            ("old.png", Kind::File),
             ("Z.txt", Kind::File),
             ("уровень.ron", Kind::File),
         ];
         assert_eq!(listed, expected);
+        #[cfg(unix)]
+        {
+            let link = scratch.0.join("linked.png");
+            std::os::unix::fs::symlink(scratch.0.join("c.png"), link).expect("linked");
+            fs::write(scratch.0.join("linked.png.meta"), "").expect("written");
+            let listed = entries(&scratch.0).expect("listed");
+            let names: Vec<&str> = listed.iter().map(|entry| entry.name.as_str()).collect();
+            let both = names.contains(&"linked.png") && names.contains(&"linked.png.meta");
+            assert!(both, "{names:?}");
+        }
     }
 
     /// A frame of `assets` filling a window 400 points across, with `events`; the text it drew.

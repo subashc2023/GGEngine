@@ -19,7 +19,7 @@ crates/           libraries
   gg-renderer/    passes, materials, render graph (to come); gets plain render data, never the scene
   gg-engine/      what games use: main loop, window, input, scene, assets, hot reload, the tool API
   gg-macros/      the derives gg-engine re-exports
-  gg-api/         the tool API, a game's view shared as it renders, and projects' manifests
+  gg-api/         the tool API, a game's shared view, projects' manifests, assets' ID files
 apps/             executables
   sandbox/        the engine's own app: a swarm of up to 100,000 sprites and a grid's scene file
   editor/         the editor: a project's game, embedded, in a panel among dockable panels

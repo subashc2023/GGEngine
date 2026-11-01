@@ -18,7 +18,9 @@ use gg_renderer::{
 use subsecond::HotFn;
 use tracing::{error, info, warn};
 
-use crate::assets::{self, Assets};
+#[cfg(feature = "dev")]
+use crate::assets::Catalog;
+use crate::assets::{self, Assets, Loaded};
 use crate::camera::{self, Camera, Tie};
 use crate::draw::{self, Poses, Scratch};
 use crate::edits::{Authors, Done, Edit};
@@ -282,6 +284,9 @@ pub struct Context {
     /// The assets the layers added: the world's, which a world that a layer puts in its place
     /// takes again, as [`share_assets`](Self::share_assets) says.
     assets: Arc<Assets>,
+    /// The textures, models and shaders the layers added, by the file each resolves to, which a
+    /// second add of that file, by whatever path, gives again.
+    loaded: Loaded,
     /// How long frames take, which the main loop measures and
     /// [`PerfPanel`](crate::PerfPanel) shows.
     pub(crate) perf: Perf,
@@ -421,6 +426,7 @@ impl Context {
             #[cfg(feature = "dev")]
             folders: Vec::new(),
             assets,
+            loaded: Loaded::default(),
             perf: Perf::default(),
             paused: false,
             authors: Authors::default(),
@@ -572,6 +578,9 @@ impl Context {
     /// includes changes, and the next frame draws with it; a change that doesn't compile, or
     /// breaks the contract, warns, and the shader keeps drawing as it did.
     ///
+    /// A file added again, by whatever form of its path, with the same vertex and parameter types
+    /// and blend, gives the shader it gave first, which compiles and reloads once.
+    ///
     /// Fails with `renderer.bad_shader` and slangc's diagnostics if it doesn't compile, with
     /// `renderer.shader_mismatch` and each way it breaks the contract if it breaks it, with
     /// `renderer.shader_files` if slangc's directory in the OS's temporary directory can't be made
@@ -582,8 +591,21 @@ impl Context {
         path: impl AsRef<Path>,
         blend: Blend,
     ) -> Result<Shader<V, P>> {
-        let shader = self.shaders.add(name, path.as_ref(), blend)?;
-        let named = assets::name_of(self.root.as_deref(), path.as_ref());
+        let path = path.as_ref();
+        let named = assets::name_of(self.root.as_deref(), path);
+        let file = assets::file_of(path);
+        let added = &self.loaded.shaders;
+        let same = |by: &Path| {
+            file.as_ref()
+                .is_some_and(|file| added.get(by) == Some(file))
+        };
+        let shader = match self.shaders.find::<V, P>(blend, same) {
+            Some(shader) => shader,
+            None => self.shaders.add(name, path, blend)?,
+        };
+        if let Some(file) = file {
+            self.loaded.shaders.insert(path.to_owned(), file);
+        }
         let types = format!("{} {} {blend:?}", layout::<V>(), layout::<P>());
         self.added("shader", &format!("{named} {types}"));
         Ok(shader)
@@ -598,25 +620,46 @@ impl Context {
     /// (1, 1) at its bottom right. `name` names the texture in errors and GPU captures. The GPU has
     /// it from the next frame that renders.
     ///
+    /// A file added again, by whatever form of its path, gives the texture it gave first, without
+    /// loading it again, as ARCHITECTURE.md's Rendering says; `name` is then unused, and the
+    /// texture keeps the name its first path gave it, which another path names too.
+    ///
     /// Fails with `engine.bad_texture` if the file can't be read, isn't a regular file, is more
     /// than 1 GiB, doesn't decode as a PNG or a JPEG, or has a side of more than 8,192 pixels, the
     /// most every Vulkan 1.4 device takes, and with `renderer.too_many_textures` past the 61,440 a
     /// renderer holds, the engine's white one among them.
     pub fn add_texture(&mut self, name: &str, path: impl AsRef<Path>) -> Result<Texture> {
         let path = path.as_ref();
-        let image = image::load_image(name, path)?;
-        let texture = self
-            .textures
-            .add(name, image.size, image.pixels, Mipmaps::None)?;
         let named = assets::name_of(self.root.as_deref(), path);
-        self.add_assets(|assets| assets.add_texture(texture, named.clone()));
+        let file = assets::file_of(path);
+        let texture = match file
+            .as_ref()
+            .and_then(|file| self.loaded.textures.get(file))
+        {
+            Some(&(texture, _)) => {
+                self.alias(texture, &named);
+                texture
+            }
+            None => {
+                let image = image::load_image(name, path)?;
+                let size = image.size;
+                let texture = self.textures.add(name, size, image.pixels, Mipmaps::None)?;
+                self.add_assets(|assets| assets.add_texture(texture, named.clone()));
+                if let Some(file) = file {
+                    self.loaded.textures.insert(file, (texture, size));
+                }
+                texture
+            }
+        };
         self.added("texture", &named);
         Ok(texture)
     }
 
     /// Loads the PNG or JPEG file at `path` as a sprite sheet: a texture, as
     /// [`add_texture`](Self::add_texture) loads one, cut into cells `cell` pixels across and down,
-    /// packed edge to edge from its top left, which [`SpriteSheet::sprite`] draws.
+    /// packed edge to edge from its top left, which [`SpriteSheet::sprite`] draws. A file added
+    /// before, as a texture or a sprite sheet, isn't loaded again: its texture is cut into these
+    /// cells.
     ///
     /// Fails as `add_texture` does, and with `engine.bad_sprite_sheet` if a side of `cell` is 0
     /// or more than the image's.
@@ -627,10 +670,32 @@ impl Context {
         cell: [u32; 2],
     ) -> Result<SpriteSheet> {
         let path = path.as_ref();
-        let image = image::load_image(name, path)?;
-        let sheet = add_sheet(&mut self.textures, name, path, image, cell)?;
         let named = assets::name_of(self.root.as_deref(), path);
-        self.add_assets(|assets| assets.add_texture(sheet.texture, named.clone()));
+        let file = assets::file_of(path);
+        let sheet = match file
+            .as_ref()
+            .and_then(|file| self.loaded.textures.get(file))
+        {
+            Some(&(texture, size)) => {
+                fits(name, path, size, cell)?;
+                self.alias(texture, &named);
+                SpriteSheet {
+                    texture,
+                    size,
+                    cell,
+                }
+            }
+            None => {
+                let image = image::load_image(name, path)?;
+                let sheet = add_sheet(&mut self.textures, name, path, image, cell)?;
+                let (texture, size) = (sheet.texture, sheet.size);
+                self.add_assets(|assets| assets.add_texture(texture, named.clone()));
+                if let Some(file) = file {
+                    self.loaded.textures.insert(file, (texture, size));
+                }
+                sheet
+            }
+        };
         self.added("texture", &named);
         Ok(sheet)
     }
@@ -670,7 +735,7 @@ impl Context {
     /// are in files in the model's folder, named by URIs relative to the model's, read no further
     /// than their byteLength, in base64 data URIs or in a GLB's BIN chunk, and images there or in
     /// buffer views: PNGs or JPEGs, as `add_texture` takes them, told apart by their bytes rather
-    /// than by the types the model declares.
+    /// than by the types the model declares. A file added again gives the model it gave first.
     ///
     /// It ignores animations, cameras and the extensions the model uses without requiring them,
     /// and logs which it has at info level, as `engine.model_ignored`: the model draws as it is at
@@ -696,22 +761,33 @@ impl Context {
         let zone = gg_core::zone!();
         let path = path.as_ref();
         zone.text(path.display());
-        let imported = gltf::read(name, path, crate::dirs::read_file, gltf::MAX_MEMORY)?;
-        if !imported.ignored.is_empty() {
-            info!(
-                code = "engine.model_ignored",
-                model = name,
-                path = %path.display(),
-                "Model {name:?} draws without what the engine ignores of it: {}",
-                imported.ignored.join(", ")
-            );
-        }
-        let before = self.textures.count();
-        let (meshes, shaders, textures) = (&mut self.meshes, &mut self.shaders, &mut self.textures);
-        let model = Model::add(name, imported, meshes, shaders, textures)?;
         let named = assets::name_of(self.root.as_deref(), path);
-        let count = self.textures.count();
-        self.add_assets(|assets| assets.add_images(&named, before, count));
+        let file = assets::file_of(path);
+        let model = match file.as_ref().and_then(|file| self.loaded.models.get(file)) {
+            Some(model) => model.clone(),
+            None => {
+                let imported = gltf::read(name, path, crate::dirs::read_file, gltf::MAX_MEMORY)?;
+                if !imported.ignored.is_empty() {
+                    info!(
+                        code = "engine.model_ignored",
+                        model = name,
+                        path = %path.display(),
+                        "Model {name:?} draws without what the engine ignores of it: {}",
+                        imported.ignored.join(", ")
+                    );
+                }
+                let before = self.textures.count();
+                let (meshes, shaders, textures) =
+                    (&mut self.meshes, &mut self.shaders, &mut self.textures);
+                let model = Model::add(name, imported, meshes, shaders, textures)?;
+                let count = self.textures.count();
+                self.add_assets(|assets| assets.add_images(&named, before, count));
+                if let Some(file) = file {
+                    self.loaded.models.insert(file, model.clone());
+                }
+                model
+            }
+        };
         let types = format!("{} {}", layout::<ModelVertex>(), layout::<ModelParams>());
         self.added("model", &format!("{named} {types}"));
         Ok(model)
@@ -723,6 +799,14 @@ impl Context {
         let (meshes, shaders) = (self.meshes.count(), self.shaders.count());
         let added = format!("{kind} {meshes} {shaders} {} {what}", self.textures.count());
         self.add_assets(|assets| assets.note(added));
+    }
+
+    /// Has `path` name `texture`, which another path to its file added before, as [`Assets::alias`]
+    /// does, unless it names a texture already.
+    fn alias(&mut self, texture: Texture, path: &Arc<str>) {
+        if self.assets.texture(path).is_none() {
+            self.add_assets(|assets| assets.alias(texture, path.clone()));
+        }
     }
 
     /// Has `add` change the assets the layers added, which the world shares from then on: the
@@ -739,6 +823,47 @@ impl Context {
     /// place, as it loaded, attached or ticked, as [`World::share_assets`] says.
     pub(crate) fn share_assets(&mut self) {
         self.world.share_assets(&self.assets);
+    }
+
+    /// Scans the assets under the app's root, as [`assets::scan`] says, writing the ID files
+    /// missing if `writes`, and warning of each missing otherwise, and has the worlds share what it
+    /// found: as a run starts, before the layers load, and as the tool API lists them. A context
+    /// without a root has none.
+    ///
+    /// Each scan walks the whole root and reads every ID file on the main thread, O(files), and
+    /// clones the catalog, O(assets): about 70 ms for 1,000 assets on Windows, but a few
+    /// milliseconds apiece for ID files just copied in, the first time they're read; and each ID
+    /// file it writes is flushed to the disk, about 6 ms apiece. So an `assets` after copying in
+    /// about 1,500 assets without ID files, or 3,000 with them, stops frames past `gg run`'s 10 s
+    /// `--hang`, and `gg run` restarts the game from its last snapshot, losing play since, while
+    /// the restart's own scan, within the 120 s a run has to start, writes the rest. Phase 7's
+    /// fourth milestone, renames that keep IDs, watches the root on a thread of its own instead,
+    /// leaving a run's start the only scan.
+    #[cfg(feature = "dev")]
+    pub(crate) fn scan_assets(&mut self, writes: bool) {
+        let Some(root) = self.root.as_deref() else {
+            return;
+        };
+        let _zone = gg_core::zone!();
+        if let Some(catalog) = assets::scan(self.assets.catalog(), root, writes) {
+            self.add_assets(|assets| assets.set_catalog(catalog));
+        }
+    }
+
+    /// The asset database, as the last scan left it.
+    #[cfg(feature = "dev")]
+    pub(crate) fn catalog(&self) -> &Catalog {
+        self.assets.catalog()
+    }
+
+    /// Whether a layer has added the file at `path` from the app's root, by whatever form of its
+    /// path, as a texture, a sprite sheet or a model: resolving the file, some 0.1 ms on Windows.
+    #[cfg(feature = "dev")]
+    pub(crate) fn has_added(&self, path: &str) -> bool {
+        let file = (self.root.as_deref()).and_then(|root| assets::file_of(&root.join(path)));
+        file.is_some_and(|file| {
+            self.loaded.textures.contains_key(&file) || self.loaded.models.contains_key(&file)
+        })
     }
 
     /// Draws `mesh` with `shader` this frame, where `transform` places it in the world, over the
@@ -1098,7 +1223,7 @@ impl Context {
 }
 
 /// Adds `image`, sprite sheet `name`'s from `path`, to `textures` as a sheet of cells `cell` pixels
-/// across and down, if they fit it; one that doesn't takes no texture.
+/// across and down, if they fit it, as [`fits`] checks; one that doesn't takes no texture.
 fn add_sheet(
     textures: &mut Textures,
     name: &str,
@@ -1106,7 +1231,21 @@ fn add_sheet(
     image: Image,
     cell: [u32; 2],
 ) -> Result<SpriteSheet> {
-    let [width, height] = image.size;
+    fits(name, path, image.size, cell)?;
+    let texture = textures.add(name, image.size, image.pixels, Mipmaps::None)?;
+    Ok(SpriteSheet {
+        texture,
+        size: image.size,
+        cell,
+    })
+}
+
+/// Checks that cells `cell` pixels across and down fit sprite sheet `name`'s image, from `path`,
+/// `size` pixels across and down.
+///
+/// Fails with `engine.bad_sprite_sheet` if a side of `cell` is 0 or more than the image's.
+fn fits(name: &str, path: &Path, size: [u32; 2], cell: [u32; 2]) -> Result<()> {
+    let [width, height] = size;
     if !(1..=width).contains(&cell[0]) || !(1..=height).contains(&cell[1]) {
         return Err(Error::new(
             "engine.bad_sprite_sheet",
@@ -1119,12 +1258,7 @@ fn add_sheet(
             ),
         ));
     }
-    let texture = textures.add(name, image.size, image.pixels, Mipmaps::None)?;
-    Ok(SpriteSheet {
-        texture,
-        size: image.size,
-        cell,
-    })
+    Ok(())
 }
 
 /// Type `T`'s name and size, such as `glam::f32::vec3::Vec3 12`: what a snapshot's assets say a
@@ -2199,6 +2333,130 @@ mod tests {
             message.contains("\"truck\"") && message.contains(&path.display().to_string()),
             "{message}"
         );
+    }
+
+    /// A texture's file added again, by another form of its path, gives the texture it gave first
+    /// without loading it again, as a sprite sheet's does, whichever comes first, cut by the image's
+    /// size; the texture keeps its first path's name, which the other path names too, and each add
+    /// notes its own path, as a snapshot's asset lines count them.
+    #[test]
+    fn a_texture_added_twice_loads_once_however_its_path_is_written() {
+        let scratch = crate::dirs::tests::Scratch::new("texture-once");
+        let root = scratch.0.clone();
+        std::fs::create_dir_all(root.join("assets")).expect("a directory");
+        let png = image::tests::png(
+            png::ColorType::Rgba,
+            png::BitDepth::Eight,
+            4,
+            &[9; 16],
+            None,
+        );
+        std::fs::write(root.join("assets/tiles.png"), png).expect("a PNG");
+        let plain = root.join("assets").join("tiles.png");
+        // A path through `..`, which only resolving the file finds the same.
+        let dotted = root.join("./assets/../assets/tiles.png");
+        let mut cx = Context::seeded(0).root(root.clone());
+        let texture = cx.add_texture("tiles", &plain).expect("a texture");
+        let count = cx.textures.count();
+        assert_eq!(cx.add_texture("again", &dotted).expect("it again"), texture);
+        assert_eq!(cx.textures.count(), count, "loaded once");
+        let sheet = cx
+            .add_sprite_sheet("tiles", &dotted, [2, 1])
+            .expect("a sheet");
+        assert_eq!(
+            (sheet.texture, sheet.size, sheet.cell),
+            (texture, [4, 1], [2, 1])
+        );
+        let error = (cx.add_sprite_sheet("tiles", &plain, [8, 1])).expect_err("cells too wide");
+        assert_eq!(error.code(), "engine.bad_sprite_sheet");
+        assert_eq!(cx.textures.count(), count);
+        let (first, other) = ("assets/tiles.png", "assets/../assets/tiles.png");
+        assert_eq!(cx.assets.path(texture), Some(first));
+        assert_eq!(cx.assets.texture(other), Some(texture));
+        let note = |name: &str| format!("texture {} 1 {count} {name}", cx.meshes.count());
+        let added: Vec<&str> = cx.assets.added().iter().map(|note| &**note).collect();
+        assert_eq!(added, [note(first), note(other), note(other)]);
+
+        let mut sheet_first = Context::seeded(0).root(root);
+        let sheet = (sheet_first.add_sprite_sheet("tiles", &dotted, [2, 1])).expect("a sheet");
+        assert_eq!(sheet.size, [4, 1]);
+        let texture = sheet_first
+            .add_texture("tiles", &plain)
+            .expect("its texture");
+        assert_eq!(texture, sheet.texture);
+        assert_eq!(sheet_first.textures.count(), count);
+    }
+
+    /// A model's file added again gives the model it gave first, adding none of its meshes or
+    /// images again; each add notes it.
+    #[test]
+    fn a_model_added_twice_loads_once() {
+        let scratch = crate::dirs::tests::Scratch::new("model-once");
+        std::fs::create_dir_all(&scratch.0).expect("a directory");
+        let path = scratch.0.join("m.glb");
+        std::fs::write(&path, gltf::tests::model()).expect("a model");
+        let mut cx = Context::seeded(0);
+        cx.add_model("m", &path).expect("a model");
+        let counts = (cx.meshes.count(), cx.textures.count());
+        assert!(counts.0 > 0 && counts.1 > 1, "{counts:?}");
+        cx.add_model("again", &path).expect("it again");
+        assert_eq!((cx.meshes.count(), cx.textures.count()), counts);
+        let models = cx
+            .assets
+            .added()
+            .iter()
+            .filter(|note| note.starts_with("model "));
+        assert_eq!(models.count(), 2);
+    }
+
+    /// A shader's file added again with the same vertex and parameter types and blend gives the
+    /// shader it gave first, by another form of its path inside the root too, compiled once; with
+    /// another blend or type of parameters, of the same size, it's another shader.
+    #[test]
+    fn a_shader_added_twice_loads_once_for_its_types_and_blend() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let path = root.join("tests/shaders/flat_color.slang");
+        let dotted = root.join("tests/./shaders/flat_color.slang");
+        let mut cx = Context::seeded(0).root(root);
+        let added = |cx: &mut Context, path: &Path, blend| {
+            let shader = cx.add_shader::<[f32; 3], Vec4>("flat", path, blend);
+            format!("{:?}", shader.expect("the shader compiles"))
+        };
+        let flat = added(&mut cx, &path, Blend::Opaque);
+        let count = cx.shaders.count();
+        assert_eq!(added(&mut cx, &path, Blend::Opaque), flat);
+        assert_eq!(added(&mut cx, &dotted, Blend::Opaque), flat);
+        assert_eq!((cx.shaders.sources().len(), cx.shaders.count()), (1, count));
+        assert_ne!(added(&mut cx, &path, Blend::Alpha), flat);
+        assert_eq!(cx.shaders.sources().len(), 2);
+        let array = cx.add_shader::<[f32; 3], [f32; 4]>("flat", &path, Blend::Opaque);
+        array.expect("the shader compiles");
+        assert_eq!(cx.shaders.sources().len(), 3);
+        let shaders = cx
+            .assets
+            .added()
+            .iter()
+            .filter(|note| note.starts_with("shader "));
+        assert_eq!(shaders.count(), 5);
+    }
+
+    /// Two files that a layer's paths name alike are two files, each loaded: here one outside the
+    /// root, by a path relative to the working directory, gg-engine's, where cargo runs its tests,
+    /// and one inside it.
+    #[test]
+    fn files_named_alike_load_apart() {
+        let scratch = crate::dirs::tests::Scratch::new("named-alike");
+        let shaders = scratch.0.join("tests").join("shaders");
+        std::fs::create_dir_all(&shaders).expect("a directory");
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/shaders/flat_color.slang");
+        std::fs::copy(source, shaders.join("flat_color.slang")).expect("copied");
+        let mut cx = Context::seeded(0).root(scratch.0.clone());
+        let relative = Path::new("tests/shaders/flat_color.slang");
+        for path in [relative, &shaders.join("flat_color.slang")] {
+            let shader = cx.add_shader::<[f32; 3], Vec4>("flat", path, Blend::Opaque);
+            shader.expect("the shader compiles");
+        }
+        assert_eq!(cx.shaders.sources().len(), 2);
     }
 
     /// What a layer outlines is the frame's it's set in alone, as `outlined` says until the frame

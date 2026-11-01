@@ -229,6 +229,20 @@ impl Shaders {
         Ok(Shader::new(index, writes_depth(blend)))
     }
 
+    /// The shader [`add`](Self::add) gave for a file whose path `same` takes, drawing meshes of `V`
+    /// with parameters `P` and blending as `blend` says, if one was added: its types by their names
+    /// and sizes, as a snapshot's asset lines name a draw's.
+    pub fn find<V: NoUninit, P: NoUninit>(
+        &self,
+        blend: Blend,
+        same: impl Fn(&Path) -> bool,
+    ) -> Option<Shader<V, P>> {
+        let types = Types::of::<V, P>();
+        let source = (self.sources.iter())
+            .find(|source| source.blend == blend && source.types == types && same(&source.path))?;
+        Some(Shader::new(source.index, writes_depth(blend)))
+    }
+
     /// The games' shaders added so far, in the order they were added, for hot reload to compile
     /// again as their files change; the engine's own shaders aren't among them.
     pub fn sources(&self) -> &[ShaderSource] {

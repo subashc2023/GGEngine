@@ -27,11 +27,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use gg_api::asset::AssetKind;
 use gg_api::view::{Pacer, Writer};
 use gg_api::{
-    Applied, Apply, Authored, Button, By, Capture, Captured, EntityList, Failure, Field, Hash,
-    Hello, History, Input, InputEvent, Listed, Looked, Patched, Picked, Pulse, Request, Scene,
-    SceneAction, Session, Snapshotted, Status, Step, View, Welcome,
+    Applied, Apply, AssetList, Authored, Button, By, Capture, Captured, EntityList, Failure, Field,
+    Hash, Hello, History, Input, InputEvent, Listed, ListedAsset, ListedOrphan, Looked, Patched,
+    Picked, Pulse, Request, Scene, SceneAction, Session, Snapshotted, Status, Step, View, Welcome,
 };
 use gg_core::log::Events;
 use gg_core::math::{Quat, Vec3, Vec4};
@@ -59,10 +60,10 @@ use crate::{
 };
 
 /// The methods, as `api.unknown_method` lists them.
-const METHODS: [&str; 27] = [
+const METHODS: [&str; 28] = [
     "hello", "ping", "status", "pause", "resume", "play", "stop", "step", "scene", "capture",
-    "view", "input", "look", "pick", "entities", "entity", "get", "types", "hash", "snapshot",
-    "patch", "apply", "undo", "redo", "edits", "logs", "quit",
+    "view", "input", "look", "pick", "entities", "entity", "get", "types", "hash", "assets",
+    "snapshot", "patch", "apply", "undo", "redo", "edits", "logs", "quit",
 ];
 
 /// The most of the clients' picks a frame asks: half as many as a frame reads back, so that the
@@ -75,7 +76,7 @@ const UNNAMED: &str = "api";
 /// The most ticks a `step` runs.
 const MOST_STEPS: u64 = 10_000;
 
-/// The most entities an `entities` page lists.
+/// The most entities or assets a page of `entities` or `assets` lists.
 const MOST_LISTED: usize = 10_000;
 
 /// How long a connection has to say hello before it's dropped.
@@ -217,6 +218,11 @@ enum Call {
     },
     Types,
     Hash,
+    Assets {
+        kind: Option<AssetKind>,
+        skip: usize,
+        take: usize,
+    },
     Snapshot(Option<PathBuf>),
     Patch(JumpTable),
     /// An edit's operations, and the gesture it's part of, if it's a set of one.
@@ -603,6 +609,9 @@ impl Api {
                         content: format!("{:016x}", hash.content),
                         layout: format!("{:016x}", hash.layout),
                     });
+                }
+                Call::Assets { kind, skip, take } => {
+                    reply.send(assets(cx, stack.watches_scenes(), kind, skip, take));
                 }
                 // A run stopped, or playing a copy, is snapshotted before its first tick too, so
                 // that a restart keeps the world as edited; what the layers queued as they attached
@@ -999,6 +1008,62 @@ fn list(world: &World, with: Option<&str>, skip: usize, take: usize) -> Result<S
     let page = listing.by_ref().skip(skip).take(take);
     let entities = page.map(|entity| listed(world, entity)).collect();
     let list = EntityList { total, entities };
+    Ok(serde_json::to_string(&list).expect("a list serializes"))
+}
+
+/// The page of the assets under `cx`'s root that `assets` asks for, and the orphaned ID files,
+/// scanned first, as [`Context::scan_assets`] does, writing the ID files missing if `writes`, as
+/// for a game alone or a lockstep session's host.
+///
+/// Fails with `engine.no_root` for a game that names no asset root, and with `asset.unlisted`,
+/// naming the root, if the root can't be listed.
+fn assets(
+    cx: &mut Context,
+    writes: bool,
+    kind: Option<AssetKind>,
+    skip: usize,
+    take: usize,
+) -> Result<String, Failure> {
+    let Some(root) = &cx.root else {
+        let message = "the game names no asset root, which App::root or App::project gives it";
+        return Err(Failure::new("engine.no_root", message));
+    };
+    let root = root.display().to_string();
+    cx.scan_assets(writes);
+    let catalog = cx.catalog();
+    if let Some(error) = catalog.unlisted() {
+        let message = format!("can't scan the asset root, {root}: {error}");
+        return Err(Failure::new("asset.unlisted", message));
+    }
+    let of_kind = |of: AssetKind| kind.is_none_or(|kind| of == kind);
+    let total = catalog
+        .listed()
+        .filter(|(_, asset)| of_kind(asset.kind))
+        .count();
+    let page = (catalog.listed())
+        .filter(|(_, asset)| of_kind(asset.kind))
+        .skip(skip)
+        .take(take);
+    let assets = page.map(|(path, asset)| ListedAsset {
+        id: asset.id.map(|id| id.to_string()),
+        path: path.to_owned(),
+        kind: asset.kind,
+        loaded: cx.has_added(path),
+        problem: (asset.problem.as_ref())
+            .map(|problem| Failure::new(problem.code, &*problem.message)),
+    });
+    let orphans = (catalog.orphans().iter())
+        .filter(|&&(_, kind, _)| of_kind(kind))
+        .map(|(path, kind, id)| ListedOrphan {
+            path: path.to_string(),
+            kind: *kind,
+            id: id.map(|id| id.to_string()),
+        });
+    let list = AssetList {
+        total,
+        assets: assets.collect(),
+        orphans: orphans.collect(),
+    };
     Ok(serde_json::to_string(&list).expect("a list serializes"))
 }
 
@@ -1712,6 +1777,14 @@ fn parse(request: &Request) -> Result<Call, Failure> {
         "entity" => {
             let gg_api::Entity { id } = take(method, params)?;
             Call::Entity(entity_id(&id)?)
+        }
+        "assets" => {
+            let gg_api::Assets { kind, skip, take } = self::take(method, params)?;
+            if take > MOST_LISTED {
+                let what = format!("lists at most {MOST_LISTED} assets a page, not {take}");
+                return Err(bad_params(method, what));
+            }
+            Call::Assets { kind, skip, take }
         }
         "get" => {
             let Field {
@@ -2652,6 +2725,121 @@ mod tests {
         }
     }
 
+    /// A client lists the assets under the game's root, a page of them, of a kind or all, each with
+    /// its ID, which the game writes where its ID file is missing, as it scans first, and whether a
+    /// layer added it; and the ID files whose assets aren't there. It's refused, with a code, in a
+    /// game without a root, or whose root isn't there.
+    #[test]
+    fn a_client_lists_the_assets_under_the_root_with_their_ids() {
+        use gg_api::asset::{AssetId, Meta};
+
+        let (mut api, session) = started("Api Assets");
+        let dir = Scratch::new("api-assets");
+        let write = |name: &str, bytes: &[u8]| {
+            let path = dir.0.join(name);
+            fs::create_dir_all(path.parent().expect("a folder")).expect("a directory");
+            fs::write(path, bytes).expect("written");
+        };
+        let meta = |id: &str| Meta {
+            id: id.parse().expect("an ID"),
+        };
+        let png =
+            crate::image::tests::png(png::ColorType::Rgba, png::BitDepth::Eight, 1, &[9; 4], None);
+        write("assets/a.png", &png);
+        write("assets/b.png", &png);
+        write(
+            "assets/b.png.meta",
+            meta("5f3c9a1e07b2d846").text().as_bytes(),
+        );
+        write("models/m.glb", b"");
+        write("scenes/x.ron", b"(entities: {})\n");
+        write(
+            "assets/gone.png.meta",
+            meta("0a1b2c3d4e5f6071").text().as_bytes(),
+        );
+        let mut cx = Context::seeded(2).root(dir.0.clone());
+        cx.add_texture("b", dir.0.join("assets/b.png"))
+            .expect("a texture");
+        let mut stepper = Stepper::default();
+        let ask = |mut client: Client| {
+            let mut list = |params: Value| {
+                let list = client.call_as::<AssetList>("assets", params);
+                list.expect("a list")
+            };
+            [
+                list(Value::Null),
+                list(json!({"kind": "model"})),
+                list(json!({"skip": 1, "take": 1})),
+                list(json!({})),
+            ]
+        };
+        let [all, models, page, again] = serving(
+            &mut api,
+            &mut cx,
+            &mut Stack::default(),
+            &mut stepper,
+            session.clone(),
+            ask,
+            |_, _, _| {},
+        );
+        let paths = |list: &AssetList| -> Vec<String> {
+            list.assets.iter().map(|asset| asset.path.clone()).collect()
+        };
+        assert_eq!(all.total, 3);
+        assert_eq!(
+            paths(&all),
+            ["assets/a.png", "assets/b.png", "models/m.glb"]
+        );
+        let a = all.assets[0].id.as_deref().expect("written");
+        let a: AssetId = a.parse().expect("16 hex digits");
+        let written = Meta::read(&dir.0.join("assets/a.png.meta")).expect("its ID file");
+        assert_eq!(written.id, a);
+        assert_eq!(all.assets[1].id.as_deref(), Some("5f3c9a1e07b2d846"));
+        let loaded: Vec<bool> = all.assets.iter().map(|asset| asset.loaded).collect();
+        assert_eq!(loaded, [false, true, false]);
+        assert!(
+            all.assets.iter().all(|asset| asset.problem.is_none()),
+            "{all:?}"
+        );
+        let gone = ListedOrphan {
+            path: "assets/gone.png.meta".to_owned(),
+            kind: AssetKind::Texture,
+            id: Some("0a1b2c3d4e5f6071".to_owned()),
+        };
+        assert_eq!(all.orphans, [gone]);
+        assert_eq!(
+            (models.total, paths(&models)),
+            (1, vec!["models/m.glb".to_owned()])
+        );
+        assert_eq!(models.assets[0].kind, AssetKind::Model);
+        assert!(models.orphans.is_empty(), "the orphan's asset is a texture");
+        assert_eq!(
+            (page.total, paths(&page)),
+            (3, vec!["assets/b.png".to_owned()])
+        );
+        assert_eq!(again, all, "the same IDs");
+
+        let refusals = [
+            (Context::seeded(3), "engine.no_root"),
+            (
+                Context::seeded(3).root(dir.0.join("none")),
+                "asset.unlisted",
+            ),
+        ];
+        for (mut cx, code) in refusals {
+            let refused = serving(
+                &mut api,
+                &mut cx,
+                &mut Stack::default(),
+                &mut stepper,
+                session.clone(),
+                |mut client: Client| client.call("assets", Value::Null).expect_err("refused"),
+                |_, _, _| {},
+            );
+            assert_eq!(refused.code, code, "{}", refused.message);
+        }
+    }
+
     /// A patch that can't apply is answered with `api.patch`: here, one whose table's reference is
     /// past where any process's `main` is, which a test's build refuses whether its executable
     /// exports `main` or not, as `patch`'s own tests say.
@@ -3210,6 +3398,13 @@ mod tests {
         };
         let given = json!({"with": "Sprite"});
         assert_eq!(parse(&request("entities", given)), Ok(entities));
+        let assets = Call::Assets {
+            kind: Some(AssetKind::Model),
+            skip: 2,
+            take: 100,
+        };
+        let given = json!({"kind": "model", "skip": 2});
+        assert_eq!(parse(&request("assets", given)), Ok(assets));
         // As `dx tools hotpatch` prints it, the map's keys as strings, its library a path from the
         // root.
         let lib = std::env::temp_dir().join("patch.dll");
@@ -3362,6 +3557,8 @@ mod tests {
                 "api.bad_params",
             ),
             ("entities", json!({"take": 10_001}), "api.bad_params"),
+            ("assets", json!({"take": 10_001}), "api.bad_params"),
+            ("assets", json!({"kind": "sound"}), "api.bad_params"),
             ("entity", json!({"id": "nope"}), "ecs.bad_id"),
             ("patch", Value::Null, "api.bad_params"),
             ("patch", json!({ "table": relative }), "api.bad_params"),

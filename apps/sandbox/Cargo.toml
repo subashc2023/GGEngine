@@ -15,6 +15,10 @@ path = "src/main.rs"
 gg-engine = { workspace = true, features = ["dev"] }
 tracing.workspace = true
 
+[dev-dependencies]
+# Scans the sandbox's assets for their ID files, as development builds do.
+gg-api.workspace = true
+
 [features]
 # Zones for Tracy: `cargo run -p sandbox --release --features tracy`.
 tracy = ["gg-engine/tracy"]

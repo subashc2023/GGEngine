@@ -72,10 +72,13 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Play, Simulate and Stop in the game, the editor's own world deleted** (2026-10-31)
 - **Scenes through the API and the File menu** (2026-10-31)
 - **Phase 6, projects and the editor on the tool API** (2026-10-31)
+- **Asset IDs beside their files** (2026-10-31)
 
 ## Now
 
-**Phase 7's first milestone**, chosen as [Phase 7](#next) starts; its plan says when it's done.
+**Textures named by ID**, Phase 7's second milestone: scenes, the world hash, recordings, lockstep
+inputs and snapshots name textures by the IDs their ID files give them, rather than by their paths;
+its plan says when it's done.
 
 ## Next
 
@@ -86,7 +89,13 @@ Each phase ends in something you can run and check.
    by ID or by path, and reloaded as their files change, textures, meshes and shaders alike; and the
    editor's Assets panel dropping a texture onto a sprite, a model into the scene. *Done when* a
    texture dragged from the Assets panel onto a sprite saves in its scene by ID, survives renaming
-   its file, and an edit to it in an image editor shows in the running game.
+   its file, and an edit to it in an image editor shows in the running game. Its milestones, in
+   order: asset IDs beside their files; textures named by ID; assets loaded wherever they're named,
+   the demo's arena's Pillar textured, committed; renames that keep IDs, which the running game
+   pairs by content, with a cache for each clone; reloading any change; models in scenes by ID; and
+   dropping from the editor's Assets panel. The second decides what a build without `dev`, which
+   reads no ID file, names a texture by; how a lockstep joiner gets the IDs its host writes after
+   the joiner's scan; and whether replays and test contexts scan once the hash reads IDs.
 8. **Text and sound.** Text drawn from multi-channel signed distance fields, crisp at any size,
    fonts baked by the asset pipeline; a game's own UI, HUDs and menus, apart from the development
    UI; and audio: sounds and music, mixed, positioned in 2D, loaded as assets. *Done when* the demo
@@ -248,7 +257,9 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Pruning the pipeline cache, which keeps every pipeline it was given, an edited shader's old ones too | It grows to tens of megabytes |
 | Requiring a slangc that decorates sampled images `NonUniform` itself, Slang 2026.11's or later, such as the Vulkan SDK 1.4.363's, and dropping gg-renderer's `decorate_non_uniform`, which does it for older ones | The engine requires the Vulkan SDK 1.4.363 or later |
 | Games' shaders compile with slangc as they're added, so running a game needs slangc where its build found it | Phase 10, which cooks shaders |
-| Beyond textures named by their paths: a library that finds an asset by its path or name, so that a file added twice loads once, where now it loads twice, and that loads one a scene names; `MeshDraw`'s mesh and shader named, as `Sprite.texture` is: opaque until then, shown but not set, saved in scenes or hashed, and carried across a restart by their indices only where the layers added the same assets in the same order; setting them by name, and dropping the Assets panel's images onto a sprite, whose texture the Inspector shows but doesn't set | A game builds its draws from data, or someone edits a sprite's texture in the editor |
+| `MeshDraw`'s mesh and shader named, as `Sprite.texture` is: opaque until then, shown but not set, saved in scenes or hashed, and carried across a restart by their indices only where the layers added the same assets in the same order; and setting them by name | A game builds its draws from data |
+| Scanning the asset root on a thread of its own, or not at all: a run's start and each `assets` request walk it whole, read every ID file and flush each ID file written to the disk, on the main thread, so an `assets` after copying in about 1,500 assets without ID files stops frames past `gg run`'s 10 s `--hang`, and the game restarts from its last snapshot | Phase 7's fourth milestone, whose watcher keeps the database |
+| IDs for shaders, scenes, sounds and other kinds, for assets outside the asset root, and for assets reached through links: the scan gives textures and models under the root alone, never through a link | Each kind as something first names it by ID |
 | 8- and 16-bit vertex fields, whose features Vulkan 1.4 guarantees but the device doesn't enable | A mesh packs its vertices, as Phase 10's cooker will |
 | Splits in a torn-off window, which holds one tab group | A tool wants panels side by side outside the main window |
 | Reordering tabs by dragging them along their bar; a drop among the tabs adds one at the end | Someone reorders tabs |

@@ -1197,7 +1197,7 @@ mod json {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::cell::Cell;
 
     use serde_json::{Value, json};
@@ -1315,7 +1315,7 @@ mod tests {
     }
 
     /// A GLB of a model of each kind of node, primitive and material that reading takes.
-    fn model() -> Vec<u8> {
+    pub(crate) fn model() -> Vec<u8> {
         let mut bin = Bin::default();
         // Three vertices' positions and texture coordinates, interleaved.
         let interleaved = bin.view(

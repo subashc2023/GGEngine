@@ -3,8 +3,9 @@
 //! TCP connection on the machine's loopback; the session file a running game says where it serves
 //! in; what each method takes and answers; the memory a game's view is shared through as it
 //! renders, [`view`]; and a client, for tools. It also reads a game's project manifest,
-//! [`Project`], which tools find a game by and its development build reads. It depends on no crate
-//! of the engine's, so that tools build without the GPU's toolchain.
+//! [`Project`], which tools find a game by and its development build reads, and assets' ID files,
+//! [`asset`], which its development build writes beside each texture and model. It depends on no
+//! crate of the engine's, so that tools build without the GPU's toolchain.
 //!
 //! A request is `{"id":1,"method":"step","params":{"ticks":2}}`, without `params` for a method that
 //! takes none, and its answer `{"id":1,"result":...}` or `{"id":1,"error":{"code":...,"message":...}}`,
@@ -94,6 +95,30 @@
 //!   the editor's Inspector does. A type's description never changes once it's registered, but a
 //!   game rebuilt may describe its types otherwise.
 //! - `hash`: answers [`struct@Hash`], the world's.
+//! - `assets`, [`Assets`]: answers [`AssetList`], a page of the textures and models under the
+//!   game's asset root, in the order of their paths, each with its ID, which its ID file beside it,
+//!   [`asset::Meta`], holds, as ARCHITECTURE.md's Project state describes, and the ID files whose
+//!   assets aren't there. It scans the root first, so that an asset added since is listed, and a
+//!   run that writes ID files, a game alone or a lockstep session's host that serves the API,
+//!   writes each one missing then, as it does as it starts. A listed asset's `problem` says what's
+//!   wrong with its ID file:
+//!   - `asset.no_id`, none, in a run that writes none, a lockstep session's joiner: its host writes
+//!     it, as a game alone does;
+//!   - `asset.bad_meta`, one that doesn't read: fix it, or remove it for a fresh one;
+//!   - `asset.meta_case`, one whose name differs from `<file>.meta` in case alone: rename it;
+//!   - `asset.duplicate_id`, one holding the ID another asset has this run, as a copy's or a
+//!     renamed asset's does, or none while another ID file holds its ID. From the next run, the
+//!     first asset by path whose ID file holds an ID has it, as the message says, and another
+//!     whose file holds it goes without until that file is removed, after which a run writes it a
+//!     fresh one, as it does for one without an ID file: remove a copy's ID file, rather than the
+//!     original's;
+//!   - `asset.id_changed`, one changed since the run read it: the run keeps the ID it had until it
+//!     ends;
+//!   - `asset.unwritten`, one the run couldn't write, saying why.
+//!
+//!   An orphan, an ID file left behind as by a rename, goes beside its asset, named for it, or is
+//!   deleted. It fails with `engine.no_root` in a game that names no asset root, and with
+//!   `asset.unlisted` if the root can't be listed.
 //! - `snapshot`, [`Snapshot`]: saves the world whole as a file, which a run given `--restore`
 //!   starts from, and answers [`Snapshotted`] once it's written: a stopped game's file records that
 //!   it's stopped, and one taken while a copy plays saves the world as edited too, so that a run
@@ -145,6 +170,7 @@
 //! which takes its default, as in a scene; what's opaque is kept as it is, or made as the type's
 //! own is, as an `(opaque)` that a create or an add gives says.
 
+pub mod asset;
 mod project;
 // It maps memory another process shares, which only unsafe code reaches.
 #[allow(unsafe_code)]
@@ -162,7 +188,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_json::value::RawValue;
 
-pub use project::Project;
+pub use project::{Project, UNBUILT};
 
 /// The most bytes a line may have, its line break aside, past which the side reading it drops the
 /// connection: a request's or an answer's, such as a page of entities.
@@ -871,6 +897,52 @@ pub struct Hash {
     pub layout: String,
 }
 
+/// What `assets` takes: the assets of kind `kind`, or all, in the order of their paths, `skip` of
+/// them skipped and at most `take`, 100 by default.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Assets {
+    #[serde(default)]
+    pub kind: Option<asset::AssetKind>,
+    #[serde(default)]
+    pub skip: usize,
+    #[serde(default = "page")]
+    pub take: usize,
+}
+
+/// What `assets` answers: how many there are in all, of the kind asked for; the page asked for; and
+/// every ID file of that kind whose asset isn't there.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetList {
+    pub total: usize,
+    pub assets: Vec<ListedAsset>,
+    pub orphans: Vec<ListedOrphan>,
+}
+
+/// An asset as `assets` lists it: its ID, 16 hex digits, or `None` while it has none; its path from
+/// the asset root, with `/` between its parts, as [`Status::scene`] names files, spelled as on disk;
+/// its kind; whether a layer has added it, by whatever path; and what's wrong with its ID file, if
+/// anything, as the `assets` method's docs list: why it has no ID, or why its ID isn't the one its
+/// file holds.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListedAsset {
+    pub id: Option<String>,
+    pub path: String,
+    pub kind: asset::AssetKind,
+    pub loaded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<Failure>,
+}
+
+/// An ID file whose asset isn't there, as after a rename that left it behind: its own path from the
+/// asset root, the kind of the asset it names, and the ID it holds, or `None` if it doesn't read.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListedOrphan {
+    pub path: String,
+    pub kind: asset::AssetKind,
+    pub id: Option<String>,
+}
+
 /// What `snapshot` takes: where to write the snapshot, an absolute path, whose directory exists;
 /// without one, a file in the `snapshots` directory beside the game's executable.
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -1514,6 +1586,66 @@ mod tests {
         let older = r#"{"ticks": 1, "paused": false, "frames": 2, "entities": 3, "view": null}"#;
         let status: Status = serde_json::from_str(older).unwrap();
         assert_eq!((status.scene, status.unsaved), (None, false));
+    }
+
+    /// `assets` takes a kind there is, or none, and a page, defaulting each; and its answer gives
+    /// each kind in lowercase, and a listed asset's problem only where it has one.
+    #[test]
+    fn asset_lists_read_as_their_docs_say() {
+        let read =
+            |json: &str| serde_json::from_str::<Assets>(json).map(|a| (a.kind, a.skip, a.take));
+        assert_eq!(read("{}").unwrap(), (None, 0, 100));
+        let all = r#"{"kind": null, "skip": 0, "take": 100}"#;
+        assert_eq!(read(all).unwrap(), (None, 0, 100), "as gg asks");
+        let models = read(r#"{"kind": "model", "skip": 2}"#).unwrap();
+        assert_eq!(models, (Some(asset::AssetKind::Model), 2, 100));
+        for refused in [
+            r#"{"kind": "sound"}"#,
+            r#"{"kind": "Model"}"#,
+            r#"{"with": "Sprite"}"#,
+        ] {
+            assert!(read(refused).is_err(), "{refused}");
+        }
+        let json = concat!(
+            r#"{"total":2,"assets":[{"id":"5f3c9a1e07b2d846","path":"assets/sheet.png","#,
+            r#""kind":"texture","loaded":true},{"id":null,"path":"assets/copy.png","#,
+            r#""kind":"texture","loaded":false,"problem":{"code":"asset.duplicate_id","#,
+            r#""message":"..."}}],"orphans":[{"path":"assets/gone.png.meta","kind":"texture","#,
+            r#""id":"0a1b2c3d4e5f6071"}]}"#,
+        );
+        let expected = AssetList {
+            total: 2,
+            assets: vec![
+                ListedAsset {
+                    id: Some("5f3c9a1e07b2d846".to_owned()),
+                    path: "assets/sheet.png".to_owned(),
+                    kind: asset::AssetKind::Texture,
+                    loaded: true,
+                    problem: None,
+                },
+                ListedAsset {
+                    id: None,
+                    path: "assets/copy.png".to_owned(),
+                    kind: asset::AssetKind::Texture,
+                    loaded: false,
+                    problem: Some(Failure::new("asset.duplicate_id", "...")),
+                },
+            ],
+            orphans: vec![ListedOrphan {
+                path: "assets/gone.png.meta".to_owned(),
+                kind: asset::AssetKind::Texture,
+                id: Some("0a1b2c3d4e5f6071".to_owned()),
+            }],
+        };
+        assert_eq!(serde_json::from_str::<AssetList>(json).unwrap(), expected);
+        assert_eq!(serde_json::to_string(&expected).unwrap(), json);
+        let model = ListedAsset {
+            kind: asset::AssetKind::Model,
+            ..expected.assets[0].clone()
+        };
+        let written = serde_json::to_value(&model).unwrap();
+        assert_eq!(written["kind"], "model");
+        assert_eq!(written.get("problem"), None, "none to write");
     }
 
     #[test]

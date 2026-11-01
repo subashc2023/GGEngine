@@ -36,7 +36,12 @@ the game's code made; or opens another scene file in its place, or empties it, n
 can be undone. `look` sets parts of the view's look, its viewpoint, an outline round an entity, a \
 grid, and whether colliders' outlines show, which the editor and any other client set too, the \
 last to set a part winning; give back, as null, what you set when you're done. `capture` shows \
-the view with the look, and `pick` names the entity at a pixel of it, as a capture's PNG has it.";
+the view with the look, and `pick` names the entity at a pixel of it, as a capture's PNG has it. \
+Textures and models have IDs, 16 hex digits, which `assets` lists with their paths: the game, but a \
+lockstep session's joiner, whose host does, writes each one's in an ID file beside it, \
+`<file>.meta`, such as `stone.png.meta`, as it starts and as `assets` lists them; commit it with \
+its file, and rename or move it in the same step as its file, before the game's next `assets` or \
+start, or the file gets a fresh ID. A texture's value is still its path.";
 
 /// Serves MCP on stdin and stdout until stdin ends, reaching the game `pick` picks.
 ///
@@ -330,6 +335,27 @@ fn tools() -> Value {
             &[]
         ),
         tool(
+            "assets",
+            "The game's textures and models, a page of them by their paths from its asset root, as \
+             `scene` names files: each one's ID, 16 hex digits, or null while it has none; its \
+             kind; whether a layer has added it; and `problem`, what's wrong with its ID file, if \
+             anything, as `asset.duplicate_id`; and `orphans`, ID files whose assets aren't there, \
+             as after a rename that left one behind. It scans the asset root first, so that a file \
+             added since is listed, and the game, but a lockstep session's joiner, writes each \
+             missing ID file, `<file>.meta` beside its file, which you commit with it and move \
+             with it.",
+            json!({
+                "kind": {
+                    "type": "string",
+                    "enum": gg_api::asset::KINDS,
+                    "description": "Only those of this kind",
+                },
+                "skip": {"type": "integer", "minimum": 0, "default": 0},
+                "take": {"type": "integer", "minimum": 0, "maximum": 10000, "default": 100},
+            }),
+            &[],
+        ),
+        tool(
             "snapshot",
             "Saves the world whole as a snapshot file, which a run given `--restore` starts from.",
             json!({}),
@@ -465,7 +491,7 @@ fn run(pick: &Pick, name: &str, mut arguments: Map<String, Value>) -> Result<Ran
         }
         // `scene`'s path as given, from the game's asset root, as its status names scene files.
         "step" | "scene" | "look" | "pick" | "entities" | "entity" | "get" | "apply" | "undo"
-        | "redo" | "edits" => call(name, Value::Object(arguments)),
+        | "redo" | "edits" | "assets" => call(name, Value::Object(arguments)),
         "set" => {
             arguments.entry("path").or_insert_with(|| json!(""));
             call("apply", json!({"operations": [{"set": arguments}]}))
@@ -578,9 +604,9 @@ mod tests {
         }
     }
 
-    /// `initialize` serves the client's version if it's one of those served, and names the edits
-    /// after the client; a notification goes unanswered; and the tools are listed, each with a
-    /// schema.
+    /// `initialize` serves the client's version if it's one of those served, names the edits after
+    /// the client, and tells it of assets' ID files; a notification goes unanswered; and the tools
+    /// are listed, each with a schema, `assets` taking the kinds gg-api names.
     #[test]
     fn a_client_initializes_and_lists_the_tools() {
         let mut pick = pick();
@@ -592,6 +618,8 @@ mod tests {
         assert_eq!(answer["id"], 1);
         assert_eq!(answer["result"]["protocolVersion"], "2025-06-18");
         assert_eq!(pick.client, "claude-code");
+        let instructions = answer["result"]["instructions"].as_str();
+        assert!(instructions.is_some_and(|text| text.contains("<file>.meta")));
         let newer = r#"{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2099-01-01"}}"#;
         let answer = super::answer(&mut pick, newer).expect("answered");
         assert_eq!(answer["result"]["protocolVersion"], VERSIONS[0]);
@@ -607,6 +635,9 @@ mod tests {
         for tool in tools {
             assert_eq!(tool["inputSchema"]["type"], "object", "{tool}");
         }
+        let assets = tools.iter().find(|tool| tool["name"] == "assets");
+        let kinds = &assets.expect("an `assets` tool")["inputSchema"]["properties"]["kind"]["enum"];
+        assert_eq!(*kinds, json!(gg_api::asset::KINDS));
         let unknown = super::answer(&mut pick, r#"{"jsonrpc":"2.0","id":3,"method":"nope"}"#);
         assert_eq!(unknown.expect("answered")["error"]["code"], -32601);
         let broken = super::answer(&mut pick, "{").expect("answered");

@@ -5,7 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-# Reads projects' manifests.
+# Reads projects' manifests and assets' ID files.
 ron.workspace = true
 serde.workspace = true
 # raw_value, so that a client hands on a result's JSON as the game wrote it, its objects' keys in

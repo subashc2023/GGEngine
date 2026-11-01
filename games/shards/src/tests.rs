@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -39,6 +40,35 @@ fn the_project_is_canonical_and_starts_in_the_arena() {
     let project = Project::parse(&text).expect("the project reads");
     assert_eq!(project.text(), text);
     assert_eq!(project.start_path(dir), scene("arena.ron"));
+}
+
+/// Each texture and model under the game's asset root has its ID file beside it, committed with
+/// it, each holding an ID of its own, and no ID file is left without its asset, so that every
+/// checkout gives each asset the ID the repository holds, rather than its runs writing others.
+#[test]
+fn every_asset_has_its_id_file_beside_it() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let project = Project::read(dir).expect("the project reads");
+    // The game has no texture or model yet, so it finds none: it bites once Phase 7's third
+    // milestone gives the arena's Pillar a texture.
+    let found = gg_api::asset::scan(&project.assets_dir(dir));
+    let mut ids = HashSet::new();
+    for asset in &found.assets {
+        let path = &asset.path;
+        match &asset.meta {
+            Some(Ok(meta)) => {
+                let id = meta.id;
+                assert!(ids.insert(id), "{path}.meta holds {id}, another asset's ID");
+            }
+            Some(Err(failure)) => panic!("{path}'s ID file: {}: {failure}", failure.code),
+            None => panic!(
+                "{path} has no ID file, {path}.meta: a run that serves the tool API writes it; \
+                 commit it beside its file"
+            ),
+        }
+    }
+    assert!(found.orphans.is_empty(), "{:?}", found.orphans);
+    assert!(found.unread.is_empty(), "{:?}", found.unread);
 }
 
 /// The arena's scene loads and saves to its own bytes, so that a type of the game's that changes

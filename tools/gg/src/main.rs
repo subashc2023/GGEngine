@@ -118,6 +118,14 @@ Talk to a running game, through its tool API:
   entity <ID>                    An entity and its components' values
   get <ID> <COMPONENT> [PATH]    A component's value, or its field at PATH, such as `translation.x`
   hash                           Its world's hash
+  assets [--kind <KIND>] [--skip <N>] [--take <N>]
+                                 List its textures and models, those of KIND, `texture` or `model`,
+                                 N at a time (100), by their paths from its asset root, each with
+                                 its ID, whether a layer has added it, and what's wrong with its ID
+                                 file, and the ID files left without their assets; the game, but a
+                                 lockstep session's joiner, whose host does, writes each one's ID
+                                 in a file beside it, `<file>.meta`, as it starts and as `assets`
+                                 lists them: commit it with its file, and rename or move it with it
   apply <OPERATIONS>             Apply OPERATIONS, a JSON array of the API's operations, as one edit:
                                  all or none, between ticks, which `undo` takes back
   set <ID> <COMPONENT> <PATH> <VALUE>
@@ -271,7 +279,7 @@ fn absolute(path: &str) -> Result<PathBuf, Failure> {
 }
 
 /// The flags that take a value: `--name value` or `--name=value`.
-const VALUED: [&str; 13] = [
+const VALUED: [&str; 14] = [
     "--project",
     "--peers",
     "--author",
@@ -282,6 +290,7 @@ const VALUED: [&str; 13] = [
     "--snapshot",
     "--frames",
     "--with",
+    "--kind",
     "--skip",
     "--take",
     "--level",
@@ -633,6 +642,18 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
                 json!({"with": with, "skip": skip, "take": take}),
             )?
         }
+        "assets" => {
+            parsed.positional(0, 0, "assets [--kind <KIND>] [--skip <N>] [--take <N>]")?;
+            // The game refuses a kind there's none of, as it does a component.
+            let kind = parsed.value("--kind");
+            let skip: usize = parsed.number("--skip", 0)?;
+            let take: usize = parsed.number("--take", 100)?;
+            call(
+                &mut parsed,
+                "assets",
+                json!({"kind": kind, "skip": skip, "take": take}),
+            )?
+        }
         "entity" => {
             let id = parsed.positional(1, 1, "entity <ID>")?.remove(0);
             call(&mut parsed, "entity", json!({"id": id}))?
@@ -843,6 +864,11 @@ mod tests {
             ),
             // A pixel outside the view too, which the game answers with none.
             (&["pick", "3", "-4.5"], json!({"at": [3.0, -4.5]})),
+            (&["assets"], json!({"kind": null, "skip": 0, "take": 100})),
+            (
+                &["assets", "--kind", "model", "--take", "5"],
+                json!({"kind": "model", "skip": 0, "take": 5}),
+            ),
         ] {
             let Ok(Command::Call { method, params, .. }) = parsed(args) else {
                 panic!("a call");
@@ -891,6 +917,7 @@ mod tests {
             &["status", "extra"],
             &["step", "many"],
             &["entities", "--take"],
+            &["assets", "x"],
             &["logs", "--level", "loud"],
             &["call", "status", "{not json"],
             &["status", "--release=yes"],

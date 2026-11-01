@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use gg_api::{Client, Failure, Patch, Patched, Session};
+use gg_api::{Client, Failure, Patch, Patched, Session, UNBUILT};
 use serde_json::{Value, json};
 
 use crate::build::{self, Package};
@@ -27,9 +27,6 @@ const QUIET: Duration = Duration::from_millis(200);
 /// process lives, as a file dialog or the window menu may hold its main thread, which applies it,
 /// for minutes; a process that hangs is ended, which closes the connection.
 const CONNECT: Duration = Duration::from_secs(10);
-
-/// The directories at a package's root whose files no build of the package reads.
-const UNBUILT: [&str; 4] = ["target", "tests", "benches", "examples"];
 
 /// Why a change to a file that isn't one of the game's modules rebuilds it.
 const OUTSIDE: &str = "a change outside the game's crate";

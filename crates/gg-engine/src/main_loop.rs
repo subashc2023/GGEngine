@@ -176,6 +176,9 @@ pub(crate) fn run_headless(
 /// one, rather than the one `stack`'s layers attach, stopped or playing as the snapshot's run was,
 /// as [`Stack::restore`] says, given whether a tool API `serves` the run, dropping it once it has;
 /// or else from the world the layers attach, stopped if `stopped` says so, as `--stopped` asks.
+/// In a development build it first scans the assets under the app's root, before the layers load,
+/// as `Context::scan_assets` says, writing the ID files missing if the API serves the run and it
+/// isn't a lockstep session's joiner, whose host alone writes them.
 ///
 /// Fails as `Stack::restore` does.
 pub(crate) fn start(
@@ -186,6 +189,8 @@ pub(crate) fn start(
     stopped: bool,
     serves: bool,
 ) -> Result<()> {
+    #[cfg(feature = "dev")]
+    cx.scan_assets(serves && stack.watches_scenes());
     let stopped = match snapshot {
         Some(snapshot) => {
             let (ticks, stopped) = stack.restore(cx, &snapshot, serves)?;
@@ -1037,6 +1042,58 @@ pub(crate) mod tests {
         // As `stop` brings back a world as edited at tick 0.
         stepper.jump_to(0);
         assert_eq!((stepper.ticks, stepper.ran()), (0, 3));
+    }
+
+    /// A development build's run scans the assets under its root as it starts, before its layers
+    /// load: one that serves the tool API writes the ID files missing; one that doesn't, or that
+    /// joins a lockstep session, whose host writes them, writes none, and warns of each asset
+    /// without one.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_run_writes_missing_id_files_as_it_starts_only_if_it_serves_the_api() {
+        /// Notes, as it loads, whether the ID file at its path is there.
+        struct Looks(std::path::PathBuf, Rc<Cell<Option<bool>>>);
+
+        impl Layer for Looks {
+            fn load(&mut self, _: &mut Context) {
+                self.1.set(Some(self.0.exists()));
+            }
+        }
+
+        let scratch = crate::dirs::tests::Scratch::new("start-scans");
+        std::fs::create_dir_all(&scratch.0).expect("a directory");
+        std::fs::write(scratch.0.join("a.png"), "").expect("an asset");
+        let meta = scratch.0.join("a.png.meta");
+        let logged = crate::testing::logged();
+        // Whether the run serves the API and whether it joins, the one that writes last.
+        for (serves, joins) in [(false, false), (true, true), (true, false)] {
+            let found = Rc::new(Cell::new(None));
+            let mut stack = Stack::default();
+            stack.push_layer(Looks(meta.clone(), Rc::clone(&found)));
+            if joins {
+                // It connects as it first turns, which this run never does.
+                let join = crate::args::Net::Join("127.0.0.1:9".to_owned());
+                let net = crate::net::Lockstep::start(&join, "Tested", &[]).expect("joining");
+                stack.lockstep(net);
+            }
+            let mut cx = Context::new(None);
+            cx.root = Some(scratch.0.clone());
+            let stepper = &mut Stepper::default();
+            start(&mut stack, &mut cx, stepper, None, false, serves).expect("started");
+            let writes = serves && !joins;
+            let case = format!("serves: {serves}, joins: {joins}");
+            assert_eq!(found.get(), Some(writes), "{case}");
+            let codes = logged
+                .codes
+                .try_iter()
+                .filter(|code| code.starts_with("asset."));
+            let expected = if writes {
+                "asset.id_written"
+            } else {
+                "asset.no_id"
+            };
+            assert_eq!(codes.collect::<Vec<_>>(), [expected], "{case}");
+        }
     }
 
     #[test]

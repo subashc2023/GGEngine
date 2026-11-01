@@ -64,11 +64,11 @@ The editor uses `gg-api` too, beside `gg-engine`, as a client of the tool API, a
 - **`gg-api`:** the [tool API](#agents-and-tools)'s protocol: its messages, the descriptions of a
   game's types that a client reads and writes its values by, the session file that says where a
   game serves it, a client, which tools and the editor speak it through, and the memory a game's
-  view is shared through as it renders; and the reader and writer of a
-  [project](#project-state)'s manifest, another file that tools and development builds share. It
-  depends on no `gg-*` crate, so that tools build without the engine, and `gg-engine` uses it in
-  development builds alone, so that only they read a manifest: shipping builds start from cooked
-  data.
+  view is shared through as it renders; and the readers and writers of the text of a
+  [project](#project-state)'s manifest and of its assets' ID files, with the scan that finds those
+  under an asset root: files that tools and development builds share. It depends on no `gg-*`
+  crate, so that tools build without the engine, and `gg-engine` uses it in development builds
+  alone, so that only they read a manifest or an ID file: shipping builds start from cooked data.
 - **`sandbox`:** the engine's own app, for its development: a swarm of up to 100,000 sprites
   drifting on the job system's threads, which measures how fast the engine simulates and draws, and
   a grid from its scene file.
@@ -81,19 +81,19 @@ The editor uses `gg-api` too, beside `gg-engine`, as a client of the tool API, a
   shows under the cursor through the API; its camera, the pick's outline, its grid and the
   colliders' outlines going to the game as the API's look, which it takes up from other clients
   too; the game's events in its Logs as the game logs them; and the project's assets in its Assets
-  panel. Its Play and Simulate are the API's `play`, and Stop its `stop`, which brings back the
-  world as edited. Its File menu's New, Open and Save are the API's `scene`, on the game's open
-  scene, which its title bar names, marked while unsaved; and since closing it ends the game, it
-  asks before New, Open or closing loses unsaved edits. Play sees through the game's camera, which
-  gets all of the view's input. For a game whose ticks are all its own code, Simulate plays the
-  game as Play does, but through the editor's orbit camera, the game getting no input, as Unreal's
-  Simulate In Editor does; switching between them carries on, moving the camera and the input over,
-  as Unreal's Possess and Eject do. The toolbar's camera switch is that switch while the game
-  plays; stopped, it shows what the game's camera sees, the input staying the editor's, until the
-  editor's camera takes some. A Stop turns the view to the editor's camera, which carries on from
-  where the view was, as it does whenever it takes the view over. The editor has no world of its
-  own: started elsewhere, it runs no game, and says it needs a project.
-  [game.rs](apps/editor/src/game.rs) describes the rest.
+  panel, an ID file beside its asset hidden. Its Play and Simulate are the API's `play`, and Stop
+  its `stop`, which brings back the world as edited. Its File menu's New, Open and Save are the
+  API's `scene`, on the game's open scene, which its title bar names, marked while unsaved; and
+  since closing it ends the game, it asks before New, Open or closing loses unsaved edits. Play
+  sees through the game's camera, which gets all of the view's input. For a game whose ticks are
+  all its own code, Simulate plays the game as Play does, but through the editor's orbit camera,
+  the game getting no input, as Unreal's Simulate In Editor does; switching between them carries
+  on, moving the camera and the input over, as Unreal's Possess and Eject do. The toolbar's camera
+  switch is that switch while the game plays; stopped, it shows what the game's camera sees, the
+  input staying the editor's, until the editor's camera takes some. A Stop turns the view to the
+  editor's camera, which carries on from where the view was, as it does whenever it takes the view
+  over. The editor has no world of its own: started elsewhere, it runs no game, and says it needs a
+  project. [game.rs](apps/editor/src/game.rs) describes the rest.
 - **`player`:** the reference player. It runs a cooked scene without game code and shows how a
   game builds its own player.
 - **`tools/gg`:** the command-line tool, a client of the tool API, which `cargo gg` runs.
@@ -206,9 +206,10 @@ in the editor is out of an agent's reach.
   in `sessions` beside its executable, removed as the run ends: query the world, apply and undo
   [operations](#project-state), play and stop, pause and step, open, save and empty the [open
   scene](#project-state), capture frames, share the view as frames render it, set how it looks and
-  pick what it shows, hand the layers input as the window would, save the world whole as a snapshot
-  file, as [ECS](#ecs) describes, which a run given `--restore` starts from, apply patches of the
-  game's code, as [Game code](#game-code) describes, and read [diagnostics](#diagnostics). Requests
+  pick what it shows, list the asset root's textures and models with their [IDs](#project-state),
+  hand the layers input as the window would, save the world whole as a snapshot file, as [ECS](#ecs)
+  describes, which a run given `--restore` starts from, apply patches of the game's code, as
+  [Game code](#game-code) describes, and read [diagnostics](#diagnostics). Requests
   and their answers are lines of JSON, as [gg-api](crates/gg-api/src/lib.rs) describes, and a
   connection's first request says hello with the token, so that only processes that can read the
   file reach the game. A thread of the API's reads each connection and answers its pings itself,
@@ -270,9 +271,11 @@ in the editor is out of an agent's reach.
   [project](#project-state), found from where it runs or named by `--project`, it runs cargo in the
   project's directory, builds the project's game, and reaches the project's games alone, those whose
   session files name its manifest; `gg mcp` gives agents that speak MCP the same reach over stdio, a
-  tool for each of gg's commands that talk to a game but `quit` and `call`, connecting at each call
-  to the game it chooses, so that a restarted game is the one it reaches, as the agent, by its MCP
-  client's name; the editor is one more client, with no ability an agent lacks.
+  tool for each of gg's commands that talk to a game but `quit` and `call`, telling them, as gg's
+  usage does, that the game, but a lockstep session's joiner, whose host does, writes each
+  texture's and model's ID file, to commit with it and move with it, connecting at each call to the
+  game it chooses, so that a restarted game is the one it reaches, as the agent, by its MCP client's
+  name; the editor is one more client, with no ability an agent lacks.
 - **Headless runs.** Every app runs without a window (`--headless`) and can run a set number
   of frames, then exit with a status (`--frames N`): 0 for a clean run, 1 after an error or any
   validation message, and 2 for bad arguments. Dedicated servers, CI and agents checking their
@@ -327,6 +330,38 @@ A project's state is text that people and agents edit, diff and merge with ordin
   files, operations, diagnostics and network messages use to name it. IDs are random rather
   than sequential, so entities added on two branches neither collide nor land on the same
   lines.
+- **Asset IDs.** Each texture (`.png`, `.jpg`, `.jpeg`) and model (`.gltf`, `.glb`) under the asset
+  root, whatever its extension's case, has an ID that outlives its file's name: 64 random bits,
+  never 0, written as 16 lowercase hex digits, as an entity's are, in an ID file beside it, its
+  file's name and `.meta`, such as `stone.png.meta`, matched by that exact name, a name that matches
+  only when case is ignored being a problem (`asset.meta_case`), so that a file system that ignores
+  case gives an asset the ID one that doesn't gives it. An ID file is canonical RON, a part to a
+  line, `(`, `    id: "5f3c9a1e07b2d846",`, `)`; a part it hasn't is refused, and one added since,
+  as import settings will be, takes its default where a file leaves it out. It's committed with its
+  asset, and moves with it. A development run that serves the tool API writes the ID file of each
+  asset that has none as it starts, before its layers load, and as the API's `assets` lists them,
+  unless it's a lockstep session's joiner, whose host alone writes them, as it alone watches scene
+  files: each only where nothing is there, whole or not at all, linked into place, so that two runs
+  never give one asset two IDs, warning of one it can't write (`asset.unwritten`); each ID drawn
+  until it holds a letter but `e`, so that its text never reads as a JSON number. Another
+  development run reads them and warns of each asset that has none (`asset.no_id`), as `gg check`
+  reports; builds without `dev` and replays read none; and tools never write one: gg-api writes
+  none, and the editor's own app names no root. The scan goes through every folder under the root
+  but those whose names start with `.`, every `target`, and at its top `tests`, `benches` and
+  `examples`, as a package's root holds them, never through a link; it skips hidden files too, and
+  warns of what it can't take (`asset.unlisted`), such as a name that isn't Unicode or a folder it
+  can't list. A run warns once of each problem, and rewrites nothing, since an ID file that doesn't
+  read may be a merge's conflict or someone's edit: one that doesn't read (`asset.bad_meta`), its
+  asset going without an ID; one without its asset beside it as a file of its name
+  (`asset.orphaned`); and one holding the ID another asset has this run (`asset.duplicate_id`), as a
+  copy's does, or a renamed asset's until the next run, whose first scan gives each ID to the first
+  asset by path whose ID file holds it, the others going without until their ID files are removed,
+  after which a run writes each a fresh one. `assets` gives each asset's problem, and the orphans,
+  as data. An asset's ID, once a run has it, stays its for the run: an ID file changed since, as by
+  a branch's checkout, warns (`asset.id_changed`) and counts from the next run, and a run writes its
+  ID back only while no other ID file its scan found holds it.
+  [asset.rs](crates/gg-api/src/asset.rs) and [assets.rs](crates/gg-engine/src/assets.rs) have the
+  rest.
 - **Operations.** Every authoring change, by a person or an agent, is an operation with an
   inverse: create, duplicate or delete an entity, add or remove a component, set a field,
   reparent. An operation names entities by their IDs and carries values as reflection's, and
@@ -502,10 +537,10 @@ it's exactly a number of the field's, and a component that no longer reads, or w
 is left out, its entity going on without it, each change warned of once, by the type's path rather
 than by value (`snapshot.changed`); a rotation that rounding took off unit length is normalized.
 What's opaque, such as a `MeshDraw`'s mesh and shader, holds indices, so it comes back only into a
-run whose layers added the same assets in the same order, of the same types, as the file's `asset`
-lines check, a draw's bytes by its mesh's and shader's types' names and sizes, and is left out
-otherwise. A world no load could read, such as a value nested deeper than a scene's may, isn't
-saved. [ecs/file.rs](crates/gg-engine/src/ecs/file.rs) and
+run whose layers added the same assets in the same order, a file added again counting again, of the
+same types, as the file's `asset` lines check, a draw's bytes by its mesh's and shader's types'
+names and sizes, and is left out otherwise. A world no load could read, such as a value nested
+deeper than a scene's may, isn't saved. [ecs/file.rs](crates/gg-engine/src/ecs/file.rs) and
 [snapshot.rs](crates/gg-engine/src/snapshot.rs) have the rest.
 
 A world holds resources beside its entities, a value of each type, for the rest of the simulation,
@@ -860,7 +895,13 @@ neither hang the read nor fill memory; `--replay` alone reads its recording from
 given, so that it can come through a pipe. A texture's handle is its index in the bindless set,
 which a draw's parameters carry as it is and the shader samples by, with one of the engine's
 samplers, which it picks by its index too. A model's textures have their full chains of mip levels,
-which the CPU makes as the frame that copies them renders, until they're cooked.
+which the CPU makes as the frame that copies them renders, until they're cooked. A layer that adds a
+file again, by whatever form of its path, as a texture or a sprite sheet, a model, or a shader of
+the same vertex and parameter types and blend, gets what the first add made, the file loaded once,
+as the OS resolves `.`, `..`, links and, where names ignore it, case; a texture keeps the name its
+first path gave it, which its other paths name too. A name is a path as the layer wrote it, rather
+than as the disk spells it, which a file system that ignores case keeps as an editor last saved it,
+so that every checkout of a game names its files alike.
 
 Meshes and textures reach GPU memory the best way the device has, as gg-gpu's `UploadPath` says:
 beside the frames the GPU renders, through a queue apart from graphics, where the device has one.

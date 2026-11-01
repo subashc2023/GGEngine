@@ -10,6 +10,10 @@ use serde::Deserialize;
 
 use crate::Failure;
 
+/// The directories at a package's root whose files no build of the package reads, which `gg run`'s
+/// watcher and the asset [`scan`](crate::asset::scan) skip there.
+pub const UNBUILT: [&str; 4] = ["target", "tests", "benches", "examples"];
+
 /// A game's project, as its manifest gives it, as ARCHITECTURE.md's Project state describes. Its
 /// paths are relative to the manifest's directory, with `/` between their parts.
 ///

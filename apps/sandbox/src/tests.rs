@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 
 use gg_engine::math::Vec4;
@@ -29,6 +30,32 @@ fn the_grid_saves_as_it_is() {
         .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(world.save_scene(&roots).expect("saved"), text);
     assert_eq!(grid(&world).len(), 100);
+}
+
+/// Each texture and model under the sandbox's root has its ID file beside it, committed with it,
+/// each holding an ID of its own, and no ID file is left without its asset, so that every checkout
+/// gives each asset the ID the repository holds, rather than its runs writing others.
+#[test]
+fn every_asset_has_its_id_file_beside_it() {
+    let found = gg_api::asset::scan(Path::new(env!("CARGO_MANIFEST_DIR")));
+    assert!(!found.assets.is_empty(), "the swarm's sheet is an asset");
+    let mut ids = HashSet::new();
+    for asset in &found.assets {
+        let path = &asset.path;
+        match &asset.meta {
+            Some(Ok(meta)) => {
+                let id = meta.id;
+                assert!(ids.insert(id), "{path}.meta holds {id}, another asset's ID");
+            }
+            Some(Err(failure)) => panic!("{path}'s ID file: {}: {failure}", failure.code),
+            None => panic!(
+                "{path} has no ID file, {path}.meta: a run that serves the tool API writes it; \
+                 commit it beside its file"
+            ),
+        }
+    }
+    assert!(found.orphans.is_empty(), "{:?}", found.orphans);
+    assert!(found.unread.is_empty(), "{:?}", found.unread);
 }
 
 /// Drift finds, to reset, exactly the drifters that wrap across the field at each tick, as their

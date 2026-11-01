@@ -13,8 +13,8 @@
 //! loading what layers add, images as textures and glTF models, whose nodes spawn as entities;
 //! lockstep between two peers, each tick run on both peers' inputs; the pipeline cache's file,
 //! which windowed runs keep;
-//! and in development builds, behind `dev`, reading a game's project's manifest, compiling games'
-//! shaders again as their files change, and the OS's file dialogs.
+//! and in development builds, behind `dev`, reading a game's project's manifest and its assets' ID
+//! files, compiling games' shaders again as their files change, and the OS's file dialogs.
 //!
 //! An app's `main` starts the engine; there is no separate entry-point crate.
 
@@ -195,7 +195,10 @@ impl App {
     /// directory, as `env!("CARGO_MANIFEST_DIR")` gives it, with `/` between its parts, such as
     /// `assets/logo.png`: what scenes, snapshots, recordings and the tool API name a sprite's
     /// texture by, so that they find it again in another run, or on another machine. Without it,
-    /// or for a file outside it, an asset is named by its path as the layer gave it.
+    /// or for a file outside it, an asset is named by its path as the layer gave it. In a
+    /// development build, each texture and model under it has an ID, kept in an ID file beside it,
+    /// which a run that serves the tool API writes where it's missing, but a lockstep session's
+    /// joiner, whose host writes them, as ARCHITECTURE.md's Project state describes.
     #[must_use]
     pub fn root(mut self, root: impl Into<PathBuf>) -> Self {
         self.root = Some(root.into());

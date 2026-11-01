@@ -1,7 +1,7 @@
 //! The OS's directories where an app keeps its files for the user, never beside the executable:
 //! one for what it keeps from run to run, such as the dock's layout, and one for what it can make
 //! again, such as its pipeline cache; and reading a file, a regular one alone, and writing one
-//! whole, there or, as a scene's, anywhere.
+//! whole, there or, as a scene's, anywhere, or creating one whole, as an asset's ID file.
 
 use std::ffi::OsString;
 use std::fs::{self, File};
@@ -106,6 +106,18 @@ pub(crate) fn write_whole(path: &Path, data: &[u8]) -> io::Result<()> {
         let _ = fs::remove_file(&temporary);
     }
     written
+}
+
+/// Writes `data` as a new file at `path`, whole or not at all, unless something is there, when it
+/// fails with `AlreadyExists`: to a file of its own beside it, flushed to the disk, then hard-linked
+/// at `path`, which fails if anything is there, the file of its own removed either way, so that two
+/// processes never both write one, and none reads one half-written. Makes no directories.
+#[cfg(feature = "dev")]
+pub(crate) fn create(path: &Path, data: &[u8]) -> io::Result<()> {
+    let (temporary, file) = create_beside(path)?;
+    let created = flush(file, data, None).and_then(|()| fs::hard_link(&temporary, path));
+    let _ = fs::remove_file(&temporary);
+    created
 }
 
 /// A file new to the disk beside `target`, named after it with this process's ID, a count and
@@ -229,5 +241,25 @@ pub(crate) mod tests {
             "/dev/zero"
         };
         read_file(Path::new(device), 1 << 20).expect_err("a device");
+    }
+
+    /// A file created whole holds its bytes, and creating it again, as a second process would,
+    /// fails with `AlreadyExists`, leaving the first's bytes; neither leaves a file of its own.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_file_is_created_whole_once_whoever_writes_first() {
+        let scratch = Scratch::new("created-whole");
+        fs::create_dir_all(&scratch.0).expect("a directory");
+        let path = scratch.0.join("stone.png.meta");
+        create(&path, b"first").expect("created");
+        assert_eq!(fs::read(&path).expect("the file"), b"first");
+        let second = create(&path, b"second").expect_err("there already");
+        assert_eq!(second.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&path).expect("the file"), b"first");
+        let names: Vec<String> = (fs::read_dir(&scratch.0).expect("listed"))
+            .map(|entry| entry.expect("an entry").file_name().into_string())
+            .collect::<Result<_, _>>()
+            .expect("Unicode");
+        assert_eq!(names, ["stone.png.meta"], "no file of its own left");
     }
 }
