@@ -1,7 +1,8 @@
 //! What the editor draws over its view: a toolbar at the view's top left, whose controls
 //! [`Toolbar::show`] lists; a gizmo at its top right, which shows which way the camera faces, and
-//! turns it; and at its bottom left, the name of what the view shows under the cursor. And Play and
-//! Simulate, at the middle of the title bar, which play the game and stop it.
+//! turns it; at its bottom left, the name of what the view shows under the cursor; and round its
+//! edges, while a texture or a model from the Assets panel is held over it, an outline. And Play
+//! and Simulate, at the middle of the title bar, which play the game and stop it.
 
 use std::f32::consts::{PI, TAU};
 
@@ -594,6 +595,15 @@ pub fn name_hovered(egui: &egui::Context, view: &Response, name: String) {
     let inner = outer - margin;
     painter.add(frame.paint(inner));
     painter.galley(inner.min, galley, color);
+}
+
+/// Outlines `view`, which takes a texture or a model from the Assets panel let go over it, inside
+/// its edges in the selection's color, as egui lights its drop zones: painted on the view's own
+/// layer, as the name under the cursor is.
+pub fn outline_drop(egui: &egui::Context, view: &Response) {
+    let painter = egui.layer_painter(view.layer_id).with_clip_rect(view.rect);
+    let color = egui.global_style().visuals.selection.stroke.color;
+    painter.rect_stroke(view.rect, 0.0, Stroke::new(2.0, color), StrokeKind::Inside);
 }
 
 #[cfg(test)]

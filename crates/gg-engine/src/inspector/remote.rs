@@ -42,7 +42,7 @@ mod imp {
     use super::super::commands::Command;
     use super::super::inspected::{Inspected, Pending};
     use super::super::link::{Linking, Placed};
-    use super::super::{Edit, Gesture, Inspector, Pass, Refusal, Step};
+    use super::super::{Edit, Gesture, Inspector, Pass, Step};
     use crate::api::json::{self, Remote as Names};
     use crate::reflect::{Reflect, Type, Types, Value};
     use crate::{EntityId, Pose, Transform};
@@ -401,11 +401,10 @@ mod imp {
                                 "{failure}"
                             );
                             if shown {
-                                inspector.refusals.push(Refusal {
-                                    component: edit.component,
-                                    path: edit.path,
-                                    message: failure.message,
-                                });
+                                let Edit {
+                                    component, path, ..
+                                } = edit;
+                                inspector.refuse(&*self, id, component, path, failure.message);
                             }
                         }
                     }
@@ -632,10 +631,10 @@ mod imp {
         }
 
         /// Sends the game what a pass of the panels did, as [`Inspector::queue`] queues it for a
-        /// tick: the link's sets and seals, then the pass's sets of the picked entity's fields,
-        /// each gesture's sets of one field joining as one edit, then its operations, each of which
-        /// ends the gesture going on, then the step its Edit menu or keys chose; and asks for
-        /// what's next.
+        /// tick: the link's sets, creates and seals, then the pass's sets of the picked entity's
+        /// fields, each gesture's sets of one field joining as one edit, then its operations, each
+        /// of which ends the gesture going on, as the link's creates do, then the step its Edit
+        /// menu or keys chose; and asks for what's next.
         pub(in super::super) fn send(&mut self, pass: Pass, inspector: &mut Inspector) {
             let Pass {
                 sets,
@@ -647,6 +646,11 @@ mod imp {
             for linking in linked.drain(..) {
                 match linking {
                     Linking::Set(id, edit) => self.set(id, edit, Gesture::Link),
+                    Linking::Create(components) => {
+                        let parent = None;
+                        let create = Command::Create { parent, components };
+                        self.operation(create, inspector.picked);
+                    }
                     Linking::Seal => self.end(Gesture::Link),
                 }
             }

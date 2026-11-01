@@ -609,7 +609,7 @@ impl OrbitCamera {
 
     /// The point `at`, in the main window's pixels, shows, on the plane through the pivot facing
     /// the view, which `view` shows.
-    fn under(&self, at: [f64; 2], view: Viewport) -> Vec3 {
+    pub fn under(&self, at: [f64; 2], view: Viewport) -> Vec3 {
         let [width, height] = view.size.map(|side| side as f32);
         let x = (at[0] - f64::from(view.origin[0])) as f32 / width * 2.0 - 1.0;
         let y = 1.0 - (at[1] - f64::from(view.origin[1])) as f32 / height * 2.0;

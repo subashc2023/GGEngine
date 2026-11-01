@@ -823,6 +823,13 @@ impl Sight {
         Some((ends, [start, end]))
     }
 
+    /// The point pixel `at` shows on the plane through the origin square to `normal`, as the grid
+    /// lies: `None` where its ray runs along the plane, and in perspective, where it meets it
+    /// behind the camera.
+    pub fn on_plane(&self, at: Vec2, normal: Vec3) -> Option<Vec3> {
+        self.ray(at).meet(Vec3::ZERO, normal)
+    }
+
     /// The ray through pixel `at`.
     fn ray(&self, at: Vec2) -> Ray {
         let [x0, y0] = self.view.origin.map(|at| at as f32);

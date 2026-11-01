@@ -34,6 +34,13 @@
 //! the game as parts of its look, as [`look`](crate::look) says: each as the user changes it, the
 //! editor taking the parts another client, such as an agent, sets.
 //!
+//! A texture or a model dragged from the Assets panel outlines the view while it's held over it,
+//! and is let go there as an edit of the editor's, through the Inspector's link, which names it by
+//! its asset ID: a texture sets the texture of the sprite the game's view shows there, as the API's
+//! `pick` finds it, which the panels show picked, and whose refusal, as of an entity without a
+//! sprite, the Inspector shows; and a model is a root, named after its file, where the cursor
+//! shows the grid's plane, as [`landing`](Game::landing) says, which the panels show picked.
+//!
 //! The File menu acts on the game's open scene through the API's `scene`, never reading or writing
 //! a scene file itself: New empties it, Open opens a scene the OS's dialog picks in its place, and
 //! Save and Save As save the world as edited to its file, or to one the dialog picks, which is then
@@ -56,19 +63,21 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use gg_api::asset::{AssetKind, Meta};
 use gg_api::view::Reader;
 use gg_api::{Client, Failure, InputEvent, LogEvents, Looked, Scene, SceneAction, Session, Status};
-use gg_engine::egui::{self, Color32, RichText, ScrollArea, ViewportCommand, ViewportId};
-use gg_engine::grid::Plane;
-use gg_engine::math::{Quat, Vec3};
+use gg_engine::egui::{self, Color32, Response, RichText, ScrollArea, ViewportCommand, ViewportId};
+use gg_engine::grid::{self, Plane};
+use gg_engine::math::{Quat, Vec2, Vec3};
+use gg_engine::reflect::{self, Reflect};
 use gg_engine::{
     App, Context, Docked, EntityId, Event, FileDialog, Inspector, InspectorLink, Key, Layer,
-    MouseButton, PerfPanel, Projection, Scroll, Ui, Viewpoint, Viewport,
+    MouseButton, Name, PerfPanel, Projection, Scroll, Transform, Ui, Viewpoint, Viewport,
 };
 use serde_json::{Value, json};
 use tracing::{info, warn};
 
-use crate::assets::Assets;
+use crate::assets::{Assets, Dragged};
 use crate::file::{self, Choice, Item, Message};
 use crate::handles::{Picked, Reading, Sight};
 use crate::look::{Looking, Part, Parts};
@@ -147,6 +156,8 @@ struct Game {
     tickets: u64,
     /// The ticket of the pick at the cursor that waits for its answer, if one does: one at a time.
     hovering: Option<u64>,
+    /// The texture let go over the view whose pick waits for its answer, if one does: the latest.
+    dropping: Option<Dropping>,
     /// The answers to picks that came back since the last update, each with its ticket.
     answered: Vec<(u64, Option<Found>)>,
     /// The game's look, as the editor keeps it.
@@ -273,6 +284,15 @@ enum Closing {
     Granted,
 }
 
+/// A texture let go over the view: the ticket of the pick at where it was let go, its name, as the
+/// game takes it, and its file's name, as the Logs say it.
+#[derive(Debug, PartialEq)]
+struct Dropping {
+    ticket: u64,
+    name: String,
+    file: String,
+}
+
 /// What a pick of the game's view found: an entity, by its ID, and what the view's bottom left
 /// calls it, its name, or without one, its ID.
 #[derive(Clone, Debug, PartialEq)]
@@ -362,6 +382,7 @@ impl Game {
             view,
             tickets: 0,
             hovering: None,
+            dropping: None,
             answered: Vec::new(),
             looking: Looking::new(CLIENT),
             wants,
@@ -551,10 +572,11 @@ impl Game {
     }
 
     /// Lets go of the connection to the game, which has gone, of the input it didn't get, of the
-    /// picks it didn't answer, of its look and of how it ran, which the next to serve answers anew;
-    /// and the Inspector, of its world. The File menu's request goes, unanswered, with what was to
-    /// follow it, and a prompt for New or Open; a close being checked or prompted for goes by the
-    /// last status, as [`close`](Self::close) says of one while no game serves.
+    /// picks it didn't answer, a drop's among them, of its look and of how it ran, which the next
+    /// to serve answers anew; and the Inspector, of its world. The File menu's request goes,
+    /// unanswered, with what was to follow it, and a prompt for New or Open; a close being checked
+    /// or prompted for goes by the last status, as [`close`](Self::close) says of one while no game
+    /// serves.
     fn disconnect(&mut self) {
         self.request = None;
         self.then = None;
@@ -572,6 +594,7 @@ impl Game {
         self.told = false;
         self.view.asked = None;
         self.hovering = None;
+        self.dropping = None;
         self.answered.clear();
         self.looking.reset();
         self.stopped = true;
@@ -1146,8 +1169,9 @@ impl Game {
     }
 
     /// Takes the answers to picks that came back since: the latest click's, which the Inspector
-    /// picks, and all of them for what's under the cursor, which [`ui`](Layer::ui) reads; and
-    /// failures, which it logs.
+    /// picks; a dropped texture's, which [`take_texture`](Self::take_texture) takes; and all of
+    /// them for what's under the cursor, which [`ui`](Layer::ui) reads; and failures, which it
+    /// logs.
     fn take_picks(&mut self) {
         self.answered.clear();
         let Some(talker) = &self.talker else {
@@ -1158,8 +1182,15 @@ impl Game {
             if self.hovering == Some(ticket) {
                 self.hovering = None;
             }
+            let dropped = self.dropping.take_if(|dropping| dropping.ticket == ticket);
             match answer {
-                Ok(picked) => self.answered.push((ticket, Found::of(picked))),
+                Ok(picked) => {
+                    let found = Found::of(picked);
+                    if let Some(dropped) = dropped {
+                        self.take_texture(dropped, found.clone());
+                    }
+                    self.answered.push((ticket, found));
+                }
                 Err(Failure { code, message }) => {
                     if self.view.asked == Some(ticket) {
                         self.view.asked = None;
@@ -1177,6 +1208,110 @@ impl Game {
             self.view.link.pick(found.map(|found| found.id));
             self.took_pick = None;
         }
+    }
+
+    /// Takes what the Assets panel let go over `response`, the view's, this frame, while a game
+    /// serves, as [`let_go`](Self::let_go) says, with the view at `view` and the window at `scale`
+    /// pixels a point; and outlines the view while a texture or a model is held over it.
+    fn take_drop(
+        &mut self,
+        egui: &egui::Context,
+        response: &Response,
+        view: Option<Viewport>,
+        scale: f32,
+    ) {
+        if self.talker.is_none() {
+            return;
+        }
+        if response.dnd_hover_payload::<Dragged>().is_some() {
+            overlay::outline_drop(egui, response);
+        }
+        let Some(dropped) = response.dnd_release_payload::<Dragged>() else {
+            return;
+        };
+        // Where it was let go, as egui places what it hits; kept for its frame by a tap, as the
+        // cursor isn't once the window loses it.
+        let Some(at) = egui.pointer_interact_pos() else {
+            return;
+        };
+        let ppp = egui.pixels_per_point();
+        let at = [at.x * ppp, at.y * ppp].map(f64::from);
+        self.let_go(&dropped, at, view, scale);
+    }
+
+    /// Takes `dropped`, let go at `at`, in the main window's pixels, over the view, at `view`,
+    /// with the window at `scale` pixels a point, as the module says, naming it as [`asset_name`]
+    /// does: a texture asks the game for a pick there, whose answer
+    /// [`take_picks`](Self::take_picks) takes; a model is a root the Inspector's link creates where
+    /// it [`lands`](Self::landing), named after its file, or where it can't land yet, before a
+    /// frame has come, is logged as taken by nothing.
+    fn let_go(&mut self, dropped: &Dragged, at: [f64; 2], view: Option<Viewport>, scale: f32) {
+        let root = self.folders.as_ref().map(|folders| folders.root.as_path());
+        let name = asset_name(root, &dropped.path);
+        let file = dropped.path.file_name().unwrap_or_default();
+        let file = file.to_string_lossy().into_owned();
+        match dropped.kind {
+            AssetKind::Texture => {
+                let origin = view.map_or([0, 0], |view| view.origin);
+                if let Some(ticket) = self.ask_pick(at, origin) {
+                    self.dropping = Some(Dropping { ticket, name, file });
+                }
+            }
+            AssetKind::Model => {
+                let Some(landing) = self.landing(at, view, scale) else {
+                    let why = "the view has shown no frame to place it in yet";
+                    self.log(Level::Info, format!("{file} was let go, but {why}"));
+                    return;
+                };
+                let stem = dropped.path.file_stem().unwrap_or_default();
+                let called = Name(stem.to_string_lossy().into_owned());
+                let transform = Transform {
+                    translation: landing,
+                    ..Transform::IDENTITY
+                };
+                // A tuple struct's field, `0`, as the game reads one.
+                let root = vec![("0".into(), reflect::Value::String(name))];
+                self.view.link.create(vec![
+                    ("Name".into(), called.to_value()),
+                    ("Transform".into(), transform.to_value()),
+                    ("ModelRoot".into(), reflect::Value::Struct(root)),
+                ]);
+            }
+        }
+    }
+
+    /// Takes `found`, what the game's view shows where `dropped`'s texture was let go: the entity
+    /// there, which the Inspector picks, its sprite's texture set through the Inspector's link as
+    /// an edit of its own, which the game refuses for an entity without a sprite, the Inspector
+    /// showing why; and where no entity draws, nothing, which the Logs say.
+    fn take_texture(&mut self, dropped: Dropping, found: Option<Found>) {
+        let Some(found) = found else {
+            let said = format!("{} was let go where no entity draws", dropped.file);
+            self.log(Level::Info, said);
+            return;
+        };
+        let link = &self.view.link;
+        link.pick(Some(found.id));
+        self.took_pick = None;
+        let texture = reflect::Value::String(dropped.name);
+        let texture = reflect::Value::Option(Some(Box::new(texture)));
+        link.set(found.id, "Sprite", "texture", texture);
+        link.seal();
+    }
+
+    /// Where a model let go at `at`, in the main window's pixels, lands, with the view at `view`,
+    /// and the window at `scale` pixels a point: where the view's last frame shows the grid's
+    /// plane through the origin, as the grid would lie, whether or not it shows; or where its ray
+    /// runs along the plane, or meets it behind the camera, under `at` on the plane through the
+    /// editor's camera's pivot facing the view, which sees as the game's camera does while that
+    /// drives the view. `None` until a frame that projects has come.
+    fn landing(&self, at: [f64; 2], view: Option<Viewport>, scale: f32) -> Option<Vec3> {
+        let (seen, screen) = self.seen.zip(self.screen(view))?;
+        let plane = grid::shown(&seen, self.view.toolbar.plane);
+        let sight = Sight::new(seen, screen, scale)?;
+        let pixel = Vec2::new(at[0] as f32, at[1] as f32);
+        let met = sight.on_plane(pixel, plane.normal());
+        Some(met.unwrap_or_else(|| self.view.camera.under(at, screen)))
     }
 
     /// Shows the game's latest frame, if one came since: what it was drawn from is what the handles
@@ -1351,6 +1486,19 @@ fn folders(dir: &Path) -> Folders {
             scenes: Vec::new(),
         },
     }
+}
+
+/// What the game names the asset at `path` by: its ID, as its ID file beside it gives it; or,
+/// without one that reads, as before the game's scan has written one, its path from the asset
+/// root, `root`, with `/` between its parts, which the game loads it by, naming it by the ID its
+/// scan finds for it.
+fn asset_name(root: Option<&Path>, path: &Path) -> String {
+    if let Ok(meta) = Meta::read(&Meta::path(path)) {
+        return meta.id.to_string();
+    }
+    let under = root.and_then(|root| path.strip_prefix(root).ok());
+    let parts = under.unwrap_or(path).iter().map(OsStr::to_string_lossy);
+    parts.collect::<Vec<_>>().join("/")
 }
 
 /// `path`, relative, with `/` between its parts, as manifests and the API name files, joined to
@@ -1636,6 +1784,14 @@ impl Layer for Game {
                 ui.weak("Not in a game's project");
             }
         });
+        // What's held over the view counts as over it, as egui's hover doesn't while another
+        // widget drags, so that the corner names what would take it.
+        let view = ui.view();
+        let held = self.talker.is_some()
+            && (view.as_ref()).is_some_and(|view| view.dnd_hover_payload::<Dragged>().is_some());
+        if let Some(response) = &view {
+            self.take_drop(ui.egui(), response, cx.view(), cx.scale() as f32);
+        }
         let logs = &self.logs;
         ui.panel("Logs", |ui| {
             ScrollArea::vertical()
@@ -1657,7 +1813,7 @@ impl Layer for Game {
         // What the game's view shows under the cursor, while the cursor's over it: a pick at the
         // cursor as each comes back, and what the latest answer found, painted over the handles.
         let origin = cx.view().map_or([0, 0], |view| view.origin);
-        let over = ui.view().filter(|view| view.hovered());
+        let over = view.filter(|view| view.hovered() || held);
         let at = over.and(cx.input().cursor());
         self.view.hover.see(at.is_some(), &self.answered);
         if let Some(at) = at
@@ -2015,21 +2171,24 @@ impl Measures {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use gg_api::view::Writer;
     use gg_api::{By, Look, Outline};
     use gg_engine::Key;
-    use gg_engine::math::Vec2;
 
     use super::*;
+    use crate::assets::tests::{Scratch, find, texts};
     use crate::camera::Tool;
-    use crate::tests::{VIEW, reading};
+    use crate::tests::{SCALE, VIEW, reading};
 
     /// The game's ends of the connections of a layer that [`serving`] gives: the requests the layer
-    /// sends, where their answers go back, and the picks it asks for.
+    /// sends, where their answers go back, the picks it asks for, and where their answers go back.
     struct Ends {
         asked: Receiver<(String, Value)>,
         answer: Sender<(String, Result<Value, Failure>)>,
         picks: Receiver<(u64, [f64; 2])>,
+        found: Sender<(u64, Result<gg_api::Picked, Failure>)>,
     }
 
     /// The layer with a game serving, as `serve` leaves it, that plays, through its camera, as the
@@ -2040,7 +2199,7 @@ mod tests {
         let (answer, answers) = mpsc::channel();
         let (_, logged) = mpsc::channel();
         let (picks, picking) = mpsc::channel();
-        let (_, picked) = mpsc::channel();
+        let (found, picked) = mpsc::channel();
         game.talker = Some(Talker {
             asks,
             answers,
@@ -2054,6 +2213,7 @@ mod tests {
             asked,
             answer,
             picks: picking,
+            found,
         };
         (game, ends)
     }
@@ -3206,5 +3366,226 @@ mod tests {
             (Level::Debug, "A tick"),
         ];
         assert_eq!(logs, expected);
+    }
+
+    /// The events of a drag with the primary button from `from` to `to`, a frame's each, as egui
+    /// gets them: past how far a click goes in the frame after the press, then to `to`, then let go.
+    fn drag(from: egui::Pos2, to: egui::Pos2) -> Vec<egui::Event> {
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        vec![
+            egui::Event::PointerMoved(from),
+            button(from, true),
+            egui::Event::PointerMoved(from + egui::vec2(12.0, 0.0)),
+            egui::Event::PointerMoved(to),
+            egui::Event::PointerMoved(to + egui::vec2(1.0, 1.0)),
+            button(to + egui::vec2(1.0, 1.0), false),
+        ]
+    }
+
+    /// A texture dragged from the Assets panel outlines the view once it's held over it, until
+    /// it's let go there, which asks the game for a pick where it was let go, in the view's pixels.
+    /// One let go elsewhere asks nothing, nor does a file that isn't a texture or a model, which
+    /// doesn't drag.
+    #[test]
+    fn a_texture_dragged_from_the_assets_panel_is_let_go_on_the_view() {
+        let scratch = Scratch::new("dragged");
+        for file in ["stone.png", "notes.txt"] {
+            fs::write(scratch.0.join(file), "").expect("written");
+        }
+        let (mut game, ends) = serving();
+        game.folders = Some(folders(&scratch.0));
+        game.assets = Some(Assets::new(scratch.0.clone()));
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 400.0));
+        let (panel, view) = screen.split_left_right_at_x(400.0);
+        let place = Viewport {
+            origin: [400, 0],
+            size: [400, 400],
+        };
+        // A frame of the panel beside a view that senses presses as the dock's does.
+        let frame = |game: &mut Game, event: Option<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                events: event.into_iter().collect(),
+                ..egui::RawInput::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                let sense = egui::Sense::CLICK | egui::Sense::DRAG;
+                let response = ui.interact(view, egui::Id::unique("test view"), sense);
+                if let Some(assets) = &mut game.assets {
+                    let builder = egui::UiBuilder::new().max_rect(panel);
+                    ui.scope_builder(builder, |ui| assets.show(ui));
+                }
+                game.take_drop(ui.ctx(), &response, Some(place), 1.0);
+            });
+            output.textures_delta.clear();
+            output.shapes
+        };
+        // The drag from `from` to `to`, and whether each of its frames outlined the view.
+        let drop = |game: &mut Game, from: egui::Rect, to| {
+            let frames = drag(from.center(), to).into_iter();
+            let shapes = frames.map(|event| frame(game, Some(event)));
+            let outlined = |shapes: Vec<egui::epaint::ClippedShape>| {
+                let outline = |shape: &_| matches!(shape, egui::Shape::Rect(r) if r.rect == view);
+                shapes.iter().any(|clipped| outline(&clipped.shape))
+            };
+            shapes.map(outlined).collect::<Vec<bool>>()
+        };
+        frame(&mut game, None);
+        let shown = texts(&frame(&mut game, None));
+        let (stone, notes) = (find(&shown, "stone.png"), find(&shown, "notes.txt"));
+        let elsewhere = egui::pos2(200.0, 350.0);
+        for (from, to) in [(notes, view.center()), (stone, elsewhere)] {
+            assert_eq!(drop(&mut game, from, to), [false; 6]);
+            assert!(ends.picks.try_recv().is_err());
+        }
+        // Outlined once it's over the view, until it's let go.
+        let outlined = drop(&mut game, stone, view.center());
+        assert_eq!(outlined, [false, false, false, true, true, true]);
+        let (ticket, at) = ends.picks.try_recv().expect("a pick");
+        // Let go a pixel right of and below the view's middle, (600, 200).
+        assert_eq!(at, [201.0, 201.0]);
+        assert_eq!(game.dropping.map(|dropping| dropping.ticket), Some(ticket));
+    }
+
+    /// A texture let go over the view asks the game for a pick there; the entity the answer finds
+    /// is picked, and its sprite's texture set through the link, as an edit of its own, to the
+    /// texture's ID, as its ID file gives it, or without one, its path from the asset root. Where
+    /// no entity draws, nothing is set, and the Logs say so; and of two let go before an answer,
+    /// the latest alone is set.
+    #[test]
+    fn a_texture_let_go_on_the_view_sets_the_texture_of_the_sprite_there() {
+        let scratch = Scratch::new("texture-let-go");
+        let textures = scratch.0.join("textures");
+        fs::create_dir(&textures).expect("made");
+        for file in ["stone.png", "new.png"] {
+            fs::write(textures.join(file), "").expect("written");
+        }
+        let id = "5f3c9a1e07b2d846";
+        let meta = Meta {
+            id: id.parse().expect("an ID"),
+        };
+        fs::write(Meta::path(&textures.join("stone.png")), meta.text()).expect("written");
+        let (mut game, ends) = serving();
+        game.folders = Some(folders(&scratch.0));
+        let texture = |name: &str| Dragged {
+            path: textures.join(name),
+            kind: AssetKind::Texture,
+        };
+        let entity: EntityId = "0123456789abcdef".parse().expect("an ID");
+        let found = |id: Option<EntityId>| gg_api::Picked {
+            id: id.map(|id| id.to_string()),
+            name: id.map(|_| "Pillar".to_owned()),
+        };
+        let set = |name: &str| {
+            let texture = reflect::Value::String(name.to_owned());
+            let texture = reflect::Value::Option(Some(Box::new(texture)));
+            Some((entity, "Sprite".to_owned(), "texture".to_owned(), texture))
+        };
+        game.let_go(&texture("stone.png"), [300.0, 200.0], Some(VIEW), SCALE);
+        let (ticket, at) = ends.picks.try_recv().expect("a pick");
+        // [`VIEW`]'s top left is at (100, 50).
+        assert_eq!(at, [200.0, 150.0]);
+        ends.found
+            .send((ticket, Ok(found(Some(entity)))))
+            .expect("sent");
+        game.take_picks();
+        assert_eq!(game.view.link.pending(), [set(id), None]);
+        assert_eq!(game.dropping, None);
+        // Where no entity draws.
+        game.let_go(&texture("new.png"), [300.0, 200.0], Some(VIEW), SCALE);
+        let (ticket, _) = ends.picks.try_recv().expect("a pick");
+        ends.found.send((ticket, Ok(found(None)))).expect("sent");
+        game.take_picks();
+        assert_eq!(game.view.link.pending().len(), 2, "nothing more set");
+        let said = game.logs.back().map(|logged| logged.text.as_str());
+        assert_eq!(said, Some("new.png was let go where no entity draws"));
+        // Two before an answer: the latest's alone.
+        game.let_go(&texture("stone.png"), [300.0, 200.0], Some(VIEW), SCALE);
+        game.let_go(&texture("new.png"), [300.0, 200.0], Some(VIEW), SCALE);
+        let tickets: Vec<u64> = ends.picks.try_iter().map(|(ticket, _)| ticket).collect();
+        for ticket in tickets {
+            ends.found
+                .send((ticket, Ok(found(Some(entity)))))
+                .expect("sent");
+        }
+        game.take_picks();
+        let pending = game.view.link.pending();
+        assert_eq!(pending[2..], [set("textures/new.png"), None]);
+    }
+
+    /// A model let go over the view is a root the link creates, named after its file, by its path
+    /// from the asset root without an ID file, where the view's last frame shows the grid's plane
+    /// there: through the editor's camera as it starts, the plane the 2D games are in. In
+    /// perspective, where the ray meets the ground in front of the camera, and above the horizon,
+    /// where it doesn't, on the plane through the camera's pivot facing the view. Before a frame
+    /// has come, it lands nowhere, and the Logs say so.
+    #[test]
+    fn a_model_let_go_on_the_view_lands_where_the_cursor_shows_the_grids_plane() {
+        let scratch = Scratch::new("model-let-go");
+        let (mut game, _ends) = serving();
+        game.folders = Some(folders(&scratch.0));
+        let rock = Dragged {
+            path: scratch.0.join("models").join("rock.gltf"),
+            kind: AssetKind::Model,
+        };
+        game.let_go(&rock, [560.0, 290.0], Some(VIEW), SCALE);
+        assert!(game.view.link.creates().is_empty());
+        let said = game.logs.back().map(|logged| logged.text.as_str());
+        let why = "the view has shown no frame to place it in yet";
+        assert_eq!(
+            said,
+            Some(format!("rock.gltf was let go, but {why}").as_str())
+        );
+        // Where a create put it, its name and its model as they're given.
+        let landed = |game: &Game| {
+            let creates = game.view.link.creates();
+            let last = creates.last().expect("a create");
+            let [(name, named), (transform, placed), (root, rooted)] = &last[..] else {
+                panic!("a name, a transform and a model's root: {creates:?}");
+            };
+            let fields = [name, transform, root].map(|ident| ident.as_ref());
+            assert_eq!(fields, ["Name", "Transform", "ModelRoot"]);
+            assert_eq!(*named, Name("rock".to_owned()).to_value());
+            let model = reflect::Value::String("models/rock.gltf".to_owned());
+            assert_eq!(*rooted, reflect::Value::Struct(vec![("0".into(), model)]));
+            Transform::from_value(placed)
+                .expect("a transform")
+                .translation
+        };
+        // As the editor's camera starts: the origin at (500, 350), and a unit 60 pixels across.
+        game.seen = Some(game.view.camera.viewpoint());
+        game.size = Some(VIEW.size);
+        game.let_go(&rock, [560.0, 290.0], Some(VIEW), SCALE);
+        let at = landed(&game);
+        assert!(at.abs_diff_eq(Vec3::new(1.0, 1.0, 0.0), 1e-4), "{at}");
+        // Looking along the ground, 1 unit above it.
+        let along = Viewpoint {
+            position: Vec3::new(0.0, 1.0, 10.0),
+            rotation: Quat::IDENTITY,
+            projection: Projection::Perspective {
+                fov: 1.0,
+                near: 0.1,
+            },
+        };
+        game.seen = Some(along);
+        game.view.camera.adopt(&along);
+        game.view.toolbar.plane = Plane::XZ;
+        // Below the view's middle, (500, 350), and above it.
+        game.let_go(&rock, [500.0, 500.0], Some(VIEW), SCALE);
+        let ground = landed(&game);
+        assert!(ground.y.abs() < 1e-4 && ground.z < 10.0, "{ground}");
+        game.let_go(&rock, [500.0, 200.0], Some(VIEW), SCALE);
+        let screen = game.screen(Some(VIEW)).expect("a frame");
+        assert_eq!(
+            landed(&game),
+            game.view.camera.under([500.0, 200.0], screen)
+        );
+        assert_eq!(game.view.link.creates().len(), 3);
     }
 }

@@ -6,15 +6,19 @@ use std::rc::Rc;
 
 use super::Edit;
 use super::fields::AXES;
-use crate::reflect::{Shape, Type, Types, Value};
+use crate::reflect::{Ident, Shape, Type, Types, Value};
 use crate::{EntityId, Pose, Transform};
 
 /// A link to an [`Inspector`], which [`Inspector::link`] gives, through which another layer picks
 /// and edits as the Inspector's panels do, such as with a tool's handles in the game's view: its
-/// sets join the Inspector's commands, which its next tick makes and a recording keeps, and its
-/// Edit menu undoes and redoes them as its own: a gesture of the link's sets of one field, from its
-/// first set to its seal, one edit, as the log merges a gesture's sets of one field. A layer keeps
-/// it, cloned, on the main thread, as layers are.
+/// sets and creates join the Inspector's commands, which its next tick makes and a recording keeps,
+/// and its Edit menu undoes and redoes them as its own: a gesture of the link's sets of one field,
+/// from its first set to its seal, one edit, as the log merges a gesture's sets of one field. A
+/// layer keeps it, cloned, on the main thread, as layers are.
+///
+/// The values it's given are those of the world the Inspector shows: a remote Inspector's, as it
+/// reads a game's, hold an entity by its ID and a texture or a model by its name or a path to its
+/// file, each as a [`Value::String`], which the game reads by its own world.
 ///
 /// [`Inspector`]: super::Inspector
 /// [`Inspector::link`]: super::Inspector::link
@@ -27,8 +31,8 @@ pub(super) struct Linked {
     /// The pick asked for since the Inspector's last pass, which its next makes: `Some(None)`
     /// unpicks.
     pub(super) pick: Option<Option<EntityId>>,
-    /// The sets and the seals made since the Inspector's last pass, in order, each set the latest
-    /// of its field since the seal before it, where that latest came.
+    /// The sets, creates and seals made since the Inspector's last pass, in order, each set the
+    /// latest of its field since the seal before it, where that latest came.
     pub(super) pending: Vec<Linking>,
     /// Whether sets the Inspector has queued wait for its next tick.
     pub(super) queued: bool,
@@ -66,10 +70,12 @@ pub struct Placed {
     pub generation: u64,
 }
 
-/// A set or a seal made through a link.
+/// A set, a create or a seal made through a link.
 pub(super) enum Linking {
     /// Sets a field of the entity with this ID.
     Set(EntityId, Edit),
+    /// Creates a root with these components, each a type's name and its whole value.
+    Create(Vec<(Ident, Value)>),
     /// Ends the link's gesture.
     Seal,
 }
@@ -101,7 +107,9 @@ impl InspectorLink {
     /// after the sets made since the field's last, so that a mouse that reports a thousand moves a
     /// second doesn't set a thousand, and a vector set whole and one of its components still set in
     /// the order they came. Until the tick, the Inspector panel draws the field as the set will
-    /// make it, while `entity` is picked; a refusal shows and is logged as the panels' do.
+    /// make it, while `entity` is picked; a refusal shows and is logged as the panels' do, but one
+    /// of a component `entity` hasn't, which the panel doesn't draw, shows above its components,
+    /// as an operation's does.
     ///
     /// `path` is a field of the component's own, such as `translation`, which holds nothing the
     /// panels set at a path of its own, as a struct, a list or an array does; or a component of a
@@ -143,6 +151,16 @@ impl InspectorLink {
         }
     }
 
+    /// Creates a root with `components`, each a type's name and its whole value, at the Inspector's
+    /// next tick, as the Entity menu's Create Empty does, after the link's sets and seals made
+    /// before it: it ends the link's gesture, the Edit menu undoes it in one step, and the
+    /// Inspector picks the entity it makes, unless the pick changes first. A refusal shows above
+    /// the components, and is logged, as the menu's does.
+    pub fn create(&self, components: Vec<(Ident, Value)>) {
+        let pending = &mut self.0.borrow_mut().pending;
+        pending.push(Linking::Create(components));
+    }
+
     #[cfg(feature = "dev")]
     /// Has a remote Inspector, which [`Inspector::remote`](super::Inspector::remote) makes, show
     /// the world of the game `session` names from its next pass, connecting to it, as it serves; or
@@ -174,17 +192,18 @@ impl InspectorLink {
     }
 
     /// Whether nothing made through the link, or the panels, waits for the game, for a remote
-    /// Inspector: no set made through the link since its last pass, and, as of that pass, no edit
-    /// it hasn't sent its game, nor one whose answer hasn't come, sets, operations, undos and redos
-    /// alike, while it's connected. So a request that another connection to the game sends from
-    /// then on reaches the game after all of them, as a save of what they edited must. Unlike
-    /// [`waiting`](Self::waiting), it doesn't wait for a read to show what the game has answered.
-    /// The local Inspector, whose edits wait for its tick rather than for a game, has none
-    /// unanswered: it says only whether a set made through the link waits for its next pass.
+    /// Inspector: no set or create made through the link since its last pass, and, as of that
+    /// pass, no edit it hasn't sent its game, nor one whose answer hasn't come, sets, operations,
+    /// undos and redos alike, while it's connected. So a request that another connection to the
+    /// game sends from then on reaches the game after all of them, as a save of what they edited
+    /// must. Unlike [`waiting`](Self::waiting), it doesn't wait for a read to show what the game
+    /// has answered. The local Inspector, whose edits wait for its tick rather than for a game,
+    /// has none unanswered: it says only whether a set or a create made through the link waits for
+    /// its next pass.
     pub fn idle(&self) -> bool {
         let linked = self.0.borrow();
-        let set = |linking: &Linking| matches!(linking, Linking::Set(..));
-        !linked.unanswered && !linked.pending.iter().any(set)
+        let edit = |linking: &Linking| !matches!(linking, Linking::Seal);
+        !linked.unanswered && !linked.pending.iter().any(edit)
     }
 
     /// Where the entity picked is, for a remote Inspector, as the game's last read of it gave it,
@@ -207,20 +226,34 @@ impl InspectorLink {
     }
 
     /// The sets and the seals made through the link since the Inspector's last pass, in order: a
-    /// set as its entity's ID, component, path and value, and a seal as `None`. For tests.
+    /// set as its entity's ID, component, path and value, and a seal as `None`; its creates are
+    /// [`creates`](Self::creates)'. For tests.
     #[doc(hidden)]
     pub fn pending(&self) -> Vec<Option<(EntityId, String, String, Value)>> {
         let linked = self.0.borrow();
-        let pending = linked.pending.iter().map(|linking| match linking {
-            Linking::Set(id, edit) => Some((
+        let pending = linked.pending.iter().filter_map(|linking| match linking {
+            Linking::Set(id, edit) => Some(Some((
                 *id,
                 edit.component.clone(),
                 edit.path.clone(),
                 edit.value.clone(),
-            )),
-            Linking::Seal => None,
+            ))),
+            Linking::Create(_) => None,
+            Linking::Seal => Some(None),
         });
         pending.collect()
+    }
+
+    /// The creates made through the link since the Inspector's last pass, in order, each as its
+    /// components. For tests.
+    #[doc(hidden)]
+    pub fn creates(&self) -> Vec<Vec<(Ident, Value)>> {
+        let linked = self.0.borrow();
+        let creates = linked.pending.iter().filter_map(|linking| match linking {
+            Linking::Create(components) => Some(components.clone()),
+            _ => None,
+        });
+        creates.collect()
     }
 }
 

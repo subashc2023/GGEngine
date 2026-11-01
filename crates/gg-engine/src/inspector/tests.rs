@@ -1191,8 +1191,9 @@ fn its_commands_are_values_that_queue_them_again() {
 }
 
 /// Adds and removes, queued as a recording replays them, are made at the next tick, through
-/// the log, whose undo takes them back; and an add or a remove forgets what its component
-/// refused. One refused shows above the components.
+/// the log, whose undo takes them back; a remove forgets what its component refused, as an add
+/// does, and either clears a refusal shown above the components, as a set's of a component the
+/// entity hasn't is. One refused shows above the components.
 #[test]
 fn components_are_added_and_removed_at_the_next_tick() {
     let mut world = World::default();
@@ -1212,7 +1213,9 @@ fn components_are_added_and_removed_at_the_next_tick() {
     inspector.apply(&mut world, Some(picked), count);
     let tint = refused("Sprite", "color", Value::F32(1.0));
     inspector.apply(&mut world, Some(picked), tint);
-    assert_eq!(inspector.refusals.len(), 2);
+    assert_eq!(inspector.refusals.len(), 1);
+    let says = inspector.not_done.clone().expect("refused");
+    assert!(says.contains("has no `Sprite`"), "{says}");
     let named = |name: &str, value| (Ident::Owned(name.to_owned()), value);
     let text = |text: &str| Value::String(text.to_owned());
     let operation = |name: &str, component: &str, value: Option<Value>| {
@@ -1241,7 +1244,7 @@ fn components_are_added_and_removed_at_the_next_tick() {
     assert_eq!(names, ["Transform", "Sprite"]);
     let color = world.get::<Sprite>(entity).expect("a sprite").color;
     assert_eq!(color, sprite.color);
-    assert!(inspector.refusals.is_empty());
+    assert!(inspector.refusals.is_empty() && inspector.not_done.is_none());
     assert_eq!(inspector.log.edits().len(), 2);
     // Refused, since it has one, and said so above its components.
     let again = operation("Add", "Transform", Some(Transform::IDENTITY.to_value()));
@@ -3021,7 +3024,8 @@ fn queued_names(inspector: &Inspector) -> Vec<&'static str> {
         Ok(("Set", _)) => "Set",
         Ok(("Seal", _)) => "Seal",
         Ok(("Undo", _)) => "Undo",
-        other => panic!("not a set, a seal or an undo: {other:?}"),
+        Ok(("Create", _)) => "Create",
+        other => panic!("not a set, a seal, an undo or a create: {other:?}"),
     });
     names.collect()
 }
@@ -3370,6 +3374,91 @@ fn the_links_latest_set_of_a_field_comes_after_those_made_since() {
     assert_eq!(link.pending(), expected);
 }
 
+/// A create through the link queues after the link's sets before it, ending their gesture, and
+/// makes a root at the next tick, which the Inspector picks; one undo takes it back alone. One
+/// the world refuses, of a type it hasn't, shows above the components, as the menu's does.
+#[test]
+fn a_create_through_the_link_makes_a_root_and_picks_it() {
+    let mut world = World::default();
+    world.register::<Name>().expect("registered");
+    let entity = world.spawn(Transform::IDENTITY);
+    let picked = id(&world, entity);
+    let ctx = crate::egui_context();
+    let mut inspector = Inspector::default();
+    let link = inspector.link();
+    let at = Value::Vec3(Vec3::new(1.0, 0.0, 0.0));
+    link.set(picked, "Transform", "translation", at);
+    let made = Transform {
+        translation: Vec3::new(0.0, 2.0, 0.0),
+        ..Transform::IDENTITY
+    };
+    let components: Vec<(Ident, Value)> = vec![
+        ("Name".into(), called("Rock").to_value()),
+        ("Transform".into(), made.to_value()),
+    ];
+    link.create(components);
+    assert!(!link.idle(), "until a pass takes it");
+    assert_eq!(link.creates().len(), 1);
+    inspector.queue(Pass::default());
+    assert_eq!(queued_names(&inspector), ["Set", "Create"]);
+    assert!(link.creates().is_empty());
+    Layer::tick(&mut inspector, &mut world, Tick { number: 0 });
+    let mut named = world.query::<(Entity, &Name)>();
+    let rock = named.find_map(|(entity, name)| (name.0 == "Rock").then_some(entity));
+    let rock = rock.expect("made");
+    assert_eq!(world.get::<Transform>(rock), Some(&made));
+    assert_eq!(world.parent(rock).expect("alive"), None, "a root");
+    assert_eq!(inspector.picked, Some(id(&world, rock)));
+    make(
+        &mut inspector,
+        &mut world,
+        Pass {
+            chosen: Some(Step::Undo),
+            ..Pass::default()
+        },
+    );
+    assert_eq!(world.entity(id(&world, entity)), Some(entity));
+    let translation = world.get::<Transform>(entity).map(|at| at.translation);
+    assert_eq!(translation, Some(Vec3::X), "the set stays");
+    assert_eq!(
+        world.entities(None).expect("all").len(),
+        1,
+        "the create undone"
+    );
+    link.create(vec![("Nothing".into(), Value::Bool(true))]);
+    // Refused at the first frame's tick, and shown from the next.
+    frame(&mut inspector, &mut world, &ctx, 1.0, Vec::new());
+    let (texts, _) = frame(&mut inspector, &mut world, &ctx, 2.0, Vec::new());
+    let said = inspector.not_done.clone().expect("refused");
+    assert!(texts.iter().any(|(text, _)| *text == said), "{texts:?}");
+}
+
+/// A set through the link of a component the picked entity hasn't, whose field the panel doesn't
+/// draw, is refused above its components, as an operation is, rather than beside a field.
+#[test]
+fn a_links_set_of_a_component_the_entity_hasnt_shows_above_its_components() {
+    let mut world = World::default();
+    world.register::<Sprite>().expect("registered");
+    let entity = world.spawn(Transform::IDENTITY);
+    let picked = id(&world, entity);
+    let ctx = crate::egui_context();
+    let mut inspector = Inspector::default();
+    inspector.pick(picked);
+    let link = inspector.link();
+    link.set(picked, "Sprite", "color", Value::Vec4(Vec4::ONE));
+    // Refused at the first frame's tick, and shown from the next.
+    frame(&mut inspector, &mut world, &ctx, 1.0, Vec::new());
+    let (texts, _) = frame(&mut inspector, &mut world, &ctx, 2.0, Vec::new());
+    assert!(inspector.refusals.is_empty());
+    let said = inspector.not_done.clone().expect("refused");
+    assert!(said.contains("has no `Sprite`"), "{said}");
+    let (_, under) = texts.iter().find(|(text, _)| *text == said).expect("shown");
+    let (_, heading) = (texts.iter())
+        .find(|(text, _)| *text == format!("Entity {picked}"))
+        .expect("the heading");
+    assert!(under.max.y <= heading.min.y, "above the components");
+}
+
 #[cfg(feature = "dev")]
 mod remote {
     use std::thread;
@@ -3482,7 +3571,9 @@ mod remote {
 
     /// A remote Inspector lists a game's entities through its API, as they come and go, shows the
     /// one picked, its components in the order they registered, sets a field in a gesture, which
-    /// one undo takes back, its Edit menu naming the edit, and creates an entity, which it picks.
+    /// one undo takes back, its Edit menu naming the edit, and creates an entity, which it picks,
+    /// as it does one its link creates; and a set through the link of a component the entity
+    /// hasn't is refused above its components.
     #[test]
     fn a_remote_inspector_shows_and_edits_a_game_through_the_api() {
         let app = "Remote Inspector";
@@ -3638,5 +3729,42 @@ mod remote {
         );
         assert_ne!(inspector.picked, Some(hero_id), "{texts:?}");
         assert_eq!(game.cx.world().entities(None).expect("all").len(), 2);
+        // One the link creates, picked too.
+        let made = Transform {
+            translation: Vec3::new(0.0, 3.0, 0.0),
+            ..Transform::IDENTITY
+        };
+        inspector.link().create(vec![
+            ("Name".into(), called("Rock").to_value()),
+            ("Transform".into(), made.to_value()),
+        ]);
+        until(
+            &mut inspector,
+            &mut game,
+            &ctx,
+            &mut time,
+            |_| {},
+            |texts, _| texts.iter().any(|text| text.starts_with("Rock, entity ")),
+        );
+        let rock = inspector.picked.expect("picked");
+        let world = game.cx.world();
+        let placed = world
+            .entity(rock)
+            .and_then(|rock| world.get::<Transform>(rock));
+        assert_eq!(placed, Some(&made));
+        // Its sprite's color, which it hasn't.
+        inspector
+            .link()
+            .set(rock, "Sprite", "color", Value::Vec4(Vec4::ONE));
+        let refused = |text: &String| text.contains("has no `Sprite`");
+        until(
+            &mut inspector,
+            &mut game,
+            &ctx,
+            &mut time,
+            |_| {},
+            |texts, _| texts.iter().any(refused),
+        );
+        assert!(inspector.refusals.is_empty());
     }
 }

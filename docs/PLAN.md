@@ -78,28 +78,17 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Renames that keep IDs** (2026-11-01)
 - **Reloading any change** (2026-11-01)
 - **Models in scenes by ID** (2026-11-01)
+- **Dropping from the Assets panel** (2026-11-01)
+- **Phase 7, assets** (2026-11-01)
 
 ## Now
 
-**Dropping from the Assets panel**, Phase 7's seventh and last milestone: the editor's Assets panel
-dropping a texture onto a sprite and a model into the scene, as operations through the tool API
-that name them by their IDs; its plan says when it's done, which Phase 7's *Done when* below
-bounds.
+**Phase 8's first milestone**, chosen as [Phase 8](#next) starts; its plan says when it's done.
 
 ## Next
 
 Each phase ends in something you can run and check.
 
-7. **Assets.** An asset database: every asset of a project found by a stable ID kept in a text file
-   beside it, which scenes name it by, with its import settings; assets loaded once whoever asks,
-   by ID or by path, and reloaded as their files change, textures, meshes and shaders alike; and the
-   editor's Assets panel dropping a texture onto a sprite, a model into the scene. *Done when* a
-   texture dragged from the Assets panel onto a sprite saves in its scene by ID, survives renaming
-   its file, and an edit to it in an image editor shows in the running game. Its milestones, in
-   order: asset IDs beside their files; textures named by ID; assets loaded wherever they're named,
-   the demo's arena's Pillar textured, committed; renames that keep IDs, which the running game
-   pairs by content, with a cache for each clone; reloading any change; models in scenes by ID; and
-   dropping from the editor's Assets panel.
 8. **Text and sound.** Text drawn from multi-channel signed distance fields, crisp at any size,
    fonts baked by the asset pipeline; a game's own UI, HUDs and menus, apart from the development
    UI; and audio: sounds and music, mixed, positioned in 2D, loaded as assets. *Done when* the demo
@@ -217,7 +206,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | The editor drawing the world's cameras in its view, as outlines of what each sees | The editor shows a game's cameras |
 | Moving the world's camera from the editor's view, as Unreal's Pilot and Blender's Lock Camera to View do: a move of the editor's camera goes back to its own | Someone frames a camera's shot from the view |
 | A scene or prefab loaded with a primary camera making the world's other cameras not primary, as an operation's does: a load sets fields as they're written, and of several primary, the view sees through the lowest ID's, warning | A prefab brings a camera of its own, as a player's would |
-| Finding the point in the world under the cursor, as `Context::pick` finds the entity there: the editor's camera finds one on a plane itself, but nothing reads the view's depth, and the tool API's `pick` answers the entity alone; and the orthographic camera controller zooms about the view's center | Something places what it adds at the cursor's depth, an agent places something at a pixel, or a game zooms toward the cursor |
+| Finding the point in the world under the cursor, as `Context::pick` finds the entity there: the editor's camera finds one on a plane itself, and a model dropped from the Assets panel lands on the grid's plane, but nothing reads the view's depth, and the tool API's `pick` answers the entity alone; and the orthographic camera controller zooms about the view's center | Something places what it adds at the cursor's depth, such as a model dropped onto another, an agent places something at a pixel, or a game zooms toward the cursor |
 | A dockspace's view in a window of its own: it docks and floats over the main window alone, since only the main window's input reaches the layers, and its image is made at the main window's scale | The editor shows the game on a display of its own |
 | Showing whether keys reach the view, such as an outline around it while they do: from a press on it, or with the cursor over it | Someone misses it |
 | Gamepads following a dockspace's view: they reach the layers whichever panel has the keys, as they do in games | The editor binds a pad, or a panel takes a pad's input |
@@ -338,6 +327,9 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Comments in scene files, which a save drops | People annotate scenes |
 | A list of recent scenes in the editor's File menu | Someone keeps opening the same few scenes |
 | Opening a scene from the editor's Assets panel, by a double click or a drag onto the view, as the drag of the editor's own world did; the File menu's Open opens one | Someone opens scenes often |
+| A texture from the Assets panel let go where no sprite takes it making one: on empty space a sprite of its own, on an entity without one a `Sprite`; the Logs, and the Inspector, say it took nothing | Someone lays out a 2D scene from the Assets panel |
+| Drops from the Assets panel onto the Entities panel's rows, as a child of the entity there, and onto the Inspector's texture fields: the view alone takes them | Someone drops onto them |
+| Dragging from the Assets panel torn off into a window of its own: a drag stays in the window it started in, which takes the button's release, so it never reaches the view | Someone keeps the Assets panel in a window of its own |
 | Listing the Assets panel's folder off the main thread, as a thread watching it would: it's listed on the main thread each second it shows, which a folder of many thousands of files would hold up for milliseconds | A project's asset folder that big |
 | Keeping edits made while a copy plays, which go with it at Stop, as Unity's do, but a scene file's save; and showing that the game plays beyond the lit Play or Simulate, such as a tint round the view | Someone loses an edit made while the world runs, or edits a running world for the scene |
 | Play and Stop, and the open scene's New and Open, in recorded runs and lockstep sessions, and its Save in lockstep sessions: kept as lines a replay brings the world as edited back at, or starts history afresh at, and applied by both peers at one tick, a save's text with them; `stop` answers `api.no_stop` there, `scene` answers `api.no_scene`, and `--stopped` is refused with `--record`, `--host` and `--join` | Someone records, or plays a lockstep session, in the editor |

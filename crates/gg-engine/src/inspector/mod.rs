@@ -465,12 +465,12 @@ impl Inspector {
 
     /// Queues a pass of the panels, for the next tick to make: first what the link did since the
     /// last pass, whose events came before the pass's input, its sets of one field as one edit
-    /// from its gesture's first set to its seal; then the pass's sets of the picked entity's
-    /// fields, as one edit from a press of the pointer to its release, or while a widget has the
-    /// keys, as its input says, so that a drag, or a number typed, is one edit; then its
-    /// operations, each of which ends the edit going on; then the step the Edit menu chose, or a
-    /// key asks for. Each gesture's first set ends the other's edit going on, and the pass's input
-    /// ends only its own.
+    /// from its gesture's first set to its seal, and its creates, each of which ends the edit
+    /// going on; then the pass's sets of the picked entity's fields, as one edit from a press of
+    /// the pointer to its release, or while a widget has the keys, as its input says, so that a
+    /// drag, or a number typed, is one edit; then its operations, each of which ends the edit
+    /// going on; then the step the Edit menu chose, or a key asks for. Each gesture's first set
+    /// ends the other's edit going on, and the pass's input ends only its own.
     fn queue(&mut self, pass: Pass) {
         let Pass {
             sets,
@@ -486,6 +486,11 @@ impl Inspector {
                     self.queued.0.push(Command::Set(id, edit));
                     self.link.borrow_mut().queued = true;
                     self.open = Some(Gesture::Link);
+                }
+                Linking::Create(components) => {
+                    let parent = None;
+                    self.queued.0.push(Command::Create { parent, components });
+                    self.open = None;
                 }
                 Linking::Seal => self.seal(Gesture::Link),
             }
@@ -805,7 +810,9 @@ impl Inspector {
         });
     }
     /// Sets the field `edit` changed of `entity`, the entity picked as it was made, as part of the
-    /// edit going on, and keeps the refusal if it's refused, while that's still the entity picked.
+    /// edit going on, and keeps the refusal if it's refused, while that's still the entity picked:
+    /// beside its field, or above the components for one of a component the entity hasn't, as a
+    /// link's set may be, whose field isn't drawn.
     fn apply(&mut self, world: &mut World, entity: Option<EntityId>, edit: Edit) {
         let Some(id) = entity.filter(|&id| world.entity(id).is_some()) else {
             return;
@@ -836,12 +843,30 @@ impl Inspector {
                 "{error}"
             );
             if shown {
-                self.refusals.push(Refusal {
-                    component,
-                    path,
-                    message: error.to_string(),
-                });
+                self.refuse(&*world, id, component, path, error.to_string());
             }
+        }
+    }
+
+    /// Keeps `message`, why a set of `path` of the picked entity's `component` was refused, as
+    /// `world`, which it's of, has the entity now: beside the field, or above the components for a
+    /// component the entity hasn't, whose field isn't drawn.
+    fn refuse(
+        &mut self,
+        world: &dyn Inspected,
+        id: EntityId,
+        component: String,
+        path: String,
+        message: String,
+    ) {
+        if world.components(id).contains(&component.as_str()) {
+            self.refusals.push(Refusal {
+                component,
+                path,
+                message,
+            });
+        } else {
+            self.not_done = Some(message);
         }
     }
 }

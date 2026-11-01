@@ -27,10 +27,19 @@ const BACK: f32 = 16.0;
 /// adds, removes or renames there shows, such as an agent's scene.
 const RELIST: Duration = Duration::from_secs(1);
 
+/// A texture or a model dragged from the Assets panel, by its file, as egui's drag and drop holds
+/// it: what the game's view takes as it's let go there, as [`game`](crate::game) says.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Dragged {
+    pub path: PathBuf,
+    pub kind: AssetKind,
+}
+
 /// The Assets panel: the files in a folder, its root, and in the folders under it, one folder at a
 /// time, as a content browser shows them: folders first, then files, each by its name, in rows as
 /// many across as fit. A double click on a folder shows it, and Back the folder above, as far up as
-/// the root. Files show dimmed, since nothing opens or drags them yet. An asset's ID file,
+/// the root. A texture or a model drags, as a [`Dragged`], egui drawing its cell under the cursor;
+/// other files show dimmed, since nothing opens or drags them yet. An asset's ID file,
 /// `<file>.meta` beside it, doesn't show.
 pub struct Assets {
     root: PathBuf,
@@ -59,6 +68,8 @@ struct Entry {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
     Folder,
+    /// A texture or a model, by its file's extension, which drags.
+    Asset(AssetKind),
     File,
 }
 
@@ -144,7 +155,8 @@ impl Assets {
 
 /// The files and folders in `folder`, but each texture's and model's ID file beside it, folders
 /// first, then files, each by its name regardless of case, then as it's spelled. A link is what it
-/// leads to, and one that leads nowhere a file.
+/// leads to, and one that leads nowhere a file; a link to a texture or a model is a file too, as
+/// the game's scan takes no asset through a link.
 ///
 /// It's listed on the main thread, which a folder of many thousands of files would hold up for
 /// some milliseconds each second it shows; a thread watching the folder wouldn't.
@@ -165,7 +177,12 @@ fn entries(folder: &Path) -> io::Result<Vec<Entry>> {
         if file_type.is_file() {
             files.insert(path.clone());
         }
-        let kind = if is_folder { Kind::Folder } else { Kind::File };
+        // A texture or a model a regular file, as the game's scan takes them.
+        let kind = match AssetKind::of(&path) {
+            _ if is_folder => Kind::Folder,
+            Some(asset) if file_type.is_file() => Kind::Asset(asset),
+            _ => Kind::File,
+        };
         let name = entry.file_name().to_string_lossy().into_owned();
         entries.push(Entry { path, name, kind });
     }
@@ -174,7 +191,7 @@ fn entries(folder: &Path) -> io::Result<Vec<Entry>> {
     // exactly, as the game's scan matches them, whatever the file system ignores.
     entries.retain(|entry| {
         let asset = entry.path.with_extension("");
-        let id_file = entry.kind == Kind::File
+        let id_file = entry.kind != Kind::Folder
             && entry.path.extension() == Some(OsStr::new(Meta::EXTENSION))
             && AssetKind::of(&asset).is_some();
         !(id_file && files.contains(&asset))
@@ -212,13 +229,23 @@ fn cells(ui: &mut egui::Ui, folder: &Path, entries: &[Entry]) -> Option<PathBuf>
     chosen
 }
 
-/// Draws `entry`'s cell into `ui`, and gives its folder if it's a folder double-clicked. A name cut
-/// short to fit gives itself whole as the cell's tooltip.
+/// Draws `entry`'s cell into `ui`, and gives its folder if it's a folder double-clicked. A texture's
+/// or a model's cell is a drag source, as [`Assets`] says. A name cut short to fit gives itself
+/// whole as the cell's tooltip.
 fn cell(ui: &mut egui::Ui, entry: &Entry) -> Option<PathBuf> {
     // By its path, so that no two cells share one, however alike they look.
     let id = Id::unique(("gg editor asset", &entry.path));
-    let (rect, cut) = draw(ui, entry);
-    let response = ui.interact(rect, id, Sense::CLICK);
+    let (response, cut) = match entry.kind {
+        Kind::Asset(kind) => {
+            let path = entry.path.clone();
+            let source = ui.dnd_drag_source(id, Dragged { path, kind }, |ui| draw(ui, entry).1);
+            (source.response, source.inner)
+        }
+        Kind::Folder | Kind::File => {
+            let (rect, cut) = draw(ui, entry);
+            (ui.interact(rect, id, Sense::CLICK), cut)
+        }
+    };
     let response = if cut {
         response.on_hover_text(entry.name.as_str())
     } else {
@@ -249,7 +276,7 @@ fn draw(ui: &mut egui::Ui, entry: &Entry) -> (Rect, bool) {
             painter.rect_filled(rect, lit.corner_radius, lit.weak_bg_fill);
         }
         let color = match entry.kind {
-            Kind::Folder => visuals.text_color(),
+            Kind::Folder | Kind::Asset(_) => visuals.text_color(),
             Kind::File => visuals.weak_text_color(),
         };
         let icon = Rect::from_min_size(
@@ -276,7 +303,7 @@ fn paint(painter: &Painter, rect: Rect, kind: Kind, color: Color32) {
             let body = Rect::from_min_max(at(1.5, 4.0), at(14.5, 13.0));
             painter.rect_filled(body, 0.75 * scale, color);
         }
-        Kind::File => {
+        Kind::Asset(_) | Kind::File => {
             let line = Stroke::new(0.75 * scale, color);
             let page = vec![
                 at(3.5, 1.5),
@@ -306,17 +333,17 @@ fn back() -> Atom<'static> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use gg_engine::egui::{Event, Modifiers, PointerButton, Pos2, RawInput};
 
     use super::*;
 
     /// A directory of a test's own in the OS's temporary directory, made empty, and removed as the
     /// test ends, failed or not.
-    struct Scratch(PathBuf);
+    pub(crate) struct Scratch(pub(crate) PathBuf);
 
     impl Scratch {
-        fn new(name: &str) -> Self {
+        pub(crate) fn new(name: &str) -> Self {
             let dir = std::env::temp_dir().join(format!("gg-editor-{name}-{}", std::process::id()));
             let _ = fs::remove_dir_all(&dir);
             fs::create_dir(&dir).expect("made");
@@ -331,7 +358,7 @@ mod tests {
     }
 
     /// The text drawn in `shapes`, a frame's output, each with where it was drawn.
-    fn texts(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, Rect)> {
+    pub(crate) fn texts(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, Rect)> {
         fn find(shape: &egui::Shape, texts: &mut Vec<(String, Rect)>) {
             match shape {
                 egui::Shape::Vec(shapes) => {
@@ -353,21 +380,22 @@ mod tests {
     }
 
     /// Where `text` was drawn among `texts`.
-    fn find(texts: &[(String, Rect)], text: &str) -> Rect {
+    pub(crate) fn find(texts: &[(String, Rect)], text: &str) -> Rect {
         let found = texts.iter().find(|(drawn, _)| drawn == text);
         found.unwrap_or_else(|| panic!("no {text}: {texts:?}")).1
     }
 
     /// Folders come first, then files, each by its name regardless of case, then as it's spelled,
-    /// names that aren't Latin among them; a folder's name never makes it a file. An asset's ID file
-    /// beside it doesn't show; one named for it but for case does, as the game warns of it, and so
-    /// do one without its asset, a folder at its name and any other `.meta` file, even beside the
-    /// file it's named for, and, where links can be made, one beside a link to a file, which the
-    /// game's scan doesn't take as an asset.
+    /// names that aren't Latin among them; a folder's name never makes it a file, nor an asset.
+    /// Textures and models are assets, by their extensions in any case. An asset's ID file beside
+    /// it doesn't show; one named for it but for case does, as the game warns of it, and so do one
+    /// without its asset, a folder at its name and any other `.meta` file, even beside the file
+    /// it's named for, and, where links can be made, one beside a link to a file, which the game's
+    /// scan doesn't take as an asset, nor does the panel.
     #[test]
     fn a_folder_lists_its_folders_then_its_files_by_name() {
         let scratch = Scratch::new("assets-listed");
-        for folder in ["b", "A", "maps.ron", "old.png.meta"] {
+        for folder in ["b", "A", "maps.ron", "old.png.meta", "shown.gltf"] {
             fs::create_dir(scratch.0.join(folder)).expect("made");
         }
         for file in [
@@ -384,6 +412,7 @@ mod tests {
             "B.ron",
             "B.ron.meta",
             "a.RON",
+            "rock.GLB",
             "Z.txt",
         ] {
             fs::write(scratch.0.join(file), "").expect("written");
@@ -392,22 +421,25 @@ mod tests {
         let listed: Vec<(&str, Kind)> = (listed.iter())
             .map(|entry| (entry.name.as_str(), entry.kind))
             .collect();
+        let texture = Kind::Asset(AssetKind::Texture);
         let expected = [
             ("A", Kind::Folder),
             ("b", Kind::Folder),
             ("maps.ron", Kind::Folder),
             ("old.png.meta", Kind::Folder),
+            ("shown.gltf", Kind::Folder),
             ("a.RON", Kind::File),
             ("B.ron", Kind::File),
             ("B.ron.meta", Kind::File),
-            ("c.png", Kind::File),
-            ("d.png", Kind::File),
+            ("c.png", texture),
+            ("d.png", texture),
             ("d.png.META", Kind::File),
-            ("E.png", Kind::File),
+            ("E.png", texture),
             ("e.png.meta", Kind::File),
             ("gone.png.meta", Kind::File),
             ("notes.meta", Kind::File),
-            ("old.png", Kind::File),
+            ("old.png", texture),
+            ("rock.GLB", Kind::Asset(AssetKind::Model)),
             ("Z.txt", Kind::File),
             ("уровень.ron", Kind::File),
         ];
@@ -418,9 +450,12 @@ mod tests {
             std::os::unix::fs::symlink(scratch.0.join("c.png"), link).expect("linked");
             fs::write(scratch.0.join("linked.png.meta"), "").expect("written");
             let listed = entries(&scratch.0).expect("listed");
-            let names: Vec<&str> = listed.iter().map(|entry| entry.name.as_str()).collect();
-            let both = names.contains(&"linked.png") && names.contains(&"linked.png.meta");
-            assert!(both, "{names:?}");
+            let kinds: Vec<(&str, Kind)> = (listed.iter())
+                .map(|entry| (entry.name.as_str(), entry.kind))
+                .collect();
+            let both = kinds.contains(&("linked.png", Kind::File))
+                && kinds.contains(&("linked.png.meta", Kind::File));
+            assert!(both, "{kinds:?}");
         }
     }
 

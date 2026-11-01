@@ -81,19 +81,21 @@ The editor uses `gg-api` too, beside `gg-engine`, as a client of the tool API, a
   shows under the cursor through the API; its camera, the pick's outline, its grid and the
   colliders' outlines going to the game as the API's look, which it takes up from other clients
   too; the game's events in its Logs as the game logs them; and the project's assets in its Assets
-  panel, an ID file beside its asset hidden. Its Play and Simulate are the API's `play`, and Stop
-  its `stop`, which brings back the world as edited. Its File menu's New, Open and Save are the
-  API's `scene`, on the game's open scene, which its title bar names, marked while unsaved; and
-  since closing it ends the game, it asks before New, Open or closing loses unsaved edits. Play
-  sees through the game's camera, which gets all of the view's input. For a game whose ticks are
-  all its own code, Simulate plays the game as Play does, but through the editor's orbit camera,
-  the game getting no input, as Unreal's Simulate In Editor does; switching between them carries
-  on, moving the camera and the input over, as Unreal's Possess and Eject do. The toolbar's camera
-  switch is that switch while the game plays; stopped, it shows what the game's camera sees, the
-  input staying the editor's, until the editor's camera takes some. A Stop turns the view to the
-  editor's camera, which carries on from where the view was, as it does whenever it takes the view
-  over. The editor has no world of its own: started elsewhere, it runs no game, and says it needs a
-  project. [game.rs](apps/editor/src/game.rs) describes the rest.
+  panel, an ID file beside its asset hidden, from which a texture dropped on the view sets the
+  texture of the sprite there, and a model is a root where the cursor shows the grid's plane,
+  each an edit of the editor's naming the asset by its ID. Its Play and Simulate are the API's
+  `play`, and Stop its `stop`, which brings back the world as edited. Its File menu's New, Open
+  and Save are the API's `scene`, on the game's open scene, which its title bar names, marked
+  while unsaved; and since closing it ends the game, it asks before New, Open or closing loses
+  unsaved edits. Play sees through the game's camera, which gets all of the view's input. For a
+  game whose ticks are all its own code, Simulate plays the game as Play does, but through the
+  editor's orbit camera, the game getting no input, as Unreal's Simulate In Editor does; switching
+  between them carries on, moving the camera and the input over, as Unreal's Possess and Eject do.
+  The toolbar's camera switch is that switch while the game plays; stopped, it shows what the
+  game's camera sees, the input staying the editor's, until the editor's camera takes some. A Stop
+  turns the view to the editor's camera, which carries on from where the view was, as it does
+  whenever it takes the view over. The editor has no world of its own: started elsewhere, it runs
+  no game, and says it needs a project. [game.rs](apps/editor/src/game.rs) describes the rest.
 - **`player`:** the reference player. It runs a cooked scene without game code and shows how a
   game builds its own player.
 - **`tools/gg`:** the command-line tool, a client of the tool API, which `cargo gg` runs.
@@ -679,10 +681,10 @@ keeps between ticks only what it set up as it attached and its queue, and the wo
 rest of the simulation, as a snapshot restores it. The Inspector's log is the exception, which a
 replay from the attach rebuilds from the recorded edits; it can't be a component, since its
 inverses hold typed columns tied to the world they were made in. Operations are the commands of
-authoring: the Inspector's edits, undos and redos wait for its next tick, and another layer picks
-and edits through its link, `Inspector::link`, as the editor's view and handles do. Edits from
-outside the layers, the tool API's and the scene files', are the engine's own, which apply between
-ticks, and the authors' logs the context's, rebuilt by a replay as the Inspector's is.
+authoring: the Inspector's edits, undos and redos wait for its next tick, and another layer picks,
+edits and creates through its link, `Inspector::link`, as the editor's handles and drops do. Edits
+from outside the layers, the tool API's and the scene files', are the engine's own, which apply
+between ticks, and the authors' logs the context's, rebuilt by a replay as the Inspector's is.
 
 ## Networking
 
