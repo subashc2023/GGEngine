@@ -648,7 +648,7 @@ mod open_scene {
     /// `scene.watched` for a file that another scene file the game loaded has, but the open one;
     /// as [`read_scene`](crate::read_scene) fails; as the text's load would, the path beginning its
     /// message; and with `ecs.id_taken` for an ID it gives that an entity the open scene doesn't
-    /// own has.
+    /// own has, a model's node going with its root.
     pub(crate) fn check_open(
         cx: &mut Context,
         file: (PathBuf, String),
@@ -674,7 +674,9 @@ mod open_scene {
             error.with_message(message)
         })?;
         let owned: HashSet<Entity> = owned(world, files, open).into_iter().collect();
-        let theirs = |id: &EntityId| world.entity(*id).is_some_and(|e| !owned.contains(&e));
+        let theirs = |id: &EntityId| {
+            (world.entity(*id)).is_some_and(|e| !owned.contains(&world.node_root(e)))
+        };
         if let Some(id) = World::scene_ids(&text)?.into_iter().find(theirs) {
             let message = format!(
                 "{}: entity {id} is in the world already, and the open scene doesn't own it, so \
@@ -1567,7 +1569,8 @@ pub(crate) mod tests {
 
     /// Open and new delete a model's root the open scene owns with its nodes, which scenes don't
     /// save, and whatever code put under them, the scene's or the game's, as a change of its model
-    /// does; and its file, opened again, spawns the nodes again, under the same IDs.
+    /// does; its file, opened again, spawns the nodes again, under the same IDs; and a file may give
+    /// an entity a node's ID, which the node frees as it goes.
     #[test]
     fn open_and_new_take_a_models_nodes_with_its_root() {
         let dir = Scratch::new("open-scene-model");
@@ -1598,16 +1601,28 @@ pub(crate) mod tests {
         let held = world.spawn(Transform::IDENTITY);
         world.set_parent(held, Some(node)).expect("code may");
 
-        let file = open_scene::resolve(&cx, Path::new("scenes/main.ron"), true);
-        let file = file.expect("in the scenes folder");
-        let opening = open_scene::check_open(&mut cx, file, 0, true).expect("opens");
-        open_scene::open(&mut cx, &mut stack, opening).expect("opened");
+        let open = |cx: &mut Context, stack: &mut Stack, path: &str| {
+            let file = open_scene::resolve(cx, Path::new(path), true);
+            let file = file.expect("in the scenes folder");
+            let opening = open_scene::check_open(cx, file, 0, true).expect("opens");
+            open_scene::open(cx, stack, opening).expect("opened");
+        };
+        open(&mut cx, &mut stack, "scenes/main.ron");
         let world = cx.world();
         assert_eq!(nodes(world), spawned, "spawned again, under the same IDs");
         let a = world.entity(ids[0]).expect("the file's");
         assert_eq!(world.parent(a).expect("alive"), None, "as its file has it");
         assert!(!world.contains(held), "gone with the node it was under");
         assert!(!open_scene::unsaved(&mut cx, 0));
+
+        let node = format!("(entities: {{\"{}\": ()}})\n", spawned[0]);
+        save(&dir.0.join("scenes").join("node.ron"), &node, 0);
+        open(&mut cx, &mut stack, "scenes/node.ron");
+        let world = cx.world();
+        let entity = world.entity(spawned[0]).expect("the file's");
+        assert!(world.get::<ModelNode>(entity).is_none());
+        assert_eq!((world.entity(root_id), nodes(world)), (None, vec![]));
+        open(&mut cx, &mut stack, "scenes/main.ron");
 
         open_scene::new(&mut cx, &mut stack).expect("emptied");
         let world = cx.world();
