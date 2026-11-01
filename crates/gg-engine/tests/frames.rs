@@ -3,7 +3,8 @@
 //! rings, games' meshes with parameters, opaque and blended, a glTF model and a mirrored copy of
 //! it, a turning hierarchy and drifters that wrap, whose ticks despawn and spawn entities, with
 //! colliders, whose outlines draw over the rest, as a layer's own lines and square's outline do,
-//! and an outline round the turning parent, as the editor outlines what's picked, seen through a
+//! text, written and shaped again each frame, and an outline round the turning parent, as the
+//! editor outlines what's picked, seen through a
 //! camera of the world's that a pivot the ticks turn carries round, run through the engine's main
 //! loop headless, without the tool API, whose development runs' watchers of the assets' files
 //! allocate as they look, three fifths of a tick apart, so that they draw between ticks, once its
@@ -29,6 +30,7 @@ mod common;
 
 use std::collections::VecDeque;
 use std::f32::consts::TAU;
+use std::fmt::Write as _;
 use std::fs;
 use std::io::BufWriter;
 use std::ops::ControlFlow;
@@ -40,9 +42,9 @@ use std::time::Duration;
 
 use gg_engine::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_engine::{
-    Actions, App, Binding, Blend, BoxCollider2D, Camera, Change, Circle, CircleCollider2D,
-    Component, Context, Entity, Event, Key, Layer, Mesh, MeshDraw, Model, MouseButton, Pick,
-    Projection, Shader, Source, Sprite, SpriteSheet, Texture, Tick, Transform, World,
+    Actions, Align, App, Binding, Blend, BoxCollider2D, Camera, Change, Circle, CircleCollider2D,
+    Component, Context, Entity, Event, Font, Key, Layer, Mesh, MeshDraw, Model, MouseButton, Pick,
+    Projection, Shader, Source, Sprite, SpriteSheet, TextStyle, Texture, Tick, Transform, World,
 };
 use serde_json::json;
 
@@ -136,6 +138,8 @@ struct Assets {
     sheet: SpriteSheet,
     /// Opaque, so that its copies draw in runs that the order of their IDs doesn't split.
     plain: Model,
+    /// The engine's own font, Inter.
+    font: Font,
 }
 
 /// The app: what it spawns as it attaches, and what its ticks move, spawn and despawn.
@@ -159,6 +163,8 @@ struct Scene {
     /// The tickets of the picks of each of the last frames, by its number modulo `ASKED`: at the
     /// view's middle, then outside it.
     asked: [Option<[Pick; 2]>; ASKED],
+    /// The text each frame draws, written again in its memory.
+    text: String,
 }
 
 impl Scene {
@@ -227,6 +233,9 @@ impl Layer for Scene {
         let sheet = cx.add_sprite_sheet("cells", self.dir.join("cells.png"), [8, 8]);
         let pair = cx.add_model("pair", self.dir.join("pair.gltf"));
         let plain = cx.add_model("plain", self.dir.join("plain.gltf"));
+        let inter =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fonts/Inter/Inter-Regular.ttf");
+        let font = cx.add_font("inter", inter);
         let assets = Assets {
             quad: quad.expect("the quad is whole triangles"),
             opaque: opaque.expect("the shader compiles"),
@@ -234,6 +243,7 @@ impl Layer for Scene {
             texture: texture.expect("the checker loads"),
             sheet: sheet.expect("the cells load"),
             plain: plain.expect("the plain model loads"),
+            font: font.expect("Inter bakes"),
         };
         let pair = pair.expect("the pair loads");
 
@@ -371,6 +381,18 @@ impl Layer for Scene {
             ..Circle::default()
         };
         cx.draw_circle(Mat4::from_translation(Vec3::new(1.5, 5.0, 0.0)), ring);
+        // Text shaped again each frame, of the same length, and kerned, over two lines.
+        self.text.clear();
+        let written = write!(self.text, "Frame {:06}\nAVA Æ€ ‘f’ \u{7}漢", self.frames);
+        written.expect("a string takes any text");
+        let style = TextStyle {
+            font: self.assets().font,
+            size: 0.5,
+            color: Vec4::new(0.9, 0.9, 0.9, 1.0),
+            align: [Align::Start, Align::End],
+        };
+        let corner = Mat4::from_translation(Vec3::new(-6.0, -6.0, 0.0));
+        cx.draw_text(corner, &self.text, &style);
         let turning = self.turning.expect("attached");
         let turning = cx.world().id(turning).expect("alive");
         cx.outline(turning, Vec4::new(1.0, 0.6, 0.1, 1.0), 1.0);

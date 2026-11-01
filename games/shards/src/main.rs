@@ -4,8 +4,9 @@
 //! `--host <address>` steering player 0 and one given `--join <address>` player 1, each with its own
 //! keys. The arena's walls are its scene file, `scenes/arena.ron`, which a development build
 //! applies as it's saved; its floor is its shader, `shaders/floor.slang`, which it reloads as it's
-//! saved.
+//! saved; and its scores are text in its font, `fonts/Inter-Bold.ttf`.
 
+use std::fmt::Write as _;
 use std::ops::ControlFlow;
 use std::path::Path;
 use std::process::ExitCode;
@@ -14,9 +15,10 @@ use std::time::Duration;
 use bytemuck::NoUninit;
 use gg_engine::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_engine::{
-    Actions, App, Binding, Blend, BodyType, Camera, Change, Circle, CircleCollider2D, Commands,
-    Component, Context, Entity, Event, Key, Layer, Mesh, Name, PadButton, Physics2D, Projection,
-    Reflect, RigidBody2D, Shader, Source, Sprite, Stick, Tick, Transform, World, step_physics,
+    Actions, Align, App, Binding, Blend, BodyType, Camera, Change, Circle, CircleCollider2D,
+    Commands, Component, Context, Entity, Event, Font, Key, Layer, Mesh, Name, PadButton,
+    Physics2D, Projection, Reflect, RigidBody2D, Shader, Source, Sprite, Stick, TextStyle, Tick,
+    Transform, World, step_physics,
 };
 
 fn main() -> ExitCode {
@@ -151,6 +153,10 @@ struct Shards {
     commands: Vec<Command>,
     /// The floor's square and shader, once the game loads.
     floor: Option<(Mesh<Corner>, Shader<Corner, Floor>)>,
+    /// The font the scores are drawn in, once the game loads.
+    font: Option<Font>,
+    /// The scores' text, written again in its memory each frame.
+    text: String,
 }
 
 impl Shards {
@@ -183,6 +189,8 @@ impl Shards {
             actions,
             commands: Vec::new(),
             floor: None,
+            font: None,
+            text: String::new(),
         }
     }
 }
@@ -201,6 +209,8 @@ impl Layer for Shards {
             square.expect("the floor is two whole triangles"),
             shader.expect("the floor's shader compiles"),
         ));
+        let font = cx.add_font("Inter Bold", root.join("fonts/Inter-Bold.ttf"));
+        self.font = Some(font.expect("the game's font bakes"));
         register(cx.world_mut());
     }
 
@@ -271,7 +281,9 @@ impl Layer for Shards {
         let Some(&found) = cx.world().query::<&Match>().next() else {
             return;
         };
-        draw_scores(cx, &found);
+        if let Some(font) = self.font {
+            draw_scores(cx, &found, font, &mut self.text);
+        }
     }
 
     fn event(&mut self, _: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
@@ -482,38 +494,43 @@ fn spin(world: &mut World, dt: Duration) {
     }
 }
 
-/// Draws the match's scores above the arena: each player's shards as dots in its color, from its
-/// side toward the middle, and its matches won as rings beyond them.
-fn draw_scores(cx: &mut Context, found: &Match) {
+/// Draws the match's scores above the arena, in `font`, writing each text into `text`: each
+/// player's shards in its color at its side, and the matches it has won beside them, toward the
+/// middle, where the shards that win a match are named.
+fn draw_scores(cx: &mut Context, found: &Match, font: Font, text: &mut String) {
+    // Between the top wall and the view's top.
+    let y = ARENA.y + 0.9;
+    let at = |x: f32| Mat4::from_translation(Vec3::new(x, y, 0.5));
+    let style = |size: f32, color: Vec4, across: Align| TextStyle {
+        font,
+        size,
+        color,
+        align: [across, Align::Center],
+    };
     for (index, &color) in COLORS.iter().enumerate() {
-        let side = if index == 0 { -1.0 } else { 1.0 };
-        let color = Vec3::from(color);
-        let y = ARENA.y + 0.9;
-        let dot = |n: u32, from: f32| {
-            let x = side * (from - n as f32 * 0.45);
-            Mat4::from_scale_rotation_translation(
-                Vec3::splat(0.3),
-                Quat::IDENTITY,
-                Vec3::new(x, y, 0.5),
-            )
+        // Each side's text grows from its edge toward the middle.
+        let (side, across) = if index == 0 {
+            (-1.0, Align::Start)
+        } else {
+            (1.0, Align::End)
         };
-        for n in 0..WINS_AT {
-            let scored = n < found.scores[index];
-            let circle = Circle {
-                color: color.extend(if scored { 1.0 } else { 0.2 }),
-                ..Circle::default()
-            };
-            cx.draw_circle(dot(n, ARENA.x - 0.5), circle);
-        }
-        for n in 0..found.wins[index].min(5) {
-            let ring = Circle {
-                color: color.extend(1.0),
-                thickness: 0.35,
-                ..Circle::default()
-            };
-            cx.draw_circle(dot(n, ARENA.x - 0.5 - 0.45 * WINS_AT as f32 - 0.3), ring);
-        }
+        let color = Vec3::from(color);
+        let write = |text: &mut String, value: u32, then: &str| {
+            text.clear();
+            write!(text, "{value}{then}").expect("a string takes any text");
+        };
+        write(text, found.scores[index], "");
+        let edge = side * ARENA.x;
+        cx.draw_text(at(edge), text, &style(0.55, color.extend(1.0), across));
+        let won = found.wins[index];
+        write(text, won, if won == 1 { " WIN" } else { " WINS" });
+        let beside = style(0.3, color.extend(0.7), across);
+        cx.draw_text(at(edge - side * 0.65), text, &beside);
     }
+    text.clear();
+    write!(text, "FIRST TO {WINS_AT}").expect("a string takes any text");
+    let gray = Vec4::new(0.55, 0.6, 0.7, 1.0);
+    cx.draw_text(at(0.0), text, &style(0.3, gray, Align::Center));
 }
 
 #[cfg(test)]

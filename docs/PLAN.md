@@ -80,10 +80,14 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Models in scenes by ID** (2026-11-01)
 - **Dropping from the Assets panel** (2026-11-01)
 - **Phase 7, assets** (2026-11-01)
+- **Fonts and text** (2026-11-01)
 
 ## Now
 
-**Phase 8's first milestone**, chosen as [Phase 8](#next) starts; its plan says when it's done.
+**Text in the world**, Phase 8's second milestone: a `Text` component the world draws as it draws
+sprites, which scenes save and the Inspector and tools edit, naming its font by its asset ID; fonts
+loaded wherever text names them, and baked again as their files change; its plan says when it's
+done.
 
 ## Next
 
@@ -92,7 +96,11 @@ Each phase ends in something you can run and check.
 8. **Text and sound.** Text drawn from multi-channel signed distance fields, crisp at any size,
    fonts baked by the asset pipeline; a game's own UI, HUDs and menus, apart from the development
    UI; and audio: sounds and music, mixed, positioned in 2D, loaded as assets. *Done when* the demo
-   shows its scores and a menu in text and plays its sounds.
+   shows its scores and a menu in text and plays its sounds. Its milestones, in order: fonts and
+   text; text in the world; a game's UI, HUDs and menus that layers lay out as they update, with
+   the demo's menu; sounds, which ticks queue and layers play, positioned in 2D, with the demo's;
+   and music, streamed, looped and faded under volume buses, with the demo's. The fourth decides
+   how a sound a tick queues on an entity follows it as it moves.
 9. **Scripting.** Luau, as [Game code](../ARCHITECTURE.md#game-code) describes: scripts as assets,
    attached to entities, their fields in the Inspector, reaching other entities and Rust components
    through reflection, reloaded as they're saved with the world kept, deterministic for lockstep
@@ -168,7 +176,13 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Following a texture's or a model's file outside the asset root, which has no asset ID, as it's renamed or moved: it's watched where it was, missing there, and reloads no more | Someone moves such files while their game runs |
 | Per-frame data in a buffer: shaders get the camera's view and projection as one matrix, and see the world through each draw's transform, but not the camera's position, the time or the lights | Phase 12, with lighting |
 | Materials: parameters kept on the GPU and written when they change, rather than copied every frame with each instance; `MeshDraw`'s cap of 64 bytes of parameters, past which a shader draws through `Context::draw`, goes with it | Phase 12, with materials |
-| Textures of data rather than color, such as normal maps, which shaders read as stored rather than decoded from sRGB | Phase 12, with PBR's maps |
+| Games' textures of data rather than color, such as normal maps, which shaders read as stored rather than decoded from sRGB, as they read fonts' fields: `Context::add_texture` adds color alone | Phase 12, with PBR's maps |
+| Glyphs beyond the characters Windows-1252 prints: a font's field holds those alone, and any other character draws as the font's `.notdef`; a field that grows as text needs glyphs, or a list of characters in a font's ID file, would hold more | A game writes a language beyond Western European ones |
+| Shaping's features that put glyphs in place of others, such as ligatures and contextual alternates, which text is shaped without, as its font's field may not hold what they'd substitute; and the scripts that need them, those written right to left, and lines of more than one direction | A game's font relies on them, or a game writes such a script |
+| Text wrapped to a width, and fallback fonts, a character one lacks drawn from another | A game's UI lays out paragraphs, or mixes scripts in a line |
+| Outlines, shadows and glows round text, from the true distance field its field holds in its alpha | A game's text needs one to read over what's behind it |
+| Fonts' fields kept between runs, or cooked: each font bakes as it loads, Inter Bold's 218 glyphs in about 50 ms in release and 140 ms in a debug build, on the job system's threads | Phase 10, which cooks them |
+| Fonts other than a file's default instance of outlines: a variable font draws at its axes' defaults, unhinted, and collections (`.ttc`, `.otc`), color fonts and fonts of bitmaps alone don't load | A game needs one |
 | Premultiplied alpha for games' textures: with straight alpha, as PNGs store it, a linear filter at an edge mixes in the color of the transparent pixels beside it | A game's art shows dark or colored fringes |
 | Sorting what blends back to front by its depth in the view, rather than by its z in the world, which orders it rightly only as seen from in front, as [Rendering](../ARCHITECTURE.md#rendering) says; and what layers draw themselves goes in the order given. Sorting coplanar sprites each by its own depth would sort the swarm's 100,000 every frame the camera turns, and swap overlapping ones as it does | A game blends in 3D, such as particles or glass |
 | Back-face culling for games' own meshes: `MeshDraw::new` and `Context::draw` draw both faces, as sprites mirrored by a negative scale need; models' materials alone cull | A game draws closed meshes of its own |
@@ -260,7 +274,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Games' shaders compile with slangc as they're added, so running a game needs slangc where its build found it | Phase 10, which cooks shaders |
 | `MeshDraw`'s mesh and shader named, as `Sprite.texture` is: opaque until then, shown but not set, saved in scenes or hashed, and carried across a restart by their indices only where the layers added the same assets in the same order; and setting them by name | A game builds its draws from data |
 | Watching the asset root through the OS's notifications of changes: its thread scans it every second, walking it whole and reading every ID file, about 70 ms for 1,000 assets on Windows, and reads whole each asset's file that changed, for its print, every one in a clone's first run, which delays its next scans but no answer; and a run's start scans it on the main thread, before its layers load, flushing each ID file it writes to the disk, about 6 ms apiece | A project's asset root of tens of thousands of files |
-| IDs for shaders, scenes, sounds and other kinds, for assets outside the asset root, and for assets reached through links: the scan gives textures and models under the root alone, never through a link | Each kind as something first names it by ID |
+| IDs for shaders, scenes, sounds and other kinds, for assets outside the asset root, and for assets reached through links: the scan gives textures, models and fonts under the root alone, never through a link | Each kind as something first names it by ID |
 | Builds without `dev` naming textures by their IDs: they read no ID file, so they name every texture by its path, and a scene, a recording or a snapshot that names one by its ID finds none there | Phase 10, whose cooked package gives each asset its ID |
 | Loading the textures that scene text names where a layer loads it into a world itself, as inside a tick, as the sandbox's grid reload does: a world can't reach the renderer's textures, which are the context's, so `World::load_scene` finds only those loaded, while `Context::load_scene_file`, the tool API and the engine's other reads load them | A game loads scene text in a tick that names textures no layer adds |
 | A lockstep joiner loading for its tool API a texture its host hasn't named (`asset.not_given`), whose name could differ from the host's; the host's edits load any | Someone edits a joiner's textures from its own editor |

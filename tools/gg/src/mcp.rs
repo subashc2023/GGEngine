@@ -37,10 +37,10 @@ can be undone. `look` sets parts of the view's look, its viewpoint, an outline r
 grid, and whether colliders' outlines show, which the editor and any other client set too, the \
 last to set a part winning; give back, as null, what you set when you're done. `capture` shows \
 the view with the look, and `pick` names the entity at a pixel of it, as a capture's PNG has it. \
-Textures and models have IDs, 16 hex digits, which `assets` lists with their paths: the game, but a \
-lockstep session's joiner, whose host does, writes each one's in an ID file beside it, \
-`<file>.meta`, such as `stone.png.meta`, as it starts and as it finds new files; commit it with \
-its file. Rename or move a file with its ID file or alone: the game moves an ID file left behind \
+Textures, models and fonts have IDs, 16 hex digits, which `assets` lists with their paths: the \
+game, but a lockstep session's joiner, whose host does, writes each one's in an ID file beside \
+it, `<file>.meta`, such as `stone.png.meta`, as it starts and as it finds new files; commit it \
+with its file. Rename or move a file with its ID file or alone: the game moves an ID file left behind \
 beside the file it was renamed to, by what the file holds, as it runs or as it next starts, so \
 that it keeps its ID, unless you edit it in the same step, or rename it in a clone the game hasn't \
 run in yet; a warning then names the ID left behind. A texture's or a model's value is its ID \
@@ -345,11 +345,11 @@ fn tools() -> Value {
         ),
         tool(
             "assets",
-            "The game's textures and models, a page of them by their paths from its asset root, as \
-             `scene` names files: each one's ID, 16 hex digits, or null while it has none; its \
-             kind; whether a layer has added it; and `problem`, what's wrong with its ID file, if \
-             anything, as `asset.duplicate_id`; and `orphans`, ID files whose assets aren't there, \
-             as after a rename made with an edit. It answers once the game has looked at the asset \
+            "The game's textures, models and fonts, a page of them by their paths from its asset \
+             root, as `scene` names files: each one's ID, 16 hex digits, or null while it has \
+             none; its kind; whether a layer has added it; and `problem`, what's wrong with its ID \
+             file, if anything, as `asset.duplicate_id`; and `orphans`, ID files whose assets \
+             aren't there, as after a rename made with an edit. It answers once the game has looked at the asset \
              root since, so that a file added or renamed since is listed, and the game, but a \
              lockstep session's joiner, writes each missing ID file, `<file>.meta` beside its \
              file, which you commit with it, and moves one a rename of its file alone left behind \

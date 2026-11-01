@@ -119,13 +119,13 @@ Talk to a running game, through its tool API:
   get <ID> <COMPONENT> [PATH]    A component's value, or its field at PATH, such as `translation.x`
   hash                           Its world's hash
   assets [--kind <KIND>] [--skip <N>] [--take <N>]
-                                 List its textures and models, those of KIND, `texture` or `model`,
-                                 N at a time (100), by their paths from its asset root, each with
-                                 its ID, whether a layer has added it, and what's wrong with its ID
-                                 file, and the ID files left without their assets; the game, but a
-                                 lockstep session's joiner, whose host does, writes each one's ID
-                                 in a file beside it, `<file>.meta`, as it starts and as it finds
-                                 new files: commit it with its file. A file renamed or moved alone
+                                 List its textures, models and fonts, those of KIND, `texture`,
+                                 `model` or `font`, N at a time (100), by their paths from its
+                                 asset root, each with its ID, whether a layer has added it, and
+                                 what's wrong with its ID file, and the ID files left without their
+                                 assets; the game, but a lockstep session's joiner, whose host
+                                 does, writes each one's ID in a file beside it, `<file>.meta`, as
+                                 it starts and as it finds new files: commit it with its file. A file renamed or moved alone
                                  keeps its ID, the game moving its ID file after it, unless it's
                                  edited in the same step. A file of a texture or a model the game
                                  has added, edited, reloads in it, as a shader's does, the nodes

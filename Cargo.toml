@@ -27,6 +27,9 @@ egui-winit = { version = "0.37.0", default-features = false, features = [
     "x11",
 ] }
 epaint = { version = "0.37.0", features = ["bytemuck"] }
+# Fonts' multi-channel signed distance fields, in Rust alone: msdfgen's method, its error
+# correction among it, but not its handling of outlines that overlap themselves.
+fdsm = "0.8.0"
 # Gamepads. On Windows its default backend, Windows.Gaming.Input, delivers input only to a
 # focused window of the process; on Linux it builds against libudev through pkg-config, so a
 # build needs pkg-config and libudev's headers, and a run libudev1.
@@ -37,6 +40,10 @@ gilrs = "0.11.2"
 # additions only on ARM, and with libm's functions rather than the platform's C library's. Cargo
 # merges features across a build, so drawing's math is scalar too.
 glam = { version = "0.34.1", features = ["bytemuck", "scalar-math", "libm"] }
+# Shapes games' text. epaint's version, so that the two build once.
+harfrust = "0.12.0"
+# The images fdsm generates fonts' fields into. fdsm's version, without its defaults, its codecs.
+image = { version = "0.25.10", default-features = false }
 # Finds RenderDoc's library in the process, for captures. ash's version, so that the two build
 # once.
 libloading = "0.8.9"
@@ -70,6 +77,9 @@ ron = { version = "0.12.2", features = ["integer128"] }
 rustix = "1.1.5"
 scoped-tls = "1.0.1"
 serde = { version = "1.0.229", features = ["derive"] }
+# Reads fonts' outlines and metrics for their fields. epaint's version, so that the two build once,
+# and so that its fonts are the ones harfrust reads.
+skrifa = "0.44.0"
 # float_roundtrip, so that numbers parse to the float nearest them in every build: Cargo turns a
 # crate's features on across a build, and without it here, a build where another crate asked for
 # it would parse a model's transforms, which reach the world hash, to other bits than one where none
@@ -113,4 +123,10 @@ undocumented_unsafe_blocks = "warn"
 # Debug builds decode a model's JPEGs as a layer adds it, the sandbox's 2,048 by 2,048 one in about
 # 0.75 s unoptimized, at each of its tests' attaches and CI's runs.
 [profile.dev.package.zune-jpeg]
+opt-level = 3
+
+# Debug builds bake a font's field as a layer adds it, Inter's in some 15 s unoptimized, at each of
+# their tests' and runs' starts. nalgebra's and image's code that it runs is generic, and builds in
+# fdsm, at fdsm's level.
+[profile.dev.package.fdsm]
 opt-level = 3

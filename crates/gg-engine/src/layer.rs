@@ -18,7 +18,7 @@ use gg_core::math::{Mat4, Vec2, Vec3, Vec4};
 use gg_core::{Error, Result};
 use gg_renderer::{
     Blend, Circle, Draws, Line, MAX_PICKS, Mesh, Meshes, Mipmaps, ModelParams, ModelVertex,
-    Outline, Shader, Shaders, Sprite, SpriteSheet, Texture, Textures, Viewpoint, Viewport,
+    Outline, Shader, Shaders, Sprite, SpriteSheet, Texels, Texture, Textures, Viewpoint, Viewport,
 };
 #[cfg(feature = "dev")]
 use subsecond::HotFn;
@@ -32,6 +32,7 @@ use crate::assets::{Catalog, Prints};
 use crate::camera::{self, Camera, Tie};
 use crate::draw::{self, Poses, Scratch};
 use crate::edits::{Authors, Done, Edit};
+use crate::font::{self, Font, Fonts, TextStyle};
 use crate::gltf;
 use crate::grid::{self, Plane};
 #[cfg(feature = "dev")]
@@ -241,6 +242,7 @@ pub struct Context {
     meshes: Meshes,
     shaders: Shaders,
     textures: Textures,
+    fonts: Fonts,
     /// What to draw this frame.
     draws: Draws,
     /// What to draw this frame over the rest, after the world: lines.
@@ -445,6 +447,7 @@ impl Context {
             meshes: Meshes::default(),
             shaders: Shaders::default(),
             textures: Textures::default(),
+            fonts: Fonts::default(),
             draws: Draws::default(),
             over: Draws::default(),
             colliders: false,
@@ -892,6 +895,45 @@ impl Context {
         };
         self.added("model", &format!("{named} {}", model_types()));
         Ok(model)
+    }
+
+    /// Loads the TrueType or OpenType font at `path`, a `.ttf` or `.otf` file, for
+    /// [`draw_text`](Self::draw_text) to draw text in from then on, through the handle, baking its
+    /// field as it loads: a texture of data, a multi-channel signed distance field of each glyph of
+    /// the characters Windows-1252 prints that the font has, and of its `.notdef`, which draws in
+    /// place of the characters the font or the field lacks but whitespace and control characters,
+    /// as ARCHITECTURE.md's Rendering says. The outlines are its default instance's, a variable
+    /// font's at its axes' defaults, unhinted, since the field draws them at any size. `name` names
+    /// the font in errors and its field in GPU captures, as `<name> field`; the GPU has it from the
+    /// next frame that renders. A file added again, by whatever form of its path, gives the font it
+    /// gave first, without baking it again.
+    ///
+    /// Fails with `engine.bad_font` if the file can't be read, isn't a regular file, is more than
+    /// 256 MiB, or isn't a TrueType or OpenType font with outlines, as a font of bitmaps alone
+    /// isn't, and with `renderer.too_many_textures` if the renderer hasn't room for its field.
+    pub fn add_font(&mut self, name: &str, path: impl AsRef<Path>) -> Result<Font> {
+        let path = path.as_ref();
+        let named = assets::name_of(self.root.as_deref(), path);
+        let file = assets::file_of(path);
+        let loaded = file.as_ref().and_then(|file| self.loaded.fonts.get(file));
+        let font = match loaded.copied() {
+            Some(font) => font,
+            None => {
+                let textures = &mut self.textures;
+                let baked = font::bake(name, path, |size, pixels| {
+                    textures.add(&format!("{name} field"), size, pixels, Texels::Data)
+                })?;
+                let field = baked.field();
+                self.add_assets(|assets| assets.add_unnamed(field));
+                let font = self.fonts.push(baked);
+                if let Some(file) = file {
+                    self.loaded.fonts.insert(file, font);
+                }
+                font
+            }
+        };
+        self.added("font", &named);
+        Ok(font)
     }
 
     /// Records that a layer added an asset of `kind`, as `what` says it: its name, and the types
@@ -1818,6 +1860,25 @@ impl Context {
     /// says. It's of no entity, so a [pick](Self::pick) where it's on top finds none.
     pub fn draw_circle(&mut self, transform: Mat4, circle: Circle) {
         self.draws.push_circle(&mut self.shaders, transform, circle);
+    }
+
+    /// Draws `text` this frame in `style`, where `transform` places its origin in the world, over
+    /// the meshes drawn before it but where an opaque one is nearer, in the game's view as the
+    /// camera sees it: a line for each of its own, which `\n` ends, or `\r\n`, laid out left to
+    /// right, each of its characters a glyph of the style's font as its kerning places them, shaped
+    /// without the features that put glyphs in place of others, as ligatures, its em `style.size`
+    /// of the transform's units, and its origin the point of its box `style.align` says, in the
+    /// transform's XY plane, +Y up, facing +Z, as a sprite is. Each glyph is drawn crisp at any
+    /// size from the font's field, as [`Glyph`](gg_renderer::Glyph) says, by straight alpha, and
+    /// it's of no entity, so a [pick](Self::pick) where it's on top finds none. Once a text as long
+    /// has been drawn, drawing text allocates nothing.
+    ///
+    /// # Panics
+    ///
+    /// If `style.font` is another context's.
+    pub fn draw_text(&mut self, transform: Mat4, text: &str, style: &TextStyle) {
+        let glyphs = self.fonts.lay_out(transform, text, style);
+        self.draws.extend_glyphs(&mut self.shaders, glyphs);
     }
 
     /// Draws a line from `from` to `to` in the world this frame, `width` pixels of the view wide

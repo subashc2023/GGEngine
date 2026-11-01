@@ -16,7 +16,7 @@ use gg_gpu::{
 use tracing::warn;
 
 use crate::shader::{self, Shader};
-use crate::texture::{self, Mipmaps};
+use crate::texture::{self, Mipmaps, Texels};
 use crate::{DrawCounts, Draws, Uploads, grid, sprite};
 
 /// A mesh that [`Meshes::add`] handed out, of vertex type `V`.
@@ -454,20 +454,26 @@ impl MeshPass {
                 index == self.textures.len()
             };
             assert!(follows, "a renderer samples the textures of one `Textures`");
-            texture::add_mipmaps(&mut added.pixels, added.size, added.mipmaps);
-            let mipmapped = added.mipmaps != Mipmaps::None;
+            let mipmaps = added.texels.mipmaps();
+            texture::add_mipmaps(&mut added.pixels, added.size, mipmaps);
+            let mipmapped = mipmaps != Mipmaps::None;
+            // A replacement keeps the format it was made with, as its `Textures` keeps its kind.
             if let Some(texture) = self.textures.get_mut(index) {
                 frame.refill_texture(texture, added.size, mipmapped, &added.pixels)?;
                 continue;
             }
             // In the slot of its handle's index, which shaders sample it by.
             let [width, height] = added.size;
+            let format = match added.texels {
+                Texels::Color(_) => TextureFormat::Rgba8Srgb,
+                Texels::Data => TextureFormat::Rgba8Unorm,
+            };
             let mut texture = GpuTexture::placed(
                 &self.device,
                 added.index,
                 width,
                 height,
-                TextureFormat::Rgba8Srgb,
+                format,
                 mipmapped,
                 &added.name,
             )?;

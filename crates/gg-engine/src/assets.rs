@@ -3,10 +3,9 @@
 //! another process, or another machine, finds it again: its asset ID, where it has one, and else
 //! its path; what the layers loaded, and what was loaded where text named it, by their files as the
 //! OS resolves them, so that a file loads once however its path is written; and, in development
-//! builds, the asset database,
-//! `Catalog`: the textures and models under the root and the IDs their ID files hold, whose text
-//! and scan are gg-api's, an ID going with its asset as it's renamed or moved, paired by what its
-//! file holds where the rename left its ID file behind.
+//! builds, the asset database, `Catalog`: the textures, models and fonts under the root and the IDs
+//! their ID files hold, whose text and scan are gg-api's, an ID going with its asset as it's
+//! renamed or moved, paired by what its file holds where the rename left its ID file behind.
 
 use std::collections::HashMap;
 #[cfg(feature = "dev")]
@@ -33,7 +32,6 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "dev")]
 use tracing::{info, warn};
 
-use crate::Model;
 #[cfg(feature = "dev")]
 use crate::dirs::{self, Kind};
 #[cfg(feature = "dev")]
@@ -41,6 +39,7 @@ use crate::ecs::mix64;
 #[cfg(feature = "dev")]
 use crate::model::Made;
 use crate::model::Nodes;
+use crate::{Font, Model};
 
 /// The textures a context added, as its layers added them or where text named them, each by its
 /// index, with the path of the file it was loaded from: relative to the app's
@@ -274,6 +273,16 @@ impl Assets {
         }));
     }
 
+    /// Adds `texture`, the next texture added, which no text names, as a font's field.
+    pub(crate) fn add_unnamed(&mut self, texture: Texture) {
+        assert_eq!(
+            texture.index() as usize,
+            self.textures.len(),
+            "textures are named in the order they're added"
+        );
+        self.textures.push(None);
+    }
+
     /// Has `path` name `texture` too, added before from another path to its file, unless it names
     /// one already; `texture` keeps its first path.
     pub(crate) fn alias(&mut self, texture: Texture, path: Arc<str>) {
@@ -375,6 +384,7 @@ pub(crate) struct Loaded {
     /// a sheet is cut by.
     pub(crate) textures: HashMap<PathBuf, (Texture, [u32; 2])>,
     pub(crate) models: HashMap<PathBuf, Model>,
+    pub(crate) fonts: HashMap<PathBuf, Font>,
     /// What each model is made of on the renderer, by its index, which a reload replaces: a
     /// stand-in's of nothing.
     #[cfg(feature = "dev")]
@@ -415,10 +425,10 @@ pub(crate) fn is_id(name: &str) -> bool {
     name.len() == 16 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// The textures and models under the app's root, as the scans found them, and their IDs, from
-/// their ID files, which gg-api reads: the asset database. An asset the run has found it keeps,
-/// with its ID, even once its file is gone, so that its ID stays its for the run, until it turns up
-/// at another path, renamed or moved, which takes it, as [`scanned`] says.
+/// The textures, models and fonts under the app's root, as the scans found them, and their IDs,
+/// from their ID files, which gg-api reads: the asset database. An asset the run has found it
+/// keeps, with its ID, even once its file is gone, so that its ID stays its for the run, until it
+/// turns up at another path, renamed or moved, which takes it, as [`scanned`] says.
 #[cfg(feature = "dev")]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Catalog {

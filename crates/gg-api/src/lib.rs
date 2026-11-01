@@ -4,8 +4,8 @@
 //! in; what each method takes and answers; the memory a game's view is shared through as it
 //! renders, [`view`]; and a client, for tools. It also reads a game's project manifest,
 //! [`Project`], which tools find a game by and its development build reads, and assets' ID files,
-//! [`asset`], which its development build writes beside each texture and model. It depends on no
-//! crate of the engine's, so that tools build without the GPU's toolchain.
+//! [`asset`], which its development build writes beside each texture, model and font. It depends on
+//! no crate of the engine's, so that tools build without the GPU's toolchain.
 //!
 //! A request is `{"id":1,"method":"step","params":{"ticks":2}}`, without `params` for a method that
 //! takes none, and its answer `{"id":1,"result":...}` or `{"id":1,"error":{"code":...,"message":...}}`,
@@ -95,10 +95,10 @@
 //!   the editor's Inspector does. A type's description never changes once it's registered, but a
 //!   game rebuilt may describe its types otherwise.
 //! - `hash`: answers [`struct@Hash`], the world's.
-//! - `assets`, [`Assets`]: answers [`AssetList`], a page of the textures and models under the
-//!   game's asset root, in the order of their paths, each with its ID, which its ID file beside it,
-//!   [`asset::Meta`], holds, as ARCHITECTURE.md's Project state describes, and the ID files whose
-//!   assets aren't there. It answers once the game has looked at the root since it asked, or at
+//! - `assets`, [`Assets`]: answers [`AssetList`], a page of the textures, models and fonts under
+//!   the game's asset root, in the order of their paths, each with its ID, which its ID file beside
+//!   it, [`asset::Meta`], holds, as ARCHITECTURE.md's Project state describes, and the ID files
+//!   whose assets aren't there. It answers once the game has looked at the root since it asked, or at
 //!   once from its last look while its frames pause, as while its window is minimized, so that
 //!   an asset added or renamed since is listed, a run that writes ID files, a game alone or a
 //!   lockstep session's host that serves the API, having written each one missing and moved beside

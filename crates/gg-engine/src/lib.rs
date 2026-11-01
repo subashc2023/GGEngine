@@ -10,7 +10,8 @@
 //! log, which undoes and redoes them; recordings of runs, the commands their ticks applied, which
 //! replay without a GPU to the same world, naming where one goes another way; and measuring each
 //! frame, for the log and the Performance panel; the grid a tool's view shows in an axis plane;
-//! loading what layers add, images as textures and glTF models, whose nodes spawn as entities;
+//! loading what layers add, images as textures, glTF models, whose nodes spawn as entities, and
+//! fonts, baked into fields that draw text crisp at any size, which it shapes and lays out;
 //! lockstep between two peers, each tick run on both peers' inputs; the pipeline cache's file,
 //! which windowed runs keep;
 //! and in development builds, behind `dev`, reading a game's project's manifest and its assets' ID
@@ -39,6 +40,7 @@ mod draw;
 mod ecs;
 mod edits;
 mod event;
+mod font;
 mod gltf;
 pub mod grid;
 // In development builds alone, as `dev` has it.
@@ -111,6 +113,7 @@ pub use ecs::{
 /// share the engine's version.
 pub use egui;
 pub use event::{Event, Key, MouseButton, Pad, PadButton, Scroll, Stick, Trigger};
+pub use font::{Align, Font, TextStyle};
 /// The engine's vectors, matrices and quaternions; apps use them from here, so that they share
 /// the engine's version.
 pub use gg_core::math;
@@ -199,9 +202,9 @@ impl App {
     /// `assets/logo.png`: what scenes, snapshots, recordings and the tool API name a sprite's
     /// texture by, so that they find it again in another run, or on another machine. Without it,
     /// or for a file outside it, an asset is named by its path as the layer gave it. In a
-    /// development build, each texture and model under it has an ID, kept in an ID file beside it,
-    /// which a run that serves the tool API writes where it's missing, but a lockstep session's
-    /// joiner, whose host writes them, as ARCHITECTURE.md's Project state describes.
+    /// development build, each texture, model and font under it has an ID, kept in an ID file
+    /// beside it, which a run that serves the tool API writes where it's missing, but a lockstep
+    /// session's joiner, whose host writes them, as ARCHITECTURE.md's Project state describes.
     #[must_use]
     pub fn root(mut self, root: impl Into<PathBuf>) -> Self {
         self.root = Some(root.into());

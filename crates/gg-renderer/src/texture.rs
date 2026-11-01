@@ -45,6 +45,32 @@ pub enum Mipmaps {
     AlphaWeighted,
 }
 
+/// What a texture's texels are: colors, sRGB-encoded as images store them, which shaders sample
+/// decoded to linear, with smaller mip levels as [`Mipmaps`] says, which a `Mipmaps` stands for;
+/// or data, such as a font's distance field, which shaders read as stored, each channel a byte
+/// from 0 to 1, with one level.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Texels {
+    Color(Mipmaps),
+    Data,
+}
+
+impl From<Mipmaps> for Texels {
+    fn from(mipmaps: Mipmaps) -> Self {
+        Self::Color(mipmaps)
+    }
+}
+
+impl Texels {
+    /// The levels a frame makes from the first: none for data.
+    pub(crate) fn mipmaps(self) -> Mipmaps {
+        match self {
+            Self::Color(mipmaps) => mipmaps,
+            Self::Data => Mipmaps::None,
+        }
+    }
+}
+
 /// The textures a renderer's shaders sample, the first of them the engine's white texture. It
 /// hands out each one's handle at once, and keeps its pixels until
 /// [`Uploads::take`](crate::Uploads::take) takes them, for a frame to copy to the GPU; a texture
@@ -52,8 +78,8 @@ pub enum Mipmaps {
 pub struct Textures {
     /// Those added or replaced since they were last taken, in order.
     pub(crate) added: Vec<Added>,
-    /// How many have been added.
-    count: u32,
+    /// Whether each is data, by its index, which its replacements keep to.
+    data: Vec<bool>,
 }
 
 pub(crate) struct Added {
@@ -64,16 +90,17 @@ pub(crate) struct Added {
     pub(crate) name: String,
     pub(crate) size: [u32; 2],
     pub(crate) pixels: Vec<u8>,
-    pub(crate) mipmaps: Mipmaps,
+    pub(crate) texels: Texels,
 }
 
 impl Textures {
     /// Adds a texture `size` pixels across and down. `pixels` holds its rows of RGBA8, tightly
-    /// packed, top row first, as images store them: colors sRGB-encoded, and alpha not multiplied
-    /// into them. It keeps a `Vec` of pixels as it is, and copies borrowed ones. Shaders sample its
-    /// colors decoded to linear, with texture coordinates from (0, 0) at its top left to (1, 1) at
-    /// its bottom right. `mipmaps` says whether it has smaller levels too, made from it as a frame
-    /// copies it to the GPU, and how. `name` names it in errors and GPU captures.
+    /// packed, top row first, as images store them, which are colors or data as `texels` says: for
+    /// colors, sRGB-encoded, and alpha not multiplied into them, which shaders sample decoded to
+    /// linear, with smaller levels too if the [`Mipmaps`] it gives say so, made from it as a frame
+    /// copies it to the GPU, and how; for data, read as stored. It keeps a `Vec` of pixels as it
+    /// is, and copies borrowed ones. Shaders sample it with texture coordinates from (0, 0) at its
+    /// top left to (1, 1) at its bottom right. `name` names it in errors and GPU captures.
     ///
     /// Fails with `renderer.bad_texture` if a side is 0 or more than 8,192 pixels, the most every
     /// Vulkan 1.4 device takes, or `pixels` doesn't fill it exactly; and with
@@ -84,12 +111,13 @@ impl Textures {
         name: &str,
         size: [u32; 2],
         pixels: impl Into<Cow<'a, [u8]>>,
-        mipmaps: Mipmaps,
+        texels: impl Into<Texels>,
     ) -> Result<Texture> {
-        let pixels = pixels.into();
+        let (pixels, texels) = (pixels.into(), texels.into());
         check(name, size, &pixels)?;
         // Its handle is its slot, so a renderer holds as many as the bindless set has placed slots.
-        if self.count == PLACED_TEXTURES {
+        let index = self.count();
+        if index == PLACED_TEXTURES {
             return Err(Error::new(
                 "renderer.too_many_textures",
                 format!(
@@ -98,21 +126,20 @@ impl Textures {
                 ),
             ));
         }
-        let index = self.count;
-        self.count += 1;
+        self.data.push(texels == Texels::Data);
         self.added.push(Added {
             index,
             replacement: false,
             name: name.to_owned(),
             size,
             pixels: pixels.into_owned(),
-            mipmaps,
+            texels,
         });
         Ok(Texture { index })
     }
 
     /// Puts another image in place of `texture`'s, which keeps its handle: `size` pixels across and
-    /// down, whatever size it had, its `pixels` and `mipmaps` as [`add`](Self::add) takes them, so
+    /// down, whatever size it had, its `pixels` and `texels` as [`add`](Self::add) takes them, so
     /// that what samples it shows them from the frame that copies them to the GPU on, which waits
     /// for the frames before it, as they may sample the old. It takes the place of any of that
     /// texture's pixels still waiting for a frame, as it was added or replaced. `name` names it in
@@ -122,18 +149,25 @@ impl Textures {
     ///
     /// # Panics
     ///
-    /// If `texture` isn't one of these textures, as another `Textures`' handles can be past them.
+    /// If `texture` isn't one of these textures, as another `Textures`' handles can be past them,
+    /// or `texels` are data where its texels are colors, or colors where they're data: a texture
+    /// keeps the kind it was added as.
     pub fn replace<'a>(
         &mut self,
         name: &str,
         texture: Texture,
         size: [u32; 2],
         pixels: impl Into<Cow<'a, [u8]>>,
-        mipmaps: Mipmaps,
+        texels: impl Into<Texels>,
     ) -> Result<()> {
-        assert!(
-            texture.index < self.count,
-            "texture {name:?} replaces one of another `Textures`"
+        let Some(&data) = self.data.get(texture.index as usize) else {
+            panic!("texture {name:?} replaces one of another `Textures`");
+        };
+        let texels = texels.into();
+        assert_eq!(
+            texels == Texels::Data,
+            data,
+            "texture {name:?} is replaced by texels of the other kind"
         );
         let pixels = pixels.into();
         check(name, size, &pixels)?;
@@ -142,7 +176,7 @@ impl Textures {
             Some(waiting) => {
                 waiting.size = size;
                 waiting.pixels = pixels;
-                waiting.mipmaps = mipmaps;
+                waiting.texels = texels;
             }
             None => self.added.push(Added {
                 index: texture.index,
@@ -150,7 +184,7 @@ impl Textures {
                 name: name.to_owned(),
                 size,
                 pixels,
-                mipmaps,
+                texels,
             }),
         }
         Ok(())
@@ -159,12 +193,12 @@ impl Textures {
     /// How many more textures it holds, so that what adds several can check they fit before it
     /// adds any.
     pub fn room(&self) -> u32 {
-        PLACED_TEXTURES - self.count
+        PLACED_TEXTURES - self.count()
     }
 
     /// How many it has handed out, the engine's white texture among them: the index of the next.
     pub fn count(&self) -> u32 {
-        self.count
+        self.data.len() as u32
     }
 }
 
@@ -334,7 +368,7 @@ impl Default for Textures {
     fn default() -> Self {
         let mut textures = Self {
             added: Vec::new(),
-            count: 0,
+            data: Vec::new(),
         };
         let white = textures
             .add("white", [1, 1], &[255; 4], Mipmaps::None)
@@ -401,32 +435,47 @@ mod tests {
         let a = textures
             .add("a", [1, 1], &[0; 4], Mipmaps::None)
             .expect("a");
-        let waiting = |textures: &Textures| -> Vec<(u32, bool, [u32; 2], Mipmaps)> {
+        let waiting = |textures: &Textures| -> Vec<(u32, bool, [u32; 2], Texels)> {
             let added = textures.added.iter();
             added
-                .map(|added| (added.index, added.replacement, added.size, added.mipmaps))
+                .map(|added| (added.index, added.replacement, added.size, added.texels))
                 .collect()
         };
         // Still waiting as it was added, which takes the image instead.
         let replaced = textures.replace("a", a, [2, 1], &[9; 8], Mipmaps::Averaged);
         replaced.expect("another image");
-        let white = (0, false, [1, 1], Mipmaps::None);
-        assert_eq!(
-            waiting(&textures),
-            [white, (1, false, [2, 1], Mipmaps::Averaged)]
-        );
+        let white = (0, false, [1, 1], Texels::Color(Mipmaps::None));
+        let averaged = Texels::Color(Mipmaps::Averaged);
+        assert_eq!(waiting(&textures), [white, (1, false, [2, 1], averaged)]);
         // Once a frame has taken it, in place of the one the renderer has.
         textures.added.clear();
         let replaced = textures.replace("a", a, [1, 2], &[7; 8], Mipmaps::None);
         replaced.expect("another image");
-        assert_eq!(waiting(&textures), [(1, true, [1, 2], Mipmaps::None)]);
+        let none = Texels::Color(Mipmaps::None);
+        assert_eq!(waiting(&textures), [(1, true, [1, 2], none)]);
         // A broken image leaves it as it was.
         let error = textures
             .replace("a", a, [2, 2], &[0; 4], Mipmaps::None)
             .expect_err("a broken image");
         assert_eq!(error.code(), "renderer.bad_texture");
-        assert_eq!(waiting(&textures), [(1, true, [1, 2], Mipmaps::None)]);
+        assert_eq!(waiting(&textures), [(1, true, [1, 2], none)]);
         assert_eq!(textures.added[0].pixels, [7; 8]);
+        // Data, replaced by data.
+        let field = textures.add("field", [1, 1], &[0; 4], Texels::Data);
+        let field = field.expect("data");
+        let replaced = textures.replace("field", field, [2, 1], &[1; 8], Texels::Data);
+        replaced.expect("other data");
+        let data = (2, false, [2, 1], Texels::Data);
+        assert_eq!(waiting(&textures), [(1, true, [1, 2], none), data]);
+    }
+
+    #[test]
+    #[should_panic(expected = "replaced by texels of the other kind")]
+    fn a_texture_keeps_its_kind_of_texels() {
+        let mut textures = Textures::default();
+        let field = textures.add("field", [1, 1], &[0; 4], Texels::Data);
+        let field = field.expect("data");
+        let _ = textures.replace("field", field, [1, 1], &[0; 4], Mipmaps::None);
     }
 
     /// The levels after the first that `pixels`, `size` pixels across and down, gets.

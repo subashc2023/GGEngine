@@ -1,6 +1,6 @@
-//! Assets' ID files, `<file>.meta` beside each texture and model under a game's asset root: what
-//! names an asset beyond its file's name, which a game's development build writes and reads, as
-//! ARCHITECTURE.md's Project state describes; their text, and the scan that finds them.
+//! Assets' ID files, `<file>.meta` beside each texture, model and font under a game's asset root:
+//! what names an asset beyond its file's name, which a game's development build writes and reads,
+//! as ARCHITECTURE.md's Project state describes; their text, and the scan that finds them.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsStr;
@@ -89,10 +89,12 @@ pub enum AssetKind {
     Texture,
     /// A glTF, `.gltf` or `.glb`, as `Context::add_model` loads.
     Model,
+    /// A TrueType or OpenType font, `.ttf` or `.otf`, as `Context::add_font` loads.
+    Font,
 }
 
 /// The kinds, by the names the API gives them, as `assets`' `kind` takes them.
-pub const KINDS: [&str; 2] = ["texture", "model"];
+pub const KINDS: [&str; 3] = ["texture", "model", "font"];
 
 impl AssetKind {
     /// The kind of the file at `path`, by its extension, whatever its case; `None` for any other
@@ -102,6 +104,7 @@ impl AssetKind {
         match extension.as_str() {
             "png" | "jpg" | "jpeg" => Some(Self::Texture),
             "gltf" | "glb" => Some(Self::Model),
+            "ttf" | "otf" => Some(Self::Font),
             _ => None,
         }
     }
@@ -179,7 +182,7 @@ pub type Stamp = (SystemTime, u64);
 /// between them.
 #[derive(Debug, Default, PartialEq)]
 pub struct Scan {
-    /// The textures and models, in the order of their paths.
+    /// The textures, models and fonts, in the order of their paths.
     pub assets: Vec<Scanned>,
     /// The ID files whose assets aren't there, in the order of their paths.
     pub orphans: Vec<Orphan>,
@@ -223,10 +226,10 @@ pub struct Unread {
     pub error: String,
 }
 
-/// Scans the asset root `root` for textures and models and their ID files, as ARCHITECTURE.md's
-/// Project state describes: every folder under it but those whose names start with `.`, those
-/// named `target`, and at its top level [`UNBUILT`]'s, which a package's root holds; never through
-/// a link, to a folder or to a file; each asset's ID file by its exact name.
+/// Scans the asset root `root` for textures, models and fonts and their ID files, as
+/// ARCHITECTURE.md's Project state describes: every folder under it but those whose names start
+/// with `.`, those named `target`, and at its top level [`UNBUILT`]'s, which a package's root holds;
+/// never through a link, to a folder or to a file; each asset's ID file by its exact name.
 ///
 /// Matching by exact name, rather than asking the file system for the file, gives the same answer
 /// on Windows' and macOS's file systems, which ignore case, as on Linux's.
@@ -504,10 +507,20 @@ mod tests {
             ("b.JPEG", AssetKind::Texture),
             ("c.gltf", AssetKind::Model),
             ("c.GLB", AssetKind::Model),
+            ("fonts/d.ttf", AssetKind::Font),
+            ("d.OTF", AssetKind::Font),
         ] {
             assert_eq!(kind(name), Some(expected), "{name}");
         }
-        for name in ["a.slang", "arena.ron", "notes.meta", "x.png.meta", "png"] {
+        let others = [
+            "a.slang",
+            "arena.ron",
+            "notes.meta",
+            "x.png.meta",
+            "png",
+            "d.woff2",
+        ];
+        for name in others {
             assert_eq!(kind(name), None, "{name}");
         }
         for name in KINDS {
@@ -516,9 +529,9 @@ mod tests {
         }
     }
 
-    /// A scan lists each texture and model with what its ID file holds, or why it doesn't, and the
-    /// ID files left without their assets; but nothing in hidden folders, in `target`s, or in a
-    /// package's own tests, benches and examples, and never through a link.
+    /// A scan lists each texture, model and font with what its ID file holds, or why it doesn't,
+    /// and the ID files left without their assets; but nothing in hidden folders, in `target`s, or
+    /// in a package's own tests, benches and examples, and never through a link.
     #[test]
     fn a_scan_lists_assets_with_their_id_files_and_skips_what_it_should() {
         let root = std::env::temp_dir().join(format!("gg-api-scan-{}", std::process::id()));
@@ -547,6 +560,7 @@ mod tests {
         write("models/truck.glb", "");
         write("models/tree.gltf", "");
         fs::create_dir_all(root.join("models/tree.gltf.meta")).unwrap();
+        write("ui/title.otf", "");
         write("notes.meta", "notes");
         write("shaders/a.slang", "");
         for skipped in ["target", "sub/target", "tests", ".hidden"] {
@@ -566,10 +580,10 @@ mod tests {
                 .map(|asset| (&*asset.path, asset.kind, asset.meta.as_ref().map(held)))
                 .collect()
         }
-        use AssetKind::{Model, Texture};
+        use AssetKind::{Font, Model, Texture};
         let code = |code: &str| Some(Err(code.to_owned()));
         let stone = Some(Ok(id("5f3c9a1e07b2d846")));
-        let expected: [Listed; 7] = [
+        let expected: [Listed; 8] = [
             ("assets/Case.png", Texture, code("asset.meta_case")),
             ("assets/bad.png", Texture, code("asset.bad_meta")),
             ("assets/new.jpg", Texture, None),
@@ -577,6 +591,7 @@ mod tests {
             ("models/tree.gltf", Model, code("asset.bad_meta")),
             ("models/truck.glb", Model, None),
             ("sub/tests/y.png", Texture, None),
+            ("ui/title.otf", Font, None),
         ];
         let found = scan(&root);
         assert_eq!(listed(&found), expected);
@@ -592,6 +607,7 @@ mod tests {
         let misnamed = found.assets.iter().map(|asset| asset.misnamed.as_deref());
         let named = [
             Some("assets/case.png.meta"),
+            None,
             None,
             None,
             None,

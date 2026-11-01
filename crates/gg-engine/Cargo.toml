@@ -8,11 +8,14 @@ publish.workspace = true
 bytemuck.workspace = true
 egui.workspace = true
 egui-winit.workspace = true
+fdsm.workspace = true
 gilrs.workspace = true
 gg-api = { workspace = true, optional = true }
 gg-core.workspace = true
 gg-macros.workspace = true
 gg-renderer.workspace = true
+harfrust.workspace = true
+image.workspace = true
 png.workspace = true
 rapier2d.workspace = true
 rayon-core.workspace = true
@@ -21,6 +24,7 @@ ron.workspace = true
 scoped-tls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+skrifa.workspace = true
 subsecond = { workspace = true, optional = true }
 tracing.workspace = true
 winit.workspace = true

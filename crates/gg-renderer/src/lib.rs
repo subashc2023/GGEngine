@@ -1,9 +1,9 @@
 //! Turns the render data the engine hands it each frame into images, built on `gg-gpu`: meshes,
-//! sprites, circles, lines and grids drawn in the game's view, as its camera sees them, with games'
-//! shaders and textures and the engine's own, models' unlit materials among them, and the UI over
-//! them; picks, which read back the ID of the draw the view shows at a pixel; an outline round what
-//! the view shows of an ID; and the render graph, lighting, PBR materials and post-processing to
-//! come.
+//! sprites, circles, lines, grids and text drawn in the game's view, as its camera sees them, with
+//! games' shaders and textures and the engine's own, models' unlit materials among them, and the UI
+//! over them; picks, which read back the ID of the draw the view shows at a pixel; an outline round
+//! what the view shows of an ID; and the render graph, lighting, PBR materials and post-processing
+//! to come.
 //!
 //! It knows nothing about the scene, ECS or gameplay. It receives plain data, so rendering
 //! can run on its own thread, a frame behind simulation.
@@ -17,6 +17,7 @@ mod model;
 mod pick;
 mod shader;
 mod sprite;
+mod text;
 mod texture;
 mod ui;
 mod view;
@@ -48,7 +49,8 @@ pub use model::{AlphaMode, Material, ModelVertex};
 pub use pick::{MAX_PICKS, Pick};
 pub use shader::{Compiled, Shader, ShaderSource, Shaders};
 pub use sprite::{Sprite, SpriteSheet};
-pub use texture::{Mipmaps, Texture, Textures};
+pub use text::Glyph;
+pub use texture::{Mipmaps, Texels, Texture, Textures};
 pub use ui::Ui;
 pub use view::{Outline, ViewCallback};
 pub use viewpoint::{Projection, Viewpoint};

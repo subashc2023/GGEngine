@@ -7,7 +7,9 @@ use bytemuck::NoUninit;
 use gg_core::math::{Mat3, Mat4, Vec4};
 use gg_gpu::Faces;
 
-use crate::{Circle, Grid, Line, Mesh, MeshDraw, Meshes, Shader, Shaders, Sprite, halves, sprite};
+use crate::{
+    Circle, Glyph, Grid, Line, Mesh, MeshDraw, Meshes, Shader, Shaders, Sprite, halves, sprite,
+};
 
 /// What a frame draws besides UI, in order, each over those before it, but where an opaque one
 /// before it is nearer: meshes, each with a shader for its vertex type, the parameters that shader
@@ -131,6 +133,24 @@ impl Draws {
         }
         let circles = circles.map(|(transform, circle, id)| (transform, circle.params(), id));
         self.extend_quads(shaders.circle(), circles);
+    }
+
+    /// Draws each of `glyphs`, a transform, a glyph and its ID, in turn, over the meshes drawn
+    /// before it but where an opaque one is nearer, as [`Glyph`] describes, with the engine's text
+    /// shader, which `shaders` adds the first time it's asked for, making room for them and joining
+    /// a run once for them all. Each transform takes the glyph's own space, where it's a unit square
+    /// around the origin, to the world's.
+    pub fn extend_glyphs(
+        &mut self,
+        shaders: &mut Shaders,
+        glyphs: impl ExactSizeIterator<Item = (Mat4, Glyph, u64)>,
+    ) {
+        // No glyphs ask for no shader, which would have a renderer make its pipeline.
+        if glyphs.len() == 0 {
+            return;
+        }
+        let glyphs = glyphs.map(|(transform, glyph, id)| (transform, glyph.params(), id));
+        self.extend_quads(shaders.text(), glyphs);
     }
 
     /// Draws `line` over the meshes drawn before it but where an opaque one is nearer, as [`Line`]

@@ -1244,7 +1244,7 @@ impl Game {
     /// does: a texture asks the game for a pick there, whose answer
     /// [`take_picks`](Self::take_picks) takes; a model is a root the Inspector's link creates where
     /// it [`lands`](Self::landing), named after its file, or where it can't land yet, before a
-    /// frame has come, is logged as taken by nothing.
+    /// frame has come, is logged as taken by nothing, as a font is.
     fn let_go(&mut self, dropped: &Dragged, at: [f64; 2], view: Option<Viewport>, scale: f32) {
         let root = self.folders.as_ref().map(|folders| folders.root.as_path());
         let name = asset_name(root, &dropped.path);
@@ -1276,6 +1276,10 @@ impl Game {
                     ("Transform".into(), transform.to_value()),
                     ("ModelRoot".into(), reflect::Value::Struct(root)),
                 ]);
+            }
+            AssetKind::Font => {
+                let why = "nothing in the view takes a font";
+                self.log(Level::Info, format!("{file} was let go, but {why}"));
             }
         }
     }

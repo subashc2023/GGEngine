@@ -21,10 +21,10 @@ use std::sync::Arc;
 use bytemuck::NoUninit;
 use gg_core::math::{self, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{
-    AlphaMode, Blend, Circle, DrawCounts, Draws, Grid, GridLines, Line, Material, Mesh, MeshDraw,
-    Meshes, Mipmaps, ModelVertex, Outline, Pick, Pixels, Projection, RenderData, Renderer, Sampler,
-    Settings, Shaders, Sprite, SpriteSheet, Texture, Textures, Ui, UploadPath, Uploads,
-    ViewCallback, Viewpoint, Viewport, Wrap,
+    AlphaMode, Blend, Circle, DrawCounts, Draws, Glyph, Grid, GridLines, Line, Material, Mesh,
+    MeshDraw, Meshes, Mipmaps, ModelVertex, Outline, Pick, Pixels, Projection, RenderData,
+    Renderer, Sampler, Settings, Shaders, Sprite, SpriteSheet, Texels, Texture, Textures, Ui,
+    UploadPath, Uploads, ViewCallback, Viewpoint, Viewport, Wrap,
 };
 
 /// Runs each test through `tests`, by the name it's written with; after `uploading by`, giving
@@ -73,6 +73,7 @@ fn main() -> ExitCode {
         sprites_match_their_reference,
         batches_match_their_reference,
         circles_match_their_reference,
+        text_matches_its_reference,
         outlines_match_their_reference,
         lines_match_their_reference,
         grids_match_their_reference,
@@ -658,6 +659,118 @@ fn circles_match_their_reference() {
         render_without_ui(&mut renderer, data);
     }
     check(renderer, "circles", WIDTH, HEIGHT);
+}
+
+/// Draws glyphs from a field of data whose distances this test computes, a ring's and a square's,
+/// as a font's field holds a glyph's in each channel, and compares them with their reference image:
+/// along the top, rings on quads from 8 to 120 pixels across, from a quarter of a pixel a texel of
+/// the field to nearly four, each smoothed over a pixel; along the bottom, squares, one turned, one
+/// half transparent over an orange sprite, their corners square, and a small white one. What's
+/// fully transparent draws nothing, so a shader that draws its whole quad changes hundreds of pixels.
+fn text_matches_its_reference() {
+    const WIDTH: u32 = 320;
+    const HEIGHT: u32 = 160;
+    /// Each cell's texels across and down, and how far their distances reach.
+    const CELL: u32 = 32;
+    const RANGE: f32 = 8.0;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores::default();
+    // The ring's and the square's signed distances from their edges, inward, in texels, from each
+    // texel's middle: two cells side by side.
+    let ring = |x: f32, y: f32| {
+        let from = Vec2::new(x, y).length();
+        (12.0 - from).min(from - 6.0)
+    };
+    let square = |x: f32, y: f32| {
+        let outside = Vec2::new(x.abs() - 11.0, y.abs() - 11.0);
+        let past = outside.max(Vec2::ZERO).length();
+        if past > 0.0 {
+            -past
+        } else {
+            -outside.max_element()
+        }
+    };
+    let mut pixels = Vec::with_capacity((CELL * 2 * CELL * 4) as usize);
+    for y in 0..CELL {
+        for cell in [&ring as &dyn Fn(f32, f32) -> f32, &square] {
+            for x in 0..CELL {
+                let middle = CELL as f32 / 2.0;
+                let distance = cell(x as f32 + 0.5 - middle, y as f32 + 0.5 - middle);
+                let byte = ((distance / RANGE + 0.5).clamp(0.0, 1.0) * 255.0).round() as u8;
+                pixels.extend_from_slice(&[byte; 4]);
+            }
+        }
+    }
+    let field = stores
+        .textures
+        .add("field", [CELL * 2, CELL], pixels, Texels::Data);
+    let field = field.expect("a field");
+    let glyph = |cell: f32, color: [f32; 4]| Glyph {
+        color: Vec4::from(color),
+        field,
+        rect: [Vec2::new(cell / 2.0, 0.0), Vec2::new(cell / 2.0 + 0.5, 1.0)],
+        range: RANGE,
+    };
+    // 4 units from the view's bottom to its top, 40 pixels a unit, and 8 across, around the origin.
+    let viewpoint = Viewpoint {
+        projection: Projection::Orthographic {
+            height: 4.0,
+            near: -1.0,
+            far: 1.0,
+        },
+        ..Viewpoint::default()
+    };
+    // `size` units across and up, centered at (`x`, `y`), turned by `angle`.
+    let place = |[x, y]: [f32; 2], size: f32, angle: f32| {
+        Mat4::from_scale_rotation_translation(
+            Vec3::new(size, size, 1.0),
+            Quat::from_rotation_z(angle),
+            Vec3::new(x, y, 0.0),
+        )
+    };
+    let mut draws = Draws::default();
+    // First, for the half transparent square to go over.
+    let orange = Sprite {
+        color: Vec4::new(0.9, 0.4, 0.1, 1.0),
+        ..Sprite::default()
+    };
+    draws.push_sprite(place([1.25, -1.25], 1.0, 0.0), orange);
+    let white = [1.0; 4];
+    let rings = [
+        (-3.4, 0.2),
+        (-3.0, 0.4),
+        (-2.4, 0.8),
+        (-1.2, 1.6),
+        (1.2, 3.0),
+    ];
+    let mut glyphs: Vec<(Mat4, Glyph, u64)> = (rings.iter())
+        .map(|&(x, size)| (place([x, 1.0], size, 0.0), glyph(0.0, white), 0))
+        .collect();
+    glyphs.extend(
+        [
+            (
+                place([-3.0, -1.0], 1.2, 0.0),
+                glyph(1.0, [0.2, 0.8, 0.3, 1.0]),
+            ),
+            (
+                place([-1.25, -1.0], 1.2, 0.5),
+                glyph(1.0, [0.1, 0.8, 0.9, 1.0]),
+            ),
+            (
+                place([0.75, -0.75], 1.2, 0.0),
+                glyph(1.0, [0.6, 0.2, 0.9, 0.5]),
+            ),
+            (place([3.0, -1.0], 0.6, 0.0), glyph(1.0, white)),
+        ]
+        .map(|(at, glyph)| (at, glyph, 0)),
+    );
+    draws.extend_glyphs(&mut stores.shaders, glyphs.into_iter());
+    // More frames than are in flight.
+    for _ in 0..3 {
+        let data = stores.data(filling([WIDTH, HEIGHT]), viewpoint, &draws);
+        render_without_ui(&mut renderer, data);
+    }
+    check(renderer, "text", WIDTH, HEIGHT);
 }
 
 /// Outlines what the view shows of one ID, 3 pixels wide, and compares it with its reference image:

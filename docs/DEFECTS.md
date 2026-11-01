@@ -21,6 +21,7 @@ file, under Workflow.
 | A swapchain without an sRGB format falls back to the first one offered, where colors come out too dark | Encode colors to sRGB in the shaders that draw into a swapchain image of another format | A device offers no sRGB swapchain format |
 | A swapchain's semaphores are destroyed once the device is idle, which doesn't cover presents, whose waits on them could still be pending; closing torn-off windows makes it more frequent | Wait for present fences (`VK_KHR_swapchain_maintenance1`) before destroying them | Validation reports it, or windows open and close often |
 | The `gpu.pipeline_cache` warnings, for saved data that's damaged or that the driver fails to load, name the GPU but not the file, since gg-gpu is given the bytes alone | Pass the file's path, as a label for the warnings, through `Settings::pipeline_cache` to `Device::load_pipeline_cache` | Someone needs to find the file |
+| A glyph whose outline overlaps itself, as variable fonts' often do, can draw with seams where its contours cross: fdsm, which bakes fonts' fields, doesn't resolve overlapping contours, as msdfgen does through Skia, and its error correction leaves overlaps out | Join each glyph's contours into one outline before it bakes, or bake through msdfgen built with Skia | A game's font shows seams |
 
 ## Windows and the dock
 

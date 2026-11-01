@@ -22,7 +22,7 @@ use tracing::{debug, warn};
 
 use crate::model::{self, AlphaMode, ModelVertex};
 use crate::sprite::{self, Corner, Params};
-use crate::{circle, grid, line};
+use crate::{circle, grid, line, text};
 
 /// The slangc that compiled the renderer's own shaders, as the build found it.
 const SLANGC: &str = env!("GG_SLANGC");
@@ -81,8 +81,8 @@ pub struct Shaders {
     count: u32,
     /// The handles of the engine's shaders that are added the first time they're asked for, once
     /// each has been: its model shaders, for opaque, masked and blended materials, then its circle
-    /// shader, its line shader and its grid shader.
-    lazy: [Option<u32>; 6],
+    /// shader, its line shader, its grid shader and its text shader.
+    lazy: [Option<u32>; 7],
     /// The games' shaders, in the order they were added.
     sources: Vec<ShaderSource>,
 }
@@ -345,6 +345,12 @@ impl Shaders {
         self.lazy(5, "grid", grid::SPIRV, Blend::Alpha)
     }
 
+    /// The engine's text shader, which the build compiled, added as the model shaders are the
+    /// first time it's asked for.
+    pub(crate) fn text(&mut self) -> Shader<Corner, text::Params> {
+        self.lazy(6, "text", text::SPIRV, Blend::Alpha)
+    }
+
     /// The engine's shader in slot `slot` of `lazy`, `name`, compiled to `spirv`, which draws
     /// meshes of `V` with parameters `P` and blends as `blend` says: added the first time it's
     /// asked for, and then the same.
@@ -365,7 +371,7 @@ impl Default for Shaders {
         let mut shaders = Self {
             added: Vec::new(),
             count: 0,
-            lazy: [None; 6],
+            lazy: [None; 7],
             sources: Vec::new(),
         };
         let types = Types::of::<Corner, Params>();
@@ -756,6 +762,7 @@ mod tests {
             (circle::SPIRV, Types::of::<Corner, circle::Params>()),
             (line::SPIRV, Types::of::<Corner, line::Params>()),
             (grid::SPIRV, Types::of::<Vec2, grid::Params>()),
+            (text::SPIRV, Types::of::<Corner, text::Params>()),
             (model::OPAQUE_SPIRV, models),
             (model::MASKED_SPIRV, models),
             (model::BLENDED_SPIRV, models),

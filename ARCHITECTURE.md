@@ -56,8 +56,8 @@ The editor uses `gg-api` too, beside `gg-engine`, as a client of the tool API, a
 - **`gg-renderer`:** the render graph, passes, materials, lighting and post-processing. It owns
   the GPU resources and hands out handles to them.
 - **`gg-engine`:** the main loop, window and input, the job system and the render thread, scene
-  and assets, plus hot reload and the tool API in development builds: what apps and games build
-  on.
+  and assets, fonts and text, plus hot reload and the tool API in development builds: what apps and
+  games build on.
 - **`gg-macros`:** the derives `gg-engine` re-exports beside its traits of the same names,
   `Reflect` and `Component`. Rust builds a derive as a crate of its own; only `gg-engine`
   depends on it, and games derive through `gg-engine`.
@@ -355,14 +355,15 @@ A project's state is text that people and agents edit, diff and merge with ordin
   files, operations, diagnostics and network messages use to name it. IDs are random rather
   than sequential, so entities added on two branches neither collide nor land on the same
   lines.
-- **Asset IDs.** Each texture (`.png`, `.jpg`, `.jpeg`) and model (`.gltf`, `.glb`) under the asset
-  root, whatever its extension's case, has an ID that outlives its file's name: 64 random bits,
-  never 0, written as 16 lowercase hex digits, as an entity's are, in an ID file beside it, its
-  file's name and `.meta`, such as `stone.png.meta`, matched by that exact name, a name that matches
-  only when case is ignored being a problem (`asset.meta_case`), so that a file system that ignores
-  case gives an asset the ID one that doesn't gives it. An ID file is canonical RON, a part to a
-  line, `(`, `    id: "5f3c9a1e07b2d846",`, `)`; a part it hasn't is refused, and one added since,
-  as import settings will be, takes its default where a file leaves it out. It's committed with its
+- **Asset IDs.** Each texture (`.png`, `.jpg`, `.jpeg`), model (`.gltf`, `.glb`) and font (`.ttf`,
+  `.otf`) under the asset root, whatever its extension's case, has an ID that outlives its file's
+  name: 64 random bits, never 0, written as 16 lowercase hex digits, as an entity's are, in an ID
+  file beside it, its file's name and `.meta`, such as `stone.png.meta`, matched by that exact
+  name, a name that matches only when case is ignored being a problem (`asset.meta_case`), so that
+  a file system that ignores case gives an asset the ID one that doesn't gives it. An ID file is
+  canonical RON, a part to a line, `(`, `    id: "5f3c9a1e07b2d846",`, `)`; a part it hasn't is
+  refused, and one added since, as import settings will be, takes its default where a file leaves
+  it out. It's committed with its
   asset, and moves with it. A development run that serves the tool API writes the ID file of each
   asset that has none as it starts, before its layers load, and from then on as a thread of its
   own, `gg-assets`, finds them: it scans the root every second, or at once as the API's `assets`
@@ -410,7 +411,7 @@ A project's state is text that people and agents edit, diff and merge with ordin
     or a model by its name: its asset ID, or a model's image by its model's and its place in it,
     such as `5f3c9a1e07b2d846#0`, so that a file renamed with its ID file changes none of them; or
     else its path, as for an asset outside the root, or whose ID file is missing in a run that
-    writes none. Each is read by a name or by a path to the asset's file. An asset is named as it's
+    writes none. Nothing names a font yet: layers load fonts by their paths. Each is read by a name or by a path to the asset's file. An asset is named as it's
     added, by the ID its run's database holds for its file then, and keeps that name for the run,
     but in a replay or a lockstep joiner, which go by the names they're given, as below.
   - A texture or a model that a scene, the tool API's edit or `scene open`, or a recorded or a
@@ -797,6 +798,12 @@ egui, the engine's immediate-mode UI, is the top overlay: it sees every event fi
 it wants, such as a click on one of its panels, but no key's or button's release, and `gg-renderer`
 draws its meshes over the frame.
 
+egui is the development UI. A game's own, its HUDs and menus, is immediate too, but apart from it:
+layers lay it out as they update, each frame, in the view's own space, anchored to its edges and
+scaled with it, as text and quads that the engine draws into the view, so that captures and the
+editor's view show it. Its state, such as which button has the focus, is the layer's, so that each
+lockstep peer has its own, and a choice that changes the game queues a command, as input does.
+
 Layers draw UI through `Ui`: dockable panels, and egui itself for anything else. The dock is the
 engine's own, since egui's docking crates can't put a panel in a window of its own. Panels sit in
 tab groups, docked in strips along the main window's edges around a central area that stays the
@@ -1059,6 +1066,22 @@ same on every device. Lines go in a list of draws of their own, which the frame 
 everything else, the world's draws too, so that they show over all of it but where an opaque mesh is
 nearer, as debugging wants.
 
+Text is drawn from fonts' fields, which `Context::add_font` bakes as a TrueType or OpenType font
+loads, until Phase 10 cooks them: a texture of data, which shaders read as stored rather than
+decoded from sRGB, holding a multi-channel signed distance field of each glyph of the characters
+Windows-1252 prints that the font has, and of its `.notdef`, which draws in place of any other
+character but whitespace and controls, 48 texels to an em, its distances reaching 4 texels either
+side of each glyph's edge, and in its alpha the true distance, which outlines and shadows will
+read. The median of a texel's three distances keeps a glyph's corners sharp at any size, where a
+single distance would round them off. fdsm generates each glyph's field from the outline skrifa
+reads, unhinted, on the job system's threads, a fixed seed coloring its edges so that a font bakes
+the same field every time, and corrects its errors. `Context::draw_text` shapes each line of a
+text with harfrust, for the font's kerning and its marks' places, but without the features that
+put glyphs in place of others, as ligatures and contextual alternates, whose glyphs the field may
+not hold; and draws each glyph on the engine's quad with the text shader, an instanced draw for a
+run of them, as sprites are, which smooths a glyph's edge over a pixel by how many of the view's
+pixels the field's range spans there, so that text is as crisp drawn large as small.
+
 `Context::draw_grid` draws a grid on one of the world's axis planes as a viewpoint sees it, as the
 editor's view shows one: lines a power of ten apart, fading as they near each other and toward
 grazing angles, and the plane's two axes in their colors, with a shader and a mesh of the engine's
@@ -1091,6 +1114,16 @@ and triangles; the Performance panel shows them and `engine.perf` logs their pea
 An error while rendering ends the renderer, since a failed frame can leave meshes and textures
 half copied to the GPU. A game's shader compiled again whose new pipeline can't be made doesn't:
 it warns, and the old pipeline goes on drawing.
+
+## Audio
+
+Sounds and music, not built yet, are kira's, on cpal, on an audio thread of its own, as the
+simulation's state never is: what plays follows from the world, and never feeds it. A tick queues a
+sound, at a place or on an entity, in a resource of the world that the engine drains after each
+tick, so that no snapshot, hash, recording or scene holds one; each is tagged with its tick, so that
+rollback, running a tick again, can leave out those already played. Layers play music and their
+UI's sounds as they update. A sound at a place is panned and faded by where it is from the view's
+viewpoint, the listener, in 2D. Replays and headless runs play nothing.
 
 ## Threads
 
@@ -1146,5 +1179,7 @@ on the main thread.
 | Agent access | MCP and a command-line tool, both clients of the [tool API](#agents-and-tools) |
 | Shaders | Slang, compiled to SPIR-V by the Vulkan SDK's `slangc` rather than linked in: the engine's own as it builds, games' as they're added and, in development builds, as their files change, their SPIR-V checked against the shader contract |
 | Assets | glTF 2.0 in, read by the engine over `serde_json`; meshoptimizer for meshes and meshlets; BC-compressed textures in KTX2; until cooking, PNGs and JPEGs that `png` and `zune-jpeg` decode as layers add them |
+| Text | TrueType and OpenType fonts, whose outlines `skrifa` reads and `fdsm` bakes into multi-channel signed distance fields, as fonts load until they're cooked; text shaped by `harfrust`; `skrifa` and `harfrust` at the releases egui's own text takes |
+| Audio | `kira` on `cpal`, its sounds decoded by `symphonia`: tracks, panning and streaming, without allocating on the audio thread |
 
 Areas not listed here are undecided.

@@ -27,8 +27,8 @@ const BACK: f32 = 16.0;
 /// adds, removes or renames there shows, such as an agent's scene.
 const RELIST: Duration = Duration::from_secs(1);
 
-/// A texture or a model dragged from the Assets panel, by its file, as egui's drag and drop holds
-/// it: what the game's view takes as it's let go there, as [`game`](crate::game) says.
+/// A texture, a model or a font dragged from the Assets panel, by its file, as egui's drag and drop
+/// holds it: what the game's view takes as it's let go there, as [`game`](crate::game) says.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Dragged {
     pub path: PathBuf,
@@ -153,10 +153,10 @@ impl Assets {
     }
 }
 
-/// The files and folders in `folder`, but each texture's and model's ID file beside it, folders
-/// first, then files, each by its name regardless of case, then as it's spelled. A link is what it
-/// leads to, and one that leads nowhere a file; a link to a texture or a model is a file too, as
-/// the game's scan takes no asset through a link.
+/// The files and folders in `folder`, but each texture's, model's and font's ID file beside it,
+/// folders first, then files, each by its name regardless of case, then as it's spelled. A link is
+/// what it leads to, and one that leads nowhere a file; a link to an asset is a file too, as the
+/// game's scan takes no asset through a link.
 ///
 /// It's listed on the main thread, which a folder of many thousands of files would hold up for
 /// some milliseconds each second it shows; a thread watching the folder wouldn't.
@@ -387,11 +387,11 @@ pub(crate) mod tests {
 
     /// Folders come first, then files, each by its name regardless of case, then as it's spelled,
     /// names that aren't Latin among them; a folder's name never makes it a file, nor an asset.
-    /// Textures and models are assets, by their extensions in any case. An asset's ID file beside
-    /// it doesn't show; one named for it but for case does, as the game warns of it, and so do one
-    /// without its asset, a folder at its name and any other `.meta` file, even beside the file
-    /// it's named for, and, where links can be made, one beside a link to a file, which the game's
-    /// scan doesn't take as an asset, nor does the panel.
+    /// Textures, models and fonts are assets, by their extensions in any case. An asset's ID file
+    /// beside it doesn't show; one named for it but for case does, as the game warns of it, and so
+    /// do one without its asset, a folder at its name and any other `.meta` file, even beside the
+    /// file it's named for, and, where links can be made, one beside a link to a file, which the
+    /// game's scan doesn't take as an asset, nor does the panel.
     #[test]
     fn a_folder_lists_its_folders_then_its_files_by_name() {
         let scratch = Scratch::new("assets-listed");
@@ -413,6 +413,7 @@ pub(crate) mod tests {
             "B.ron.meta",
             "a.RON",
             "rock.GLB",
+            "title.TTF",
             "Z.txt",
         ] {
             fs::write(scratch.0.join(file), "").expect("written");
@@ -440,6 +441,7 @@ pub(crate) mod tests {
             ("notes.meta", Kind::File),
             ("old.png", texture),
             ("rock.GLB", Kind::Asset(AssetKind::Model)),
+            ("title.TTF", Kind::Asset(AssetKind::Font)),
             ("Z.txt", Kind::File),
             ("уровень.ron", Kind::File),
         ];
