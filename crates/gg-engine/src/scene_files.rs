@@ -383,7 +383,7 @@ mod open_scene {
     use super::{Open, SceneFile, same_file};
     use crate::ecs::SceneEdit;
     use crate::layer::Stack;
-    use crate::{Context, Entity, EntityId, Operation, World};
+    use crate::{Context, Entity, EntityId, ModelNode, Operation, World};
 
     /// The scene file that `path`, absolute or relative to the asset root, names for the tool
     /// API's `scene`: its path rebuilt from the asset root, and its author, its path from the asset
@@ -611,7 +611,8 @@ mod open_scene {
 
     /// Empties the open scene, as the tool API's `scene new` asks, once a copy that played has
     /// stopped: deletes the entities it owns, as [`owned`] says, keeping the game's own, a child of
-    /// theirs made a root first; starts every author's edits afresh, as [`Stack::rewrite`] says,
+    /// theirs made a root first, but what's under a model's node, which goes with the model's root,
+    /// as [`emptying`] says; starts every author's edits afresh, as [`Stack::rewrite`] says,
     /// since none of them would undo it; and leaves it untitled, its file no longer watched, and on
     /// disk as it was. Logs `scene.new`.
     ///
@@ -729,16 +730,22 @@ mod open_scene {
 
     /// The operations that delete the entities of `world` that open scene `open`, of scene files
     /// `files`, owns, and how many it owns: each child of theirs it doesn't own made a root first,
-    /// so that it stays, and then each whose parent it doesn't own deleted, with its descendants,
-    /// which it owns once those children are roots.
+    /// so that it stays, but a model's node, which goes with its root, with whatever is under it,
+    /// as when its model changes; and then each deleted whose parent it doesn't own, nor the
+    /// model's root of a parent that's a node, with its descendants, which it owns once those
+    /// children are roots, but models' nodes and what's under them.
     fn emptying(world: &World, files: &[SceneFile], open: &Open) -> (Vec<Operation>, usize) {
         let owned = owned(world, files, open);
         let owns: HashSet<Entity> = owned.iter().copied().collect();
         let id = |entity| world.id(entity).expect("alive");
         let mut operations = Vec::new();
         for &entity in &owned {
+            // Nothing is taken out from under a node: its undo, as an open refused after the
+            // deletes has, would put it back under the node, which operations refuse.
+            let theirs =
+                |child: &Entity| !owns.contains(child) && world.get::<ModelNode>(*child).is_none();
             let children = world.children(entity).expect("alive");
-            for child in children.filter(|child| !owns.contains(child)) {
+            for child in children.filter(theirs) {
                 let entity = id(child);
                 operations.push(Operation::Reparent {
                     entity,
@@ -748,6 +755,7 @@ mod open_scene {
         }
         for &entity in &owned {
             let parent = world.parent(entity).expect("alive");
+            let parent = parent.map(|parent| world.node_root(parent));
             if parent.is_none_or(|parent| !owns.contains(&parent)) {
                 let entity = id(entity);
                 operations.push(Operation::Delete { entity });
@@ -828,7 +836,9 @@ pub(crate) mod tests {
     use crate::net::{DELAY, Lockstep};
     use crate::reflect::Value;
     use crate::snapshot::{self, Run, Snapshot};
-    use crate::{Context, Entity, Operation, Reflect, Tick, Transform, World};
+    use crate::{
+        Context, Entity, ModelNode, ModelRoot, Operation, Reflect, Tick, Transform, World,
+    };
 
     /// Writes `text` at `path`, stamped `later` seconds past now, so that a look sees it changed
     /// whatever the clock's grain.
@@ -1553,6 +1563,56 @@ pub(crate) mod tests {
         let opening = open_scene::check_open(&mut cx, file, 0, true).expect("opens");
         open_scene::open(&mut cx, &mut stack, opening).expect("opened");
         assert_eq!((x(cx.world(), p), x(cx.world(), q)), (1.0, 0.0));
+    }
+
+    /// Open and new delete a model's root the open scene owns with its nodes, which scenes don't
+    /// save, and whatever code put under them, the scene's or the game's, as a change of its model
+    /// does; and its file, opened again, spawns the nodes again, under the same IDs.
+    #[test]
+    fn open_and_new_take_a_models_nodes_with_its_root() {
+        let dir = Scratch::new("open-scene-model");
+        let (_, ids) = project(&dir.0, 1);
+        let mut cx = started(&dir.0);
+        let mut stack = Stack::default();
+        let (model, _) = crate::model::tests::added(&mut cx, "m", crate::model::tests::imported());
+        // First in ID order, so that its delete comes before those of what the scene owns.
+        let root_id = EntityId::new(1).expect("not zero");
+        let create = Operation::Create {
+            entity: Some(root_id),
+            parent: None,
+            components: vec![("ModelRoot".into(), ModelRoot(model).to_value())],
+        };
+        apply(&mut cx, &mut stack, "agent", vec![create]);
+        open_scene::save(&mut cx, None).expect("saved");
+        let nodes = |world: &World| {
+            let nodes = world.query::<(Entity, &ModelNode)>();
+            let ids = nodes.map(|(node, _)| world.id(node).expect("alive"));
+            sorted(ids.collect())
+        };
+        let spawned = nodes(cx.world());
+        assert_eq!(spawned.len(), 4);
+        let world = cx.world_mut();
+        let node = world.entity(spawned[0]).expect("alive");
+        let a = world.entity(ids[0]).expect("loaded");
+        world.set_parent(a, Some(node)).expect("code may");
+        let held = world.spawn(Transform::IDENTITY);
+        world.set_parent(held, Some(node)).expect("code may");
+
+        let file = open_scene::resolve(&cx, Path::new("scenes/main.ron"), true);
+        let file = file.expect("in the scenes folder");
+        let opening = open_scene::check_open(&mut cx, file, 0, true).expect("opens");
+        open_scene::open(&mut cx, &mut stack, opening).expect("opened");
+        let world = cx.world();
+        assert_eq!(nodes(world), spawned, "spawned again, under the same IDs");
+        let a = world.entity(ids[0]).expect("the file's");
+        assert_eq!(world.parent(a).expect("alive"), None, "as its file has it");
+        assert!(!world.contains(held), "gone with the node it was under");
+        assert!(!open_scene::unsaved(&mut cx, 0));
+
+        open_scene::new(&mut cx, &mut stack).expect("emptied");
+        let world = cx.world();
+        assert_eq!((world.entity(root_id), world.entity(ids[0])), (None, None));
+        assert_eq!(nodes(world), []);
     }
 
     /// A path names a scene file from the asset root, given relative or absolute, in its folder's
