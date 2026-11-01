@@ -1419,25 +1419,29 @@ mod tests {
         assert_eq!(at, chosen);
         refused(done);
 
-        // The joiner's, from before it joined.
+        // The joiner's, from before it joined, which applies as the first tick of its host's world
+        // runs, once the host's inputs for it, which follow the world, have come.
         let mut joiner = Peer::joiner(&mut host);
         let theirs = patch(&mut joiner, table());
         let world = host.next;
         join(&mut host, &mut joiner);
+        until(&mut host, &mut joiner, |_, joiner| {
+            joiner.net().is_done(theirs)
+        });
         let (at, done) = joiner.net().done(theirs).expect("applied");
         assert_eq!(at, world);
         refused(done);
 
-        // The host's next, which the joiner waits for from `gg run`.
+        // The host's next, which the joiner waits for from `gg run`, though it has the host's inputs
+        // for the tick, as the host goes on.
         let second = patch(&mut host, table());
         let chosen = host.next + DELAY;
         until(&mut host, &mut joiner, |_, joiner| joiner.next == chosen);
-        for _ in 0..20 {
-            host.turn();
-            joiner.turn();
-        }
+        until(&mut host, &mut joiner, |host, joiner| {
+            let inputs = joiner.net().theirs.get(&chosen);
+            host.next > chosen && inputs.is_some_and(|inputs| inputs.whole)
+        });
         assert_eq!(joiner.next, chosen);
-        assert!(host.next > chosen);
         let theirs = patch(&mut joiner, table());
         until(&mut host, &mut joiner, |host, joiner| {
             host.net().is_done(second) && joiner.net().is_done(theirs)
