@@ -41,7 +41,9 @@ Textures and models have IDs, 16 hex digits, which `assets` lists with their pat
 lockstep session's joiner, whose host does, writes each one's in an ID file beside it, \
 `<file>.meta`, such as `stone.png.meta`, as it starts and as `assets` lists them; commit it with \
 its file, and rename or move it in the same step as its file, before the game's next `assets` or \
-start, or the file gets a fresh ID. A texture's value is still its path.";
+start, or the file gets a fresh ID. A texture's value is its ID where its file has one, as scenes \
+save it, a lockstep joiner's its host's, and else its path; a value you give may name it either \
+way.";
 
 /// Serves MCP on stdin and stdout until stdin ends, reaching the game `pick` picks.
 ///

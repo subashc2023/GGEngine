@@ -90,10 +90,11 @@ impl Digest<'_> {
         self.word(self.world.id(entity).map_or(0, EntityId::get));
     }
 
-    /// By its path, the renderer's handle being its own, or 0 if it has none.
+    /// By its name, its ID or else its path, the renderer's handle being its own, or 0 if it has
+    /// none, so that a texture's file renamed with its ID file hashes as it did.
     pub(crate) fn texture(&mut self, texture: Texture) {
-        match self.world.assets().path(texture) {
-            Some(path) => self.bytes(path.as_bytes()),
+        match self.world.assets().name(texture) {
+            Some(name) => self.bytes(name.as_bytes()),
             None => self.word(0),
         }
     }
@@ -389,11 +390,13 @@ mod tests {
         assert_ne!(point, first, "a variant, by its index");
         let texture = Textures::default().add("own", [1, 1], &[255, 0, 0, 255], Mipmaps::None);
         let texture = texture.expect("a texture");
-        world.assets_mut().add_texture(texture, "own.png".into());
+        world
+            .assets_mut()
+            .add_texture(texture, "own.png".into(), "own.png".into());
         let textured = changed(&mut world, posed, |sprite: &mut Sprite| {
             sprite.texture = Some(texture);
         });
-        assert_ne!(textured, start, "a sprite's texture, by its path");
+        assert_ne!(textured, start, "a sprite's texture, by its name");
 
         let target = |world: &mut World, target: Option<Entity>| {
             changed(world, all, move |e: &mut Everything| e.target = target)

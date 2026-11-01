@@ -153,8 +153,9 @@ impl World {
     /// component's type changed since, its value is matched to the type by its fields' and its
     /// variants' names: a field the type hasn't is dropped, and one it has that the value hasn't
     /// takes its default; a number of another kind is taken where it's exactly a number of the
-    /// field's; a texture is found by its path; and an entity by its ID. A component whose value
-    /// that can't give, or whose type no longer is, is left out, its entity going on without it,
+    /// field's; a texture is found by its name or a path to its file; and an entity by its ID. A
+    /// component whose value that can't give, or whose type no longer is, is left out, its entity
+    /// going on without it,
     /// as is one opaque as a whole unless `opaque` says the process's layers added the same assets
     /// in the same order as the saved one's did, so that its state names them. A resource is made
     /// by the [`Saved`](super::Saved) type of its name, and left out if there's none; one the world
@@ -595,7 +596,7 @@ fn migrate(
         (Type::Entity, Text::Dead) => Value::Entity(Entity::DEAD),
         (Type::Texture, Text::Texture(at)) => match world.assets().texture(at) {
             Some(texture) => Value::Texture(texture),
-            None => return Err(format!("no texture was loaded from `{at}`")),
+            None => return Err(format!("no texture loaded has the ID or path `{at}`")),
         },
         (Type::Option(_), Text::None) => Value::Option(None),
         (Type::Option(inner), Text::Some(text)) => {

@@ -1,9 +1,10 @@
 //! The text of a recording's values: reflection's [`Value`]s, each on one line, every part tagged
 //! with its kind, so that they read back without their types, with their floats' bits, with the
-//! entities they hold by their IDs and with the textures by their paths. The engine writes the text
-//! itself, and `ron` only reads it.
+//! entities they hold by their IDs and with the textures by their names, their IDs or else their
+//! paths. The engine writes the text itself, and `ron` only reads it.
 
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 use gg_core::math::{Quat, Vec2, Vec3, Vec4};
 use gg_core::{Error, Result};
@@ -20,8 +21,8 @@ use crate::{Entity, EntityId, World};
 /// UInt(10000))])`. A float is the shortest text that reads back to its bits, but for a NaN, which
 /// keeps its sign but not its payload, as arithmetic leaves that to the platform; a string is
 /// quoted by a scene's escapes, which leave no line break; an entity is its ID in `world`, or
-/// `Dead` if it isn't alive there; and a texture is its path in `world`, or `Opaque` if it has
-/// none, which nothing sets.
+/// `Dead` if it isn't alive there; and a texture is its name in `world`, its ID or else its path,
+/// or `Opaque` if it has none, which nothing sets.
 pub(crate) fn write(out: &mut String, value: &Value, world: &World) {
     put(out, value, world, false);
 }
@@ -90,10 +91,10 @@ fn put(out: &mut String, value: &Value, world: &World, fold: bool) {
             Some(id) => write!(out, "Entity(\"{id}\")").expect("a string takes any text"),
             None => out.push_str("Dead"),
         },
-        &Value::Texture(texture) => match world.assets().path(texture) {
-            Some(path) => {
+        &Value::Texture(texture) => match world.assets().name(texture) {
+            Some(name) => {
                 out.push_str("Texture(");
-                quote(out, path);
+                quote(out, name);
                 out.push(')');
             }
             None => out.push_str("Opaque"),
@@ -130,6 +131,30 @@ fn put(out: &mut String, value: &Value, world: &World, fold: bool) {
     }
 }
 
+/// Writes `name` and `path`, a texture's name and the path it names, as
+/// [`Assets::named_from`](crate::assets::Assets::named_from) gives them, on one line, as a list of
+/// two strings: as a snapshot's `named` lines, a recording's and a lockstep host's hold them, such
+/// as `List([String("5f3c9a1e07b2d846"), String("assets/stone.png")])`.
+pub(crate) fn write_named(out: &mut String, name: &str, path: &str) {
+    out.push_str("List([String(");
+    quote(out, name);
+    out.push_str("), String(");
+    quote(out, path);
+    out.push_str(")])");
+}
+
+/// The name and path that `text`, written by [`write_named`] and starting at column `from` of its
+/// line, gives, if it's that.
+pub(crate) fn read_named(text: &str, from: usize) -> Option<(Arc<str>, Arc<str>)> {
+    let Text::List(parts) = Text::parse(text, from).ok()? else {
+        return None;
+    };
+    match <[Text; 2]>::try_from(parts).ok()? {
+        [Text::String(name), Text::String(path)] => Some((name.into(), path.into())),
+        _ => None,
+    }
+}
+
 /// A value as a recording's text gives it: a [`Value`], but with each entity it holds by its ID,
 /// since it's read before the world that the ID names an entity in, at the tick that applies it.
 #[derive(Debug, Deserialize)]
@@ -147,7 +172,7 @@ pub(crate) enum Text {
     Entity(Id),
     /// An entity that wasn't alive as it was written.
     Dead,
-    /// A texture, by its path.
+    /// A texture, by its name, or a path to its file.
     Texture(String),
     None,
     Some(Box<Text>),
@@ -227,8 +252,8 @@ impl Text {
     }
 
     /// The value it gives in `world`, where each entity it holds is the one with its ID, or, if none
-    /// has it, a handle that names none; and each texture the one with its path, or, if none has
-    /// it, `Opaque`, which nothing sets.
+    /// has it, a handle that names none; and each texture the one it names, or, if none, `Opaque`,
+    /// which nothing sets.
     pub(crate) fn value(&self, world: &World) -> Value {
         let fields = |given: &[(String, Text)]| {
             let given = given.iter();
@@ -249,8 +274,8 @@ impl Text {
             &Self::Quat(x, y, z, w) => Value::Quat(Quat::from_xyzw(x, y, z, w)),
             Self::Entity(Id(id)) => Value::Entity(world.entity(*id).unwrap_or(Entity::DEAD)),
             Self::Dead => Value::Entity(Entity::DEAD),
-            Self::Texture(path) => {
-                (world.assets().texture(path)).map_or(Value::Opaque, Value::Texture)
+            Self::Texture(name) => {
+                (world.assets().texture(name)).map_or(Value::Opaque, Value::Texture)
             }
             Self::None => Value::Option(None),
             Self::Some(text) => Value::Option(Some(Box::new(text.value(world)))),

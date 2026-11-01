@@ -338,6 +338,12 @@ impl World {
         &self.assets
     }
 
+    /// What names the textures its components show, as it shares them, to share them again.
+    #[cfg(feature = "dev")]
+    pub(crate) fn shared_assets(&self) -> &Arc<Assets> {
+        &self.assets
+    }
+
     /// What names the textures its components show, to name another, which its copies from before
     /// don't see.
     #[cfg(test)]

@@ -1,9 +1,10 @@
 //! Reflection's values as the tool API writes and reads them, as gg-api's docs describe: JSON
 //! written by hand, so that a struct's fields keep their order, with the entities they hold by
-//! their IDs and the textures by their paths; and read by the type of the field it goes in, as
-//! reflection describes it. A game reads and writes them with its world's entities and textures;
-//! a client, as the editor's Inspector is, with another process's, which it keeps by their IDs and
-//! paths, as [`Remote`] says; and reflection's descriptions of types go to and come back from
+//! their IDs and the textures by their names, their IDs or else their paths; and read by the type
+//! of the field it goes in, as reflection describes it, a texture by its name or a path to its
+//! file. A game reads and writes them with its world's entities and textures; a client, as the
+//! editor's Inspector is, with another process's, which it keeps by their IDs and names, as
+//! [`Remote`] says; and reflection's descriptions of types go to and come back from
 //! gg-api's, as `types` answers them.
 
 use std::borrow::Cow;
@@ -17,23 +18,23 @@ use crate::ecs::MAX_DEPTH;
 use crate::reflect::{self, Bound, Field, Ident, Meta, Shape, Show, Type, Types, Value, Variant};
 use crate::{Entity, EntityId, Texture, World};
 
-/// What finds the entities and textures values hold as JSON names them, by their IDs and paths,
+/// What finds the entities and textures values hold as JSON names them, by their IDs and names,
 /// and names them back: a game's [`World`], or a client's [`Remote`].
 pub(crate) trait Names {
     /// The types values are read by.
     fn types(&self) -> &Types;
     /// The ID of `entity`, if it's alive.
     fn id(&self, entity: Entity) -> Option<EntityId>;
-    /// The path `texture` was added from, if it has one.
-    fn path(&self, texture: Texture) -> Option<&str>;
+    /// The name of `texture`, its ID or else its path, if it has one.
+    fn name(&self, texture: Texture) -> Option<&str>;
     /// The value of the entity of ID `id`.
     ///
     /// Fails with `ecs.no_entity` if it isn't alive.
     fn entity(&self, id: EntityId) -> Result<Value>;
-    /// The value of the texture added from `path`.
+    /// The value of the texture `name` names, by its name or a path to its file.
     ///
-    /// Fails with `api.no_texture` if none was.
-    fn texture(&self, path: &str) -> Result<Value>;
+    /// Fails with `api.no_texture` if none is.
+    fn texture(&self, name: &str) -> Result<Value>;
 }
 
 impl Names for World {
@@ -45,8 +46,8 @@ impl Names for World {
         World::id(self, entity)
     }
 
-    fn path(&self, texture: Texture) -> Option<&str> {
-        self.assets().path(texture)
+    fn name(&self, texture: Texture) -> Option<&str> {
+        self.assets().name(texture)
     }
 
     fn entity(&self, id: EntityId) -> Result<Value> {
@@ -55,10 +56,11 @@ impl Names for World {
         Ok(Value::Entity(entity))
     }
 
-    fn texture(&self, path: &str) -> Result<Value> {
-        let texture = self.assets().texture(path).ok_or_else(|| {
-            let message =
-                format!("no texture was added from `{path}`, a path as the app's root names it");
+    fn texture(&self, name: &str) -> Result<Value> {
+        let texture = self.assets().texture(name).ok_or_else(|| {
+            let message = format!(
+                "no texture added has the ID or path `{name}`, a path as the app's root names it"
+            );
             Error::new("api.no_texture", message)
         })?;
         Ok(Value::Texture(texture))
@@ -67,7 +69,7 @@ impl Names for World {
 
 /// Another process's values, as a client of its API keeps them, by the types it described: an
 /// entity by its ID, as [`Value::String`], or [`Entity::DEAD`] for one that isn't alive, as JSON's
-/// `null` gives it; and a texture by its path, as [`Value::String`]. Written back, they're the JSON
+/// `null` gives it; and a texture by its name, as [`Value::String`]. Written back, they're the JSON
 /// they were read from, which the game reads by its own world.
 pub(crate) struct Remote<'a>(pub(crate) &'a Types);
 
@@ -80,7 +82,7 @@ impl Names for Remote<'_> {
         None
     }
 
-    fn path(&self, _: Texture) -> Option<&str> {
+    fn name(&self, _: Texture) -> Option<&str> {
         None
     }
 
@@ -88,13 +90,13 @@ impl Names for Remote<'_> {
         Ok(Value::String(id.to_string()))
     }
 
-    fn texture(&self, path: &str) -> Result<Value> {
-        Ok(Value::String(path.to_owned()))
+    fn texture(&self, name: &str) -> Result<Value> {
+        Ok(Value::String(name.to_owned()))
     }
 }
 
 /// Writes `value` as JSON, with the entities it holds by their IDs, as `names` names them, `null`
-/// for one that isn't alive, and the textures by their paths, `null` for one without.
+/// for one that isn't alive, and the textures by their names, `null` for one without.
 pub(crate) fn write(out: &mut String, value: &Value, names: &dyn Names) {
     match value {
         Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
@@ -118,8 +120,8 @@ pub(crate) fn write(out: &mut String, value: &Value, names: &dyn Names) {
             Some(id) => string(out, &id.to_string()),
             None => out.push_str("null"),
         },
-        &Value::Texture(texture) => match names.path(texture) {
-            Some(path) => string(out, path),
+        &Value::Texture(texture) => match names.name(texture) {
+            Some(name) => string(out, name),
             None => out.push_str("null"),
         },
         Value::Option(None) => out.push_str("null"),
@@ -149,15 +151,15 @@ pub(crate) fn write(out: &mut String, value: &Value, names: &dyn Names) {
 
 /// The value `json` gives a field of type `ty`, as gg-api's docs describe: with the entities it
 /// names by their IDs, alive as `names` finds them, or `null` for a dead one, as one that isn't
-/// alive writes, and the textures by their paths, as `names` finds them; a struct, or a variant's
-/// fields, missing a field takes its default, or is opaque, which keeps or makes it as its type's
-/// own is; and a whole number an `Int` for a signed field, as reflection reads one, and a `UInt`
-/// for an unsigned one, if it can be.
+/// alive writes, and the textures by their names or paths to their files, as `names` finds them;
+/// a struct, or a variant's fields, missing a field takes its default, or is opaque, which keeps
+/// or makes it as its type's own is; and a whole number an `Int` for a signed field, as
+/// reflection reads one, and a `UInt` for an unsigned one, if it can be.
 ///
 /// Fails, saying where in the value, with `reflect.wrong_kind` for JSON of another kind than the
 /// type's, `reflect.no_variant` and `reflect.no_field` for a variant or a field the type hasn't,
 /// `ecs.bad_id` and `ecs.no_entity` for an ID that isn't one or names no living entity,
-/// `api.no_texture` for a path no texture was added from, and `api.too_deep` for a value nested
+/// `api.no_texture` for a name or path no texture has, and `api.too_deep` for a value nested
 /// more than a scene's values may be.
 pub(crate) fn read(json: &JsonValue, ty: &Type, names: &dyn Names) -> Result<Value> {
     read_at(json, ty, names, 1)
@@ -240,8 +242,8 @@ fn read_at(json: &JsonValue, ty: &Type, names: &dyn Names, depth: u32) -> Result
             _ => return Err(wrong("an entity's ID, a string, or null for none alive")),
         },
         Type::Texture => match json {
-            JsonValue::String(path) => names.texture(path)?,
-            _ => return Err(wrong("a texture's path, a string")),
+            JsonValue::String(name) => names.texture(name)?,
+            _ => return Err(wrong("a texture's ID or path, a string")),
         },
         Type::Option(inner) => match json {
             JsonValue::Null => Value::Option(None),
@@ -812,7 +814,7 @@ mod tests {
         // `null`, as a dead entity writes, reads back as one.
         let none = super::read(&JsonValue::Null, &Type::Entity, &world).expect("read");
         assert_eq!(none, Value::Entity(Entity::DEAD));
-        // A texture by the path a layer added it from, which none here has.
+        // A texture by a path a layer added it from, which none here has.
         world.register::<crate::Sprite>().expect("registered");
         let sprite = Type::Named(world.types().find("Sprite").expect("registered"));
         let error =

@@ -159,13 +159,13 @@ impl Writer<'_> {
             (_, Value::Quat(q)) => floats(out, &q.to_array()),
             (_, &Value::Entity(entity)) => self.reference(entity)?,
             (_, &Value::Texture(texture)) => {
-                let Some(path) = self.world.assets().path(texture) else {
+                let Some(name) = self.world.assets().name(texture) else {
                     return Err(Error::new(
                         "asset.unnamed",
-                        "it's a texture that wasn't loaded from a file, so it has no path to save",
+                        "it's a texture that wasn't loaded from a file, so it has no name to save",
                     ));
                 };
-                quote(out, path);
+                quote(out, name);
             }
             (Type::Option(_), Value::Option(None)) => out.push_str("None"),
             (Type::Option(inner), Value::Option(Some(value))) => {

@@ -999,7 +999,8 @@ mod imp {
 
         fn texture_label(&self, value: &Value) -> String {
             match value {
-                Value::String(path) => path.clone(),
+                // Its name, its ID or else its path, as the game's values give it.
+                Value::String(name) => name.clone(),
                 _ => "none".to_owned(),
             }
         }

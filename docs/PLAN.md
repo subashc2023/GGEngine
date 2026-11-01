@@ -73,12 +73,13 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Scenes through the API and the File menu** (2026-10-31)
 - **Phase 6, projects and the editor on the tool API** (2026-10-31)
 - **Asset IDs beside their files** (2026-10-31)
+- **Textures named by ID** (2026-10-31)
 
 ## Now
 
-**Textures named by ID**, Phase 7's second milestone: scenes, the world hash, recordings, lockstep
-inputs and snapshots name textures by the IDs their ID files give them, rather than by their paths;
-its plan says when it's done.
+**Assets loaded wherever they're named**, Phase 7's third milestone: a texture that a scene, the
+tool API or a command names, by its ID or its path, loads where no layer has added it, and the
+demo's arena's Pillar gets a small texture, committed; its plan says when it's done.
 
 ## Next
 
@@ -93,9 +94,7 @@ Each phase ends in something you can run and check.
    order: asset IDs beside their files; textures named by ID; assets loaded wherever they're named,
    the demo's arena's Pillar textured, committed; renames that keep IDs, which the running game
    pairs by content, with a cache for each clone; reloading any change; models in scenes by ID; and
-   dropping from the editor's Assets panel. The second decides what a build without `dev`, which
-   reads no ID file, names a texture by; how a lockstep joiner gets the IDs its host writes after
-   the joiner's scan; and whether replays and test contexts scan once the hash reads IDs.
+   dropping from the editor's Assets panel.
 8. **Text and sound.** Text drawn from multi-channel signed distance fields, crisp at any size,
    fonts baked by the asset pipeline; a game's own UI, HUDs and menus, apart from the development
    UI; and audio: sounds and music, mixed, positioned in 2D, loaded as assets. *Done when* the demo
@@ -189,7 +188,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Sprite sheets with space between or around their cells, as some tile sets come; `SpriteSheet` takes cells packed edge to edge from the top left | A game's art comes that way |
 | Tiling one cell of a sheet: a repeating sampler repeats the whole texture | A game tiles part of an atlas, such as a background |
 | A sprite that samples past its rectangle, so that a seamless texture tiled across sprites side by side blends across their edges under a linear sampler | A game tiles one texture across sprites |
-| A tile map in the engine, which scenes save; the sandbox's map is code of its own, its tiles sprites that snapshots and scenes save each with its texture's path | A game edits its map |
+| A tile map in the engine, which scenes save; the sandbox's map is code of its own, its tiles sprites that snapshots and scenes save each with its texture's name | A game edits its map |
 | glTF that `Context::add_model` refuses or ignores, as it lists: lighting and the material's other textures, skins and animations, morph targets, cameras, models without a scene and scenes other than the default, sparse accessors and accessors without a buffer view, primitives other than triangle lists, samplers that wrap across and down differently, minification filters, texture transforms, quantized or compressed meshes and textures (KHR_mesh_quantization, Draco, meshopt, Basis Universal), and integers written as floats, such as `1.0`, which glTF allows | Each with the first model that needs it; lighting and the other textures in Phase 12, compression with Phase 10's cooker |
 | Decoding images off the main thread; `Context::add_texture` and `add_model` decode before they return | Phase 10, with the streaming loader |
 | Models that take more than 4 GiB to read, of their buffers, decoded images, vertices and nodes, which `add_model` refuses with `engine.unsupported_model` | Phase 10, with streaming and the GPU's memory budget |
@@ -260,6 +259,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | `MeshDraw`'s mesh and shader named, as `Sprite.texture` is: opaque until then, shown but not set, saved in scenes or hashed, and carried across a restart by their indices only where the layers added the same assets in the same order; and setting them by name | A game builds its draws from data |
 | Scanning the asset root on a thread of its own, or not at all: a run's start and each `assets` request walk it whole, read every ID file and flush each ID file written to the disk, on the main thread, so an `assets` after copying in about 1,500 assets without ID files stops frames past `gg run`'s 10 s `--hang`, and the game restarts from its last snapshot | Phase 7's fourth milestone, whose watcher keeps the database |
 | IDs for shaders, scenes, sounds and other kinds, for assets outside the asset root, and for assets reached through links: the scan gives textures and models under the root alone, never through a link | Each kind as something first names it by ID |
+| Builds without `dev` naming textures by their IDs: they read no ID file, so they name every texture by its path, and a scene, a recording or a snapshot that names one by its ID finds none there | Phase 10, whose cooked package gives each asset its ID |
 | 8- and 16-bit vertex fields, whose features Vulkan 1.4 guarantees but the device doesn't enable | A mesh packs its vertices, as Phase 10's cooker will |
 | Splits in a torn-off window, which holds one tab group | A tool wants panels side by side outside the main window |
 | Reordering tabs by dragging them along their bar; a drop among the tabs adds one at the end | Someone reorders tabs |

@@ -918,7 +918,9 @@ pub(super) mod tests {
             .for_each(|done| done.expect("registered"));
         let texture = Textures::default().add("own", [1, 1], &[255, 0, 0, 255], Mipmaps::None);
         let texture = texture.expect("a texture");
-        world.assets_mut().add_texture(texture, "own.png".into());
+        world
+            .assets_mut()
+            .add_texture(texture, "own.png".into(), "own.png".into());
         let at = |x: f32| Transform {
             translation: Vec3::new(x, 0.0, 0.0),
             ..Transform::IDENTITY

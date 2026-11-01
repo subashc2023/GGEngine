@@ -866,9 +866,9 @@ impl Visitor<'_> for Leaf<'_, '_> {
                     let error = Error::new(
                         "asset.no_texture",
                         format!(
-                            "no texture was loaded from `{text}`: a game loads the textures its \
-                             scenes show, with `Context::add_texture` or `add_sprite_sheet`, \
-                             before it loads them"
+                            "no texture loaded has the ID or path `{text}`: a game loads the \
+                             textures its scenes show, with `Context::add_texture` or \
+                             `add_sprite_sheet`, before it loads them"
                         ),
                     );
                     Err(self.load.refuse(self.item, error))

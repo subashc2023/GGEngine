@@ -311,15 +311,17 @@ A project's state is text that people and agents edit, diff and merge with ordin
   line and paragraph separators and default-ignorable code points; names ASCII identifiers; at
   most 64 levels deep. The engine writes the text itself, so that the bytes depend on no
   library's formatting, line endings or Rust release, and `ron` only reads it, through seeds
-  that reflection's descriptions drive, never its untyped values. A texture is saved as its path,
-  relative to the app's root (`App::root`), which a load finds it by among the textures the game
-  has loaded; what's opaque, such as a `MeshDraw`, isn't saved: a load builds each component on its
-  type's `Component::base`, which gives it that, or from the scene alone. A field a scene leaves
-  out, as one saved before its type had the field does, takes its default, and saves again whole.
-  A child's `Parent` is saved as its parent's ID, and a root's isn't. A save makes each component
-  again as a load would, so that every scene saved loads; a load checks everything before it spawns
-  anything, all or nothing, and a refusal begins with the line and column where the text is
-  refused, and, but for a syntax error, names the entity, the component and the field.
+  that reflection's descriptions drive, never its untyped values. A texture is saved as its name,
+  its asset ID or else its path relative to the app's root (`App::root`), as Asset IDs says below,
+  which a load finds it by among the textures the game has loaded, as it finds it by a path to its
+  file, as a scene written by hand may name it; what's opaque, such as a `MeshDraw`, isn't saved:
+  a load builds each component on its type's `Component::base`, which gives it that, or from the
+  scene alone. A field a scene leaves out, as one saved before its type had the field does, takes
+  its default, and saves again whole. A child's `Parent` is saved as its parent's ID, and a root's
+  isn't. A save makes each component again as a load would, so that every scene saved loads; a
+  load checks everything before it spawns anything, all or nothing, and a refusal begins with the
+  line and column where the text is refused, and, but for a syntax error, names the entity, the
+  component and the field.
 - **Prefabs.** A prefab is a scene of one subtree, placed as a copy under a parent. Each of the
   copy's IDs is mixed from one drawn for the copy and the prefab's own, `mix64(local ^
   mix64(instance ^ PLACE))`, a permutation of the prefab's IDs for each copy, fixed for good, so
@@ -360,6 +362,28 @@ A project's state is text that people and agents edit, diff and merge with ordin
   as data. An asset's ID, once a run has it, stays its for the run: an ID file changed since, as by
   a branch's checkout, warns (`asset.id_changed`) and counts from the next run, and a run writes its
   ID back only while no other ID file its scan found holds it.
+  - Scenes, the world's hash, recordings, snapshots, lockstep inputs and the tool API name a texture
+    by its name: its asset ID, or a model's image by its model's and its place in it, such as
+    `5f3c9a1e07b2d846#0`, so that a file renamed with its ID file changes none of them; or else its
+    path, as for a texture outside the root, or whose ID file is missing in a run that writes none.
+    Each is read by a name or by a path to the texture's file. A texture is named as it's added,
+    by the ID its run's database holds for its file then, and keeps that name for the run, but in
+    a replay or a lockstep joiner, which go by the names they're given, as below.
+  - Builds without `dev`, which read no ID file, name every texture by its path, so that a scene,
+    a recording or a snapshot naming one by its ID finds none there; cooked data will give them
+    IDs.
+  - A run's names travel with what another process reads of it, so that the other goes as it did
+    whatever ID files its disk holds, as a checkout without those not yet committed. A recording
+    has a `named` line for each texture named otherwise than by its path, the name and the path,
+    by which its replay, reading no ID file, names its textures. A snapshot file has them too, by
+    which a run restored from it reads its values, a texture whose ID changed since coming back by
+    its path, though the run names it its own way. A lockstep joiner names every texture as its
+    host does, by its path until the host's world comes with its names, which rename those it has
+    added, as each world the host sends again does, and by the names the host sends of those it
+    adds after, before the inputs that may name them; so a joiner's names may be IDs its own disk
+    holds no ID file for, which its `assets` doesn't list.
+  - A test's context reads the ID files under the root it's given, writing none, as a run that
+    serves no tool API does, so that a game's reference hashes name its textures as its runs do.
   [asset.rs](crates/gg-api/src/asset.rs) and [assets.rs](crates/gg-engine/src/assets.rs) have the
   rest.
 - **Operations.** Every authoring change, by a person or an agent, is an operation with an
@@ -482,8 +506,9 @@ has one. Values cross as a closed `Value`: integers of fixed sizes only, so that
 same on every machine; `f32` apart from `f64`, so that bits come back as they went; an entity as
 its handle, as components hold one, which scenes, the tool API and replication name by its ID;
 a texture as its handle, which the renderer alone makes, so that no value makes an index that
-shaders sample unchecked, and which scenes, snapshots, recordings and the tool API name by its path;
-and `Opaque` for what reflection keeps but doesn't read, such as a `MeshDraw`, which no value may
+shaders sample unchecked, and which scenes, snapshots, recordings and the tool API name by its name,
+its asset ID or else its path, as [Project state](#project-state) says; and `Opaque` for what
+reflection keeps but doesn't read, such as a `MeshDraw`, which no value may
 make. The world reads and sets a field by its component's name and a path, such as
 `rect[1].y`: a set checks the whole value against the description before anything changes, and
 returns the old value, which sets it back unless code stored one that a set refuses. The Inspector
@@ -494,7 +519,7 @@ through the API a few times a second, and the descriptions of its types once, an
 it hasn't comes, with one request at a time, so that what it reads after an edit's answer shows the
 edit, and edits the world as the game's client, drawing what waits for an answer as it will be.
 Values cross as JSON, read and written by the types the game describes, an entity's by its ID and
-a texture's by its path.
+a texture's by its name.
 
 A field's default is the one `#[reflect(default = ...)]` gives, or else its type's, so that
 adding a component, switching an enum to another variant and resetting a field each start from a
@@ -527,15 +552,16 @@ after a crash or a rebuild, goes on where the world was: each slot under its gen
 ones in their order; each table in the order it was made, empty ones too, and its rows in theirs,
 each with its entity's ID and its components' values, as a recording's text writes values, by their
 fields' names; each parent's children in their order; the stream of IDs; the resources that save
-themselves; the ticks the simulation had run; the assets the layers had added; and, of a game the
-tool API stopped, that it's stopped, or of one playing a copy, the world as edited too, which it
-held aside, with its ticks, its hash and its scene files. Loaded, it's the world saved, hash for
-hash, but for the slots a log kept vacant, which no log in the new process gives back, so that
-they're freed. A component whose type changed since is matched to the type as it is by its fields'
-names: a field added takes its default, one dropped goes, a number of another kind is taken where
-it's exactly a number of the field's, and a component that no longer reads, or whose type is gone,
-is left out, its entity going on without it, each change warned of once, by the type's path rather
-than by value (`snapshot.changed`); a rotation that rounding took off unit length is normalized.
+themselves; the ticks the simulation had run; the assets the layers had added, and the names their
+textures had, as [Project state](#project-state) says; and, of a game the tool API stopped, that
+it's stopped, or of one playing a copy, the world as edited too, which it held aside, with its
+ticks, its hash and its scene files. Loaded, it's the world saved, hash for hash, but for the slots
+a log kept vacant, which no log in the new process gives back, so that they're freed. A component
+whose type changed since is matched to the type as it is by its fields' names: a field added takes
+its default, one dropped goes, a number of another kind is taken where it's exactly a number of
+the field's, and a component that no longer reads, or whose type is gone, is left out, its entity
+going on without it, each change warned of once, by the type's path rather than by value
+(`snapshot.changed`); a rotation that rounding took off unit length is normalized.
 What's opaque, such as a `MeshDraw`'s mesh and shader, holds indices, so it comes back only into a
 run whose layers added the same assets in the same order, a file added again counting again, of the
 same types, as the file's `asset` lines check, a draw's bytes by its mesh's and shader's types'
@@ -608,8 +634,9 @@ them, since each peer runs both players' world.
   while it waits. Each tick, a peer takes what its layers queued since the last and sends it as its
   inputs for the tick [`DELAY`](crates/gg-engine/src/net.rs) ticks on, so that the inputs reach the
   other peer before it needs them; a frame that ticks drains the socket first. Inputs travel as
-  text, the values written as recordings write them, entities by their IDs, read into values only
-  at their tick, against the world then.
+  text, the values written as recordings write them, entities by their IDs and textures by their
+  names, which the joiner takes from its host, as [Project state](#project-state) says, read into
+  values only at their tick, against the world then.
 - **Edits and patches are inputs too.** The tool API's edits, on either peer, go out with the
   peer's inputs for the tick `DELAY` on, and apply on both before it, so that a request's answer
   comes once its edit has applied. A scene file's save is an edit of the file's text, which each
@@ -898,10 +925,11 @@ samplers, which it picks by its index too. A model's textures have their full ch
 which the CPU makes as the frame that copies them renders, until they're cooked. A layer that adds a
 file again, by whatever form of its path, as a texture or a sprite sheet, a model, or a shader of
 the same vertex and parameter types and blend, gets what the first add made, the file loaded once,
-as the OS resolves `.`, `..`, links and, where names ignore it, case; a texture keeps the name its
-first path gave it, which its other paths name too. A name is a path as the layer wrote it, rather
-than as the disk spells it, which a file system that ignores case keeps as an editor last saved it,
-so that every checkout of a game names its files alike.
+as the OS resolves `.`, `..`, links and, where names ignore it, case; a texture keeps the path it
+was first added by, which its other paths find it by too, and its name, as [Project
+state](#project-state) says. A path is as the layer wrote it, rather than as the disk spells it,
+which a file system that ignores case keeps as an editor last saved it, so that every checkout of a
+game names its files alike.
 
 Meshes and textures reach GPU memory the best way the device has, as gg-gpu's `UploadPath` says:
 beside the frames the GPU renders, through a queue apart from graphics, where the device has one.

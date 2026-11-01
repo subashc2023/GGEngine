@@ -445,7 +445,7 @@ fn a_refused_scene_changes_nothing_and_says_where() {
                 .to_owned(),
             "asset.no_texture",
             "\"nowhere.png\"",
-            about("Sprite.texture") + "no texture was loaded from `nowhere.png`",
+            about("Sprite.texture") + "no texture loaded has the ID or path `nowhere.png`",
         ),
         (
             "            ),\n        ),\n    },\n)",
@@ -1178,39 +1178,43 @@ fn a_copy_that_would_have_a_living_or_kept_entitys_id_is_another() {
     }
 }
 
-/// A sprite's texture saves as its path, which a load finds the texture by in a world that has it;
-/// one without that path refuses the scene, and a texture without a path refuses the save.
+/// A sprite's texture saves as its name, its ID where it has one, which a load finds the texture by
+/// in a world that has it, as it finds it by a path to its file, as a scene written by hand may
+/// name it, and saves again by its name; a name no texture has refuses the scene, and a texture
+/// without a name refuses the save.
 #[test]
-fn a_sprite_saves_its_texture_by_its_path() {
+fn a_sprite_saves_its_texture_by_its_name() {
     let mut textures = Textures::default();
     let mut add = |name| textures.add(name, [1, 1], &[0; 4], Mipmaps::None);
     let [logo, unnamed] = ["logo", "unnamed"].map(|name| add(name).expect("a texture"));
+    let named = |world: &mut World| {
+        let (path, id) = ("assets/logo.png".into(), "5f3c9a1e07b2d846".into());
+        world.assets_mut().add_texture(logo, path, id);
+    };
     let mut world = golden_world(4);
-    world
-        .assets_mut()
-        .add_texture(logo, "assets/logo.png".into());
+    named(&mut world);
     let shown = Sprite {
         texture: Some(logo),
         ..Sprite::default()
     };
     let entity = world.spawn(shown);
     let text = world.save_scene(&[entity]).expect("saved");
-    assert!(
-        text.contains("texture: Some(\"assets/logo.png\"),"),
-        "{text}"
-    );
-    let mut other = golden_world(5);
-    other
-        .assets_mut()
-        .add_texture(logo, "assets/logo.png".into());
-    let loaded = other.load_scene(&text).expect("loaded")[0];
-    assert_eq!(other.get::<Sprite>(loaded), Some(&shown));
+    let by_id = "texture: Some(\"5f3c9a1e07b2d846\"),";
+    assert!(text.contains(by_id), "{text}");
+    let by_path = text.replace(by_id, "texture: Some(\"assets/logo.png\"),");
+    for given in [&text, &by_path] {
+        let mut other = golden_world(5);
+        named(&mut other);
+        let loaded = other.load_scene(given).expect("loaded")[0];
+        assert_eq!(other.get::<Sprite>(loaded), Some(&shown));
+        assert_eq!(other.save_scene(&[loaded]).expect("saved"), text);
+    }
     let refused = golden_world(6)
         .load_scene(&text)
         .expect_err("no such texture");
     assert_eq!(refused.code(), "asset.no_texture", "{refused}");
     world.get_mut::<Sprite>(entity).expect("a sprite").texture = Some(unnamed);
-    let refused = world.save_scene(&[entity]).expect_err("no path");
+    let refused = world.save_scene(&[entity]).expect_err("no name");
     assert_eq!(refused.code(), "asset.unnamed", "{refused}");
 }
 

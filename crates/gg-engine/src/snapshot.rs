@@ -1,7 +1,10 @@
 //! Snapshot files: a run's world saved whole as text, which a run given `--restore` starts from, in
 //! another process, after a crash or a rebuild, so that it goes on where the world was: its app,
 //! its engine and build, its layers from the bottom up, the ticks the simulation had run, the
-//! world's hash, the assets the layers had added, which name what's opaque in the world, the scene
+//! world's hash, the assets the layers had added, which name what's opaque in the world, the name
+//! of each texture its run named otherwise than by its path, as by its ID, with that path, which
+//! its values name textures by, read so in a run that names them otherwise, as after an ID file
+//! changed, and taken as its own by a lockstep joiner, whose host's world comes so, the scene
 //! files the layers had loaded, each its path, its author and its text as last applied, as a
 //! recording's values write them, which the restored run watches, the open scene, its file's
 //! author or none and the IDs it made, written so too, and the world, as [`World::save_whole`]
@@ -19,6 +22,7 @@
 //! ticks 1234
 //! hash 58183b6352a09a44 fb695ce29daa8479
 //! asset texture 1 1 2 assets/checkerboard.png
+//! named List([String("5f3c9a1e07b2d846"), String("assets/checkerboard.png")])
 //! scene List([String("/game/scenes/grid.ron"), String("scenes/grid.ron"), String("(entities: ...")])
 //! open List([Some(String("scenes/grid.ron")), List([String("1a2b3c4d5e6f7081")])])
 //! stream 3f8a6c2e9b1d4057
@@ -31,14 +35,16 @@
 //! end
 //! ```
 
+use std::collections::HashMap;
 use std::fs;
 use std::ops::Range;
 use std::path::Path;
+use std::sync::Arc;
 
 use gg_core::{Error, Result};
 use tracing::{info, warn};
 
-use crate::recording::text::Text;
+use crate::recording::text::{Text, read_named};
 use crate::reflect::Value;
 use crate::scene_files::{Open, SceneFile};
 use crate::{World, WorldHash};
@@ -95,6 +101,11 @@ pub(crate) fn write(
     writeln!(out, "hash {}", world.hash()).expect(written);
     for added in world.assets().added() {
         writeln!(out, "asset {added}").expect(written);
+    }
+    for (name, path) in world.assets().named_from(0) {
+        out.push_str("named ");
+        crate::recording::text::write_named(&mut out, name, path);
+        out.push('\n');
     }
     write_scenes(&mut out, scenes, open, world);
     world.save_whole(&mut out)?;
@@ -218,6 +229,16 @@ pub(crate) struct Snapshot {
     hash: WorldHash,
     /// What the layers of the run it was taken from had added, in order.
     assets: Vec<String>,
+    /// The name that run gave each texture it named otherwise than by its path, by that path,
+    /// which its values name textures by.
+    #[cfg_attr(
+        not(feature = "dev"),
+        allow(
+            dead_code,
+            reason = "builds without `dev` name every texture by its path"
+        )
+    )]
+    pub(crate) names: HashMap<Arc<str>, Arc<str>>,
     /// The scene files that run's layers had loaded, as last applied.
     pub(crate) scenes: Vec<SceneFile>,
     /// That run's open scene; `None` for a snapshot written before the open scene was.
@@ -304,6 +325,20 @@ impl Snapshot {
             .and_then(|line| line.strip_prefix("asset "))
         {
             assets.push(added.to_owned());
+            world += 1;
+        }
+        let mut names = HashMap::new();
+        while let Some(named) = lines
+            .get(world)
+            .and_then(|line| line.strip_prefix("named "))
+        {
+            let (name, path) = read_named(named, "named ".len() + 1).ok_or_else(|| {
+                refused(format!(
+                    "line {}: a texture's name is a list of it and the path it names",
+                    world + 1
+                ))
+            })?;
+            names.insert(path, name);
             world += 1;
         }
         // The scene lines from line `at` on, then the open scene's line, if there's one, and the
@@ -396,6 +431,7 @@ impl Snapshot {
             ticks,
             hash,
             assets,
+            names,
             scenes,
             open,
             world: world..end,
@@ -408,7 +444,10 @@ impl Snapshot {
     /// Loads the snapshot's world into `world`, whose component types and assets the layers,
     /// `layers` from the bottom up, have registered and added as they loaded, in place of its
     /// entities, as [`World::load_whole`] does; what's opaque in it comes back if the layers added
-    /// the assets the snapshot's had, in the same order, as their first. Logs what it changed of
+    /// the assets the snapshot's had, in the same order, as their first; and each texture its
+    /// values name by a name its run gave it, as by an ID since changed, comes back by the path
+    /// that name was given, the world hashed as that run named it to check it against the hash
+    /// saved, though the run goes on naming it its own way. Logs what it changed of
     /// the world to match the types as they are, each change once, and returns the ticks the
     /// simulation had run, which the run goes on from.
     ///
@@ -476,7 +515,28 @@ impl Snapshot {
                 .all(|(theirs, ours)| *theirs == **ours);
         let numbered =
             (lines.start + 1..).zip(self.text.lines().skip(lines.start).take(lines.len()));
-        let changes = world.load_whole(numbered, same).map_err(|error| {
+        // Its values and its hash name textures as its run did, so a run that names them otherwise,
+        // as after an ID file changed, reads and hashes them by those names for the load, by the
+        // paths they were given, and goes on with its own.
+        #[cfg(feature = "dev")]
+        let own = {
+            let own = Arc::clone(world.shared_assets());
+            let alike = own.named_from(0).count() == self.names.len()
+                && (own.named_from(0)).all(|(name, path)| {
+                    self.names.get(path).is_some_and(|theirs| **theirs == *name)
+                });
+            if !alike {
+                let mut theirs = (*own).clone();
+                theirs.rename(&self.names);
+                world.share_assets(&Arc::new(theirs));
+            }
+            own
+        };
+        let loaded = world.load_whole(numbered, same);
+        let restored = loaded.as_ref().ok().map(|_| world.hash());
+        #[cfg(feature = "dev")]
+        world.share_assets(&own);
+        let changes = loaded.map_err(|error| {
             let message = format!("{path}: {error:#}");
             Error::new(error.code(), message)
         })?;
@@ -489,7 +549,7 @@ impl Snapshot {
                  are: {change}"
             );
         }
-        let restored = world.hash();
+        let restored = restored.expect("hashed once loaded");
         if changes.is_empty() && restored != hash {
             warn!(
                 code = "snapshot.hash",
@@ -733,5 +793,55 @@ mod tests {
                 Some(&Transform::IDENTITY)
             );
         }
+    }
+
+    /// A snapshot names each texture its run named by an ID with its path, and its values hold
+    /// textures by those names; a run whose ID files give the texture another ID since, as after a
+    /// checkout, restores each to its texture all the same, its hash as the snapshot's run named
+    /// it the one saved, so that it warns of no change, and goes on by the run's own name, and so
+    /// hashes otherwise.
+    #[test]
+    fn a_texture_comes_back_by_the_name_its_snapshot_gave_it() {
+        let logged = crate::testing::logged();
+        let dir = Scratch::new("snapshot-named");
+        let root = dir.0.clone();
+        fs::create_dir_all(root.join("assets")).expect("a directory");
+        let png =
+            crate::image::tests::png(png::ColorType::Rgba, png::BitDepth::Eight, 1, &[9; 4], None);
+        fs::write(root.join("assets/stone.png"), png).expect("a PNG");
+        let named = |id: &str| {
+            let meta = gg_api::asset::Meta {
+                id: id.parse().expect("an ID"),
+            };
+            fs::write(root.join("assets/stone.png.meta"), meta.text()).expect("its ID file");
+            let mut cx = Context::seeded(3).root(root.clone());
+            let stone = cx.add_texture("stone", root.join("assets/stone.png"));
+            (cx, stone.expect("a texture"))
+        };
+        let (mut saved, stone) = named("5f3c9a1e07b2d846");
+        let sprite = Sprite {
+            texture: Some(stone),
+            ..Sprite::default()
+        };
+        let shown = saved.world_mut().spawn((Transform::IDENTITY, sprite));
+        let none = Open::default();
+        let text = write(saved.world(), &[], &none, &Run::Playing, "Tested", &[], 0);
+        let text = text.expect("written");
+        let line = "named List([String(\"5f3c9a1e07b2d846\"), String(\"assets/stone.png\")])";
+        assert!(text.lines().any(|named| named == line), "{text}");
+        assert!(text.contains("Texture(\"5f3c9a1e07b2d846\")"), "{text}");
+        let snapshot = Snapshot::parse(text, "a test".to_owned(), "Tested").expect("read");
+        let (mut restored, stone) = named("0a1b2c3d4e5f6071");
+        let _ = logged.codes.try_iter().count();
+        snapshot
+            .restore(restored.world_mut(), &[])
+            .expect("restored");
+        let codes: Vec<String> = logged.codes.try_iter().collect();
+        let warned = codes.iter().filter(|code| code.starts_with("snapshot."));
+        assert_eq!(warned.count(), 0, "{codes:?}");
+        let world = restored.world();
+        assert_eq!(world.get::<Sprite>(shown), Some(&sprite));
+        assert_eq!(world.assets().name(stone), Some("0a1b2c3d4e5f6071"));
+        assert_ne!(world.hash(), saved.world().hash());
     }
 }

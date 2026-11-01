@@ -178,7 +178,8 @@ pub(crate) fn run_headless(
 /// or else from the world the layers attach, stopped if `stopped` says so, as `--stopped` asks.
 /// In a development build it first scans the assets under the app's root, before the layers load,
 /// as `Context::scan_assets` says, writing the ID files missing if the API serves the run and it
-/// isn't a lockstep session's joiner, whose host alone writes them.
+/// isn't a lockstep session's joiner, whose host alone writes them, and whose textures go by the
+/// names its host gives them, by their paths until the host's world comes.
 ///
 /// Fails as `Stack::restore` does.
 pub(crate) fn start(
@@ -190,7 +191,14 @@ pub(crate) fn start(
     serves: bool,
 ) -> Result<()> {
     #[cfg(feature = "dev")]
-    cx.scan_assets(serves && stack.watches_scenes());
+    {
+        // Whether it hosts or plays alone, rather than joins.
+        let own = stack.watches_scenes();
+        cx.scan_assets(serves && own);
+        if !own {
+            cx.name_as([]);
+        }
+    }
     let stopped = match snapshot {
         Some(snapshot) => {
             let (ticks, stopped) = stack.restore(cx, &snapshot, serves)?;

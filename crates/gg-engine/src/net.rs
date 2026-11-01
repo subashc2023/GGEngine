@@ -9,7 +9,7 @@
 //! main thread:
 //!
 //! ```text
-//! hello\tgg-lockstep 1\tShards\t0.1.0 debug dev\tShards Inspector
+//! hello\tgg-lockstep 2\tShards\t0.1.0 debug dev\tShards Inspector
 //!                                                    the joiner, as it connects
 //! refused <why>                                      the host, refusing it, before it closes
 //! world 1234 2                                       the host's world, at tick 1234, its code
@@ -23,11 +23,16 @@
 //! t 1238                                             the inputs for tick 1238 are whole
 //! h 1234 58183b6352a09a44 fb695ce29daa8479           the world's hash after tick 1234
 //! p 3 1240                                           the host's third patch, before tick 1240
+//! n List([String("5f3c9a1e07b2d846"), String(...)])  the name the host gave a texture it added,
+//!                                                      and the path it names
 //! ```
 //!
-//! Values are written as recordings write them, entities by their IDs, and read into values only
-//! at their tick, against the world then. A peer's ticks allocate, for their inputs' text and the
-//! hash's lines, as recorded ticks do.
+//! Values are written as recordings write them, entities by their IDs and textures by their names,
+//! and read into values only at their tick, against the world then. The joiner names its textures
+//! as its host does, whatever ID files its own disk holds: as its host's world gives them, and as
+//! the host's `n` lines give the names of those it adds after, before the inputs that may name
+//! them. A peer's ticks allocate, for their inputs' text and the hash's lines, as recorded ticks
+//! do.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -36,6 +41,8 @@ use std::mem;
 #[cfg(test)]
 use std::net::SocketAddr;
 use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
+#[cfg(feature = "dev")]
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::Duration;
@@ -56,7 +63,7 @@ pub(crate) const DELAY: u64 = 4;
 
 /// The hello's first part: the protocol and its version, which a change to its lines takes to the
 /// next.
-const PROTOCOL: &str = "gg-lockstep 1";
+const PROTOCOL: &str = "gg-lockstep 2";
 
 /// How long a joiner waits between tries at connecting to its host.
 const RETRY: Duration = Duration::from_millis(250);
@@ -213,6 +220,14 @@ pub(crate) struct Lockstep {
     hashes: [BTreeMap<u64, WorldHash>; 2],
     #[cfg(feature = "dev")]
     patches: Patches,
+    /// The host's: how many textures there were as it last told its joiner their names, the
+    /// engine's white texture among them.
+    #[cfg(feature = "dev")]
+    named: usize,
+    /// The joiner's: the names its host gave the textures it added, each with the path it names,
+    /// as they came since they were last taken.
+    #[cfg(feature = "dev")]
+    names: Vec<(Arc<str>, Arc<str>)>,
 }
 
 /// The patches `gg run` gave a peer since its process started, which it gives both peers of a
@@ -296,6 +311,10 @@ impl Lockstep {
             hashes: Default::default(),
             #[cfg(feature = "dev")]
             patches: Patches::default(),
+            #[cfg(feature = "dev")]
+            named: 0,
+            #[cfg(feature = "dev")]
+            names: Vec::new(),
         })
     }
 
@@ -520,6 +539,11 @@ impl Lockstep {
                     _ => self.lose(&format!("the peer sent a line that isn't one: {line}")),
                 }
             }
+            #[cfg(feature = "dev")]
+            "n" if !self.hosts() => match text::read_named(rest, "n ".len() + 1) {
+                Some(named) => self.names.push(named),
+                None => self.lose(&format!("the peer sent a line that isn't one: {line}")),
+            },
             _ => self.lose(&format!("the peer sent a line that isn't one: {line}")),
         }
         None
@@ -555,12 +579,19 @@ impl Lockstep {
     }
 
     /// The host, between ticks, the next to run being `next`: sends the joiner `world`, a snapshot
-    /// file's text, with how many patches its code is on; its inputs for each tick from `next` to
-    /// the tick [`DELAY`] on, which it has sent before, or has none of within `DELAY` ticks of its
-    /// start or restore; and its patches that are to apply. The joiner's inputs are needed from the
-    /// tick `DELAY` on from `next`, the first it can reach.
-    pub(crate) fn send_world(&mut self, world: &str, next: u64) {
+    /// file's text, which names its textures as the host does, there being `textures` of them,
+    /// with how many patches its code is on; its inputs for each tick from `next` to the tick
+    /// [`DELAY`] on, which it has sent before, or has none of within `DELAY` ticks of its start or
+    /// restore; and its patches that are to apply. The joiner's inputs are needed from the tick
+    /// `DELAY` on from `next`, the first it can reach.
+    pub(crate) fn send_world(&mut self, world: &str, textures: usize, next: u64) {
         self.owed = false;
+        #[cfg(feature = "dev")]
+        {
+            self.named = textures;
+        }
+        #[cfg(not(feature = "dev"))]
+        let _ = textures;
         #[cfg(feature = "dev")]
         let patches = self.patches.applied;
         #[cfg(not(feature = "dev"))]
@@ -626,6 +657,13 @@ impl Lockstep {
                 patches.due.push((patches.hosts, tick));
             }
         }
+    }
+
+    /// The joiner's: the names its host gave the textures it added after its world, each with the
+    /// path it names, which came since they were last taken.
+    #[cfg(feature = "dev")]
+    pub(crate) fn take_names(&mut self) -> Vec<(Arc<str>, Arc<str>)> {
+        mem::take(&mut self.names)
     }
 
     /// The joiner, once it has restored its host's world at tick `tick`: says it has joined.
@@ -733,6 +771,17 @@ impl Lockstep {
         }
         if self.from.is_some() {
             let mut text = String::new();
+            // The names of the textures the host added since it last told them, before the inputs
+            // that may name them.
+            #[cfg(feature = "dev")]
+            if self.hosts() {
+                for (name, path) in world.assets().named_from(self.named) {
+                    text.push_str("n ");
+                    text::write_named(&mut text, name, path);
+                    text.push('\n');
+                }
+                self.named = world.assets().count();
+            }
             write_inputs(&mut text, ahead, &inputs);
             self.send(&text);
         }
@@ -1396,5 +1445,139 @@ mod tests {
                 .push(&command.to_value())
                 .expect("the game takes its commands");
         }
+    }
+
+    /// A command of [`Painter`]'s: spawns a sprite of this texture.
+    #[cfg(feature = "dev")]
+    #[derive(Reflect)]
+    struct Paint(crate::Texture);
+
+    /// Loads `assets/stone.png` under its context's root as it loads, attaches a sprite of it, and
+    /// spawns a sprite of each texture its commands give.
+    #[cfg(feature = "dev")]
+    #[derive(Default)]
+    struct Painter {
+        stone: Option<crate::Texture>,
+        commands: Vec<Paint>,
+    }
+
+    #[cfg(feature = "dev")]
+    impl Layer for Painter {
+        fn load(&mut self, cx: &mut Context) {
+            let root = cx.root.clone().expect("a root");
+            let stone = cx.add_texture("stone", root.join("assets/stone.png"));
+            self.stone = Some(stone.expect("a texture"));
+        }
+
+        fn attach(&mut self, cx: &mut Context) {
+            self.commands.push(Paint(self.stone.expect("loaded")));
+            self.tick(cx.world_mut(), Tick { number: 0 });
+        }
+
+        fn tick(&mut self, world: &mut World, _: Tick) {
+            for Paint(texture) in self.commands.drain(..) {
+                let sprite = crate::Sprite {
+                    texture: Some(texture),
+                    ..crate::Sprite::default()
+                };
+                world.spawn((crate::Transform::IDENTITY, sprite));
+            }
+        }
+
+        fn commands(&mut self) -> Option<&mut dyn Commands> {
+            Some(&mut self.commands)
+        }
+    }
+
+    /// A joiner whose disk holds none of its host's ID files, as another machine's checkout without
+    /// those not yet committed, names its textures as its host does: those it loaded, as its host's
+    /// world comes, and one both add after it joined, as the host's line says before the command
+    /// that names it; so the peers' worlds hash alike, and neither parts from the other.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_joiner_names_textures_as_its_host_does() {
+        use std::fs;
+
+        use crate::dirs::tests::Scratch;
+
+        let (codes, logged) = mpsc::channel();
+        let subscriber = tracing_subscriber::registry().with(Codes(codes));
+        let _logging = tracing::subscriber::set_default(subscriber);
+        let dir = Scratch::new("net-named");
+        let png =
+            crate::image::tests::png(png::ColorType::Rgba, png::BitDepth::Eight, 1, &[9; 4], None);
+        let [ours, theirs] = ["host", "joiner"].map(|peer| dir.0.join(peer));
+        for root in [&ours, &theirs] {
+            fs::create_dir_all(root.join("assets")).expect("a directory");
+            for name in ["stone.png", "late.png"] {
+                fs::write(root.join("assets").join(name), &png).expect("a PNG");
+            }
+        }
+        let (stone, late) = ("5f3c9a1e07b2d846", "0a1b2c3d4e5f6071");
+        for (name, id) in [("stone", stone), ("late", late)] {
+            let meta = gg_api::asset::Meta {
+                id: id.parse().expect("an ID"),
+            };
+            let file = ours.join("assets").join(format!("{name}.png.meta"));
+            fs::write(file, meta.text()).expect("its ID file");
+        }
+        let peer = |net: &Net, mut cx: Context| {
+            let mut stack = Stack::default();
+            stack.push_layer(Painter::default());
+            let names = stack.names().to_vec();
+            stack.lockstep(Lockstep::start(net, "Tested", &names).expect("started"));
+            stack.attach(&mut cx);
+            Peer { stack, cx, next: 0 }
+        };
+        let mut host = peer(
+            &Net::Host("127.0.0.1:0".to_owned()),
+            Context::seeded(1).root(&ours),
+        );
+        host.turn();
+        let address = host.net().listening.expect("listening").to_string();
+        // As a joiner's run starts, its textures by their paths until its host's world comes.
+        let mut cx = Context::seeded(2).root(&theirs);
+        cx.name_as([]);
+        let mut joiner = peer(&Net::Join(address), cx);
+        join(&mut host, &mut joiner);
+        // The name of the texture a peer loaded from `path`.
+        let textured = |peer: &Peer, path: &str| {
+            let assets = peer.cx.world().assets();
+            let texture = assets.texture(path)?;
+            assets.name(texture).map(str::to_owned)
+        };
+        assert_eq!(
+            textured(&joiner, "assets/stone.png").as_deref(),
+            Some(stone)
+        );
+
+        let add = |peer: &mut Peer| {
+            let root = peer.cx.root.clone().expect("a root");
+            let added = peer.cx.add_texture("late", root.join("assets/late.png"));
+            added.expect("a texture")
+        };
+        let texture = add(&mut host);
+        add(&mut joiner);
+        let path = "assets/late.png";
+        assert_eq!(textured(&joiner, path).as_deref(), Some(path));
+        let queue = host
+            .stack
+            .commands_of(0)
+            .expect("the painter queues commands");
+        queue
+            .push(&Paint(texture).to_value())
+            .expect("the painter takes its commands");
+        let at = host.next.max(joiner.next) + DELAY + 1;
+        meet(&mut host, &mut joiner, at);
+        assert_eq!(textured(&joiner, path).as_deref(), Some(late));
+        let sprites = |peer: &Peer| peer.cx.world().query::<&crate::Sprite>().count();
+        assert_eq!((sprites(&host), sprites(&joiner)), (2, 2));
+        assert_eq!(host.cx.world().hash(), joiner.cx.world().hash());
+        let codes: Vec<String> = logged.try_iter().collect();
+        let parted = ["net.desync", "net.bad_command"];
+        assert!(
+            !codes.iter().any(|code| parted.contains(&code.as_str())),
+            "{codes:?}"
+        );
     }
 }

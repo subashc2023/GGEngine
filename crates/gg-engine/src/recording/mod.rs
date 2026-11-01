@@ -6,11 +6,12 @@
 //! A recording is text, a line at a time:
 //!
 //! ```text
-//! gg-recording 1
+//! gg-recording 3
 //! app Sandbox
 //! engine 0.1.0 debug
 //! layers Sandbox PerfPanel Inspector
 //! seed 3f8a6c2e9b1d4057
+//! named List([String("55bcfa88ac30e5a5"), String("assets/sheet.png")])
 //! attach 58183b6352a09a44 fb695ce29daa8479
 //! > 0 Variant("Swarm", [("0", UInt(10000))])
 //! 0 8c35cd01914c7df5 fb695ce29daa8479
@@ -21,15 +22,20 @@
 //! the bottom up and the seed its world drew its IDs from; then come the world's hash once the
 //! layers attached, its content then its layout, and each tick's commands, `>`, the index of the
 //! layer whose tick applied them and their value as [`text`] writes it, before the tick's number
-//! and the world's hash after it; and `end`, once the run ended.
+//! and the world's hash after it; and `end`, once the run ended. Before the first line that may
+//! name it, each texture the run named otherwise than by its path, as by its ID, has a `named` line,
+//! its name and the path it names, which a replay names it by, scanning no ID file, so that it goes
+//! as the run went wherever the ID files differ.
 
 pub(crate) mod text;
 
 use std::fmt::{self, Write as _};
 use std::fs::{self, File};
 use std::io::{self, Write as _};
+use std::iter::Peekable;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Instant;
 
 use gg_core::{Error, Result};
@@ -43,7 +49,11 @@ use text::Text;
 
 /// A recording's first line: its format, and the format's version, which a change to its lines or
 /// to its values' text takes to the next.
-const FORMAT: &str = "gg-recording 2";
+const FORMAT: &str = "gg-recording 3";
+
+/// The format of the recordings before textures' names, `named` lines, whose values name every
+/// texture by its path, which this engine reads too.
+const BEFORE_NAMES: &str = "gg-recording 2";
 
 /// The format of the recordings before edits from outside the layers, `@` lines, which this
 /// engine reads too.
@@ -68,6 +78,9 @@ pub(crate) struct Recorder {
     /// Why the recording stopped, after which nothing more is written: the first write that failed,
     /// or the first command that wouldn't replay.
     failed: Option<Error>,
+    /// How many textures there were as it last wrote their names, the engine's white texture among
+    /// them.
+    named: usize,
 }
 
 impl Recorder {
@@ -85,6 +98,7 @@ impl Recorder {
             app,
             line: String::new(),
             failed: None,
+            named: 0,
         })
     }
 
@@ -110,10 +124,28 @@ impl Recorder {
 
     /// Writes the world's hash once the layers have attached.
     pub(crate) fn attached(&mut self, world: &World) {
+        self.names(world);
         self.line.clear();
         let hash = world.hash();
         writeln!(self.line, "attach {hash}").expect("a string takes any text");
         self.flush();
+    }
+
+    /// Writes a `named` line for each texture of `world`'s that the layers added since it last
+    /// wrote them and that's named otherwise than by its path, before a line that may name it.
+    fn names(&mut self, world: &World) {
+        let assets = world.assets();
+        if assets.count() == self.named {
+            return;
+        }
+        for (name, path) in assets.named_from(self.named) {
+            self.line.clear();
+            self.line.push_str("named ");
+            text::write_named(&mut self.line, name, path);
+            self.line.push('\n');
+            self.flush();
+        }
+        self.named = assets.count();
     }
 
     /// Writes the commands `commands` holds, the queue of the layer at `layer` from the bottom of
@@ -127,6 +159,7 @@ impl Recorder {
         commands: &dyn Commands,
         world: &World,
     ) {
+        self.names(world);
         for i in 0..commands.len() {
             let value = commands.value(i);
             self.line.clear();
@@ -152,6 +185,7 @@ impl Recorder {
     /// the entities it holds by their IDs in `world`: it belongs to the tick after, before its
     /// commands.
     pub(crate) fn edited(&mut self, edit: &crate::reflect::Value, world: &World) {
+        self.names(world);
         self.line.clear();
         self.line.push_str("@ ");
         text::write(&mut self.line, edit, world);
@@ -161,6 +195,7 @@ impl Recorder {
 
     /// Writes the world's hash after `tick`.
     pub(crate) fn ticked(&mut self, tick: Tick, world: &World) {
+        self.names(world);
         self.line.clear();
         let hash = world.hash();
         writeln!(self.line, "{} {hash}", tick.number).expect("a string takes any text");
@@ -206,6 +241,16 @@ struct Recording {
     /// The names of the layers' types, from the bottom up.
     layers: Vec<String>,
     seed: u64,
+    /// The name its run gave each texture it named otherwise than by its path, with the path it
+    /// names.
+    #[cfg_attr(
+        not(feature = "dev"),
+        allow(
+            dead_code,
+            reason = "builds without `dev` name every texture by its path"
+        )
+    )]
+    names: Vec<(Arc<str>, Arc<str>)>,
     /// The world's hash once the layers attached, and the line that gives it.
     attach: (WorldHash, usize),
     ticks: Vec<Ticked>,
@@ -275,9 +320,9 @@ impl Recording {
     /// that isn't one of a recording's, a value that isn't one, or a tick out of order, and with
     /// `replay.bad_command` for a command of a layer the recording hasn't.
     fn parse(text: &str) -> Result<Self> {
-        let mut lines = whole_lines(text);
+        let mut lines = whole_lines(text).peekable();
         match lines.next() {
-            Some((_, FORMAT | BEFORE_EDITS)) => {}
+            Some((_, FORMAT | BEFORE_NAMES | BEFORE_EDITS)) => {}
             Some((_, line)) if line.starts_with("gg-recording ") => {
                 return Err(format_error(format!(
                     "it's a recording of format `{line}`, but this engine reads `{FORMAT}`"
@@ -291,8 +336,8 @@ impl Recording {
                 )));
             }
         }
-        let mut header = |key: &str| {
-            let (number, line) = lines.next().ok_or_else(|| {
+        let header = |lines: &mut Peekable<_>, key: &str| {
+            let (number, line): (usize, &str) = lines.next().ok_or_else(|| {
                 format_error(format!("it ends in its header, before its `{key}` line"))
             })?;
             let value = line
@@ -303,14 +348,24 @@ impl Recording {
             })?;
             Ok::<_, Error>((number, value))
         };
-        let app = header("app")?.1.to_owned();
-        let engine = header("engine")?.1.to_owned();
+        let app = header(&mut lines, "app")?.1.to_owned();
+        let engine = header(&mut lines, "engine")?.1.to_owned();
         // None, for an app without layers, as the player is.
-        let layers = header("layers")?.1.split_whitespace();
+        let layers = header(&mut lines, "layers")?.1.split_whitespace();
         let layers: Vec<String> = layers.map(str::to_owned).collect();
-        let (number, seed) = header("seed")?;
+        let (number, seed) = header(&mut lines, "seed")?;
         let seed = hex16(seed).ok_or_else(|| syntax(number, "a seed is 16 hex digits"))?;
-        let (number, attach) = header("attach")?;
+        let named = |number: usize, named: &str| {
+            let read = text::read_named(named, "named ".len() + 1);
+            let what = "a texture's name is a list of it and the path it names";
+            read.ok_or_else(|| syntax(number, what))
+        };
+        // Those of the textures the layers added as they loaded, before the attach.
+        let mut names = Vec::new();
+        while let Some((number, line)) = lines.next_if(|(_, line)| line.starts_with("named ")) {
+            names.push(named(number, &line["named ".len()..])?);
+        }
+        let (number, attach) = header(&mut lines, "attach")?;
         let attach =
             parse_hash(attach).ok_or_else(|| syntax(number, "a hash is two of 16 hex digits"))?;
         let mut recording = Self {
@@ -318,6 +373,7 @@ impl Recording {
             engine,
             layers,
             seed,
+            names,
             attach: (attach, number),
             ticks: Vec::new(),
             complete: false,
@@ -329,6 +385,8 @@ impl Recording {
             }
             if line == "end" {
                 recording.complete = true;
+            } else if let Some(texture) = line.strip_prefix("named ") {
+                recording.names.push(named(number, texture)?);
             } else if let Some(command) = line.strip_prefix("> ") {
                 ticked.commands.push(recording.command(number, command)?);
             } else if let Some(edit) = line.strip_prefix("@ ") {
@@ -346,7 +404,8 @@ impl Recording {
                         number,
                         format!(
                             "expected a command, `> <layer> <value>`, an edit, `@ <value>`, a tick's hash, \
-                             `<tick> <content> <layout>`, or `end`; found `{line}`"
+                             `<tick> <content> <layout>`, a texture's name, `named <value>`, or \
+                             `end`; found `{line}`"
                         ),
                     ));
                 };
@@ -447,8 +506,11 @@ impl Replay {
             )));
         }
         let mut cx = Context::seeded(recording.seed);
-        // So that its textures are named as the run's were, and it starts in the run's scene.
+        // So that its textures are named as the run's were, by the names the recording gives them
+        // or by their paths from the root, scanning no ID file, and it starts in the run's scene.
         cx.root.clone_from(&app.root);
+        #[cfg(feature = "dev")]
+        cx.name_as(recording.names.iter().cloned());
         cx.start = app.manifest().map(|manifest| manifest.start.clone());
         app.stack.attach(&mut cx);
         Ok(Self {
@@ -878,6 +940,44 @@ mod tests {
         }
     }
 
+    /// A command of [`Painter`]'s: spawns a sprite of this texture.
+    #[derive(Reflect)]
+    struct Paint(crate::Texture);
+
+    /// Adds the texture `assets/stone.png` under the app's root as it loads, and queues a sprite of
+    /// it as it attaches, which its next tick spawns.
+    #[derive(Default)]
+    struct Painter {
+        stone: Option<crate::Texture>,
+        commands: Vec<Paint>,
+    }
+
+    impl Layer for Painter {
+        fn load(&mut self, cx: &mut Context) {
+            let root = cx.root.clone().expect("a root");
+            let stone = cx.add_texture("stone", root.join("assets/stone.png"));
+            self.stone = Some(stone.expect("a texture"));
+        }
+
+        fn attach(&mut self, _: &mut Context) {
+            self.commands.push(Paint(self.stone.expect("loaded")));
+        }
+
+        fn tick(&mut self, world: &mut World, _: Tick) {
+            for Paint(texture) in self.commands.drain(..) {
+                let sprite = Sprite {
+                    texture: Some(texture),
+                    ..Sprite::default()
+                };
+                world.spawn((Transform::IDENTITY, sprite));
+            }
+        }
+
+        fn commands(&mut self) -> Option<&mut dyn Commands> {
+            Some(&mut self.commands)
+        }
+    }
+
     /// An app of a layer whose commands its updates queue, under one without.
     fn two_layers() -> App {
         let app = App::new("Recorded").layer(Queuer::default());
@@ -943,6 +1043,56 @@ mod tests {
         let mut lines: Vec<&str> = text.lines().collect();
         lines[at] = line;
         lines.iter().map(|line| format!("{line}\n")).collect()
+    }
+
+    /// A run that names a texture by its ID records the name, with its path, before the line that
+    /// first names it, and the commands that hold it by it; and its replay names it so, reading no
+    /// ID file, so that it replays to its hashes once the ID file is gone, where, without the
+    /// names, it finds no texture for the command that names it.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_replay_names_textures_as_its_recording_says_reading_no_id_file() {
+        let dir = Scratch::new("recording-named");
+        let root = dir.0.clone();
+        fs::create_dir_all(root.join("assets")).expect("a directory");
+        let png =
+            crate::image::tests::png(png::ColorType::Rgba, png::BitDepth::Eight, 1, &[9; 4], None);
+        fs::write(root.join("assets/stone.png"), png).expect("a PNG");
+        let id = "5f3c9a1e07b2d846";
+        let meta = gg_api::asset::Meta {
+            id: id.parse().expect("an ID"),
+        };
+        fs::write(root.join("assets/stone.png.meta"), meta.text()).expect("its ID file");
+        let app = || App::new("Named").root(&root).layer(Painter::default());
+
+        let path = dir.0.join("run.recording");
+        let mut run = app();
+        run.stack
+            .record(Recorder::create(&path, run.name).expect("created"));
+        let mut cx = Context::seeded(1).root(root.clone());
+        run.stack.attach(&mut cx);
+        for number in 0..2 {
+            run.stack.tick(&mut cx, Tick { number });
+        }
+        let ended = cx.world().hash();
+        run.stack.detach(&mut cx);
+        run.stack.recorded().expect("written");
+        let text = fs::read_to_string(&path).expect("written");
+        let lines: Vec<&str> = text.lines().collect();
+        let named = format!("named List([String(\"{id}\"), String(\"assets/stone.png\")])");
+        let at = lines.iter().position(|line| *line == named);
+        let at = at.unwrap_or_else(|| panic!("{text}"));
+        assert!(lines[at + 1].starts_with("attach "), "{text}");
+        let painted = format!("> 0 Struct([(\"0\", Texture(\"{id}\"))])");
+        assert!(lines.contains(&&*painted), "{text}");
+
+        fs::remove_file(root.join("assets/stone.png.meta")).expect("removed");
+        let replayed = replay_all(app(), &text).unwrap_or_else(|(_, error)| panic!("{error}"));
+        assert_eq!(replayed, (2, ended));
+        let unnamed = text.lines().filter(|line| !line.starts_with("named "));
+        let unnamed: String = unnamed.map(|line| format!("{line}\n")).collect();
+        let (ran, error) = replay_all(app(), &unnamed).expect_err("named by its path");
+        assert_eq!((ran, error.code()), (0, "replay.bad_command"), "{error}");
     }
 
     /// A run recorded as it goes at a frame rate of its own, of a layer whose commands its updates
@@ -1179,8 +1329,9 @@ mod tests {
         let hash = lines[second].split_once(' ').expect("a hash").1;
         let bad_value = "> 0 Struct([(\"0\", F32(1.0)]";
         let after_end = format!("{text}0 {hash}\n");
+        let named = |line: &str| changed(&text, 4, &format!("{}\n{line}", lines[4]));
         let cases = [
-            (changed(&text, 0, "gg-recording 3"), "replay.format", None),
+            (changed(&text, 0, "gg-recording 4"), "replay.format", None),
             (changed(&text, 0, "(entities: {})"), "replay.format", None),
             (
                 lines[..3].iter().map(|line| format!("{line}\n")).collect(),
@@ -1192,6 +1343,17 @@ mod tests {
             (changed(&text, 4, "attach"), "replay.syntax", Some(5)),
             (changed(&text, 4, "seed 12"), "replay.syntax", Some(5)),
             (changed(&text, 5, "attach 00 00"), "replay.syntax", Some(6)),
+            // A texture's name that's no list of it and its path.
+            (
+                named("named List([String(\"5f3c9a1e07b2d846\")])"),
+                "replay.syntax",
+                Some(6),
+            ),
+            (
+                changed(&text, second, "named Bool(true)"),
+                "replay.syntax",
+                Some(second + 1),
+            ),
             (
                 changed(&text, second, &format!("2 {hash}")),
                 "replay.syntax",

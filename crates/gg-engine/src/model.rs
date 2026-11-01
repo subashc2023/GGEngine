@@ -31,7 +31,8 @@ struct Part {
 impl Model {
     /// Adds what model `name`, as `read` gave it, draws: its images to `textures`, each with mip
     /// levels, weighted by alpha where a masked or blended material samples it, then its primitives
-    /// to `meshes`, each drawn with its material through `shaders`' model shader.
+    /// to `meshes`, each drawn with its material through `shaders`' model shader. Gives the model
+    /// and its images' textures, in the model's order.
     ///
     /// Fails, adding nothing, with `renderer.too_many_textures` if `textures` hasn't room for its
     /// images.
@@ -41,7 +42,7 @@ impl Model {
         meshes: &mut Meshes,
         shaders: &mut Shaders,
         textures: &mut Textures,
-    ) -> Result<Self> {
+    ) -> Result<(Self, Vec<Texture>)> {
         let Imported {
             parts,
             primitives,
@@ -107,7 +108,7 @@ impl Model {
                 draw: part.primitive.map(|i| draws[i]),
             })
             .collect();
-        Ok(Self { parts })
+        Ok((Self { parts }, images))
     }
 
     /// Spawns the model into `world` as entities, and returns its root, at `at`: under it, the
@@ -217,7 +218,8 @@ mod tests {
 
     fn add(imported: Imported, textures: &mut Textures) -> Result<Model> {
         let (mut meshes, mut shaders) = (Meshes::default(), Shaders::default());
-        Model::add("m", imported, &mut meshes, &mut shaders, textures)
+        let added = Model::add("m", imported, &mut meshes, &mut shaders, textures);
+        added.map(|(model, _)| model)
     }
 
     #[test]

@@ -66,10 +66,11 @@ pub fn read_scene(path: &Path) -> Result<String> {
 impl World {
     /// `roots` and their descendants as a scene's canonical text: a prefab, for one root. Each
     /// component is saved but those that are opaque as a whole, such as a
-    /// [`MeshDraw`](crate::MeshDraw), and the fields that are opaque; a texture as its path, as
-    /// [`App::root`](crate::App::root) names it; a root's [`Parent`] isn't, since its parent isn't
-    /// saved. Each component is checked as [`World::set_field`] checks a value, and made again as a
-    /// load makes it, so that every scene saved loads.
+    /// [`MeshDraw`](crate::MeshDraw), and the fields that are opaque; a texture as its name, its
+    /// asset ID, or else its path as [`App::root`](crate::App::root) names it, as
+    /// [`Context::add_texture`](crate::Context::add_texture) says; a root's [`Parent`] isn't, since
+    /// its parent isn't saved. Each component is checked as [`World::set_field`] checks a value,
+    /// and made again as a load makes it, so that every scene saved loads.
     ///
     /// Fails with `ecs.no_entity` for a root that isn't alive, or a field that refers to an entity
     /// that isn't; `scene.outside` for one that refers to an entity that isn't saved;
@@ -109,9 +110,9 @@ impl World {
     /// the order of their IDs: all of them, or, if it's refused, none. Each parent's children are
     /// in the order of their IDs. Every component type it names must be registered, since a world
     /// knows a type by name once it has; what's opaque, which scenes leave out, comes from
-    /// [`Component::base`](crate::Component::base); a texture is found by its path among those the
-    /// layers loaded; and a field that isn't given, as in a scene saved before its type had it,
-    /// takes its default.
+    /// [`Component::base`](crate::Component::base); a texture is found by its name or a path to its
+    /// file among those the layers loaded; and a field that isn't given, as in a scene saved before
+    /// its type had it, takes its default.
     ///
     /// Fails, changing nothing, with an error that begins with the line and column where the text
     /// is refused: `scene.syntax` for text that isn't a scene's RON, or enables RON's extensions;
@@ -119,8 +120,8 @@ impl World {
     /// that isn't one; `scene.duplicate_id` for an entity, and `reflect.duplicate_component` for an
     /// entity's component, given twice; `ecs.id_taken` for an ID a living entity has;
     /// `scene.unknown_id` for a reference to an entity the scene doesn't give; `ecs.parent_cycle`
-    /// for entities that would be their own ancestors; `asset.no_texture` for a path no texture
-    /// was loaded from; `scene.too_deep` for a value nested more than 64 levels; and as
+    /// for entities that would be their own ancestors; `asset.no_texture` for a name or path no
+    /// texture loaded has; `scene.too_deep` for a value nested more than 64 levels; and as
     /// [`World::set_field`] does for a value it refuses, such as `reflect.no_field` for a field the
     /// type hasn't, and with `reflect.missing_field` for one that isn't given and has no default.
     /// Every error but `scene.syntax` names the entity it's about, and the component and the path

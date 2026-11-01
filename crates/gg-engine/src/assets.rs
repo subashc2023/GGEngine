@@ -1,9 +1,10 @@
-//! Assets named by their paths: what scenes, snapshots, recordings and the tool API name a texture
-//! by, where its handle is the renderer's own, so that a restart in another process, or another
-//! machine, finds it again; what the layers loaded, by their files as the OS resolves them, so that
-//! a file loads once however a layer writes its path; and, in development builds, the asset
-//! database, `Catalog`: the textures and models under the root and the IDs their ID files hold,
-//! whose text and scan are gg-api's.
+//! Assets by their names: what scenes, snapshots, recordings, lockstep inputs, the world's hash and
+//! the tool API name a texture by, where its handle is the renderer's own, so that a restart in
+//! another process, or another machine, finds it again: its asset ID, where it has one, and else
+//! its path; what the layers loaded, by their files as the OS resolves them, so that a file loads
+//! once however a layer writes its path; and, in development builds, the asset database,
+//! `Catalog`: the textures and models under the root and the IDs their ID files hold, whose text
+//! and scan are gg-api's.
 
 use std::collections::HashMap;
 #[cfg(feature = "dev")]
@@ -22,20 +23,23 @@ use tracing::{info, warn};
 
 use crate::Model;
 
-/// The textures a context added, each by its index, named by the file it was loaded from: its
-/// path relative to the app's [root](crate::App::root), with `/` between its parts, or as it was
-/// given for a file outside it; a model's images by the model's path and their order in it, such
-/// as `assets/truck.glb#0`. The engine's white texture has no name. A context's worlds and their
-/// copies share it, and what a world loads from text finds its textures here, as an entity is found
-/// by its ID: a path no texture has names none. In development builds it holds the asset database
-/// too, as the last scan left it.
+/// The textures a context added, each by its index, with the path of the file it was loaded from:
+/// relative to the app's [root](crate::App::root), with `/` between its parts, or as it was given
+/// for a file outside it; a model's images by the model's path and their order in it, such as
+/// `assets/truck.glb#0`. Each is named, as text names it, by its asset ID, 16 hex digits, or a
+/// model's image by its model's and its order, such as `5f3c9a1e07b2d846#0`, where the context gave
+/// it one as it was added, or since, as a lockstep joiner takes its host's names, and otherwise by
+/// its path. The engine's white texture has none. A
+/// context's worlds and their copies share it, and what a world loads from text finds its textures
+/// here, by a name or a path, as an entity is found by its ID: text no texture has names none. In
+/// development builds it holds the asset database too, as the last scan left it.
 #[derive(Clone, Debug)]
 pub(crate) struct Assets {
-    /// Each texture's name, by its index.
-    textures: Vec<Option<Arc<str>>>,
-    /// Each texture added from a file of its own, by each name the layers gave its file: the first
-    /// added, if two files have one name.
-    by_path: HashMap<Arc<str>, Texture>,
+    /// Each texture's name and path, by its index.
+    textures: Vec<Option<Named>>,
+    /// Each texture loaded from a file, by its name and by each path the layers gave its file: the
+    /// first added, if two have one.
+    by_name: HashMap<Arc<str>, Texture>,
     /// What the layers added, in order, each with how many meshes, shaders and textures there
     /// were after it, as `texture 1 1 2 assets/logo.png`: what names the meshes, shaders and
     /// textures by their indices, so that what's opaque in a snapshot, which holds indices, comes
@@ -49,12 +53,24 @@ pub(crate) struct Assets {
     catalog: Catalog,
 }
 
+/// A texture loaded from a file, as [`Assets`] holds it.
+#[derive(Clone, Debug)]
+struct Named {
+    /// Which it is, for [`Assets::rename`].
+    #[cfg(feature = "dev")]
+    texture: Texture,
+    /// What text names it by: its ID, or else its path.
+    name: Arc<str>,
+    /// The path of its file, as the first layer to add it wrote it.
+    path: Arc<str>,
+}
+
 impl Default for Assets {
     /// The engine's white texture alone, which every renderer's textures start with.
     fn default() -> Self {
         Self {
             textures: vec![None],
-            by_path: HashMap::new(),
+            by_name: HashMap::new(),
             added: Vec::new(),
             #[cfg(feature = "dev")]
             catalog: Catalog::default(),
@@ -73,44 +89,79 @@ impl Assets {
         self.added.push(what.into());
     }
 
-    /// The name of `texture`, if it has one.
+    /// The name of `texture`, which text names it by, if it has one.
+    pub(crate) fn name(&self, texture: Texture) -> Option<&str> {
+        let named = self.textures.get(texture.index() as usize)?.as_ref()?;
+        Some(&named.name)
+    }
+
+    /// The path of `texture`'s file, if it has one: for people, whom a path tells more than an ID.
     pub(crate) fn path(&self, texture: Texture) -> Option<&str> {
-        let name = self.textures.get(texture.index() as usize)?;
-        name.as_deref()
+        let named = self.textures.get(texture.index() as usize)?.as_ref()?;
+        Some(&named.path)
     }
 
-    /// The texture loaded from the file `path` names, if one was.
-    pub(crate) fn texture(&self, path: &str) -> Option<Texture> {
-        self.by_path.get(path).copied()
+    /// The texture that `name` names, by its name or a path to its file, if one does.
+    pub(crate) fn texture(&self, name: &str) -> Option<Texture> {
+        self.by_name.get(name).copied()
     }
 
-    /// Names `texture`, the next texture added, loaded from the file `path` names.
-    pub(crate) fn add_texture(&mut self, texture: Texture, path: Arc<str>) {
+    /// How many textures there are, the engine's white texture among them: the index the next
+    /// added takes.
+    pub(crate) fn count(&self) -> usize {
+        self.textures.len()
+    }
+
+    /// The name and path of each texture from index `from` on that's named otherwise than by its
+    /// path, as by its ID, in the order they were added: what a run that names its textures by IDs
+    /// tells those that follow it, as a recording does its replay and a lockstep host its joiner.
+    pub(crate) fn named_from(&self, from: usize) -> impl Iterator<Item = (&str, &str)> {
+        let textures = self.textures.iter().skip(from).flatten();
+        let named = textures.filter(|named| named.name != named.path);
+        named.map(|named| (&*named.name, &*named.path))
+    }
+
+    /// Adds `texture`, the next texture added, loaded from the file `path` names, named `name`.
+    pub(crate) fn add_texture(&mut self, texture: Texture, path: Arc<str>, name: Arc<str>) {
         assert_eq!(
             texture.index() as usize,
             self.textures.len(),
             "textures are named in the order they're added"
         );
-        self.by_path.entry(path.clone()).or_insert(texture);
-        self.textures.push(Some(path));
+        self.by_name.entry(name.clone()).or_insert(texture);
+        self.by_name.entry(path.clone()).or_insert(texture);
+        self.textures.push(Some(Named {
+            #[cfg(feature = "dev")]
+            texture,
+            name,
+            path,
+        }));
     }
 
     /// Has `path` name `texture` too, added before from another path to its file, unless it names
-    /// one already; `texture` keeps its first name.
+    /// one already; `texture` keeps its first path.
     pub(crate) fn alias(&mut self, texture: Texture, path: Arc<str>) {
-        self.by_path.entry(path).or_insert(texture);
+        self.by_name.entry(path).or_insert(texture);
     }
 
-    /// Names the textures added since there were `before`, a model's images, from the model's path,
-    /// `path`, and their order in it.
-    pub(crate) fn add_images(&mut self, path: &str, before: u32, count: u32) {
-        assert_eq!(
-            before as usize,
-            self.textures.len(),
-            "textures are named in the order they're added"
-        );
-        let images = (0..count - before).map(|image| Some(format!("{path}#{image}").into()));
-        self.textures.extend(images);
+    /// Names each texture as `names` gives its path a name, and every other by its path, in place
+    /// of what named it before: as a run takes the names its recording's run, or its lockstep host,
+    /// gave its textures.
+    #[cfg(feature = "dev")]
+    pub(crate) fn rename(&mut self, names: &HashMap<Arc<str>, Arc<str>>) {
+        let Self {
+            textures, by_name, ..
+        } = self;
+        // Every old name goes before any new one comes, as one texture may take another's.
+        for named in textures.iter().flatten() {
+            if named.name != named.path && by_name.get(&named.name) == Some(&named.texture) {
+                by_name.remove(&named.name);
+            }
+        }
+        for named in textures.iter_mut().flatten() {
+            named.name = names.get(&named.path).unwrap_or(&named.path).clone();
+            by_name.entry(named.name.clone()).or_insert(named.texture);
+        }
     }
 
     /// The asset database, as the last scan left it.
@@ -219,6 +270,12 @@ impl Catalog {
             .iter()
             .filter(|(_, cataloged)| cataloged.present);
         present.map(|(path, cataloged)| (&**path, cataloged))
+    }
+
+    /// The ID of the asset at `path` from the root, with `/` between its parts, if it has one: the
+    /// ID it keeps for the run.
+    pub(crate) fn id(&self, path: &str) -> Option<AssetId> {
+        self.assets.get(path)?.id
     }
 
     /// The ID files whose assets the last scan didn't find, in the order of their paths.

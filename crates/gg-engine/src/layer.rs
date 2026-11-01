@@ -1,6 +1,8 @@
 //! The layer stack: how an app's code, and the engine's tools, plug into the main loop.
 
 use std::any::type_name;
+#[cfg(feature = "dev")]
+use std::collections::HashMap;
 use std::mem;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
@@ -8,6 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytemuck::NoUninit;
+#[cfg(feature = "dev")]
+use gg_api::asset::AssetId;
 use gg_core::math::{Mat4, Vec2, Vec3, Vec4};
 use gg_core::{Error, Result};
 use gg_renderer::{
@@ -287,6 +291,11 @@ pub struct Context {
     /// The textures, models and shaders the layers added, by the file each resolves to, which a
     /// second add of that file, by whatever path, gives again.
     loaded: Loaded,
+    /// The names given the textures the layers add, by their paths, in place of the IDs the asset
+    /// database holds, as [`name_as`](Self::name_as) says: `None` while the run names its textures
+    /// by the database's.
+    #[cfg(feature = "dev")]
+    given: Option<HashMap<Arc<str>, Arc<str>>>,
     /// How long frames take, which the main loop measures and
     /// [`PerfPanel`](crate::PerfPanel) shows.
     pub(crate) perf: Perf,
@@ -347,31 +356,35 @@ impl Context {
     }
 
     /// Names the assets the layers add from files by their paths relative to `root`, as
-    /// [`App::root`](crate::App::root) does for a run: for a [`seeded`](Self::seeded) context, so
-    /// that the world's hash, which reads its textures' names, doesn't depend on where the game's
-    /// files are.
+    /// [`App::root`](crate::App::root) does for a run, and, in a development build, by the IDs the
+    /// ID files under it hold, which it reads, writing none, as a run that serves no tool API does:
+    /// for a [`seeded`](Self::seeded) context, so that the world's hash, which reads its textures'
+    /// names, doesn't depend on where the game's files are, and names them as the game's runs do.
     #[doc(hidden)]
     #[must_use]
     pub fn root(mut self, root: impl Into<PathBuf>) -> Self {
         self.root = Some(root.into());
+        #[cfg(feature = "dev")]
+        self.scan_assets(false);
         self
     }
 
     /// Makes the context's game the project whose manifest is in `dir`, as
-    /// [`App::project`](crate::App::project) does for a run, naming assets from its asset root and
-    /// loading its start scene: for a [`seeded`](Self::seeded) context.
+    /// [`App::project`](crate::App::project) does for a run, naming assets from its asset root, as
+    /// [`root`](Self::root) does, and loading its start scene: for a [`seeded`](Self::seeded)
+    /// context.
     ///
     /// Fails as the manifest's reading does in a run that `App::project` made a project's.
     #[doc(hidden)]
-    pub fn project(mut self, dir: impl AsRef<Path>) -> Result<Self> {
+    pub fn project(self, dir: impl AsRef<Path>) -> Result<Self> {
         let manifest = crate::Manifest::read(dir.as_ref())?;
-        self.root = Some(manifest.root);
-        self.start = Some(manifest.start);
+        let mut cx = self.root(manifest.root);
+        cx.start = Some(manifest.start);
         #[cfg(feature = "dev")]
         {
-            self.folders = manifest.scenes;
+            cx.folders = manifest.scenes;
         }
-        Ok(self)
+        Ok(cx)
     }
 
     fn with_world(window: Option<Window>, mut world: World) -> Self {
@@ -427,6 +440,8 @@ impl Context {
             folders: Vec::new(),
             assets,
             loaded: Loaded::default(),
+            #[cfg(feature = "dev")]
+            given: None,
             perf: Perf::default(),
             paused: false,
             authors: Authors::default(),
@@ -622,7 +637,9 @@ impl Context {
     ///
     /// A file added again, by whatever form of its path, gives the texture it gave first, without
     /// loading it again, as ARCHITECTURE.md's Rendering says; `name` is then unused, and the
-    /// texture keeps the name its first path gave it, which another path names too.
+    /// texture keeps the path it was first added by, which another path names too. Scenes,
+    /// snapshots, recordings and the tool API name it by its asset ID, where its file has one, as
+    /// ARCHITECTURE.md's Project state says, and otherwise by that path.
     ///
     /// Fails with `engine.bad_texture` if the file can't be read, isn't a regular file, is more
     /// than 1 GiB, doesn't decode as a PNG or a JPEG, or has a side of more than 8,192 pixels, the
@@ -644,7 +661,8 @@ impl Context {
                 let image = image::load_image(name, path)?;
                 let size = image.size;
                 let texture = self.textures.add(name, size, image.pixels, Mipmaps::None)?;
-                self.add_assets(|assets| assets.add_texture(texture, named.clone()));
+                let id = self.texture_name(&named, path, file.as_deref(), None);
+                self.add_assets(|assets| assets.add_texture(texture, named.clone(), id));
                 if let Some(file) = file {
                     self.loaded.textures.insert(file, (texture, size));
                 }
@@ -689,7 +707,8 @@ impl Context {
                 let image = image::load_image(name, path)?;
                 let sheet = add_sheet(&mut self.textures, name, path, image, cell)?;
                 let (texture, size) = (sheet.texture, sheet.size);
-                self.add_assets(|assets| assets.add_texture(texture, named.clone()));
+                let id = self.texture_name(&named, path, file.as_deref(), None);
+                self.add_assets(|assets| assets.add_texture(texture, named.clone(), id));
                 if let Some(file) = file {
                     self.loaded.textures.insert(file, (texture, size));
                 }
@@ -735,7 +754,9 @@ impl Context {
     /// are in files in the model's folder, named by URIs relative to the model's, read no further
     /// than their byteLength, in base64 data URIs or in a GLB's BIN chunk, and images there or in
     /// buffer views: PNGs or JPEGs, as `add_texture` takes them, told apart by their bytes rather
-    /// than by the types the model declares. A file added again gives the model it gave first.
+    /// than by the types the model declares. A file added again gives the model it gave first. Its
+    /// images are named by the model's asset ID, where its file has one, or else by its path, and
+    /// their places in it, such as `5f3c9a1e07b2d846#0` or `assets/truck.glb#0`.
     ///
     /// It ignores animations, cameras and the extensions the model uses without requiring them,
     /// and logs which it has at info level, as `engine.model_ignored`: the model draws as it is at
@@ -776,12 +797,22 @@ impl Context {
                         imported.ignored.join(", ")
                     );
                 }
-                let before = self.textures.count();
                 let (meshes, shaders, textures) =
                     (&mut self.meshes, &mut self.shaders, &mut self.textures);
-                let model = Model::add(name, imported, meshes, shaders, textures)?;
-                let count = self.textures.count();
-                self.add_assets(|assets| assets.add_images(&named, before, count));
+                let (model, images) = Model::add(name, imported, meshes, shaders, textures)?;
+                // Each named by the model's ID, or path, and its order in the model.
+                let images: Vec<_> = (images.into_iter().enumerate())
+                    .map(|(i, image)| {
+                        let at = Some(i);
+                        let id = self.texture_name(&named, path, file.as_deref(), at);
+                        (image, format!("{named}#{i}").into(), id)
+                    })
+                    .collect();
+                self.add_assets(|assets| {
+                    for (image, path, id) in images {
+                        assets.add_texture(image, path, id);
+                    }
+                });
                 if let Some(file) = file {
                     self.loaded.models.insert(file, model.clone());
                 }
@@ -809,6 +840,83 @@ impl Context {
         }
     }
 
+    /// What names the texture loaded from `file`, which a layer gave as `path`, whose path among
+    /// assets is `named`, as [`Assets`] says, or with `image`, its image of that place in the
+    /// model: in a development build, the name given its path, if the run is given its textures'
+    /// names, as [`name_as`](Self::name_as) says, and else its file's ID in the asset database,
+    /// with an image's place after the model's; and otherwise its path, as a build without `dev`,
+    /// which reads no ID file, names every one.
+    fn texture_name(
+        &self,
+        named: &str,
+        path: &Path,
+        file: Option<&Path>,
+        image: Option<usize>,
+    ) -> Arc<str> {
+        let at: Arc<str> = match image {
+            Some(i) => format!("{named}#{i}").into(),
+            None => named.into(),
+        };
+        #[cfg(feature = "dev")]
+        {
+            let given = match &self.given {
+                Some(given) => given.get(&at).cloned(),
+                None => self.asset_id(path, file).map(|id| match image {
+                    Some(i) => format!("{id}#{i}").into(),
+                    None => id.to_string().into(),
+                }),
+            };
+            if let Some(name) = given {
+                return name;
+            }
+        }
+        #[cfg(not(feature = "dev"))]
+        let _ = (path, file);
+        at
+    }
+
+    /// The ID the asset database holds for `file`, which a layer gave as `path`: by that path
+    /// from the root, if it's given inside it, as layers spell a file's path as its disk does, or
+    /// else by the path from the root of the file the OS resolves it to, as through `..`, a link
+    /// or, where names ignore it, case.
+    #[cfg(feature = "dev")]
+    fn asset_id(&self, path: &Path, file: Option<&Path>) -> Option<AssetId> {
+        let root = self.root.as_deref()?;
+        let catalog = self.assets.catalog();
+        let spelled = path.strip_prefix(root).ok();
+        let spelled = spelled.and_then(|within| catalog.id(&assets::name_of(None, within)));
+        spelled.or_else(|| {
+            let within = file?.strip_prefix(assets::file_of(root)?).ok()?;
+            catalog.id(&assets::name_of(None, within))
+        })
+    }
+
+    /// Has the run name the textures its layers add as `names`, each a name and the path it names,
+    /// names their paths, and every other by its path, in place of the IDs the asset database
+    /// holds, renaming those added already: as a replay names them as its recording's run did, and
+    /// a lockstep session's joiner as its host does, whose ID files its own disk may not hold.
+    #[cfg(feature = "dev")]
+    pub(crate) fn name_as(&mut self, names: impl IntoIterator<Item = (Arc<str>, Arc<str>)>) {
+        let given = names.into_iter().map(|(name, path)| (path, name)).collect();
+        self.rename(given);
+    }
+
+    /// As [`name_as`](Self::name_as), but with `names` beside the names given already: as a
+    /// lockstep host names the textures it adds after its joiner has joined.
+    #[cfg(feature = "dev")]
+    pub(crate) fn name_also(&mut self, names: impl IntoIterator<Item = (Arc<str>, Arc<str>)>) {
+        let mut given = self.given.take().unwrap_or_default();
+        given.extend(names.into_iter().map(|(name, path)| (path, name)));
+        self.rename(given);
+    }
+
+    /// Names the textures as `given` names their paths, and every other by its path, from now on.
+    #[cfg(feature = "dev")]
+    fn rename(&mut self, given: HashMap<Arc<str>, Arc<str>>) {
+        self.add_assets(|assets| assets.rename(&given));
+        self.given = Some(given);
+    }
+
     /// Has `add` change the assets the layers added, which the world shares from then on: the
     /// context's, so that a world that took the world's place doesn't lose them, and copied only
     /// where a copy of the world shares them.
@@ -827,8 +935,9 @@ impl Context {
 
     /// Scans the assets under the app's root, as [`assets::scan`] says, writing the ID files
     /// missing if `writes`, and warning of each missing otherwise, and has the worlds share what it
-    /// found: as a run starts, before the layers load, and as the tool API lists them. A context
-    /// without a root has none.
+    /// found: as a run starts, before the layers load, as a test's context is given its root, and
+    /// as the tool API lists them. A context without a root has none. A texture is named by the ID
+    /// the database holds for it as it's added, so that a scan after names none afresh.
     ///
     /// Each scan walks the whole root and reads every ID file on the main thread, O(files), and
     /// clones the catalog, O(assets): about 70 ms for 1,000 assets on Windows, but a few
@@ -1377,8 +1486,10 @@ impl Stack {
 
     /// Between ticks, as a frame starts, the next tick to run being `next`: takes what the lockstep
     /// peer sent since the last turn, sending the joiner the world, if the host owes it, or
-    /// restoring the host's in place of the joiner's, as [`Lockstep::turn`] says. Returns the tick
-    /// the joiner's world is at once it restores the host's, which its ticks go on from.
+    /// restoring the host's in place of the joiner's, as [`Lockstep::turn`] says, the joiner's
+    /// textures taking the names the host's gave them, as they do the names the host gave those it
+    /// added since. Returns the tick the joiner's world is at once it restores the host's, which
+    /// its ticks go on from.
     pub(crate) fn net_turn(&mut self, cx: &mut Context, next: u64) -> Option<u64> {
         let mut net = self.net.take()?;
         let mut restored = None;
@@ -1395,7 +1506,7 @@ impl Stack {
                     next,
                 );
                 match text {
-                    Ok(text) => net.send_world(&text, next),
+                    Ok(text) => net.send_world(&text, cx.world.assets().count(), next),
                     Err(error) => {
                         error!(
                             code = error.code(),
@@ -1407,7 +1518,15 @@ impl Stack {
             Turn::Restore((tick, text)) => {
                 let from = format!("the lockstep host's world at tick {tick}");
                 let snapshot = Snapshot::parse(text, from, net.app());
-                match snapshot.and_then(|snapshot| self.restore_in_place(cx, &snapshot)) {
+                let ticks = snapshot.and_then(|snapshot| {
+                    // Its textures go by the host's names, whatever ID files this peer's disk holds.
+                    #[cfg(feature = "dev")]
+                    cx.name_as(
+                        (snapshot.names.iter()).map(|(path, name)| (name.clone(), path.clone())),
+                    );
+                    self.restore_in_place(cx, &snapshot)
+                });
+                match ticks {
                     Ok(ticks) => {
                         net.restored(ticks);
                         restored = Some(ticks);
@@ -1417,6 +1536,13 @@ impl Stack {
                         net.lose("its world can't be restored");
                     }
                 }
+            }
+        }
+        #[cfg(feature = "dev")]
+        {
+            let names = net.take_names();
+            if !names.is_empty() {
+                cx.name_also(names);
             }
         }
         self.net = Some(net);
@@ -2094,7 +2220,7 @@ mod tests {
         let add = |cx: &mut Context, path: &str| {
             let texture = cx.textures.add(path, [1, 1], &[0; 4], Mipmaps::None);
             let texture = texture.expect("a texture");
-            cx.add_assets(|assets| assets.add_texture(texture, path.into()));
+            cx.add_assets(|assets| assets.add_texture(texture, path.into(), path.into()));
             texture
         };
         let first = add(&mut cx, "first.png");
@@ -2385,6 +2511,91 @@ mod tests {
             .expect("its texture");
         assert_eq!(texture, sheet.texture);
         assert_eq!(sheet_first.textures.count(), count);
+    }
+
+    /// A texture whose ID file holds an ID is named by it, as a test's context reads it from its
+    /// root, writing none: found by it and by its path, however that's written; one without an ID
+    /// file by its path; and a model's images by the model's ID and their places. So a world hashes
+    /// alike once a texture's file is renamed with its ID file, but not without it.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_texture_is_named_by_its_id_so_its_file_renamed_with_it_hashes_alike() {
+        use gg_api::asset::Meta;
+
+        let scratch = crate::dirs::tests::Scratch::new("named-by-id");
+        let root = scratch.0.clone();
+        std::fs::create_dir_all(root.join("assets")).expect("a directory");
+        let png = image::tests::png(png::ColorType::Rgba, png::BitDepth::Eight, 1, &[9; 4], None);
+        let write = |name: &str, bytes: &[u8]| {
+            std::fs::write(root.join("assets").join(name), bytes).expect("written");
+        };
+        let meta = |id: &str| {
+            Meta {
+                id: id.parse().expect("an ID"),
+            }
+            .text()
+        };
+        let (stone, model) = ("5f3c9a1e07b2d846", "1d2c3b4a59687f0e");
+        write("stone.png", &png);
+        write("stone.png.meta", meta(stone).as_bytes());
+        write("plain.png", &png);
+        write("m.glb", &gltf::tests::model());
+        write("m.glb.meta", meta(model).as_bytes());
+        let mut cx = Context::seeded(0).root(root.clone());
+        assert!(!root.join("assets/plain.png.meta").exists(), "none written");
+        let dotted = "assets/./stone.png";
+        let textured = cx
+            .add_texture("stone", root.join(dotted))
+            .expect("a texture");
+        let plain = cx.add_texture("plain", root.join("assets/plain.png"));
+        let plain = plain.expect("a texture");
+        cx.add_model("m", root.join("assets/m.glb"))
+            .expect("a model");
+        let assets = &cx.assets;
+        assert_eq!(assets.name(textured), Some(stone));
+        assert_eq!(assets.path(textured), Some(dotted));
+        assert_eq!(
+            [stone, dotted].map(|name| assets.texture(name)),
+            [Some(textured); 2]
+        );
+        assert_eq!(assets.name(plain), Some("assets/plain.png"));
+        let named: Vec<_> = assets.named_from(0).collect();
+        let images = &named[1..];
+        assert_eq!(named[0], (stone, dotted));
+        assert!(!images.is_empty(), "{named:?}");
+        for (i, &image) in images.iter().enumerate() {
+            let (id, path) = (format!("{model}#{i}"), format!("assets/m.glb#{i}"));
+            assert_eq!(image, (&*id, &*path));
+        }
+        // A file outside the root, given by a path from the working directory spelled as one in the
+        // root is from it, has none of that one's ID.
+        let stone_id = Some(stone.parse().expect("an ID"));
+        assert_eq!(cx.asset_id(&root.join("assets/stone.png"), None), stone_id);
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let outside = assets::file_of(&manifest).expect("gg-engine's manifest");
+        let spelled = Path::new("assets/stone.png");
+        assert_eq!(cx.asset_id(spelled, Some(&outside)), None);
+
+        let hash = |file: &str| {
+            let mut cx = Context::seeded(0).root(root.clone());
+            let texture = cx.add_texture("stone", root.join(file)).expect("a texture");
+            let world = cx.world_mut();
+            let sprite = Sprite {
+                texture: Some(texture),
+                ..Sprite::default()
+            };
+            world.spawn((Transform::IDENTITY, sprite));
+            world.hash()
+        };
+        let before = hash("assets/stone.png");
+        for name in ["stone.png", "stone.png.meta"] {
+            let to = name.replacen("stone", "rock", 1);
+            let assets = root.join("assets");
+            std::fs::rename(assets.join(name), assets.join(to)).expect("renamed");
+        }
+        assert_eq!(hash("assets/rock.png"), before, "renamed with its ID file");
+        std::fs::remove_file(root.join("assets/rock.png.meta")).expect("removed");
+        assert_ne!(hash("assets/rock.png"), before, "by its path, without one");
     }
 
     /// A model's file added again gives the model it gave first, adding none of its meshes or
