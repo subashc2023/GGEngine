@@ -5,8 +5,9 @@
 //! colliders, whose outlines draw over the rest, as a layer's own lines and square's outline do,
 //! and an outline round the turning parent, as the editor outlines what's picked, seen through a
 //! camera of the world's that a pivot the ticks turn carries round, run through the engine's main
-//! loop headless, three fifths of a tick apart, so that they draw between ticks, once its first
-//! frames have run. Every frame picks what the view shows at its middle, as the frame before had
+//! loop headless, without the tool API, whose development runs' watchers of the assets' files
+//! allocate as they look, three fifths of a tick apart, so that they draw between ticks, once its
+//! first frames have run. Every frame picks what the view shows at its middle, as the frame before had
 //! it, and outside it, from the first on, and headless, each answer comes back in the frame it's
 //! due: four frames after the one that asked, and two for the pick outside the view, which finds
 //! nothing.
@@ -16,9 +17,9 @@
 //! whichever thread makes it; the Vulkan loader, the driver, the validation layer and VMA, beneath
 //! the engine, go uncounted. It needs a GPU, as the GPU tests do, and `GG_SKIP_GPU_TESTS` skips
 //! it. With `--windowed`, it runs the app in a window instead, for checks by hand of frames that
-//! the mouse moves and clicks over: without `dev`, whose shader watcher allocates as it looks at
-//! files, as `cargo test -p gg-engine --test frames -- --windowed`, and with no gamepad connected,
-//! since gilrs allocates as it reads one.
+//! the mouse moves and clicks over: without `dev`, whose watcher of the assets' files allocates as
+//! it looks at them, as `cargo test -p gg-engine --test frames -- --windowed`, and with no gamepad
+//! connected, since gilrs allocates as it reads one.
 
 // For the allocator that counts, in `common`, and for setting the environment; see the SAFETY
 // comments.
@@ -509,8 +510,9 @@ fn main() {
     let windowed = std::env::args().any(|arg| arg == "--windowed");
     if windowed && cfg!(feature = "dev") {
         panic!(
-            "the shader watcher, which `dev` adds, allocates as it looks at files: run the \
-             windowed check without it, as `cargo test -p gg-engine --test frames -- --windowed`"
+            "the watcher of the assets' files, which `dev` adds, allocates as it looks at them: \
+             run the windowed check without it, as `cargo test -p gg-engine --test frames -- \
+             --windowed`"
         );
     }
     // CI runners without a GPU or a Vulkan driver, Windows' and macOS's, set this. Linux CI runs
@@ -543,7 +545,9 @@ fn main() {
     let frames = (WARM_UP + COUNTED + 1).to_string();
     let mut args = vec!["--frames", &frames, "--threads", "4"];
     if !windowed {
-        args.push("--headless");
+        // Without the tool API, whose runs in a development build have threads watch the assets'
+        // files, which allocate as they look at them, as docs/PLAN.md's Deferred says.
+        args.extend(["--headless", "--no-api"]);
     }
     assert_eq!(
         gg_engine::run_with(app, args),

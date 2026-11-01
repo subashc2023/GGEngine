@@ -85,9 +85,10 @@ there. renderdoccmd exits 0 whatever the run does, so read the run's log. `rende
 (`vkSetDebugUtilsObjectNameEXT`) and pass's label (`vkCmdBeginDebugUtilsLabelEXT`) among it.
 
 Development builds (gg-engine's `dev`, the apps' and the games') serve the tool API, apply a
-scene file a layer loaded with `Context::load_scene_file` as it's saved, and windowed, compile a
-game's shader again as its files change (`Shader reloaded`), warning at a change that fails. Run a
-game under `cargo gg run`, in the background: it patches in an edit inside function bodies as it's
+scene file a layer loaded with `Context::load_scene_file` as it's saved, and, serving the API,
+reload a game's shaders, textures and models as their files change (`Shader reloaded`,
+`Texture reloaded`, `Model reloaded`), warning at a change that fails. Run a game under
+`cargo gg run`, in the background: it patches in an edit inside function bodies as it's
 saved, with Dioxus's `dx` of the root Cargo.toml's `subsecond` release (`gg` names its install),
 and restarts it from a snapshot after any other change, a crash or a hang (without `dx`, after a
 `cargo build`). `cargo gg status`, `capture` (a PNG), `set`, `undo`, `logs --follow` and the

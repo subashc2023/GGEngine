@@ -871,7 +871,7 @@ what's drawn there or nearer, so that at one depth the later goes over, as 2D dr
 
 Layers add shaders, meshes and textures and draw them through their `Context`, and the renderer's
 `Shaders`, `Meshes` and `Textures` hand out their handles at once, on the main thread; each frame's
-render data carries what's been added to them since, in order. After the frame's ticks and the
+render data carries what's been added to them, or replaced in them, since, in order. After the frame's ticks and the
 layers' updates, the engine draws the world's entities that have a `Transform` and a sprite, a
 circle or a `MeshDraw`, a mesh with its shader and parameters held without their types, after what
 the layers drew, children where their ancestors carry them: first the meshes whose shaders are
@@ -944,12 +944,28 @@ contract `Shaders::add` describes, as the shader's added and as it reloads, and 
 breaks it, naming each way (`renderer.shader_mismatch`). It reads the SPIR-V because Slang's
 reflection names what a pointer points at but none of its fields.
 
-In a development build's windowed run, a thread of its own watches the files each game's shader read
-as it was added, its own and those it includes as slangc lists them, and compiles the shader again
-as they change, off the main thread; the next frame the main thread hands the renderer draws with
-it, and the old pipeline retires until the GPU is done with it. A change that doesn't compile, or
-breaks the contract, warns, and the shader keeps drawing as it did. The engine's own shaders don't
-reload.
+In a development run that serves the tool API, a thread of its own, `gg-watch`, watches the files
+each game's shader, texture and model read as it was loaded, a shader's own and those it includes as
+slangc lists them, a texture's image, and a model's glTF file and the buffers and images it names,
+by their times and lengths every tenth of a second, and reads the asset again as they change and
+then hold for a look, off the main thread: compiles the shader, decodes the image, reads the model.
+As the next frame starts, the main thread puts what it read in place of the asset, under the same
+handle, so that whatever draws it draws what's new from that frame: a shader's old pipeline and a
+mesh's old buffers retire until the GPU is done with them, and a texture's new image takes its slot
+in the bindless set once the GPU has finished the frames before, which may sample the old, so the
+frame that takes it waits for them, a frame's time at most. A texture takes an image of any size,
+but one cut into a sprite sheet, whose cells a layer has where its size put them, keeps drawing as
+it did rather than take one of another (`asset.sheet_resized`). A model takes each primitive's
+vertices and indices and each image, which its entities draw at once; what else changed, its nodes
+and its materials, which its entities hold, stays as it was until the run starts again
+(`asset.model_changed`), and a model of other numbers of primitives or images takes nothing. A
+stand-in takes its file's image once the file comes, or the file of the asset whose ID it stands
+for, once one has it, but never a file outside the asset root (`asset.outside_root`); and a texture
+or a model whose file under the root is renamed or moved, as the asset database finds it by the ID
+it has, or that the database gives its file once it has one, is watched where it is, a rename
+alone reading nothing again. A change that
+doesn't compile, decode or read, or breaks a shader's contract, warns, and the asset keeps drawing
+as it did. The engine's own shaders don't reload, nor do the meshes layers make themselves.
 
 Windowed runs keep a pipeline cache, which they load from the OS's per-user directory for caches as
 the renderer starts and save as it ends, so that pipelines an earlier run made are made again in a

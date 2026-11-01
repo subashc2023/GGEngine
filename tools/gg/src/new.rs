@@ -25,7 +25,8 @@ name = "gg-{name}"
 path = "src/main.rs"
 
 [dependencies]
-# A development build, which serves the tool API and applies its scene file's saves.
+# A development build, which serves the tool API, applies its scene file's saves and reloads its
+# assets as they change.
 gg-engine = { workspace = true, features = ["dev"] }
 
 [lints]

@@ -3,12 +3,13 @@
 //! Reading adds nothing anywhere, so a model that fails to read leaves no trace.
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::io;
 use std::mem;
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use gg_core::math::{Mat4, Quat, Vec3, Vec4};
 use gg_core::{Error, Result};
@@ -98,6 +99,22 @@ impl Default for Material {
 /// vertices take about 1.5 GiB, so that a small file can't fill memory by naming its data many
 /// times, such as one PNG's bytes as many images.
 pub(crate) const MAX_MEMORY: u64 = 4 << 30;
+
+/// Reads model `name`'s file at `path`, and the files it names, from the disk, as [`read`] does
+/// through [`dirs::read_file`](crate::dirs::read_file), and lists the files it read, its own first,
+/// each once: those that hot reload watches.
+pub(crate) fn read_listing(name: &str, path: &Path) -> Result<(Imported, Vec<PathBuf>)> {
+    let files: RefCell<Vec<PathBuf>> = RefCell::default();
+    let read_file = |file: &Path, most: u64| {
+        let mut files = files.borrow_mut();
+        if !files.iter().any(|read| read == file) {
+            files.push(file.to_owned());
+        }
+        crate::dirs::read_file(file, most)
+    };
+    let imported = read(name, path, read_file, MAX_MEMORY)?;
+    Ok((imported, files.into_inner()))
+}
 
 /// Reads model `name`'s file at `path`, and the files it names, through `read_file`, which reads a
 /// regular file as far as the bytes it's given ([`dirs::read_file`](crate::dirs::read_file), or
@@ -1614,6 +1631,22 @@ pub(crate) mod tests {
         };
         assert_eq!(imported.primitives, [primitive]);
         assert_eq!(imported.images[0].pixels, PIXELS);
+
+        // From the disk, listing the files read, its own first, as hot reload watches them.
+        let scratch = crate::dirs::tests::Scratch::new("gltf-files");
+        let folder = scratch.0.join("models");
+        std::fs::create_dir_all(folder.join("textures")).expect("a directory");
+        let model = folder.join("m.gltf");
+        std::fs::write(&model, gltf.to_string()).expect("the model");
+        for (name, bytes) in files {
+            std::fs::write(folder.join(name), bytes).expect("a file it names");
+        }
+        let (read, listed) = read_listing("m", &model).expect("a model");
+        assert_eq!(read, imported);
+        let mut named: Vec<PathBuf> = listed[1..].to_vec();
+        named.sort();
+        let beside = ["my data.bin", "textures/a b.png"].map(|name| folder.join(name));
+        assert_eq!((&listed[0], named.as_slice()), (&model, beside.as_slice()));
     }
 
     #[test]

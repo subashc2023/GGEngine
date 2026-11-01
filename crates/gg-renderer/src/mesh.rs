@@ -142,10 +142,10 @@ impl MeshDraw {
 
 /// The meshes a renderer draws, the first of them the engine's quad, which sprites are drawn on.
 /// It hands out each one's handle at once, and keeps its vertices and indices until
-/// [`Uploads::take`] takes them, for a frame to copy to the GPU. A renderer draws the meshes of one
-/// `Meshes` only.
+/// [`Uploads::take`] takes them, for a frame to copy to the GPU; a mesh replaced by others the same
+/// way. A renderer draws the meshes of one `Meshes` only.
 pub struct Meshes {
-    /// Those added since they were last taken, in order.
+    /// Those added or replaced since they were last taken, in order.
     pub(crate) added: Vec<Added>,
     /// How many have been added.
     count: u32,
@@ -156,6 +156,9 @@ pub struct Meshes {
 
 pub(crate) struct Added {
     index: u32,
+    /// Whether it's vertices and indices in place of a mesh's a renderer has, rather than a mesh
+    /// added, which comes after those a renderer has.
+    replacement: bool,
     name: String,
     vertices: Vec<u8>,
     vertex_size: usize,
@@ -196,29 +199,12 @@ impl Meshes {
         vertices: &[V],
         indices: &[u32],
     ) -> Result<Mesh<V>> {
-        // Vulkan's buffers hold at least a byte.
-        const { assert!(size_of::<V>() > 0, "a vertex type has a size") };
-        let bad =
-            |problem: String| Error::new("renderer.bad_mesh", format!("mesh {name:?} {problem}"));
-        if indices.is_empty() {
-            return Err(bad("has no triangles".to_owned()));
-        }
-        if !indices.len().is_multiple_of(3) {
-            return Err(bad(format!(
-                "has {} indices, not three for each triangle",
-                indices.len()
-            )));
-        }
-        if let Some(index) = indices.iter().find(|&&i| i as usize >= vertices.len()) {
-            return Err(bad(format!(
-                "has index {index}, past its {} vertices",
-                vertices.len()
-            )));
-        }
+        check(name, vertices, indices)?;
         let index = self.count;
         self.count += 1;
         self.added.push(Added {
             index,
+            replacement: false,
             name: name.to_owned(),
             vertices: bytemuck::cast_slice(vertices).to_vec(),
             vertex_size: size_of::<V>(),
@@ -226,6 +212,71 @@ impl Meshes {
         });
         Ok(Mesh::new(index))
     }
+
+    /// Puts other triangles in place of `mesh`'s, which keeps its handle: `indices` and `vertices`
+    /// as [`add`](Self::add) takes them, as many as they are, so that every draw of it draws them
+    /// from the frame that copies them to the GPU on. It takes the place of any of that mesh's
+    /// vertices and indices still waiting for a frame, as it was added or replaced. `name` names it
+    /// in errors.
+    ///
+    /// Fails with `renderer.bad_mesh` as `add` does, leaving the mesh as it was.
+    ///
+    /// # Panics
+    ///
+    /// If `mesh` isn't one of these meshes, as another `Meshes`' handles can be past them.
+    pub fn replace<V: NoUninit>(
+        &mut self,
+        name: &str,
+        mesh: Mesh<V>,
+        vertices: &[V],
+        indices: &[u32],
+    ) -> Result<()> {
+        assert!(
+            mesh.index < self.count,
+            "mesh {name:?} replaces one of another `Meshes`"
+        );
+        check(name, vertices, indices)?;
+        let (vertices, indices) = (bytemuck::cast_slice(vertices).to_vec(), indices.to_vec());
+        match (self.added.iter_mut()).find(|added| added.index == mesh.index) {
+            Some(waiting) => {
+                waiting.vertices = vertices;
+                waiting.indices = indices;
+            }
+            None => self.added.push(Added {
+                index: mesh.index,
+                replacement: true,
+                name: name.to_owned(),
+                vertices,
+                vertex_size: size_of::<V>(),
+                indices,
+            }),
+        }
+        Ok(())
+    }
+}
+
+/// Checks that `indices` are whole triangles of `vertices`, mesh `name`'s, as [`Meshes::add`]
+/// says.
+fn check<V>(name: &str, vertices: &[V], indices: &[u32]) -> Result<()> {
+    // Vulkan's buffers hold at least a byte.
+    const { assert!(size_of::<V>() > 0, "a vertex type has a size") };
+    let bad = |problem: String| Error::new("renderer.bad_mesh", format!("mesh {name:?} {problem}"));
+    if indices.is_empty() {
+        return Err(bad("has no triangles".to_owned()));
+    }
+    if !indices.len().is_multiple_of(3) {
+        return Err(bad(format!(
+            "has {} indices, not three for each triangle",
+            indices.len()
+        )));
+    }
+    if let Some(index) = indices.iter().find(|&&i| i as usize >= vertices.len()) {
+        return Err(bad(format!(
+            "has index {index}, past its {} vertices",
+            vertices.len()
+        )));
+    }
+    Ok(())
 }
 
 impl Default for Meshes {
@@ -347,7 +398,9 @@ impl MeshPass {
     }
 
     /// Copies the meshes and textures in `uploads` to the GPU, taking them, which must happen
-    /// before the frame's passes.
+    /// before the frame's passes. A mesh replaced gets buffers anew, the old retiring until the GPU
+    /// is done with them; a texture replaced, an image anew in its slot, once the GPU has finished
+    /// the frames before, which may sample the old, as [`Frame::refill_texture`] says.
     ///
     /// # Panics
     ///
@@ -356,11 +409,14 @@ impl MeshPass {
     pub(crate) fn upload(&mut self, frame: &mut Frame<'_>, uploads: &mut Uploads) -> Result<()> {
         let _zone = gg_core::zone!();
         for added in uploads.meshes.drain(..) {
-            assert_eq!(
-                added.index as usize,
-                self.meshes.len(),
-                "a renderer draws the meshes of one `Meshes`"
-            );
+            let index = added.index as usize;
+            // A mesh replaced is one the pass has; any other is the next its `Meshes` added.
+            let follows = if added.replacement {
+                index < self.meshes.len()
+            } else {
+                index == self.meshes.len()
+            };
+            assert!(follows, "a renderer draws the meshes of one `Meshes`");
             let indices: &[u8] = bytemuck::cast_slice(&added.indices);
             let buffer = |bytes: &[u8], what| {
                 let name = format!("{} {what}", added.name);
@@ -374,15 +430,36 @@ impl MeshPass {
             };
             frame.fill_buffer(&mut mesh.vertices, &added.vertices)?;
             frame.fill_buffer(&mut mesh.indices, indices)?;
-            self.meshes.push(mesh);
+            match self.meshes.get_mut(index) {
+                Some(old) => {
+                    // Which the draws' sizes are checked against: its own type, since only the
+                    // `Meshes` that added it replaces it.
+                    assert_eq!(
+                        old.vertex_size, mesh.vertex_size,
+                        "mesh {:?} is replaced by vertices of another type; a renderer draws the \
+                         meshes of one `Meshes`",
+                        added.name
+                    );
+                    *old = mesh;
+                }
+                None => self.meshes.push(mesh),
+            }
         }
         for mut added in uploads.textures.drain(..) {
-            assert_eq!(
-                added.index as usize,
-                self.textures.len(),
-                "a renderer samples the textures of one `Textures`"
-            );
+            let index = added.index as usize;
+            // A texture replaced is one the pass has; any other is the next its `Textures` added.
+            let follows = if added.replacement {
+                index < self.textures.len()
+            } else {
+                index == self.textures.len()
+            };
+            assert!(follows, "a renderer samples the textures of one `Textures`");
             texture::add_mipmaps(&mut added.pixels, added.size, added.mipmaps);
+            let mipmapped = added.mipmaps != Mipmaps::None;
+            if let Some(texture) = self.textures.get_mut(index) {
+                frame.refill_texture(texture, added.size, mipmapped, &added.pixels)?;
+                continue;
+            }
             // In the slot of its handle's index, which shaders sample it by.
             let [width, height] = added.size;
             let mut texture = GpuTexture::placed(
@@ -391,7 +468,7 @@ impl MeshPass {
                 width,
                 height,
                 TextureFormat::Rgba8Srgb,
-                added.mipmaps != Mipmaps::None,
+                mipmapped,
                 &added.name,
             )?;
             frame.fill_texture(&mut texture, &added.pixels)?;
@@ -524,6 +601,35 @@ mod tests {
         // After the engine's quad.
         assert_eq!(add(&[0, 1, 2]).ok(), Some(1));
         assert_eq!(add(&[2, 1, 0]).ok(), Some(2));
+    }
+
+    #[test]
+    fn a_mesh_replaced_keeps_its_handle_and_the_place_of_triangles_waiting() {
+        let mut meshes = Meshes::default();
+        let a = meshes.add("a", &TRIANGLE, &[0, 1, 2]).expect("a");
+        let waiting = |meshes: &Meshes| -> Vec<(u32, bool, Vec<u32>)> {
+            let added = meshes.added.iter();
+            added
+                .map(|added| (added.index, added.replacement, added.indices.clone()))
+                .collect()
+        };
+        // Still waiting as it was added, which takes the triangles instead.
+        let square = [TRIANGLE.as_slice(), &[[1.0; 3]]].concat();
+        meshes
+            .replace("a", a, &square, &[0, 1, 2, 2, 1, 3])
+            .expect("others");
+        let quad = (0, false, sprite::INDICES.to_vec());
+        assert_eq!(waiting(&meshes), [quad, (1, false, vec![0, 1, 2, 2, 1, 3])]);
+        // Once a frame has taken it, in place of the one the renderer has.
+        meshes.added.clear();
+        meshes
+            .replace("a", a, &TRIANGLE, &[2, 1, 0])
+            .expect("others");
+        assert_eq!(waiting(&meshes), [(1, true, vec![2, 1, 0])]);
+        // Broken triangles leave it as it was.
+        let error = (meshes.replace("a", a, &TRIANGLE, &[0, 1, 3])).expect_err("broken");
+        assert_eq!(error.code(), "renderer.bad_mesh");
+        assert_eq!(waiting(&meshes), [(1, true, vec![2, 1, 0])]);
     }
 
     #[test]

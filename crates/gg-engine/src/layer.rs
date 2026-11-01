@@ -8,6 +8,8 @@ use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(feature = "dev")]
+use std::time::SystemTime;
 
 use bytemuck::NoUninit;
 #[cfg(feature = "dev")]
@@ -32,6 +34,8 @@ use crate::draw::{self, Poses, Scratch};
 use crate::edits::{Authors, Done, Edit};
 use crate::gltf;
 use crate::grid::{self, Plane};
+#[cfg(feature = "dev")]
+use crate::hot_reload::{HotReload, Reloaded, Source};
 use crate::image::{self, Image};
 use crate::interpolation::Past;
 #[cfg(feature = "dev")]
@@ -311,6 +315,10 @@ pub struct Context {
     /// API, as [`start_assets`](Self::start_assets) starts it.
     #[cfg(feature = "dev")]
     asset_watch: Option<AssetWatch>,
+    /// The thread that reads the layers' shaders, textures and models again as their files change,
+    /// in a run that serves the tool API, as [`start_assets`](Self::start_assets) starts it.
+    #[cfg(feature = "dev")]
+    hot_reload: Option<HotReload>,
     /// How long frames take, which the main loop measures and
     /// [`PerfPanel`](crate::PerfPanel) shows.
     pub(crate) perf: Perf,
@@ -465,6 +473,8 @@ impl Context {
             asset_cache: None,
             #[cfg(feature = "dev")]
             asset_watch: None,
+            #[cfg(feature = "dev")]
+            hot_reload: None,
             perf: Perf::default(),
             paused: false,
             authors: Authors::default(),
@@ -612,9 +622,9 @@ impl Context {
     /// and GPU captures. The shader keeps to the contract that [`gg_renderer::Shaders::add`]
     /// describes, which the engine checks.
     ///
-    /// In a development build's windowed run, the shader compiles again as its file or a file it
-    /// includes changes, and the next frame draws with it; a change that doesn't compile, or
-    /// breaks the contract, warns, and the shader keeps drawing as it did.
+    /// In a development run that serves the tool API, the shader compiles again as its file or a
+    /// file it includes changes, and the next frame draws with it; a change that doesn't compile,
+    /// or breaks the contract, warns, and the shader keeps drawing as it did.
     ///
     /// A file added again, by whatever form of its path, with the same vertex and parameter types
     /// and blend, gives the shader it gave first, which compiles and reloads once.
@@ -656,7 +666,10 @@ impl Context {
     /// or gamma it holds, as glTF requires, and its alpha as not multiplied into them, and shaders
     /// sample its colors decoded to linear, with texture coordinates from (0, 0) at its top left to
     /// (1, 1) at its bottom right. `name` names the texture in errors and GPU captures. The GPU has
-    /// it from the next frame that renders.
+    /// it from the next frame that renders. In a development run that serves the tool API, the
+    /// texture takes its file's image again as the file changes, at whatever size, from the next
+    /// frame on, as ARCHITECTURE.md's Rendering says; one that doesn't decode warns, and the
+    /// texture keeps drawing as it did.
     ///
     /// A file added again, by whatever form of its path, gives the texture it gave first, without
     /// loading it again, as ARCHITECTURE.md's Rendering says, and so does an asset's file renamed
@@ -679,10 +692,14 @@ impl Context {
                 texture
             }
             None => {
+                #[cfg(feature = "dev")]
+                let read_at = SystemTime::now();
                 let image = image::load_image(name, path)?;
                 let size = image.size;
                 let texture = self.textures.add(name, size, image.pixels, Mipmaps::None)?;
                 let id = self.texture_name(&named, path, file.as_deref(), None);
+                #[cfg(feature = "dev")]
+                self.watch_texture(texture, name, path, read_at, &id);
                 self.add_assets(|assets| assets.add_texture(texture, named.clone(), id));
                 if let Some(file) = file {
                     self.loaded.textures.insert(file, (texture, size));
@@ -698,7 +715,8 @@ impl Context {
     /// [`add_texture`](Self::add_texture) loads one, cut into cells `cell` pixels across and down,
     /// packed edge to edge from its top left, which [`SpriteSheet::sprite`] draws. A file added
     /// before, as a texture or a sprite sheet, isn't loaded again: its texture is cut into these
-    /// cells.
+    /// cells. Its texture reloads as `add_texture`'s does, but only at the size it has, where its
+    /// sprites have its cells.
     ///
     /// Fails as `add_texture` does, and with `engine.bad_sprite_sheet` if a side of `cell` is 0
     /// or more than the image's.
@@ -722,10 +740,14 @@ impl Context {
                 }
             }
             None => {
+                #[cfg(feature = "dev")]
+                let read_at = SystemTime::now();
                 let image = image::load_image(name, path)?;
                 let sheet = add_sheet(&mut self.textures, name, path, image, cell)?;
                 let (texture, size) = (sheet.texture, sheet.size);
                 let id = self.texture_name(&named, path, file.as_deref(), None);
+                #[cfg(feature = "dev")]
+                self.watch_texture(texture, name, path, read_at, &id);
                 self.add_assets(|assets| assets.add_texture(texture, named.clone(), id));
                 if let Some(file) = file {
                     self.loaded.textures.insert(file, (texture, size));
@@ -733,6 +755,10 @@ impl Context {
                 sheet
             }
         };
+        #[cfg(feature = "dev")]
+        if !self.loaded.sheets.contains(&sheet.texture) {
+            self.loaded.sheets.push(sheet.texture);
+        }
         self.added("texture", &named);
         Ok(sheet)
     }
@@ -774,7 +800,9 @@ impl Context {
     /// buffer views: PNGs or JPEGs, as `add_texture` takes them, told apart by their bytes rather
     /// than by the types the model declares. A file added again gives the model it gave first. Its
     /// images are named by the model's asset ID, where its file has one, or else by its path, and
-    /// their places in it, such as `5f3c9a1e07b2d846#0` or `assets/truck.glb#0`.
+    /// their places in it, such as `5f3c9a1e07b2d846#0` or `assets/truck.glb#0`. In a development
+    /// run that serves the tool API, its meshes and images take what its files hold again as they
+    /// change, but not its nodes or materials, as ARCHITECTURE.md's Rendering says.
     ///
     /// It ignores animations, cameras and the extensions the model uses without requiring them,
     /// and logs which it has at info level, as `engine.model_ignored`: the model draws as it is at
@@ -805,7 +833,9 @@ impl Context {
         let model = match file.as_ref().and_then(|file| self.loaded.models.get(file)) {
             Some(model) => model.clone(),
             None => {
-                let imported = gltf::read(name, path, crate::dirs::read_file, gltf::MAX_MEMORY)?;
+                #[cfg(feature = "dev")]
+                let read_at = SystemTime::now();
+                let (imported, files) = gltf::read_listing(name, path)?;
                 if !imported.ignored.is_empty() {
                     info!(
                         code = "engine.model_ignored",
@@ -832,8 +862,12 @@ impl Context {
                     }
                 });
                 if let Some(file) = file {
+                    #[cfg(feature = "dev")]
+                    self.watch_model(&file, name, path, files, read_at);
                     self.loaded.models.insert(file, model.clone());
                 }
+                #[cfg(not(feature = "dev"))]
+                let _ = files;
                 model
             }
         };
@@ -1022,11 +1056,21 @@ impl Context {
         {
             given.insert(path.into(), name.into());
         }
-        let (file, within) = match &self.root {
-            Some(root) => (root.join(path), root.as_path()),
-            None => (PathBuf::from(path), Path::new(".")),
+        let file = match &self.root {
+            Some(root) => root.join(path),
+            None => PathBuf::from(path),
         };
-        if let (Some(resolved), Some(within)) = (assets::file_of(&file), assets::file_of(within))
+        self.within_root(path, &file)?;
+        let texture = self.add_texture(path, &file)?;
+        self.alias(texture, &name.into());
+        Ok(())
+    }
+
+    /// Fails with `asset.outside_root` if `file`, which `path` names, resolves outside the asset
+    /// root, as through `..` or a link; one that doesn't resolve, as one that isn't there, doesn't.
+    fn within_root(&self, path: &str, file: &Path) -> Result<()> {
+        let within = self.root.as_deref().unwrap_or(Path::new("."));
+        if let (Some(resolved), Some(within)) = (assets::file_of(file), assets::file_of(within))
             && !resolved.starts_with(&within)
         {
             let message = format!(
@@ -1036,15 +1080,15 @@ impl Context {
             );
             return Err(Error::new("asset.outside_root", message));
         }
-        let texture = self.add_texture(path, &file)?;
-        self.alias(texture, &name.into());
         Ok(())
     }
 
     /// Has a stand-in, a texture of magenta and black squares, take the place of the texture text
     /// names `name`, of the file at `path` from the asset root, if its name led to one, which
     /// couldn't be loaded, as `why` says, warning `asset.stand_in`: named as the file would have
-    /// been, or else as `name`.
+    /// been, or else as `name`. In a run that reloads assets, the file's image takes the stand-in's
+    /// place once it loads, as after a checkout brings it, or that of the asset whose ID `name` is,
+    /// once one has it.
     fn stand_in(&mut self, name: &str, path: Option<&str>, why: &Error) {
         // 8 pixels across and down, in squares of 4.
         let pixels: Vec<u8> = (0..64)
@@ -1063,16 +1107,27 @@ impl Context {
                 return;
             }
         };
-        let (path, named): (Arc<str>, Arc<str>) = match path {
+        let (path, named, file): (Arc<str>, Arc<str>, _) = match path {
             Some(path) => {
                 let file = self
                     .root
                     .as_deref()
                     .map_or(PathBuf::from(path), |root| root.join(path));
-                (path.into(), self.texture_name(path, &file, None, None))
+                let named = self.texture_name(path, &file, None, None);
+                (path.into(), named, Some(file))
             }
-            None => (name.into(), name.into()),
+            None => (name.into(), name.into(), None),
         };
+        // So that it gives way to its texture once its file comes, or once an asset has its ID; but
+        // never to a file outside the asset root.
+        #[cfg(feature = "dev")]
+        match &file {
+            Some(_) if why.code() == "asset.outside_root" => {}
+            Some(file) => self.watch_texture(texture, name, file, SystemTime::now(), &named),
+            None => self.watch_for(texture, name),
+        }
+        #[cfg(not(feature = "dev"))]
+        let _ = file;
         self.add_assets(|assets| assets.add_texture(texture, path.clone(), named));
         self.alias(texture, &name.into());
         self.added("texture", &path);
@@ -1235,19 +1290,41 @@ impl Context {
         };
         let _zone = gg_core::zone!();
         if let Some(catalog) = assets::scan(self.assets.catalog(), root, prints, writes) {
-            self.add_assets(|assets| assets.set_catalog(catalog));
+            self.set_catalog(catalog);
         }
     }
 
-    /// As a run starts, before the layers load, scans the assets under the app's root, as
+    /// Has the worlds share `catalog`, the asset database as a scan left it, and the thread that
+    /// reloads assets follow each texture and model whose file it has elsewhere since, as
+    /// [`HotReload::follow`] says.
+    #[cfg(feature = "dev")]
+    fn set_catalog(&mut self, catalog: Catalog) {
+        self.add_assets(|assets| assets.set_catalog(catalog));
+        if let (Some(hot_reload), Some(root)) = (&mut self.hot_reload, &self.root) {
+            hot_reload.follow(self.assets.catalog(), root);
+        }
+    }
+
+    /// As a run starts, before the layers load, if a tool API `serves` the run, starts the thread
+    /// that reloads the layers' shaders, textures and models as their files change, as
+    /// `hot_reload` says, warning if it can't; then scans the assets under the app's root, as
     /// [`scan_assets`](Self::scan_assets) does, writing the ID files missing if `writes`, and
     /// moving those that renames made since the last run left behind beside their assets, by the
-    /// prints its cache keeps, as [`assets::scanned`] says; then, if a tool API `serves` the run,
-    /// starts the thread that keeps the database from then on, as `asset_watch` says, warning if
-    /// it can't, so that the API's `assets` scans on the main thread instead. A context without a
-    /// root has none.
+    /// prints its cache keeps, as [`assets::scanned`] says; then, if the API serves the run, starts
+    /// the thread that keeps the database from then on, as `asset_watch` says, warning if it can't,
+    /// so that the API's `assets` scans on the main thread instead. A context without a root has
+    /// no assets to scan.
     #[cfg(feature = "dev")]
     pub(crate) fn start_assets(&mut self, serves: bool, writes: bool) {
+        if serves {
+            match HotReload::start() {
+                Ok(hot_reload) => self.hot_reload = Some(hot_reload),
+                Err(error) => warn!(
+                    code = error.code(),
+                    "{error:#}; assets don't reload as their files change"
+                ),
+            }
+        }
         let Some(root) = self.root.clone() else {
             return;
         };
@@ -1276,8 +1353,219 @@ impl Context {
     pub(crate) fn take_assets(&mut self) {
         let catalog = self.asset_watch.as_mut().and_then(AssetWatch::take);
         if let Some(catalog) = catalog {
-            self.add_assets(|assets| assets.set_catalog(catalog));
+            self.set_catalog(catalog);
         }
+    }
+
+    /// Sends the thread that reloads assets the shaders the layers added since, and puts each
+    /// shader, texture and model it read again since in place of the one loaded, under the same
+    /// handle, as [`reload_texture`](Self::reload_texture) and
+    /// [`reload_model`](Self::reload_model) say, which the next frame handed off draws: as a frame
+    /// starts. Once it has sent the shaders, it allocates nothing unless something came back.
+    #[cfg(feature = "dev")]
+    pub(crate) fn take_reloaded(&mut self) {
+        let Some(hot_reload) = &mut self.hot_reload else {
+            return;
+        };
+        hot_reload.watch_shaders(&self.shaders);
+        while let Some(reloaded) = self.hot_reload.as_ref().and_then(HotReload::take) {
+            match reloaded {
+                Reloaded::Shader(compiled) => {
+                    let source = compiled.source();
+                    let (shader, path) = (source.name(), source.path().display());
+                    info!(shader, path = %path, "Shader reloaded");
+                    self.shaders.replace(compiled);
+                }
+                Reloaded::Texture {
+                    texture,
+                    path,
+                    image,
+                } => self.reload_texture(texture, &path, image),
+                Reloaded::Model {
+                    file,
+                    path,
+                    imported,
+                } => self.reload_model(&file, &path, imported),
+            }
+        }
+    }
+
+    /// Puts `image`, read again from `path`, in place of `texture`'s pixels, at whatever size it
+    /// is, logging `Texture reloaded`, and has a later add of its file, by whatever path, give the
+    /// texture, as for a stand-in whose file came. A sprite sheet's texture keeps drawing as it did
+    /// rather than take an image of another size, whose cells would be elsewhere in it than its
+    /// sprites have them, warning `asset.sheet_resized`; and a stand-in keeps its place rather
+    /// than take a file that came outside the asset root, as through `..` or a link, as text's
+    /// names are kept inside it, warning `asset.outside_root`.
+    #[cfg(feature = "dev")]
+    fn reload_texture(&mut self, texture: Texture, path: &Path, image: Image) {
+        let named = assets::name_of(self.root.as_deref(), path);
+        let Image { size, pixels } = image;
+        let loaded = self.loaded.textures.values();
+        let was = loaded.copied().find(|&(loaded, _)| loaded == texture);
+        // Only a stand-in was loaded from no file.
+        if was.is_none()
+            && let Err(error) = self.within_root(&named, path)
+        {
+            let consequence = "the stand-in keeps its place";
+            warn!(
+                code = error.code(),
+                texture = &*named,
+                "{error:#}; {consequence}"
+            );
+            return;
+        }
+        if let Some((_, was)) = was
+            && was != size
+            && self.loaded.sheets.contains(&texture)
+        {
+            warn!(
+                code = "asset.sheet_resized",
+                texture = &*named,
+                "Texture `{named}` is {size:?} pixels across and down now, where it was {was:?}, \
+                 but it's cut into a sprite sheet's cells, which a layer finds by its size as it \
+                 adds it: it keeps drawing as it did until the run starts again"
+            );
+            return;
+        }
+        if let Err(error) = self
+            .textures
+            .replace(&named, texture, size, pixels, Mipmaps::None)
+        {
+            let consequence = "the texture keeps drawing as it did";
+            warn!(
+                code = error.code(),
+                texture = &*named,
+                "{error:#}; {consequence}"
+            );
+            return;
+        }
+        for (loaded, was) in self.loaded.textures.values_mut() {
+            if *loaded == texture {
+                *was = size;
+            }
+        }
+        if let Some(file) = assets::file_of(path) {
+            self.loaded.textures.entry(file).or_insert((texture, size));
+        }
+        info!(texture = &*named, ?size, "Texture reloaded");
+    }
+
+    /// Puts what the model loaded from `file` draws, `imported`, read again from `path`, in place
+    /// of what it drew, as [`Model::reload`] says, logging `Model reloaded`, or warning
+    /// `asset.model_changed` of what changed that stays as it was until the run starts again, as
+    /// its nodes and materials.
+    #[cfg(feature = "dev")]
+    fn reload_model(&mut self, file: &Path, path: &Path, imported: gltf::Imported) {
+        let Some(model) = self.loaded.models.get(file) else {
+            return;
+        };
+        let named = assets::name_of(self.root.as_deref(), path);
+        match model.reload(&named, imported, &mut self.meshes, &mut self.textures) {
+            Ok(kept) if kept.is_empty() => info!(model = &*named, "Model reloaded"),
+            Ok(kept) => warn!(
+                code = "asset.model_changed",
+                model = &*named,
+                "Model `{named}` reloaded its meshes and images, but its {} changed too, which \
+                 the entities spawned from it keep as they were until the run starts again",
+                kept.join(" and ")
+            ),
+            Err(error) => warn!(
+                code = error.code(),
+                model = &*named,
+                "{error:#}; the model keeps drawing as it did"
+            ),
+        }
+    }
+
+    /// Has the thread that reloads assets, if one does, watch `texture`, loaded as `name` from the
+    /// file at `path` by a read begun at `read_at`, following its file as it's renamed or moved,
+    /// as [`followed`](Self::followed) says, by its asset ID if it's named by one, as `named` is.
+    #[cfg(feature = "dev")]
+    fn watch_texture(
+        &mut self,
+        texture: Texture,
+        name: &str,
+        path: &Path,
+        read_at: SystemTime,
+        named: &str,
+    ) {
+        let id = named
+            .parse::<AssetId>()
+            .ok()
+            .filter(|_| assets::is_id(named));
+        let (id, at) = self.followed(id, path);
+        if let Some(hot_reload) = &mut self.hot_reload {
+            let source = Source::Texture {
+                texture,
+                name: name.to_owned(),
+                path: path.to_owned(),
+                read_at,
+            };
+            hot_reload.watch(source, id, at);
+        }
+    }
+
+    /// Has the thread that reloads assets, if one does, put the file of the asset whose ID `name`
+    /// is, if it's one, in place of `texture`, which stands in for it, once one has it.
+    #[cfg(feature = "dev")]
+    fn watch_for(&mut self, texture: Texture, name: &str) {
+        let id = name.parse::<AssetId>().ok().filter(|_| assets::is_id(name));
+        if let (Some(hot_reload), Some(id)) = (&mut self.hot_reload, id) {
+            hot_reload.watch_for(texture, name, id);
+        }
+    }
+
+    /// Has the thread that reloads assets, if one does, watch the model loaded as `name` from the
+    /// file at `path`, which resolved to `file`, by a read begun at `read_at` that read `files`,
+    /// following its file as it's renamed or moved, as [`followed`](Self::followed) says.
+    #[cfg(feature = "dev")]
+    fn watch_model(
+        &mut self,
+        file: &Path,
+        name: &str,
+        path: &Path,
+        files: Vec<PathBuf>,
+        read_at: SystemTime,
+    ) {
+        let (id, at) = self.followed(self.asset_id(path, Some(file)), path);
+        if let Some(hot_reload) = &mut self.hot_reload {
+            let source = Source::Model {
+                file: file.to_owned(),
+                name: name.to_owned(),
+                path: path.to_owned(),
+                files,
+                read_at,
+            };
+            hot_reload.watch(source, id, at);
+        }
+    }
+
+    /// What the thread that reloads assets follows the file at `path` by as it's renamed or moved,
+    /// as [`HotReload::watch`] takes it: its asset ID, `id`, if it has one, and its path from the
+    /// asset root, as the asset database has it by that ID, or else as `path` gives it, or as the
+    /// OS resolves it, if it's under the root, by which the database gives it an ID once it has
+    /// one, as for a file new to the run; none outside the root.
+    #[cfg(feature = "dev")]
+    fn followed(&self, id: Option<AssetId>, path: &Path) -> (Option<AssetId>, Option<Arc<str>>) {
+        let by_id = id
+            .and_then(|id| self.assets.catalog().path(id))
+            .map(Arc::from);
+        let at = by_id.or_else(|| {
+            let root = self.root.as_deref()?;
+            let spelled = path
+                .strip_prefix(root)
+                .ok()
+                .map(|within| assets::name_of(None, within));
+            spelled.or_else(|| {
+                let within = assets::file_of(path)?;
+                Some(assets::name_of(
+                    None,
+                    within.strip_prefix(assets::file_of(root)?).ok()?,
+                ))
+            })
+        });
+        (id, at)
     }
 
     /// Whether a thread watches the asset root, keeping the database.
@@ -1684,12 +1972,6 @@ impl Context {
         for pick in self.unseen.drain(..) {
             self.picked.push((pick, None));
         }
-    }
-
-    /// The shaders layers added, for hot reload to put those it compiles again in their place.
-    #[cfg(feature = "dev")]
-    pub(crate) fn shaders(&mut self) -> &mut Shaders {
-        &mut self.shaders
     }
 }
 
@@ -3058,6 +3340,143 @@ mod tests {
         assert_eq!(writes.catalog().id("b.png"), Some(a));
         assert!(!writes.watches_assets(), "a run that serves no API");
         assert!(!root.join("a.png.meta").exists(), "moved beside b.png");
+    }
+
+    /// In a run that reloads assets, a texture whose file is edited takes the image as a frame
+    /// starts, under its handle, at another size; one renamed with its ID file is followed where the
+    /// database finds it, and an edit there taken; a stand-in takes its file's image once the file
+    /// comes, which a later add of the file gives, and is followed by the ID the database gives it
+    /// then; a sprite sheet's texture keeps its size, warning, since its cells would move; and a
+    /// stand-in for a file outside the asset root takes none of it.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_texture_edited_renamed_or_come_reloads_under_its_handle() {
+        use gg_api::asset::Meta;
+
+        let scratch = crate::dirs::tests::Scratch::new("reloaded");
+        let root = scratch.0.join("game");
+        let assets = root.join("assets");
+        std::fs::create_dir_all(&assets).expect("a directory");
+        let png = |width: u32| {
+            let pixels = vec![9; width as usize * 4];
+            image::tests::png(
+                png::ColorType::Rgba,
+                png::BitDepth::Eight,
+                width,
+                &pixels,
+                None,
+            )
+        };
+        // Dated an hour back, so that each loads as it is.
+        let written_long_ago = |name: &str, bytes: &[u8]| {
+            let path = assets.join(name);
+            std::fs::write(&path, bytes).expect("written");
+            let an_hour_ago = std::time::SystemTime::now() - Duration::from_secs(60 * 60);
+            let file = std::fs::File::options().write(true).open(path);
+            (file.and_then(|file| file.set_modified(an_hour_ago))).expect("its time");
+        };
+        written_long_ago("stone.png", &png(1));
+        let meta = Meta {
+            id: "5f3c9a1e07b2d846".parse().expect("an ID"),
+        };
+        written_long_ago("stone.png.meta", meta.text().as_bytes());
+        written_long_ago("sheet.png", &png(2));
+        let logged = crate::testing::logged();
+        let mut cx = Context::seeded(0).root(root.clone());
+        cx.hot_reload = Some(HotReload::start().expect("the thread"));
+        let stone = cx.add_texture("stone", assets.join("stone.png"));
+        let stone = stone.expect("a texture");
+        let sheet = cx.add_sprite_sheet("sheet", assets.join("sheet.png"), [1, 1]);
+        let sheet = sheet.expect("a sheet").texture;
+        cx.load_named(["assets/later.png"], true);
+        let later = cx.assets.texture("assets/later.png").expect("a stand-in");
+
+        let size = |cx: &Context, texture: Texture| {
+            let loaded = cx.loaded.textures.values();
+            loaded
+                .copied()
+                .find(|&(loaded, _)| loaded == texture)
+                .map(|(_, size)| size)
+        };
+        // Frame starts until `done`.
+        let until = |cx: &mut Context, done: &dyn Fn(&Context) -> bool, what: &str| {
+            let until = std::time::Instant::now() + Duration::from_secs(30);
+            while !done(cx) {
+                assert!(std::time::Instant::now() < until, "{what}");
+                std::thread::sleep(Duration::from_millis(5));
+                cx.take_reloaded();
+            }
+        };
+        std::fs::write(assets.join("stone.png"), png(3)).expect("an edit");
+        until(
+            &mut cx,
+            &|cx| size(cx, stone) == Some([3, 1]),
+            "the edit reloads",
+        );
+
+        // Renamed with its ID file, and edited at once, before the database has it there.
+        for name in ["stone.png", "stone.png.meta"] {
+            let to = assets.join(name.replacen("stone", "rock", 1));
+            std::fs::rename(assets.join(name), to).expect("renamed");
+        }
+        std::fs::write(assets.join("rock.png"), png(4)).expect("an edit");
+        cx.scan_assets(false);
+        until(
+            &mut cx,
+            &|cx| size(cx, stone) == Some([4, 1]),
+            "the edit where it is reloads",
+        );
+
+        std::fs::write(assets.join("later.png"), png(5)).expect("its file comes");
+        until(
+            &mut cx,
+            &|cx| size(cx, later) == Some([5, 1]),
+            "the stand-in gives way",
+        );
+        let added = cx.add_texture("later", assets.join("later.png"));
+        assert_eq!(added.expect("a texture"), later, "loaded once");
+        // Given an ID file, which the database reads, then renamed with it and edited at once.
+        let meta = Meta {
+            id: "7a1b2c3d4f5a6b7c".parse().expect("an ID"),
+        };
+        std::fs::write(assets.join("later.png.meta"), meta.text()).expect("written");
+        cx.scan_assets(false);
+        for name in ["later.png", "later.png.meta"] {
+            let to = assets.join(name.replacen("later", "other", 1));
+            std::fs::rename(assets.join(name), to).expect("renamed");
+        }
+        std::fs::write(assets.join("other.png"), png(6)).expect("an edit");
+        cx.scan_assets(false);
+        until(
+            &mut cx,
+            &|cx| size(cx, later) == Some([6, 1]),
+            "the edit where the stand-in's file is now reloads",
+        );
+
+        let warned = |code: &'static str| {
+            let logged = &logged;
+            move |_: &Context| logged.codes.try_iter().any(|logged| logged == code)
+        };
+        std::fs::write(assets.join("sheet.png"), png(7)).expect("an edit");
+        let resized = warned("asset.sheet_resized");
+        until(&mut cx, &resized, "a sheet's texture keeps its size");
+        assert_eq!(size(&cx, sheet), Some([2, 1]));
+
+        // Outside the root, through `..`: one there is refused, and isn't watched; one that comes
+        // after is refused as it comes.
+        std::fs::write(scratch.0.join("there.png"), png(8)).expect("written");
+        cx.load_named(["../there.png", "../after.png"], true);
+        let there = cx.assets.texture("../there.png").expect("a stand-in");
+        let after = cx.assets.texture("../after.png").expect("a stand-in");
+        std::fs::write(scratch.0.join("there.png"), png(9)).expect("an edit");
+        std::fs::write(scratch.0.join("after.png"), png(10)).expect("it comes");
+        let outside = warned("asset.outside_root");
+        until(&mut cx, &outside, "a file outside the root is refused");
+        for _ in 0..50 {
+            std::thread::sleep(Duration::from_millis(10));
+            cx.take_reloaded();
+        }
+        assert_eq!((size(&cx, there), size(&cx, after)), (None, None));
     }
 
     /// A scene file loads the textures it names that no layer added, by an ID or by a path from the

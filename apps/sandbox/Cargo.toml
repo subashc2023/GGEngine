@@ -11,7 +11,7 @@ name = "gg-sandbox"
 path = "src/main.rs"
 
 [dependencies]
-# A development build, which reloads its shaders as they change.
+# A development build, which reloads its shaders and textures as they change.
 gg-engine = { workspace = true, features = ["dev"] }
 tracing.workspace = true
 

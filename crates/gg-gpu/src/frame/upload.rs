@@ -185,6 +185,53 @@ impl<'a> Frame<'a> {
         Ok(())
     }
 
+    /// Fills `texture` anew with the pixels of another image, `size` pixels across and down, with
+    /// the full chain of mip levels that [`mip_sizes`](crate::mip_sizes) gives if `mipmapped` and
+    /// otherwise one, packed as [`Frame::fill_texture`] takes them: in place of what it held,
+    /// whether or not a frame has filled or written it, in an image made for them, which keeps the
+    /// texture's index, so that shaders that sample it by its index see them from this frame's
+    /// passes on. Frames before this one may still sample it, so it first waits for the GPU to
+    /// finish them, a frame's time at most: it's for an asset reloaded as its file changes, not for
+    /// every frame. The old image retires until this frame has finished.
+    ///
+    /// # Panics
+    ///
+    /// If a forgotten pass is still open, another device made the texture, a side is 0 or more
+    /// than [`MAX_TEXTURE_SIZE`](crate::MAX_TEXTURE_SIZE), or `pixels` doesn't fill the levels
+    /// exactly.
+    pub fn refill_texture(
+        &mut self,
+        texture: &mut Texture,
+        size: [u32; 2],
+        mipmapped: bool,
+        pixels: &[u8],
+    ) -> Result<()> {
+        self.outside_pass();
+        self.frames
+            .device
+            .check_made("the texture refilled", texture.device());
+        let [width, height] = size;
+        let levels = if mipmapped { usize::MAX } else { 1 };
+        let bytes: u64 = (crate::mip_sizes(width, height).take(levels))
+            .map(|[width, height]| u64::from(width) * u64::from(height) * 4)
+            .sum();
+        // Before anything changes, so that the texture is never left unfilled.
+        assert_eq!(
+            pixels.len() as u64,
+            bytes,
+            "the pixels don't fill a {width}x{height} texture's levels"
+        );
+        let before = self.frames.submitted;
+        if before > 0 {
+            self.frames.wait(before)?;
+            self.frames.device.frames_finished(before);
+        }
+        // SAFETY: the GPU has finished every frame before this one, and this one, still recording,
+        // takes the texture's slot as it's written.
+        unsafe { texture.remake(width, height, mipmapped) }?;
+        self.fill_texture(texture, pixels)
+    }
+
     /// Fills `buffer`, which no frame has written, with `bytes`: all of it. Shaders and draws see
     /// them from this frame's passes on, as [`Frame::fill_texture`] has it; a device that copies
     /// textures from the host copies buffers on the graphics queue.

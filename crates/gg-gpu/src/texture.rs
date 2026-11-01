@@ -1,6 +1,7 @@
 //! Textures: images shaders sample, each in a slot of the bindless set.
 
 use std::iter;
+use std::mem;
 use std::slice;
 use std::sync::Arc;
 
@@ -52,9 +53,9 @@ pub enum TextureFormat {
 }
 
 /// An RGBA image with 8-bit channels, with one mip level or a full chain of them, that shaders
-/// sample through its index in the bindless set. Frames fill its pixels, and may write over those
-/// of one with one level, and they're undefined until then. Dropping it retires it until the GPU
-/// is done with it.
+/// sample through its index in the bindless set. Frames fill its pixels, may write over those of
+/// one with one level, and may refill it with another image, and they're undefined until then.
+/// Dropping it retires it until the GPU is done with it.
 pub struct Texture {
     device: Arc<Device>,
     raw: vk::Image,
@@ -64,6 +65,7 @@ pub struct Texture {
     extent: vk::Extent2D,
     /// How many mip levels it has.
     levels: u32,
+    format: vk::Format,
     index: u32,
     /// Whether a frame has filled or written it, which leaves it in the shader-read-only layout.
     written: bool,
@@ -123,85 +125,71 @@ impl Texture {
         mipmapped: bool,
         name: &str,
     ) -> Result<Self> {
-        let sides = 1..=MAX_TEXTURE_SIZE;
-        assert!(
-            sides.contains(&width) && sides.contains(&height),
-            "a {width}x{height} texture, but textures are 1 to {MAX_TEXTURE_SIZE} pixels a side"
-        );
-        let extent = vk::Extent2D { width, height };
-        let levels = if mipmapped {
-            mip_sizes(width, height).count() as u32
-        } else {
-            1
-        };
         let format = match format {
             TextureFormat::Rgba8Unorm => vk::Format::R8G8B8A8_UNORM,
             TextureFormat::Rgba8Srgb => vk::Format::R8G8B8A8_SRGB,
         };
-        // Host copies need it, and only devices whose drivers say it costs them nothing upload
-        // that way, unless a test asks.
-        let usage = if device.upload_path() == UploadPath::HostImageCopy {
-            Self::USAGE | vk::ImageUsageFlags::HOST_TRANSFER_EXT
-        } else {
-            Self::USAGE
-        };
-        let info = vk::ImageCreateInfo::default()
-            .image_type(vk::ImageType::TYPE_2D)
-            .format(format)
-            .extent(extent.into())
-            .mip_levels(levels)
-            .array_layers(1)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(usage);
+        let (info, levels) = image_info(device, width, height, format, mipmapped);
         // The slot first: a refused one panics, which must leave no image behind.
         let bindless = device.bindless();
         let index = bindless.reserve(slot, name)?;
-        let (raw, allocation) = match device.allocator().create_image(&info, Memory::Gpu, name) {
+        let (raw, allocation, view) = match make_image(device, &info, name) {
             Ok(made) => made,
             Err(error) => {
                 bindless.remove(index);
                 return Err(error);
             }
         };
-        let view_info = vk::ImageViewCreateInfo::default()
-            .image(raw)
-            .view_type(vk::ImageViewType::TYPE_2D)
-            .format(info.format)
-            .subresource_range(COLOR_RANGE);
-        // SAFETY: the image is live and bound to memory.
-        let view = match unsafe { device.raw().create_image_view(&view_info, None) } {
-            Ok(view) => view,
-            Err(error) => {
-                device.retire(Retired::Texture(
-                    raw,
-                    vk::ImageView::null(),
-                    allocation,
-                    index,
-                ));
-                let view = format_args!("texture {name:?}'s view");
-                return Err(vk_error("vkCreateImageView", view, error));
-            }
-        };
         // SAFETY: the view is of a live sampled image, which is in the shader-read-only layout
-        // before any shader can sample it: frames fill or write it first.
+        // before any shader can sample it: frames fill or write it first. No frame uses the slot,
+        // which was free when it was reserved.
         unsafe { bindless.write(device.raw(), view, index) };
-        // SAFETY: the image and view are live.
-        unsafe {
-            device.set_name(raw, name);
-            device.set_name(view, name);
-        }
         Ok(Self {
             device: device.clone(),
             raw,
             view,
             allocation: Some(allocation),
-            extent,
+            extent: vk::Extent2D { width, height },
             levels,
+            format,
             index,
             written: false,
             name: name.to_owned(),
         })
+    }
+
+    /// Makes the texture's image anew, `width` by `height` pixels, with the full chain of mip
+    /// levels that [`mip_sizes`] gives if `mipmapped` and otherwise one, in its format, its slot
+    /// taking its view at once: a frame then fills it as one no frame has written. The old image
+    /// retires until the GPU is done with the frames that may use it. If it fails, the texture is
+    /// as it was.
+    ///
+    /// # Safety
+    ///
+    /// No frame that the GPU may still run samples the texture: its slot changes at once, which the
+    /// bindless set allows only for slots no submitted frame uses.
+    ///
+    /// # Panics
+    ///
+    /// If a side is 0, or more than [`MAX_TEXTURE_SIZE`].
+    pub(crate) unsafe fn remake(&mut self, width: u32, height: u32, mipmapped: bool) -> Result<()> {
+        let (info, levels) = image_info(&self.device, width, height, self.format, mipmapped);
+        let (raw, allocation, view) = make_image(&self.device, &info, &self.name)?;
+        let bindless = self.device.bindless();
+        // SAFETY: the view is of a live sampled image, which frames fill before any shader samples
+        // it, as for a new texture; the caller guarantees that no submitted frame uses the slot.
+        unsafe { bindless.write(self.device.raw(), view, self.index) };
+        let old = self.allocation.replace(allocation);
+        let old = old.expect("a texture keeps its memory until it's dropped");
+        let (old_raw, old_view) = (
+            mem::replace(&mut self.raw, raw),
+            mem::replace(&mut self.view, view),
+        );
+        self.device.retire(Retired::Image(old_raw, old_view, old));
+        self.extent = vk::Extent2D { width, height };
+        self.levels = levels;
+        self.written = false;
+        Ok(())
     }
 
     /// Where shaders find the texture in the bindless set's texture array.
@@ -312,6 +300,82 @@ impl Texture {
         unsafe { functions.copy_memory_to_image(&info) }
             .map_err(|e| vk_error("vkCopyMemoryToImageEXT", texture, e))
     }
+}
+
+/// How an image of `width` by `height` pixels in `format` is made for a texture on `device`, with
+/// the full chain of mip levels that [`mip_sizes`] gives if `mipmapped` and otherwise one, and how
+/// many levels it has.
+///
+/// # Panics
+///
+/// If a side is 0, or more than [`MAX_TEXTURE_SIZE`].
+fn image_info(
+    device: &Device,
+    width: u32,
+    height: u32,
+    format: vk::Format,
+    mipmapped: bool,
+) -> (vk::ImageCreateInfo<'static>, u32) {
+    let sides = 1..=MAX_TEXTURE_SIZE;
+    assert!(
+        sides.contains(&width) && sides.contains(&height),
+        "a {width}x{height} texture, but textures are 1 to {MAX_TEXTURE_SIZE} pixels a side"
+    );
+    let levels = if mipmapped {
+        mip_sizes(width, height).count() as u32
+    } else {
+        1
+    };
+    // Host copies need it, and only devices whose drivers say it costs them nothing upload that
+    // way, unless a test asks.
+    let usage = if device.upload_path() == UploadPath::HostImageCopy {
+        Texture::USAGE | vk::ImageUsageFlags::HOST_TRANSFER_EXT
+    } else {
+        Texture::USAGE
+    };
+    let info = vk::ImageCreateInfo::default()
+        .image_type(vk::ImageType::TYPE_2D)
+        .format(format)
+        .extent(vk::Extent3D {
+            width,
+            height,
+            depth: 1,
+        })
+        .mip_levels(levels)
+        .array_layers(1)
+        .samples(vk::SampleCountFlags::TYPE_1)
+        .tiling(vk::ImageTiling::OPTIMAL)
+        .usage(usage);
+    (info, levels)
+}
+
+/// Makes the image `info` describes in GPU memory, and a view of it, both named `name`.
+fn make_image(
+    device: &Device,
+    info: &vk::ImageCreateInfo<'_>,
+    name: &str,
+) -> Result<(vk::Image, Allocation, vk::ImageView)> {
+    let (raw, allocation) = device.allocator().create_image(info, Memory::Gpu, name)?;
+    let view_info = vk::ImageViewCreateInfo::default()
+        .image(raw)
+        .view_type(vk::ImageViewType::TYPE_2D)
+        .format(info.format)
+        .subresource_range(COLOR_RANGE);
+    // SAFETY: the image is live and bound to memory.
+    let view = match unsafe { device.raw().create_image_view(&view_info, None) } {
+        Ok(view) => view,
+        Err(error) => {
+            device.retire(Retired::Image(raw, vk::ImageView::null(), allocation));
+            let view = format_args!("texture {name:?}'s view");
+            return Err(vk_error("vkCreateImageView", view, error));
+        }
+    };
+    // SAFETY: the image and view are live.
+    unsafe {
+        device.set_name(raw, name);
+        device.set_name(view, name);
+    }
+    Ok((raw, allocation, view))
 }
 
 impl Drop for Texture {

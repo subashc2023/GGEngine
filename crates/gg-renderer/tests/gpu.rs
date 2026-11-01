@@ -102,6 +102,7 @@ fn main() -> ExitCode {
             textures_match_their_reference,
             sheets_match_their_reference,
             a_large_texture_draws_in_the_frame_that_adds_it,
+            replaced_meshes_and_textures_draw_from_the_frame_that_takes_them,
             mipmaps_match_their_reference,
         );
     }
@@ -1506,6 +1507,87 @@ fn a_large_texture_draws_in_the_frame_that_adds_it(path: UploadPath) {
             .all(|(&got, want)| got.abs_diff(want) <= 1);
         assert!(close, "read back {pixel:?}, expected {COLOR:?}");
     }
+}
+
+/// A textured square that covers a view of `SIZE` pixels a side, red, whose mesh and texture are
+/// replaced while the frames before may still draw them, over more frames than are in flight: the
+/// mesh by one that covers the view's left half, the texture by a green one of another size, with
+/// mip levels. The frame that takes them draws them, and validation, synchronization's among it,
+/// sees the old ones go only once the GPU is done with them.
+fn replaced_meshes_and_textures_draw_from_the_frame_that_takes_them(path: UploadPath) {
+    const SIZE: u32 = 16;
+    let mut renderer = renderer_uploading(SIZE, SIZE, Some(path));
+    let mut stores = Stores::default();
+    // Positions, then texture coordinates.
+    let textured = (stores.shaders)
+        .add::<[f32; 5], Sampling>("textured", &shader("textured.slang"), Blend::Opaque)
+        .expect("a shader");
+    // The whole view, which is 2 units high and as wide.
+    let whole = [
+        [-1.0, -1.0, 0.0, 0.0, 1.0],
+        [1.0, -1.0, 0.0, 1.0, 1.0],
+        [1.0, 1.0, 0.0, 1.0, 0.0],
+        [-1.0, 1.0, 0.0, 0.0, 0.0],
+    ];
+    let indices = [0, 1, 2, 2, 3, 0];
+    let square = (stores.meshes)
+        .add("square", &whole, &indices)
+        .expect("a mesh");
+    let red = [255, 0, 0, 255].repeat(4);
+    let texture = (stores.textures)
+        .add("color", [2, 2], &red, Mipmaps::None)
+        .expect("a texture");
+    let mut draws = Draws::default();
+    let sampling = Sampling {
+        texture,
+        sampler: Sampler::NearestClamp.index(),
+    };
+    draws.push(square, textured, Mat4::IDENTITY, sampling);
+    let viewpoint = Viewpoint {
+        projection: Projection::Orthographic {
+            height: 2.0,
+            near: -1.0,
+            far: 1.0,
+        },
+        ..Viewpoint::default()
+    };
+    // The pixels a quarter of the way across and three quarters of the way, halfway down.
+    let left_and_right = |renderer: &mut Renderer| {
+        let pixels = (renderer.read_back())
+            .expect("the frame's pixels")
+            .expect("a headless renderer's frame can be read back");
+        let at = |x: u32| {
+            let at = ((SIZE / 2 * SIZE + x) * 4) as usize;
+            <[u8; 4]>::try_from(&pixels[at..at + 4]).expect("a pixel")
+        };
+        [at(SIZE / 4), at(SIZE * 3 / 4)]
+    };
+    let (red, green) = ([255, 0, 0, 255], [0, 255, 0, 255]);
+    for frame in 0..6 {
+        if frame == 3 {
+            let left_half = whole.map(|[x, y, z, u, v]| [x.min(0.0), y, z, u, v]);
+            (stores.meshes)
+                .replace("square", square, &left_half, &indices)
+                .expect("the mesh replaced");
+            let pixels = green.repeat(4 * 4);
+            (stores.textures)
+                .replace("color", texture, [4, 4], &pixels, Mipmaps::Averaged)
+                .expect("the texture replaced");
+        }
+        let data = stores.data(filling([SIZE, SIZE]), viewpoint, &draws);
+        render_without_ui(&mut renderer, data);
+        // Reading back waits for the GPU, so not between the first frame and the replacements.
+        match frame {
+            0 => assert_eq!(left_and_right(&mut renderer), [red, red], "red"),
+            3 | 5 => {
+                let [left, right] = left_and_right(&mut renderer);
+                assert_eq!(left, green, "green on the left");
+                assert!(![red, green].contains(&right), "the clear color, {right:?}");
+            }
+            _ => {}
+        }
+    }
+    shut_down(renderer);
 }
 
 /// Draws models' meshes with materials into an offscreen image, as a camera with perspective sees

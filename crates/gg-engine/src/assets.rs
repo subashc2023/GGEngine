@@ -244,6 +244,9 @@ pub(crate) struct Loaded {
     /// Each path a shader's file was added by, which the renderer's shaders know it by, with the
     /// file it resolves to.
     pub(crate) shaders: HashMap<PathBuf, PathBuf>,
+    /// The textures cut into sprite sheets, whose cells a reload at another size would move.
+    #[cfg(feature = "dev")]
+    pub(crate) sheets: Vec<Texture>,
 }
 
 /// What names the file at `path` among assets: its path relative to `root`, with `/` between its

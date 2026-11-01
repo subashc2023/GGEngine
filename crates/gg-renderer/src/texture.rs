@@ -47,10 +47,10 @@ pub enum Mipmaps {
 
 /// The textures a renderer's shaders sample, the first of them the engine's white texture. It
 /// hands out each one's handle at once, and keeps its pixels until
-/// [`Uploads::take`](crate::Uploads::take) takes them, for a frame to copy to the GPU. A renderer
-/// samples the textures of one `Textures` only.
+/// [`Uploads::take`](crate::Uploads::take) takes them, for a frame to copy to the GPU; a texture
+/// replaced by another image the same way. A renderer samples the textures of one `Textures` only.
 pub struct Textures {
-    /// Those added since they were last taken, in order.
+    /// Those added or replaced since they were last taken, in order.
     pub(crate) added: Vec<Added>,
     /// How many have been added.
     count: u32,
@@ -58,6 +58,9 @@ pub struct Textures {
 
 pub(crate) struct Added {
     pub(crate) index: u32,
+    /// Whether it's another image in place of one a renderer has, rather than one added, which
+    /// comes after those a renderer has.
+    pub(crate) replacement: bool,
     pub(crate) name: String,
     pub(crate) size: [u32; 2],
     pub(crate) pixels: Vec<u8>,
@@ -84,26 +87,7 @@ impl Textures {
         mipmaps: Mipmaps,
     ) -> Result<Texture> {
         let pixels = pixels.into();
-        let bad = |problem: String| {
-            Error::new(
-                "renderer.bad_texture",
-                format!("texture {name:?} {problem}"),
-            )
-        };
-        let [width, height] = size;
-        let sides = 1..=MAX_TEXTURE_SIZE;
-        if !sides.contains(&width) || !sides.contains(&height) {
-            return Err(bad(format!(
-                "is {width}x{height} pixels, but textures are 1 to {MAX_TEXTURE_SIZE} pixels a side"
-            )));
-        }
-        let bytes = u64::from(width) * u64::from(height) * 4;
-        if pixels.len() as u64 != bytes {
-            return Err(bad(format!(
-                "is {width}x{height} pixels, {bytes} bytes of RGBA8, but has {} bytes",
-                pixels.len()
-            )));
-        }
+        check(name, size, &pixels)?;
         // Its handle is its slot, so a renderer holds as many as the bindless set has placed slots.
         if self.count == PLACED_TEXTURES {
             return Err(Error::new(
@@ -118,12 +102,58 @@ impl Textures {
         self.count += 1;
         self.added.push(Added {
             index,
+            replacement: false,
             name: name.to_owned(),
             size,
             pixels: pixels.into_owned(),
             mipmaps,
         });
         Ok(Texture { index })
+    }
+
+    /// Puts another image in place of `texture`'s, which keeps its handle: `size` pixels across and
+    /// down, whatever size it had, its `pixels` and `mipmaps` as [`add`](Self::add) takes them, so
+    /// that what samples it shows them from the frame that copies them to the GPU on, which waits
+    /// for the frames before it, as they may sample the old. It takes the place of any of that
+    /// texture's pixels still waiting for a frame, as it was added or replaced. `name` names it in
+    /// errors.
+    ///
+    /// Fails with `renderer.bad_texture` as `add` does, leaving the texture as it was.
+    ///
+    /// # Panics
+    ///
+    /// If `texture` isn't one of these textures, as another `Textures`' handles can be past them.
+    pub fn replace<'a>(
+        &mut self,
+        name: &str,
+        texture: Texture,
+        size: [u32; 2],
+        pixels: impl Into<Cow<'a, [u8]>>,
+        mipmaps: Mipmaps,
+    ) -> Result<()> {
+        assert!(
+            texture.index < self.count,
+            "texture {name:?} replaces one of another `Textures`"
+        );
+        let pixels = pixels.into();
+        check(name, size, &pixels)?;
+        let pixels = pixels.into_owned();
+        match (self.added.iter_mut()).find(|added| added.index == texture.index) {
+            Some(waiting) => {
+                waiting.size = size;
+                waiting.pixels = pixels;
+                waiting.mipmaps = mipmaps;
+            }
+            None => self.added.push(Added {
+                index: texture.index,
+                replacement: true,
+                name: name.to_owned(),
+                size,
+                pixels,
+                mipmaps,
+            }),
+        }
+        Ok(())
     }
 
     /// How many more textures it holds, so that what adds several can check they fit before it
@@ -136,6 +166,32 @@ impl Textures {
     pub fn count(&self) -> u32 {
         self.count
     }
+}
+
+/// Checks that `pixels` fill a texture named `name`, `size` pixels across and down, that every
+/// Vulkan 1.4 device takes, as [`Textures::add`] says.
+fn check(name: &str, size: [u32; 2], pixels: &[u8]) -> Result<()> {
+    let bad = |problem: String| {
+        Error::new(
+            "renderer.bad_texture",
+            format!("texture {name:?} {problem}"),
+        )
+    };
+    let [width, height] = size;
+    let sides = 1..=MAX_TEXTURE_SIZE;
+    if !sides.contains(&width) || !sides.contains(&height) {
+        return Err(bad(format!(
+            "is {width}x{height} pixels, but textures are 1 to {MAX_TEXTURE_SIZE} pixels a side"
+        )));
+    }
+    let bytes = u64::from(width) * u64::from(height) * 4;
+    if pixels.len() as u64 != bytes {
+        return Err(bad(format!(
+            "is {width}x{height} pixels, {bytes} bytes of RGBA8, but has {} bytes",
+            pixels.len()
+        )));
+    }
+    Ok(())
 }
 
 /// Appends to `pixels`, the RGBA8 of a texture `size` pixels across and down, colors sRGB-encoded
@@ -337,6 +393,40 @@ mod tests {
             .add("one more", [1, 1], &[0; 4], Mipmaps::None)
             .expect_err("no slot left");
         assert_eq!(error.code(), "renderer.too_many_textures");
+    }
+
+    #[test]
+    fn a_texture_replaced_keeps_its_handle_and_the_place_of_pixels_waiting() {
+        let mut textures = Textures::default();
+        let a = textures
+            .add("a", [1, 1], &[0; 4], Mipmaps::None)
+            .expect("a");
+        let waiting = |textures: &Textures| -> Vec<(u32, bool, [u32; 2], Mipmaps)> {
+            let added = textures.added.iter();
+            added
+                .map(|added| (added.index, added.replacement, added.size, added.mipmaps))
+                .collect()
+        };
+        // Still waiting as it was added, which takes the image instead.
+        let replaced = textures.replace("a", a, [2, 1], &[9; 8], Mipmaps::Averaged);
+        replaced.expect("another image");
+        let white = (0, false, [1, 1], Mipmaps::None);
+        assert_eq!(
+            waiting(&textures),
+            [white, (1, false, [2, 1], Mipmaps::Averaged)]
+        );
+        // Once a frame has taken it, in place of the one the renderer has.
+        textures.added.clear();
+        let replaced = textures.replace("a", a, [1, 2], &[7; 8], Mipmaps::None);
+        replaced.expect("another image");
+        assert_eq!(waiting(&textures), [(1, true, [1, 2], Mipmaps::None)]);
+        // A broken image leaves it as it was.
+        let error = textures
+            .replace("a", a, [2, 2], &[0; 4], Mipmaps::None)
+            .expect_err("a broken image");
+        assert_eq!(error.code(), "renderer.bad_texture");
+        assert_eq!(waiting(&textures), [(1, true, [1, 2], Mipmaps::None)]);
+        assert_eq!(textures.added[0].pixels, [7; 8]);
     }
 
     /// The levels after the first that `pixels`, `size` pixels across and down, gets.

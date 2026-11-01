@@ -14,7 +14,8 @@
 //! lockstep between two peers, each tick run on both peers' inputs; the pipeline cache's file,
 //! which windowed runs keep;
 //! and in development builds, behind `dev`, reading a game's project's manifest and its assets' ID
-//! files, compiling games' shaders again as their files change, and the OS's file dialogs.
+//! files, reloading games' shaders, textures and models as their files change, and the OS's file
+//! dialogs.
 //!
 //! An app's `main` starts the engine; there is no separate entry-point crate.
 

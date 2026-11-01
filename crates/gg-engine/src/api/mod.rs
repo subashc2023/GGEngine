@@ -66,10 +66,11 @@ pub(crate) fn start(
 }
 
 /// As a frame starts, before its ticks, in a development build, takes the asset database as the
-/// thread that watches the root last sent it, as `Context::take_assets` says, applies the scene
-/// files saved since, as [`scene_files::look`] says, and answers the requests that have come, from
-/// `cx`, whose layers are `stack`'s and whose simulation `stepper` steps, as [`Api::serve`] says;
-/// returns whether one asked the run to end.
+/// thread that watches the root last sent it, as `Context::take_assets` says, and the shaders,
+/// textures and models read again as their files changed, as `Context::take_reloaded` says,
+/// applies the scene files saved since, as [`scene_files::look`] says, and answers the requests
+/// that have come, from `cx`, whose layers are `stack`'s and whose simulation `stepper` steps, as
+/// [`Api::serve`] says; returns whether one asked the run to end.
 ///
 /// [`scene_files::look`]: crate::scene_files
 pub(crate) fn serve(
@@ -79,7 +80,10 @@ pub(crate) fn serve(
     stepper: &mut Stepper,
 ) -> bool {
     #[cfg(feature = "dev")]
-    cx.take_assets();
+    {
+        cx.take_assets();
+        cx.take_reloaded();
+    }
     #[cfg(feature = "dev")]
     crate::scene_files::look(cx, stack);
     #[cfg(feature = "dev")]
@@ -90,9 +94,9 @@ pub(crate) fn serve(
     false
 }
 
-/// Between frames, while they pause, takes the asset database, applies the scene files saved since
-/// and answers the requests that need no frames, as [`serve`] does as a frame starts; returns
-/// whether one asked the run to end.
+/// Between frames, while they pause, takes the asset database and the assets read again, applies
+/// the scene files saved since and answers the requests that need no frames, as [`serve`] does as
+/// a frame starts; returns whether one asked the run to end.
 pub(crate) fn serve_paused(
     api: &mut Option<Api>,
     cx: &mut Context,
@@ -100,7 +104,10 @@ pub(crate) fn serve_paused(
     stepper: &mut Stepper,
 ) -> bool {
     #[cfg(feature = "dev")]
-    cx.take_assets();
+    {
+        cx.take_assets();
+        cx.take_reloaded();
+    }
     #[cfg(feature = "dev")]
     crate::scene_files::look(cx, stack);
     #[cfg(feature = "dev")]

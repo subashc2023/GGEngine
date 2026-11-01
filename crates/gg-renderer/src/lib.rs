@@ -105,9 +105,9 @@ pub struct DrawCounts {
     pub triangles: usize,
 }
 
-/// What's been added to a [`Meshes`], [`Shaders`] and [`Textures`] since it was last taken from
-/// them, in order: the shaders a frame makes pipelines for, and the meshes and textures it copies
-/// to the GPU, before it draws. Taking moves them out of the registries, which go on handing out
+/// What's been added to a [`Meshes`], [`Shaders`] and [`Textures`], or replaced in them, since it
+/// was last taken from them, in order: the shaders a frame makes pipelines for, and the meshes and
+/// textures it copies to the GPU, before it draws. Taking moves them out of the registries, which go on handing out
 /// handles where they are, so that a renderer on another thread renders what they handed out
 /// before. It keeps its memory, so that a frame that adds nothing allocates nothing.
 #[derive(Default)]

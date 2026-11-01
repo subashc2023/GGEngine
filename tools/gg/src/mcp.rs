@@ -46,7 +46,10 @@ that it keeps its ID, unless you edit it in the same step, or rename it in a clo
 run in yet; a warning then names the ID left behind. A texture's value is its ID where its file \
 has one, as scenes \
 save it, a lockstep joiner's its host's, and else its path; a value you give may name it either \
-way, by its path from the asset root, and the game loads one it hasn't loaded yet.";
+way, by its path from the asset root, and the game loads one it hasn't loaded yet. Edit the file \
+of a shader, a texture or a model the game has loaded, and it reloads within a second or so, \
+warning in its logs if it doesn't compile or decode; a model's nodes and materials change only as \
+the game next starts.";
 
 /// Serves MCP on stdin and stdout until stdin ends, reaching the game `pick` picks.
 ///

@@ -25,8 +25,6 @@ use crate::api::{self, Api, Waited, Waiting};
 use crate::args::Args;
 use crate::chrome::{self, Chrome};
 use crate::dock::{self, Dock, Under};
-#[cfg(feature = "dev")]
-use crate::hot_reload::HotReload;
 use crate::layer::Stack;
 use crate::main_loop::{
     Clock, MainUi, Ran, Stepper, hand_off, keeps_egui, run_frame, settings, start, take_back,
@@ -87,8 +85,6 @@ pub(crate) fn run(
         #[cfg(target_os = "windows")]
         frame: None,
         render: None,
-        #[cfg(feature = "dev")]
-        hot_reload: None,
         resized: None,
         egui: egui_context(),
         egui_runs: true,
@@ -144,9 +140,6 @@ struct Handler<'a> {
     render: Option<RenderThread>,
     /// The pipeline cache's file, which the renderer loads as it starts and saves as it ends.
     pipelines: Option<PathBuf>,
-    /// Watches the files of the shaders the layers add, from when they attach.
-    #[cfg(feature = "dev")]
-    hot_reload: Option<HotReload>,
     /// The main window's size since the renderer was last told it, which it's told once it's back
     /// from rendering.
     resized: Option<PhysicalSize<u32>>,
@@ -230,14 +223,6 @@ impl Handler<'_> {
             self.args.stopped,
             self.api.is_some(),
         )?;
-        #[cfg(feature = "dev")]
-        {
-            let started = HotReload::start().inspect_err(|error| {
-                let consequence = "shaders don't reload as their files change";
-                tracing::warn!(code = error.code(), "{error:#}; {consequence}");
-            });
-            self.hot_reload = started.ok();
-        }
         Ok(())
     }
 
@@ -292,11 +277,6 @@ impl Handler<'_> {
             Some(output) => tessellate(&self.egui, output),
             None => (MainUi::none(), Duration::ZERO),
         };
-        // Shaders compiled again since, which the frame handed off below draws with.
-        #[cfg(feature = "dev")]
-        if let Some(hot_reload) = &mut self.hot_reload {
-            hot_reload.update(self.cx.shaders());
-        }
         // The frame before, which rendered meanwhile.
         let (mut minimized, mut failed) = (false, None);
         match take_back(render, &mut self.cx, tessellated) {
@@ -659,10 +639,6 @@ impl ApplicationHandler for Handler<'_> {
         });
         let stopping = Instant::now();
         let _zone = gg_core::zone!("shutdown");
-        #[cfg(feature = "dev")]
-        if let Some(hot_reload) = self.hot_reload.take() {
-            hot_reload.stop();
-        }
         self.dock.save();
         if let Some((renderer, last)) = stopped {
             match last.map(|last| last.presented) {

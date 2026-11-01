@@ -374,7 +374,7 @@ impl Bindless {
     ///
     /// # Safety
     ///
-    /// As for [`Bindless::write`].
+    /// As for [`Bindless::write`], but for the slot, which is free as it's reserved.
     ///
     /// # Panics
     ///
@@ -387,7 +387,8 @@ impl Bindless {
         name: &str,
     ) -> Result<u32> {
         let index = self.reserve(slot, name)?;
-        // SAFETY: the caller guarantees the device and view.
+        // SAFETY: the caller guarantees the device and view, and no frame uses the slot, which was
+        // free when it was reserved.
         unsafe { self.write(device, view, index) };
         Ok(index)
     }
@@ -409,7 +410,9 @@ impl Bindless {
     /// # Safety
     ///
     /// `device` must be the set's, and `view` a live view of a sampled image of it, in the
-    /// shader-read-only layout whenever a shader samples it.
+    /// shader-read-only layout whenever a shader samples it; and no submitted frame that the GPU
+    /// may still run may use the slot, which the binding's flags allow updating only while unused:
+    /// a frame still recording takes the new view.
     pub(crate) unsafe fn write(&self, device: &ash::Device, view: vk::ImageView, index: u32) {
         let _slots = self.lock();
         let image_info = [vk::DescriptorImageInfo::default()
@@ -421,8 +424,8 @@ impl Bindless {
             .dst_array_element(index)
             .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
             .image_info(&image_info);
-        // SAFETY: the caller guarantees the device and view; the lock is held, and no frame in
-        // flight uses the slot, which was free when it was reserved.
+        // SAFETY: the caller guarantees the device and view, and that no submitted frame uses the
+        // slot; the lock is held.
         unsafe { device.update_descriptor_sets(&[write], &[]) };
     }
 
