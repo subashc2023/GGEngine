@@ -41,6 +41,8 @@ use hierarchy::Links;
 pub use hierarchy::{Parent, Pose};
 pub use id::EntityId;
 use id::IdStream;
+#[cfg(feature = "dev")]
+pub(crate) use id::mix64;
 pub use log::Log;
 pub use ops::Operation;
 pub use query::{Query, QueryIter, QueryIterMut, ReadOnlyQuery};

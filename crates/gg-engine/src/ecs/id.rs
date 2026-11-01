@@ -85,7 +85,7 @@ pub(super) fn splitmix64(state: &mut u64) -> u64 {
 
 /// SplitMix64's mix, of xorshifts and multiplications by odd constants: a bijection of the 64-bit
 /// numbers, which spreads each bit of `z` over all of them.
-pub(super) fn mix64(mut z: u64) -> u64 {
+pub(crate) fn mix64(mut z: u64) -> u64 {
     z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
     z ^ (z >> 31)

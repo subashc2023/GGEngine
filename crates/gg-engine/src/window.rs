@@ -432,6 +432,7 @@ impl Handler<'_> {
         self.clock.resume();
         if minimized {
             debug!("Window minimized; rendering pauses until it's restored");
+            api::frames_paused(&mut self.api, &mut self.cx);
             let _ = self.dispatch(&Event::Minimized);
         } else {
             debug!("Window restored; rendering resumes");

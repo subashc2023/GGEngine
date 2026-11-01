@@ -39,9 +39,12 @@ last to set a part winning; give back, as null, what you set when you're done. `
 the view with the look, and `pick` names the entity at a pixel of it, as a capture's PNG has it. \
 Textures and models have IDs, 16 hex digits, which `assets` lists with their paths: the game, but a \
 lockstep session's joiner, whose host does, writes each one's in an ID file beside it, \
-`<file>.meta`, such as `stone.png.meta`, as it starts and as `assets` lists them; commit it with \
-its file, and rename or move it in the same step as its file, before the game's next `assets` or \
-start, or the file gets a fresh ID. A texture's value is its ID where its file has one, as scenes \
+`<file>.meta`, such as `stone.png.meta`, as it starts and as it finds new files; commit it with \
+its file. Rename or move a file with its ID file or alone: the game moves an ID file left behind \
+beside the file it was renamed to, by what the file holds, as it runs or as it next starts, so \
+that it keeps its ID, unless you edit it in the same step, or rename it in a clone the game hasn't \
+run in yet; a warning then names the ID left behind. A texture's value is its ID where its file \
+has one, as scenes \
 save it, a lockstep joiner's its host's, and else its path; a value you give may name it either \
 way, by its path from the asset root, and the game loads one it hasn't loaded yet.";
 
@@ -342,10 +345,11 @@ fn tools() -> Value {
              `scene` names files: each one's ID, 16 hex digits, or null while it has none; its \
              kind; whether a layer has added it; and `problem`, what's wrong with its ID file, if \
              anything, as `asset.duplicate_id`; and `orphans`, ID files whose assets aren't there, \
-             as after a rename that left one behind. It scans the asset root first, so that a file \
-             added since is listed, and the game, but a lockstep session's joiner, writes each \
-             missing ID file, `<file>.meta` beside its file, which you commit with it and move \
-             with it.",
+             as after a rename made with an edit. It answers once the game has looked at the asset \
+             root since, so that a file added or renamed since is listed, and the game, but a \
+             lockstep session's joiner, writes each missing ID file, `<file>.meta` beside its \
+             file, which you commit with it, and moves one a rename of its file alone left behind \
+             beside it.",
             json!({
                 "kind": {
                     "type": "string",

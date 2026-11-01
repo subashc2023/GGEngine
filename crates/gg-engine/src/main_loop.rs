@@ -177,9 +177,12 @@ pub(crate) fn run_headless(
 /// as [`Stack::restore`] says, given whether a tool API `serves` the run, dropping it once it has;
 /// or else from the world the layers attach, stopped if `stopped` says so, as `--stopped` asks.
 /// In a development build it first scans the assets under the app's root, before the layers load,
-/// as `Context::scan_assets` says, writing the ID files missing if the API serves the run and it
+/// and has a thread watch them if the API serves the run, as `Context::start_assets` says, writing
+/// the ID files missing, and moving those renames left behind, if the API serves the run and it
 /// isn't a lockstep session's joiner, whose host alone writes them, and whose textures go by the
-/// names its host gives them, by their paths until the host's world comes.
+/// names its host gives them, by their paths until the host's world comes. The snapshot's textures
+/// are then found where the run's database has their IDs, as after a rename, as
+/// `Snapshot::follow` says.
 ///
 /// Fails as `Stack::restore` does.
 pub(crate) fn start(
@@ -191,10 +194,15 @@ pub(crate) fn start(
     serves: bool,
 ) -> Result<()> {
     #[cfg(feature = "dev")]
+    let mut snapshot = snapshot;
+    #[cfg(feature = "dev")]
     {
         // Whether it hosts or plays alone, rather than joins.
         let own = stack.watches_scenes();
-        cx.scan_assets(serves && own);
+        cx.start_assets(serves, serves && own);
+        if own && let Some(snapshot) = &mut snapshot {
+            snapshot.follow(cx.catalog());
+        }
         if !own {
             cx.name_as([]);
         }

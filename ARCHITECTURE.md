@@ -341,10 +341,14 @@ A project's state is text that people and agents edit, diff and merge with ordin
   line, `(`, `    id: "5f3c9a1e07b2d846",`, `)`; a part it hasn't is refused, and one added since,
   as import settings will be, takes its default where a file leaves it out. It's committed with its
   asset, and moves with it. A development run that serves the tool API writes the ID file of each
-  asset that has none as it starts, before its layers load, and as the API's `assets` lists them,
-  unless it's a lockstep session's joiner, whose host alone writes them, as it alone watches scene
-  files: each only where nothing is there, whole or not at all, linked into place, so that two runs
-  never give one asset two IDs, warning of one it can't write (`asset.unwritten`); each ID drawn
+  asset that has none as it starts, before its layers load, and from then on as a thread of its
+  own, `gg-assets`, finds them: it scans the root every second, or at once as the API's `assets`
+  asks, which it answers once a scan begun after it has taken what it found, or, while frames
+  pause, from what it last took, and takes a change once it holds from one scan to the next, 100 ms
+  on. That is unless the run is a lockstep session's joiner,
+  whose host alone writes them, as it alone watches scene files, and whose thread only reads them.
+  Each is written only where nothing is there, whole or not at all, linked into place, so that two
+  runs never give one asset two IDs, warning of one it can't write (`asset.unwritten`); each ID drawn
   until it holds a letter but `e`, so that its text never reads as a JSON number. Another
   development run reads them and warns of each asset that has none (`asset.no_id`), as `gg check`
   reports; builds without `dev` and replays read none; and tools never write one: gg-api writes
@@ -356,12 +360,29 @@ A project's state is text that people and agents edit, diff and merge with ordin
   read may be a merge's conflict or someone's edit: one that doesn't read (`asset.bad_meta`), its
   asset going without an ID; one without its asset beside it as a file of its name
   (`asset.orphaned`); and one holding the ID another asset has this run (`asset.duplicate_id`), as a
-  copy's does, or a renamed asset's until the next run, whose first scan gives each ID to the first
-  asset by path whose ID file holds it, the others going without until their ID files are removed,
-  after which a run writes each a fresh one. `assets` gives each asset's problem, and the orphans,
-  as data. An asset's ID, once a run has it, stays its for the run: an ID file changed since, as by
-  a branch's checkout, warns (`asset.id_changed`) and counts from the next run, and a run writes its
+  copy's does, a run's first scan giving each ID to the first asset by path whose ID file holds it,
+  the others going without until their ID files are removed, after which a run writes each a fresh
+  one. `assets` gives each asset's problem, and the orphans, as data. An asset's ID, once a run has
+  it, stays its for the run, wherever it's renamed or moved: an ID file changed since, as by a
+  branch's checkout, warns (`asset.id_changed`) and counts from the next run, and a run writes its
   ID back only while no other ID file its scan found holds it.
+  - An asset renamed or moved keeps its ID. With its ID file, as `git mv` of both moves it, its ID
+    goes with it at the next scan, the asset at its old path gone. Without it, as a plain `mv`,
+    `git mv` or Explorer's rename of the file alone leaves the ID file behind, a run that writes ID
+    files moves that ID file beside the file, linked there and then removed, if the file is new to
+    the run, has none, and holds what the asset of that ID last held, as no other new file does:
+    by a print of its length and its bytes, mixed 8 at a time by SplitMix64's mix. It logs
+    `asset.renamed`, as its thread takes the rename, or, for one made while no run watched, as the
+    next run starts, by the prints the run keeps in its clone's cache, a file of the asset root's
+    own in the app's directory for caches, which every build of the clone shares; its thread reads
+    each asset's file for its print as it changes, and every one in a clone's first run. An asset
+    renamed and edited at once, or one of two new files alike, as a copy's twin, gets a fresh ID,
+    and the ID file left behind is warned of (`asset.orphaned`), naming its ID: moved beside the
+    file in place of the fresh one, it gives it that ID from the next run. A fresh clone's first
+    run has no cache, so a rename made before it gets a fresh ID too. A file moved over one the
+    run has, its ID file with it, takes that one's place, keeping its ID for the run, as any ID file
+    changed does. A texture loaded from an asset's file before it was renamed is the one its new
+    path gives, loaded once.
   - Scenes, the world's hash, recordings, snapshots, lockstep inputs and the tool API name a texture
     by its name: its asset ID, or a model's image by its model's and its place in it, such as
     `5f3c9a1e07b2d846#0`, so that a file renamed with its ID file changes none of them; or else its
@@ -396,15 +417,17 @@ A project's state is text that people and agents edit, diff and merge with ordin
     has a `named` line for each texture named otherwise than by its path, the name and the path,
     by which its replay, reading no ID file, names its textures. A snapshot file has them too, by
     which a run restored from it reads its values, a texture whose ID changed since coming back by
-    its path, though the run names it its own way. A lockstep joiner names every texture as its
+    its path, though the run names it its own way, and one whose file was renamed since, its ID
+    file moved with it, from where the run's database has that ID now, its `asset` line following
+    it, so that what's opaque comes back. A lockstep joiner names every texture as its
     host does, by its path until the host's world comes with its names, which rename those it has
     added, as each world the host sends again does, and by the names the host sends of those it
     adds after, before the inputs that may name them; so a joiner's names may be IDs its own disk
     holds no ID file for, which its `assets` doesn't list.
   - A test's context reads the ID files under the root it's given, writing none, as a run that
     serves no tool API does, so that a game's reference hashes name its textures as its runs do.
-  [asset.rs](crates/gg-api/src/asset.rs) and [assets.rs](crates/gg-engine/src/assets.rs) have the
-  rest.
+  [asset.rs](crates/gg-api/src/asset.rs), [assets.rs](crates/gg-engine/src/assets.rs) and
+  [asset_watch.rs](crates/gg-engine/src/asset_watch.rs) have the rest.
 - **Operations.** Every authoring change, by a person or an agent, is an operation with an
   inverse: create, duplicate or delete an entity, add or remove a component, set a field,
   reparent. An operation names entities by their IDs and carries values as reflection's, and

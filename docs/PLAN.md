@@ -75,12 +75,13 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Asset IDs beside their files** (2026-10-31)
 - **Textures named by ID** (2026-10-31)
 - **Assets loaded wherever they're named** (2026-11-01)
+- **Renames that keep IDs** (2026-11-01)
 
 ## Now
 
-**Renames that keep IDs**, Phase 7's fourth milestone: an asset renamed or moved keeps its ID,
-which the running game pairs with it by its content, with a cache for each clone; its plan says
-when it's done.
+**Reloading any change**, Phase 7's fifth milestone: textures, meshes and shaders reloaded as their
+files change, in every development run that serves the tool API, the editor's embedded game among
+them; its plan says when it's done.
 
 ## Next
 
@@ -153,7 +154,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | `gg build` and `gg test`, with their results as data: `run` and `check` build through cargo, passing on its messages about the code as it renders them, and cargo's test harness writes JSON on nightly alone | An agent needs a build's or the tests' results as data, or libtest's JSON output is stable |
 | Capabilities each client of the tool API is granted, as [Agents and tools](../ARCHITECTURE.md#agents-and-tools) describes: a connection that says hello with the session's token reaches everything, which only processes that can read the session file beside the game do | A client the user doesn't run as their own, such as one on another machine or a mod's, or an agent kept to one scene |
 | MCP beyond tools: resources, prompts, progress, cancellation and the client's roots; `gg mcp`'s tools are the API's methods but `quit`, `patch` and the paths of `capture` and `snapshot`, a capture's PNG coming inline | An agent needs one of them |
-| Steps and captures while the window is minimized, which fail with `api.paused`, and requests while a file dialog or Windows' window menu holds the main thread, which wait; `ping` says which | A tool needs them then |
+| Steps and captures while the window is minimized, which fail with `api.paused`, and requests while a file dialog or Windows' window menu holds the main thread, which wait; `ping` says which. An `assets` while it's minimized answers from the asset database as its thread last sent it, up to a second old | A tool needs them then |
 | Labels inside passes: each run of draws labeled by what it draws, and the frame pass's view and UI apart; a capture shows a label for each pass | Phase 12, with the render graph |
 | Synchronization validation under RenderDoc, whose layer hides the validation layer's settings: through `VK_EXT_validation_features`, or the validation layer's environment | A synchronization bug shows under RenderDoc alone |
 | Captures on macOS, where RenderDoc doesn't run, so `--capture` is refused | Someone needs a capture of a Mac's frames |
@@ -250,7 +251,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Wave operations in games' shaders, and the other SPIR-V capabilities a device's properties decide rather than its features, which the check refuses | A game's shader needs them |
 | Hot reloading the engine's own shaders, which the build compiles in | Work on the engine's shaders wants it |
 | Watching shaders' files through the OS's notifications, rather than by their times and lengths every tenth of a second, which reads every watched file each time, and, while a shader fails, every file in the directories its files are in, but none in directories within them: an include in one of those that a failing shader found broken, fixed where it is, waits for another change | Phase 7, with asset hot reload, or a game with many shaders |
-| The shader watcher allocates as it looks: each shader's stamps, collected at every look on every platform; on Windows, each file's path, which it converts to UTF-16 to read the file's times; and the entries of a failing shader's directories, which it lists | A development build's frames must allocate nothing on any thread |
+| The shader watcher allocates as it looks: each shader's stamps, collected at every look on every platform; on Windows, each file's path, which it converts to UTF-16 to read the file's times; and the entries of a failing shader's directories, which it lists. So does the asset watcher, each second, as it lists the asset root and reads its ID files | A development build's frames must allocate nothing on any thread |
 | Compiling at once the shaders whose changes hold on the same look, rather than one after another: after an edit to an include that N shaders share, the last reloads about N tenths of a second after the first, and no file is looked at meanwhile | A game with many shaders that share an include |
 | `VK_KHR_pipeline_binary`, which saves and loads pipelines whole; ash 0.38 lacks it | ash's next release, or a driver whose pipeline cache keeps less |
 | Saving the pipeline cache as pipelines are made rather than as the run ends, which a crash skips, so that a game `gg run` restarts after one makes its pipelines again | A restart after a crash takes noticeably longer for it |
@@ -258,13 +259,16 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Requiring a slangc that decorates sampled images `NonUniform` itself, Slang 2026.11's or later, such as the Vulkan SDK 1.4.363's, and dropping gg-renderer's `decorate_non_uniform`, which does it for older ones | The engine requires the Vulkan SDK 1.4.363 or later |
 | Games' shaders compile with slangc as they're added, so running a game needs slangc where its build found it | Phase 10, which cooks shaders |
 | `MeshDraw`'s mesh and shader named, as `Sprite.texture` is: opaque until then, shown but not set, saved in scenes or hashed, and carried across a restart by their indices only where the layers added the same assets in the same order; and setting them by name | A game builds its draws from data |
-| Scanning the asset root on a thread of its own, or not at all: a run's start and each `assets` request walk it whole, read every ID file and flush each ID file written to the disk, on the main thread, so an `assets` after copying in about 1,500 assets without ID files stops frames past `gg run`'s 10 s `--hang`, and the game restarts from its last snapshot | Phase 7's fourth milestone, whose watcher keeps the database |
+| Watching the asset root through the OS's notifications of changes: its thread scans it every second, walking it whole and reading every ID file, about 70 ms for 1,000 assets on Windows, and reads whole each asset's file that changed, for its print, every one in a clone's first run, which delays its next scans but no answer; and a run's start scans it on the main thread, before its layers load, flushing each ID file it writes to the disk, about 6 ms apiece | A project's asset root of tens of thousands of files, or Phase 7's reloading any change, whose watcher reads what assets' files hold too |
 | IDs for shaders, scenes, sounds and other kinds, for assets outside the asset root, and for assets reached through links: the scan gives textures and models under the root alone, never through a link | Each kind as something first names it by ID |
 | Builds without `dev` naming textures by their IDs: they read no ID file, so they name every texture by its path, and a scene, a recording or a snapshot that names one by its ID finds none there | Phase 10, whose cooked package gives each asset its ID |
 | Loading the textures that scene text names where a layer loads it into a world itself, as inside a tick, as the sandbox's grid reload does: a world can't reach the renderer's textures, which are the context's, so `World::load_scene` finds only those loaded, while `Context::load_scene_file`, the tool API and the engine's other reads load them | A game loads scene text in a tick that names textures no layer adds |
 | A model's image named in text, as `5f3c9a1e07b2d846#0`, loading its model where no layer added it: it's refused (`asset.model_image`), or stands in where the run follows another | Phase 7's models in scenes by ID |
 | A stand-in giving way to its texture once its file comes, as after a checkout: it stands in for the run | Phase 7's reloading any change |
 | A lockstep joiner loading for its tool API a texture its host hasn't named (`asset.not_given`), whose name could differ from the host's; the host's edits load any | Someone edits a joiner's textures from its own editor |
+| `gg mv` and an MCP `mv`, moving an asset and its ID file in one step: a file renamed alone keeps its ID by what it holds, but not one edited in the same step, nor one renamed in a fresh clone before its first run, which has no cache of prints | An agent's renames lose IDs that pairing by content can't keep |
+| A lockstep joiner that joins after its host's texture was renamed finding its file where it is now: it loads it by the path its host loaded it from, as the host names it, standing in where that's gone, as it is on one machine | Someone renames assets during a lockstep session |
+| Following a rename in case alone, as Windows' and macOS's file systems allow, of an asset whose ID file keeps the old case: the ID file matches only when case is ignored (`asset.meta_case`), so the asset keeps its ID for the run, then goes without until its ID file is renamed too | Someone renames assets in case alone |
 | 8- and 16-bit vertex fields, whose features Vulkan 1.4 guarantees but the device doesn't enable | A mesh packs its vertices, as Phase 10's cooker will |
 | Splits in a torn-off window, which holds one tab group | A tool wants panels side by side outside the main window |
 | Reordering tabs by dragging them along their bar; a drop among the tabs adds one at the end | Someone reorders tabs |

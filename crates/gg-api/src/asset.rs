@@ -11,6 +11,7 @@ use std::io;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
@@ -170,8 +171,13 @@ impl Meta {
     }
 }
 
-/// What [`scan`] found under an asset root.
-#[derive(Debug, Default)]
+/// When a file last changed and its length, as its folder's listing gives them, which show that it
+/// changed.
+pub type Stamp = (SystemTime, u64);
+
+/// What [`scan`] found under an asset root: equal to another scan's while nothing it lists changed
+/// between them.
+#[derive(Debug, Default, PartialEq)]
 pub struct Scan {
     /// The textures and models, in the order of their paths.
     pub assets: Vec<Scanned>,
@@ -182,14 +188,15 @@ pub struct Scan {
 }
 
 /// A texture or a model [`scan`] found: its path from the root, with `/` between its parts, such as
-/// `assets/stone.png`; the file, as the scan reached it; its kind; and its ID file: `None` if
-/// there's none, or what it holds, or why it doesn't: `asset.bad_meta` for one that doesn't read or
-/// isn't a regular file, `asset.meta_case` for one whose name matches only when case is ignored,
-/// whose path from the root `misnamed` gives.
-#[derive(Debug)]
+/// `assets/stone.png`; the file, as the scan reached it; its stamp, `None` if its listing gave
+/// none; its kind; and its ID file: `None` if there's none, or what it holds, or why it doesn't:
+/// `asset.bad_meta` for one that doesn't read or isn't a regular file, `asset.meta_case` for one
+/// whose name matches only when case is ignored, whose path from the root `misnamed` gives.
+#[derive(Debug, PartialEq)]
 pub struct Scanned {
     pub path: String,
     pub file: PathBuf,
+    pub stamp: Option<Stamp>,
     pub kind: AssetKind,
     pub meta: Option<Result<Meta, Failure>>,
     pub misnamed: Option<String>,
@@ -197,11 +204,12 @@ pub struct Scanned {
 
 /// An ID file whose asset isn't there, as a regular file of its name, though a link or a folder,
 /// which the scan doesn't take, may be: its own path from the root, such as
-/// `assets/gone.png.meta`; the kind of the asset it names; and what it holds, or why it doesn't
-/// read.
-#[derive(Debug)]
+/// `assets/gone.png.meta`; the file, as the scan reached it; the kind of the asset it names; and
+/// what it holds, or why it doesn't read.
+#[derive(Debug, PartialEq)]
 pub struct Orphan {
     pub path: String,
+    pub file: PathBuf,
     pub kind: AssetKind,
     pub meta: Result<Meta, Failure>,
 }
@@ -209,7 +217,7 @@ pub struct Orphan {
 /// What the scan couldn't take: a folder it couldn't list, `.` for the root itself, or an entry
 /// whose name isn't Unicode, or whose type it couldn't tell, which it skips; its path from the
 /// root, and why.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Unread {
     pub path: String,
     pub error: String,
@@ -241,13 +249,16 @@ pub fn scan(root: &Path) -> Scan {
         }
         let mut claimed = HashSet::new();
         for (name, &entry) in &entries {
-            let Some(kind) = AssetKind::of(Path::new(name)).filter(|_| entry == Entry::File) else {
+            let Entry::File(stamp) = entry else {
+                continue;
+            };
+            let Some(kind) = AssetKind::of(Path::new(name)) else {
                 continue;
             };
             let id_file = format!("{name}.{}", Meta::EXTENSION);
             let mut found_as = None;
             let meta = match entries.get(&id_file) {
-                Some(Entry::File) => Some(Meta::read(&dir.join(&id_file))),
+                Some(Entry::File(_)) => Some(Meta::read(&dir.join(&id_file))),
                 Some(_) => Some(Err(Failure::new(
                     "asset.bad_meta",
                     "it isn't a regular file",
@@ -265,6 +276,7 @@ pub fn scan(root: &Path) -> Scan {
             scan.assets.push(Scanned {
                 path: join(&at, name),
                 file: dir.join(name),
+                stamp,
                 kind,
                 meta,
                 misnamed: found_as,
@@ -274,14 +286,20 @@ pub fn scan(root: &Path) -> Scan {
             // As an asset is a regular file alone, an ID file beside a link or a folder of its
             // asset's name is left without one.
             let orphan = stem(name).filter(|&of| {
-                entry == Entry::File
-                    && entries.get(of) != Some(&Entry::File)
+                matches!(entry, Entry::File(_))
+                    && !matches!(entries.get(of), Some(Entry::File(_)))
                     && !claimed.contains(&**name)
             });
             if let Some(kind) = orphan.and_then(|of| AssetKind::of(Path::new(of))) {
-                let meta = Meta::read(&dir.join(name));
+                let file = dir.join(name);
+                let meta = Meta::read(&file);
                 let path = join(&at, name);
-                scan.orphans.push(Orphan { path, kind, meta });
+                scan.orphans.push(Orphan {
+                    path,
+                    file,
+                    kind,
+                    meta,
+                });
             }
         }
         for (name, &entry) in &entries {
@@ -300,7 +318,8 @@ pub fn scan(root: &Path) -> Scan {
 /// What an entry of a folder is, as its listing tells without following links.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Entry {
-    File,
+    /// A regular file, with its stamp, `None` if the listing gave none.
+    File(Option<Stamp>),
     Folder,
     /// A link, to a folder or to a file, which the scan never goes through: on Windows, a junction
     /// too.
@@ -347,7 +366,11 @@ fn entries(dir: &Path, at: &str, unread: &mut Vec<Unread>) -> Option<BTreeMap<St
         let kind = match entry.file_type() {
             Ok(kind) if kind.is_symlink() => Entry::Link,
             Ok(kind) if kind.is_dir() => Entry::Folder,
-            Ok(kind) if kind.is_file() => Entry::File,
+            // Windows' listing gives it with the type, and Unix's a stat that follows no link.
+            Ok(kind) if kind.is_file() => {
+                let metadata = entry.metadata().ok();
+                Entry::File(metadata.and_then(|file| Some((file.modified().ok()?, file.len()))))
+            }
             Ok(_) => Entry::Other,
             Err(error) => {
                 let (path, error) = (join(at, &name), error.to_string());
@@ -559,6 +582,9 @@ mod tests {
         assert_eq!(listed(&found), expected);
         let file = root.join("assets").join("stone.png");
         assert_eq!(found.assets[3].file, file);
+        let length = |at: usize| found.assets[at].stamp.map(|(_, length)| length);
+        assert_eq!((length(3), length(5)), (Some(0), Some(0)));
+        assert_eq!(scan(&root), found, "nothing changed");
         let Some(Err(misnamed)) = &found.assets[0].meta else {
             panic!("a misnamed ID file: {:?}", found.assets[0]);
         };

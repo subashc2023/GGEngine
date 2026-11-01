@@ -454,6 +454,42 @@ impl Snapshot {
         textures.filter_map(|line| line.splitn(4, ' ').nth(3))
     }
 
+    /// Has the snapshot name, by the path its file is at now, each texture its run named by an ID
+    /// that `catalog`, the asset database of the run restored from it, holds for an asset at another
+    /// path, its file gone from the path it had, as after a rename that the snapshot's run, or this
+    /// run's start, moved its ID file for: in its `asset` lines and its names, so that the run loads
+    /// the texture from there, and its own `asset` line for it, which then is the snapshot's, keeps
+    /// what's opaque in the world. A texture whose file is where it was keeps its path, though a
+    /// copy took its ID, as its ID changed since. A model's images, which load with their model,
+    /// keep their paths.
+    #[cfg(feature = "dev")]
+    pub(crate) fn follow(&mut self, catalog: &crate::assets::Catalog) {
+        let moved: HashMap<Arc<str>, Arc<str>> = (self.names.iter())
+            .filter_map(|(path, name)| {
+                let now = catalog.path(name.parse().ok()?)?;
+                (now != &**path && !catalog.present(path)).then(|| (path.clone(), now.into()))
+            })
+            .collect();
+        if moved.is_empty() {
+            return;
+        }
+        for line in &mut self.assets {
+            let Some(texture) = line.strip_prefix("texture ") else {
+                continue;
+            };
+            let mut parts = texture.splitn(4, ' ');
+            let counts: Vec<&str> = parts.by_ref().take(3).collect();
+            if let Some(now) = parts.next().and_then(|path| moved.get(path)) {
+                *line = format!("texture {} {now}", counts.join(" "));
+            }
+        }
+        let names = self.names.drain().map(|(path, name)| {
+            let now = moved.get(&path).cloned().unwrap_or(path);
+            (now, name)
+        });
+        self.names = names.collect();
+    }
+
     /// Loads the snapshot's world into `world`, whose component types and assets the layers,
     /// `layers` from the bottom up, have registered and added as they loaded, in place of its
     /// entities, as [`World::load_whole`] does; what's opaque in it comes back if the layers added
@@ -921,5 +957,78 @@ mod tests {
             let texture = world.get::<Sprite>(shown).and_then(|sprite| sprite.texture);
             assert!(texture.is_some_and(|texture| world.assets().path(texture).is_some()));
         }
+    }
+
+    /// A texture loaded where named, its file renamed since with its ID file, as the watcher moves
+    /// it, comes back from where its file is now in a run whose database holds its ID there, once
+    /// the snapshot follows it, the world restored warning of no change: its `asset` line, which
+    /// follows it too, is the one the run's load notes. One whose file is where it was, a copy
+    /// having taken its ID, keeps its path.
+    #[test]
+    fn a_texture_renamed_since_comes_back_from_where_its_file_is() {
+        let logged = crate::testing::logged();
+        let dir = Scratch::new("snapshot-renamed");
+        let root = dir.0.clone();
+        fs::create_dir_all(root.join("assets")).expect("a directory");
+        let png =
+            crate::image::tests::png(png::ColorType::Rgba, png::BitDepth::Eight, 1, &[9; 4], None);
+        fs::write(root.join("assets/stone.png"), png).expect("a PNG");
+        let id = "5f3c9a1e07b2d846";
+        let meta = gg_api::asset::Meta {
+            id: id.parse().expect("an ID"),
+        };
+        fs::write(root.join("assets/stone.png.meta"), meta.text()).expect("its ID file");
+        let mut saved = Context::seeded(3).root(root.clone());
+        saved.load_named([id], false);
+        let stone = saved.world().assets().texture(id).expect("loaded");
+        let sprite = Sprite {
+            texture: Some(stone),
+            ..Sprite::default()
+        };
+        let shown = saved.world_mut().spawn((Transform::IDENTITY, sprite));
+        let none = Open::default();
+        let text = write(saved.world(), &[], &none, &Run::Playing, "Tested", &[], 0);
+        let text = text.expect("written");
+        let assets = root.join("assets");
+        let parsed = || Snapshot::parse(text.clone(), "a test".to_owned(), "Tested").expect("read");
+        // A copy made with its ID file, which a run's first scan gives the ID to, as the first by
+        // path whose ID file holds it, while the texture's file is where it was: no rename.
+        for name in ["stone.png", "stone.png.meta"] {
+            fs::copy(assets.join(name), assets.join(format!("a_{name}"))).expect("copied");
+        }
+        let copied = Context::seeded(3).root(root.clone());
+        let mut kept = parsed();
+        kept.follow(copied.catalog());
+        assert_eq!(kept.textures().collect::<Vec<_>>(), ["assets/stone.png"]);
+        for name in ["a_stone.png", "a_stone.png.meta"] {
+            fs::remove_file(assets.join(name)).expect("removed");
+        }
+        for name in ["stone.png", "stone.png.meta"] {
+            let to = assets.join(name.replace("stone", "pillar"));
+            fs::rename(assets.join(name), to).expect("moved");
+        }
+
+        let mut restored = Context::seeded(3).root(root.clone());
+        let mut snapshot = parsed();
+        snapshot.follow(restored.catalog());
+        assert_eq!(
+            snapshot.textures().collect::<Vec<_>>(),
+            ["assets/pillar.png"]
+        );
+        let _ = logged.codes.try_iter().count();
+        let restoring = Stack::default().restore(&mut restored, &snapshot, false);
+        restoring.expect("restored");
+        let codes: Vec<String> = logged.codes.try_iter().collect();
+        let warned = codes.iter().filter(|code| code.starts_with("snapshot."));
+        assert_eq!(warned.count(), 0, "{codes:?}");
+        assert!(
+            !codes.iter().any(|code| code == "asset.stand_in"),
+            "{codes:?}"
+        );
+        let world = restored.world();
+        let texture = world.get::<Sprite>(shown).and_then(|sprite| sprite.texture);
+        let path = texture.and_then(|texture| world.assets().path(texture));
+        assert_eq!(path, Some("assets/pillar.png"));
+        assert_eq!(world.hash(), saved.world().hash());
     }
 }

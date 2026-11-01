@@ -65,10 +65,11 @@ pub(crate) fn start(
     Ok(None)
 }
 
-/// As a frame starts, before its ticks, in a development build, applies the scene files saved since,
-/// as [`scene_files::look`] says, and answers the requests that have come, from `cx`, whose layers
-/// are `stack`'s and whose simulation `stepper` steps, as [`Api::serve`] says; returns whether one
-/// asked the run to end.
+/// As a frame starts, before its ticks, in a development build, takes the asset database as the
+/// thread that watches the root last sent it, as `Context::take_assets` says, applies the scene
+/// files saved since, as [`scene_files::look`] says, and answers the requests that have come, from
+/// `cx`, whose layers are `stack`'s and whose simulation `stepper` steps, as [`Api::serve`] says;
+/// returns whether one asked the run to end.
 ///
 /// [`scene_files::look`]: crate::scene_files
 pub(crate) fn serve(
@@ -77,6 +78,8 @@ pub(crate) fn serve(
     stack: &mut Stack,
     stepper: &mut Stepper,
 ) -> bool {
+    #[cfg(feature = "dev")]
+    cx.take_assets();
     #[cfg(feature = "dev")]
     crate::scene_files::look(cx, stack);
     #[cfg(feature = "dev")]
@@ -87,15 +90,17 @@ pub(crate) fn serve(
     false
 }
 
-/// Between frames, while they pause, applies the scene files saved since and answers the requests
-/// that need no frames, as [`serve`] does as a frame starts; returns whether one asked the run to
-/// end.
+/// Between frames, while they pause, takes the asset database, applies the scene files saved since
+/// and answers the requests that need no frames, as [`serve`] does as a frame starts; returns
+/// whether one asked the run to end.
 pub(crate) fn serve_paused(
     api: &mut Option<Api>,
     cx: &mut Context,
     stack: &mut Stack,
     stepper: &mut Stepper,
 ) -> bool {
+    #[cfg(feature = "dev")]
+    cx.take_assets();
     #[cfg(feature = "dev")]
     crate::scene_files::look(cx, stack);
     #[cfg(feature = "dev")]
@@ -104,6 +109,18 @@ pub(crate) fn serve_paused(
     }
     let _ = (api, cx, stack, stepper);
     false
+}
+
+/// As frames pause, as the window is minimized, answers each `assets` waiting for a look at the
+/// asset root from the database as the thread that watches it last sent it, as one that comes while
+/// they pause is answered, since a look the thread takes then would wait for the next request.
+pub(crate) fn frames_paused(api: &mut Option<Api>, cx: &mut Context) {
+    #[cfg(feature = "dev")]
+    if let Some(api) = api {
+        cx.take_assets();
+        api.frames_paused(cx);
+    }
+    let _ = (api, cx);
 }
 
 /// With the renderer back from a frame, takes the view it read back, if it rode with captures and

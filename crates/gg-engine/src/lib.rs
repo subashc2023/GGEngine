@@ -24,6 +24,8 @@ extern crate self as gg_engine;
 mod actions;
 mod api;
 mod args;
+#[cfg(feature = "dev")]
+mod asset_watch;
 mod assets;
 mod camera;
 mod chrome;

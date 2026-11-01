@@ -98,16 +98,18 @@
 //! - `assets`, [`Assets`]: answers [`AssetList`], a page of the textures and models under the
 //!   game's asset root, in the order of their paths, each with its ID, which its ID file beside it,
 //!   [`asset::Meta`], holds, as ARCHITECTURE.md's Project state describes, and the ID files whose
-//!   assets aren't there. It scans the root first, so that an asset added since is listed, and a
-//!   run that writes ID files, a game alone or a lockstep session's host that serves the API,
-//!   writes each one missing then, as it does as it starts. A listed asset's `problem` says what's
-//!   wrong with its ID file:
+//!   assets aren't there. It answers once the game has looked at the root since it asked, or at
+//!   once from its last look while its frames pause, as while its window is minimized, so that
+//!   an asset added or renamed since is listed, a run that writes ID files, a game alone or a
+//!   lockstep session's host that serves the API, having written each one missing and moved beside
+//!   its file each that a rename of the file alone left behind, as it does as it starts and as it
+//!   watches the root. A listed asset's `problem` says what's wrong with its ID file:
 //!   - `asset.no_id`, none, in a run that writes none, a lockstep session's joiner: its host writes
 //!     it, as a game alone does;
 //!   - `asset.bad_meta`, one that doesn't read: fix it, or remove it for a fresh one;
 //!   - `asset.meta_case`, one whose name differs from `<file>.meta` in case alone: rename it;
-//!   - `asset.duplicate_id`, one holding the ID another asset has this run, as a copy's or a
-//!     renamed asset's does, or none while another ID file holds its ID. From the next run, the
+//!   - `asset.duplicate_id`, one holding the ID another asset has this run, as a copy's does, or
+//!     none while another ID file holds its ID. From the next run, the
 //!     first asset by path whose ID file holds an ID has it, as the message says, and another
 //!     whose file holds it goes without until that file is removed, after which a run writes it a
 //!     fresh one, as it does for one without an ID file: remove a copy's ID file, rather than the
@@ -116,9 +118,10 @@
 //!     ends;
 //!   - `asset.unwritten`, one the run couldn't write, saying why.
 //!
-//!   An orphan, an ID file left behind as by a rename, goes beside its asset, named for it, or is
-//!   deleted. It fails with `engine.no_root` in a game that names no asset root, and with
-//!   `asset.unlisted` if the root can't be listed.
+//!   An orphan, an ID file left behind as by a rename the game couldn't pair with its file, as one
+//!   made with an edit, goes beside its asset, named for it, or is deleted. It fails with
+//!   `engine.no_root` in a game that names no asset root, and with `asset.unlisted` if the root
+//!   can't be listed.
 //! - `snapshot`, [`Snapshot`]: saves the world whole as a file, which a run given `--restore`
 //!   starts from, and answers [`Snapshotted`] once it's written: a stopped game's file records that
 //!   it's stopped, and one taken while a copy plays saves the world as edited too, so that a run

@@ -5,24 +5,39 @@
 //! OS resolves them, so that a file loads once however its path is written; and, in development
 //! builds, the asset database,
 //! `Catalog`: the textures and models under the root and the IDs their ID files hold, whose text
-//! and scan are gg-api's.
+//! and scan are gg-api's, an ID going with its asset as it's renamed or moved, paired by what its
+//! file holds where the rename left its ID file behind.
 
 use std::collections::HashMap;
 #[cfg(feature = "dev")]
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 #[cfg(feature = "dev")]
-use std::io;
+use std::fs::File;
+#[cfg(feature = "dev")]
+use std::io::{self, Read};
+#[cfg(feature = "dev")]
+use std::mem;
 use std::path::{self, Path, PathBuf};
 use std::sync::Arc;
+#[cfg(feature = "dev")]
+use std::time::{Duration, SystemTime};
 
 #[cfg(feature = "dev")]
-use gg_api::asset::{self as asset_files, AssetId, AssetKind, Meta, Scanned};
+use gg_api::Failure;
+#[cfg(feature = "dev")]
+use gg_api::asset::{self as asset_files, AssetId, AssetKind, Meta, Orphan, Scan, Scanned, Stamp};
 use gg_renderer::Texture;
+#[cfg(feature = "dev")]
+use serde::{Deserialize, Serialize};
 #[cfg(feature = "dev")]
 use tracing::{info, warn};
 
 use crate::Model;
+#[cfg(feature = "dev")]
+use crate::dirs::{self, Kind};
+#[cfg(feature = "dev")]
+use crate::ecs::mix64;
 
 /// The textures a context added, as its layers added them or where text named them, each by its
 /// index, with the path of the file it was loaded from: relative to the app's
@@ -260,8 +275,9 @@ pub(crate) fn is_id(name: &str) -> bool {
 }
 
 /// The textures and models under the app's root, as the scans found them, and their IDs, from
-/// their ID files, which gg-api reads: the asset database. It only grows: an asset the run has
-/// found it keeps, with its ID, even once its file is gone, so that its ID stays its for the run.
+/// their ID files, which gg-api reads: the asset database. An asset the run has found it keeps,
+/// with its ID, even once its file is gone, so that its ID stays its for the run, until it turns up
+/// at another path, renamed or moved, which takes it, as [`scanned`] says.
 #[cfg(feature = "dev")]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Catalog {
@@ -319,6 +335,11 @@ impl Catalog {
         present.map(|(path, cataloged)| (&**path, cataloged))
     }
 
+    /// Whether the last scan found an asset at `path` from the root, with `/` between its parts.
+    pub(crate) fn present(&self, path: &str) -> bool {
+        self.assets.get(path).is_some_and(|asset| asset.present)
+    }
+
     /// The ID of the asset at `path` from the root, with `/` between its parts, if it has one: the
     /// ID it keeps for the run.
     pub(crate) fn id(&self, path: &str) -> Option<AssetId> {
@@ -343,18 +364,37 @@ impl Catalog {
     }
 }
 
-/// Scans the assets under `root`, as gg-api's `scan` does, and gives what `catalog` becomes, or
-/// `None` if nothing changed, warning of each problem once a run and writing the ID files missing
-/// if `writes`, as ARCHITECTURE.md's Project state says.
+/// Scans the assets under `root`, as gg-api's `scan` does, and gives what `catalog` becomes, as
+/// [`scanned`] says.
+#[cfg(feature = "dev")]
+pub(crate) fn scan(
+    catalog: &Catalog,
+    root: &Path,
+    prints: &mut Prints,
+    writes: bool,
+) -> Option<Catalog> {
+    scanned(catalog, &asset_files::scan(root), prints, writes)
+}
+
+/// What `catalog` becomes of `found`, what a scan found under the asset root, or `None` if nothing
+/// changed, warning of each problem once a run and writing the ID files missing if `writes`, as
+/// ARCHITECTURE.md's Project state says.
 ///
 /// An asset found gets the ID its ID file holds, unless another asset has it this run, and keeps
 /// it for the run, whatever its ID file holds later: at a run's first scan, the asset first by
-/// path keeps an ID two hold. An asset without an ID file, where the run `writes`, gets one written
-/// whole beside it, holding the ID it has this run, or else one drawn, unless another ID file holds
-/// that ID now, as after a rename that took its ID file along.
+/// path keeps an ID two hold. An asset whose ID file holds the ID of one the run had that's gone
+/// takes it, as after a rename that took its ID file along, logging `asset.renamed`. Where the run
+/// `writes`, an asset new to the run without an ID file takes one that a rename left behind, moved
+/// beside it, if its file holds what that ID's asset last held, as [`renamed`] says, `prints`
+/// telling; and any other without one gets one written whole beside it, holding the ID it has
+/// this run, or else one drawn, unless another ID file holds that ID now.
 #[cfg(feature = "dev")]
-pub(crate) fn scan(catalog: &Catalog, root: &Path, writes: bool) -> Option<Catalog> {
-    let found = asset_files::scan(root);
+pub(crate) fn scanned<'f>(
+    catalog: &Catalog,
+    found: &'f Scan,
+    prints: &mut Prints,
+    writes: bool,
+) -> Option<Catalog> {
     let mut next = catalog.clone();
     for cataloged in next.assets.values_mut() {
         cataloged.present = false;
@@ -362,12 +402,35 @@ pub(crate) fn scan(catalog: &Catalog, root: &Path, writes: bool) -> Option<Catal
     }
     let root_unread = found.unread.iter().find(|unread| unread.path == ".");
     next.unlisted = root_unread.map(|unread| unread.error.as_str().into());
+    // Every asset found is present before any takes an ID, so that a duplicate's holder, and a
+    // renamed asset's former self, are told present or gone whatever their paths' order.
+    for scanned in &found.assets {
+        let cataloged = (next.assets.entry(scanned.path.as_str().into())).or_insert(Cataloged {
+            kind: scanned.kind,
+            id: None,
+            present: true,
+            problem: None,
+        });
+        cataloged.kind = scanned.kind;
+        cataloged.present = true;
+    }
+    let renamed = if writes {
+        renamed(&next, found, prints)
+    } else {
+        HashMap::new()
+    };
+    // Each asset's ID file, as found, or as moved beside it.
+    let moved: HashMap<&str, Result<Meta, Failure>> = (renamed.iter())
+        .map(|(&path, &(_, id))| (path, Ok(Meta { id })))
+        .collect();
+    let meta_of = |scanned: &'f Scanned| moved.get(scanned.path.as_str()).or(scanned.meta.as_ref());
     // Each ID an ID file holds, by the path of the first in order of those that hold it.
-    let ids = (found.assets.iter()).filter_map(|scanned| match &scanned.meta {
+    let ids = (found.assets.iter()).filter_map(|scanned| match meta_of(scanned) {
         Some(Ok(meta)) => Some((format!("{}.{}", scanned.path, Meta::EXTENSION), meta.id)),
         _ => None,
     });
-    let orphaned = (found.orphans.iter())
+    let left = |orphan: &&Orphan| !renamed.values().any(|&(from, _)| from == orphan.path);
+    let orphaned = (found.orphans.iter().filter(left))
         .filter_map(|orphan| Some((orphan.path.clone(), orphan.meta.as_ref().ok()?.id)));
     let mut holders: Vec<_> = ids.chain(orphaned).collect();
     holders.sort_unstable();
@@ -379,31 +442,20 @@ pub(crate) fn scan(catalog: &Catalog, root: &Path, writes: bool) -> Option<Catal
     // it: the asset a run's first scan gives it to.
     let mut first = HashMap::new();
     for scanned in &found.assets {
-        if let Some(Ok(meta)) = &scanned.meta {
+        if let Some(Ok(meta)) = meta_of(scanned) {
             first.entry(meta.id).or_insert(scanned.path.as_str());
         }
     }
-    // Every asset found is present before any takes an ID, so that a duplicate's holder is told
-    // present or gone whatever its path's order.
     for scanned in &found.assets {
-        let cataloged = (next.assets.entry(scanned.path.as_str().into())).or_insert(Cataloged {
-            kind: scanned.kind,
-            id: None,
-            present: true,
-            problem: None,
-        });
-        cataloged.kind = scanned.kind;
-        cataloged.present = true;
-    }
-    for scanned in &found.assets {
-        let had = next.assets[scanned.path.as_str()].id;
-        let (id, problem) = identify(&mut next, &held, &first, scanned, had, writes);
+        let paired = renamed.contains_key(scanned.path.as_str());
+        let meta = meta_of(scanned);
+        let (id, problem) = identify(&mut next, &held, &first, scanned, meta, writes, paired);
         let cataloged = (next.assets.get_mut(scanned.path.as_str())).expect("found");
         (cataloged.id, cataloged.problem) = (id, problem);
     }
     let mut orphans = Vec::with_capacity(found.orphans.len());
-    for orphan in found.orphans {
-        let path: Arc<str> = orphan.path.into();
+    for orphan in found.orphans.iter().filter(left) {
+        let path: Arc<str> = orphan.path.as_str().into();
         let asset = path.rsplit_once('.').map_or(&*path, |(asset, _)| asset);
         let code = "asset.orphaned";
         if once(&mut next.warned, code, &path) {
@@ -426,7 +478,7 @@ pub(crate) fn scan(catalog: &Catalog, root: &Path, writes: bool) -> Option<Catal
                 ),
             }
         }
-        let id = orphan.meta.ok().map(|meta| meta.id);
+        let id = orphan.meta.as_ref().ok().map(|meta| meta.id);
         orphans.push((path, orphan.kind, id));
     }
     next.orphans = orphans;
@@ -443,23 +495,26 @@ pub(crate) fn scan(catalog: &Catalog, root: &Path, writes: bool) -> Option<Catal
     (next != *catalog).then_some(next)
 }
 
-/// What asset `scanned` gets of the ID file the scan found beside it, given the ID it `had` this
-/// run, if any; `held`, each ID an ID file holds, by the path of the first that holds it; and
-/// `first`, each ID an asset's ID file holds, by the first such asset's path: its ID, and what's
-/// wrong, if anything, warned of once a run; writing its ID file if it's missing and the run
-/// `writes`, and binding its ID in `next` if it's new, as [`scan`] says.
+/// What asset `scanned` gets of its ID file, `meta`, as the scan found it beside it or a rename's
+/// was moved there, `paired`, given the ID it had this run, if any; `held`, each ID an ID file
+/// holds, by the path of the first that holds it; and `first`, each ID an asset's ID file holds, by
+/// the first such asset's path: its ID, and what's wrong, if anything, warned of once a run;
+/// writing its ID file if it's missing and the run `writes`, and binding its ID in `next` if it's
+/// new to it, as [`scanned`] says.
 #[cfg(feature = "dev")]
 fn identify(
     next: &mut Catalog,
     held: &HashMap<AssetId, String>,
     first: &HashMap<AssetId, &str>,
     scanned: &Scanned,
-    had: Option<AssetId>,
+    meta: Option<&Result<Meta, Failure>>,
     writes: bool,
+    paired: bool,
 ) -> (Option<AssetId>, Option<Problem>) {
     let path = scanned.path.as_str();
+    let had = next.assets[path].id;
     let written;
-    let meta = match &scanned.meta {
+    let meta = match meta {
         Some(meta) => meta,
         None if !writes => {
             let code = "asset.no_id";
@@ -552,24 +607,37 @@ fn identify(
                     .assets
                     .get(&holder)
                     .is_some_and(|holder| holder.present);
-                let code = "asset.duplicate_id";
                 // A run's first scan gives an ID to the first by path whose ID file holds it.
                 let takes = first.get(&id) == Some(&path);
-                let message = match (takes, present) {
-                    (true, true) => format!(
+                if takes && !present {
+                    // Renamed or moved, its ID file with it or moved after it: its ID goes with it,
+                    // and the asset it was is no more.
+                    next.ids.insert(id, path.into());
+                    next.assets.remove(&holder);
+                    if !paired {
+                        info!(
+                            code = "asset.renamed",
+                            path,
+                            from = &*holder,
+                            id = %id,
+                            "{holder} is now {path}, its ID file with it: it keeps the ID {id}"
+                        );
+                    }
+                    return (Some(id), None);
+                }
+                let code = "asset.duplicate_id";
+                let message = if takes {
+                    format!(
                         "{path}.meta holds {id}, {holder}'s ID this run: from the next run, {path} \
                          takes it, as the first by path whose ID file holds it, and {holder} goes \
                          without, unless {path}.meta is removed before then, for a run that writes \
                          ID files to write {path} a fresh one"
-                    ),
-                    (true, false) => format!(
-                        "{path}.meta holds {id}, {holder}'s ID this run, though its file is gone, \
-                         as after a rename: {path} takes it at the next run"
-                    ),
-                    (false, _) => format!(
+                    )
+                } else {
+                    format!(
                         "{path}.meta holds {id}, {holder}'s ID: {path} has no ID until its ID file \
                          is removed, after which a run that writes ID files writes it a fresh one"
-                    ),
+                    )
                 };
                 if once(&mut next.warned, code, path) {
                     warn!(code, path, holder = &*holder, id = %id, "{message}");
@@ -614,6 +682,284 @@ fn identify(
             }
         }
     }
+}
+
+/// The assets `found` new to the run without ID files, as after a rename that left theirs behind,
+/// whose files hold what the asset of an ID file left behind last held, as `prints` last found it,
+/// and no other's: each by its path, with the path of that ID file, which is moved beside it, and
+/// the ID it holds, logging `asset.renamed`. An ID file is left behind where the scan finds it
+/// without its asset, holding an ID that no asset found holds in its ID file, nor has this run. Two
+/// new assets alike, or two ID files left behind whose assets were alike, pair with none, as a copy
+/// may be either. The move links the ID file beside the asset, which fails rather than write over
+/// one there, then removes it, so that a move that fails leaves it where it was.
+///
+/// Reads each new asset's file of a length that such an asset had, as [`Prints`] says.
+#[cfg(feature = "dev")]
+fn renamed<'f>(
+    next: &Catalog,
+    found: &'f Scan,
+    prints: &mut Prints,
+) -> HashMap<&'f str, (&'f str, AssetId)> {
+    let held: HashSet<AssetId> = (found.assets.iter())
+        .filter_map(|scanned| Some(scanned.meta.as_ref()?.as_ref().ok()?.id))
+        .collect();
+    let taken = |id: &AssetId| {
+        let holder = next.ids.get(id).and_then(|holder| next.assets.get(holder));
+        held.contains(id) || holder.is_some_and(|holder| holder.present)
+    };
+    let mut left: HashMap<Print, Vec<(&Orphan, AssetId)>> = HashMap::new();
+    for orphan in &found.orphans {
+        if let Ok(meta) = &orphan.meta
+            && !taken(&meta.id)
+            && let Some(&print) = prints.by_id.get(&meta.id)
+        {
+            left.entry(print).or_default().push((orphan, meta.id));
+        }
+    }
+    if left.is_empty() {
+        return HashMap::new();
+    }
+    let lengths: HashSet<u64> = left.keys().map(|print| print.length).collect();
+    let mut new: HashMap<Print, Vec<&Scanned>> = HashMap::new();
+    for scanned in &found.assets {
+        let fresh = scanned.meta.is_none() && next.id(&scanned.path).is_none();
+        let alike = (scanned.stamp).is_none_or(|(_, length)| lengths.contains(&length));
+        if fresh
+            && alike
+            && let Some(print) = prints.of(scanned)
+        {
+            new.entry(print).or_default().push(scanned);
+        }
+    }
+    let mut renamed = HashMap::new();
+    for (print, assets) in &new {
+        let ([asset], Some([(orphan, id)])) = (&assets[..], left.get(print).map(Vec::as_slice))
+        else {
+            continue;
+        };
+        if fs::hard_link(&orphan.file, Meta::path(&asset.file)).is_err() {
+            continue;
+        }
+        // Should it stay, its ID is in two ID files, and the scans from then on warn of it as left
+        // without its asset, saying to delete it.
+        let _ = fs::remove_file(&orphan.file);
+        let (path, from) = (asset.path.as_str(), orphan.path.as_str());
+        let was = from.rsplit_once('.').map_or(from, |(asset, _)| asset);
+        info!(
+            code = "asset.renamed",
+            path,
+            from = was,
+            id = %id,
+            "{was} is now {path}, its file as it was: its ID file is moved beside it, so that it \
+             keeps the ID {id}"
+        );
+        renamed.insert(path, (from, *id));
+    }
+    renamed
+}
+
+/// What a file holds, as far as telling an asset's file renamed from another goes: its length, and
+/// a hash of its bytes, each 8 of them mixed in turn by SplitMix64's mix, which files of one length
+/// share by chance about once in 2^64 pairs.
+#[cfg(feature = "dev")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct Print {
+    length: u64,
+    hash: u64,
+}
+
+#[cfg(feature = "dev")]
+impl Print {
+    /// How much of a file is read at a time: a multiple of 8, so that only the last part read ends
+    /// in a part of a word.
+    const CHUNK: usize = 1 << 16;
+
+    /// The print of the file at `path`.
+    ///
+    /// Fails as reading it does.
+    fn of(path: &Path) -> io::Result<Self> {
+        let _zone = gg_core::zone!();
+        let mut file = File::open(path)?;
+        let mut chunk = Vec::with_capacity(Self::CHUNK);
+        let (mut length, mut hash) = (0, 0);
+        loop {
+            chunk.clear();
+            (&mut file)
+                .take(Self::CHUNK as u64)
+                .read_to_end(&mut chunk)?;
+            length += chunk.len() as u64;
+            hash = mixed(hash, &chunk);
+            if chunk.len() < Self::CHUNK {
+                return Ok(Self { length, hash });
+            }
+        }
+    }
+}
+
+/// `hash` with `bytes` mixed into it, as little-endian words of 8, the last padded with zeros.
+#[cfg(feature = "dev")]
+fn mixed(hash: u64, bytes: &[u8]) -> u64 {
+    bytes.chunks(8).fold(hash, |hash, word| {
+        let mut padded = [0; 8];
+        padded[..word.len()].copy_from_slice(word);
+        mix64(hash ^ u64::from_le_bytes(padded))
+    })
+}
+
+/// The assets' [`Print`]s, which pair a renamed asset with the ID file its rename left behind, as
+/// [`scanned`] says: each file's, by its path from the root, with its stamp as it was read, so that
+/// it's read again only once it changes; and each ID's, of what its asset last held, of the assets
+/// found and those whose ID files are left behind. A run that writes ID files keeps them in its
+/// clone's [`cache`] for the next, so that a rename made while no run watched pairs as the
+/// next run starts.
+#[cfg(feature = "dev")]
+#[derive(Debug, Default)]
+pub(crate) struct Prints {
+    by_path: HashMap<Arc<str>, (Option<Stamp>, Print)>,
+    by_id: HashMap<AssetId, Print>,
+    /// Whether the cache couldn't be written this run, which warns once.
+    unsaved: bool,
+}
+
+/// What a clone's cache holds: the prints of the assets under the asset root, which resolves to
+/// `root`, the file's name a hash of it: each file's, as its path from the root, when it last
+/// changed in nanoseconds since 1970, its length and its hash; and each ID's, as the ID, the length
+/// and the hash.
+#[cfg(feature = "dev")]
+#[derive(Serialize, Deserialize)]
+struct Cached {
+    root: String,
+    files: Vec<(String, u64, u64, u64)>,
+    ids: Vec<(String, u64, u64)>,
+}
+
+/// The most a cache's file may hold, which is read whole.
+#[cfg(feature = "dev")]
+const MOST_CACHED: u64 = 1 << 26;
+
+#[cfg(feature = "dev")]
+impl Prints {
+    /// What the cache at `cache` holds of the asset root `root`; none if it's missing, can't be
+    /// read, or is of another root, as a cache may be.
+    pub(crate) fn read(cache: &Path, root: &Path) -> Self {
+        let _zone = gg_core::zone!();
+        let read = dirs::read_file(cache, MOST_CACHED).ok();
+        let cached = read.and_then(|bytes| serde_json::from_slice::<Cached>(&bytes).ok());
+        let root = file_of(root).map(|root| root.to_string_lossy().into_owned());
+        let Some(cached) = cached.filter(|cached| Some(&cached.root) == root.as_ref()) else {
+            return Self::default();
+        };
+        let files = cached.files.into_iter().map(|(path, nanos, length, hash)| {
+            let changed = SystemTime::UNIX_EPOCH + Duration::from_nanos(nanos);
+            (
+                path.into(),
+                (Some((changed, length)), Print { length, hash }),
+            )
+        });
+        let ids = (cached.ids.into_iter())
+            .filter_map(|(id, length, hash)| Some((id.parse().ok()?, Print { length, hash })));
+        Self {
+            by_path: files.collect(),
+            by_id: ids.collect(),
+            unsaved: false,
+        }
+    }
+
+    /// Writes the prints to the cache at `cache`, of the asset root `root`, whole, as
+    /// [`dirs::write`] does, warning `asset.no_cache` once a run if it can't.
+    pub(crate) fn save(&mut self, cache: &Path, root: &Path) {
+        let _zone = gg_core::zone!();
+        let nanos = |stamp: &Option<Stamp>| {
+            let (changed, _) = (*stamp)?;
+            let since = changed.duration_since(SystemTime::UNIX_EPOCH).ok()?;
+            u64::try_from(since.as_nanos()).ok()
+        };
+        let files = self.by_path.iter().filter_map(|(path, (stamp, print))| {
+            Some((path.to_string(), nanos(stamp)?, print.length, print.hash))
+        });
+        let ids = (self.by_id.iter()).map(|(id, print)| (id.to_string(), print.length, print.hash));
+        let cached = Cached {
+            root: file_of(root).map_or_else(String::new, |root| root.to_string_lossy().into()),
+            files: files.collect(),
+            ids: ids.collect(),
+        };
+        let text = serde_json::to_vec(&cached).expect("prints serialize");
+        if let Err(error) = dirs::write(cache, &text)
+            && !mem::replace(&mut self.unsaved, true)
+        {
+            warn!(
+                code = "asset.no_cache",
+                path = %cache.display(),
+                error = %error,
+                "Can't keep the assets' prints in {}: {error}; an asset renamed while no run \
+                 watches the asset root gets a fresh ID at the next",
+                cache.display()
+            );
+        }
+    }
+
+    /// The print of `scanned`'s file, read unless it was since the file last changed; `None` if it
+    /// can't be read.
+    fn of(&mut self, scanned: &Scanned) -> Option<Print> {
+        if let Some(&(stamp, print)) = self.by_path.get(scanned.path.as_str())
+            && stamp.is_some()
+            && stamp == scanned.stamp
+        {
+            return Some(print);
+        }
+        let print = Print::of(&scanned.file).ok()?;
+        let path = scanned.path.as_str().into();
+        self.by_path.insert(path, (scanned.stamp, print));
+        Some(print)
+    }
+
+    /// Takes the prints of the assets `found` that have IDs in `catalog`, each its ID's too, reading
+    /// those whose files changed since they were last read; keeps those of the IDs that ID files
+    /// `found` left behind hold; and forgets the rest. Returns whether any changed.
+    pub(crate) fn update(&mut self, catalog: &Catalog, found: &Scan) -> bool {
+        let was = mem::take(&mut self.by_path);
+        let mut changed = false;
+        let mut ids = HashSet::new();
+        for scanned in &found.assets {
+            let Some(id) = catalog.id(&scanned.path) else {
+                continue;
+            };
+            ids.insert(id);
+            let path: Arc<str> = scanned.path.as_str().into();
+            let print = match was.get(&path) {
+                Some(&(stamp, print)) if stamp.is_some() && stamp == scanned.stamp => print,
+                // Being written, or held by its writer: a later look reads it.
+                _ => match Print::of(&scanned.file) {
+                    Ok(print) => {
+                        changed = true;
+                        print
+                    }
+                    Err(_) => continue,
+                },
+            };
+            self.by_path.insert(path, (scanned.stamp, print));
+            changed |= self.by_id.insert(id, print) != Some(print);
+        }
+        let left = found.orphans.iter();
+        ids.extend(left.filter_map(|orphan| Some(orphan.meta.as_ref().ok()?.id)));
+        let count = self.by_id.len();
+        self.by_id.retain(|id, _| ids.contains(id));
+        changed || self.by_id.len() != count || self.by_path.len() != was.len()
+    }
+}
+
+/// Where the [`Prints`] of the assets under `root` are kept between runs of app `app`: a file of the
+/// root's own, by a hash of the path it resolves to, in the app's directory for caches, as
+/// [`dirs::dir`] says, so that each clone of a game keeps its own, whichever build runs it. `None`
+/// without the directory, or for a root that doesn't resolve.
+#[cfg(feature = "dev")]
+pub(crate) fn cache(app: &str, root: &Path) -> Option<PathBuf> {
+    let root = file_of(root)?;
+    let dir = dirs::dir(app, Kind::Cache, std::env::consts::OS, |name| {
+        std::env::var_os(name)
+    })?;
+    let key = mixed(0, root.as_os_str().as_encoded_bytes());
+    Some(dir.join("assets").join(format!("{key:016x}.json")))
 }
 
 /// Whether the problem `code` with what's at `about` is new to `warned`, which then holds it.
@@ -670,8 +1016,8 @@ mod tests {
     /// A scan gives each asset under the root the ID its ID file holds; writes the ID files missing
     /// where the run may, and says why an asset has none where it may not; warns of each problem
     /// once a run; never writes over an ID file that's there; keeps an asset's ID for the run,
-    /// whatever its ID file comes to hold; and writes back no ID another ID file holds, as after a
-    /// rename that took the ID file along.
+    /// whatever its ID file comes to hold, until it's renamed with its ID file, which takes it
+    /// along; and writes back no ID another ID file holds.
     #[cfg(feature = "dev")]
     #[test]
     fn a_scan_writes_missing_id_files_where_the_run_may_and_each_problem_warns_once() {
@@ -691,7 +1037,7 @@ mod tests {
             listed.collect()
         };
         let rescan = |catalog: &mut Catalog, writes| {
-            if let Some(next) = scan(catalog, root, writes) {
+            if let Some(next) = scan(catalog, root, &mut Prints::default(), writes) {
                 *catalog = next;
             }
         };
@@ -715,7 +1061,8 @@ mod tests {
         assert!(!root.join("a.png.meta").exists(), "a run that writes none");
         let b = Some(id("5f3c9a1e07b2d846"));
         assert_eq!(state(&catalog, "b.png"), (b, None));
-        assert_eq!(scan(&catalog, root, false), None, "nothing changed");
+        let unchanged = scan(&catalog, root, &mut Prints::default(), false);
+        assert_eq!(unchanged, None, "nothing changed");
         rescan(&mut catalog, true);
         let (a, problem) = state(&catalog, "a.png");
         let a = a.expect("an ID written");
@@ -771,8 +1118,8 @@ mod tests {
         assert_eq!((read("d.png.meta"), problem), (Meta { id: d }.text(), None));
         assert_eq!(codes(), ["asset.id_written"]);
 
-        // Renamed with its ID file, then a new file at the old name, whose ID this run another ID
-        // file holds now: nothing written back.
+        // Renamed with its ID file, which takes its ID along; then a new file at the old name,
+        // which gets a fresh one.
         write("e.png", "");
         rescan(&mut catalog, true);
         let e = state(&catalog, "e.png").0.expect("an ID written");
@@ -780,21 +1127,26 @@ mod tests {
             fs::rename(root.join(from), root.join(to)).expect("renamed");
         }
         rescan(&mut catalog, true);
-        assert_eq!(state(&catalog, "f.png"), (None, Some("asset.duplicate_id")));
+        assert_eq!(state(&catalog, "f.png"), (Some(e), None));
         assert!(catalog.listed().all(|(path, _)| path != "e.png"), "gone");
         write("e.png", "");
         rescan(&mut catalog, true);
+        let (fresh, problem) = state(&catalog, "e.png");
+        assert!(fresh.is_some_and(|fresh| fresh != e) && problem.is_none());
+        let renamed = ["asset.id_written", "asset.renamed", "asset.id_written"];
+        assert_eq!(codes(), renamed);
+        // Its ID file moved beside another asset, whose ID this run another ID file holds: nothing
+        // written back, as its ID would be in two files.
+        fs::remove_file(root.join("e.png.meta")).expect("removed");
+        fs::rename(root.join("f.png.meta"), root.join("e.png.meta")).expect("moved");
+        rescan(&mut catalog, true);
         assert_eq!(
-            state(&catalog, "e.png"),
+            state(&catalog, "f.png"),
             (Some(e), Some("asset.duplicate_id"))
         );
-        assert!(!names().contains(&"e.png.meta".to_owned()), "{:?}", names());
-        let written = [
-            "asset.id_written",
-            "asset.duplicate_id",
-            "asset.duplicate_id",
-        ];
-        assert_eq!(codes(), written);
+        assert_eq!(state(&catalog, "e.png"), (fresh, Some("asset.id_changed")));
+        assert!(!names().contains(&"f.png.meta".to_owned()), "{:?}", names());
+        assert_eq!(codes(), ["asset.id_changed", "asset.duplicate_id"]);
         let mut held: Vec<AssetId> = (names().iter())
             .filter(|name| name.ends_with(".meta"))
             .filter_map(|name| Meta::read(&root.join(name)).ok())
@@ -804,6 +1156,135 @@ mod tests {
         held.sort_unstable();
         held.dedup();
         assert_eq!(held.len(), files, "no two ID files hold one ID");
+    }
+
+    /// An asset renamed without its ID file, its file as it was, takes the ID file along where the
+    /// run writes ID files, the ID file moved beside it, logging `asset.renamed`: as the rename is
+    /// looked at, or, by the prints a cache kept, as the next run starts. One renamed and edited
+    /// at once, and twins of one that's renamed, get fresh IDs, the ID file left behind warned of;
+    /// and a run that writes none moves none.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn an_asset_renamed_without_its_id_file_keeps_its_id_by_what_its_file_holds() {
+        let logged = crate::testing::logged();
+        let scratch = Scratch::new("scan-renamed");
+        let root = scratch.0.join("game");
+        fs::create_dir_all(&root).expect("a directory");
+        let write = |name: &str, text: &str| fs::write(root.join(name), text).expect("written");
+        let rename = |from: &str, to: &str| fs::rename(root.join(from), root.join(to)).expect("");
+        let there = |name: &str| root.join(name).exists();
+        let held = |name: &str| Meta::read(&root.join(name)).expect("an ID file").id;
+        let codes = || logged.codes.try_iter().collect::<Vec<_>>();
+        // A look at the root, as the thread that watches it takes one.
+        let look = |catalog: &mut Catalog, prints: &mut Prints, writes| {
+            let found = asset_files::scan(&root);
+            if let Some(next) = scanned(catalog, &found, prints, writes) {
+                *catalog = next;
+            }
+            prints.update(catalog, &found);
+        };
+        let (mut catalog, mut prints) = (Catalog::default(), Prints::default());
+        for (name, text) in [("a.png", "alpha"), ("b.png", "beta"), ("e.png", "twin")] {
+            write(name, text);
+        }
+        write("h.png", "kept");
+        look(&mut catalog, &mut prints, true);
+        let [a, b, e, h] = ["a", "b", "e", "h"].map(|name| held(&format!("{name}.png.meta")));
+        let _ = codes();
+
+        rename("a.png", "c.png");
+        look(&mut catalog, &mut prints, true);
+        assert_eq!(catalog.id("c.png"), Some(a));
+        assert_eq!(catalog.path(a), Some("c.png"));
+        assert_eq!((held("c.png.meta"), there("a.png.meta")), (a, false));
+        assert_eq!(codes(), ["asset.renamed"]);
+
+        // Renamed and edited at once; and renamed beside a copy of what it held.
+        rename("b.png", "d.png");
+        write("d.png", "BETA");
+        fs::copy(root.join("e.png"), root.join("f.png")).expect("copied");
+        rename("e.png", "g.png");
+        look(&mut catalog, &mut prints, true);
+        for (name, was) in [("d.png", b), ("f.png", e), ("g.png", e)] {
+            let id = catalog.id(name).expect("a fresh ID");
+            assert!(id != was && held(&format!("{name}.meta")) == id, "{name}");
+        }
+        assert_eq!(
+            (held("b.png.meta"), held("e.png.meta")),
+            (b, e),
+            "left behind"
+        );
+        let fresh = ["asset.id_written"; 3];
+        assert_eq!(codes(), [&fresh[..], &["asset.orphaned"; 2]].concat());
+        // The prints of what the assets left behind held are kept, and those of an asset gone with
+        // its ID file forgotten.
+        assert!([b, e].iter().all(|id| prints.by_id.contains_key(id)));
+        let d = catalog.id("d.png").expect("an ID");
+        for name in ["d.png", "d.png.meta"] {
+            fs::remove_file(root.join(name)).expect("removed");
+        }
+        look(&mut catalog, &mut prints, true);
+        assert!(!prints.by_id.contains_key(&d), "forgotten");
+
+        // An ID file left behind whose ID another asset's ID file holds, as one copied beside the
+        // asset it renamed, pairs with none, though a new file holds what its asset held.
+        write("x.png", "ex");
+        look(&mut catalog, &mut prints, true);
+        let x = held("x.png.meta");
+        fs::copy(root.join("x.png.meta"), root.join("y.png.meta")).expect("copied");
+        rename("x.png", "y.png");
+        write("z.png", "ex");
+        look(&mut catalog, &mut prints, true);
+        assert_eq!((catalog.id("y.png"), held("x.png.meta")), (Some(x), x));
+        let z = catalog.id("z.png").expect("a fresh ID");
+        assert!(z != x && held("z.png.meta") == z);
+        let _ = codes();
+
+        // A run that writes none moves none.
+        rename("c.png", "c2.png");
+        look(&mut catalog, &mut prints, false);
+        assert_eq!((catalog.id("c2.png"), there("c.png.meta")), (None, true));
+        rename("c2.png", "c.png");
+        look(&mut catalog, &mut prints, true);
+
+        // Renamed while no run watched: the next run's start pairs it by the prints the last kept.
+        let cache = scratch.0.join("cache").join("prints.json");
+        prints.save(&cache, &root);
+        rename("h.png", "i.png");
+        let mut next = Prints::read(&cache, &root);
+        let started = scan(&Catalog::default(), &root, &mut next, true).expect("found");
+        assert_eq!(started.id("i.png"), Some(h));
+        assert_eq!((held("i.png.meta"), there("h.png.meta")), (h, false));
+        assert!(codes().contains(&"asset.renamed".to_owned()));
+        let other = Prints::read(&cache, &scratch.0);
+        assert!(other.by_id.is_empty(), "a cache is of its root alone");
+    }
+
+    /// A file's print is its length and its bytes mixed 8 at a time, whatever the parts it's read
+    /// in.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_print_mixes_every_byte_of_its_file_however_its_read() {
+        let scratch = Scratch::new("print");
+        fs::create_dir_all(&scratch.0).expect("a directory");
+        let path = scratch.0.join("long.png");
+        let bytes: Vec<u8> = (0..Print::CHUNK as u32 + 5)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        fs::write(&path, &bytes).expect("written");
+        let print = Print::of(&path).expect("read");
+        let length = bytes.len() as u64;
+        assert_eq!(
+            print,
+            Print {
+                length,
+                hash: mixed(0, &bytes)
+            }
+        );
+        let mut edited = bytes;
+        edited[Print::CHUNK + 2] ^= 1;
+        fs::write(&path, &edited).expect("written");
+        assert_ne!(Print::of(&path).expect("read"), print);
     }
 
     /// A copy of an asset made with its ID file has no ID while the original keeps it this run,
@@ -818,17 +1299,18 @@ mod tests {
         let x: AssetId = "5f3c9a1e07b2d846".parse().expect("an ID");
         fs::write(root.join("m.png"), "").expect("an asset");
         fs::write(root.join("m.png.meta"), Meta { id: x }.text()).expect("its ID file");
-        let catalog = scan(&Catalog::default(), root, true).expect("found");
+        let rescan = |catalog: &Catalog| scan(catalog, root, &mut Prints::default(), true);
+        let catalog = rescan(&Catalog::default()).expect("found");
         for name in ["m.png", "m.png.meta"] {
             fs::copy(root.join(name), root.join(name.replacen('m', "a", 1))).expect("copied");
         }
-        let catalog = scan(&catalog, root, true).expect("changed");
+        let catalog = rescan(&catalog).expect("changed");
         let (_, copy) = (catalog.listed().find(|&(path, _)| path == "a.png")).expect("listed");
         let problem = copy.problem.as_ref().expect("a problem");
         assert_eq!((copy.id, problem.code), (None, "asset.duplicate_id"));
         let told = "from the next run, a.png takes it";
         assert!(problem.message.contains(told), "{problem:?}");
-        let next = scan(&Catalog::default(), root, true).expect("found");
+        let next = rescan(&Catalog::default()).expect("found");
         let ids: Vec<_> = next
             .listed()
             .map(|(path, asset)| (path, asset.id))

@@ -23,8 +23,10 @@ use subsecond::HotFn;
 use tracing::{error, info, warn};
 
 #[cfg(feature = "dev")]
-use crate::assets::Catalog;
+use crate::asset_watch::AssetWatch;
 use crate::assets::{self, Assets, Loaded};
+#[cfg(feature = "dev")]
+use crate::assets::{Catalog, Prints};
 use crate::camera::{self, Camera, Tie};
 use crate::draw::{self, Poses, Scratch};
 use crate::edits::{Authors, Done, Edit};
@@ -301,6 +303,14 @@ pub struct Context {
     /// name textures as that run did: a texture they name that can't be loaded then stands in, as
     /// [`load_named`](Self::load_named) says, rather than refusing what names it.
     pub(crate) follows: bool,
+    /// Where the run keeps the prints of what its assets hold between runs, as [`assets::cache`]
+    /// says, if it can: a run's, never a test's.
+    #[cfg(feature = "dev")]
+    asset_cache: Option<PathBuf>,
+    /// The thread that keeps the asset database as the root changes, in a run that serves the tool
+    /// API, as [`start_assets`](Self::start_assets) starts it.
+    #[cfg(feature = "dev")]
+    asset_watch: Option<AssetWatch>,
     /// How long frames take, which the main loop measures and
     /// [`PerfPanel`](crate::PerfPanel) shows.
     pub(crate) perf: Perf,
@@ -345,8 +355,11 @@ impl Context {
         cx.root.clone_from(&app.root);
         cx.start = app.manifest().map(|manifest| manifest.start.clone());
         #[cfg(feature = "dev")]
-        if let Some(manifest) = app.manifest() {
-            cx.folders.clone_from(&manifest.scenes);
+        {
+            if let Some(manifest) = app.manifest() {
+                cx.folders.clone_from(&manifest.scenes);
+            }
+            cx.asset_cache = (cx.root.as_deref()).and_then(|root| assets::cache(app.name, root));
         }
         cx
     }
@@ -448,6 +461,10 @@ impl Context {
             #[cfg(feature = "dev")]
             given: None,
             follows: false,
+            #[cfg(feature = "dev")]
+            asset_cache: None,
+            #[cfg(feature = "dev")]
+            asset_watch: None,
             perf: Perf::default(),
             paused: false,
             authors: Authors::default(),
@@ -642,8 +659,9 @@ impl Context {
     /// it from the next frame that renders.
     ///
     /// A file added again, by whatever form of its path, gives the texture it gave first, without
-    /// loading it again, as ARCHITECTURE.md's Rendering says; `name` is then unused, and the
-    /// texture keeps the path it was first added by, which another path names too. Scenes,
+    /// loading it again, as ARCHITECTURE.md's Rendering says, and so does an asset's file renamed
+    /// or moved since, by the ID that names it; `name` is then unused, and the texture keeps the
+    /// path it was first added by, which another path names too. Scenes,
     /// snapshots, recordings and the tool API name it by its asset ID, where its file has one, as
     /// ARCHITECTURE.md's Project state says, and otherwise by that path.
     ///
@@ -655,11 +673,8 @@ impl Context {
         let path = path.as_ref();
         let named = assets::name_of(self.root.as_deref(), path);
         let file = assets::file_of(path);
-        let texture = match file
-            .as_ref()
-            .and_then(|file| self.loaded.textures.get(file))
-        {
-            Some(&(texture, _)) => {
+        let texture = match self.loaded_texture(&named, path, file.as_deref()) {
+            Some((texture, _)) => {
                 self.alias(texture, &named);
                 texture
             }
@@ -696,11 +711,8 @@ impl Context {
         let path = path.as_ref();
         let named = assets::name_of(self.root.as_deref(), path);
         let file = assets::file_of(path);
-        let sheet = match file
-            .as_ref()
-            .and_then(|file| self.loaded.textures.get(file))
-        {
-            Some(&(texture, size)) => {
+        let sheet = match self.loaded_texture(&named, path, file.as_deref()) {
+            Some((texture, size)) => {
                 fits(name, path, size, cell)?;
                 self.alias(texture, &named);
                 SpriteSheet {
@@ -1109,6 +1121,30 @@ impl Context {
         at
     }
 
+    /// The texture loaded from `file`, which a layer gave as `path`, whose path among assets is
+    /// `named`, with its size, if one was: by the file, as [`Loaded`] keeps it; or else, in a
+    /// development build, the one loaded from the asset's file before it was renamed or moved,
+    /// which its ID names, kept for `file` too from then on, so that an asset loads once whatever
+    /// its file's been called.
+    fn loaded_texture(
+        &mut self,
+        named: &str,
+        path: &Path,
+        file: Option<&Path>,
+    ) -> Option<(Texture, [u32; 2])> {
+        if let Some(&found) = file.and_then(|file| self.loaded.textures.get(file)) {
+            return Some(found);
+        }
+        let id = self.texture_name(named, path, file, None);
+        let texture = self.assets.texture(&id).filter(|_| assets::is_id(&id))?;
+        let loaded = self.loaded.textures.values();
+        let found = loaded.copied().find(|&(loaded, _)| loaded == texture)?;
+        if let Some(file) = file {
+            self.loaded.textures.insert(file.to_owned(), found);
+        }
+        Some(found)
+    }
+
     /// The ID the asset database holds for `file`, which a layer gave as `path`: by that path
     /// from the root, if it's given inside it, as layers spell a file's path as its disk does, or
     /// else by the path from the root of the file the OS resolves it to, as through `..`, a link
@@ -1177,28 +1213,93 @@ impl Context {
 
     /// Scans the assets under the app's root, as [`assets::scan`] says, writing the ID files
     /// missing if `writes`, and warning of each missing otherwise, and has the worlds share what it
-    /// found: as a run starts, before the layers load, as a test's context is given its root, and
-    /// as the tool API lists them. A context without a root has none. A texture is named by the ID
+    /// found: as a test's context is given its root, and as the tool API lists them in a run that
+    /// no thread watches them for. A context without a root has none. A texture is named by the ID
     /// the database holds for it as it's added, so that a scan after names none afresh.
     ///
     /// Each scan walks the whole root and reads every ID file on the main thread, O(files), and
     /// clones the catalog, O(assets): about 70 ms for 1,000 assets on Windows, but a few
     /// milliseconds apiece for ID files just copied in, the first time they're read; and each ID
-    /// file it writes is flushed to the disk, about 6 ms apiece. So an `assets` after copying in
-    /// about 1,500 assets without ID files, or 3,000 with them, stops frames past `gg run`'s 10 s
-    /// `--hang`, and `gg run` restarts the game from its last snapshot, losing play since, while
-    /// the restart's own scan, within the 120 s a run has to start, writes the rest. Phase 7's
-    /// fourth milestone, renames that keep IDs, watches the root on a thread of its own instead,
-    /// leaving a run's start the only scan.
+    /// file it writes is flushed to the disk, about 6 ms apiece.
     #[cfg(feature = "dev")]
     pub(crate) fn scan_assets(&mut self, writes: bool) {
+        self.scan_with(&mut Prints::default(), writes);
+    }
+
+    /// Scans the assets under the app's root, as [`scan_assets`](Self::scan_assets) does, pairing
+    /// renames by `prints`.
+    #[cfg(feature = "dev")]
+    fn scan_with(&mut self, prints: &mut Prints, writes: bool) {
         let Some(root) = self.root.as_deref() else {
             return;
         };
         let _zone = gg_core::zone!();
-        if let Some(catalog) = assets::scan(self.assets.catalog(), root, writes) {
+        if let Some(catalog) = assets::scan(self.assets.catalog(), root, prints, writes) {
             self.add_assets(|assets| assets.set_catalog(catalog));
         }
+    }
+
+    /// As a run starts, before the layers load, scans the assets under the app's root, as
+    /// [`scan_assets`](Self::scan_assets) does, writing the ID files missing if `writes`, and
+    /// moving those that renames made since the last run left behind beside their assets, by the
+    /// prints its cache keeps, as [`assets::scanned`] says; then, if a tool API `serves` the run,
+    /// starts the thread that keeps the database from then on, as `asset_watch` says, warning if
+    /// it can't, so that the API's `assets` scans on the main thread instead. A context without a
+    /// root has none.
+    #[cfg(feature = "dev")]
+    pub(crate) fn start_assets(&mut self, serves: bool, writes: bool) {
+        let Some(root) = self.root.clone() else {
+            return;
+        };
+        let cache = self.asset_cache.clone().filter(|_| writes);
+        let mut prints = match &cache {
+            Some(cache) => Prints::read(cache, &root),
+            None => Prints::default(),
+        };
+        self.scan_with(&mut prints, writes);
+        if !serves {
+            return;
+        }
+        let catalog = self.assets.catalog().clone();
+        match AssetWatch::start(root, catalog, prints, writes, cache) {
+            Ok(watch) => self.asset_watch = Some(watch),
+            Err(error) => warn!(
+                code = error.code(),
+                "{error:#}; the tool API's `assets` scans the asset root itself"
+            ),
+        }
+    }
+
+    /// Takes the asset database the thread that watches the asset root sent since, if it changed,
+    /// and has the worlds share it: as a frame starts, before the tool API's requests are answered.
+    #[cfg(feature = "dev")]
+    pub(crate) fn take_assets(&mut self) {
+        let catalog = self.asset_watch.as_mut().and_then(AssetWatch::take);
+        if let Some(catalog) = catalog {
+            self.add_assets(|assets| assets.set_catalog(catalog));
+        }
+    }
+
+    /// Whether a thread watches the asset root, keeping the database.
+    #[cfg(feature = "dev")]
+    pub(crate) fn watches_assets(&self) -> bool {
+        self.asset_watch.is_some()
+    }
+
+    /// Asks the thread that watches the asset root to look now, as the tool API's `assets` does;
+    /// returns the look's number, which [`assets_answered`](Self::assets_answered) reaches once
+    /// it's taken; `None` in a run that no thread watches the root for.
+    #[cfg(feature = "dev")]
+    pub(crate) fn ask_assets(&self) -> Option<u64> {
+        self.asset_watch.as_ref().map(AssetWatch::ask)
+    }
+
+    /// The looks [`ask_assets`](Self::ask_assets) asked for that have been taken: those up to it.
+    #[cfg(feature = "dev")]
+    pub(crate) fn assets_answered(&self) -> u64 {
+        self.asset_watch
+            .as_ref()
+            .map_or(u64::MAX, AssetWatch::answered)
     }
 
     /// The asset database, as the last scan left it.
@@ -1208,13 +1309,16 @@ impl Context {
     }
 
     /// Whether a layer has added the file at `path` from the app's root, by whatever form of its
-    /// path, as a texture, a sprite sheet or a model: resolving the file, some 0.1 ms on Windows.
+    /// path, as a texture, a sprite sheet or a model, or a texture its asset's ID names is loaded,
+    /// as one loaded from it before it was renamed is: resolving the file, some 0.1 ms on Windows.
     #[cfg(feature = "dev")]
     pub(crate) fn has_added(&self, path: &str) -> bool {
         let file = (self.root.as_deref()).and_then(|root| assets::file_of(&root.join(path)));
-        file.is_some_and(|file| {
+        let by_file = file.is_some_and(|file| {
             self.loaded.textures.contains_key(&file) || self.loaded.models.contains_key(&file)
-        })
+        });
+        let id = self.assets.catalog().id(path);
+        by_file || id.is_some_and(|id| self.assets.texture(&id.to_string()).is_some())
     }
 
     /// Draws `mesh` with `shader` this frame, where `transform` places it in the world, over the
@@ -2880,6 +2984,80 @@ mod tests {
         assert_eq!(hash("assets/rock.png"), before, "renamed with its ID file");
         std::fs::remove_file(root.join("assets/rock.png.meta")).expect("removed");
         assert_ne!(hash("assets/rock.png"), before, "by its path, without one");
+    }
+
+    /// A texture's file renamed with its ID file while the run has it loaded, added again by its
+    /// new path once the database has it there, gives the texture loaded before, as by its ID,
+    /// loading nothing again; a sheet cut from it too.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_texture_renamed_while_loaded_loads_once_by_its_new_path() {
+        use gg_api::asset::Meta;
+
+        let scratch = crate::dirs::tests::Scratch::new("renamed-loaded");
+        let root = scratch.0.clone();
+        let assets = root.join("assets");
+        std::fs::create_dir_all(&assets).expect("a directory");
+        let png = image::tests::png(png::ColorType::Rgba, png::BitDepth::Eight, 2, &[9; 8], None);
+        std::fs::write(assets.join("stone.png"), png).expect("written");
+        let meta = Meta {
+            id: "5f3c9a1e07b2d846".parse().expect("an ID"),
+        };
+        std::fs::write(assets.join("stone.png.meta"), meta.text()).expect("written");
+        let mut cx = Context::seeded(0).root(root.clone());
+        let stone = cx.add_texture("stone", assets.join("stone.png"));
+        let stone = stone.expect("a texture");
+        for name in ["stone.png", "stone.png.meta"] {
+            let to = assets.join(name.replacen("stone", "rock", 1));
+            std::fs::rename(assets.join(name), to).expect("renamed");
+        }
+        cx.scan_assets(false);
+        let count = cx.assets.count();
+        let rock = cx.add_texture("rock", assets.join("rock.png"));
+        assert_eq!(rock.expect("a texture"), stone);
+        let sheet = cx.add_sprite_sheet("rock", assets.join("rock.png"), [1, 1]);
+        assert_eq!(sheet.expect("a sheet").texture, stone);
+        assert_eq!(cx.assets.count(), count, "nothing loaded again");
+        assert_eq!(cx.assets.texture("assets/rock.png"), Some(stone));
+    }
+
+    /// A run that serves the tool API and writes ID files keeps the prints of what its assets hold
+    /// in its cache, by the thread that watches them, so that the next run's start gives an asset
+    /// renamed alone while no run watched the ID it had, by the ID file the rename left behind; a
+    /// run that writes none reads no cache, and moves nothing.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_runs_start_keeps_the_id_of_an_asset_renamed_while_none_watched() {
+        let scratch = crate::dirs::tests::Scratch::new("start-renamed");
+        let root = scratch.0.join("game");
+        std::fs::create_dir_all(&root).expect("a directory");
+        std::fs::write(root.join("a.png"), "alpha").expect("an asset");
+        let cache = scratch.0.join("cache").join("prints.json");
+        let started = |serves, writes| {
+            let mut cx = Context::seeded(1);
+            cx.root = Some(root.clone());
+            cx.asset_cache = Some(cache.clone());
+            cx.start_assets(serves, writes);
+            cx
+        };
+        let mut cx = started(true, true);
+        let a = cx.catalog().id("a.png").expect("an ID written");
+        let look = cx.ask_assets().expect("a thread watches");
+        let until = std::time::Instant::now() + Duration::from_secs(30);
+        while cx.assets_answered() < look {
+            assert!(std::time::Instant::now() < until, "the thread looked");
+            std::thread::sleep(Duration::from_millis(5));
+            cx.take_assets();
+        }
+        drop(cx);
+        std::fs::rename(root.join("a.png"), root.join("b.png")).expect("renamed");
+        let reads = started(false, false);
+        assert_eq!(reads.catalog().id("b.png"), None, "a run that writes none");
+        assert!(root.join("a.png.meta").exists());
+        let writes = started(false, true);
+        assert_eq!(writes.catalog().id("b.png"), Some(a));
+        assert!(!writes.watches_assets(), "a run that serves no API");
+        assert!(!root.join("a.png.meta").exists(), "moved beside b.png");
     }
 
     /// A scene file loads the textures it names that no layer added, by an ID or by a path from the

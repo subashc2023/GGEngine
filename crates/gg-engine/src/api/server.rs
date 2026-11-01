@@ -110,6 +110,8 @@ pub(crate) struct Api {
     shared: Arc<Shared>,
     /// `step`s waiting for the simulation to have run as many ticks as each says.
     steps: Vec<(Reply, u64)>,
+    /// `assets` waiting for the thread that watches the asset root to have looked since each came.
+    listing: Vec<Listing>,
     /// `capture`s waiting for a frame handed off of their kind, bare or not, in the order they
     /// came.
     asked: Vec<Capturing>,
@@ -146,6 +148,16 @@ pub(crate) struct Api {
     taken: Sender<Taken>,
     /// Edits and patches offered to a lockstep session, waiting for the tick they apply before.
     offered: Vec<(Reply, Ticket, Offer)>,
+}
+
+/// An `assets` waiting for a look at the asset root, as `Context::ask_assets` numbered it, and the
+/// page it asks for.
+struct Listing {
+    reply: Reply,
+    look: u64,
+    kind: Option<AssetKind>,
+    skip: usize,
+    take: usize,
 }
 
 /// A `capture` waiting for its frame: where its answer goes, where its PNG goes, and whether it's
@@ -385,6 +397,7 @@ impl Api {
             held: None,
             shared,
             steps: Vec::new(),
+            listing: Vec::new(),
             asked: Vec::new(),
             riding: Vec::new(),
             riding_ticks: 0,
@@ -472,6 +485,21 @@ impl Api {
         self.answer(cx, stack, stepper, true)
     }
 
+    /// As frames pause, answers each `assets` waiting for a look from `cx`'s database as it is, as
+    /// `api::frames_paused` says.
+    pub(crate) fn frames_paused(&mut self, cx: &Context) {
+        for listing in self.listing.drain(..) {
+            let Listing {
+                reply,
+                kind,
+                skip,
+                take,
+                ..
+            } = listing;
+            reply.send(assets(cx, kind, skip, take));
+        }
+    }
+
     /// Answers the requests that have come, as [`serve`](Self::serve) says, `paused` if frames
     /// have paused.
     fn answer(
@@ -486,6 +514,20 @@ impl Api {
             .extract_if(.., |&mut (_, until)| until <= stepper.ticks);
         for (reply, _) in ran.collect::<Vec<_>>() {
             reply.result(&self.status(cx, stepper));
+        }
+        let answered = cx.assets_answered();
+        let looked = self
+            .listing
+            .extract_if(.., |listing| listing.look <= answered);
+        for listing in looked {
+            let Listing {
+                reply,
+                kind,
+                skip,
+                take,
+                ..
+            } = listing;
+            reply.send(assets(cx, kind, skip, take));
         }
         let applied = self
             .offered
@@ -612,7 +654,25 @@ impl Api {
                     });
                 }
                 Call::Assets { kind, skip, take } => {
-                    reply.send(assets(cx, stack.watches_scenes(), kind, skip, take));
+                    // While frames pause, a look the thread takes would wait for the next request
+                    // to be answered, so the database as the thread last sent it answers; and a run
+                    // that no thread watches the root for scans it here.
+                    let look = if paused { None } else { cx.ask_assets() };
+                    match look {
+                        Some(look) => self.listing.push(Listing {
+                            reply,
+                            look,
+                            kind,
+                            skip,
+                            take,
+                        }),
+                        None => {
+                            if !cx.watches_assets() {
+                                cx.scan_assets(stack.watches_scenes());
+                            }
+                            reply.send(assets(cx, kind, skip, take));
+                        }
+                    }
                 }
                 // A run stopped, or playing a copy, is snapshotted before its first tick too, so
                 // that a restart keeps the world as edited; what the layers queued as they attached
@@ -1017,15 +1077,13 @@ fn list(world: &World, with: Option<&str>, skip: usize, take: usize) -> Result<S
     Ok(serde_json::to_string(&list).expect("a list serializes"))
 }
 
-/// The page of the assets under `cx`'s root that `assets` asks for, and the orphaned ID files,
-/// scanned first, as [`Context::scan_assets`] does, writing the ID files missing if `writes`, as
-/// for a game alone or a lockstep session's host.
+/// The page of the assets under `cx`'s root that `assets` asks for, and the orphaned ID files, as
+/// the asset database holds them.
 ///
 /// Fails with `engine.no_root` for a game that names no asset root, and with `asset.unlisted`,
-/// naming the root, if the root can't be listed.
+/// naming the root, if the root couldn't be listed.
 fn assets(
-    cx: &mut Context,
-    writes: bool,
+    cx: &Context,
     kind: Option<AssetKind>,
     skip: usize,
     take: usize,
@@ -1035,7 +1093,6 @@ fn assets(
         return Err(Failure::new("engine.no_root", message));
     };
     let root = root.display().to_string();
-    cx.scan_assets(writes);
     let catalog = cx.catalog();
     if let Some(error) = catalog.unlisted() {
         let message = format!("can't scan the asset root, {root}: {error}");
@@ -2942,6 +2999,47 @@ mod tests {
         );
         assert_eq!(again, all, "the same IDs");
 
+        // With a thread watching the root, each answers once it has looked since it came: an
+        // asset renamed without its ID file is listed at its new path with its ID, still loaded,
+        // and one that came with the ID written it.
+        cx.start_assets(true, true);
+        assert!(cx.watches_assets());
+        let [b, c, d] = ["b", "c", "d"].map(|name| dir.0.join(format!("assets/{name}.png")));
+        let other =
+            crate::image::tests::png(png::ColorType::Rgba, png::BitDepth::Eight, 1, &[7; 4], None);
+        let ask = move |mut client: Client| {
+            let mut list = || client.call_as::<AssetList>("assets", json!({}));
+            let first = list().expect("a list");
+            fs::rename(&b, &c).expect("renamed");
+            fs::write(&d, other).expect("written");
+            (first, list().expect("a list"))
+        };
+        let (first, after) = serving(
+            &mut api,
+            &mut cx,
+            &mut Stack::default(),
+            &mut stepper,
+            session.clone(),
+            ask,
+            |_, cx, _| cx.take_assets(),
+        );
+        assert_eq!(first.assets, all.assets);
+        let expected = [
+            "assets/a.png",
+            "assets/c.png",
+            "assets/d.png",
+            "models/m.glb",
+        ];
+        assert_eq!(paths(&after), expected);
+        let c = &after.assets[1];
+        assert_eq!(
+            (c.id.as_deref(), c.loaded),
+            (Some("5f3c9a1e07b2d846"), true)
+        );
+        let written = Meta::read(&dir.0.join("assets/d.png.meta")).expect("its ID file");
+        assert_eq!(after.assets[2].id, Some(written.id.to_string()));
+        assert_eq!(after.orphans, all.orphans, "b.png's ID file moved");
+
         let refusals = [
             (Context::seeded(3), "engine.no_root"),
             (
@@ -2961,6 +3059,29 @@ mod tests {
             );
             assert_eq!(refused.code, code, "{}", refused.message);
         }
+    }
+
+    /// An `assets` waiting for a look at the asset root is answered as frames pause, from the
+    /// database as it is, rather than waiting for a frame or the next request.
+    #[test]
+    fn an_assets_waiting_for_a_look_is_answered_as_frames_pause() {
+        let (mut api, _) = started("Api Paused Assets");
+        let dir = Scratch::new("api-paused-assets");
+        fs::create_dir_all(&dir.0).expect("a directory");
+        fs::write(dir.0.join("a.png"), "").expect("an asset");
+        let cx = Context::seeded(2).root(dir.0.clone());
+        let (to, answers) = mpsc::channel();
+        api.listing.push(Listing {
+            reply: Reply { id: 7, to },
+            look: u64::MAX,
+            kind: None,
+            skip: 0,
+            take: 10,
+        });
+        api.frames_paused(&cx);
+        let answer = answers.try_recv().expect("answered");
+        assert!(answer.contains("\"a.png\""), "{answer}");
+        assert!(api.listing.is_empty());
     }
 
     /// A patch that can't apply is answered with `api.patch`: here, one whose table's reference is
