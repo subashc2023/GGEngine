@@ -1080,7 +1080,8 @@ impl Context {
         }
     }
 
-    /// Loads the model that text names `name`, as [`load_named`](Self::load_named) does. Gives the
+    /// Loads the model that text names `name`, as [`load_named`](Self::load_named) does, a file
+    /// loaded already taking the names alone, as [`load_path`](Self::load_path) says. Gives the
     /// path from the asset root its name led to, if it led to one.
     ///
     /// Fails as [`asset_path`](Self::asset_path) and [`add_model`](Self::add_model) do, and with
@@ -1091,16 +1092,23 @@ impl Context {
             Err(error) => return (None, Err(error)),
         };
         let loaded = self.named_file(name, &path).and_then(|file| {
-            let model = self.add_model(&path, &file)?;
-            if self.assets.model(name).is_none() {
-                self.add_assets(|assets| assets.alias_model(model, name.into()));
+            let resolved = assets::file_of(&file);
+            let model = match self.loaded_model(&path, &file, resolved.as_deref()) {
+                Some(model) => model,
+                None => self.add_model(&path, &file)?,
+            };
+            for named in [&*path, name] {
+                if self.assets.model(named).is_none() {
+                    self.add_assets(|assets| assets.alias_model(model, named.into()));
+                }
             }
             Ok(())
         });
         (Some(path), loaded)
     }
 
-    /// Loads the font that text names `name`, as [`load_named`](Self::load_named) does. Gives the
+    /// Loads the font that text names `name`, as [`load_named`](Self::load_named) does, a file
+    /// loaded already taking the names alone, as [`load_path`](Self::load_path) says. Gives the
     /// path from the asset root its name led to, if it led to one.
     ///
     /// Fails as [`asset_path`](Self::asset_path) and [`add_font`](Self::add_font) do, and with
@@ -1111,9 +1119,15 @@ impl Context {
             Err(error) => return (None, Err(error)),
         };
         let loaded = self.named_file(name, &path).and_then(|file| {
-            let font = self.add_font(&path, &file)?;
-            if self.assets.font(name).is_none() {
-                self.add_assets(|assets| assets.alias_font(font, name.into()));
+            let resolved = assets::file_of(&file);
+            let font = match self.loaded_font(&path, &file, resolved.as_deref()) {
+                Some(font) => font,
+                None => self.add_font(&path, &file)?,
+            };
+            for named in [&*path, name] {
+                if self.assets.font(named).is_none() {
+                    self.add_assets(|assets| assets.alias_font(font, named.into()));
+                }
             }
             Ok(())
         });
@@ -1219,13 +1233,20 @@ impl Context {
 
     /// Loads the texture at `path` from the asset root, which text names `name`, as
     /// [`add_texture`](Self::add_texture) loads a file, its name `name` too: a run that follows
-    /// another names it so, as that run did.
+    /// another names it so, as that run did. A file loaded already, as by a layer's add, takes the
+    /// names alone, unnoted, as [`Assets`] keeps its notes.
     ///
     /// Fails as [`named_file`](Self::named_file) does, and as `add_texture` does.
     fn load_path(&mut self, name: &str, path: &str) -> Result<()> {
         let file = self.named_file(name, path)?;
-        let texture = self.add_texture(path, &file)?;
-        self.alias(texture, &name.into());
+        let resolved = assets::file_of(&file);
+        let texture = match self.loaded_texture(path, &file, resolved.as_deref()) {
+            Some((texture, _)) => texture,
+            None => self.add_texture(path, &file)?,
+        };
+        for named in [path, name] {
+            self.alias(texture, &named.into());
+        }
         Ok(())
     }
 
@@ -4321,6 +4342,67 @@ mod tests {
         }
         assert!(width(&mut cx) > regular, "bold is wider");
         assert_eq!(cx.assets.font(id), Some(title), "under its handle");
+    }
+
+    /// Text that names by their IDs a font, a texture and a model a layer added already loads none
+    /// of them again, noting nothing, in a run that names them by their IDs and in one that names
+    /// them by their paths, as a lockstep joiner does until its host's names come: so that both
+    /// note what their layers added alike, by which what's opaque in the host's world comes back
+    /// in the joiner's. The run that names them by their paths names them by the IDs too from then
+    /// on.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn text_naming_by_id_what_a_layer_added_notes_nothing_however_the_run_names_it() {
+        use gg_api::asset::Meta;
+
+        let scratch = crate::dirs::tests::Scratch::new("named-loaded");
+        let root = scratch.0.join("game");
+        for dir in ["fonts", "textures", "models"] {
+            std::fs::create_dir_all(root.join(dir)).expect("a directory");
+        }
+        let png = image::tests::png(png::ColorType::Rgba, png::BitDepth::Eight, 1, &[9; 4], None);
+        let model = gltf::tests::model();
+        let files: [(&str, &[u8], &str); 3] = [
+            ("fonts/title.ttf", font::INTER, "4d5e6f708192a3b4"),
+            ("textures/tile.png", &png, "1a2b3c4d5e6f7081"),
+            ("models/m.glb", &model, "8192a3b4c5d6e7f8"),
+        ];
+        for (path, bytes, id) in files {
+            std::fs::write(root.join(path), bytes).expect("an asset");
+            let meta = Meta {
+                id: id.parse().expect("an ID"),
+            };
+            std::fs::write(root.join(format!("{path}.meta")), meta.text()).expect("its ID file");
+        }
+        let [
+            (font_path, _, font_id),
+            (texture_path, _, texture_id),
+            (model_path, _, model_id),
+        ] = files;
+        let mut notes = Vec::new();
+        for by_paths in [false, true] {
+            let mut cx = Context::seeded(0).root(root.clone());
+            if by_paths {
+                cx.name_as([]);
+            }
+            let font = cx.add_font("title", root.join(font_path)).expect("a font");
+            let texture = cx.add_texture("tile", root.join(texture_path));
+            let texture = texture.expect("a texture");
+            let model = cx.add_model("m", root.join(model_path)).expect("a model");
+            let added = cx.assets.added().to_vec();
+            let named = [
+                Asset::Font(font_id),
+                Asset::Texture(texture_id),
+                Asset::Model(model_id),
+            ];
+            cx.load_named(named, true);
+            assert_eq!(cx.assets.added(), added, "noted again");
+            assert_eq!(cx.assets.font(font_id), Some(font));
+            assert_eq!(cx.assets.texture(texture_id), Some(texture));
+            assert_eq!(cx.assets.model(model_id), Some(model));
+            notes.push(added);
+        }
+        assert_eq!(notes[0], notes[1]);
     }
 
     /// A font that a run following another can't load stands in, named as named, so that a scene

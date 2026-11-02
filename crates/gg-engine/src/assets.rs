@@ -77,7 +77,9 @@ pub(crate) struct Assets {
     /// shader's and a model's give the types their draws hold the bytes of too, by their names and
     /// sizes, and a shader's its blend, as
     /// `shader 1 2 1 shaders/colored.slang game::Colored 28 () 0 Opaque`, so that a draw comes back
-    /// only where its bytes mean what they did. A file added again counts again.
+    /// only where its bytes mean what they did. A file a layer adds again counts again; one that
+    /// text names, loaded already, doesn't, as a run that names it otherwise, as a lockstep joiner
+    /// by its path where its host has its ID, loads it so where that run doesn't.
     added: Vec<Arc<str>>,
     /// Why each texture that text named by a name no texture had couldn't be loaded, as the last
     /// try at loading such textures found it: its error's code and message, by that name, which a
