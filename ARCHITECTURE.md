@@ -56,8 +56,8 @@ The editor uses `gg-api` too, beside `gg-engine`, as a client of the tool API, a
 - **`gg-renderer`:** the render graph, passes, materials, lighting and post-processing. It owns
   the GPU resources and hands out handles to them.
 - **`gg-engine`:** the main loop, window and input, the job system and the render thread, scene
-  and assets, fonts and text, a game's UI, sounds, plus hot reload and the tool API in development
-  builds: what apps and games build on.
+  and assets, fonts and text, a game's UI, sounds and music, plus hot reload and the tool API in
+  development builds: what apps and games build on.
 - **`gg-macros`:** the derives `gg-engine` re-exports beside its traits of the same names,
   `Reflect` and `Component`. Rust builds a derive as a crate of its own; only `gg-engine`
   depends on it, and games derive through `gg-engine`.
@@ -1140,13 +1140,26 @@ it warns, and the old pipeline goes on drawing.
 
 ## Audio
 
-Sounds are kira's, mixed on cpal's audio thread, as the simulation's state never is: what plays
-follows from the world, and never feeds it. A layer loads a sound from a WAV, Ogg Vorbis, FLAC or
-MP3 file, which symphonia decodes whole into memory, as a game's short sounds are; music, not built
-yet, will stream. A tick queues a sound with `World::play_sound`, from nowhere, at a point or on an
-entity, in a resource of the world that the engine empties once each tick has run, playing what it
-held, so that no snapshot, hash, recording or scene holds one, and each lockstep peer plays what
-its own ticks queue. Layers play their UI's sounds as they update, with `Context::play_sound`.
+Sounds and music are kira's, mixed on cpal's audio thread, as the simulation's state never is: what
+plays follows from the world, and never feeds it. A layer loads a sound from a WAV, Ogg Vorbis, FLAC
+or MP3 file, which symphonia decodes whole into memory, as a game's short sounds are. A tick queues
+a sound with `World::play_sound`, from nowhere, at a point or on an entity, in a resource of the
+world that the engine empties once each tick has run, playing what it held, so that no snapshot,
+hash, recording or scene holds one, and each lockstep peer plays what its own ticks queue. Layers
+play their UI's sounds as they update, with `Context::play_sound`.
+
+Music streams: a layer loads it from the same formats, read whole into memory as compressed as its
+file is and decoded as it plays, on a thread of kira's for each play, so that a long piece takes
+little memory and a play never reads the disk, as a cooked package's audio, mapped into memory,
+won't. Layers play one at a time, with `Context::play_music`, looping from its start, the music
+before it fading out as it fades in. Playing the music playing goes on as it was, so that a layer
+can say each frame which plays; ticks play none, since a layer that reads the world as it updates
+plays what the world calls for. The decoder is the engine's, over symphonia, as kira's leaves the
+codec as it was across a seek, so that a loop's start would run on from the packets before it.
+
+What plays mixes through three buses: the music's, the sounds', and the main one over both, whose
+volumes layers set with `Context::set_volume`, gliding there over a fade, as a game's settings
+would, and as a menu ducks the music under it.
 
 A sound at a point or on an entity is panned and faded by where it shows in the game's view, the
 listener, as the frame handed off sees it: toward the side of the view it's on, halfway there at
@@ -1158,8 +1171,10 @@ despawned, it plays to its end from where the entity was last, as an impact's do
 it is gone.
 
 Windowed and embedded runs play sound, the editor's game among them, opening the system's default
-output device as their first sound loads, so that a game without sounds opens none; headless runs,
-replays and tests play none.
+output device as their first sound or music loads, so that a game without either opens none;
+headless runs, replays and tests play none. In development runs, music reloads as its file
+changes, its play crossfading to what the file holds now from where it was, so that an edit is heard
+at once, as a shader's is seen.
 
 ## Threads
 
@@ -1216,6 +1231,6 @@ on the main thread.
 | Shaders | Slang, compiled to SPIR-V by the Vulkan SDK's `slangc` rather than linked in: the engine's own as it builds, games' as they're added and, in development builds, as their files change, their SPIR-V checked against the shader contract |
 | Assets | glTF 2.0 in, read by the engine over `serde_json`; meshoptimizer for meshes and meshlets; BC-compressed textures in KTX2; until cooking, PNGs and JPEGs that `png` and `zune-jpeg` decode as layers add them |
 | Text | TrueType and OpenType fonts, whose outlines `skrifa` reads and `fdsm` bakes into multi-channel signed distance fields, as fonts load until they're cooked; text shaped by `harfrust`; `skrifa` and `harfrust` at the releases egui's own text takes |
-| Audio | `kira` on `cpal`, its sounds decoded by `symphonia`: tracks, panning and streaming, without allocating on the audio thread |
+| Audio | `kira` on `cpal`, its sounds and music decoded by `symphonia`, music through a decoder of the engine's: tracks as buses, panning and streaming, without allocating on the audio thread |
 
 Areas not listed here are undecided.

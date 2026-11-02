@@ -283,6 +283,27 @@ fn the_menu_takes_the_keys_while_its_open() {
     assert!(cx.exiting(), "Quit ends the run");
 }
 
+/// The music plays from the game's load, quieter while the menu's open, and as loud as it is once
+/// it closes.
+#[test]
+fn the_music_plays_quieter_under_the_menu() {
+    let (mut cx, mut shards) = attached(0x5eed);
+    assert!(cx.music_playing().is_some());
+    assert_eq!(cx.volume(Bus::Music), 1.0);
+    for (open, volume) in [(true, MUSIC_UNDER_MENU), (false, 1.0)] {
+        for pressed in [true, false] {
+            let escape = Event::Key {
+                key: Key::Escape,
+                pressed,
+                repeat: false,
+            };
+            let _ = shards.event(&mut cx, &escape);
+        }
+        assert_eq!(shards.menu.is_some(), open);
+        assert_eq!(cx.volume(Bus::Music), volume);
+    }
+}
+
 /// A new match puts both players back at their starts, at rest, and every score and match won at
 /// 0.
 #[test]

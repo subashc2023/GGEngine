@@ -13,7 +13,7 @@ path = "src/main.rs"
 [dependencies]
 bytemuck = { workspace = true, features = ["derive"] }
 # A development build, which serves the tool API, applies its scene file's saves and reloads its
-# shader, textures, font and sounds as they change.
+# shader, textures, font, sounds and music as they change.
 gg-engine = { workspace = true, features = ["dev"] }
 
 [dev-dependencies]

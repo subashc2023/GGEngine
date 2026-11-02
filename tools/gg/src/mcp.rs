@@ -49,11 +49,11 @@ path; a value you give may name it either way, by its path from the asset root, 
 one it hasn't loaded yet. A model is placed as an entity with a `ModelRoot` of it, under which the \
 game spawns the model's nodes, which you change through the model's file or the root, never \
 themselves. An entity's `Text` draws its text where the entity is, in its font, or the engine's \
-own for none. Edit the file of a shader, a texture, a model, a font or a sound the game has \
-loaded, and it reloads within a second or so, warning in its logs if it doesn't compile, decode \
-or bake; in a recorded run or a lockstep session, a model's nodes and materials change only as \
-the game next starts. You can't hear the game, but its logs say each sound it starts, `Sound \
-started`, at the debug level.";
+own for none. Edit the file of a shader, a texture, a model, a font, a sound or music the game \
+has loaded, and it reloads within a second or so, warning in its logs if it doesn't compile, \
+decode or bake, music playing on from where it was; in a recorded run or a lockstep session, a \
+model's nodes and materials change only as the game next starts. You can't hear the game, but its \
+logs say each sound and music it starts, `Sound started` and `Music started`, at the debug level.";
 
 /// Serves MCP on stdin and stdout until stdin ends, reaching the game `pick` picks.
 ///

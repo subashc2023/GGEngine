@@ -1,26 +1,46 @@
-//! Sounds: what layers load from audio files, decoded whole as they load, which ticks queue in the
-//! world and layers play as they update, each panned and faded by where it shows in the game's
-//! view, through kira, whose mixer runs on cpal's audio thread, as ARCHITECTURE.md's Audio says.
+//! Sounds and music: what layers load from audio files. Sounds decode whole as they load; ticks
+//! queue them in the world and layers play them as they update, each panned and faded by where it
+//! shows in the game's view. Music decodes as it plays, which layers play one at a time, looping.
+//! Both mix through volume buses in kira, whose mixer runs on cpal's audio thread, as
+//! ARCHITECTURE.md's Audio says.
 
 use std::io::Cursor;
 use std::mem;
 use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 
 use gg_core::math::libm::log10f;
 use gg_core::math::{Mat4, Vec3};
 use gg_core::{Error, Result};
 use gg_renderer::Viewpoint;
 use kira::backend::cpal::CpalBackend;
-use kira::sound::PlaybackState;
 use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
-use kira::{AudioManager, AudioManagerSettings, Decibels, Panning, Tween};
+use kira::sound::streaming::{Decoder, StreamingSoundData, StreamingSoundHandle};
+use kira::sound::{FromFileError, PlaybackState};
+use kira::track::{MainTrackBuilder, TrackBuilder, TrackHandle};
+use kira::{AudioManager, AudioManagerSettings, Decibels, Frame, Panning, Tween};
+use symphonia::core::audio::conv::{FromSample, IntoSample};
+use symphonia::core::audio::sample::Sample;
+use symphonia::core::audio::{Audio as _, AudioBuffer, GenericAudioBufferRef};
+use symphonia::core::codecs::CodecParameters;
+use symphonia::core::codecs::audio::AudioDecoder;
+use symphonia::core::formats::probe::Hint;
+use symphonia::core::formats::{FormatReader, SeekMode, SeekTo, TrackType};
+use symphonia::core::io::MediaSourceStream;
+use symphonia::core::units::Timestamp;
 use tracing::{debug, warn};
 
 use crate::{Entity, World, dirs};
 
 /// The most bytes a sound's file may hold, as it's decoded whole as it loads: some 90 seconds of
-/// CD-quality WAV, more than a game's sounds need; longer audio, as music, would stream.
-const MAX_FILE: u64 = 16 << 20;
+/// CD-quality WAV, more than a game's sounds need; longer audio is music, which streams.
+const MAX_SOUND: u64 = 16 << 20;
+
+/// The most bytes a music's file may hold, as it's read whole as it loads, as compressed as the
+/// file is, and decoded as it plays: over an hour of Ogg Vorbis at 128 kb/s, some 12 minutes of
+/// CD-quality FLAC.
+const MAX_MUSIC: u64 = 64 << 20;
 
 /// How far toward a side a sound at that edge of the view pans: halfway, so that the other ear
 /// still hears it, as kira pans at constant power, all of it in one ear at a side.
@@ -30,6 +50,14 @@ const PAN: f32 = 0.5;
 /// them.
 const FADE: f32 = 1.0;
 
+/// The quickest a fade goes: kira's default tween, as a change of volume any quicker clicks.
+const QUICKEST: Duration = Duration::from_millis(10);
+
+/// How long a play of music whose file changed crossfades to what the file holds now, from where it
+/// was.
+#[cfg(feature = "dev")]
+const RELOAD_FADE: Duration = Duration::from_millis(100);
+
 /// A sound a layer loaded with [`Context::add_sound`], whole in memory, which ticks queue with
 /// [`World::play_sound`] and layers play with [`Context::play_sound`]: as often as they like, many
 /// at once, each from its start. A handle, of the context that loaded it.
@@ -38,6 +66,29 @@ const FADE: f32 = 1.0;
 /// [`Context::play_sound`]: crate::Context::play_sound
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Sound(u32);
+
+/// Music a layer loaded with [`Context::add_music`]: its file's bytes, in memory as compressed as
+/// the file is, which a play decodes as it goes, looping. Layers play one at a time, with
+/// [`Context::play_music`]. A handle, of the context that loaded it.
+///
+/// [`Context::add_music`]: crate::Context::add_music
+/// [`Context::play_music`]: crate::Context::play_music
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Music(u32);
+
+/// A bus that what plays mixes through, whose volume layers set with [`Context::set_volume`], as a
+/// game's settings would, or a menu that ducks the music under it.
+///
+/// [`Context::set_volume`]: crate::Context::set_volume
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Bus {
+    /// All that plays: the music's bus and the sounds'.
+    Main,
+    /// The music.
+    Music,
+    /// The sounds: those ticks queue, and those layers play.
+    Sounds,
+}
 
 /// Where a sound plays from, which pans and fades it by where it shows in the game's view, the
 /// listener: toward the side of the view it's on, halfway there at the view's edge, and as loud as
@@ -161,10 +212,10 @@ pub(crate) fn decode(name: &str, path: &Path) -> Result<StaticSoundData> {
         Error::new("engine.bad_sound", message)
     };
     // A byte past the most a sound's file holds, so that a longer one is refused.
-    let bytes = dirs::read_file(path, MAX_FILE + 1)
+    let bytes = dirs::read_file(path, MAX_SOUND + 1)
         .map_err(|error| bad("can't be read".to_owned()).with_source(error))?;
-    if bytes.len() as u64 > MAX_FILE {
-        return Err(bad(format!("is more than {} MiB", MAX_FILE >> 20)));
+    if bytes.len() as u64 > MAX_SOUND {
+        return Err(bad(format!("is more than {} MiB", MAX_SOUND >> 20)));
     }
     // Its text in the message, rather than as a source: kira's error says its own source's.
     StaticSoundData::from_cursor(Cursor::new(bytes)).map_err(|error| {
@@ -174,16 +225,187 @@ pub(crate) fn decode(name: &str, path: &Path) -> Result<StaticSoundData> {
     })
 }
 
-/// The run's sounds: those the layers loaded, by their handles, kira's output, which plays them in
-/// a run that plays sound, and where those playing from a place are, which each frame pans and
-/// fades as the game's view hears them.
-#[derive(Default)]
+/// A music's file as it was read: its bytes, which each play decodes, and how many frames they
+/// hold, at their own rate.
+pub(crate) struct Encoded {
+    bytes: Arc<[u8]>,
+    pub(crate) frames: usize,
+}
+
+/// Reads the audio file at `path`, music `name`'s, whole, as [`Context::add_music`] says, and checks
+/// that a play can decode it: that it's WAV, Ogg Vorbis, FLAC or MP3 of a rate and a length it says,
+/// at least a frame long, and that its first packet decodes, of one channel or two. What's past its
+/// first packet decodes only as it plays.
+///
+/// Fails with `engine.bad_music` if the file can't be read, isn't a regular file, is more than
+/// 64 MiB, or isn't such audio.
+///
+/// [`Context::add_music`]: crate::Context::add_music
+pub(crate) fn read_music(name: &str, path: &Path) -> Result<Encoded> {
+    let zone = gg_core::zone!();
+    zone.text(path.display());
+    let bad = |problem: String| {
+        let message = format!("music {name:?} at {} {problem}", path.display());
+        Error::new("engine.bad_music", message)
+    };
+    // A byte past the most a music's file holds, so that a longer one is refused.
+    let bytes = dirs::read_file(path, MAX_MUSIC + 1)
+        .map_err(|error| bad("can't be read".to_owned()).with_source(error))?;
+    if bytes.len() as u64 > MAX_MUSIC {
+        return Err(bad(format!("is more than {} MiB", MAX_MUSIC >> 20)));
+    }
+    let bytes: Arc<[u8]> = bytes.into();
+    // Its text in the message, rather than as a source, as a sound's.
+    let undecoded = |error: FromFileError| {
+        bad(format!(
+            "doesn't decode as WAV, Ogg Vorbis, FLAC or MP3 of one or two channels: {error}"
+        ))
+    };
+    let mut stream = Stream::new(bytes.clone()).map_err(undecoded)?;
+    if stream.frames == 0 {
+        return Err(bad("holds no audio".to_owned()));
+    }
+    stream.decode().map_err(undecoded)?;
+    let frames = stream.frames;
+    Ok(Encoded { bytes, frames })
+}
+
+/// What decodes a music's bytes as a play goes, for kira's stream of it, as kira's own decoder does
+/// but that it resets the codec as it seeks: kira 0.12.6's doesn't, so the packet after a seek, as
+/// at a loop's end, runs on from those decoded before it, as Vorbis's and MP3's overlap, and every
+/// frame after it plays a block out of place. Once kira resets it, its own decoder, through
+/// `StreamingSoundData::from_cursor`, does as this does.
+struct Stream {
+    reader: Box<dyn FormatReader>,
+    codec: Box<dyn AudioDecoder>,
+    track: u32,
+    rate: u32,
+    frames: usize,
+}
+
+impl Stream {
+    /// A stream of `bytes`, probed for their format and their default audio track, and a codec for
+    /// it, as kira's decoder makes them.
+    fn new(bytes: Arc<[u8]>) -> Result<Self, FromFileError> {
+        let source = MediaSourceStream::new(Box::new(Cursor::new(bytes)), Default::default());
+        let probe = symphonia::default::get_probe();
+        let reader = probe.probe(
+            &Hint::default(),
+            source,
+            Default::default(),
+            Default::default(),
+        )?;
+        let track =
+            (reader.default_track(TrackType::Audio)).ok_or(FromFileError::NoDefaultTrack)?;
+        let Some(CodecParameters::Audio(parameters)) = &track.codec_params else {
+            return Err(FromFileError::NoDefaultTrack);
+        };
+        let rate = (parameters.sample_rate).ok_or(FromFileError::UnknownSampleRate)?;
+        let frames = track.num_frames.ok_or(FromFileError::UnknownDuration)?;
+        let frames = usize::try_from(frames).map_err(|_| FromFileError::UnknownDuration)?;
+        let codecs = symphonia::default::get_codecs();
+        let codec = codecs.make_audio_decoder(parameters, &Default::default())?;
+        let track = track.id;
+        Ok(Self {
+            reader,
+            codec,
+            track,
+            rate,
+            frames,
+        })
+    }
+}
+
+impl Decoder for Stream {
+    type Error = FromFileError;
+
+    fn sample_rate(&self) -> u32 {
+        self.rate
+    }
+
+    fn num_frames(&self) -> usize {
+        self.frames
+    }
+
+    fn decode(&mut self) -> Result<Vec<Frame>, FromFileError> {
+        let packet = loop {
+            match self.reader.next_packet()? {
+                Some(packet) if packet.track_id == self.track => break packet,
+                Some(_) => {}
+                None => return Ok(Vec::new()),
+            }
+        };
+        frames(&self.codec.decode(&packet)?)
+    }
+
+    fn seek(&mut self, index: usize) -> Result<usize, FromFileError> {
+        let to = SeekTo::Timestamp {
+            ts: Timestamp::new(index as i64),
+            track_id: self.track,
+        };
+        let seeked = self.reader.seek(SeekMode::Accurate, to)?;
+        // As the codec would otherwise run on from what it decoded before the seek.
+        self.codec.reset();
+        let at = usize::try_from(seeked.actual_ts.get()).unwrap_or(0);
+        Ok(at.min(self.frames))
+    }
+}
+
+/// What `buffer` holds as kira's frames, as kira's decoder makes them.
+///
+/// Fails if it holds more than two channels.
+fn frames(buffer: &GenericAudioBufferRef) -> Result<Vec<Frame>, FromFileError> {
+    match buffer {
+        GenericAudioBufferRef::U8(buffer) => frames_of(buffer),
+        GenericAudioBufferRef::U16(buffer) => frames_of(buffer),
+        GenericAudioBufferRef::U24(buffer) => frames_of(buffer),
+        GenericAudioBufferRef::U32(buffer) => frames_of(buffer),
+        GenericAudioBufferRef::S8(buffer) => frames_of(buffer),
+        GenericAudioBufferRef::S16(buffer) => frames_of(buffer),
+        GenericAudioBufferRef::S24(buffer) => frames_of(buffer),
+        GenericAudioBufferRef::S32(buffer) => frames_of(buffer),
+        GenericAudioBufferRef::F32(buffer) => frames_of(buffer),
+        GenericAudioBufferRef::F64(buffer) => frames_of(buffer),
+    }
+}
+
+/// [`frames`] for a buffer of samples of type `S`: one channel's in both of a frame's sides, or two
+/// channels' each in its own.
+fn frames_of<S: Sample>(buffer: &AudioBuffer<S>) -> Result<Vec<Frame>, FromFileError>
+where
+    f32: FromSample<S>,
+{
+    let sample = |sample: &S| -> f32 { (*sample).into_sample() };
+    match (buffer.num_planes(), buffer.plane(0), buffer.plane(1)) {
+        (1, Some(mono), _) => Ok(mono.iter().map(|s| Frame::from_mono(sample(s))).collect()),
+        (2, Some(left), Some(right)) => Ok((left.iter().zip(right))
+            .map(|(l, r)| Frame::new(sample(l), sample(r)))
+            .collect()),
+        _ => Err(FromFileError::UnsupportedChannelConfiguration),
+    }
+}
+
+/// A play of music, as kira's handle to it.
+type MusicHandle = StreamingSoundHandle<FromFileError>;
+
+/// The run's sounds and music: those the layers loaded, by their handles, kira's output, which
+/// plays them in a run that plays sound, where the sounds playing from a place are, which each
+/// frame pans and fades as the game's view hears them, the music playing, and the buses' volumes.
 pub(crate) struct Audio {
     output: Output,
     /// Each sound loaded, by its index: its name, and what it holds, which each play shares.
     sounds: Vec<(Box<str>, StaticSoundData)>,
+    /// Each music loaded, by its index: its name, and its file as it was read, which each play
+    /// decodes.
+    music: Vec<(Box<str>, Encoded)>,
     /// The sounds playing from a place, with where.
     playing: Vec<(StaticSoundHandle, Spot)>,
+    /// The music layers last had play, if any, with its play, while the output's open and it
+    /// started.
+    now_playing: Option<(Music, Option<MusicHandle>)>,
+    /// Each bus's volume as layers last set it, in [`Bus`]'s order, which the output takes as it
+    /// opens.
+    volumes: [f32; 3],
     /// The matrix from the world to the clip space of the view the last frame handed off with one
     /// that projects, which hears the sounds; `None` before any.
     listener: Option<Mat4>,
@@ -193,17 +415,41 @@ pub(crate) struct Audio {
     full: bool,
 }
 
-/// kira's output, which plays a run's sounds.
+impl Default for Audio {
+    fn default() -> Self {
+        Self {
+            output: Output::default(),
+            sounds: Vec::new(),
+            music: Vec::new(),
+            playing: Vec::new(),
+            now_playing: None,
+            volumes: [1.0; 3],
+            listener: None,
+            queued: Vec::new(),
+            full: false,
+        }
+    }
+}
+
+/// kira's output, which plays a run's sounds and music.
 #[derive(Default)]
 enum Output {
     /// None: the run plays no sound, as headless runs, replays and tests don't, or its output
     /// couldn't be opened.
     #[default]
     Silent,
-    /// None yet: the run plays sound from its first sound loaded, which opens it.
+    /// None yet: the run plays sound from its first sound or music loaded, which opens it.
     Unopened,
     /// Open, its mixer on cpal's audio thread.
-    Open(Box<AudioManager<CpalBackend>>),
+    Open(Box<Mixer>),
+}
+
+/// kira's output, open: its manager, and the tracks under its main track that the music and the
+/// sounds play on, the three of them the buses.
+struct Mixer {
+    manager: AudioManager<CpalBackend>,
+    music: TrackHandle,
+    sounds: TrackHandle,
 }
 
 impl Audio {
@@ -215,15 +461,29 @@ impl Audio {
         }
     }
 
-    /// Adds `data`, sound `name`'s, opening the output as the first is added to a run that plays
-    /// sound, as [`open`] says.
-    pub(crate) fn add(&mut self, name: &str, data: StaticSoundData) -> Sound {
+    /// Opens the output, as the first sound or music is added to a run that plays sound, as
+    /// [`open`] says.
+    fn adding(&mut self) {
         if matches!(self.output, Output::Unopened) {
-            self.output = open();
+            self.output = open(self.volumes);
         }
+    }
+
+    /// Adds `data`, sound `name`'s, opening the output as the first sound or music is added to a
+    /// run that plays sound, as [`open`] says.
+    pub(crate) fn add(&mut self, name: &str, data: StaticSoundData) -> Sound {
+        self.adding();
         let index = u32::try_from(self.sounds.len()).expect("fewer than 2³² sounds");
         self.sounds.push((name.into(), data));
         Sound(index)
+    }
+
+    /// Adds `encoded`, music `name`'s, opening the output as [`add`](Self::add) does.
+    pub(crate) fn add_music(&mut self, name: &str, encoded: Encoded) -> Music {
+        self.adding();
+        let index = u32::try_from(self.music.len()).expect("fewer than 2³² pieces of music");
+        self.music.push((name.into(), encoded));
+        Music(index)
     }
 
     /// Puts `data` in place of what `sound` holds, which its plays take from then on; those playing
@@ -233,10 +493,34 @@ impl Audio {
         self.sounds[sound.0 as usize].1 = data;
     }
 
+    /// Puts `encoded` in place of what `music` holds, which its plays take from then on: one
+    /// playing crossfades to it over [`RELOAD_FADE`], from where it was, or as far into its loop.
+    #[cfg(feature = "dev")]
+    pub(crate) fn replace_music(&mut self, music: Music, encoded: Encoded) {
+        self.music[music.0 as usize].1 = encoded;
+        let playing = self.now_playing.as_mut();
+        let Some((_, handle)) = playing.filter(|(playing, _)| *playing == music) else {
+            return;
+        };
+        let at = handle.take().map_or(0.0, |mut handle| {
+            let at = handle.position();
+            handle.stop(tween(RELOAD_FADE));
+            at
+        });
+        let handle = self.start_music(music, at, RELOAD_FADE);
+        self.now_playing = Some((music, handle));
+    }
+
     /// How many frames `sound` holds, at its own rate.
     #[cfg(test)]
     pub(crate) fn frames(&self, sound: Sound) -> usize {
         self.sounds[sound.0 as usize].1.num_frames()
+    }
+
+    /// How many frames `music` holds, at its own rate.
+    #[cfg(test)]
+    pub(crate) fn music_frames(&self, music: Music) -> usize {
+        self.music[music.0 as usize].1.frames
     }
 
     /// Plays `sound` from `place` in `world` now, as [`Context::play_sound`] says.
@@ -279,11 +563,11 @@ impl Audio {
                 sound.0
             );
         };
-        let Output::Open(output) = &mut self.output else {
+        let Output::Open(mixer) = &mut self.output else {
             return;
         };
         let (panning, volume) = heard(self.listener.as_ref(), spot.follow(world));
-        match output.play(data.panning(panning).volume(volume)) {
+        match mixer.sounds.play(data.panning(panning).volume(volume)) {
             Ok(handle) => {
                 self.full = false;
                 debug!(sound = &**name, "Sound started");
@@ -305,21 +589,129 @@ impl Audio {
         }
     }
 
+    /// Plays `music`, or none, in place of the music playing, fading over `fade`, as
+    /// [`Context::play_music`] says.
+    ///
+    /// # Panics
+    ///
+    /// If `music` is another context's, past those loaded here.
+    ///
+    /// [`Context::play_music`]: crate::Context::play_music
+    pub(crate) fn play_music(&mut self, music: Option<Music>, fade: Duration) {
+        if let Some(Music(index)) = music {
+            let loaded = self.music.len();
+            let here = (index as usize) < loaded;
+            assert!(
+                here,
+                "music {index} is another context's, of the {loaded} loaded here"
+            );
+        }
+        if self.music_playing() == music {
+            return;
+        }
+        if let Some((_, Some(mut handle))) = self.now_playing.take() {
+            handle.stop(tween(fade));
+        }
+        let started = music.map(|music| (music, self.start_music(music, 0.0, fade)));
+        self.now_playing = started;
+    }
+
+    /// The music layers last had play, if any.
+    pub(crate) fn music_playing(&self) -> Option<Music> {
+        self.now_playing.as_ref().map(|&(music, _)| music)
+    }
+
+    /// Starts `music` from `at` seconds into it, or as far into its loop, fading in over `fade`, on
+    /// the music's bus, looping, if the output's open; or, if it can't, warns
+    /// `audio.music_failed`.
+    fn start_music(&mut self, music: Music, at: f64, fade: Duration) -> Option<MusicHandle> {
+        let Output::Open(mixer) = &mut self.output else {
+            return None;
+        };
+        let (name, encoded) = &self.music[music.0 as usize];
+        let stream = Stream::new(encoded.bytes.clone());
+        let stream = stream.expect("a music's bytes probe as they did as they were read");
+        let at = at % (encoded.frames as f64 / f64::from(stream.rate));
+        let data = StreamingSoundData::from_decoder(stream)
+            .loop_region(..)
+            .start_position(at)
+            .fade_in_tween(tween(fade));
+        match mixer.music.play(data) {
+            Ok(handle) => {
+                // Where in it, in seconds, as a reload starts it from where it was.
+                debug!(music = &**name, at, "Music started");
+                Some(handle)
+            }
+            // A seek to where it starts that fails, or a full track.
+            Err(error) => {
+                warn!(
+                    code = "audio.music_failed",
+                    music = &**name,
+                    "Music {name:?} can't start: {error}"
+                );
+                None
+            }
+        }
+    }
+
+    /// Has `bus`'s volume go to `volume` over `fade`, as [`Context::set_volume`] says.
+    ///
+    /// # Panics
+    ///
+    /// If `volume` isn't a finite number.
+    ///
+    /// [`Context::set_volume`]: crate::Context::set_volume
+    pub(crate) fn set_volume(&mut self, bus: Bus, volume: f32, fade: Duration) {
+        assert!(
+            volume.is_finite(),
+            "a bus's volume is {volume}, not a number"
+        );
+        let volume = volume.max(0.0);
+        if mem::replace(&mut self.volumes[bus as usize], volume) == volume {
+            return;
+        }
+        let Output::Open(mixer) = &mut self.output else {
+            return;
+        };
+        let (volume, fade) = (decibels(volume), tween(fade));
+        match bus {
+            Bus::Main => mixer.manager.main_track().set_volume(volume, fade),
+            Bus::Music => mixer.music.set_volume(volume, fade),
+            Bus::Sounds => mixer.sounds.set_volume(volume, fade),
+        }
+    }
+
+    /// `bus`'s volume, as layers last set it.
+    pub(crate) fn volume(&self, bus: Bus) -> f32 {
+        self.volumes[bus as usize]
+    }
+
     /// Has the sounds playing from a place pan and fade as the view of the frame being handed off
     /// hears them, seeing from `viewpoint`, `size` pixels across and down, while it has an area,
     /// following each on an entity of `world` that's alive to where the latest tick left it, as
     /// [`Place::On`] says; and forgets those that have ended. Warns `audio.output_failed` of what
     /// went wrong with the output since, which kira opens again on the system's default output
-    /// device, as it does as that changes. It allocates nothing unless something went wrong.
+    /// device, as it does as that changes, and `audio.music_failed` of what went wrong decoding
+    /// the music playing, which stops it. It allocates nothing unless something went wrong.
     pub(crate) fn hear_from(&mut self, viewpoint: &Viewpoint, size: [u32; 2], world: &World) {
-        let Output::Open(output) = &mut self.output else {
+        let Output::Open(mixer) = &mut self.output else {
             return;
         };
-        while let Some(error) = output.backend_mut().pop_error() {
+        while let Some(error) = mixer.manager.backend_mut().pop_error() {
             warn!(
                 code = "audio.output_failed",
                 "The sound's output failed: {error}; it opens again on the default output device"
             );
+        }
+        if let Some((music, Some(handle))) = &mut self.now_playing {
+            while let Some(error) = handle.pop_error() {
+                let name = &*self.music[music.0 as usize].0;
+                warn!(
+                    code = "audio.music_failed",
+                    music = name,
+                    "Music {name:?} failed as it played: {error}; it stops"
+                );
+            }
         }
         let [width, height] = size.map(|side| side as f32);
         if width > 0.0 && height > 0.0 && viewpoint.projection.projects() {
@@ -339,15 +731,30 @@ impl Audio {
     }
 }
 
-/// Opens kira's output on the system's default output device, its mixer on cpal's audio thread;
-/// or, if it can't, as on a machine without one, warns `audio.no_output` with why, and the run
-/// plays no sound.
-fn open() -> Output {
+/// Opens kira's output on the system's default output device, its mixer on cpal's audio thread,
+/// with a track under its main track for the music and one for the sounds, each bus at its volume
+/// in `volumes`, in [`Bus`]'s order; or, if it can't, as on a machine without one, warns
+/// `audio.no_output` with why, and the run plays no sound.
+fn open(volumes: [f32; 3]) -> Output {
     let _zone = gg_core::zone!("open the sound's output");
-    match AudioManager::<CpalBackend>::new(AudioManagerSettings::default()) {
-        Ok(output) => {
+    let [main, music, sounds] = volumes.map(decibels);
+    let settings = AudioManagerSettings {
+        main_track_builder: MainTrackBuilder::new().volume(main),
+        ..AudioManagerSettings::default()
+    };
+    match AudioManager::<CpalBackend>::new(settings) {
+        Ok(mut manager) => {
+            let mut track = |volume: Decibels| {
+                let track = manager.add_sub_track(TrackBuilder::new().volume(volume));
+                track.expect("two of the 128 tracks kira's mixer takes")
+            };
+            let (music, sounds) = (track(music), track(sounds));
             debug!("The sound's output opened");
-            Output::Open(Box::new(output))
+            Output::Open(Box::new(Mixer {
+                manager,
+                music,
+                sounds,
+            }))
         }
         Err(error) => {
             warn!(
@@ -356,6 +763,24 @@ fn open() -> Output {
             );
             Output::Silent
         }
+    }
+}
+
+/// A tween over `fade`, or over [`QUICKEST`] if that's sooner.
+fn tween(fade: Duration) -> Tween {
+    Tween {
+        duration: fade.max(QUICKEST),
+        ..Tween::default()
+    }
+}
+
+/// `amplitude` in decibels: 1 as loud as it is, 0.5 half as loud, about -6 dB, down to silence at
+/// 0, or below, where kira's silence, -60 dB, is reached.
+fn decibels(amplitude: f32) -> Decibels {
+    if amplitude > 0.0 {
+        Decibels((20.0 * log10f(amplitude)).max(Decibels::SILENCE.0))
+    } else {
+        Decibels::SILENCE
     }
 }
 
@@ -375,12 +800,7 @@ fn heard(listener: Option<&Mat4>, at: Option<Vec3>) -> (Panning, Decibels) {
     }
     // Clip space spans the view from -1 to 1, across and down.
     let beyond = (x.abs().max(y.abs()) - 1.0).max(0.0);
-    let amplitude = 1.0 - beyond / (2.0 * FADE);
-    let volume = if amplitude > 0.0 {
-        Decibels((20.0 * log10f(amplitude)).max(Decibels::SILENCE.0))
-    } else {
-        Decibels::SILENCE
-    };
+    let volume = decibels(1.0 - beyond / (2.0 * FADE));
     (Panning(x.clamp(-1.0, 1.0) * PAN), volume)
 }
 
@@ -521,5 +941,97 @@ pub(crate) mod tests {
         }
         let queue = world.resource::<Queue>().expect("the queue");
         assert!(queue.0.capacity() >= 2 && audio.queued.capacity() >= 2);
+    }
+
+    /// Ogg Vorbis that a stream seeks back to the start of, as a loop's end does, decodes as it
+    /// did from its start, bit for bit, rather than run on from what it decoded before the seek, a
+    /// block out of place.
+    #[test]
+    fn music_decodes_alike_after_seeking_back_as_a_loop_does() {
+        let bytes = include_bytes!("../tests/audio/tone.ogg");
+        let mut stream = Stream::new(bytes.as_slice().into()).expect("Ogg Vorbis");
+        assert_eq!((stream.rate, stream.frames), (48_000, 24_000));
+        let mut passes = Vec::new();
+        for _ in 0..2 {
+            let start = stream.seek(0).expect("a seek to the start");
+            // A packet may decode to no frames, as Vorbis's first does, so packets are read until
+            // the stream's frames are, as kira reads them.
+            let mut frames = Vec::new();
+            for _ in 0..1_000 {
+                frames.extend(stream.decode().expect("a packet"));
+                if frames.len() >= stream.frames {
+                    break;
+                }
+            }
+            assert!(frames.len() >= 24_000, "{} frames", frames.len());
+            frames.truncate(24_000);
+            passes.push((start, frames));
+        }
+        assert!(passes[0] == passes[1], "the second pass decodes otherwise");
+    }
+
+    /// The music one layer had play last plays, until another or none: playing it again starts
+    /// nothing, so that a layer can say each frame what plays. Each bus starts at its full volume,
+    /// keeps what a layer last set it to, a number below 0 silence, and a run that plays no sound
+    /// keeps them as well.
+    #[test]
+    fn music_plays_one_at_a_time_and_buses_keep_their_volumes() {
+        let mut audio = Audio::default();
+        let encoded = |frames| Encoded {
+            bytes: Arc::from(wav(&vec![0; frames])),
+            frames,
+        };
+        let [match_music, menu_music] = [encoded(480), encoded(960)].map(|music| {
+            let music = audio.add_music("music", music);
+            assert_eq!(audio.music_playing(), None);
+            music
+        });
+        assert_eq!(audio.music_frames(menu_music), 960);
+        let second = Duration::from_secs(1);
+        audio.play_music(Some(match_music), second);
+        audio.play_music(Some(match_music), Duration::ZERO);
+        assert_eq!(audio.music_playing(), Some(match_music));
+        audio.play_music(Some(menu_music), second);
+        assert_eq!(audio.music_playing(), Some(menu_music));
+        audio.play_music(None, second);
+        assert_eq!(audio.music_playing(), None);
+        assert_eq!(
+            [Bus::Main, Bus::Music, Bus::Sounds].map(|bus| audio.volume(bus)),
+            [1.0; 3]
+        );
+        audio.set_volume(Bus::Music, 0.25, second);
+        audio.set_volume(Bus::Sounds, -1.0, second);
+        assert_eq!(audio.volume(Bus::Music), 0.25);
+        assert_eq!(audio.volume(Bus::Sounds), 0.0);
+        assert_eq!(audio.volume(Bus::Main), 1.0);
+    }
+
+    /// A file that's music reads, its frames counted, and one that isn't, holds none, or isn't
+    /// there is refused, naming the music and its file.
+    #[test]
+    fn music_reads_whole_and_refuses_what_isnt_any() {
+        let scratch = crate::dirs::tests::Scratch::new("music-read");
+        std::fs::create_dir_all(&scratch.0).expect("a directory");
+        let tone = scratch.0.join("tone.ogg");
+        std::fs::write(&tone, include_bytes!("../tests/audio/tone.ogg")).expect("a file");
+        assert_eq!(read_music("tone", &tone).expect("music").frames, 24_000);
+        let empty = wav(&[]);
+        let files = [
+            ("noise.ogg", &b"OggS, but no more"[..], "doesn't decode"),
+            ("empty.wav", &empty, "holds no audio"),
+        ];
+        for (file, bytes, why) in files {
+            std::fs::write(scratch.0.join(file), bytes).expect("a file");
+            let Err(error) = read_music("bad", &scratch.0.join(file)) else {
+                panic!("{file} reads as music");
+            };
+            assert_eq!(error.code(), "engine.bad_music");
+            let message = format!("{error:#}");
+            assert!(message.contains(file) && message.contains(why), "{message}");
+        }
+        let Err(error) = read_music("none", &scratch.0.join("none.ogg")) else {
+            panic!("a file that isn't there reads as music");
+        };
+        assert_eq!(error.code(), "engine.bad_music");
     }
 }

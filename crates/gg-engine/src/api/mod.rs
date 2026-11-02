@@ -67,7 +67,7 @@ pub(crate) fn start(
 
 /// As a frame starts, before its ticks, in a development build, takes the asset database as the
 /// thread that watches the root last sent it, as `Context::take_assets` says, and the shaders,
-/// textures, models, fonts and sounds read again as their files changed, as
+/// textures, models, fonts, sounds and music read again as their files changed, as
 /// `Context::take_reloaded` says,
 /// applies the scene files saved since, as [`scene_files::look`] says, and answers the requests
 /// that have come, from `cx`, whose layers are `stack`'s and whose simulation `stepper` steps, as

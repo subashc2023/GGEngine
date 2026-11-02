@@ -87,16 +87,17 @@ there. renderdoccmd exits 0 whatever the run does, so read the run's log. `rende
 
 Development builds (gg-engine's `dev`, the apps' and the games') serve the tool API, apply a
 scene file a layer loaded with `Context::load_scene_file` as it's saved, and, serving the API,
-reload a game's shaders, textures, models, fonts and sounds as their files change (`Shader
-reloaded`, `Texture reloaded`, `Model reloaded`, `Font reloaded`, `Sound reloaded`), warning at a
-change that fails. Windowed and embedded runs play sound, which an agent can't hear: each sound
-started logs `Sound started` at the debug level. Run a
-game under `cargo gg run`, in the background: it patches in an edit inside function bodies as it's
-saved, with Dioxus's `dx` of the root Cargo.toml's `subsecond` release (`gg` names its install),
-and restarts it from a snapshot after any other change, a crash or a hang (without `dx`, after a
-`cargo build`). `cargo gg status`, `capture` (a PNG), `set`, `undo`, `logs --follow` and the
-rest answer in JSON; `cargo gg mcp` serves them over MCP. A layer's `load` makes its assets; its
-`attach`, which a restart skips, builds the world. Test `dev` with `--features dev -p gg-engine`.
+reload a game's shaders, textures, models, fonts, sounds and music as their files change (`Shader
+reloaded`, `Texture reloaded`, `Model reloaded`, `Font reloaded`, `Sound reloaded`, `Music
+reloaded`), warning at a change that fails. Windowed and embedded runs play sound, which an agent
+can't hear: each sound or music started logs `Sound started` or `Music started` at the debug level.
+Run a game under `cargo gg run`, in the background: it patches in an edit inside function bodies
+as it's saved, with Dioxus's `dx` of the root Cargo.toml's `subsecond` release (`gg` names its
+install), and restarts it from a snapshot after any other change, a crash or a hang (without `dx`,
+after a `cargo build`). `cargo gg status`, `capture` (a PNG), `set`, `undo`, `logs --follow` and
+the rest answer in JSON; `cargo gg mcp` serves them over MCP. A layer's `load` makes its assets;
+its `attach`, which a restart skips, builds the world. Test `dev` with `--features dev -p
+gg-engine`.
 
 A change is done when all seven pass:
 

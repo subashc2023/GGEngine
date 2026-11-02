@@ -6,9 +6,10 @@
 //! applies as it's saved; its floor is its shader, `shaders/floor.slang`, which it reloads as it's
 //! saved; its scores are text in its font, `fonts/Inter-Bold.ttf`, on the view's canvas, in its top
 //! corners; Escape or a pad's Start opens its menu there, over the match, which goes on meanwhile:
-//! Resume; New match, a command that both lockstep peers apply; and Quit; and its sounds,
+//! Resume; New match, a command that both lockstep peers apply; and Quit; its sounds,
 //! `sounds/*.wav`, play as a disc dashes, following it, as a shard is collected, where it was, as a
-//! match is won, and as the menu's focus moves and an item is chosen.
+//! match is won, and as the menu's focus moves and an item is chosen; and its music,
+//! `music/match.ogg`, loops from the start, quieter while the menu's open.
 
 use std::fmt::Write as _;
 use std::ops::ControlFlow;
@@ -19,7 +20,7 @@ use std::time::Duration;
 use bytemuck::NoUninit;
 use gg_engine::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_engine::{
-    Actions, Align, App, Binding, Blend, BodyType, Camera, Change, Circle, CircleCollider2D,
+    Actions, Align, App, Binding, Blend, BodyType, Bus, Camera, Change, Circle, CircleCollider2D,
     Commands, Component, Context, Entity, Event, Font, Key, Layer, Mesh, MouseButton, Name,
     PadButton, Physics2D, Place, Projection, Reflect, RigidBody2D, Shader, Sound, Source, Sprite,
     Stick, TextStyle, Tick, Transform, World, step_physics,
@@ -100,6 +101,12 @@ const BUTTON: Vec2 = Vec2::new(440.0, 84.0);
 const FIRST_ITEM: f32 = 50.0;
 const ITEM_STEP: f32 = 104.0;
 const TITLE: f32 = 180.0;
+
+/// The music: how long it takes to fade in as the game loads; and how loud it is while the menu's
+/// open, about -9 dB, and how long it takes to get there and back.
+const MUSIC_FADE_IN: Duration = Duration::from_secs(2);
+const MUSIC_UNDER_MENU: f32 = 0.35;
+const MUSIC_DUCK: Duration = Duration::from_millis(300);
 
 /// A player's disc: which player steers it, which way it's steered, and its dash, the ticks left
 /// of it and until the next.
@@ -297,6 +304,9 @@ impl Layer for Shards {
             focus: sound(cx, "focus"),
             choose: sound(cx, "choose"),
         });
+        let music = cx.add_music("match", root.join("music/match.ogg"));
+        let music = music.expect("the game's music reads");
+        cx.play_music(Some(music), MUSIC_FADE_IN);
         register(cx.world_mut());
     }
 
@@ -455,6 +465,13 @@ impl Layer for Shards {
                 cx.play_sound(sounds.focus, Place::Nowhere);
             }
         }
+        // The music, quieter under this run's menu.
+        let music = if menu.is_some() {
+            MUSIC_UNDER_MENU
+        } else {
+            1.0
+        };
+        cx.set_volume(Bus::Music, music, MUSIC_DUCK);
         ControlFlow::Continue(())
     }
 }
