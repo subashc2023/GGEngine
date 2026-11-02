@@ -3,6 +3,8 @@
 //! lists and arrays of any reflected type. `usize` and `isize` aren't, since their size differs by
 //! platform, and a value saved or sent must mean the same everywhere.
 
+use std::any::Any;
+
 use gg_core::math::{Quat, Vec2, Vec3, Vec4};
 
 use super::{
@@ -66,6 +68,8 @@ macro_rules! integers {
                 to.$digest((*self).into());
             }
 
+            fn entities_mut(&mut self, _: &mut dyn FnMut(&mut Entity)) {}
+
             whole!();
         }
 
@@ -106,6 +110,14 @@ macro_rules! plain {
                 to.$digest(*self);
             }
 
+            /// Of these, an entity alone holds one: itself.
+            fn entities_mut(&mut self, each: &mut dyn FnMut(&mut Entity)) {
+                let any: &mut dyn Any = self;
+                if let Some(entity) = any.downcast_mut::<Entity>() {
+                    each(entity);
+                }
+            }
+
             whole!();
         }
     )*};
@@ -144,6 +156,8 @@ impl Reflect for String {
     fn digest(&self, to: &mut Digest<'_>) {
         to.bytes(self.as_bytes());
     }
+
+    fn entities_mut(&mut self, _: &mut dyn FnMut(&mut Entity)) {}
 
     whole!();
 }
@@ -196,6 +210,8 @@ macro_rules! vectors {
                     to.f32(component);
                 }
             }
+
+            fn entities_mut(&mut self, _: &mut dyn FnMut(&mut Entity)) {}
         }
 
         impl Ranged for $T {}
@@ -246,6 +262,8 @@ impl Reflect for Quat {
         }
     }
 
+    fn entities_mut(&mut self, _: &mut dyn FnMut(&mut Entity)) {}
+
     whole!();
 }
 
@@ -281,6 +299,12 @@ impl<T: Reflect> Reflect for Option<T> {
                 to.word(1);
                 value.digest(to);
             }
+        }
+    }
+
+    fn entities_mut(&mut self, each: &mut dyn FnMut(&mut Entity)) {
+        if let Some(value) = self {
+            value.entities_mut(each);
         }
     }
 
@@ -350,6 +374,12 @@ impl<T: Reflect> Reflect for Vec<T> {
             item.digest(to);
         }
     }
+
+    fn entities_mut(&mut self, each: &mut dyn FnMut(&mut Entity)) {
+        for item in self {
+            item.entities_mut(each);
+        }
+    }
 }
 
 impl<T: Ranged> Ranged for Vec<T> {}
@@ -403,6 +433,12 @@ impl<T: Reflect, const N: usize> Reflect for [T; N] {
     fn digest(&self, to: &mut Digest<'_>) {
         for item in self {
             item.digest(to);
+        }
+    }
+
+    fn entities_mut(&mut self, each: &mut dyn FnMut(&mut Entity)) {
+        for item in self {
+            item.entities_mut(each);
         }
     }
 }

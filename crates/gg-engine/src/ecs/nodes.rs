@@ -369,7 +369,7 @@ mod tests {
             path: "0".into(),
             value: Value::Model(other),
         };
-        let (_, mut inverse) = apply(world, set).expect("set");
+        let (_, mut inverse) = apply(world, set.clone()).expect("set");
         assert_eq!(node_ids(world, root).len(), 1, "the other's one node");
         world.undo(&mut inverse).expect("undone");
         assert_eq!(
@@ -377,6 +377,10 @@ mod tests {
             first,
             "its own again, under their IDs"
         );
+        // Rolled back, as an edit refused after it rolls it back, the same.
+        let (_, mut inverse) = apply(world, set).expect("set");
+        world.roll_back(&mut inverse).expect("rolled back");
+        assert_eq!(node_ids(world, root), first);
 
         // Taken away, and given back.
         let remove = Operation::Remove {

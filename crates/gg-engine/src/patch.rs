@@ -43,7 +43,10 @@ pub(crate) fn apply(table: JumpTable, ticks: u64) -> Result<()> {
     let library = table.lib.clone();
     let apply = move || {
         // SAFETY: only a process that can read the session file's token can ask for a patch, and
-        // the API trusts it as it trusts the user, since a table made up to could corrupt memory.
+        // only the user the game runs as can read the file, from before it holds the token, as
+        // `dirs::write_private` writes it: on Unix of mode 0600, on Windows of a DACL that allows
+        // its owner alone. The API trusts that process as it trusts the user, since a table made
+        // up to could corrupt memory.
         // `gg run` asks only with a patch that `dx tools hotpatch` built against this process's
         // executable and the address of `main` in it that the session file gives, from edits it
         // found inside function bodies alone, but for the items declared in them, so that its code

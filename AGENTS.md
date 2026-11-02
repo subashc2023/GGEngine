@@ -97,8 +97,9 @@ as it's saved, with Dioxus's `dx` of the root Cargo.toml's `subsecond` release (
 install), and restarts it from a snapshot after any other change, a crash or a hang (without `dx`,
 after a `cargo build`). `cargo gg status`, `capture` (a PNG), `set`, `undo`, `logs --follow` and
 the rest answer in JSON; `cargo gg mcp` serves them over MCP. A layer's `load` makes its assets;
-its `attach`, which a restart skips, builds the world. Test `dev` with `--features dev -p
-gg-engine`.
+its `attach`, which a restart skips, builds the world, so an edit to it shows only in a run started
+afresh; a patch or a rebuild that fails, and such an edit, warn in its log (`gg.patch_failed`,
+`gg.rebuild_failed`, `gg.attach_changed`). Test `dev` with `--features dev -p gg-engine`.
 
 A change is done when all seven pass:
 

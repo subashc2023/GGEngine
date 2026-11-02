@@ -16,7 +16,7 @@ use crate::draw::Poses;
 use crate::interpolation::Past;
 use crate::reflect::{self, Digest, Field, Meta, Reflect, Result, Shape, Show, Type, Types, Value};
 use crate::{
-    Actions, Binding, Component, Context, EntityId, Event, Key, MouseButton, Source, Stick,
+    Actions, Binding, Component, Context, Entity, EntityId, Event, Key, MouseButton, Source, Stick,
     Transform, Trigger, World, Writable,
 };
 
@@ -212,6 +212,8 @@ impl Reflect for Projection {
             }
         }
     }
+
+    fn entities_mut(&mut self, _: &mut dyn FnMut(&mut Entity)) {}
 }
 
 /// Cameras primary at once, of which the view sees through the one of the lowest ID.

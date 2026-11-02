@@ -1,7 +1,8 @@
 //! The OS's directories where an app keeps its files for the user, never beside the executable:
 //! one for what it keeps from run to run, such as the dock's layout, and one for what it can make
 //! again, such as its pipeline cache; and reading a file, a regular one alone, and writing one
-//! whole, there or, as a scene's, anywhere, or creating one whole, as an asset's ID file.
+//! whole, there or, as a scene's, anywhere, or creating one whole, as an asset's ID file, or
+//! writing one whole that only the user can read, as the tool API's session file.
 
 use std::ffi::OsString;
 use std::fs::{self, File};
@@ -100,8 +101,45 @@ pub(crate) fn write_whole(path: &Path, data: &[u8]) -> io::Result<()> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => (path.to_owned(), None),
         Err(e) => return Err(e),
     };
-    let (temporary, file) = create_beside(&target)?;
+    let (temporary, file) = create_beside(&target, open_new)?;
     let written = flush(file, data, permissions).and_then(|()| fs::rename(&temporary, &target));
+    if written.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    written
+}
+
+/// Writes `data` to the file at `path` whole or not at all, as [`write_whole`] does, but so that
+/// only the user the process runs as can read it: to a file of its own beside `path` that's the
+/// user's alone from its creation, before it holds a byte, which it renames over whatever is at
+/// `path`, a link too, rather than taking its permissions or writing through it; making the
+/// directories it's in, as [`write()`] does. On Unix the file's mode is 0600, and that of the
+/// directories it makes 0700; on Windows the file's DACL allows its owner alone access, inheriting
+/// none of its directory's ACEs, as `windows_private` says. For the tool API's session file, whose
+/// token unlocks the game.
+#[cfg(feature = "dev")]
+pub(crate) fn write_private(path: &Path, data: &[u8]) -> io::Result<()> {
+    if let Some(dir) = path.parent() {
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(fs::DirBuilder::new().recursive(true), 0o700)
+            .create(dir)?;
+        #[cfg(not(unix))]
+        fs::create_dir_all(dir)?;
+    }
+    // The umask can only narrow the mode it's created with.
+    #[cfg(unix)]
+    let open_private = |path: &Path| {
+        use std::os::unix::fs::OpenOptionsExt;
+        File::options()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+    };
+    #[cfg(target_os = "windows")]
+    let open_private = crate::windows_private::create_new;
+    let (temporary, file) = create_beside(path, open_private)?;
+    let written = flush(file, data, None).and_then(|()| fs::rename(&temporary, path));
     if written.is_err() {
         let _ = fs::remove_file(&temporary);
     }
@@ -114,28 +152,38 @@ pub(crate) fn write_whole(path: &Path, data: &[u8]) -> io::Result<()> {
 /// processes never both write one, and none reads one half-written. Makes no directories.
 #[cfg(feature = "dev")]
 pub(crate) fn create(path: &Path, data: &[u8]) -> io::Result<()> {
-    let (temporary, file) = create_beside(path)?;
+    let (temporary, file) = create_beside(path, open_new)?;
     let created = flush(file, data, None).and_then(|()| fs::hard_link(&temporary, path));
     let _ = fs::remove_file(&temporary);
     created
 }
 
-/// A file new to the disk beside `target`, named after it with this process's ID, a count and
+/// A file new to the disk beside `target`, which `open` creates, failing with `AlreadyExists` if
+/// anything is at the name it's given: named after `target` with this process's ID, a count and
 /// `.new` after, so that none already there, such as one a user named so, is emptied or replaced.
-fn create_beside(target: &Path) -> io::Result<(PathBuf, File)> {
+fn create_beside(
+    target: &Path,
+    open: impl Fn(&Path) -> io::Result<File>,
+) -> io::Result<(PathBuf, File)> {
     static COUNT: AtomicU64 = AtomicU64::new(0);
     loop {
         let mut name = target.as_os_str().to_owned();
         let count = COUNT.fetch_add(1, Ordering::Relaxed);
         name.push(format!(".{}-{count}.new", std::process::id()));
         let name = PathBuf::from(name);
-        match File::options().write(true).create_new(true).open(&name) {
+        match open(&name) {
             Ok(file) => return Ok((name, file)),
             // One a run that crashed left, whose process had this one's ID.
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(e),
         }
     }
+}
+
+/// A new file at `path`, open for writing, with the permissions files are created with; failing
+/// with `AlreadyExists` if anything is there.
+fn open_new(path: &Path) -> io::Result<File> {
+    File::options().write(true).create_new(true).open(path)
 }
 
 /// Writes `data` to `file`, gives it `permissions`, if any, and flushes it to the disk, closing it.
@@ -261,5 +309,27 @@ pub(crate) mod tests {
             .collect::<Result<_, _>>()
             .expect("Unicode");
         assert_eq!(names, ["stone.png.meta"], "no file of its own left");
+    }
+
+    /// A private file is the user's alone, of mode 0600, in directories it makes 0700, and stays so
+    /// written again in place of a file there that others could read, whose permissions it doesn't
+    /// take.
+    #[cfg(all(unix, feature = "dev"))]
+    #[test]
+    fn a_private_file_is_the_user_s_alone_whatever_was_there() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = Scratch::new("private-mode");
+        let dir = scratch.0.join("sessions");
+        let path = dir.join("game-1.json");
+        let mode = |path: &Path| fs::metadata(path).expect("there").permissions().mode() & 0o777;
+        write_private(&path, b"first").expect("written");
+        assert_eq!(
+            [mode(&scratch.0), mode(&dir), mode(&path)],
+            [0o700, 0o700, 0o600]
+        );
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("readable by all");
+        write_private(&path, b"second").expect("written");
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(fs::read(&path).expect("the file"), b"second");
     }
 }

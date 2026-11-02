@@ -368,6 +368,7 @@ impl Frames {
             submitted: false,
             transferring: false,
             rendering: false,
+            pass_begun: false,
         }))
     }
 
@@ -568,6 +569,10 @@ pub struct Frame<'a> {
     /// Whether a pass is open, which only its drop closes: the frame records nothing of its own
     /// while one is, so a pass forgotten rather than dropped is caught at the frame's next call.
     rendering: bool,
+    /// Whether a pass has begun in the frame: a texture refilled takes its new image into its slot
+    /// in the bindless set at once, which every pass recorded before it would sample as the frame
+    /// is submitted, before the copy that fills it, so a refill comes before them all.
+    pass_begun: bool,
 }
 
 impl<'a> Frame<'a> {

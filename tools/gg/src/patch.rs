@@ -1,7 +1,9 @@
 //! `gg run`'s patches, as ARCHITECTURE.md's Game code describes: building a game's development
 //! build with dx, so that it can take patches; watching its sources; and as they change, building a
 //! patch of an edit inside function bodies of its own modules and having the running game apply it
-//! through the tool API, or rebuilding the game, which the run then starts again from a snapshot.
+//! through the tool API, or rebuilding the game, which the run then starts again from a snapshot;
+//! and telling the game, through the API's `note`, what it should log of them, so that a client
+//! following its logs learns of a patch or a rebuild that failed, or of a patch that won't show.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -11,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use gg_api::{Client, Failure, Patch, Patched, Session, UNBUILT};
+use gg_api::{Client, Failure, Note, NoteLevel, Patch, Patched, Session, UNBUILT};
 use serde_json::{Value, json};
 
 use crate::build::{self, Package};
@@ -153,7 +155,7 @@ impl Patches {
     /// changed, or the processes all came to serve. Returns whether a rebuild succeeded, which the
     /// run then starts the game again from.
     pub(crate) fn tend(&mut self, games: &[Process], now: Instant) -> bool {
-        let rebuilt = self.job.as_ref().is_some_and(Job::done) && self.land();
+        let rebuilt = self.job.as_ref().is_some_and(Job::done) && self.land(games);
         let stamps = self.sources.scan();
         if stamps != self.seen {
             (self.seen, self.since) = (stamps, now);
@@ -233,11 +235,11 @@ impl Patches {
         match act(diff, games, &self.applied, self.stale) {
             Act::Nothing => {}
             Act::Rebuild(file, why) => self.rebuild(&file, why),
-            Act::Patch(files, hashes, unreadable) => {
+            Act::Patch(files, hashes, unreadable, attach) => {
                 let serving = games
                     .iter()
                     .filter_map(|game| Some((game.pid, game.session?.clone())));
-                self.patch(serving.collect(), files, hashes, unreadable);
+                self.patch(serving.collect(), files, hashes, unreadable, attach);
             }
         }
     }
@@ -263,13 +265,15 @@ impl Patches {
     /// once, as a lockstep session's joiner waits for its own at the tick its host's applies
     /// before, on a thread of its own; once they have, their modules' hashes are `hashes`. One whose sources changed as it
     /// built is dropped, as it may hold what wasn't looked at; and with `unreadable`, a module whose
-    /// text gg can't read, one that builds isn't applied.
+    /// text gg can't read, one that builds isn't applied. `attach` names the modules among `files`
+    /// whose layers' `attach` differs from the build's, which the patch tells of as it applies.
     fn patch(
         &mut self,
         processes: Vec<(u32, Session)>,
         files: Vec<PathBuf>,
         hashes: Hashes,
         unreadable: Option<PathBuf>,
+        attach: Vec<PathBuf>,
     ) {
         let (dx, fat) = (self.dx.clone(), self.fat.clone());
         let (sources, looked, checked) = (
@@ -340,14 +344,23 @@ impl Patches {
             files,
             hashes,
             unreadable,
+            attach,
             thread,
         });
     }
 
     /// Notes what the job that's done gave, printing it, and returns whether it was a rebuild that
-    /// succeeded.
-    fn land(&mut self) -> bool {
+    /// succeeded; and has the game's processes, `games`, log a rebuild or a patch that failed, and
+    /// a patch that changed a layer's `attach`, as [`note`] says.
+    fn land(&mut self, games: &[Process]) -> bool {
         let panicked = || Failure::new("gg.build", "the thread making it panicked");
+        // The sessions of the processes that serve: process `pid`'s, or all of them.
+        let serving = |pid: Option<u32>| -> Vec<Session> {
+            let games = games
+                .iter()
+                .filter(|game| pid.is_none_or(|pid| game.pid == pid));
+            games.filter_map(|game| game.session.cloned()).collect()
+        };
         match self.job.take() {
             Some(Job::Rebuild { started, thread }) => {
                 match thread.join().unwrap_or_else(|_| Err(panicked())) {
@@ -359,6 +372,13 @@ impl Patches {
                     }
                     Err(failure) => {
                         event(&json!({"event": "rebuild_failed", "error": error(&failure)}));
+                        let message = format!(
+                            "A rebuild of the game failed, so it runs on as it was built, and each \
+                             change rebuilds it until one succeeds: {}",
+                            failure.message
+                        );
+                        let fields = json!({"error": failure.code});
+                        note(serving(None), "gg.rebuild_failed", &message, &fields);
                         self.stale = true;
                         false
                     }
@@ -369,6 +389,7 @@ impl Patches {
                 files,
                 hashes,
                 unreadable,
+                attach,
                 thread,
             }) => {
                 let patching = thread.join().unwrap_or_else(|_| Patching {
@@ -385,6 +406,7 @@ impl Patches {
                     self.applied = hashes;
                 }
                 for (pid, outcome) in patching.outcomes {
+                    let to = serving(pid);
                     // A failure to build is every process's: a game alone's, its ID.
                     let pid = match (pid, &pids[..]) {
                         (Some(pid), _) => json!(pid),
@@ -392,14 +414,29 @@ impl Patches {
                         (None, pids) => json!(pids),
                     };
                     match outcome {
-                        Outcome::Applied(patched, applied) => event(&json!({
-                            "event": "patched",
-                            "pid": pid,
-                            "files": files,
-                            "build_ms": millis(patching.built),
-                            "apply_ms": millis(applied),
-                            "ticks": patched.ticks,
-                        })),
+                        Outcome::Applied(patched, applied) => {
+                            event(&json!({
+                                "event": "patched",
+                                "pid": pid,
+                                "files": files,
+                                "attach": attach,
+                                "build_ms": millis(patching.built),
+                                "apply_ms": millis(applied),
+                                "ticks": patched.ticks,
+                            }));
+                            if !attach.is_empty() {
+                                let message = format!(
+                                    "A patch changed a layer's `attach` in {}, which builds the \
+                                     world as a run starts afresh; this run keeps its world, as \
+                                     its restarts start from snapshots, so a run started afresh, \
+                                     as stopping `gg run` and starting it again starts one, shows \
+                                     the change",
+                                    listed(&attach)
+                                );
+                                let fields = json!({"files": attach});
+                                note(to, "gg.attach_changed", &message, &fields);
+                            }
+                        }
                         Outcome::Failed(failure) => {
                             // Sent, but its answer never came: the process may yet apply it, so
                             // what it runs isn't known, and the next look patches the processes
@@ -415,6 +452,13 @@ impl Patches {
                                 "files": files,
                                 "error": error(&failure),
                             }));
+                            let message = format!(
+                                "A patch of {} failed, so the game runs its code as it was: {}",
+                                listed(&files),
+                                failure.message
+                            );
+                            let fields = json!({"files": files, "error": failure.code});
+                            note(to, "gg.patch_failed", &message, &fields);
                         }
                         Outcome::Superseded => {}
                         Outcome::Unreadable => {
@@ -439,12 +483,14 @@ enum Job {
         thread: JoinHandle<Result<(Fat, Baseline), Failure>>,
     },
     /// A patch of edits to `files` for processes `pids`, after which the hashes of the game's
-    /// modules are `hashes`, and the module whose text gg can't read, if one is.
+    /// modules are `hashes`, the module whose text gg can't read, if one is, and those whose
+    /// layers' `attach` differs from the build's.
     Patch {
         pids: Vec<u32>,
         files: Vec<PathBuf>,
         hashes: Hashes,
         unreadable: Option<PathBuf>,
+        attach: Vec<PathBuf>,
         thread: JoinHandle<Patching>,
     },
 }
@@ -483,9 +529,10 @@ enum Outcome {
 enum Diff {
     /// In what a patch can't carry: a change to a file, for a reason.
     Rebuild(PathBuf, &'static str),
-    /// In function bodies of the game's modules, if at all: the hash of each module, and a module
-    /// whose text gg can't read, if one is.
-    Bodies(Hashes, Option<PathBuf>),
+    /// In function bodies of the game's modules, if at all: the hash of each module, a module whose
+    /// text gg can't read, if one is, and the modules whose layers' `attach` differs from the
+    /// build's, in the order of their paths.
+    Bodies(Hashes, Option<PathBuf>, Vec<PathBuf>),
 }
 
 /// What the sources call for.
@@ -493,9 +540,10 @@ enum Diff {
 enum Act {
     /// Nothing: the game's process runs what they hold, or takes a patch of it once it serves.
     Nothing,
-    /// A patch of edits to these modules, after which the hash of each module is as given, and the
-    /// module whose text gg can't read, if one is.
-    Patch(Vec<PathBuf>, Hashes, Option<PathBuf>),
+    /// A patch of edits to these modules, after which the hash of each module is as given, the
+    /// module whose text gg can't read, if one is, and those of the modules patched whose layers'
+    /// `attach` differs from the build's.
+    Patch(Vec<PathBuf>, Hashes, Option<PathBuf>, Vec<PathBuf>),
     /// A rebuild, for a change to a file, for a reason.
     Rebuild(PathBuf, &'static str),
 }
@@ -507,11 +555,14 @@ enum Act {
 /// changed since what they run, unless one can't take patches, as one whose executable doesn't
 /// export its `main` can't, or the build is stale; while one doesn't serve yet, they take one once
 /// it does; and a game whose processes crashed or hung, which waits for a rebuild, gets one at any
-/// change since what they ran, as a patch made after they start again could come too late.
+/// change since what they ran, as a patch made after they start again could come too late. A patch
+/// tells of the modules it carries whose layers' `attach` differs from the build's: of each again
+/// at each edit of it, as gg keeps the build's text alone, which keeping the text the processes run
+/// too would tell of once.
 fn act(diff: Diff, games: &[Process], applied: &Hashes, stale: bool) -> Act {
-    let (hashes, unreadable) = match diff {
+    let (hashes, unreadable, attach) = match diff {
         Diff::Rebuild(file, why) => return Act::Rebuild(file, why),
-        Diff::Bodies(hashes, unreadable) => (hashes, unreadable),
+        Diff::Bodies(hashes, unreadable, attach) => (hashes, unreadable, attach),
     };
     let sessions: Option<Vec<&Session>> = games.iter().map(|game| game.session).collect();
     match sessions {
@@ -534,7 +585,9 @@ fn act(diff: Diff, games: &[Process], applied: &Hashes, stale: bool) -> Act {
                            what it left";
                 return Act::Rebuild(file.clone(), why);
             }
-            Act::Patch(files, hashes, unreadable)
+            let attach = attach.into_iter().filter(|file| files.contains(file));
+            let attach = attach.collect();
+            Act::Patch(files, hashes, unreadable, attach)
         }
     }
 }
@@ -548,7 +601,8 @@ fn changed(from: &Hashes, to: &Hashes) -> Vec<PathBuf> {
 /// How the sources, whose stamps are `stamps`, differ from those of the build whose sources were
 /// `baseline`. A file added or removed, or a change outside function bodies of the game's modules,
 /// as [`classify::classify`] tells, needs a rebuild, the first in the order of their paths being the
-/// one given. A file whose stamp changed but not its content hasn't changed.
+/// one given; and it tells which modules' layers' `attach` differs from the build's. A file whose
+/// stamp changed but not its content hasn't changed.
 fn diff(sources: &Sources, baseline: &Baseline, stamps: &Stamps) -> Diff {
     let added = (stamps.keys()).filter(|path| !baseline.files.contains_key(*path));
     let removed = (baseline.files.keys()).filter(|path| !stamps.contains_key(*path));
@@ -560,7 +614,7 @@ fn diff(sources: &Sources, baseline: &Baseline, stamps: &Stamps) -> Diff {
         };
         return Diff::Rebuild(file.clone(), why);
     }
-    let (mut hashes, mut unreadable) = (Hashes::new(), None);
+    let (mut hashes, mut unreadable, mut attach) = (Hashes::new(), None, Vec::new());
     for (path, stamp) in stamps {
         let known = &baseline.files[path];
         let module = sources.module(path);
@@ -578,7 +632,8 @@ fn diff(sources: &Sources, baseline: &Baseline, stamps: &Stamps) -> Diff {
                     None => Edit::Rebuild(OUTSIDE),
                 };
                 match edit {
-                    Edit::Bodies => {}
+                    Edit::Bodies { attach: false } => {}
+                    Edit::Bodies { attach: true } => attach.push(path.clone()),
                     Edit::Unreadable => unreadable = Some(path.clone()),
                     Edit::Rebuild(why) => return Diff::Rebuild(path.clone(), why),
                 }
@@ -588,7 +643,7 @@ fn diff(sources: &Sources, baseline: &Baseline, stamps: &Stamps) -> Diff {
             hashes.insert(path.clone(), hash);
         }
     }
-    Diff::Bodies(hashes, unreadable)
+    Diff::Bodies(hashes, unreadable, attach)
 }
 
 /// What a run's patches watch, as cargo says of the game's package: the game's modules, the `.rs`
@@ -752,6 +807,51 @@ fn error(failure: &Failure) -> Value {
     json!({"code": failure.code, "message": failure.message})
 }
 
+/// Has each game of `sessions` log a warning through the API's `note`, `code`, saying `message`,
+/// cut to fit as [`fit`] says, with `fields`, an object, so that a client following its logs, as an
+/// agent does or the editor's Logs panel, learns what `gg run` prints of it: on a thread of its
+/// own, since a game that has ended takes a while to refuse the connection on Windows. One that
+/// doesn't take it, as one that has ended or whose engine is older than `note`, goes without, as
+/// `gg run`'s own line tells of it all the same.
+fn note(sessions: Vec<Session>, code: &str, message: &str, fields: &Value) {
+    if sessions.is_empty() {
+        return;
+    }
+    let note = Note {
+        code: code.to_owned(),
+        level: NoteLevel::Warn,
+        message: fit(message, gg_api::MOST_NOTE),
+        fields: fields.as_object().cloned(),
+    };
+    let note = serde_json::to_value(note).expect("a note serializes");
+    thread::spawn(move || {
+        for session in sessions {
+            let noted = Client::connect(&session, "gg", CONNECT)
+                .and_then(|mut client| client.call("note", note.clone()));
+            drop(noted);
+        }
+    });
+}
+
+/// `text`, cut to at most `most` bytes at a character's boundary, saying so where it's cut, as a
+/// note's message is bounded, and a build's errors may run past it.
+fn fit(text: &str, most: usize) -> String {
+    const CUT: &str = "\n\n(cut short: `gg run`'s output holds the rest)";
+    if text.len() <= most {
+        return text.to_owned();
+    }
+    let end = text.floor_char_boundary(most.saturating_sub(CUT.len()));
+    format!("{}{CUT}", &text[..end])
+}
+
+/// `files`' paths, as a note's message names them.
+fn listed(files: &[PathBuf]) -> String {
+    let paths: Vec<String> = (files.iter())
+        .map(|file| file.display().to_string())
+        .collect();
+    paths.join(", ")
+}
+
 /// `duration` in whole milliseconds.
 fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
@@ -770,7 +870,9 @@ mod tests {
             fs::create_dir_all(path.parent().expect("a directory")).expect("a directory");
             fs::write(path, text).expect("written");
         };
-        let game = "fn main() {\n    run(1);\n}\n\nfn run(_: u32) {\n    step(1);\n}\n";
+        let game = "fn main() {\n    run(1);\n}\n\nfn run(_: u32) {\n    step(1);\n}\n\n\
+                    impl Layer for Game {\n    fn attach(&mut self) {\n        spawn(1);\n    \
+                    }\n}\n";
         write("Cargo.toml", "[workspace]");
         write("Cargo.lock", "version = 4");
         write("game/Cargo.toml", "[package]");
@@ -805,17 +907,28 @@ mod tests {
         write("engine/tests/ticks.rs", "#[test]\nfn ticks_twice() {}\n");
         write("game/src/.#main.rs", "user@host.1234");
         write("engine/src/lib.rs~", "pub fn tick() {}\n");
-        assert!(matches!(now(), Diff::Bodies(hashes, None) if hashes == baseline.modules));
+        let Diff::Bodies(hashes, None, attach) = now() else {
+            panic!("bodies");
+        };
+        assert_eq!((hashes, attach), (baseline.modules.clone(), Vec::new()));
         // An edit inside a function body; each edit here changes the file's length, as one made
         // within the clock's resolution of the last may leave its time.
         write("game/src/main.rs", &game.replace("step(1)", "step(22)"));
-        let Diff::Bodies(hashes, None) = now() else {
+        let Diff::Bodies(hashes, None, attach) = now() else {
             panic!("bodies");
         };
         assert_ne!(hashes[&main], baseline.modules[&main]);
+        assert!(attach.is_empty());
+        // One inside a layer's `attach` too, which the patch tells of.
+        let attached = game.replace("step(1)", "step(22)");
+        write(
+            "game/src/main.rs",
+            &attached.replace("spawn(1)", "spawn(333)"),
+        );
+        assert!(matches!(now(), Diff::Bodies(_, None, attach) if attach == [main.clone()]));
         // Text that doesn't parse, which a patch's build tells of.
         write("game/src/main.rs", &game.replace("step(1)", "step(1"));
-        assert!(matches!(now(), Diff::Bodies(_, Some(file)) if file == main));
+        assert!(matches!(now(), Diff::Bodies(_, Some(file), _) if file == main));
         // A change outside the game's crate outweighs it, until it's undone.
         write("engine/src/lib.rs", "pub fn tick() {}\npub fn tock() {}\n");
         assert!(matches!(now(), Diff::Rebuild(file, OUTSIDE) if file == lib));
@@ -858,7 +971,7 @@ mod tests {
             pid: 7,
             session: None,
         }];
-        let bodies = || Diff::Bodies(edited.clone(), None);
+        let bodies = || Diff::Bodies(edited.clone(), None, Vec::new());
         // A change a patch can't carry rebuilds, whatever the game's process is doing.
         let lock = PathBuf::from("Cargo.lock");
         for games in [vec![], starting.clone(), serving(&patchable)] {
@@ -869,7 +982,7 @@ mod tests {
         // An edit inside function bodies patches a process that serves, of what changed since what
         // it runs, which, patched already, is nothing; and one that doesn't yet once it does.
         let main = vec![PathBuf::from("game/src/main.rs")];
-        let patch = Act::Patch(main.clone(), edited.clone(), None);
+        let patch = Act::Patch(main.clone(), edited.clone(), None, Vec::new());
         assert_eq!(act(bodies(), &serving(&patchable), &built, false), patch);
         assert_eq!(
             act(bodies(), &serving(&patchable), &edited, false),
@@ -886,11 +999,36 @@ mod tests {
         let acted = act(bodies(), &peers, &built, false);
         assert!(matches!(acted, Act::Rebuild(..)), "{acted:?}");
         // What gg can't read goes with the patch, which tells of it.
-        let unreadable = Diff::Bodies(edited.clone(), Some(main[0].clone()));
+        let unreadable = Diff::Bodies(edited.clone(), Some(main[0].clone()), Vec::new());
         let acted = act(unreadable, &serving(&patchable), &built, false);
         assert_eq!(
             acted,
-            Act::Patch(main.clone(), edited.clone(), Some(main[0].clone()))
+            Act::Patch(
+                main.clone(),
+                edited.clone(),
+                Some(main[0].clone()),
+                Vec::new()
+            )
+        );
+        // So does a module patched whose layers' `attach` differs from the build's, but not one
+        // that the patch doesn't carry, which no edit changed since what the process runs.
+        let attach = Diff::Bodies(edited.clone(), None, main.clone());
+        let acted = act(attach, &serving(&patchable), &built, false);
+        assert_eq!(
+            acted,
+            Act::Patch(main.clone(), edited.clone(), None, main.clone())
+        );
+        let ship = PathBuf::from("game/src/ship.rs");
+        let modules = |main_hash, ship_hash| {
+            let mut hashes = module(main_hash);
+            hashes.insert(ship.clone(), ship_hash);
+            hashes
+        };
+        let attach = Diff::Bodies(modules(2, 2), None, main.clone());
+        let acted = act(attach, &serving(&patchable), &modules(2, 1), false);
+        assert_eq!(
+            acted,
+            Act::Patch(vec![ship.clone()], modules(2, 2), None, Vec::new())
         );
         // One that can't take patches rebuilds, as does one whose last rebuild failed.
         for (session, stale) in [(&unpatchable, false), (&patchable, true)] {
@@ -900,7 +1038,7 @@ mod tests {
         // A game whose process waits for a rebuild gets one at a change since what it ran, an edit
         // or one undone after a patch, but not for sources as that process had them.
         for (now, ran) in [(&edited, &built), (&built, &edited)] {
-            let waiting = act(Diff::Bodies(now.clone(), None), &[], ran, false);
+            let waiting = act(Diff::Bodies(now.clone(), None, Vec::new()), &[], ran, false);
             assert!(matches!(waiting, Act::Rebuild(..)), "{waiting:?}");
         }
         assert_eq!(act(bodies(), &[], &edited, false), Act::Nothing);

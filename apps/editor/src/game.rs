@@ -546,13 +546,20 @@ impl Game {
         }
     }
 
-    /// Takes the game's events logged since, each a line of the Logs panel, as [`logged`] makes it.
+    /// Takes the game's events logged since, each a line of the Logs panel, as [`logged`] makes it,
+    /// but `gg run`'s notes of a patch or a rebuild that failed, which its own events show.
     fn take_logged(&mut self) {
         let Some(talker) = &self.talker else {
             return;
         };
         let reads: Vec<Vec<Value>> = talker.logged.try_iter().collect();
         for event in reads.iter().flatten() {
+            let code = event["code"].as_str();
+            if event["client"] == "gg"
+                && matches!(code, Some("gg.patch_failed" | "gg.rebuild_failed"))
+            {
+                continue;
+            }
             let Logged { level, text } = logged(event);
             self.log(level, text);
         }
@@ -3606,7 +3613,8 @@ mod tests {
     }
 
     /// The game's events reach the Logs as they're read, each with its code, its message and its
-    /// fields, but where and when it was logged, at its level.
+    /// fields, but where and when it was logged, at its level; but `gg run`'s notes of a patch that
+    /// failed, which its own events show.
     #[test]
     fn the_games_events_reach_the_logs_with_their_codes_and_fields() {
         let mut game = Game::new(Some(PathBuf::from(".")), Inspector::remote(CLIENT).link());
@@ -3629,7 +3637,12 @@ mod tests {
         let traced = r#"{"timestamp":"2026-10-30T12:00:00.000001Z","level":"TRACE",
             "message":"A tick","target":"gg_engine::main_loop","spans":[{"name":"tick"}],
             "threadName":"main"}"#;
-        let events = [warned, traced].map(|line| serde_json::from_str(line).expect("JSON"));
+        let failed = r#"{"level":"WARN","code":"gg.patch_failed","client":"gg",
+            "message":"A patch of src/main.rs failed"}"#;
+        let attached = r#"{"level":"WARN","code":"gg.attach_changed","client":"gg",
+            "message":"A patch changed a layer's attach"}"#;
+        let events = [warned, traced, failed, attached];
+        let events = events.map(|line| serde_json::from_str(line).expect("JSON"));
         log.send(events.to_vec()).expect("sent");
         log.send(Vec::new()).expect("sent");
         game.take_logged();
@@ -3642,6 +3655,10 @@ mod tests {
                 r#"[asset.missing] Can't load the texture  empty="" path="assets/hero sprite.png" tries=2"#,
             ),
             (Level::Debug, "A tick"),
+            (
+                Level::Warn,
+                "[gg.attach_changed] A patch changed a layer's attach  client=gg",
+            ),
         ];
         assert_eq!(logs, expected);
     }

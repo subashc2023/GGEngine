@@ -49,10 +49,13 @@ The editor uses `gg-api` too, beside `gg-engine`, as a client of the tool API, a
 
 - **`gg-core`:** math, logging, profiling and error types.
 - **`gg-gpu`:** Vulkan through `ash`. It turns ash's unsafe API into safe types: device, memory,
-  buffers, images, descriptors, pipelines, swapchain, synchronization and submission. They stay
-  safe whatever safe code does with them: each checks that what it's given was made by its device,
-  or a surface by its instance, and a frame or a pass forgotten rather than dropped is caught at
-  the next call.
+  buffers, images, descriptors, pipelines, swapchain, synchronization and submission. They keep
+  the CPU's side safe whatever safe code does with them: each checks that what it's given was made
+  by its device, or a surface by its instance, and a frame or a pass forgotten rather than dropped
+  is caught at the next call. What runs on the GPU is trusted: a shader's SPIR-V, and the
+  addresses and texture indices it's given, none of which Vulkan checks, so a shader that reads
+  past what it's given, or samples by an index no filled texture holds, can fault the device.
+  gg-renderer checks games' shaders against their contract, and makes every address a draw reads.
 - **`gg-renderer`:** the render graph, passes, materials, lighting and post-processing. It owns
   the GPU resources and hands out handles to them.
 - **`gg-engine`:** the main loop, window and input, the job system and the render thread, scene
@@ -147,10 +150,12 @@ sandbox does, and shipping builds never do. [Its Cargo.toml](crates/gg-engine/Ca
 `dev` gates. Shipping builds run cooked data only. Cargo merges the features of every package a
 command selects, so `--workspace`, a bare `cargo build` and `--bin gg-player` would all hand the
 player `dev`. Shipping builds therefore select the player alone, with `-p player`, and a game's
-shipping build selects the game alone the same way; the shipping gate, `cargo clippy -p player`,
-checks `gg-engine` as they build it. A gate of its own, `cargo clippy -p gg-engine --all-targets`,
-checks `gg-engine`'s tests without `dev` too, which no other command builds: kept apart from the
-shipping gate, as their dev-dependencies' features would merge into the player's build.
+will select the game alone the same way, once Phase 10 gives games a shipping profile: until then
+each game turns `dev` on in its manifest, as `gg new` writes it. The shipping gate,
+`cargo clippy -p player`, checks `gg-engine` as they build it. A gate of its own,
+`cargo clippy -p gg-engine --all-targets`, checks `gg-engine`'s tests without `dev` too, which no
+other command builds: kept apart from the shipping gate, as their dev-dependencies' features would
+merge into the player's build.
 
 Tracy is a feature of its own, `tracy`, off by default and in no shipping build: it compiles
 Tracy's C++ client, which listens on the machine's loopback and keeps what it records in memory
@@ -201,7 +206,10 @@ makes; anyone else's game depends on the engine from its own repository.
   a function's body, a new component, a constant, an engine edit, or an edit to code that has run
   as the game started, `main` and a layer's `load` and `restored`, which a patch would come after,
   rebuilds the game, restarts it and restores the world from a snapshot taken just before,
-  matching each changed component to its new layout by field name.
+  matching each changed component to its new layout by field name. An edit inside a layer's
+  `attach`, which builds the world as a run starts afresh, is patched, but the world a run keeps,
+  as its restarts start from snapshots, never shows it: `gg run` says so, having the game log
+  `gg.attach_changed`, and a run started afresh shows it.
 - **Luau comes after v0.1, for mods and quick scripts.** Players can install sandboxed mods,
   and quests, dialogue and level events reload in milliseconds. Scripts reach Rust components
   through reflection, without hand-written bindings, and can declare components of their own.
@@ -221,16 +229,21 @@ in the editor is out of an agent's reach.
   pick what it shows, list the assets in the asset root with their [IDs](#project-state),
   hand the layers input as the window would, save the world whole as a snapshot file, as [ECS](#ecs)
   describes, which a run given `--restore` starts from, apply patches of the game's code, as
-  [Game code](#game-code) describes, and read [diagnostics](#diagnostics). Requests
-  and their answers are lines of JSON, as [gg-api](crates/gg-api/src/lib.rs) describes, and a
-  connection's first request says hello with the token, so that only processes that can read the
-  file reach the game. A thread of the API's reads each connection and answers its pings itself,
+  [Game code](#game-code) describes, read [diagnostics](#diagnostics), and log a client's notes
+  among them, warnings or facts it gives with stable codes, as `gg run` tells a game of a patch or
+  a rebuild that failed. Requests and their answers are lines of JSON, as
+  [gg-api](crates/gg-api/src/lib.rs) describes, and a connection's first request says hello with
+  the token, which the game compares in constant time, so that only processes that can read the
+  file reach the game: the user's own, as the file is the user's alone from before it holds the
+  token: on Unix of mode 0600, and on Windows of a protected DACL that allows its owner alone. A
+  thread of the API's reads each connection and answers its pings itself,
   from the frames the main loop counts, so that a tool tells a hung game from a busy one, and from
   one whose frames have paused for the user, as for a minimized window or a file dialog; and its
   reads of the log, from the events the run keeps in memory as it logs them, its last 10,000, each
   numbered, which `logs` serves as they come, waiting for one if none has, so that a client follows
   them from the number it left off at, and, by the run's own number, which a restart changes, misses
-  none across a restart that the new run kept. The main loop answers the rest as each frame starts,
+  none across a restart that the new run kept; and its notes, so that one comes through while
+  frames pause. The main loop answers the rest as each frame starts,
   before its ticks: a step once its ticks have run, a capture once the render thread has read the
   frame's view back, without the UI, which a thread of the API's writes as a PNG, and a snapshot
   once a thread of the API's has written the copy of the world the main loop took, but none before
@@ -266,20 +279,23 @@ in the editor is out of an agent's reach.
   among it, or, asked to, as the game shows it on its own, from a bare frame, which draws without
   the look, isn't shared and leaves the picks asked to the next frame, so that none reads a view a
   client isn't shown. A pick answers which entity the view shows at a pixel, and its name, once the
-  frame that read it comes back. Each client gets only the capabilities it is granted, such as
-  reading the world or editing one scene.
+  frame that read it comes back. Each client will get only the capabilities it's granted, such as
+  reading the world or editing one scene, as Phase 9 grants them: until then, a client that says
+  hello with the token reaches everything, `patch` among it.
 - **Clients.** The command-line tool, `tools/gg`, builds and runs games, supervising them: it
   runs a copy of a game's executable, so that the game builds again meanwhile, removing those runs
   it killed left; patches it as its code changes, and rebuilds it at any other change, as [Game
-  code](#game-code) describes; snapshots it every few seconds from its first frame; and starts it
-  again from its last snapshot after a crash or a hang, and from one taken then as it's rebuilt,
-  telling of each, or waits for a rebuild if the game would only end the same way again, as one
-  that ends before its first snapshot would. A game started again so comes back stopped if it was,
-  or playing a copy with the world as edited held, as its snapshot keeps both. A game that comes
-  to its own end, as its window closes, ends the supervision, as one that never serves does; so does
-  the end of the tool a run embeds the game in (`--embedded`), as the editor ends, which closes gg's
-  stdin. One `gg run` runs a game at a time; a second is refused. It runs headless checks, talks to
-  running games, all with machine-readable results, and makes new games. Inside a game's
+  code](#game-code) describes, having the game log a patch or a rebuild that failed, so that a
+  client following its logs learns of it; snapshots it every few seconds from its first frame;
+  and starts it again from its last snapshot after a crash or a hang, and from one taken then as
+  it's rebuilt, telling of each, or waits for a rebuild if the game would only end the same way
+  again, as one that ends before its first snapshot would. A game started again so comes back
+  stopped if it was, or playing a copy with the world as edited held, as its snapshot keeps both.
+  A game that comes to its own end, as its window closes, ends the supervision, as one that never
+  serves does; so does the end of the tool a run embeds the game in (`--embedded`), as the editor
+  ends, which closes gg's stdin. One `gg run` runs a game at a time; a second is refused. It runs
+  headless checks, talks to running games, all with machine-readable results, and makes new games.
+  Inside a game's
   [project](#project-state), found from where it runs or named by `--project`, it runs cargo in the
   project's directory, builds the project's game, and reaches the project's games alone, those whose
   session files name its manifest; `gg mcp` gives agents that speak MCP the same reach over stdio, a
@@ -470,13 +486,18 @@ A project's state is text that people and agents edit, diff and merge with ordin
   inverse: create, duplicate or delete an entity, add or remove a component, set a field,
   reparent. An operation names entities by their IDs and carries values as reflection's, and
   applying one checks everything before anything changes. A delete's and a remove's inverses keep
-  what they took out, typed, so that what's opaque comes back too. A component can name a `bool`
+  what they took out, typed, so that what's opaque comes back too; a set's keeps the component it
+  changed, whole, until nothing can roll its edit back, so that an edit refused partway rolls back
+  exactly what the world held, though code had stored in it what a set refuses, such as a rotation
+  no longer a unit. A component can name a `bool`
   field of its own exclusive, as a camera's `primary` is, so that one edit, a person's or an
   agent's, switches which entity has it, and one undo switches it back. A log keeps the edits
   applied, in order, each its operations with their inverses: it undoes and redoes an edit whole,
   applies one of several operations all or nothing, merges a gesture's sets of one field, such as
   a drag's, into one edit, a tool API client's too, by the number it gives each of its gestures,
-  and drops an entry whose undo the world refuses. A running game applies the tool API's edits
+  and drops an entry whose undo the world refuses, as where a set's old value is one that code
+  stored and a set refuses: an undo sets each field back, checked, keeping what has changed the
+  component's other fields since. A running game applies the tool API's edits
   between ticks, as a frame starts, paused or not, in the order they arrive, so several clients
   can edit it at once; each author, a client by the name it says hello with or a scene file by
   its path, undoes and redoes its own through a log of its own, as the Inspector does through its,
@@ -591,15 +612,17 @@ its asset ID or else its path, as [Project state](#project-state) says; and `Opa
 reflection keeps but doesn't read, such as a `MeshDraw`, which no value may
 make. The world reads and sets a field by its component's name and a path, such as
 `rect[1].y`: a set checks the whole value against the description before anything changes, and
-returns the old value, which sets it back unless code stored one that a set refuses. The Inspector
-reads the world through these calls, its IDs and its hierarchy, and edits it through operations,
-all of which the tool API serves, so that a remote Inspector shows a game's world in another
-process, as the editor's does: it reads the game's entities and the picked one's components
-through the API a few times a second, and the descriptions of its types once, and again as a type
-it hasn't comes, with one request at a time, so that what it reads after an edit's answer shows the
-edit, and edits the world as the game's client, drawing what waits for an answer as it will be.
-Values cross as JSON, read and written by the types the game describes, an entity's by its ID and
-a texture's by its name.
+returns the old value, which sets it back unless code stored one that a set refuses; so an edit
+rolled back puts the component back whole instead, and a duplicate points its copies' references
+at each other in place, through `Reflect::entities_mut`, rather than setting them again. The
+Inspector reads the world through these calls, its IDs and its hierarchy, and edits it through
+operations, all of which the tool API serves, so that a remote Inspector shows a game's world in
+another process, as the editor's does: it reads the game's entities and the picked one's
+components through the API a few times a second, and the descriptions of its types once, and
+again as a type it hasn't comes, with one request at a time, so that what it reads after an edit's
+answer shows the edit, and edits the world as the game's client, drawing what waits for an answer
+as it will be. Values cross as JSON, read and written by the types the game describes, an entity's
+by its ID and a texture's by its name.
 
 A field's default is the one `#[reflect(default = ...)]` gives, or else its type's, so that
 adding a component, switching an enum to another variant and resetting a field each start from a
@@ -1099,7 +1122,9 @@ reaching 4 texels either side of each glyph's edge, and in its alpha the true di
 outlines and shadows will read. The median of a texel's three distances keeps a glyph's corners
 sharp at any size, where a single distance would round them off. fdsm generates each glyph's field
 from the outline skrifa reads, unhinted, on the job system's threads, a fixed seed coloring its
-edges so that a font bakes the same field every time, and corrects its errors. `Context::draw_text`
+edges so that a font bakes the same field every time, and corrects its errors. A font whose glyphs'
+cells, alone or together, wouldn't fit a field of the largest texture's size is refused before any
+is made, as a crafted font's would take gigabytes. `Context::draw_text`
 shapes each line of a text with harfrust, for the font's kerning and its marks' places, but without
 the features that put glyphs in place of others, as ligatures and contextual alternates, whose
 glyphs the field may not hold; and draws each glyph on the engine's quad with the text shader, an
@@ -1150,7 +1175,9 @@ it warns, and the old pipeline goes on drawing.
 
 Sounds and music are kira's, mixed on cpal's audio thread, as the simulation's state never is: what
 plays follows from the world, and never feeds it. A layer loads a sound from a WAV, Ogg Vorbis, FLAC
-or MP3 file, which symphonia decodes whole into memory, as a game's short sounds are. A tick queues
+or MP3 file, which symphonia decodes whole into memory, as a game's short sounds are, through a
+decoder of the engine's that refuses one as it passes 2²⁴ frames, some 6 minutes at 48 kHz, where
+kira's would hold all a crafted file decodes to. A tick queues
 a sound with `World::play_sound`, from nowhere, at a point or on an entity, in a resource of the
 world that the engine empties once each tick has run, playing what it held, so that no snapshot,
 hash, recording or scene holds one, and each lockstep peer plays what its own ticks queue. Layers
@@ -1239,6 +1266,6 @@ on the main thread.
 | Shaders | Slang, compiled to SPIR-V by the Vulkan SDK's `slangc` rather than linked in: the engine's own as it builds, games' as they're added and, in development builds, as their files change, their SPIR-V checked against the shader contract |
 | Assets | glTF 2.0 in, read by the engine over `serde_json`; meshoptimizer for meshes and meshlets; BC-compressed textures in KTX2; until cooking, PNGs and JPEGs that `png` and `zune-jpeg` decode as layers add them |
 | Text | TrueType and OpenType fonts, whose outlines `skrifa` reads and `fdsm` bakes into multi-channel signed distance fields, as fonts load until they're cooked; text shaped by `harfrust`; `skrifa` and `harfrust` at the releases egui's own text takes |
-| Audio | `kira` on `cpal`, its sounds and music decoded by `symphonia`, music through a decoder of the engine's: tracks as buses, panning and streaming, without allocating on the audio thread |
+| Audio | `kira` on `cpal`, its sounds and music decoded by `symphonia` through decoders of the engine's: tracks as buses, panning and streaming, without allocating on the audio thread |
 
 Areas not listed here are undecided.

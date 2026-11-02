@@ -89,6 +89,12 @@ mod window;
 #[cfg(target_os = "windows")]
 #[allow(unsafe_code)]
 mod windows_frame;
+// A file only its owner can open, as the tool API's session file is, is created on Windows with a
+// security descriptor of its own, which only unsafe code passes: this module alone may use it, in
+// development builds alone.
+#[cfg(all(target_os = "windows", feature = "dev"))]
+#[allow(unsafe_code)]
+mod windows_private;
 // The main thread's wait for the render thread answers what's sent to its windows meanwhile, which
 // only unsafe code does: this module alone may use it.
 #[cfg(target_os = "windows")]

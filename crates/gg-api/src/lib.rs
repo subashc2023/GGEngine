@@ -149,15 +149,21 @@
 //!   severe; waiting for one to come, if none is there. A `from` given with another run's `run`, as
 //!   a client following the game's logs across a restart gives, reads from the oldest kept, so that
 //!   the client misses nothing it can still have.
+//! - `note`, [`Note`]: has the game log an event the client gives, naming the client, and answers
+//!   `{}`, so that those following its logs learn what the client knows of it, as `gg run` tells of
+//!   a patch or a rebuild of it that failed. It fails with `api.bad_params` for a code that isn't a
+//!   stable code's shape, a dotted name such as `gg.patch_failed`, or is longer than
+//!   [`MOST_NOTE_CODE`] bytes, for an empty message, and for a message or fields longer than
+//!   [`MOST_NOTE`] bytes.
 //! - `quit`: answers `{}`, and the run ends cleanly, as when its window closes, but without asking
 //!   its layers, which may keep a window open.
 //!
-//! The methods but `hello`, `ping` and `logs` are answered by the game's main thread, as a frame
-//! starts. While the window is minimized, and no frames run, it answers them between frames, but
-//! `step`, `capture` and `pick`, which need frames, fail with `api.paused`; while a file dialog or
-//! the window menu Windows runs is open, holding the main thread, they wait. The connection's own
-//! thread answers `hello`, `ping` and `logs` as it reads them, so that a `logs` that waits holds up
-//! the connection's later requests: follow the logs on a connection of their own.
+//! The methods but `hello`, `ping`, `logs` and `note` are answered by the game's main thread, as a
+//! frame starts. While the window is minimized, and no frames run, it answers them between frames,
+//! but `step`, `capture` and `pick`, which need frames, fail with `api.paused`; while a file dialog
+//! or the window menu Windows runs is open, holding the main thread, they wait. The connection's
+//! own thread answers `hello`, `ping`, `logs` and `note` as it reads them, so that a `logs` that
+//! waits holds up the connection's later requests: follow the logs on a connection of their own.
 //!
 //! A value is JSON as its kind is: a number, a string, a `bool`; a vector or a quaternion an array
 //! of numbers, `[x, y, z, w]` for a quaternion; a float that isn't finite the string `inf`, `-inf`
@@ -203,7 +209,9 @@ pub const MAX_LINE: usize = 16 << 20;
 
 /// Where a running game serves the API, which its development build writes as a file of JSON in
 /// the `sessions` directory beside its executable as the API starts, and removes as the run ends;
-/// one that a crash or a kill leaves behind names an address that refuses connections.
+/// one that a crash or a kill leaves behind names an address that refuses connections. Only the
+/// user the game runs as can read the file: on Unix its mode is 0600, and on Windows its DACL
+/// allows its owner alone.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
     /// The app's name, as `App::new` gives it, such as `Sandbox`.
@@ -212,7 +220,8 @@ pub struct Session {
     pub pid: u32,
     /// Where it listens, on the loopback.
     pub address: SocketAddr,
-    /// What a client's `hello` gives, so that only processes that can read the file talk to it.
+    /// What a client's `hello` gives, so that only processes that can read the file, the user's
+    /// own, talk to it.
     pub token: String,
     /// The run's JSON log, unless it couldn't be created.
     pub log: Option<PathBuf>,
@@ -1149,6 +1158,37 @@ pub struct LogEvents {
     pub end: u64,
     pub missed: u64,
     pub events: Vec<Box<RawValue>>,
+}
+
+/// The most bytes a [`Note`]'s code may have.
+pub const MOST_NOTE_CODE: usize = 64;
+
+/// The most bytes a [`Note`]'s message may have, and its fields as JSON: enough for a build's
+/// errors, as rustc renders them, in a line of the log that the game keeps, which may have 1 MiB.
+pub const MOST_NOTE: usize = 64 << 10;
+
+/// What `note` takes: the event's code, a stable code, as gg-api's errors have, such as
+/// `gg.patch_failed`; its level; its message, which says what happened, naming what it's about;
+/// and its fields, if any, an object of JSON, which the game logs as one field, `fields`, its JSON
+/// as a string. The game logs it with the client's name, as the connection's `hello` gave it, as
+/// `client`.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Note {
+    pub code: String,
+    pub level: NoteLevel,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fields: Option<serde_json::Map<String, Value>>,
+}
+
+/// A note's level: `"info"` or `"warn"`, never an error's, as the run's errors are its own, which a
+/// headless run's status counts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NoteLevel {
+    Info,
+    Warn,
 }
 
 /// A connection to a running game's API, for tools: a request at a time, each waiting for its

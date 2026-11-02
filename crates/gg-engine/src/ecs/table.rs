@@ -4,6 +4,7 @@
 
 use std::any::{Any, TypeId, type_name};
 use std::collections::HashMap;
+use std::mem;
 
 use gg_core::{Error, Result};
 
@@ -312,6 +313,10 @@ pub trait AnyColumn: Any + Send + Sync {
     /// A copy of `row`'s value, in a one-row column of its own.
     fn clone_row(&self, row: usize) -> Box<dyn AnyColumn>;
 
+    /// Swaps `row`'s value with the one of `with`, a one-row column of the same type, as
+    /// [`clone_row`](Self::clone_row) makes one.
+    fn swap_row(&mut self, row: usize, with: &mut dyn AnyColumn);
+
     /// Makes `to`, a column of the same type, a copy of this one, in the memory it holds.
     fn copy_to(&self, to: &mut dyn AnyColumn);
 
@@ -362,6 +367,10 @@ impl<T: Component> AnyColumn for Vec<T> {
 
     fn clone_row(&self, row: usize) -> Box<dyn AnyColumn> {
         Box::new(vec![self[row].clone()])
+    }
+
+    fn swap_row(&mut self, row: usize, with: &mut dyn AnyColumn) {
+        mem::swap(&mut self[row], &mut with.vec_mut::<T>()[0]);
     }
 
     fn copy_to(&self, to: &mut dyn AnyColumn) {

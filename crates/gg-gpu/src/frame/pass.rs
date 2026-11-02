@@ -250,6 +250,7 @@ impl<'a> Frame<'a> {
             ids.set_rendered(number);
         }
         self.rendering = true;
+        self.pass_begun = true;
         Some(Pass {
             frame: self,
             extent,

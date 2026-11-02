@@ -1,7 +1,7 @@
 //! The API's server: it listens on the machine's loopback, at a port the OS picks, which the session
 //! file in the `sessions` directory beside the executable gives with a token. A thread accepts
-//! connections, and each has a thread that reads its requests, answering `hello`, `ping` and `logs`
-//! itself, `logs` from the events the run's log keeps, and passing the rest on to the main loop,
+//! connections, and each has a thread that reads its requests, answering `hello`, `ping`, `logs`
+//! and `note` itself, `logs` from the events the log keeps, passing the rest on to the main loop,
 //! and one that writes its answers. The main loop answers them as a frame starts, before its ticks,
 //! so that a `patch` applies between ticks, a `play`, a `stop` or a `scene` holds from the frame's
 //! ticks, and a `look` reaches the frame; a `step` once its ticks have run; a `capture` once a
@@ -62,10 +62,10 @@ use crate::{
 };
 
 /// The methods, as `api.unknown_method` lists them.
-const METHODS: [&str; 28] = [
+const METHODS: [&str; 29] = [
     "hello", "ping", "status", "pause", "resume", "play", "stop", "step", "scene", "capture",
     "view", "input", "look", "pick", "entities", "entity", "get", "types", "hash", "assets",
-    "snapshot", "patch", "apply", "undo", "redo", "edits", "logs", "quit",
+    "snapshot", "patch", "apply", "undo", "redo", "edits", "logs", "note", "quit",
 ];
 
 /// The most of the clients' picks a frame asks: half as many as a frame reads back, so that the
@@ -300,7 +300,9 @@ impl Api {
     /// log is at `log`, if it has one, and keeps its last events in `events`, which plays `player`
     /// in a lockstep session, if it's a peer of one, and whose project's manifest is at `project`,
     /// if it's a project's game: listens on the loopback, starts its threads and writes the session
-    /// file.
+    /// file, which only the user the game runs as can read, from before it holds the token, as
+    /// `dirs::write_private` writes it: the token is all that keeps another process from `patch`,
+    /// which loads a library into the game, and from the writes of `capture` and `snapshot`.
     ///
     /// Fails with `api.start` if it can't.
     pub(crate) fn start(
@@ -377,12 +379,10 @@ impl Api {
         let beside = crate::beside_exe("sessions");
         let path = beside.join(Session::file_name(app, pid));
         let text = serde_json::to_string_pretty(&session).expect("a session serializes");
-        fs::create_dir_all(&beside)
-            .and_then(|()| crate::dirs::write_whole(&path, text.as_bytes()))
-            .map_err(failed(format!(
-                "can't write the session file {}",
-                path.display()
-            )))?;
+        crate::dirs::write_private(&path, text.as_bytes()).map_err(failed(format!(
+            "can't write the session file {}",
+            path.display()
+        )))?;
         info!(
             address = %address,
             session = %path.display(),
@@ -1507,9 +1507,9 @@ fn accept(
 }
 
 /// Serves connection `stream`: its first request must be `hello` with `token`, which it answers
-/// with `welcome`; then it answers `ping` and `logs` itself, and passes the rest on to the main
-/// loop through `to_main`, waking it, each answer going back through a thread that writes them as
-/// they come. A line that isn't a request ends it.
+/// with `welcome`; then it answers `ping`, `logs` and `note` itself, and passes the rest on to the
+/// main loop through `to_main`, waking it, each answer going back through a thread that writes them
+/// as they come. A line that isn't a request ends it.
 fn connection(
     stream: TcpStream,
     token: &str,
@@ -1540,7 +1540,7 @@ fn connection(
     let given = (hello.method == "hello")
         .then(|| serde_json::from_value::<Hello>(hello.params).ok())
         .flatten();
-    let Some(Hello { client, .. }) = given.filter(|hello| hello.token == token) else {
+    let Some(Hello { client, .. }) = given.filter(|hello| same_token(&hello.token, token)) else {
         let message = "a connection's first request is `hello`, with the session file's token";
         reply.send(Err(Failure::new("api.unauthorized", message)));
         return;
@@ -1563,6 +1563,10 @@ fn connection(
         }
         if request.method == "logs" {
             reply.send(logs(&request.params, shared));
+            continue;
+        }
+        if request.method == "note" {
+            reply.send(note(&request.params, &client));
             continue;
         }
         match parse(&request) {
@@ -1592,6 +1596,18 @@ fn connection(
             Err(failure) => reply.send(Err(failure)),
         }
     }
+}
+
+/// Whether `given` is `token`, compared in a time that doesn't depend on where they first differ,
+/// so that a client can't find the token a byte at a time by timing its refusals: only their
+/// lengths tell early, and the token's, 32, is no secret. `black_box` keeps the compiler from
+/// ending the loop at the first difference, as far as std's best effort goes.
+fn same_token(given: &str, token: &str) -> bool {
+    let (given, token) = (given.as_bytes(), token.as_bytes());
+    given.len() == token.len()
+        && (given.iter().zip(token))
+            .fold(0, |differ, (a, b)| std::hint::black_box(differ | (a ^ b)))
+            == 0
 }
 
 /// What `logs`, given `params`, answers, from the events `shared` keeps, as gg-api's docs say: read
@@ -1645,6 +1661,71 @@ fn logs(params: &Value, shared: &Shared) -> Result<String, Failure> {
     }
     answer.push_str("]}");
     Ok(answer)
+}
+
+/// What `note`, given `params` by client `client`, answers, having logged the event it gives, as
+/// gg-api's docs say: at its level, with its code, its message, `client`, and its fields as one
+/// field of JSON text, `fields`, since an event's fields are flat. It's answered on the
+/// connection's own thread, so that a note comes through while frames pause.
+///
+/// Fails with `api.bad_params` for parameters it doesn't take, as a level that isn't `info` or
+/// `warn`; a code that isn't a stable code's shape, as [`is_code`] says, or is longer than
+/// [`gg_api::MOST_NOTE_CODE`] bytes; an empty message; or a message or fields longer than
+/// [`gg_api::MOST_NOTE`] bytes.
+fn note(params: &Value, client: &str) -> Result<String, Failure> {
+    let method = "note";
+    let gg_api::Note {
+        code,
+        level,
+        message,
+        fields,
+    } = take(method, params)?;
+    let (most_code, most) = (gg_api::MOST_NOTE_CODE, gg_api::MOST_NOTE);
+    if code.len() > most_code {
+        let what = format!(
+            "takes a code of at most {most_code} bytes, not {}",
+            code.len()
+        );
+        return Err(bad_params(method, what));
+    }
+    if !is_code(&code) {
+        let what = format!(
+            "takes a stable code, dotted names of lowercase ASCII letters, digits and `_`, each \
+             starting with a letter, such as `gg.patch_failed`, not `{code}`"
+        );
+        return Err(bad_params(method, what));
+    }
+    if message.is_empty() || message.len() > most {
+        let what = format!(
+            "takes a message of 1 to {most} bytes, not {}",
+            message.len()
+        );
+        return Err(bad_params(method, what));
+    }
+    let fields = fields.map(|fields| Value::Object(fields).to_string());
+    if let Some(given) = fields.as_ref().filter(|given| given.len() > most) {
+        let what = format!(
+            "takes fields of at most {most} bytes as JSON, not {}",
+            given.len()
+        );
+        return Err(bad_params(method, what));
+    }
+    let (code, fields) = (code.as_str(), fields.as_deref());
+    match level {
+        gg_api::NoteLevel::Info => info!(code, client, fields, "{message}"),
+        gg_api::NoteLevel::Warn => warn!(code, client, fields, "{message}"),
+    }
+    Ok("{}".to_owned())
+}
+
+/// Whether `code` has a stable code's shape: two or more names, joined by dots, each of lowercase
+/// ASCII letters, digits and `_`, starting with a letter, as `gg.patch_failed`.
+fn is_code(code: &str) -> bool {
+    let name = |name: &str| {
+        name.starts_with(|c: char| c.is_ascii_lowercase())
+            && (name.chars()).all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    };
+    code.contains('.') && code.split('.').all(name)
 }
 
 /// The next request `reader` reads: `None` once the connection ends or breaks, or at a line that
@@ -2287,6 +2368,24 @@ mod tests {
         drop(waiting);
     }
 
+    /// A token given is the token only if every byte is: not if its first or last differs, nor if
+    /// it's the token cut short, the token with more after, or nothing.
+    #[test]
+    fn a_token_given_is_the_token_only_if_every_byte_is() {
+        let token = "0123456789abcdef0123456789abcdef";
+        assert!(same_token(token, token));
+        let longer = format!("{token}0");
+        for given in [
+            "f123456789abcdef0123456789abcdef",
+            "0123456789abcdef0123456789abcdee",
+            "0123456789abcdef",
+            &longer,
+            "",
+        ] {
+            assert!(!same_token(given, token), "{given:?}");
+        }
+    }
+
     /// The numbers of the events `read` read, each event's `n`.
     fn numbers(read: &LogEvents) -> Vec<u64> {
         let events = read.events.iter().map(|event| {
@@ -2344,6 +2443,121 @@ mod tests {
                 .map(|failure| failure.code);
             assert_eq!(code.as_deref(), Some("api.bad_params"), "{refused}");
         }
+    }
+
+    /// A note is answered by the connection's own thread while no frame serves; and one that isn't
+    /// a note, as one at an error's level, of a code of another shape, without a message, or too
+    /// long, is refused, with a code.
+    #[test]
+    fn a_client_notes_an_event_without_frames_or_is_refused() {
+        let (_api, session) = started("Api Notes");
+        let mut client = Client::connect(&session, "test", DEADLINE).expect("it connects");
+        let note = |code: &str, level: &str, message: &str| {
+            json!({
+                "code": code,
+                "level": level,
+                "message": message,
+            })
+        };
+        let mut noted = note("gg.patch_failed", "warn", "A patch didn't build");
+        noted["fields"] = json!({"files": ["src/main.rs"]});
+        let answer = client.call("note", noted).expect("noted");
+        assert_eq!(answer.get(), "{}");
+        let long = "x".repeat(gg_api::MOST_NOTE + 1);
+        let with = |key: &str, value: Value| {
+            let mut note = note("gg.patch_failed", "info", "m");
+            note[key] = value;
+            note
+        };
+        for refused in [
+            note("gg.patch_failed", "error", "m"),
+            note("gg", "info", "m"),
+            note("Gg.patch_failed", "info", "m"),
+            note("gg..patch_failed", "info", "m"),
+            note("gg.patch-failed", "info", "m"),
+            note("gg.1patch", "info", "m"),
+            note(
+                &format!("gg.{}", "x".repeat(gg_api::MOST_NOTE_CODE)),
+                "info",
+                "m",
+            ),
+            note("gg.patch_failed", "info", ""),
+            note("gg.patch_failed", "info", &long),
+            with("fields", json!(["src/main.rs"])),
+            with("fields", json!({"files": long})),
+            with("by", json!("me")),
+            json!({"code": "gg.patch_failed", "level": "info"}),
+            Value::Null,
+        ] {
+            let code = client.call("note", refused.clone()).err();
+            let code = code.map(|failure| failure.code);
+            assert_eq!(code.as_deref(), Some("api.bad_params"), "{refused}");
+        }
+    }
+
+    /// What a JSON layer writes, its events' lines, as the run's log has them.
+    #[derive(Clone, Default)]
+    struct Written(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Written {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let mut written = self.0.lock().expect("no thread panics holding it");
+            written.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A note is logged as the run's JSON log writes events: at its level, with its code and its
+    /// message, the client that gave it, and its fields, if any, as one field of JSON text.
+    #[test]
+    fn a_note_is_logged_at_its_level_as_its_clients() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let written = Written::default();
+        let writer = written.clone();
+        // Two dispatchers, as `testing::logged` keeps for the reason it gives.
+        let _other = tracing::subscriber::set_default(tracing_subscriber::registry());
+        let json = tracing_subscriber::fmt::layer()
+            .json()
+            .flatten_event(true)
+            .with_writer(move || writer.clone());
+        let _logging = tracing::subscriber::set_default(tracing_subscriber::registry().with(json));
+        let warned = json!({"code": "gg.attach_changed", "level": "warn",
+            "message": "A layer's attach changed", "fields": {"files": ["src/main.rs"]}});
+        assert_eq!(note(&warned, "gg").as_deref(), Ok("{}"));
+        let told = json!({"code": "agent.checked", "level": "info", "message": "Checked"});
+        assert_eq!(note(&told, "claude-code").as_deref(), Ok("{}"));
+        let text = written
+            .0
+            .lock()
+            .expect("no thread panics holding it")
+            .clone();
+        let text = String::from_utf8(text).expect("UTF-8");
+        let lines: Vec<Value> = (text.lines())
+            .map(|line| serde_json::from_str(line).expect("an event"))
+            .collect();
+        assert_eq!(lines.len(), 2, "{text}");
+        let field = |line: &Value, name: &str| line.get(name).cloned().unwrap_or(Value::Null);
+        let logged =
+            |line: &Value| ["level", "code", "message", "client"].map(|name| field(line, name));
+        let expected = [
+            "WARN",
+            "gg.attach_changed",
+            "A layer's attach changed",
+            "gg",
+        ];
+        assert_eq!(logged(&lines[0]), expected.map(Value::from));
+        let fields = field(&lines[0], "fields");
+        let fields = fields.as_str().expect("JSON text");
+        let fields: Value = serde_json::from_str(fields).expect("JSON");
+        assert_eq!(fields, json!({"files": ["src/main.rs"]}));
+        let expected = ["INFO", "agent.checked", "Checked", "claude-code"];
+        assert_eq!(logged(&lines[1]), expected.map(Value::from));
+        assert_eq!(field(&lines[1], "fields"), Value::Null, "none given");
     }
 
     /// A client's sets of one field in one gesture undo as one edit, and a gesture's apply is of

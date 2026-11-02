@@ -86,9 +86,37 @@ fn connect_to(path: &Path, session: &Session, client: &str) -> Result<Option<Cli
     }
 }
 
+/// Connects to each game of `sessions`, each read from its file, as `client`, as [`connect_to`]
+/// does, and returns those that answered, each with its session. One that fails otherwise than by
+/// having ended is left out if another answers, as a file that a kill left naming a port that
+/// another game, or another process, has since been given fails, which then mustn't fail every
+/// command; its file stays, as its game may yet answer.
+///
+/// Fails as the first that failed so did, if none answered.
+fn answering(
+    sessions: impl IntoIterator<Item = (PathBuf, Session)>,
+    client: &str,
+) -> Result<Vec<(Session, Client)>, Failure> {
+    let (mut answering, mut failed) = (Vec::new(), None);
+    for (path, session) in sessions {
+        match connect_to(&path, &session, client) {
+            Ok(Some(client)) => answering.push((session, client)),
+            Ok(None) => {}
+            Err(failure) => {
+                failed.get_or_insert(failure);
+            }
+        }
+    }
+    match failed {
+        Some(failure) if answering.is_empty() => Err(failure),
+        _ => Ok(answering),
+    }
+}
+
 /// Connects to the running game `pick` picks, waiting for its answers as long as it says.
 ///
-/// Fails with `gg.no_game` if none runs that it picks, and `gg.which_game` if more than one does.
+/// Fails with `gg.no_game` if none runs that it picks, and `gg.which_game` if more than one does;
+/// and as [`answering`] does.
 pub(crate) fn connect(pick: &Pick) -> Result<Client, Failure> {
     let picked = session_files(pick.project.as_deref())?
         .into_iter()
@@ -96,12 +124,10 @@ pub(crate) fn connect(pick: &Pick) -> Result<Client, Failure> {
             pick.pid.is_none_or(|pid| session.pid == pid)
                 && (pick.app.as_ref()).is_none_or(|app| session.app.eq_ignore_ascii_case(app))
         });
-    let mut running = Vec::new();
-    for (path, session) in picked {
-        if let Some(client) = connect_to(&path, &session, &pick.client)? {
-            running.push((session.player, client));
-        }
-    }
+    let answered = answering(picked, &pick.client)?.into_iter();
+    let mut running: Vec<_> = answered
+        .map(|(session, client)| (session.player, client))
+        .collect();
     // A lockstep session's peers, of one game, are reached through the host, whose edits and
     // patches both peers apply.
     let peers = running.iter().all(|(player, _)| player.is_some());
@@ -161,12 +187,11 @@ pub(crate) fn call(pick: &Pick, method: &str, params: Value) -> Result<Box<RawVa
 /// The running games, those of the project whose manifest is at `project` alone, as an array: each
 /// one's app, process, address, engine, player, project, log, the frames it has run, and what it
 /// waits for, if anything.
+///
+/// Fails as [`answering`] does, and as a game's ping fails.
 pub(crate) fn sessions(project: Option<&Path>) -> Result<Value, Failure> {
     let mut games = Vec::new();
-    for (path, session) in session_files(project)? {
-        let Some(mut client) = connect_to(&path, &session, "gg")? else {
-            continue;
-        };
+    for (session, mut client) in answering(session_files(project)?, "gg")? {
         let pulse: Pulse = client.call_as("ping", Value::Null)?;
         games.push(json!({
             "app": session.app,
@@ -274,6 +299,12 @@ pub(crate) fn log_of(dir: &Path, pid: u32) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::BufReader;
+    use std::net::{SocketAddr, TcpListener};
+    use std::thread;
+
+    use gg_api::Request;
+
     use super::*;
 
     /// Writes the session file of a game in process `pid`, of the project whose manifest is at
@@ -343,6 +374,84 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&root);
         assert_eq!((a, b), (vec![1], vec![2]));
+        assert!(none.is_empty());
+    }
+
+    /// Serves the API's `hello` on the loopback as a game does, on a thread for each connection,
+    /// welcoming a client that gives `token` and refusing any other with `api.unauthorized`, while
+    /// the tests run; and returns where.
+    fn serving(token: &'static str) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a port");
+        let address = listener.local_addr().expect("its address");
+        thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                thread::spawn(move || {
+                    let mut writer = stream.try_clone().expect("a writer");
+                    let mut reader = BufReader::new(stream);
+                    while let Ok(Some(line)) = gg_api::read_line(&mut reader) {
+                        let request: Request = serde_json::from_str(&line).expect("a request");
+                        let welcome = r#"{"app":"Sandbox","pid":1,"engine":"0.1.0","log":null}"#;
+                        let refused = Failure::new("api.unauthorized", "another game's token");
+                        let answer = if request.params["token"] == token {
+                            Ok(welcome)
+                        } else {
+                            Err(&refused)
+                        };
+                        let line = gg_api::answer_line(request.id, answer);
+                        if writer.write_all(line.as_bytes()).is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        address
+    }
+
+    /// A session whose game fails otherwise than by having ended, as one whose file a kill left
+    /// naming a port another game has since been given, which refuses its token, is left out while
+    /// another answers, and its file kept; alone, its failure is the command's. One whose game has
+    /// ended goes, with its file.
+    #[test]
+    fn a_session_that_fails_fails_a_command_only_if_no_other_answers() {
+        let dir = std::env::temp_dir().join(format!("gg-answering-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("a directory");
+        let session = |pid: u32, address: SocketAddr, token: &str| {
+            let session = Session {
+                app: "Sandbox".to_owned(),
+                pid,
+                address,
+                token: token.to_owned(),
+                log: None,
+                engine: "0.1.0 debug".to_owned(),
+                aslr_reference: 0,
+                player: None,
+                project: None,
+            };
+            let path = dir.join(Session::file_name("Sandbox", pid));
+            fs::write(&path, serde_json::to_string(&session).expect("JSON")).expect("written");
+            (path, session)
+        };
+        let address = serving("t");
+        let (live, stale) = (
+            session(1, address, "t"),
+            session(2, address, "a stale token"),
+        );
+        let ended = session(3, "127.0.0.1:1".parse().expect("an address"), "t");
+        let pids = |answered: Vec<(Session, Client)>| -> Vec<u32> {
+            answered.iter().map(|(session, _)| session.pid).collect()
+        };
+        let all = [stale.clone(), live.clone(), ended.clone()];
+        let answered = answering(all, "test").expect("one answers");
+        let left = [&stale, &live, &ended].map(|(path, _)| path.exists());
+        let refused = answering([stale.clone()], "test").err();
+        let none = answering(Vec::new(), "test").expect("none to fail");
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(pids(answered), [1]);
+        assert_eq!(left, [true, true, false]);
+        let refused = refused.map(|failure| failure.code);
+        assert_eq!(refused.as_deref(), Some("api.unauthorized"));
         assert!(none.is_empty());
     }
 }

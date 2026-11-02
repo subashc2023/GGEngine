@@ -652,7 +652,7 @@ impl Types {
 /// Implemented by hand, `describe` calls [`Types::add`] for its own type, a struct or an enum,
 /// never another's, and the rest keep to its description: `with_value` checks the value's kinds,
 /// fields and variants, and makes what it's given whole before anything changes, keeping what's
-/// opaque; and `digest` writes what `to_value` reads.
+/// opaque; `digest` writes what `to_value` reads; and `entities_mut` reaches the entities it reads.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` isn't reflected",
     note = "a type of fields describes itself with `#[derive(gg_engine::Reflect)]`, and a \
@@ -710,6 +710,12 @@ pub trait Reflect: std::any::Any + Send + Sync {
     /// its parts' own, as `to_value` reads them, and a variant's index as a `u32` does:
     /// `<u32 as Reflect>::digest(&index, to)`.
     fn digest(&self, to: &mut Digest<'_>);
+
+    /// Calls `each` with each entity it holds, to change: those [`to_value`](Self::to_value) reads
+    /// as [`Value::Entity`], in the order it reads them. So code points a reference elsewhere, as a
+    /// duplicate points its copies' at each other, keeping every other bit as it is, where setting
+    /// a value again would check it all, and refuse what code stored that a set refuses.
+    fn entities_mut(&mut self, each: &mut dyn FnMut(&mut Entity));
 }
 
 /// Types whose fields `#[reflect(min = ..)]` and `#[reflect(max = ..)]` bound: numbers, vectors,

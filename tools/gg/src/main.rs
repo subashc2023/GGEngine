@@ -59,14 +59,18 @@ Build and run:
       in a body, or to code that has run as the game started, `main` and a layer's `load` and
       `restored`, and any change while the last rebuild has failed. A game that waits for a
       rebuild gets one at any change, and one started again is patched with the edits since its
-      build at once. With `--peers 2`, it runs the two peers of a lockstep session from one build,
-      the host given `--host` and the joiner `--join` at a free port of the loopback, each
-      `started` naming its `player`: patched together, and stopped and started again together as
-      either ends or the game is rebuilt. With `--embedded`, for the tool that started gg, such as
-      the editor, the game is given `--embedded`, running offscreen for the tool, which shows its
-      view, and the run ends cleanly, stopping the game, once gg's stdin closes (`closed`), as the
-      tool ends, a build under way finishing first. A second `run` of PACKAGE while one runs is
-      refused (`gg.running`).
+      build at once. The game logs a patch or a rebuild that failed too, as warnings
+      `gg.patch_failed` and `gg.rebuild_failed`, which `logs` shows. An edit inside a layer's
+      `attach`, which builds the world as a run starts afresh, is patched, `patched` naming its
+      module in `attach` and the game warning `gg.attach_changed`, but shows only in a run started
+      afresh, as the run keeps its world, its restarts starting from snapshots. With `--peers 2`,
+      it runs the two peers of a lockstep session from one build, the host given `--host` and the
+      joiner `--join` at a free port of the loopback, each `started` naming its `player`: patched
+      together, and stopped and started again together as either ends or the game is rebuilt. With
+      `--embedded`, for the tool that started gg, such as the editor, the game is given
+      `--embedded`, running offscreen for the tool, which shows its view, and the run ends cleanly,
+      stopping the game, once gg's stdin closes (`closed`), as the tool ends, a build under way
+      finishing first. A second `run` of PACKAGE while one runs is refused (`gg.running`).
   check [PACKAGE] [--release] [--frames <N>] [--timeout <SECONDS>] [-- <ARGS>...]
       Build PACKAGE, the project's game without one, and run it headless for N frames (60) with
       ARGS, and print what it did: its exit status, its warnings and errors, and its frame times.
@@ -112,11 +116,23 @@ Talk to a running game, through its tool API:
                                  first, each `null` giving it back to the game
   pick <X> <Y>                   The ID and name of the entity its view shows at pixel X, Y from its
                                  top left, as a capture has it, the look included; `null` for none
+  input <EVENTS>                 Hand its layers EVENTS, a JSON array of the API's input events, in
+                                 order, as its window would, as a frame starts: a key down or up by
+                                 its W3C `code`, `{\"key\":{\"key\":\"KeyW\",\"pressed\":true}}`,
+                                 `{\"text\":\"w\"}`, the cursor at a pixel of the view from its top
+                                 left, `{\"cursor\":[X,Y]}`, `\"cursor_entered\"`,
+                                 `\"cursor_left\"`, a mouse button,
+                                 `{\"button\":{\"button\":\"left\",\"pressed\":true}}`, a scroll,
+                                 `{\"scroll\":{\"lines\":[0,1]}}`, and the keys' focus,
+                                 `{\"focused\":true}`
   snapshot [PATH]                Write its world as a snapshot at PATH, or in `snapshots` beside it
   entities [--with <COMPONENT>] [--skip <N>] [--take <N>]
                                  List its entities, those with COMPONENT, N at a time (100)
   entity <ID>                    An entity and its components' values
   get <ID> <COMPONENT> [PATH]    A component's value, or its field at PATH, such as `translation.x`
+  types                          Its world's component types, each with the value `add` gives it
+                                 without one, and the descriptions of the types they hold, which
+                                 values are read and written by
   hash                           Its world's hash
   assets [--kind <KIND>] [--skip <N>] [--take <N>]
                                  List its textures, models and fonts, those of KIND, `texture`,
@@ -561,9 +577,18 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
                 follow: parsed.switch("--follow"),
             }
         }
-        method @ ("status" | "pause" | "resume" | "play" | "stop" | "hash" | "quit") => {
+        method @ ("status" | "pause" | "resume" | "play" | "stop" | "types" | "hash" | "quit") => {
             parsed.positional(0, 0, method)?;
             call(&mut parsed, method, Value::Null)?
+        }
+        "input" => {
+            let given = parsed.positional(1, 1, "input <EVENTS>")?;
+            let events: Value = serde_json::from_str(&given[0])
+                .map_err(|error| bad(format!("EVENTS isn't JSON: {error}")))?;
+            if !events.is_array() {
+                return Err(bad("EVENTS is a JSON array of input events".to_owned()));
+            }
+            call(&mut parsed, "input", json!({"events": events}))?
         }
         "step" => {
             let ticks = parsed.positional(0, 1, "step [N]")?;
@@ -871,6 +896,14 @@ mod tests {
             ),
             // A pixel outside the view too, which the game answers with none.
             (&["pick", "3", "-4.5"], json!({"at": [3.0, -4.5]})),
+            (&["types"], Value::Null),
+            (
+                &[
+                    "input",
+                    r#"[{"key":{"key":"KeyW","pressed":true}},"cursor_left"]"#,
+                ],
+                json!({"events": [{"key": {"key": "KeyW", "pressed": true}}, "cursor_left"]}),
+            ),
             (&["assets"], json!({"kind": null, "skip": 0, "take": 100})),
             (
                 &["assets", "--kind", "model", "--take", "5"],
@@ -920,6 +953,11 @@ mod tests {
             &["pick", "1", "2", "3"],
             &["pick", "left", "2"],
             &["pick", "1", "NaN"],
+            &["types", "Sprite"],
+            &["input"],
+            &["input", "{not json"],
+            &["input", r#"{"key":{"key":"KeyW","pressed":true}}"#],
+            &["input", "[]", "[]"],
             &["status", "--frames", "2"],
             &["status", "extra"],
             &["step", "many"],

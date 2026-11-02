@@ -102,8 +102,9 @@ serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
 # Hot patching. The release of dx, Dioxus's tool, that builds the patches, which must be its own:
 # `gg run` checks the machine's dx against it.
 subsecond = "=0.7.2"
-# Decodes music as it plays, for kira's streams, as kira's own decoder does but for one fix, as
-# gg-engine's audio module says. kira's version, without its defaults, with kira's formats.
+# Decodes sounds as they load, and music as it plays for kira's streams, as kira's own decoders do
+# but for a fix to each, as gg-engine's audio module says. kira's version, without its defaults,
+# with kira's formats.
 symphonia = { version = "0.6.1", default-features = false, features = [
     "flac",
     "mp3",

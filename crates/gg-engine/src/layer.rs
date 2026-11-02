@@ -996,8 +996,9 @@ impl Context {
     /// that serves the tool API, it bakes again as its file changes, off the main thread.
     ///
     /// Fails with `engine.bad_font` if the file can't be read, isn't a regular file, is more than
-    /// 256 MiB, or isn't a TrueType or OpenType font with outlines, as a font of bitmaps alone
-    /// isn't, and with `renderer.too_many_textures` if the renderer hasn't room for its field.
+    /// 256 MiB, isn't a TrueType or OpenType font with outlines, as a font of bitmaps alone isn't,
+    /// or has glyphs that don't fit a field of 8,192 texels square, alone or together; and with
+    /// `renderer.too_many_textures` if the renderer hasn't room for its field.
     pub fn add_font(&mut self, name: &str, path: impl AsRef<Path>) -> Result<Font> {
         let path = path.as_ref();
         let named = assets::name_of(self.root.as_deref(), path);
@@ -1052,7 +1053,9 @@ impl Context {
     /// and tests play none.
     ///
     /// Fails with `engine.bad_sound` if the file can't be read, isn't a regular file, is more than
-    /// 16 MiB, or doesn't decode.
+    /// 16 MiB, doesn't decode, or decodes to more than 2²⁴ frames, some 6 minutes at 48 kHz, which
+    /// it's refused as it passes: longer audio is music, which [`add_music`](Self::add_music)
+    /// streams.
     pub fn add_sound(&mut self, name: &str, path: impl AsRef<Path>) -> Result<Sound> {
         let path = path.as_ref();
         let file = assets::file_of(path);

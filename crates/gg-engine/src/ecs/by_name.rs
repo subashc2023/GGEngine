@@ -1006,6 +1006,10 @@ mod tests {
         fn digest(&self, to: &mut reflect::Digest<'_>) {
             self.0.digest(to);
         }
+
+        fn entities_mut(&mut self, each: &mut dyn FnMut(&mut Entity)) {
+            self.0.entities_mut(each);
+        }
     }
 
     impl<T: Reflect + Clone> Component for Posing<T> {}

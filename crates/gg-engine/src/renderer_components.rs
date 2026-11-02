@@ -10,7 +10,7 @@ use gg_renderer::{Circle, MeshDraw, Sampler, Sprite, Texture};
 use crate::reflect::{
     self, Bound, Digest, Field, Meta, Reflect, Result, Shape, Show, Type, Types, Value,
 };
-use crate::{Component, Writable};
+use crate::{Component, Entity, Writable};
 
 impl Component for Sprite {}
 impl Writable for Sprite {}
@@ -160,6 +160,9 @@ impl Reflect for Sprite {
         rect.digest(to);
         sampler.digest(to);
     }
+
+    /// None of its fields holds one.
+    fn entities_mut(&mut self, _: &mut dyn FnMut(&mut Entity)) {}
 }
 
 /// A sprite's fields, in the order its description gives them.
@@ -303,6 +306,9 @@ impl Reflect for Circle {
         thickness.digest(to);
         fade.digest(to);
     }
+
+    /// None of its fields holds one.
+    fn entities_mut(&mut self, _: &mut dyn FnMut(&mut Entity)) {}
 }
 
 /// A circle's fields, in the order its description gives them.
@@ -369,6 +375,8 @@ impl Reflect for Sampler {
     fn digest(&self, to: &mut Digest<'_>) {
         self.index().digest(to);
     }
+
+    fn entities_mut(&mut self, _: &mut dyn FnMut(&mut Entity)) {}
 }
 
 /// A snapshot keeps its mesh's and its shader's indices, whether its shader is opaque and whether
@@ -445,4 +453,6 @@ impl Reflect for MeshDraw {
     }
 
     fn digest(&self, _: &mut Digest<'_>) {}
+
+    fn entities_mut(&mut self, _: &mut dyn FnMut(&mut Entity)) {}
 }

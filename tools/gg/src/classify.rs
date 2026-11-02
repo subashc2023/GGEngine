@@ -7,8 +7,10 @@ use syn::{Attribute, Block, File, ImplItemFn, Item, ItemFn, ItemImpl, Stmt, Trai
 /// What an edit to a module is, as a patch sees it.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Edit {
-    /// Inside the bodies of functions, which a patch carries.
-    Bodies,
+    /// Inside the bodies of functions, which a patch carries: `attach` if among them is a `Layer`
+    /// impl's `attach`, which builds the world as a run starts afresh, and so never runs again in a
+    /// run that keeps its world, whose restarts start from snapshots.
+    Bodies { attach: bool },
     /// One whose new text doesn't parse: a patch's build then says what rustc makes of it while the
     /// game runs on, but if it builds, rustc reading what gg can't, the game is rebuilt, as gg
     /// can't tell what changed.
@@ -23,7 +25,9 @@ pub(crate) enum Edit {
 /// aren't tokens. But an edit inside the bodies of code that runs as the game starts, `main` and a
 /// `Layer`'s `load` and `restored`, needs a rebuild, which runs them again, as a patch would come
 /// after they ran: as an edit to code only they call, in a function of its own, would, which gg
-/// can't tell. Old text that doesn't parse can't be compared with, so any edit to it rebuilds.
+/// can't tell. An edit inside a `Layer`'s `attach` is patched, and told of, as the world `attach`
+/// builds is the run's from its start, which no patch builds again. Old text that doesn't parse
+/// can't be compared with, so any edit to it rebuilds.
 pub(crate) fn classify(old: &str, new: &str) -> Edit {
     let Ok(old) = syn::parse_file(old) else {
         return Edit::Rebuild("an edit to a module gg can't read as it was built");
@@ -31,37 +35,45 @@ pub(crate) fn classify(old: &str, new: &str) -> Edit {
     let Ok(new) = syn::parse_file(new) else {
         return Edit::Unreadable;
     };
-    if bare(old.clone(), true) != bare(new.clone(), true) {
+    if bare(old.clone(), Keep::None) != bare(new.clone(), Keep::None) {
         return Edit::Rebuild("an edit outside function bodies");
     }
-    if bare(old, false) != bare(new, false) {
+    if bare(old.clone(), Keep::Startup) != bare(new.clone(), Keep::Startup) {
         return Edit::Rebuild(
             "an edit to code that runs as the game starts, as a patch comes after",
         );
     }
-    Edit::Bodies
+    Edit::Bodies {
+        attach: bare(old, Keep::Attach) != bare(new, Keep::Attach),
+    }
+}
+
+/// The bodies of functions that [`bare`] keeps, beside those of `const fn`s.
+#[derive(Clone, Copy, PartialEq)]
+enum Keep {
+    None,
+    /// Those of the code that runs as the game starts: `main`, and a `Layer` impl's `load` and
+    /// `restored`.
+    Startup,
+    /// Those of a `Layer` impl's `attach`, which builds the world as a run starts afresh.
+    Attach,
 }
 
 /// `file` without doc comments, which are `#[doc]` attributes, and without the bodies of the
-/// functions that aren't `const` but for the items declared in them, and with `startup`, without
-/// those of the code that runs as the game starts too.
-fn bare(mut file: File, startup: bool) -> File {
-    let mut bare = Bare {
-        startup,
-        layer: false,
-    };
+/// functions that aren't `const` but for the items declared in them, and for those `keep` keeps.
+fn bare(mut file: File, keep: Keep) -> File {
+    let mut bare = Bare { keep, layer: false };
     bare.visit_file_mut(&mut file);
     file
 }
 
 /// Empties the bodies of free functions, methods and traits' default methods, but for a `const
-/// fn`'s, which the crate's build may evaluate into a type or a static, and, unless `startup`, those
-/// of `main` and of a `Layer` impl's `load` and `restored`; keeps the items declared in a body,
-/// however deep, as a type whose values the running game holds; and drops doc comments. An item
-/// that a macro invoked in a body declares, as `thread_local!` does, goes with the body.
+/// fn`'s, which the crate's build may evaluate into a type or a static, and those `keep` keeps;
+/// keeps the items declared in a body, however deep, as a type whose values the running game
+/// holds; and drops doc comments. An item that a macro invoked in a body declares, as
+/// `thread_local!` does, goes with the body.
 struct Bare {
-    /// Whether the bodies of the code that runs as the game starts are emptied too.
-    startup: bool,
+    keep: Keep,
     /// Whether the impl being visited is one of `Layer`.
     layer: bool,
 }
@@ -72,8 +84,8 @@ impl VisitMut for Bare {
     }
 
     fn visit_item_fn_mut(&mut self, item: &mut ItemFn) {
-        let startup = !self.startup && item.sig.ident == "main";
-        if item.sig.constness.is_none() && !startup {
+        let kept = self.keep == Keep::Startup && item.sig.ident == "main";
+        if item.sig.constness.is_none() && !kept {
             keep_items(&mut item.block);
         }
         visit_mut::visit_item_fn_mut(self, item);
@@ -92,8 +104,13 @@ impl VisitMut for Bare {
 
     fn visit_impl_item_fn_mut(&mut self, item: &mut ImplItemFn) {
         let name = &item.sig.ident;
-        let startup = !self.startup && self.layer && (name == "load" || name == "restored");
-        if item.sig.constness.is_none() && !startup {
+        let kept = self.layer
+            && match self.keep {
+                Keep::None => false,
+                Keep::Startup => name == "load" || name == "restored",
+                Keep::Attach => name == "attach",
+            };
+        if item.sig.constness.is_none() && !kept {
             keep_items(&mut item.block);
         }
         visit_mut::visit_impl_item_fn_mut(self, item);
@@ -131,7 +148,8 @@ mod tests {
     use super::*;
 
     /// A module with what a game's has: a type, a static, a `const fn`, free functions, one with a
-    /// type of its own, a trait with a default method, impls of it and of `Layer`, and `main`.
+    /// type of its own, a trait with a default method, impls of it, of the type with methods named
+    /// as a `Layer`'s are, and of `Layer`, and `main`.
     const MODULE: &str = r#"
 //! The game.
 
@@ -179,11 +197,23 @@ impl Ship {
     fn load(&mut self) {
         self.x = 2.0;
     }
+
+    fn attach(&mut self) {
+        self.x = 1.0;
+    }
 }
 
 impl Layer for Ship {
     fn load(&mut self, cx: &mut Context) {
         cx.add_texture("ship.png");
+    }
+
+    fn attach(&mut self, cx: &mut Context) {
+        cx.world_mut().spawn(Ship { x: 0.0 });
+    }
+
+    fn restored(&mut self, cx: &mut Context) {
+        cx.play_music("theme.ogg");
     }
 
     fn tick(&mut self, world: &mut World, tick: Tick) {
@@ -229,8 +259,21 @@ fn main() {
             ),
         ] {
             let edit = classify(MODULE, &edited(from, to));
-            assert_eq!(edit, Edit::Bodies, "{from} -> {to}");
+            assert_eq!(edit, Edit::Bodies { attach: false }, "{from} -> {to}");
         }
+    }
+
+    /// An edit inside a `Layer`'s `attach`, which builds the world as a run starts afresh, is
+    /// patched, and said to be, beside other edits too; one to a method of another impl named so
+    /// isn't said to be.
+    #[test]
+    fn edits_inside_a_layers_attach_are_patched_and_told_of() {
+        let attached = edited("Ship { x: 0.0 }", "Ship { x: 5.0 }");
+        assert_eq!(classify(MODULE, &attached), Edit::Bodies { attach: true });
+        let beside = attached.replace("self.x += 1.0;", "self.x += 2.0;");
+        assert_eq!(classify(MODULE, &beside), Edit::Bodies { attach: true });
+        let other = classify(MODULE, &edited("self.x = 1.0;", "self.x = 4.0;"));
+        assert_eq!(other, Edit::Bodies { attach: false });
     }
 
     #[test]
@@ -274,6 +317,10 @@ fn main() {
                 "cx.add_texture(\"ship.png\");",
                 "cx.add_texture(\"boat.png\");",
             ),
+            (
+                "cx.play_music(\"theme.ogg\");",
+                "cx.play_music(\"calm.ogg\");",
+            ),
             ("App::new(\"Ships\")", "App::new(\"Boats\")"),
         ] {
             let edit = classify(MODULE, &edited(from, to));
@@ -282,6 +329,13 @@ fn main() {
                 "{edit:?}"
             );
         }
+        // Beside an edit inside `attach`, which a patch would carry.
+        let both = edited("Ship { x: 0.0 }", "Ship { x: 5.0 }").replace("ship.png", "boat.png");
+        let edit = classify(MODULE, &both);
+        assert!(
+            matches!(edit, Edit::Rebuild(why) if why.contains("starts")),
+            "{edit:?}"
+        );
     }
 
     #[test]

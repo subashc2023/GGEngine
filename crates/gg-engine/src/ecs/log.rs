@@ -1,7 +1,7 @@
 //! The log of the edits applied to a world, in order, each its operations with their inverses: what
 //! undo and redo step through.
 
-use gg_core::Result;
+use gg_core::{Error, Result};
 use tracing::field::display;
 use tracing::{debug, warn};
 
@@ -22,6 +22,10 @@ use super::ops::{Inverse, Operation};
 /// the snapshot was taken stay unused in it for good; a world [cleared](World::clear), or whose
 /// entities a scene [replaced](World::replace_scene), refuses them too, having let their slots go
 /// itself. So whoever restores, clears or replaces a world clears its log too.
+///
+/// The last entry done keeps each component its sets changed, whole, as it was, so that the rest
+/// of its edit, appended and refused, rolls it back exactly, as an edit refused partway rolls back
+/// its own; it lets go of them once another entry is done, or it's undone.
 #[derive(Default)]
 pub struct Log {
     /// Applied and not undone, the first applied first.
@@ -48,8 +52,10 @@ impl Log {
     }
 
     /// Applies `operations` to `world`, in order, as one edit, which undoes and redoes as a whole,
-    /// and logs it, as [`apply`](Self::apply) does: all of them or none, so that one refused undoes
-    /// those before it, which changes nothing, and logs nothing. An edit of none logs nothing.
+    /// and logs it, as [`apply`](Self::apply) does: all of them or none, so that one refused rolls
+    /// back those before it, which changes nothing, and logs nothing; exactly, though code had
+    /// stored in a component a set changed what a set refuses, which goes back as it was. An edit
+    /// of none logs nothing.
     ///
     /// Fails as the first operation refused is, naming it if there are others.
     pub fn apply_all(&mut self, world: &mut World, mut operations: Vec<Operation>) -> Result<()> {
@@ -62,12 +68,12 @@ impl Log {
             match world.apply(operation) {
                 Ok(inverse) => inverses.push(inverse),
                 Err(error) => {
-                    // Undone in reverse, each puts the world back as the one before it found it,
-                    // which a world that nothing else has changed meanwhile takes.
+                    // Rolled back in reverse, each puts the world back as the one before it found
+                    // it, which a world that nothing else has changed meanwhile takes.
                     for mut inverse in inverses.into_iter().rev() {
                         world
-                            .undo(&mut inverse)
-                            .expect("an operation just applied undoes");
+                            .roll_back(&mut inverse)
+                            .expect("an operation just applied rolls back");
                         world.release(inverse);
                     }
                     if count == 1 {
@@ -89,7 +95,7 @@ impl Log {
         for dropped in self.undone.drain(..) {
             release(world, dropped);
         }
-        self.done.push(Entry {
+        self.push_done(Entry {
             operations,
             inverses,
         });
@@ -100,8 +106,11 @@ impl Log {
     /// Applies `operations` to `world`, in order, as the rest of the last edit applied, just before
     /// with nothing between, which undoes and redoes with them: for operations whose values hold
     /// entities that edit made, which have handles once it's applied. Refused, they change nothing,
-    /// and that edit comes undone, and is dropped, so that the two are all or nothing too; with
-    /// nothing applied and not undone, they apply as an edit of their own.
+    /// and that edit is rolled back, exactly, as `apply_all` rolls back its own, and dropped, so
+    /// that the two are all or nothing too; unless the world has moved on from that edit since, as
+    /// it hasn't with nothing between, and refuses its roll back as it would refuse its undo: it
+    /// then stays applied, and logged. With nothing applied and not undone, they apply as an edit
+    /// of their own.
     ///
     /// Fails as [`apply_all`](Self::apply_all) does.
     pub(crate) fn append(&mut self, world: &mut World, operations: Vec<Operation>) -> Result<()> {
@@ -123,10 +132,22 @@ impl Log {
                 Ok(())
             }
             Err(error) => {
-                for inverse in last.inverses.iter_mut().rev() {
-                    world.undo(inverse).expect("the edit just applied undoes");
+                let order: Vec<usize> = (0..last.inverses.len()).rev().collect();
+                match turn(world, &mut last.inverses, &order, World::roll_back) {
+                    Ok(()) => release(world, last),
+                    Err((i, refused)) => {
+                        let operation = &last.operations[i];
+                        warn!(
+                            code = "ops.kept",
+                            refused = refused.code(),
+                            entity = operation.entity().map(display),
+                            operation = %operation,
+                            "can't roll back {operation} as an append to its edit is refused: \
+                             {refused}; the edit stays applied and logged"
+                        );
+                        self.done.push(last);
+                    }
                 }
-                release(world, last);
                 Err(error)
             }
         }
@@ -173,12 +194,15 @@ impl Log {
         self.open = false;
     }
 
-    /// Undoes the last edit applied and not undone, and returns whether there was one.
+    /// Undoes the last edit applied and not undone, and returns whether there was one: each set
+    /// sets its field back, checked as any set is, so that it keeps what changed the component's
+    /// other fields since.
     ///
     /// Refused, as when an entity it changed is gone since, or the entity a create made has
-    /// children since, which the create didn't make, it changes nothing, and its entry is dropped,
-    /// with what it kept, since the world has moved on from it and it would block the entries
-    /// before it: the error says why, and is logged as `ops.dropped`.
+    /// children since, which the create didn't make, or a field it set held what a set refuses,
+    /// as code may have stored, it changes nothing, and its entry is dropped, with what it kept,
+    /// since the world has moved on from it and it would block the entries before it: the error
+    /// says why, and is logged as `ops.dropped`.
     pub fn undo(&mut self, world: &mut World) -> Result<bool> {
         self.step(world, Step::Undo)
     }
@@ -218,13 +242,13 @@ impl Log {
     }
 
     /// Undoes or redoes the last entry, its inverses the last first: each one's turns into what
-    /// redoes it, or undoes it again, so that an entry refused partway turns those it has done
-    /// back, the first first.
+    /// redoes it, or undoes it again, so that an entry refused partway rolls back those it has
+    /// done, as [`turn`] does.
     fn step(&mut self, world: &mut World, step: Step) -> Result<bool> {
         self.open = false;
-        let (from, to) = match step {
-            Step::Undo => (&mut self.done, &mut self.undone),
-            Step::Redo => (&mut self.undone, &mut self.done),
+        let from = match step {
+            Step::Undo => &mut self.done,
+            Step::Redo => &mut self.undone,
         };
         let Some(mut entry) = from.pop() else {
             return Ok(false);
@@ -239,33 +263,65 @@ impl Log {
             Step::Undo => (0..entry.inverses.len()).rev().collect(),
             Step::Redo => (0..entry.inverses.len()).collect(),
         };
-        for (n, &i) in order.iter().enumerate() {
-            if let Err(error) = world.undo(&mut entry.inverses[i]) {
-                for &back in order[..n].iter().rev() {
-                    world
-                        .undo(&mut entry.inverses[back])
-                        .expect("an operation just undone or redone turns back");
-                }
-                let operation = &entry.operations[i];
-                let message = format!("can't {doing} {operation}: {error}");
-                warn!(
-                    code = "ops.dropped",
-                    refused = error.code(),
-                    entity = operation.entity().map(display),
-                    operation = %operation,
-                    "{message}; dropped its edit from the log"
-                );
-                release(world, entry);
-                return Err(error.with_message(message));
-            }
+        if let Err((i, error)) = turn(world, &mut entry.inverses, &order, World::undo) {
+            let operation = &entry.operations[i];
+            let message = format!("can't {doing} {operation}: {error}");
+            warn!(
+                code = "ops.dropped",
+                refused = error.code(),
+                entity = operation.entity().map(display),
+                operation = %operation,
+                "{message}; dropped its edit from the log"
+            );
+            release(world, entry);
+            return Err(error.with_message(message));
         }
         for operation in &entry.operations {
             let entity = operation.entity().map(display);
             debug!(code, entity, operation = %operation, "{done}");
         }
-        to.push(entry);
+        match step {
+            // Nothing rolls back an entry undone: a redo applies it afresh.
+            Step::Undo => {
+                entry.inverses.iter_mut().for_each(Inverse::settle);
+                self.undone.push(entry);
+            }
+            Step::Redo => self.push_done(entry),
+        }
         Ok(true)
     }
+
+    /// Pushes `entry`, as the last entry done, which keeps what rolls it back; the one before it,
+    /// which no append rolls back, lets go of it.
+    fn push_done(&mut self, entry: Entry) {
+        if let Some(before) = self.done.last_mut() {
+            before.inverses.iter_mut().for_each(Inverse::settle);
+        }
+        self.done.push(entry);
+    }
+}
+
+/// Applies each of `inverses`, in `order`, through `apply`, [`World::undo`] or
+/// [`World::roll_back`], which leaves in its place what undoes that. Refused partway, it rolls back
+/// those it applied, the last first, each finding the world as it left it, so that the world is
+/// exactly as it was, and fails with the index of the one refused, and why.
+fn turn(
+    world: &mut World,
+    inverses: &mut [Inverse],
+    order: &[usize],
+    apply: fn(&mut World, &mut Inverse) -> Result<()>,
+) -> std::result::Result<(), (usize, Error)> {
+    for (n, &i) in order.iter().enumerate() {
+        if let Err(error) = apply(world, &mut inverses[i]) {
+            for &back in order[..n].iter().rev() {
+                world
+                    .roll_back(&mut inverses[back])
+                    .expect("an inverse just applied rolls back");
+            }
+            return Err((i, error));
+        }
+    }
+    Ok(())
 }
 
 /// Releases what `entry`'s inverses keep from `world`.
@@ -293,7 +349,7 @@ impl Log {
 
 #[cfg(test)]
 pub(super) mod tests {
-    use gg_core::math::{Vec3, Vec4};
+    use gg_core::math::{Quat, Vec3, Vec4};
 
     use super::*;
     use crate::ecs::hierarchy::tests::check_links;
@@ -659,6 +715,119 @@ pub(super) mod tests {
         assert_eq!((log.kept(), vacated(&x.world)), (0, 0));
         check_ids(&x.world);
         check_links(&x.world);
+    }
+
+    /// A rotation that isn't a unit, which a set refuses, as code may store one: as 2D physics
+    /// leaves a body's long spun.
+    const DRIFTED: Quat = Quat::from_xyzw(0.0, 0.0, 0.6, 0.9);
+
+    /// A set of `entity`'s rotation.
+    fn rotate(entity: EntityId, rotation: Quat) -> Operation {
+        Operation::Set {
+            entity,
+            component: "Transform".into(),
+            path: "rotation".to_owned(),
+            value: Value::Quat(rotation),
+        }
+    }
+
+    /// Gives `entity` the rotation [`DRIFTED`], as code may.
+    fn drift(world: &mut World, entity: Entity) {
+        let transform = world.get_mut::<Transform>(entity).expect("a transform");
+        transform.rotation = DRIFTED;
+    }
+
+    /// Whether `entity`'s rotation is `rotation`, bit for bit.
+    fn rotated(world: &World, entity: Entity, rotation: Quat) -> bool {
+        let transform = world.get::<Transform>(entity).expect("a transform");
+        let bits = |rotation: Quat| rotation.to_array().map(f32::to_bits);
+        bits(transform.rotation) == bits(rotation)
+    }
+
+    /// An edit refused partway rolls back those before it exactly, though code stored in the
+    /// components they set what a set refuses, a rotation that isn't a unit and a count above its
+    /// max, which come back bit for bit, so that the world's hash is as it was.
+    #[test]
+    fn an_edit_refused_partway_rolls_back_what_code_stored_that_a_set_refuses() {
+        let mut x = fixture();
+        let mut log = Log::default();
+        let [r, f] = [x.r, x.f].map(|entity| x.id(entity));
+        drift(&mut x.world, x.r);
+        let all = x.world.get_mut::<Everything>(x.f).expect("everything");
+        all.count = 200;
+        let before = x.world.hash();
+        let edit = vec![rotate(r, Quat::IDENTITY), count(f, 5), count(f, 101)];
+        let refused = log.apply_all(&mut x.world, edit);
+        let error = refused.expect_err("above its max");
+        assert_eq!(error.code(), "reflect.out_of_range", "{error}");
+        assert!(error.to_string().starts_with("operation 3, "), "{error}");
+        assert_eq!(x.world.hash(), before);
+        assert!(rotated(&x.world, x.r, DRIFTED));
+        let all = x.world.get::<Everything>(x.f).expect("everything");
+        assert_eq!(all.count, 200);
+        assert_eq!(log.edits().len(), 0);
+    }
+
+    /// An append refused rolls back the edit before it exactly, as an edit refused partway rolls
+    /// back its own, though code stored in a component it set what a set refuses; but where the
+    /// world has moved on from that edit since, which refuses its roll back, it stays applied and
+    /// logged, as it was.
+    #[test]
+    fn an_append_refused_rolls_back_the_edit_before_it_exactly() {
+        let mut x = fixture();
+        let mut log = Log::default();
+        let [r, c, f] = [x.r, x.c, x.f].map(|entity| x.id(entity));
+        drift(&mut x.world, x.r);
+        let before = x.world.hash();
+        let edit = vec![rotate(r, Quat::IDENTITY)];
+        log.apply_all(&mut x.world, edit).expect("applied");
+        let refused = log.append(&mut x.world, vec![count(f, 101)]);
+        let error = refused.expect_err("above its max");
+        assert_eq!(error.code(), "reflect.out_of_range", "{error}");
+        assert_eq!(x.world.hash(), before);
+        assert!(rotated(&x.world, x.r, DRIFTED));
+        assert_eq!(log.edits().len(), 0, "dropped");
+        // The edit's delete can't be rolled back once the parent of what it took is gone: the set
+        // rolled back before it is turned back.
+        let edit = vec![Operation::Delete { entity: c }, rotate(r, Quat::IDENTITY)];
+        log.apply_all(&mut x.world, edit.clone()).expect("applied");
+        x.world.despawn(x.a).expect("alive");
+        let before = x.world.hash();
+        let refused = log.append(&mut x.world, vec![count(f, 101)]);
+        let error = refused.expect_err("above its max");
+        assert_eq!(error.code(), "reflect.out_of_range", "{error}");
+        assert_eq!(x.world.hash(), before);
+        assert!(rotated(&x.world, x.r, Quat::IDENTITY));
+        assert_eq!(log.undoable(), Some(edit.as_slice()), "kept");
+        assert_eq!((log.kept(), vacated(&x.world)), (1, 1));
+        check_ids(&x.world);
+        check_links(&x.world);
+    }
+
+    /// An undo refused partway turns back what it had undone exactly, though code stored, since
+    /// the edit, what a set refuses in a component it set: the rotation that was there comes back
+    /// bit for bit, which a set of it would refuse.
+    #[test]
+    fn an_undo_refused_partway_turns_back_what_code_stored_exactly() {
+        let mut x = fixture();
+        let mut log = Log::default();
+        let [r, c] = [x.r, x.c].map(|entity| x.id(entity));
+        let edit = vec![
+            Operation::Delete { entity: c },
+            rotate(r, Quat::from_rotation_z(0.5)),
+        ];
+        log.apply_all(&mut x.world, edit).expect("applied");
+        drift(&mut x.world, x.r);
+        // So that the delete's undo is refused, after the set's.
+        x.world.despawn(x.a).expect("alive");
+        let before = x.world.hash();
+        let error = log.undo(&mut x.world).expect_err("c's parent is gone");
+        assert_eq!(error.code(), "ecs.no_entity", "{error}");
+        assert_eq!(x.world.hash(), before);
+        assert!(rotated(&x.world, x.r, DRIFTED));
+        assert_eq!(log.undoable(), None, "dropped");
+        assert_eq!((log.kept(), vacated(&x.world)), (0, 0));
+        check_ids(&x.world);
     }
 
     #[test]

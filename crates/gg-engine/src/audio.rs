@@ -6,6 +6,7 @@
 
 use std::io::Cursor;
 use std::mem;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,7 +16,7 @@ use gg_core::math::{Mat4, Vec3};
 use gg_core::{Error, Result};
 use gg_renderer::Viewpoint;
 use kira::backend::cpal::CpalBackend;
-use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
+use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle, StaticSoundSettings};
 use kira::sound::streaming::{Decoder, StreamingSoundData, StreamingSoundHandle};
 use kira::sound::{FromFileError, PlaybackState};
 use kira::track::{MainTrackBuilder, TrackBuilder, TrackHandle};
@@ -36,6 +37,13 @@ use crate::{Entity, World, dirs};
 /// The most bytes a sound's file may hold, as it's decoded whole as it loads: some 90 seconds of
 /// CD-quality WAV, more than a game's sounds need; longer audio is music, which streams.
 const MAX_SOUND: u64 = 16 << 20;
+
+/// The most frames a sound may decode to, held whole in memory, two f32s each: one for each byte
+/// its file may hold, so that every WAV that loads decodes, as none the engine decodes stores a
+/// frame in less than a byte, 8-bit mono's; some 6 minutes at 48 kHz, in 128 MiB. A compressed
+/// file can hold far more, as a FLAC of silence does, which decodes to hundreds of gigabytes: it's
+/// refused as it passes this, before what's past it is held.
+const MAX_SOUND_FRAMES: usize = MAX_SOUND as usize;
 
 /// The most bytes a music's file may hold, as it's read whole as it loads, as compressed as the
 /// file is, and decoded as it plays: over an hour of Ogg Vorbis at 128 kb/s, some 12 minutes of
@@ -201,7 +209,8 @@ impl World {
 /// [`Context::add_sound`] says.
 ///
 /// Fails with `engine.bad_sound` if the file can't be read, isn't a regular file, is more than
-/// 16 MiB, or doesn't decode as WAV, Ogg Vorbis, FLAC or MP3.
+/// 16 MiB, doesn't decode as WAV, Ogg Vorbis, FLAC or MP3, or decodes to more than
+/// [`MAX_SOUND_FRAMES`].
 ///
 /// [`Context::add_sound`]: crate::Context::add_sound
 pub(crate) fn decode(name: &str, path: &Path) -> Result<StaticSoundData> {
@@ -217,11 +226,48 @@ pub(crate) fn decode(name: &str, path: &Path) -> Result<StaticSoundData> {
     if bytes.len() as u64 > MAX_SOUND {
         return Err(bad(format!("is more than {} MiB", MAX_SOUND >> 20)));
     }
+    decode_bytes(name, path, bytes, MAX_SOUND_FRAMES)
+}
+
+/// Decodes the audio file in `bytes`, sound `name`'s, read from `path`, whole, as [`decode`] does:
+/// to the frames kira's `StaticSoundData::from_cursor` decodes it to, but refusing it as it passes
+/// `most` frames, before it holds those past them, where kira's holds every frame a file decodes
+/// to.
+fn decode_bytes(name: &str, path: &Path, bytes: Vec<u8>, most: usize) -> Result<StaticSoundData> {
+    let bad = |problem: String| {
+        let message = format!("sound {name:?} at {} {problem}", path.display());
+        Error::new("engine.bad_sound", message)
+    };
     // Its text in the message, rather than as a source: kira's error says its own source's.
-    StaticSoundData::from_cursor(Cursor::new(bytes)).map_err(|error| {
+    let undecoded = |error: FromFileError| {
         bad(format!(
             "doesn't decode as WAV, Ogg Vorbis, FLAC or MP3: {error}"
         ))
+    };
+    let decode = || {
+        let mut decoding = Decoding::new(bytes).map_err(undecoded)?;
+        let mut decoded = Vec::new();
+        while let Some(buffer) = decoding.decode().map_err(undecoded)? {
+            if decoded.len() + buffer.frames() > most {
+                return Err(bad(format!(
+                    "decodes to more than {most} frames, the most a sound holds: longer audio is \
+                     music, which streams"
+                )));
+            }
+            decoded.extend(frames(&buffer).map_err(undecoded)?);
+        }
+        Ok(StaticSoundData {
+            sample_rate: decoding.rate,
+            frames: decoded.into(),
+            settings: StaticSoundSettings::default(),
+            slice: None,
+        })
+    };
+    // symphonia can panic on a malformed file, as reading files is, so that's the file's doing: the
+    // sound fails as one that doesn't decode does. gg-core's panic hook still logs it.
+    panic::catch_unwind(AssertUnwindSafe(decode)).unwrap_or_else(|_| {
+        let problem = "doesn't decode as WAV, Ogg Vorbis, FLAC or MP3: its decoder panicked on it";
+        Err(bad(problem.to_owned()))
     })
 }
 
@@ -261,32 +307,39 @@ pub(crate) fn read_music(name: &str, path: &Path) -> Result<Encoded> {
             "doesn't decode as WAV, Ogg Vorbis, FLAC or MP3 of one or two channels: {error}"
         ))
     };
-    let mut stream = Stream::new(bytes.clone()).map_err(undecoded)?;
-    if stream.frames == 0 {
-        return Err(bad("holds no audio".to_owned()));
-    }
-    stream.decode().map_err(undecoded)?;
-    let frames = stream.frames;
+    let check = || {
+        let mut stream = Stream::new(bytes.clone()).map_err(undecoded)?;
+        if stream.frames == 0 {
+            return Err(bad("holds no audio".to_owned()));
+        }
+        stream.decode().map_err(undecoded)?;
+        Ok(stream.frames)
+    };
+    // As a sound's decoding is: a panic of symphonia's on a malformed file is the file's doing.
+    let frames = panic::catch_unwind(AssertUnwindSafe(check)).unwrap_or_else(|_| {
+        let problem = "doesn't decode as WAV, Ogg Vorbis, FLAC or MP3: its decoder panicked on it";
+        Err(bad(problem.to_owned()))
+    })?;
     Ok(Encoded { bytes, frames })
 }
 
-/// What decodes a music's bytes as a play goes, for kira's stream of it, as kira's own decoder does
-/// but that it resets the codec as it seeks: kira 0.12.6's doesn't, so the packet after a seek, as
-/// at a loop's end, runs on from those decoded before it, as Vorbis's and MP3's overlap, and every
-/// frame after it plays a block out of place. Once kira resets it, its own decoder, through
-/// `StreamingSoundData::from_cursor`, does as this does.
-struct Stream {
+/// An audio file's default audio track as symphonia reads it, a packet at a time, and a codec that
+/// decodes each, as kira's decoders make them: what a sound decodes whole through as it loads, in
+/// place of kira's `StaticSoundData::from_cursor`, which holds every frame a file decodes to,
+/// however many, and what a music's [`Stream`] decodes through as a play goes.
+struct Decoding {
     reader: Box<dyn FormatReader>,
     codec: Box<dyn AudioDecoder>,
     track: u32,
     rate: u32,
-    frames: usize,
+    /// How many frames the track holds, if its file says.
+    frames: Option<u64>,
 }
 
-impl Stream {
-    /// A stream of `bytes`, probed for their format and their default audio track, and a codec for
-    /// it, as kira's decoder makes them.
-    fn new(bytes: Arc<[u8]>) -> Result<Self, FromFileError> {
+impl Decoding {
+    /// The file in `bytes`, probed for its format and its default audio track, and a codec for it,
+    /// as kira's decoders make them.
+    fn new(bytes: impl AsRef<[u8]> + Send + Sync + 'static) -> Result<Self, FromFileError> {
         let source = MediaSourceStream::new(Box::new(Cursor::new(bytes)), Default::default());
         let probe = symphonia::default::get_probe();
         let reader = probe.probe(
@@ -301,11 +354,9 @@ impl Stream {
             return Err(FromFileError::NoDefaultTrack);
         };
         let rate = (parameters.sample_rate).ok_or(FromFileError::UnknownSampleRate)?;
-        let frames = track.num_frames.ok_or(FromFileError::UnknownDuration)?;
-        let frames = usize::try_from(frames).map_err(|_| FromFileError::UnknownDuration)?;
         let codecs = symphonia::default::get_codecs();
         let codec = codecs.make_audio_decoder(parameters, &Default::default())?;
-        let track = track.id;
+        let (track, frames) = (track.id, track.num_frames);
         Ok(Self {
             reader,
             codec,
@@ -314,13 +365,47 @@ impl Stream {
             frames,
         })
     }
+
+    /// The track's next packet, decoded: `None` past its last.
+    fn decode(&mut self) -> Result<Option<GenericAudioBufferRef<'_>>, FromFileError> {
+        let packet = loop {
+            match self.reader.next_packet()? {
+                Some(packet) if packet.track_id == self.track => break packet,
+                Some(_) => {}
+                None => return Ok(None),
+            }
+        };
+        Ok(Some(self.codec.decode(&packet)?))
+    }
+}
+
+/// What decodes a music's bytes as a play goes, for kira's stream of it, as kira's own decoder does
+/// but that it resets the codec as it seeks: kira 0.12.6's doesn't, so the packet after a seek, as
+/// at a loop's end, runs on from those decoded before it, as Vorbis's and MP3's overlap, and every
+/// frame after it plays a block out of place. Once kira resets it, its own decoder, through
+/// `StreamingSoundData::from_cursor`, does as this does.
+struct Stream {
+    decoding: Decoding,
+    /// How many frames the track holds, as its file says.
+    frames: usize,
+}
+
+impl Stream {
+    /// A stream of `bytes`, as [`Decoding::new`] makes it, of a track whose file says how many
+    /// frames it holds, as kira's stream needs.
+    fn new(bytes: Arc<[u8]>) -> Result<Self, FromFileError> {
+        let decoding = Decoding::new(bytes)?;
+        let frames = decoding.frames.ok_or(FromFileError::UnknownDuration)?;
+        let frames = usize::try_from(frames).map_err(|_| FromFileError::UnknownDuration)?;
+        Ok(Self { decoding, frames })
+    }
 }
 
 impl Decoder for Stream {
     type Error = FromFileError;
 
     fn sample_rate(&self) -> u32 {
-        self.rate
+        self.decoding.rate
     }
 
     fn num_frames(&self) -> usize {
@@ -328,24 +413,20 @@ impl Decoder for Stream {
     }
 
     fn decode(&mut self) -> Result<Vec<Frame>, FromFileError> {
-        let packet = loop {
-            match self.reader.next_packet()? {
-                Some(packet) if packet.track_id == self.track => break packet,
-                Some(_) => {}
-                None => return Ok(Vec::new()),
-            }
-        };
-        frames(&self.codec.decode(&packet)?)
+        match self.decoding.decode()? {
+            Some(buffer) => frames(&buffer),
+            None => Ok(Vec::new()),
+        }
     }
 
     fn seek(&mut self, index: usize) -> Result<usize, FromFileError> {
         let to = SeekTo::Timestamp {
             ts: Timestamp::new(index as i64),
-            track_id: self.track,
+            track_id: self.decoding.track,
         };
-        let seeked = self.reader.seek(SeekMode::Accurate, to)?;
+        let seeked = self.decoding.reader.seek(SeekMode::Accurate, to)?;
         // As the codec would otherwise run on from what it decoded before the seek.
-        self.codec.reset();
+        self.decoding.codec.reset();
         let at = usize::try_from(seeked.actual_ts.get()).unwrap_or(0);
         Ok(at.min(self.frames))
     }
@@ -631,7 +712,7 @@ impl Audio {
         let (name, encoded) = &self.music[music.0 as usize];
         let stream = Stream::new(encoded.bytes.clone());
         let stream = stream.expect("a music's bytes probe as they did as they were read");
-        let at = at % (encoded.frames as f64 / f64::from(stream.rate));
+        let at = at % (encoded.frames as f64 / f64::from(stream.decoding.rate));
         let data = StreamingSoundData::from_decoder(stream)
             .loop_region(..)
             .start_position(at)
@@ -943,6 +1024,48 @@ pub(crate) mod tests {
         assert!(queue.0.capacity() >= 2 && audio.queued.capacity() >= 2);
     }
 
+    /// A sound decodes to what kira's own decoding of its file does, its frames, its rate, its
+    /// settings and its slice alike: the demo's sounds, of WAV, and Ogg Vorbis, whose first packet
+    /// decodes to no frames.
+    #[test]
+    fn a_sound_decodes_as_kiras_decoding_of_it_does() {
+        let demo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../games/shards/sounds");
+        let mut files: Vec<_> = (std::fs::read_dir(&demo).expect("the demo's sounds"))
+            .map(|entry| {
+                let path = entry.expect("a sound's entry").path();
+                let bytes = std::fs::read(&path).expect("a sound's file");
+                (path, bytes)
+            })
+            .collect();
+        assert!(files.len() >= 5, "{} of the demo's sounds", files.len());
+        let tone = include_bytes!("../tests/audio/tone.ogg").to_vec();
+        files.push(("tone.ogg".into(), tone));
+        for (path, bytes) in files {
+            let kiras = StaticSoundData::from_cursor(Cursor::new(bytes.clone()));
+            let kiras = kiras.expect("kira decodes it");
+            let decoded = decode_bytes("sound", &path, bytes, MAX_SOUND_FRAMES).expect("a sound");
+            assert!(decoded.num_frames() > 0, "{}", path.display());
+            assert!(decoded == kiras, "{} decodes otherwise", path.display());
+        }
+    }
+
+    /// A sound that decodes to more frames than a sound holds is refused as it passes them, naming
+    /// the sound, which one of as many isn't: a WAV of 2,000 frames, which symphonia reads in
+    /// packets of 1,152, so that the second packet passes the most, 1,999.
+    #[test]
+    fn a_sound_longer_than_a_sound_holds_is_refused() {
+        let path = Path::new("long.wav");
+        let long = wav(&vec![0; 2_000]);
+        let decoded = decode_bytes("long", path, long.clone(), 2_000).expect("as long as it holds");
+        assert_eq!(decoded.num_frames(), 2_000);
+        let error = decode_bytes("long", path, long, 1_999).expect_err("refused");
+        assert_eq!(error.code(), "engine.bad_sound");
+        let message = error.to_string();
+        let why = "decodes to more than 1999 frames, the most a sound holds";
+        let named = message.contains("\"long\"");
+        assert!(named && message.contains(why), "{message}");
+    }
+
     /// Ogg Vorbis that a stream seeks back to the start of, as a loop's end does, decodes as it
     /// did from its start, bit for bit, rather than run on from what it decoded before the seek, a
     /// block out of place.
@@ -950,7 +1073,7 @@ pub(crate) mod tests {
     fn music_decodes_alike_after_seeking_back_as_a_loop_does() {
         let bytes = include_bytes!("../tests/audio/tone.ogg");
         let mut stream = Stream::new(bytes.as_slice().into()).expect("Ogg Vorbis");
-        assert_eq!((stream.rate, stream.frames), (48_000, 24_000));
+        assert_eq!((stream.decoding.rate, stream.frames), (48_000, 24_000));
         let mut passes = Vec::new();
         for _ in 0..2 {
             let start = stream.seek(0).expect("a seek to the start");

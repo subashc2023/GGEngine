@@ -42,7 +42,9 @@ impl<'a> Frame<'a> {
     /// Copies `bytes` into the frame's arena, where the GPU reads them during this frame:
     /// geometry, and data shaders read through its address. The upload borrows the frame's
     /// [`Frames`], so that no later frame draws from it; its address, pushed to a shader in a
-    /// later frame, reads whatever has replaced it.
+    /// later frame, reads whatever has replaced it, or memory freed since, as the arena merges its
+    /// buffers into one as it resets, which can fault the device: shaders are trusted with the
+    /// addresses they're given, as [`GraphicsDesc::spirv`](crate::GraphicsDesc::spirv) says.
     ///
     /// [`Frames`]: crate::Frames
     pub fn upload(&mut self, bytes: &[u8]) -> Result<Upload<'a>> {
@@ -189,16 +191,18 @@ impl<'a> Frame<'a> {
     /// the full chain of mip levels that [`mip_sizes`](crate::mip_sizes) gives if `mipmapped` and
     /// otherwise one, packed as [`Frame::fill_texture`] takes them: in place of what it held,
     /// whether or not a frame has filled or written it, in an image made for them, which keeps the
-    /// texture's index, so that shaders that sample it by its index see them from this frame's
-    /// passes on. Frames before this one may still sample it, so it first waits for the GPU to
-    /// finish them, a frame's time at most: it's for an asset reloaded as its file changes, not for
-    /// every frame. The old image retires until this frame has finished.
+    /// texture's index, so that shaders that sample it by its index see them in each of this
+    /// frame's passes, which all begin after it: the new image takes the texture's slot at once,
+    /// which a pass recorded before would sample too, as the frame is submitted, before its copy.
+    /// Frames before this one may still sample it, so it first waits for the GPU to finish them, a
+    /// frame's time at most: it's for an asset reloaded as its file changes, not for every frame.
+    /// The old image retires until this frame has finished.
     ///
     /// # Panics
     ///
-    /// If a forgotten pass is still open, another device made the texture, a side is 0 or more
-    /// than [`MAX_TEXTURE_SIZE`](crate::MAX_TEXTURE_SIZE), or `pixels` doesn't fill the levels
-    /// exactly.
+    /// If a forgotten pass is still open, a pass has begun in the frame, another device made the
+    /// texture, a side is 0 or more than [`MAX_TEXTURE_SIZE`](crate::MAX_TEXTURE_SIZE), or
+    /// `pixels` doesn't fill the levels exactly.
     pub fn refill_texture(
         &mut self,
         texture: &mut Texture,
@@ -207,6 +211,11 @@ impl<'a> Frame<'a> {
         pixels: &[u8],
     ) -> Result<()> {
         self.outside_pass();
+        assert!(
+            !self.pass_begun,
+            "a texture is refilled before the frame's passes, which would sample its new image \
+             before its copy"
+        );
         self.frames
             .device
             .check_made("the texture refilled", texture.device());

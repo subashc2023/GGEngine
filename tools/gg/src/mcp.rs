@@ -162,6 +162,80 @@ fn tools() -> Value {
             "inputSchema": {"type": "object", "properties": properties, "required": required},
         })
     };
+    // An object of one key, `name`, whose value is `value`, as gg-api writes an enum's variant
+    // that holds something.
+    let variant = |name: &str, value: Value| {
+        json!({
+            "type": "object",
+            "properties": {name: value},
+            "required": [name],
+            "additionalProperties": false,
+        })
+    };
+    let input = json!({
+        "type": "array",
+        "description": "The events, each an object of one key, its kind, or a string for one that \
+                        holds nothing",
+        "items": {"anyOf": [
+            variant("key", json!({
+                "type": "object",
+                "description": "A key went down or up, by its position, as W3C UI Events' `code` \
+                                names it, such as `KeyW`, `Space`, `ArrowLeft` or `ShiftLeft`",
+                "properties": {
+                    "key": {"type": "string"},
+                    "pressed": {"type": "boolean"},
+                    "repeat": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Whether it's a press a held key repeats",
+                    },
+                },
+                "required": ["key", "pressed"],
+                "additionalProperties": false,
+            })),
+            variant("text", json!({
+                "type": "string",
+                "description": "Text a key's press typed, after the press",
+            })),
+            variant("cursor", numbers(2, "The cursor moved over the view, to [x, y], pixels from \
+                                          its top left, as a capture's PNG has it")),
+            {
+                "type": "string",
+                "enum": ["cursor_entered", "cursor_left"],
+                "description": "The cursor came over the view, or left it",
+            },
+            variant("button", json!({
+                "type": "object",
+                "description": "A mouse button went down or up",
+                "properties": {
+                    "button": {"anyOf": [
+                        {"type": "string", "enum": ["left", "right", "middle", "back", "forward"]},
+                        variant("other", json!({
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 65535,
+                            "description": "Another button, by its number, which differs from \
+                                            one platform to another",
+                        })),
+                    ]},
+                    "pressed": {"type": "boolean"},
+                },
+                "required": ["button", "pressed"],
+                "additionalProperties": false,
+            })),
+            variant("scroll", json!({
+                "description": "The wheel or a touchpad scrolled: positive y up, positive x left",
+                "anyOf": [
+                    variant("lines", numbers(2, "[x, y], as a wheel's notches go")),
+                    variant("pixels", numbers(2, "[x, y], as a touchpad's go")),
+                ],
+            })),
+            variant("focused", json!({
+                "type": "boolean",
+                "description": "The view gained or lost the keys",
+            })),
+        ]},
+    });
     json!([
         tool(
             "sessions",
@@ -315,6 +389,16 @@ fn tools() -> Value {
             &["at"],
         ),
         tool(
+            "input",
+            "Hands the game's layers input events, in order, as its window would, as a frame \
+             starts: keys going down and up, by their positions, the text their presses typed, the \
+             cursor moving over the view, coming over it and leaving it, mouse buttons, scrolls, \
+             and the view's gaining or losing the keys. Release each key and button you press, as \
+             the game holds it down until then.",
+            json!({"events": input}),
+            &["events"],
+        ),
+        tool(
             "entities",
             "A page of the world's entities: each one's ID, name, parent and components' types.",
             json!({
@@ -339,6 +423,15 @@ fn tools() -> Value {
                 "path": {"type": "string", "default": ""},
             }),
             &["id", "component"],
+        ),
+        tool(
+            "types",
+            "The world's component types, in the order they registered, each with the value an \
+             `add` without one gives it, or why there's none; and the descriptions of the types \
+             they hold, which values are read and written by: each struct's fields and each \
+             enum's variants, with their types, bounds, defaults and docs.",
+            json!({}),
+            &[],
         ),
         tool(
             "hash",
@@ -499,12 +592,12 @@ fn run(pick: &Pick, name: &str, mut arguments: Map<String, Value>) -> Result<Ran
         "sessions" => {
             game::sessions(pick.project.as_deref()).map(|sessions| Ran::Json(sessions.to_string()))
         }
-        "status" | "pause" | "resume" | "play" | "stop" | "hash" | "snapshot" => {
+        "status" | "pause" | "resume" | "play" | "stop" | "types" | "hash" | "snapshot" => {
             call(name, Value::Null)
         }
         // `scene`'s path as given, from the game's asset root, as its status names scene files.
-        "step" | "scene" | "look" | "pick" | "entities" | "entity" | "get" | "apply" | "undo"
-        | "redo" | "edits" | "assets" => call(name, Value::Object(arguments)),
+        "step" | "scene" | "look" | "pick" | "input" | "entities" | "entity" | "get" | "apply"
+        | "undo" | "redo" | "edits" | "assets" => call(name, Value::Object(arguments)),
         "set" => {
             arguments.entry("path").or_insert_with(|| json!(""));
             call("apply", json!({"operations": [{"set": arguments}]}))
@@ -655,6 +748,76 @@ mod tests {
         assert_eq!(unknown.expect("answered")["error"]["code"], -32601);
         let broken = super::answer(&mut pick, "{").expect("answered");
         assert_eq!(broken["error"]["code"], -32700);
+    }
+
+    /// `types` and `input` are listed, `types` taking nothing and `input` its events, each choice
+    /// of whose schema is a kind of gg-api's input events, and each kind one of its choices.
+    #[test]
+    fn input_and_types_are_listed_with_the_apis_events() {
+        use gg_api::{Button, InputEvent, Scroll};
+
+        let listed = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        let listed = answer(&mut pick(), listed).expect("answered");
+        let tools = listed["result"]["tools"].as_array().expect("tools");
+        let schema = |name: &str| {
+            let tool = tools.iter().find(|tool| tool["name"] == name);
+            tool.unwrap_or_else(|| panic!("a `{name}` tool"))["inputSchema"].clone()
+        };
+        let nothing = json!({"type": "object", "properties": {}, "required": []});
+        assert_eq!(schema("types"), nothing);
+        let input = schema("input");
+        assert_eq!(input["required"], json!(["events"]));
+        let events = &input["properties"]["events"];
+        assert_eq!(events["type"], "array");
+        // The kind each choice names: an object's one key, or a string's values.
+        let choices = events["items"]["anyOf"].as_array().expect("choices");
+        let mut named: Vec<&str> = (choices.iter())
+            .flat_map(|choice| match choice["enum"].as_array() {
+                Some(values) => values.iter().collect::<Vec<_>>(),
+                None => (choice["required"].as_array().expect("its key").iter()).collect(),
+            })
+            .map(|name| name.as_str().expect("a kind"))
+            .collect();
+        // An event of each kind, which the match keeps whole as kinds are added.
+        let each = [
+            InputEvent::Key {
+                key: "KeyW".to_owned(),
+                pressed: true,
+                repeat: false,
+            },
+            InputEvent::Text("w".to_owned()),
+            InputEvent::Cursor([1.0, 2.0]),
+            InputEvent::CursorEntered,
+            InputEvent::CursorLeft,
+            InputEvent::Button {
+                button: Button::Left,
+                pressed: true,
+            },
+            InputEvent::Scroll(Scroll::Lines([0.0, 1.0])),
+            InputEvent::Focused(true),
+        ];
+        let mut kinds: Vec<String> = (each.iter())
+            .map(|event| {
+                match event {
+                    InputEvent::Key { .. }
+                    | InputEvent::Text(_)
+                    | InputEvent::Cursor(_)
+                    | InputEvent::CursorEntered
+                    | InputEvent::CursorLeft
+                    | InputEvent::Button { .. }
+                    | InputEvent::Scroll(_)
+                    | InputEvent::Focused(_) => {}
+                }
+                match serde_json::to_value(event).expect("an event") {
+                    Value::String(kind) => kind,
+                    Value::Object(event) => event.keys().next().expect("its kind").clone(),
+                    other => panic!("an event as {other}"),
+                }
+            })
+            .collect();
+        named.sort_unstable();
+        kinds.sort_unstable();
+        assert_eq!(named, kinds);
     }
 
     /// A tool that fails, as one given a level there's none of, or a cursor that isn't a number,

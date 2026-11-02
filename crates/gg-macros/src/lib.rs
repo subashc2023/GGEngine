@@ -165,6 +165,8 @@ fn opaque(name: &str, doc: &str, hint: Span) -> TokenStream {
         }
 
         fn digest(&self, _: &mut #r::Digest<'_>) {}
+
+        fn entities_mut(&mut self, _: &mut dyn ::core::ops::FnMut(&mut ::gg_engine::Entity)) {}
     }
 }
 
@@ -212,6 +214,10 @@ fn structure(
     let digested = read.iter().map(|(_, field)| {
         let Field { member, ty, .. } = field;
         quote_spanned!(at_type(ty)=> <#ty as #r::Reflect>::digest(&self.#member, __to))
+    });
+    let reached = read.iter().map(|(_, field)| {
+        let Field { member, ty, .. } = field;
+        quote_spanned!(at_type(ty)=> <#ty as #r::Reflect>::entities_mut(&mut self.#member, __each))
     });
     Ok(quote! {
         fn describe(__types: &mut #r::Types) -> #r::Result<#r::Type> {
@@ -262,6 +268,13 @@ fn structure(
         fn digest(&self, __to: &mut #r::Digest<'_>) {
             #(#digested;)*
         }
+
+        fn entities_mut(
+            &mut self,
+            __each: &mut dyn ::core::ops::FnMut(&mut ::gg_engine::Entity),
+        ) {
+            #(#reached;)*
+        }
     })
 }
 
@@ -280,6 +293,7 @@ fn enumeration(
     let mut kept = Vec::new();
     let mut names = Vec::new();
     let mut digested = Vec::new();
+    let mut reached = Vec::new();
     for (index, variant) in (0u32..).zip(variants) {
         no_hints(
             &variant.attrs,
@@ -330,6 +344,25 @@ fn enumeration(
             Self::#ident { #(#members: #patterns),* } => {
                 <::core::primitive::u32 as #r::Reflect>::digest(&#index, __to);
                 #(#fields_digested;)*
+            }
+        });
+
+        let patterns_mut = fields.iter().map(|field| match field.hints.opaque {
+            Some(_) => quote!(_),
+            None => {
+                let binding = &field.binding;
+                quote!(ref mut #binding)
+            }
+        });
+        let fields_reached = fields
+            .iter()
+            .filter(|field| field.hints.opaque.is_none())
+            .map(|Field { ty, binding, .. }| {
+                quote!(<#ty as #r::Reflect>::entities_mut(#binding, __each))
+            });
+        reached.push(quote! {
+            Self::#ident { #(#members: #patterns_mut),* } => {
+                #(#fields_reached;)*
             }
         });
 
@@ -410,6 +443,15 @@ fn enumeration(
         fn digest(&self, __to: &mut #r::Digest<'_>) {
             match *self {
                 #(#digested)*
+            }
+        }
+
+        fn entities_mut(
+            &mut self,
+            __each: &mut dyn ::core::ops::FnMut(&mut ::gg_engine::Entity),
+        ) {
+            match *self {
+                #(#reached)*
             }
         }
     })

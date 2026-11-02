@@ -68,6 +68,7 @@ fn main() -> ExitCode {
         depth_clears_in_every_pass,
         ids_read_back_two_frames_later,
         filled_textures_can_be_written_over_on_every_path,
+        refills_come_before_the_frames_passes,
         forgotten_frames_and_passes_are_caught(&log),
         another_devices_objects_are_refused,
         refused_texture_slots_leak_nothing,
@@ -531,6 +532,47 @@ fn filled_textures_can_be_written_over_on_every_path() {
         }
         drop((frames, texture, levels, buffer, image, device));
     }
+
+    drop(instance);
+    check(&validation);
+}
+
+/// Fills a texture in one frame and refills it at another size in the next, before its pass, which
+/// validation checks the copy into the new image of; then refills it again after that pass, which
+/// is refused before anything changes, since the pass would sample the new image before its copy:
+/// the texture keeps its size, and the frame still submits.
+fn refills_come_before_the_frames_passes() {
+    let instance = instance();
+    let validation = instance.validation();
+    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let mut image = ColorImage::new(&device, 4, 4, "refill test target").expect("an image");
+    let format = TextureFormat::Rgba8Srgb;
+    let texture = Texture::new(&device, 2, 2, format, false, "refilled test texture");
+    let mut texture = texture.expect("a texture");
+    let mut frames = Frames::new(&device).expect("frames");
+    let black = [0.0, 0.0, 0.0, 1.0];
+    let mut frame = frames
+        .begin([Target::Image(&mut image)])
+        .expect("a frame")
+        .expect("an offscreen image can always be rendered into");
+    let pixels = [255; 2 * 2 * 4];
+    frame.fill_texture(&mut texture, &pixels).expect("a fill");
+    drop(frame.begin_pass(0, c"clear", black, None, None));
+    frame.submit().expect("the frame's submission");
+    let mut frame = frames
+        .begin([Target::Image(&mut image)])
+        .expect("a frame")
+        .expect("an offscreen image can always be rendered into");
+    let refill = frame.refill_texture(&mut texture, [3, 1], false, &[127; 3 * 4]);
+    refill.expect("a refill");
+    drop(frame.begin_pass(0, c"clear", black, None, None));
+    let message = panics(|| {
+        let _ = frame.refill_texture(&mut texture, [1, 1], false, &[0; 4]);
+    });
+    assert!(message.contains("before the frame's passes"), "{message}");
+    assert_eq!(texture.size(), [3, 1], "a refused refill changes nothing");
+    frame.submit().expect("the frame's submission");
+    drop((frames, texture, image, device));
 
     drop(instance);
     check(&validation);

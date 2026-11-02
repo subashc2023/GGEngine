@@ -435,7 +435,8 @@ pub(crate) struct Bake {
 /// Reads the font file at `path`, font `name`'s, and bakes it, as [`Context::add_font`] says.
 ///
 /// Fails with `engine.bad_font` if the file can't be read, isn't a regular file, is more than
-/// 256 MiB, or isn't a TrueType or OpenType font with outlines.
+/// 256 MiB, isn't a TrueType or OpenType font with outlines, or has glyphs that don't fit a field
+/// of [`MAX_TEXTURE_SIZE`] texels square, as [`field`] says.
 ///
 /// [`Context::add_font`]: crate::Context::add_font
 pub(crate) fn bake(name: &str, path: &Path) -> Result<Bake> {
@@ -519,6 +520,18 @@ struct Field {
     lines: Lines,
 }
 
+/// A glyph's outline in its cell's texels, before its field is generated: so that every cell's size
+/// is known, and checked, before any is made.
+struct Outline {
+    id: u32,
+    /// Its contours, +Y up from its cell's bottom row, `RANGE / 2` texels in from its edges.
+    shape: Shape<Contour>,
+    /// Where its cell's texels start about its origin on the baseline, in ems.
+    low: Vec2,
+    /// Its cell's width and height, in texels.
+    size: [u32; 2],
+}
+
 /// A glyph's field, as its outline generates it, its rows from its bottom up.
 struct Cell {
     id: u32,
@@ -530,6 +543,11 @@ struct Cell {
 /// Bakes the font in `bytes` into its field, as [`Field`] says, of the glyphs the font maps
 /// [`characters`] to and its `.notdef`, glyph 0; a glyph whose outline doesn't draw goes without,
 /// and draws as the `.notdef` does. The error says what's wrong with the font.
+///
+/// Fails, before any glyph's field is made, if a glyph's outline has a point that isn't a finite
+/// number, if a glyph's cell would be wider or taller than [`MAX_TEXTURE_SIZE`], or if the cells
+/// would come to more texels than a field that size holds, as a crafted font's can, by gigabytes;
+/// and after, if they don't pack into one.
 fn field(bytes: &[u8]) -> Result<Field, String> {
     let font = FontRef::new(bytes)
         .map_err(|error| format!("isn't a TrueType or OpenType font: {error}"))?;
@@ -546,16 +564,40 @@ fn field(bytes: &[u8]) -> Result<Field, String> {
     ids.sort_unstable();
     ids.dedup();
     let mut glyphs = Vec::with_capacity(ids.len());
-    let mut cells = Vec::new();
-    for (id, cell) in bake_glyphs(&font, &ids, units) {
-        match cell {
-            Some(cell) => cells.push(cell),
+    let mut outlines = Vec::new();
+    let drawn = font.outline_glyphs();
+    for id in ids {
+        let Some(glyph) = drawn.get(GlyphId::new(id)) else {
+            continue;
+        };
+        let mut pen = Pen::default();
+        let settings = DrawSettings::unhinted(Size::unscaled(), LocationRef::default());
+        if glyph.draw(settings, &mut pen).is_err() {
+            continue;
+        }
+        match outline(id, &pen.contours, units)? {
+            Some(outline) => outlines.push(outline),
             None => glyphs.push((id, None)),
         }
     }
-    if cells.is_empty() {
+    if outlines.is_empty() {
         return Err("has no outlines of the glyphs it maps, as a font of bitmaps alone".to_owned());
     }
+    // No field holds more texels than a texture of the largest size, so cells that come to more
+    // couldn't pack into one; and they're refused before any is made, as each texel takes 16 bytes
+    // until it's packed, so that a crafted font's glyphs, each of a size a field can be, don't take
+    // hundreds of gigabytes together. The cells, all made at once, take 1 GiB at most.
+    let most = MAX_TEXTURE_SIZE;
+    let texels: u64 = (outlines.iter())
+        .map(|&Outline { size: [w, h], .. }| u64::from(w) * u64::from(h))
+        .sum();
+    if texels > u64::from(most) * u64::from(most) {
+        return Err(format!(
+            "has glyphs too large together for a field of {most} texels square: their cells, at \
+             {EM} texels an em, take {texels} texels"
+        ));
+    }
+    let cells = bake_glyphs(outlines);
     let (size, pixels, placed) = pack(&cells)?;
     glyphs.extend(placed);
     glyphs.sort_unstable_by_key(|&(id, _)| id);
@@ -573,39 +615,41 @@ fn field(bytes: &[u8]) -> Result<Field, String> {
     })
 }
 
-/// The fields of the glyphs `ids` of `font`, `units` to an em, each with its ID, in their order,
-/// as [`cell`] makes each, on the job system's threads, which each glyph's is apart from the
-/// others': those whose outlines don't draw left out.
-fn bake_glyphs(font: &FontRef<'_>, ids: &[u32], units: f64) -> Vec<(u32, Option<Cell>)> {
+/// The fields of the glyphs of `outlines`, in their order, as [`cell`] makes each, on the job
+/// system's threads, which each glyph's is apart from the others'.
+fn bake_glyphs(mut outlines: Vec<Outline>) -> Vec<Cell> {
     // A few glyphs a job, about as long as a job takes to hand out.
-    if ids.len() > 4 {
-        let (first, rest) = ids.split_at(ids.len() / 2);
-        let first = || bake_glyphs(font, first, units);
-        let (mut baked, rest) = jobs::join(first, || bake_glyphs(font, rest, units));
+    if outlines.len() > 4 {
+        let rest = outlines.split_off(outlines.len() / 2);
+        let first = || bake_glyphs(outlines);
+        let (mut baked, rest) = jobs::join(first, || bake_glyphs(rest));
         baked.extend(rest);
         return baked;
     }
-    let outlines = font.outline_glyphs();
-    let baked = ids.iter().filter_map(|&id| {
-        let mut pen = Pen::default();
-        let outline = outlines.get(GlyphId::new(id))?;
-        let settings = DrawSettings::unhinted(Size::unscaled(), LocationRef::default());
-        outline.draw(settings, &mut pen).ok()?;
-        Some((id, cell(id, &pen.contours, units)))
-    });
-    baked.collect()
+    outlines.into_iter().map(cell).collect()
 }
 
-/// The field of glyph `id`, whose outline is `contours`, in font units, `units` to an em: `None`
-/// if it has none, as a space has.
-fn cell(id: u32, contours: &[Vec<Command>], units: f64) -> Option<Cell> {
-    let points = contours.iter().flatten().flat_map(Command::points);
-    let (low, high) = points.fold(None, |bounds: Option<(Point, Point)>, point| {
+/// The outline of glyph `id`, `contours` in font units, `units` to an em, in its cell's texels:
+/// `None` if it has none, as a space has.
+///
+/// Fails if a point of it isn't a finite number, or if its cell would be wider or taller than
+/// [`MAX_TEXTURE_SIZE`], which no field can be, as a crafted font's glyph's can be by far.
+fn outline(id: u32, contours: &[Vec<Command>], units: f64) -> Result<Option<Outline>, String> {
+    let points = || contours.iter().flatten().flat_map(Command::points);
+    if !points().all(|point| point.x.is_finite() && point.y.is_finite()) {
+        return Err(format!(
+            "has glyph {id}, whose outline has a point that isn't a finite number"
+        ));
+    }
+    let bounds = points().fold(None, |bounds: Option<(Point, Point)>, point| {
         Some(match bounds {
             None => (point, point),
             Some((low, high)) => (low.inf(&point), high.sup(&point)),
         })
-    })?;
+    });
+    let Some((low, high)) = bounds else {
+        return Ok(None);
+    };
     // From font units to the cell's texels, +Y up from its bottom row, its outline `RANGE / 2`
     // texels in from its edges.
     let scale = EM / units;
@@ -627,10 +671,35 @@ fn cell(id: u32, contours: &[Vec<Command>], units: f64) -> Option<Cell> {
         }
     }
     if shape.contours.is_empty() {
-        return None;
+        return Ok(None);
     }
-    let width = ((high.x - low.x) * scale + 2.0 * pad).ceil() as u32;
-    let height = ((high.y - low.y) * scale + 2.0 * pad).ceil() as u32;
+    // Finite, as the points are: a side that wasn't a number would pass the check below.
+    let width = ((high.x - low.x) * scale + 2.0 * pad).ceil();
+    let height = ((high.y - low.y) * scale + 2.0 * pad).ceil();
+    let most = MAX_TEXTURE_SIZE;
+    if width > f64::from(most) || height > f64::from(most) {
+        return Err(format!(
+            "has glyph {id} too large for a field of {most} texels square: its cell, at {EM} \
+             texels an em, would be {width}x{height}"
+        ));
+    }
+    let em = |units_from: f64, texels_in: f64| (units_from / units - texels_in / EM) as f32;
+    Ok(Some(Outline {
+        id,
+        shape,
+        low: Vec2::new(em(low.x, pad), em(low.y, pad)),
+        size: [width as u32, height as u32],
+    }))
+}
+
+/// The field of the glyph of `outline`, whose cell's size [`field`] has checked.
+fn cell(outline: Outline) -> Cell {
+    let Outline {
+        id,
+        shape,
+        low,
+        size: [width, height],
+    } = outline;
     // A fixed seed, so that a font bakes the same field every time.
     let colored = Shape::edge_coloring_simple(shape, 0.03, 0);
     let prepared = colored.prepare();
@@ -640,12 +709,7 @@ fn cell(id: u32, contours: &[Vec<Command>], units: f64) -> Option<Cell> {
     let config = ErrorCorrectionConfig::default();
     correct_error_mtsdf(&mut image, &colored, &prepared, RANGE, &config);
     correct_sign_mtsdf(&mut image, &prepared, FillRule::Nonzero);
-    let em = |units_from: f64, texels_in: f64| (units_from / units - texels_in / EM) as f32;
-    Some(Cell {
-        id,
-        low: Vec2::new(em(low.x, pad), em(low.y, pad)),
-        image,
-    })
+    Cell { id, low, image }
 }
 
 /// Packs `cells` into a field, on shelves, the tallest first, [`GAP`] texels apart: the field's
@@ -1018,6 +1082,50 @@ mod tests {
         };
         let centered = middles(&mut fonts, "B", [Align::Center, Align::Start])[0];
         assert!((b.x - centered.x).abs() < 1e-5, "{b} {centered}");
+    }
+
+    /// Inter with `units` font units to its em, as its `head` table says, its outlines as they are,
+    /// so that its glyphs are `2048 / units` times as large as its own.
+    fn inter_of(units: u16) -> Vec<u8> {
+        let mut bytes = INTER.to_vec();
+        let tables = usize::from(u16::from_be_bytes([bytes[4], bytes[5]]));
+        // Each table's record, past the font's 12 bytes of header: its tag, its checksum, where it
+        // starts and its length.
+        let record = (0..tables)
+            .map(|table| 12 + 16 * table)
+            .find(|&at| &bytes[at..at + 4] == b"head")
+            .expect("a head table");
+        let start = bytes[record + 8..record + 12].try_into().expect("4 bytes");
+        let head = u32::from_be_bytes(start) as usize;
+        // Past its version, its font's revision, its checksum's adjustment, its magic number and
+        // its flags.
+        bytes[head + 18..head + 20].copy_from_slice(&units.to_be_bytes());
+        bytes
+    }
+
+    /// A font whose glyph's cell would be larger than a field can be, or whose cells would come to
+    /// more than a field holds, is refused before any cell is made, saying which, with the font's
+    /// error: Inter at a unit to the em, whose cells would take tens of gigabytes each, and at 64,
+    /// megabytes each and gigabytes together, which would otherwise be made, or fail to be and
+    /// abort. An outline with a point that isn't a number is refused too.
+    #[test]
+    fn a_font_too_large_for_a_field_is_refused_before_its_cells_are_made() {
+        let path = Path::new("large.ttf");
+        let refused = bake_bytes("large", path, inter_of(1).into());
+        let error = refused.err().expect("refused");
+        assert_eq!(error.code(), "engine.bad_font");
+        let message = error.to_string();
+        let alone = "too large for a field of 8192 texels square: its cell, at 48 texels an em";
+        assert!(message.contains(alone), "{message}");
+        let error = super::field(&inter_of(64)).err().expect("refused");
+        assert!(
+            error.contains("has glyphs too large together for a field of 8192 texels square"),
+            "{error}"
+        );
+        let nowhere = Point::new(f64::NAN, 1.0);
+        let contour = vec![Command::Line(Point::new(0.0, 0.0), nowhere)];
+        let error = outline(1, &[contour], 2048.0).err().expect("refused");
+        assert!(error.contains("isn't a finite number"), "{error}");
     }
 
     /// A file that isn't a font, or is one without outlines, is refused, saying why.

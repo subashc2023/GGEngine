@@ -3,7 +3,10 @@
 //! and a remove, what they took out, typed, so that what's opaque comes back too. A delete's keeps
 //! its entities' slots and IDs, so that undoing it gives each back under its handle, and every
 //! reference to it is whole again; a create's takes out the entity it made alone, keeping it the
-//! same way. Only the [`Log`](super::Log) holds inverses, and it releases what they keep.
+//! same way. A set's keeps the component it changed too, whole and typed, as it was, so that rolling
+//! back an edit refused partway puts back exactly what the world held, which a set of the old value
+//! would refuse where code had stored what a set refuses. Only the [`Log`](super::Log) holds
+//! inverses, and it releases what they keep.
 
 use std::{fmt, mem};
 
@@ -132,11 +135,12 @@ impl fmt::Display for Operation {
     }
 }
 
-/// What undoes an operation applied to a world, which [`World::undo`] applies. It's its world's
-/// own, since its values hold the world's handles and its rows its component types, and a world
-/// restored from a snapshot is another, which may have given those handles out again; a delete's,
-/// and an undone create's, keeps its entities' slots and IDs until it's applied or
-/// [released](World::release).
+/// What undoes an operation applied to a world, which [`World::undo`] applies, and
+/// [`World::roll_back`] too. It's its world's own, since its values hold the world's handles and its
+/// rows its component types, and a world restored from a snapshot is another, which may have given
+/// those handles out again; a delete's, and an undone create's, keeps its entities' slots and IDs
+/// until it's applied or [released](World::release), and a set's its component until it's
+/// [settled](Self::settle), applied or released.
 pub(super) struct Inverse {
     /// Its world's serial.
     world: u64,
@@ -145,6 +149,13 @@ pub(super) struct Inverse {
 
 enum Undo {
     Apply(Operation),
+    /// Applies `set`, as `Apply` does, a set of the field's value before, checked as any set is;
+    /// `kept` is the component, whole, as it was before, in a one-row column of its own, which a
+    /// [roll back](World::roll_back) puts back unchecked, until it's settled.
+    Set {
+        set: Operation,
+        kept: Option<Box<dyn AnyColumn>>,
+    },
     /// Gives `entity` back the component a remove took, in a one-row column of its own.
     Put {
         entity: EntityId,
@@ -226,6 +237,25 @@ impl World {
     /// component taken away since.
     pub(super) fn undo(&mut self, inverse: &mut Inverse) -> Result<()> {
         let _zone = gg_core::zone!();
+        self.check_world(inverse)?;
+        self.revert(&mut inverse.undo, false)
+    }
+
+    /// Applies `inverse` as [`undo`](Self::undo) does, but puts a set's component back whole, as
+    /// its inverse kept it, without checking it again: for an operation applied, undone or redone
+    /// just before, with nothing changing the world since but those after it rolled back, which it
+    /// then puts back exactly as it was, though code had stored in it what a set refuses, such as a
+    /// rotation that's no longer a unit. It's refused only where the world has changed since, as
+    /// `undo` is; and a set's inverse [settled](Inverse::settle) sets its field back as `undo` does,
+    /// checked.
+    pub(super) fn roll_back(&mut self, inverse: &mut Inverse) -> Result<()> {
+        let _zone = gg_core::zone!();
+        self.check_world(inverse)?;
+        self.revert(&mut inverse.undo, true)
+    }
+
+    /// Fails with `ops.other_world` if `inverse` isn't this world's.
+    fn check_world(&self, inverse: &Inverse) -> Result<()> {
         if inverse.world != self.serial {
             return Err(Error::new(
                 "ops.other_world",
@@ -233,12 +263,13 @@ impl World {
                  operation undoes it in the world it was applied to",
             ));
         }
-        self.revert(&mut inverse.undo)
+        Ok(())
     }
 
     /// Applies `undo`, and leaves in its place what undoes that; refused, as
-    /// [`undo`](Self::undo) says, it changes neither the world nor `undo`.
-    fn revert(&mut self, undo: &mut Undo) -> Result<()> {
+    /// [`undo`](Self::undo) says, it changes neither the world nor `undo`. If `exact`, a set's
+    /// component goes back whole, as [`roll_back`](Self::roll_back) says.
+    fn revert(&mut self, undo: &mut Undo, exact: bool) -> Result<()> {
         if let Undo::Exclusive {
             undo: inner,
             excluded,
@@ -249,7 +280,7 @@ impl World {
             for excluded in &*excluded {
                 self.can_reset(excluded, *to)?;
             }
-            self.revert(inner)?;
+            self.revert(inner, exact)?;
             for Excluded {
                 entity,
                 component,
@@ -263,9 +294,17 @@ impl World {
             *to = !*to;
             return Ok(());
         }
+        if exact
+            && let Undo::Set {
+                set,
+                kept: Some(kept),
+            } = undo
+        {
+            return self.put_back(set, &mut **kept);
+        }
         let redo = match &*undo {
             Undo::Exclusive { .. } => unreachable!("reverted above"),
-            Undo::Apply(operation) => self.applied(operation)?,
+            Undo::Apply(operation) | Undo::Set { set: operation, .. } => self.applied(operation)?,
             Undo::Put {
                 entity, component, ..
             } => {
@@ -304,7 +343,7 @@ impl World {
         // Checked, so that what the inverse kept goes back, which can't fail.
         match mem::replace(undo, redo) {
             Undo::Exclusive { .. } => unreachable!("reverted above"),
-            Undo::Apply(_) | Undo::Uncreate(_) => {}
+            Undo::Apply(_) | Undo::Set { .. } | Undo::Uncreate(_) => {}
             Undo::Put {
                 entity,
                 component,
@@ -317,6 +356,38 @@ impl World {
             }
             Undo::Restore { taken, .. } => self.restore(taken),
         }
+        Ok(())
+    }
+
+    /// Puts back the component `set`, a set's inverse, changed, whole, as `kept` holds it, which
+    /// then holds the one it had; and turns `set` into what sets the field again, with its value
+    /// before: as `set` would, but exactly as the world held it, unchecked. A model's root has its
+    /// model's nodes again, as a set that changes its model gives them.
+    ///
+    /// Fails, changing nothing, with `ecs.no_entity` for an entity gone since, and as
+    /// [`get_field`](Self::get_field) does for a component taken away since, or a field gone.
+    fn put_back(&mut self, set: &mut Operation, kept: &mut dyn AnyColumn) -> Result<()> {
+        let Operation::Set {
+            entity,
+            component,
+            path,
+            value,
+        } = set
+        else {
+            unreachable!("a set's inverse is a set")
+        };
+        let handle = self.living(*entity)?;
+        let now = self.get_field(handle, component, path)?;
+        let at = self.location(handle).expect("alive");
+        let id = self.named(component).expect("its field was read");
+        let table = &mut self.tables[at.table as usize];
+        let column = table.position(id).expect("its field was read");
+        table.columns[column].swap_row(at.row as usize, kept);
+        if Some(id) == self.component::<ModelRoot>() && now != *value {
+            self.despawn_nodes(handle);
+            self.fit_nodes(handle, None);
+        }
+        *value = now;
         Ok(())
     }
 
@@ -339,7 +410,7 @@ impl World {
                 }
             }
             Undo::Exclusive { undo, .. } => self.let_go(*undo),
-            Undo::Apply(_) | Undo::Put { .. } | Undo::Uncreate(_) => {}
+            Undo::Apply(_) | Undo::Set { .. } | Undo::Put { .. } | Undo::Uncreate(_) => {}
         }
     }
 
@@ -514,13 +585,18 @@ impl World {
                 value,
             } => {
                 let handle = self.living(*entity).map_err(refused)?;
+                // Whole, before anything changes, for a roll back.
+                let kept = self.copy_of(handle, component);
                 let old = self.set_field(handle, component, path, value)?;
-                Undo::Apply(Operation::Set {
-                    entity: *entity,
-                    component: component.clone(),
-                    path: path.clone(),
-                    value: old,
-                })
+                Undo::Set {
+                    set: Operation::Set {
+                        entity: *entity,
+                        component: component.clone(),
+                        path: path.clone(),
+                        value: old,
+                    },
+                    kept,
+                }
             }
             Operation::Reparent { entity, parent } => {
                 let child = self.living(*entity).map_err(refused)?;
@@ -534,6 +610,15 @@ impl World {
                 })
             }
         })
+    }
+
+    /// A copy of `entity`'s component of type `name`, in a one-row column of its own; `None` if it
+    /// has none.
+    fn copy_of(&self, entity: Entity, name: &str) -> Option<Box<dyn AnyColumn>> {
+        let at = self.location(entity)?;
+        let table = &self.tables[at.table as usize];
+        let column = table.position(self.components.named(name)?)?;
+        Some(table.columns[column].clone_row(at.row as usize))
     }
 
     /// Fits `entity`'s nodes to its [`ModelRoot`], as [`fit_nodes`](Self::fit_nodes) does, if
@@ -746,23 +831,29 @@ impl World {
             }
             made.push((copy, id));
         }
-        // References among the originals are to their copies, as a prefab's are, and exclusive
-        // fields are false, as the copies are placed.
+        // References among the originals are to their copies, as a prefab's are, pointed there
+        // typed, so that the rest stays exactly as it was copied, though a set would refuse what
+        // code stored in it; and exclusive fields are false, as the copies are placed.
         let originals: Vec<Entity> = originals
             .into_iter()
             .map(|(original, _)| original)
             .collect();
         let copies: Vec<Entity> = made.iter().map(|&(copy, _)| copy).collect();
+        let mut retarget = |entity: &mut Entity| {
+            if let Some(at) = originals.iter().position(|original| original == entity) {
+                *entity = copies[at];
+            }
+        };
         for &copy in &copies {
             let at = self.location(copy).expect("alive");
+            let table = &mut self.tables[at.table as usize];
+            let columns = table.components.iter().zip(&mut table.columns);
+            for (_, column) in columns.filter(|&(&component, _)| component != parent_id) {
+                column.row_mut(at.row as usize).entities_mut(&mut retarget);
+            }
             let components = self.tables[at.table as usize].components.clone();
             for component in components.into_iter().filter(|&id| id != parent_id) {
                 let name = self.components.name(component).to_owned();
-                let mut value = self.get_field(copy, &name, "").expect("one it has");
-                if retarget(&mut value, &originals, &copies) {
-                    let set = self.set_field(copy, &name, "", &value);
-                    set.expect("its own value, of its own entities");
-                }
                 if let Some(field) = self.components.exclusive(component) {
                     let set = self.set_field(copy, &name, field, &Value::Bool(false));
                     set.expect("an exclusive field is a `bool` of a component it has");
@@ -895,24 +986,18 @@ impl World {
     }
 }
 
-/// Points each entity `value` holds that's one of `originals` at its copy, the one in its place in
-/// `copies`; returns whether it held one.
-fn retarget(value: &mut Value, originals: &[Entity], copies: &[Entity]) -> bool {
-    match value {
-        Value::Entity(entity) => {
-            let at = originals.iter().position(|original| original == entity);
-            at.map(|at| *entity = copies[at]).is_some()
+impl Inverse {
+    /// Lets go of what only a [roll back](World::roll_back) reads, a set's component kept whole,
+    /// once nothing will roll its operation back.
+    pub(super) fn settle(&mut self) {
+        fn settle(undo: &mut Undo) {
+            match undo {
+                Undo::Set { kept, .. } => *kept = None,
+                Undo::Exclusive { undo, .. } => settle(undo),
+                Undo::Apply(_) | Undo::Put { .. } | Undo::Uncreate(_) | Undo::Restore { .. } => {}
+            }
         }
-        Value::Option(Some(value)) => retarget(value, originals, copies),
-        Value::List(values) => values.iter_mut().fold(false, |held, value| {
-            retarget(value, originals, copies) | held
-        }),
-        Value::Struct(fields) | Value::Variant(_, fields) => {
-            fields.iter_mut().fold(false, |held, (_, value)| {
-                retarget(value, originals, copies) | held
-            })
-        }
-        _ => false,
+        settle(&mut self.undo);
     }
 }
 
@@ -924,7 +1009,7 @@ impl Inverse {
             match undo {
                 Undo::Restore { taken, .. } => taken.len(),
                 Undo::Exclusive { undo, .. } => kept(undo),
-                Undo::Apply(_) | Undo::Put { .. } | Undo::Uncreate(_) => 0,
+                Undo::Apply(_) | Undo::Set { .. } | Undo::Put { .. } | Undo::Uncreate(_) => 0,
             }
         }
         kept(&self.undo)
@@ -933,7 +1018,7 @@ impl Inverse {
 
 #[cfg(test)]
 pub(super) mod tests {
-    use gg_core::math::Vec3;
+    use gg_core::math::{Quat, Vec3};
     use gg_renderer::{Mipmaps, Texture, Textures};
 
     use super::*;
@@ -1208,6 +1293,71 @@ pub(super) mod tests {
             assert_eq!(refused.code(), code, "{refused}");
             assert!(same_snapshots(&sorted(&x.world), &before), "{case}");
         }
+    }
+
+    /// Refers to entities each way a value holds one, beside what a set refuses: a count above its
+    /// max, and a rotation that isn't a unit, in a variant with an entity.
+    #[derive(Clone, Debug, PartialEq, crate::Component)]
+    struct Links {
+        to: Option<Entity>,
+        all: Vec<Entity>,
+        tie: Tie,
+        #[reflect(max = 9)]
+        count: u8,
+    }
+
+    #[derive(Clone, Debug, PartialEq, crate::Reflect)]
+    enum Tie {
+        Turned { to: Entity, turn: Quat },
+    }
+
+    /// A duplicate points its copies' references to the originals at their copies, wherever a
+    /// value holds them, without setting their components again: the rest of each is copied bit
+    /// for bit, what a set refuses among it, as code may store it.
+    #[test]
+    fn a_duplicate_points_references_at_the_copies_keeping_what_a_set_refuses() {
+        let mut x = fixture();
+        let drifted = Quat::from_xyzw(-0.0, 0.0, 0.6, 0.9);
+        let links = Links {
+            to: Some(x.e),
+            all: vec![x.c, x.r],
+            tie: Tie::Turned {
+                to: x.d,
+                turn: drifted,
+            },
+            count: 200,
+        };
+        x.world.insert(x.b, links.clone()).expect("alive");
+        let mut duplicate = Operation::Duplicate {
+            entity: x.id(x.a),
+            copies: Vec::new(),
+        };
+        x.world.apply(&mut duplicate).expect("applied");
+        let Operation::Duplicate { copies, .. } = &duplicate else {
+            unreachable!("applied as it was")
+        };
+        let copied = copies.iter().map(|&id| x.world.entity(id).expect("alive"));
+        let [_, b, c, d, e] = copied.collect::<Vec<Entity>>()[..] else {
+            panic!("five copies: {copies:?}");
+        };
+        let copy = x.world.get::<Links>(b).expect("copied");
+        let expected = Links {
+            to: Some(e),
+            all: vec![c, x.r],
+            tie: Tie::Turned {
+                to: d,
+                turn: drifted,
+            },
+            count: 200,
+        };
+        assert_eq!(copy, &expected, "the outside one kept");
+        let bits = |turn: Quat| turn.to_array().map(f32::to_bits);
+        let Tie::Turned { turn, .. } = copy.tie;
+        assert_eq!(bits(turn), bits(drifted));
+        let original = x.world.get::<Links>(x.b);
+        assert_eq!(original, Some(&links), "the original's kept");
+        check_ids(&x.world);
+        check_links(&x.world);
     }
 
     /// A duplicate's copies of an exclusive field are false, so that it stays true on one entity at
