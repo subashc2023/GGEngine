@@ -140,7 +140,9 @@ sandbox does, and shipping builds never do. [Its Cargo.toml](crates/gg-engine/Ca
 command selects, so `--workspace`, a bare `cargo build` and `--bin gg-player` would all hand the
 player `dev`. Shipping builds therefore select the player alone, with `-p player`, and a game's
 shipping build selects the game alone the same way; the shipping gate, `cargo clippy -p player`,
-checks `gg-engine` as they build it.
+checks `gg-engine` as they build it. A gate of its own, `cargo clippy -p gg-engine --all-targets`,
+checks `gg-engine`'s tests without `dev` too, which no other command builds: kept apart from the
+shipping gate, as their dev-dependencies' features would merge into the player's build.
 
 Tracy is a feature of its own, `tracy`, off by default and in no shipping build: it compiles
 Tracy's C++ client, which listens on the machine's loopback and keeps what it records in memory

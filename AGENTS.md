@@ -95,13 +95,14 @@ and restarts it from a snapshot after any other change, a crash or a hang (witho
 rest answer in JSON; `cargo gg mcp` serves them over MCP. A layer's `load` makes its assets; its
 `attach`, which a restart skips, builds the world. Test `dev` with `--features dev -p gg-engine`.
 
-A change is done when all six pass:
+A change is done when all seven pass:
 
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy --workspace --all-targets --features sandbox/tracy -- -D warnings
 cargo clippy -p player --all-targets -- -D warnings
+cargo clippy -p gg-engine --all-targets -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
 cargo test --workspace
 ```
@@ -123,13 +124,13 @@ and dashes with the keys, sets a field through `cargo gg set`, then `undo` and `
 `scenes/arena.ron` changed and puts it back, and closes.
 
 CI ([ci.yml](.github/workflows/ci.yml)) runs the gates on every push, on Windows and Linux, x86-64
-and ARM64, and on macOS ARM64, the shipping and doc gates on Linux x86-64 alone, and the layering
-check. Only its Linux jobs run the GPU tests, on lavapipe, and the apps and the demo's two lockstep
-peers headless, grepping their logs; Windows' and macOS's runners have no GPU, so
-there `GG_SKIP_GPU_TESTS` skips the GPU tests. lavapipe has no queue for transfers alone, so CI
-never uploads through one: after changing uploads, run the GPU tests on a GPU that has one, as
-NVIDIA's do. Its minutes are billed, a macOS minute at ten times a Linux one, so push a branch to
-probe CI only for a change another platform could break.
+and ARM64, and on macOS ARM64, the shipping gate, gg-engine's without `dev` and the doc gate on
+Linux x86-64 alone, and the layering check. Only its Linux jobs run the GPU tests, on lavapipe,
+and the apps and the demo's two lockstep peers headless, grepping their logs; Windows' and macOS's
+runners have no GPU, so there `GG_SKIP_GPU_TESTS` skips the GPU tests. lavapipe has no queue for
+transfers alone, so CI never uploads through one: after changing uploads, run the GPU tests on a GPU
+that has one, as NVIDIA's do. Its minutes are billed, a macOS minute at ten times a Linux one, so
+push a branch to probe CI only for a change another platform could break.
 
 ## Rust
 

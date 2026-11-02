@@ -99,6 +99,11 @@ jobs:
       - name: Check the shipping configuration
         if: matrix.once
         run: cargo clippy -p player --all-targets --locked -- -D warnings
+      # gg-engine without `dev`, its tests included, which the workspace's builds never compile: on
+      # one runner too, apart from the player, as its tests' dev-dependencies would merge into it.
+      - name: Check gg-engine without dev
+        if: matrix.once
+        run: cargo clippy -p gg-engine --all-targets --locked -- -D warnings
       # The docs, private items' included, without a warning: on one runner too, as they're alike
       # on every platform but in code built for one alone.
       - name: Check the docs
