@@ -40,14 +40,14 @@ jobs:
     env:
       GG_SKIP_GPU_TESTS: ${{ matrix.skip-gpu-tests }}
     steps:
-      # g++ builds gg-gpu's Vulkan Memory Allocator, and gilrs, for gamepads, builds against libudev
-      # through pkg-config.
+      # g++ builds gg-gpu's Vulkan Memory Allocator; gilrs, for gamepads, builds against libudev
+      # through pkg-config, and cpal, for sound, against ALSA.
       - name: Install build tools, lavapipe and the validation layer
         if: matrix.container
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl g++ gcc git libc6-dev \
-            libudev-dev libvulkan1 mesa-vulkan-drivers pkgconf vulkan-validationlayers
+          apt-get install -y --no-install-recommends ca-certificates curl g++ gcc git libasound2-dev \
+            libc6-dev libudev-dev libvulkan1 mesa-vulkan-drivers pkgconf vulkan-validationlayers
       # gg-renderer's build compiles its shaders with slangc, which the Vulkan SDK ships, and games'
       # shaders compile with it as they run: in the tests on every runner, and in the sandbox. CI
       # takes it from Slang's release instead, checked against the release's digests.

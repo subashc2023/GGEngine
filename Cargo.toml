@@ -44,6 +44,19 @@ glam = { version = "0.34.1", features = ["bytemuck", "scalar-math", "libm"] }
 harfrust = "0.12.0"
 # The images fdsm generates fonts' fields into. fdsm's version, without its defaults, its codecs.
 image = { version = "0.25.10", default-features = false }
+# Sounds, decoded by symphonia and mixed on cpal's audio thread, which allocates nothing as it plays.
+# Without its defaults, which raise that thread to a real-time priority, through D-Bus on Linux: its
+# decoders of WAV, Ogg Vorbis, FLAC and MP3 alone. On Linux cpal builds against ALSA through
+# pkg-config, so a build needs ALSA's headers, and a run libasound2.
+kira = { version = "0.12.6", default-features = false, features = [
+    "cpal",
+    "flac",
+    "mp3",
+    "ogg",
+    "pcm",
+    "vorbis",
+    "wav",
+] }
 # Finds RenderDoc's library in the process, for captures. ash's version, so that the two build
 # once.
 libloading = "0.8.9"

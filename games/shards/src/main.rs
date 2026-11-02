@@ -5,8 +5,10 @@
 //! keys. The arena's walls are its scene file, `scenes/arena.ron`, which a development build
 //! applies as it's saved; its floor is its shader, `shaders/floor.slang`, which it reloads as it's
 //! saved; its scores are text in its font, `fonts/Inter-Bold.ttf`, on the view's canvas, in its top
-//! corners; and Escape or a pad's Start opens its menu there, over the match, which goes on
-//! meanwhile: Resume; New match, a command that both lockstep peers apply; and Quit.
+//! corners; Escape or a pad's Start opens its menu there, over the match, which goes on meanwhile:
+//! Resume; New match, a command that both lockstep peers apply; and Quit; and its sounds,
+//! `sounds/*.wav`, play as a disc dashes, following it, as a shard is collected, where it was, as a
+//! match is won, and as the menu's focus moves and an item is chosen.
 
 use std::fmt::Write as _;
 use std::ops::ControlFlow;
@@ -19,8 +21,8 @@ use gg_engine::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_engine::{
     Actions, Align, App, Binding, Blend, BodyType, Camera, Change, Circle, CircleCollider2D,
     Commands, Component, Context, Entity, Event, Font, Key, Layer, Mesh, MouseButton, Name,
-    PadButton, Physics2D, Projection, Reflect, RigidBody2D, Shader, Source, Sprite, Stick,
-    TextStyle, Tick, Transform, World, step_physics,
+    PadButton, Physics2D, Place, Projection, Reflect, RigidBody2D, Shader, Sound, Source, Sprite,
+    Stick, TextStyle, Tick, Transform, World, step_physics,
 };
 
 fn main() -> ExitCode {
@@ -188,6 +190,17 @@ struct Floor {
     pad: f32,
 }
 
+/// The game's sounds, from its `sounds` folder: a disc's dash; a shard collected; a match won; and
+/// the menu's focus moving, and an item chosen.
+#[derive(Clone, Copy)]
+struct Sounds {
+    dash: Sound,
+    collect: Sound,
+    win: Sound,
+    focus: Sound,
+    choose: Sound,
+}
+
 /// The game's layer: it builds the arena as it attaches, applies each player's commands at each
 /// tick, steering the discs, which 2D physics moves, and collecting the shards they touch; and
 /// draws the floor, the scores and the menu between ticks.
@@ -203,6 +216,8 @@ struct Shards {
     floor: Option<(Mesh<Corner>, Shader<Corner, Floor>)>,
     /// The font the scores are drawn in, once the game loads.
     font: Option<Font>,
+    /// The game's sounds, once it loads.
+    sounds: Option<Sounds>,
     /// The scores' text, written again in its memory each frame.
     text: String,
 }
@@ -249,6 +264,7 @@ impl Shards {
             menu: None,
             floor: None,
             font: None,
+            sounds: None,
             text: String::new(),
         }
     }
@@ -270,6 +286,17 @@ impl Layer for Shards {
         ));
         let font = cx.add_font("Inter Bold", root.join("fonts/Inter-Bold.ttf"));
         self.font = Some(font.expect("the game's font bakes"));
+        let sound = |cx: &mut Context, name: &str| {
+            let sound = cx.add_sound(name, root.join(format!("sounds/{name}.wav")));
+            sound.expect("the game's sounds decode")
+        };
+        self.sounds = Some(Sounds {
+            dash: sound(cx, "dash"),
+            collect: sound(cx, "collect"),
+            win: sound(cx, "win"),
+            focus: sound(cx, "focus"),
+            choose: sound(cx, "choose"),
+        });
         register(cx.world_mut());
     }
 
@@ -307,21 +334,26 @@ impl Layer for Shards {
                     continue;
                 }
             };
-            let players = world.query_mut::<&mut Player>();
-            for disc in players.filter(|disc| disc.index == player) {
+            let mut dashed = None;
+            let players = world.query_mut::<(Entity, &mut Player)>();
+            for (entity, disc) in players.filter(|(_, disc)| disc.index == player) {
                 match dash {
                     Some(heading) => disc.heading = heading.clamp_length_max(1.0),
                     None if disc.cooldown == 0 => {
                         disc.dash = DASH_TICKS;
                         disc.cooldown = DASH_EVERY;
+                        dashed = Some(entity);
                     }
                     None => {}
                 }
             }
+            if let (Some(sounds), Some(disc)) = (self.sounds, dashed) {
+                world.play_sound(sounds.dash, Place::On(disc));
+            }
         }
         steer(world, Tick::DT);
         step_physics(world);
-        collect(world);
+        collect(world, self.sounds);
         spin(world, Tick::DT);
     }
 
@@ -364,9 +396,10 @@ impl Layer for Shards {
             actions,
             commands,
             menu,
+            sounds,
             ..
         } = self;
-        let player = *player;
+        let (player, sounds, was) = (*player, *sounds, *menu);
         // Whether the menu opens or closes, and what's chosen in it.
         let (mut toggled, mut chosen) = (false, None);
         actions.event(event, |change| match (*menu, change) {
@@ -412,6 +445,15 @@ impl Layer for Shards {
             *menu = Some(0);
             let heading = Vec2::ZERO;
             commands.push(Command::Steer { player, heading });
+        }
+        // This run's own, as its menu is: a choice, or the menu opening, closing or moving its
+        // focus.
+        if let Some(sounds) = sounds {
+            if chosen.is_some() {
+                cx.play_sound(sounds.choose, Place::Nowhere);
+            } else if *menu != was {
+                cx.play_sound(sounds.focus, Place::Nowhere);
+            }
         }
         ControlFlow::Continue(())
     }
@@ -557,8 +599,9 @@ fn steer(world: &mut World, dt: Duration) {
 
 /// Gives each shard a player touches to that player, placing it again, and, at the shard that wins
 /// a match, gives the match to its player and starts another, the players back at their starts,
-/// the rest touched that tick left where they are.
-fn collect(world: &mut World) {
+/// the rest touched that tick left where they are; playing `sounds`' chime where each was, and
+/// their fanfare for the match.
+fn collect(world: &mut World, sounds: Option<Sounds>) {
     let players: Vec<(u8, Vec2)> = world
         .query::<(&Player, &Transform)>()
         .map(|(player, at)| (player.index, at.translation.truncate()))
@@ -588,10 +631,17 @@ fn collect(world: &mut World) {
                 won = Some(index);
             }
         }
+        let at = world.get::<Transform>(shard).map(|at| at.translation);
+        if let (Some(sounds), Some(at)) = (sounds, at) {
+            world.play_sound(sounds.collect, Place::At(at));
+        }
         place(world, shard);
     }
     if won.is_some() {
         to_starts(world);
+        if let Some(sounds) = sounds {
+            world.play_sound(sounds.win, Place::Nowhere);
+        }
     }
 }
 

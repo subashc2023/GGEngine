@@ -16,6 +16,7 @@ gg-macros.workspace = true
 gg-renderer.workspace = true
 harfrust.workspace = true
 image.workspace = true
+kira.workspace = true
 png.workspace = true
 rapier2d.workspace = true
 rayon-core.workspace = true
@@ -38,8 +39,8 @@ tracing-subscriber.workspace = true
 # The engine's zones for Tracy, through gg-core's profile module.
 tracy = ["gg-core/tracy"]
 # Development tooling, which development builds turn on and shipping builds never do: the tool API,
-# hot reload of games' shaders, textures, models and fonts and patches of their code, assets' ID
-# files, and the OS's file dialogs, for now.
+# hot reload of games' shaders, textures, models, fonts and sounds and patches of their code,
+# assets' ID files, and the OS's file dialogs, for now.
 dev = ["dep:gg-api", "dep:rfd", "dep:subsecond"]
 
 [target.'cfg(target_os = "windows")'.dependencies]

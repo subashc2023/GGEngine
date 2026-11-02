@@ -133,6 +133,39 @@ fn a_touched_shard_scores_and_turns_up_elsewhere() {
     assert!(player_at(world, 0).distance(STARTS[0]) < 0.2);
 }
 
+/// The ticks queue the game's sounds: a dash on its disc, but none while it cools down; and a
+/// shard collected, where it was, with the fanfare for the match it wins.
+#[test]
+fn the_ticks_queue_the_games_sounds() {
+    let (mut cx, mut shards) = attached(0x5eed);
+    let sounds = shards.sounds.expect("loaded");
+    let world = cx.world_mut();
+    let mut players = world.query::<(Entity, &Player)>();
+    let disc = players
+        .find(|(_, player)| player.index == 0)
+        .expect("player 0");
+    let disc = disc.0;
+    for number in 0..2 {
+        shards.commands.push(Command::Dash { player: 0 });
+        shards.tick(world, Tick { number });
+    }
+    let queued: Vec<_> = world.sounds_queued().collect();
+    assert_eq!(queued, [(sounds.dash, Place::On(disc))]);
+    let shard = world.query::<(Entity, &Shard)>().next().expect("a shard").0;
+    let at = world.get::<Transform>(shard).expect("placed").translation;
+    let found = world.query_mut::<&mut Match>().next().expect("the match");
+    found.scores = [WINS_AT - 1, 0];
+    let disc = world.get_mut::<Transform>(disc).expect("player 0");
+    disc.translation = at.truncate().extend(PLAYER_Z);
+    shards.tick(world, Tick { number: 2 });
+    let queued: Vec<_> = world.sounds_queued().skip(1).collect();
+    let won = [
+        (sounds.collect, Place::At(at)),
+        (sounds.win, Place::Nowhere),
+    ];
+    assert_eq!(queued, won);
+}
+
 /// The keys and the left stick queue steers and dashes for the run's own player, as they come, so
 /// that the frame's ticks apply them: player 0 alone, and the joiner's for player 1; and a tick
 /// steers only the player its commands name.

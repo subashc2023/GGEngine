@@ -39,7 +39,7 @@ use crate::ecs::mix64;
 #[cfg(feature = "dev")]
 use crate::model::Made;
 use crate::model::Nodes;
-use crate::{Font, Model};
+use crate::{Font, Model, Sound};
 
 /// The textures a context added, as its layers added them or where text named them, each by its
 /// index, with the path of the file it was loaded from: relative to the app's
@@ -448,6 +448,7 @@ pub(crate) struct Loaded {
     pub(crate) textures: HashMap<PathBuf, (Texture, [u32; 2])>,
     pub(crate) models: HashMap<PathBuf, Model>,
     pub(crate) fonts: HashMap<PathBuf, Font>,
+    pub(crate) sounds: HashMap<PathBuf, Sound>,
     /// What each model is made of on the renderer, by its index, which a reload replaces: a
     /// stand-in's of nothing.
     #[cfg(feature = "dev")]

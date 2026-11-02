@@ -30,7 +30,8 @@ use crate::{App, BUILD, egui_context};
 /// as [`start`] says.
 ///
 /// Embedded (`--embedded`), it steps the simulation in real time instead, as a windowed run does,
-/// with no UI, and its view fills its image, at the size the client it's published to asks for:
+/// with no UI, playing sound as one does, and its view fills its image, at the size the client
+/// it's published to asks for:
 /// each frame then waits for the client to take it, as [`api::pace`] says, and until a client has
 /// it published, frames come a tick apart or more.
 pub(crate) fn run_headless(
@@ -43,7 +44,8 @@ pub(crate) fn run_headless(
     let (mut width, mut height) = (1280, 720);
     let renderer = Renderer::headless(&settings(app, args), width, height)?;
     let mut render = RenderThread::start(renderer)?;
-    let mut cx = Context::of_run(None, app);
+    // An embedded run is the game a tool shows, as the editor plays it, which plays its sounds.
+    let mut cx = Context::of_run(None, app, embedded);
     let mut clock = Clock::default();
     let mut stepper = match app.headless_step {
         Some(_) => Stepper::default(),

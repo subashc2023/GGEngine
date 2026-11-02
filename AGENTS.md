@@ -56,8 +56,9 @@ cargo gg new <NAME>               # a new game, games/NAME, a project with an em
 
 Building needs a C++ compiler, for the Vulkan Memory Allocator, and `slangc` for the shaders: the
 one `SLANGC` names, else the Vulkan SDK's, else the first on the `PATH`. Games' shaders compile
-with that slangc as they run, so it stays where the build found it. On Linux, gamepads need
-pkg-config and libudev's headers too: `pkgconf` and `libudev-dev` on Debian or Ubuntu.
+with that slangc as they run, so it stays where the build found it. On Linux, gamepads and sound
+need pkg-config, libudev's headers and ALSA's too: `pkgconf`, `libudev-dev` and `libasound2-dev` on
+Debian or Ubuntu.
 
 Each run writes a JSON log and logs its path as it starts; filter it on `level`, `code` or
 `vuid`. `RUST_LOG` sets what's logged: `RUST_LOG=gg_gpu=trace` adds gg-gpu's trace events to the
@@ -86,8 +87,10 @@ there. renderdoccmd exits 0 whatever the run does, so read the run's log. `rende
 
 Development builds (gg-engine's `dev`, the apps' and the games') serve the tool API, apply a
 scene file a layer loaded with `Context::load_scene_file` as it's saved, and, serving the API,
-reload a game's shaders, textures, models and fonts as their files change (`Shader reloaded`,
-`Texture reloaded`, `Model reloaded`, `Font reloaded`), warning at a change that fails. Run a
+reload a game's shaders, textures, models, fonts and sounds as their files change (`Shader
+reloaded`, `Texture reloaded`, `Model reloaded`, `Font reloaded`, `Sound reloaded`), warning at a
+change that fails. Windowed and embedded runs play sound, which an agent can't hear: each sound
+started logs `Sound started` at the debug level. Run a
 game under `cargo gg run`, in the background: it patches in an edit inside function bodies as it's
 saved, with Dioxus's `dx` of the root Cargo.toml's `subsecond` release (`gg` names its install),
 and restarts it from a snapshot after any other change, a crash or a hang (without `dx`, after a

@@ -29,6 +29,7 @@ use crate::asset_watch::AssetWatch;
 use crate::assets::{self, Asset, Assets, Loaded};
 #[cfg(feature = "dev")]
 use crate::assets::{Catalog, Prints};
+use crate::audio::{self, Audio, Place, Sound};
 use crate::camera::{self, Camera, Tie};
 use crate::canvas::{self, Canvas};
 use crate::draw::{self, Poses, Scratch};
@@ -244,6 +245,8 @@ pub struct Context {
     shaders: Shaders,
     textures: Textures,
     fonts: Fonts,
+    /// The sounds the layers loaded, and the output that plays them, in a run that plays sound.
+    audio: Audio,
     /// What to draw this frame.
     draws: Draws,
     /// What to draw this frame over the rest, after the world: lines.
@@ -303,8 +306,8 @@ pub struct Context {
     /// The assets the layers added: the world's, which a world that a layer puts in its place
     /// takes again, as [`share_assets`](Self::share_assets) says.
     assets: Arc<Assets>,
-    /// The textures, models, fonts and shaders the layers added, by the file each resolves to,
-    /// which a second add of that file, by whatever path, gives again.
+    /// The textures, models, fonts, shaders and sounds the layers added, by the file each resolves
+    /// to, which a second add of that file, by whatever path, gives again.
     loaded: Loaded,
     /// The names given the textures the layers add, by their paths, in place of the IDs the asset
     /// database holds, as [`name_as`](Self::name_as) says: `None` while the run names its textures
@@ -323,9 +326,9 @@ pub struct Context {
     /// API, as [`start_assets`](Self::start_assets) starts it.
     #[cfg(feature = "dev")]
     asset_watch: Option<AssetWatch>,
-    /// The thread that reads the layers' shaders, textures, models and fonts again as their files
-    /// change, in a run that serves the tool API, as [`start_assets`](Self::start_assets) starts
-    /// it.
+    /// The thread that reads the layers' shaders, textures, models, fonts and sounds again as their
+    /// files change, in a run that serves the tool API, as [`start_assets`](Self::start_assets)
+    /// starts it.
     #[cfg(feature = "dev")]
     hot_reload: Option<HotReload>,
     /// How long frames take, which the main loop measures and
@@ -367,10 +370,14 @@ impl Context {
     }
 
     /// A context for `app`'s run, in `window`, if it has one, whose world draws its entities' IDs
-    /// from the app's seed, or from a seed drawn at random without one.
-    pub(crate) fn of_run(window: Option<Window>, app: &App) -> Self {
+    /// from the app's seed, or from a seed drawn at random without one; and which plays sound if
+    /// `aloud`, as a windowed or embedded run does, as [`add_sound`](Self::add_sound) says.
+    pub(crate) fn of_run(window: Option<Window>, app: &App, aloud: bool) -> Self {
         let world = app.seed.map_or_else(World::default, World::seeded);
         let mut cx = Self::with_world(window, world);
+        if aloud {
+            cx.audio = Audio::aloud();
+        }
         cx.root.clone_from(&app.root);
         cx.start = app.manifest().map(|manifest| manifest.start.clone());
         #[cfg(feature = "dev")]
@@ -459,6 +466,7 @@ impl Context {
             shaders: Shaders::default(),
             textures,
             fonts,
+            audio: Audio::default(),
             draws: Draws::default(),
             over: Draws::default(),
             canvas: canvas::Drawn::default(),
@@ -965,6 +973,58 @@ impl Context {
         };
         self.added("font", &named);
         Ok(font)
+    }
+
+    /// Loads the audio file at `path`, WAV, Ogg Vorbis, FLAC or MP3, as a sound for ticks to queue
+    /// with [`World::play_sound`], and layers to play with [`play_sound`](Self::play_sound), from
+    /// then on, through the handle, decoding it whole into memory, as a game's short sounds are.
+    /// `name` names it in errors and the log. A file added again, by whatever form of its path,
+    /// gives the sound it gave first, without decoding it again. In a development run that serves
+    /// the tool API, the sound decodes again as its file changes, and plays as its file holds from
+    /// its next play on; a change that doesn't decode warns, and the sound plays as it did.
+    ///
+    /// Windowed and embedded runs play sound, as ARCHITECTURE.md's Audio says: the first sound
+    /// loaded opens the system's default output device, so that a game without sounds opens none,
+    /// and a run that can't open one plays none, warning `audio.no_output`. Headless runs, replays
+    /// and tests play none.
+    ///
+    /// Fails with `engine.bad_sound` if the file can't be read, isn't a regular file, is more than
+    /// 16 MiB, or doesn't decode.
+    pub fn add_sound(&mut self, name: &str, path: impl AsRef<Path>) -> Result<Sound> {
+        let path = path.as_ref();
+        let file = assets::file_of(path);
+        if let Some(&sound) = file.as_ref().and_then(|file| self.loaded.sounds.get(file)) {
+            return Ok(sound);
+        }
+        #[cfg(feature = "dev")]
+        let read_at = SystemTime::now();
+        let data = audio::decode(name, path)?;
+        let sound = self.audio.add(name, data);
+        #[cfg(feature = "dev")]
+        self.watch_sound(sound, name, path, read_at);
+        if let Some(file) = file {
+            self.loaded.sounds.insert(file, sound);
+        }
+        Ok(sound)
+    }
+
+    /// Plays `sound` from `place` now, in a run that plays sound, as
+    /// [`add_sound`](Self::add_sound) says: as a layer's UI plays its sounds as it updates, panned
+    /// and faded as the game's view hears it there, as [`Place`] says, following an entity of the
+    /// world it's on. Ticks queue theirs in the world, with [`World::play_sound`]. Past the 128
+    /// sounds that play at once, it's left out, warning `audio.full`.
+    ///
+    /// # Panics
+    ///
+    /// If `sound` is another context's.
+    pub fn play_sound(&mut self, sound: Sound, place: Place) {
+        self.audio.play(sound, place, &self.world);
+    }
+
+    /// Plays the sounds the world's ticks queued, emptying its queue, as [`World::play_sound`]
+    /// says: once each tick has run.
+    pub(crate) fn play_queued(&mut self) {
+        self.audio.play_queued(&mut self.world);
     }
 
     /// Records that a layer added an asset of `kind`, as `what` says it: its name, and the types
@@ -1636,8 +1696,8 @@ impl Context {
     }
 
     /// As a run starts, before the layers load, if a tool API `serves` the run, starts the thread
-    /// that reloads the layers' shaders, textures, models and fonts as their files change, as
-    /// `hot_reload` says, warning if it can't; then scans the assets under the app's root, as
+    /// that reloads the layers' shaders, textures, models, fonts and sounds as their files change,
+    /// as `hot_reload` says, warning if it can't; then scans the assets under the app's root, as
     /// [`scan_assets`](Self::scan_assets) does, writing the ID files missing if `writes`, and
     /// moving those that renames made since the last run left behind beside their assets, by the
     /// prints its cache keeps, as [`assets::scanned`] says; then, if the API serves the run, starts
@@ -1688,12 +1748,12 @@ impl Context {
     }
 
     /// Sends the thread that reloads assets the shaders the layers added since, and puts each
-    /// shader, texture, model and font it read again since in place of the one loaded, under the
-    /// same handle, as [`reload_texture`](Self::reload_texture),
+    /// shader, texture, model, font and sound it read again since in place of the one loaded, under
+    /// the same handle, as [`reload_texture`](Self::reload_texture),
     /// [`reload_model`](Self::reload_model) and [`reload_font`](Self::reload_font) say, which the
-    /// next frame handed off draws: as a frame starts, `recorded` saying whether a recording
-    /// follows the run. Once it has sent the shaders, it allocates nothing unless something came
-    /// back.
+    /// next frame handed off draws, and a sound's next play plays, logging `Sound reloaded`: as a
+    /// frame starts, `recorded` saying whether a recording follows the run. Once it has sent the
+    /// shaders, it allocates nothing unless something came back.
     #[cfg(feature = "dev")]
     pub(crate) fn take_reloaded(&mut self, recorded: bool) {
         let Some(hot_reload) = &mut self.hot_reload else {
@@ -1719,6 +1779,12 @@ impl Context {
                     imported,
                 } => self.reload_model(&file, &path, imported, recorded),
                 Reloaded::Font { font, path, bake } => self.reload_font(font, &path, *bake),
+                Reloaded::Sound { sound, path, data } => {
+                    let named = assets::name_of(self.root.as_deref(), &path);
+                    let frames = data.num_frames();
+                    self.audio.replace(sound, *data);
+                    info!(sound = &*named, frames, "Sound reloaded");
+                }
             }
         }
     }
@@ -1982,6 +2048,21 @@ impl Context {
                 read_at,
             };
             hot_reload.watch(source, id, at);
+        }
+    }
+
+    /// Has the thread that reloads assets, if one does, watch `sound`, loaded as `name` from the
+    /// file at `path` by a read begun at `read_at`, at that path, as no asset ID names a sound.
+    #[cfg(feature = "dev")]
+    fn watch_sound(&mut self, sound: Sound, name: &str, path: &Path, read_at: SystemTime) {
+        if let Some(hot_reload) = &mut self.hot_reload {
+            let source = Source::Sound {
+                sound,
+                name: name.to_owned(),
+                path: path.to_owned(),
+                read_at,
+            };
+            hot_reload.watch(source, None, None);
         }
     }
 
@@ -2418,7 +2499,8 @@ impl Context {
     /// canvas's, placed from their anchors in the view's pixels, for the last frame's, which it
     /// forgets, keeping their memory for the next; the viewpoint a layer set this
     /// frame, which it forgets too, or else where the world's camera sees from, or else the
-    /// default; what a layer outlined this frame, which it forgets too; the pixels the view shows,
+    /// default, which hears the sounds playing from a place, as [`Place`] says; what a layer
+    /// outlined this frame, which it forgets too; the pixels the view shows,
     /// if it shows any, swapping new ones for those `frame` had; what's been added since a frame
     /// last took it, after what `frame` still holds; and the picks asked this frame, each at
     /// the pixel of the view under it, the floor of where it was asked less the view's origin, but
@@ -2442,6 +2524,7 @@ impl Context {
             )
         };
         frame.viewpoint = viewpoint.or(self.seen).unwrap_or_default();
+        (self.audio).hear_from(&frame.viewpoint, viewport.size, &self.world);
         frame.outline = outline;
         #[cfg(feature = "dev")]
         {
@@ -3069,7 +3152,8 @@ impl Stack {
     }
 
     /// Runs a tick of the simulation: each layer's, from the bottom up, after which the world
-    /// shares the context's assets again, as [`Context::share_assets`] says. A recording gets each
+    /// shares the context's assets again, as [`Context::share_assets`] says, and then the sounds
+    /// the tick queued play, as [`World::play_sound`] says. A recording gets each
     /// layer's commands just before its tick applies them, so that a tick that panics leaves them,
     /// and the world's hash after the last. In a lockstep session, the tick waits for the other
     /// peer's inputs, returning `false` without running until they've come; once they have, this
@@ -3156,6 +3240,7 @@ impl Stack {
             layer.tick(&mut cx.world, tick);
             cx.share_assets();
         }
+        cx.play_queued();
         if let Some(recorder) = recorder {
             recorder.ticked(tick, &cx.world);
         }
@@ -3180,6 +3265,7 @@ impl Stack {
             layer.tick(&mut cx.world, tick);
             cx.share_assets();
         }
+        cx.play_queued();
         Ok(())
     }
 
@@ -4455,6 +4541,96 @@ mod tests {
             .iter()
             .filter(|note| note.starts_with("model "));
         assert_eq!(models.count(), 2);
+    }
+
+    /// A sound's file added again, by another form of its path, gives the sound it gave first,
+    /// without decoding it again; a file that isn't a sound, or isn't there, is refused, naming the
+    /// sound and its file.
+    #[test]
+    fn a_sound_decodes_once_however_its_path_is_written() {
+        let scratch = crate::dirs::tests::Scratch::new("sound-once");
+        let root = scratch.0.clone();
+        std::fs::create_dir_all(root.join("sounds")).expect("a directory");
+        std::fs::write(root.join("sounds/chime.wav"), audio::tests::wav(&[0; 480])).expect("a WAV");
+        std::fs::write(root.join("sounds/noise.wav"), b"RIFF, but no more").expect("a file");
+        let mut cx = Context::seeded(0).root(root.clone());
+        let chime = cx.add_sound("chime", root.join("sounds/chime.wav"));
+        let chime = chime.expect("a sound");
+        let dotted = root.join("./sounds/../sounds/chime.wav");
+        assert_eq!(cx.add_sound("again", &dotted).expect("it again"), chime);
+        assert_eq!(cx.audio.frames(chime), 480);
+        for (name, path) in [("noise", "sounds/noise.wav"), ("none", "sounds/none.wav")] {
+            let path = root.join(path);
+            let error = cx.add_sound(name, &path).expect_err("no sound");
+            assert_eq!(error.code(), "engine.bad_sound");
+            let message = error.to_string();
+            let named = message.contains(&format!("{name:?}"));
+            assert!(
+                named && message.contains(&path.display().to_string()),
+                "{message}"
+            );
+        }
+    }
+
+    /// Queues a sound at each tick, at its entity, as a game's tick does.
+    struct Chime {
+        sound: Sound,
+        on: Entity,
+    }
+
+    impl Layer for Chime {
+        fn tick(&mut self, world: &mut World, _: Tick) {
+            world.play_sound(self.sound, Place::On(self.on));
+        }
+    }
+
+    /// The sounds a tick queues play once it has run, every layer's, so that the world holds none
+    /// between ticks, in a run that plays sound or not.
+    #[test]
+    fn the_sounds_a_tick_queues_play_once_it_has_run() {
+        let scratch = crate::dirs::tests::Scratch::new("sound-tick");
+        std::fs::create_dir_all(&scratch.0).expect("a directory");
+        let path = scratch.0.join("chime.wav");
+        std::fs::write(&path, audio::tests::wav(&[0; 480])).expect("a WAV");
+        let mut cx = Context::seeded(0);
+        let sound = cx.add_sound("chime", &path).expect("a sound");
+        let on = cx.world_mut().spawn(Transform::IDENTITY);
+        let mut stack = Stack::default();
+        stack.push_layer(Chime { sound, on });
+        stack.push_overlay(Chime { sound, on });
+        for number in 0..2 {
+            stack.tick(&mut cx, Tick { number });
+            assert_eq!(cx.world().sounds_queued().count(), 0);
+        }
+        cx.world_mut().play_sound(sound, Place::Nowhere);
+        let queued: Vec<_> = cx.world().sounds_queued().collect();
+        assert_eq!(queued, [(sound, Place::Nowhere)]);
+    }
+
+    /// A sound's file edited decodes again, under its handle, its plays taking what the file holds
+    /// now.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_sound_decodes_again_as_its_file_changes() {
+        let scratch = crate::dirs::tests::Scratch::new("sound-reload");
+        std::fs::create_dir_all(&scratch.0).expect("a directory");
+        let path = scratch.0.join("chime.wav");
+        std::fs::write(&path, audio::tests::wav(&[0; 480])).expect("a WAV");
+        // Dated an hour back, so that it loads as it is.
+        let an_hour_ago = std::time::SystemTime::now() - Duration::from_secs(60 * 60);
+        let file = std::fs::File::options().write(true).open(&path);
+        (file.and_then(|file| file.set_modified(an_hour_ago))).expect("its time");
+        let mut cx = Context::seeded(0);
+        cx.hot_reload = Some(HotReload::start().expect("the thread"));
+        let sound = cx.add_sound("chime", &path).expect("a sound");
+        std::fs::write(&path, audio::tests::wav(&[0; 960])).expect("an edit");
+        let until = std::time::Instant::now() + Duration::from_secs(30);
+        while cx.audio.frames(sound) == 480 {
+            assert!(std::time::Instant::now() < until, "the sound decodes again");
+            std::thread::sleep(Duration::from_millis(5));
+            cx.take_reloaded(false);
+        }
+        assert_eq!(cx.audio.frames(sound), 960);
     }
 
     /// A shader's file added again with the same vertex and parameter types and blend gives the

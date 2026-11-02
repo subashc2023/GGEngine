@@ -56,8 +56,8 @@ The editor uses `gg-api` too, beside `gg-engine`, as a client of the tool API, a
 - **`gg-renderer`:** the render graph, passes, materials, lighting and post-processing. It owns
   the GPU resources and hands out handles to them.
 - **`gg-engine`:** the main loop, window and input, the job system and the render thread, scene
-  and assets, fonts and text, a game's UI, plus hot reload and the tool API in development builds:
-  what apps and games build on.
+  and assets, fonts and text, a game's UI, sounds, plus hot reload and the tool API in development
+  builds: what apps and games build on.
 - **`gg-macros`:** the derives `gg-engine` re-exports beside its traits of the same names,
   `Reflect` and `Component`. Rust builds a derive as a crate of its own; only `gg-engine`
   depends on it, and games derive through `gg-engine`.
@@ -1140,13 +1140,26 @@ it warns, and the old pipeline goes on drawing.
 
 ## Audio
 
-Sounds and music, not built yet, are kira's, on cpal, on an audio thread of its own, as the
-simulation's state never is: what plays follows from the world, and never feeds it. A tick queues a
-sound, at a place or on an entity, in a resource of the world that the engine drains after each
-tick, so that no snapshot, hash, recording or scene holds one; each is tagged with its tick, so that
-rollback, running a tick again, can leave out those already played. Layers play music and their
-UI's sounds as they update. A sound at a place is panned and faded by where it is from the view's
-viewpoint, the listener, in 2D. Replays and headless runs play nothing.
+Sounds are kira's, mixed on cpal's audio thread, as the simulation's state never is: what plays
+follows from the world, and never feeds it. A layer loads a sound from a WAV, Ogg Vorbis, FLAC or
+MP3 file, which symphonia decodes whole into memory, as a game's short sounds are; music, not built
+yet, will stream. A tick queues a sound with `World::play_sound`, from nowhere, at a point or on an
+entity, in a resource of the world that the engine empties once each tick has run, playing what it
+held, so that no snapshot, hash, recording or scene holds one, and each lockstep peer plays what
+its own ticks queue. Layers play their UI's sounds as they update, with `Context::play_sound`.
+
+A sound at a point or on an entity is panned and faded by where it shows in the game's view, the
+listener, as the frame handed off sees it: toward the side of the view it's on, halfway there at
+the view's edge, as kira pans at constant power, all of it in one ear at a side, and as loud as it
+is inside the view, fading out to silence a view's width or height past its edges; a camera with
+perspective hears nothing behind it. One on an entity follows it, each frame, to where the latest
+tick left it, up to a tick ahead of where it draws, too little to hear; once the entity is
+despawned, it plays to its end from where the entity was last, as an impact's does when what made
+it is gone.
+
+Windowed and embedded runs play sound, the editor's game among them, opening the system's default
+output device as their first sound loads, so that a game without sounds opens none; headless runs,
+replays and tests play none.
 
 ## Threads
 
