@@ -210,7 +210,7 @@ in the editor is out of an agent's reach.
   in `sessions` beside its executable, removed as the run ends: query the world, apply and undo
   [operations](#project-state), play and stop, pause and step, open, save and empty the [open
   scene](#project-state), capture frames, share the view as frames render it, set how it looks and
-  pick what it shows, list the asset root's textures and models with their [IDs](#project-state),
+  pick what it shows, list the assets in the asset root with their [IDs](#project-state),
   hand the layers input as the window would, save the world whole as a snapshot file, as [ECS](#ecs)
   describes, which a run given `--restore` starts from, apply patches of the game's code, as
   [Game code](#game-code) describes, and read [diagnostics](#diagnostics). Requests
