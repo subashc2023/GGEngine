@@ -1,13 +1,15 @@
-//! The editor of the game's project it's started in, as [`game`] describes; started elsewhere, it
-//! shows no game, and says why.
+//! The editor of the game's project it's started in, as [`game`] describes; started elsewhere, of
+//! the project its [`hub`] picks.
 
 mod assets;
 mod camera;
 mod file;
 mod game;
 mod handles;
+mod hub;
 mod look;
 mod overlay;
+mod scenes;
 mod view;
 
 use std::process::ExitCode;
@@ -18,10 +20,13 @@ fn main() -> ExitCode {
     gg_engine::run(app())
 }
 
-/// The editor of the project it's started in, if it's started in one.
+/// The editor of the project it's started in, if it's started in one, its hub finding projects in
+/// the engine's workspace, where it runs, or where its executable is.
 fn app() -> App {
     let dir = std::env::current_dir().ok();
-    game::app(dir.and_then(|dir| gg_api::Project::find(&dir)))
+    let exe = std::env::current_exe().ok();
+    let workspace = hub::workspace(dir.as_deref(), exe.as_deref());
+    game::app(dir.and_then(|dir| gg_api::Project::find(&dir)), workspace)
 }
 
 #[cfg(test)]

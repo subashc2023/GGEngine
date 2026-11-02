@@ -1,0 +1,584 @@
+(
+    entities: {
+        "0da0c38dde138007": (
+            Name: ("Title"),
+            Text: (
+                text: "Physics",
+                font: Some("d2f1930c7b1ab233"),
+                size: 0.6,
+                color: (0.95, 0.96, 1.0, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 4.1, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "0e110e6ffec7c5ce": (
+            BoxCollider2D: (
+                offset: (0.0, 0.0),
+                size: (1.0, 1.0),
+                density: 1.0,
+                friction: 0.7,
+                restitution: 0.0,
+            ),
+            Name: ("Box 3"),
+            RigidBody2D: (
+                body_type: Dynamic,
+                fixed_rotation: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
+            Sprite: (
+                color: (0.2, 0.8, 0.35, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (2.6799998, -3.73, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.8, 0.8, 1.0),
+            ),
+        ),
+        "25a9993544e864c3": (
+            BoxCollider2D: (
+                offset: (0.0, 0.0),
+                size: (1.0, 1.0),
+                density: 1.0,
+                friction: 0.7,
+                restitution: 0.0,
+            ),
+            Name: ("Box 1"),
+            RigidBody2D: (
+                body_type: Dynamic,
+                fixed_rotation: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
+            Sprite: (
+                color: (1.0, 0.42, 0.1, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (1.0, -3.73, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.8, 0.8, 1.0),
+            ),
+        ),
+        "268086c068c893be": (
+            BoxCollider2D: (
+                offset: (0.0, 0.0),
+                size: (1.0, 1.0),
+                density: 1.0,
+                friction: 0.7,
+                restitution: 0.0,
+            ),
+            Name: ("Box 5"),
+            RigidBody2D: (
+                body_type: Dynamic,
+                fixed_rotation: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
+            Sprite: (
+                color: (0.5, 0.3, 1.0, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (2.26, -2.91, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.8, 0.8, 1.0),
+            ),
+        ),
+        "28ce157d3d8442d2": (
+            Circle: (
+                color: (0.2, 0.8, 0.35, 1.0),
+                thickness: 1.0,
+                fade: 0.0,
+            ),
+            CircleCollider2D: (
+                offset: (0.0, 0.0),
+                radius: 0.5,
+                density: 1.0,
+                friction: 0.5,
+                restitution: 0.3,
+            ),
+            Name: ("Ball, bouncing 0.3"),
+            RigidBody2D: (
+                body_type: Dynamic,
+                fixed_rotation: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
+            Transform: (
+                translation: (-5.6, 1.8, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.6, 0.6, 1.0),
+            ),
+        ),
+        "34d45cd11c930a06": (
+            BoxCollider2D: (
+                offset: (0.0, 0.0),
+                size: (1.0, 1.0),
+                density: 1.0,
+                friction: 0.2,
+                restitution: 0.0,
+            ),
+            Name: ("Left wall"),
+            RigidBody2D: (
+                body_type: Static,
+                fixed_rotation: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
+            Sprite: (
+                color: (0.22, 0.25, 0.32, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-7.0, -0.6, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.4, 7.6, 1.0),
+            ),
+        ),
+        "3bf585bed7c35883": (
+            Name: ("Hint"),
+            Text: (
+                text: "Press Play: boxes stack and topple, balls bounce down the ramp, and a kinematic paddle turns",
+                font: None,
+                size: 0.24,
+                color: (0.45, 0.5, 0.62, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 3.4, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "41cfe8ebb56816f9": (
+            BoxCollider2D: (
+                offset: (0.0, 0.0),
+                size: (1.0, 1.0),
+                density: 1.0,
+                friction: 0.7,
+                restitution: 0.0,
+            ),
+            Name: ("Box 6"),
+            RigidBody2D: (
+                body_type: Dynamic,
+                fixed_rotation: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
+            Sprite: (
+                color: (0.95, 0.25, 0.55, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (1.8399999, -2.0900002, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.8, 0.8, 1.0),
+            ),
+        ),
+        "5faea07debeb9ecf": (
+            BoxCollider2D: (
+                offset: (0.0, 0.0),
+                size: (1.0, 1.0),
+                density: 1.0,
+                friction: 0.5,
+                restitution: 0.0,
+            ),
+            Name: ("Falling box"),
+            RigidBody2D: (
+                body_type: Dynamic,
+                fixed_rotation: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
+            Sprite: (
+                color: (0.5, 0.3, 1.0, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (5.0, 3.0, 0.2),
+                rotation: (0.0, 0.0, 0.17364818, 0.9848077),
+                scale: (0.55, 0.55, 1.0),
+            ),
+        ),
+        "6fc4f0cac037dd8d": (
+            Circle: (
+                color: (0.15, 0.45, 1.0, 1.0),
+                thickness: 1.0,
+                fade: 0.0,
+            ),
+            CircleCollider2D: (
+                offset: (0.0, 0.0),
+                radius: 0.5,
+                density: 1.0,
+                friction: 0.5,
+                restitution: 0.6,
+            ),
+            Name: ("Ball, bouncing 0.6"),
+            RigidBody2D: (
+                body_type: Dynamic,
+                fixed_rotation: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
+            Transform: (
+                translation: (-5.2, 3.0, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.6, 0.6, 1.0),
+            ),
+        ),
+        "732d70567fd58056": (
+            BoxCollider2D: (
+                offset: (0.0, 0.0),
+                size: (1.0, 1.0),
+                density: 1.0,
+                friction: 0.3,
+                restitution: 0.0,
+            ),
+            Name: ("Ledge"),
+            RigidBody2D: (
+                body_type: Static,
+                fixed_rotation: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
+            Sprite: (
+                color: (0.22, 0.25, 0.32, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-1.0, -2.6, 0.1),
+                rotation: (0.0, 0.0, 0.104528464, 0.9945219),
+                scale: (2.4, 0.3, 1.0),
+            ),
+        ),
+        "79f378557774952e": (
+            BoxCollider2D: (
+                offset: (0.0, 0.0),
+                size: (1.0, 1.0),
+                density: 1.0,
+                friction: 0.2,
+                restitution: 0.0,
+            ),
+            Name: ("Right wall"),
+            RigidBody2D: (
+                body_type: Static,
+                fixed_rotation: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
+            Sprite: (
+                color: (0.22, 0.25, 0.32, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (7.0, -0.6, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.4, 7.6, 1.0),
+            ),
+        ),
+        "7e35a80bc8015f41": (
+            BoxCollider2D: (
+                offset: (0.0, 0.0),
+                size: (1.0, 1.0),
+                density: 1.0,
+                friction: 0.5,
+                restitution: 0.0,
+            ),
+            Name: ("Falling box"),
+            RigidBody2D: (
+                body_type: Dynamic,
+                fixed_rotation: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
+            Sprite: (
+                color: (0.95, 0.25, 0.55, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (5.6, 2.0, 0.2),
+                rotation: (0.0, 0.0, 0.34202012, 0.9396926),
+                scale: (0.55, 0.55, 1.0),
+            ),
+        ),
+        "90d2a86756e1336a": (
+            BoxCollider2D: (
+                offset: (0.0, 0.0),
+                size: (1.0, 1.0),
+                density: 1.0,
+                friction: 0.4,
+                restitution: 0.0,
+            ),
+            Name: ("Paddle"),
+            RigidBody2D: (
+                body_type: Kinematic,
+                fixed_rotation: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 1.4,
+            ),
+            Sprite: (
+                color: (0.95, 0.96, 1.0, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (4.7, -1.2, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (2.6, 0.25, 1.0),
+            ),
+        ),
+        "94eb2a92248df282": (
+            BoxCollider2D: (
+                offset: (0.0, 0.0),
+                size: (1.0, 1.0),
+                density: 1.0,
+                friction: 0.3,
+                restitution: 0.0,
+            ),
+            Name: ("Ramp"),
+            RigidBody2D: (
+                body_type: Static,
+                fixed_rotation: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
+            Sprite: (
+                color: (0.22, 0.25, 0.32, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-4.2, -0.4, 0.1),
+                rotation: (0.0, 0.0, -0.15643448, 0.98768836),
+                scale: (4.4, 0.3, 1.0),
+            ),
+        ),
+        "9e2311384c6fbb9f": (
+            BoxCollider2D: (
+                offset: (0.0, 0.0),
+                size: (1.0, 1.0),
+                density: 1.0,
+                friction: 0.5,
+                restitution: 0.0,
+            ),
+            Name: ("Falling box"),
+            RigidBody2D: (
+                body_type: Dynamic,
+                fixed_rotation: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
+            Sprite: (
+                color: (0.15, 0.45, 1.0, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (4.2, 2.4, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.55, 0.55, 1.0),
+            ),
+        ),
+        "b1ee5d536b0e4884": (
+            BoxCollider2D: (
+                offset: (0.0, 0.0),
+                size: (1.0, 1.0),
+                density: 1.0,
+                friction: 0.7,
+                restitution: 0.0,
+            ),
+            Name: ("Box 4"),
+            RigidBody2D: (
+                body_type: Dynamic,
+                fixed_rotation: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
+            Sprite: (
+                color: (0.15, 0.45, 1.0, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (1.42, -2.91, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.8, 0.8, 1.0),
+            ),
+        ),
+        "bf2bf92af85ca456": (
+            Circle: (
+                color: (0.95, 0.25, 0.55, 1.0),
+                thickness: 1.0,
+                fade: 0.0,
+            ),
+            CircleCollider2D: (
+                offset: (0.0, 0.0),
+                radius: 0.5,
+                density: 1.0,
+                friction: 0.5,
+                restitution: 0.85,
+            ),
+            Name: ("Ball, bouncing 0.85"),
+            RigidBody2D: (
+                body_type: Dynamic,
+                fixed_rotation: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
+            Transform: (
+                translation: (-6.0, 2.6, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.6, 0.6, 1.0),
+            ),
+        ),
+        "dddf9b167e2a52df": (
+            BoxCollider2D: (
+                offset: (0.0, 0.0),
+                size: (1.0, 1.0),
+                density: 1.0,
+                friction: 0.7,
+                restitution: 0.0,
+            ),
+            Name: ("Box 2"),
+            RigidBody2D: (
+                body_type: Dynamic,
+                fixed_rotation: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
+            Sprite: (
+                color: (1.0, 0.8, 0.15, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (1.8399999, -3.73, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.8, 0.8, 1.0),
+            ),
+        ),
+        "e8a7f76412f61d5d": (
+            Camera: (
+                projection: Orthographic(
+                    height: 10.0,
+                    near: 0.1,
+                    far: 100.0,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (0.0, 0.0, 10.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "fd8e48e42f47937c": (
+            BoxCollider2D: (
+                offset: (0.0, 0.0),
+                size: (1.0, 1.0),
+                density: 1.0,
+                friction: 0.6,
+                restitution: 0.0,
+            ),
+            Name: ("Ground"),
+            RigidBody2D: (
+                body_type: Static,
+                fixed_rotation: false,
+                velocity: (0.0, 0.0),
+                angular_velocity: 0.0,
+            ),
+            Sprite: (
+                color: (0.22, 0.25, 0.32, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.0, -4.4, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (14.4, 0.5, 1.0),
+            ),
+        ),
+    },
+)

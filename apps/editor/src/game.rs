@@ -11,8 +11,14 @@
 //! project's asset root; and the title bar, how the run goes, or while a game serves, whether it's
 //! stopped, playing or simulating, and whether it's paused, as the game answers the editor's
 //! requests and the `status` it asks for every quarter second, which catches another client's; with
-//! Play, Simulate, pause and step. Started outside a project, the editor runs no game, and says
-//! why.
+//! Play, Simulate, pause and step.
+//!
+//! Started outside a project, the editor shows the [`hub`] over its panels, where a
+//! project is picked, unless it's to open the latest as it starts; and the File menu's Open Project
+//! shows it over the project open, which its Back goes back to. A project picked there opens in
+//! place of the one open as a close of the editor goes, asking whether to save the open scene's
+//! unsaved edits first: the run of the one open ends, going on ending as the new project's starts,
+//! but in the same project, which waits for it, and the panels show the new project's.
 //!
 //! Play has a copy of the world as edited play in its place, as the API's `play` does, the view
 //! seeing through the game's own camera, which gets all the input the view gets, the view's tools
@@ -43,10 +49,11 @@
 //! [`landing`](Game::landing) says, which the panels show picked.
 //!
 //! The File menu acts on the game's open scene through the API's `scene`, never reading or writing
-//! a scene file itself: New empties it, Open opens a scene the OS's dialog picks in its place, and
-//! Save and Save As save the world as edited to its file, or to one the dialog picks, which is then
-//! its file; each request, and a close's status, sent once the Inspector has nothing waiting for
-//! the game, so that the game has its edits first. The title bar names the open scene's file,
+//! a scene file itself: New empties it, Open opens a scene the OS's dialog picks in its place, as a
+//! click in the [Scenes](crate::scenes) panel opens one, and Save and Save As save the world as
+//! edited to its file, or to one the dialog picks, which is then its file; each request, and a
+//! close's status, sent once the Inspector has nothing waiting for the game, so that the game has
+//! its edits first. The title bar names the open scene's file,
 //! marked while the game says it has unsaved edits, which New, Open, Quit and the window's close
 //! button ask whether to save first, discard or keep, cancelling; a close asks the game for a
 //! status first, while one serves, and otherwise goes by the last. A refusal shows in a message,
@@ -81,8 +88,10 @@ use tracing::{info, warn};
 use crate::assets::{Assets, Dragged};
 use crate::file::{self, Choice, Item, Message};
 use crate::handles::{Picked, Reading, Sight};
+use crate::hub::{self, Hub};
 use crate::look::{Looking, Part, Parts};
 use crate::overlay::{self, Mode, Toolbar};
+use crate::scenes::{self, Scenes};
 use crate::view::{self, OUTLINE, OUTLINE_WIDTH, ViewTools};
 
 /// The most lines the Logs panel keeps, past which the oldest go.
@@ -112,22 +121,22 @@ const MEASURED: usize = 16_384;
 /// agent, may change: the title bar lags such a change by as much.
 const STATUS_EVERY: Duration = Duration::from_millis(250);
 
-/// Why the editor, started outside a project, runs no game.
-const NO_PROJECT: &str = "not in a game's project: start the editor in one, such as games/shards";
-
-/// The editor of the project in directory `dir`, if it's started in one: the game's view in the
-/// Viewport, its entities left of it, the one picked right of it, above the Performance panel,
-/// and the Logs below it, the Assets among their tabs.
-pub(crate) fn app(dir: Option<PathBuf>) -> App {
+/// The editor of the project in directory `dir`, if it's started in one, and otherwise of the one
+/// the hub picks, the hub finding projects in `workspace`, the engine's, if it runs in one: the
+/// game's view in the Viewport, its entities left of it, above its scenes, the one picked right of
+/// it, above the Performance panel, and the Logs below it, the Assets among their tabs.
+pub(crate) fn app(dir: Option<PathBuf>, workspace: Option<PathBuf>) -> App {
     let app = App::new("Editor").custom_title_bar().view_panel("Viewport");
     let app = app
         .dock("Inspector", Docked::RightOf("Viewport"))
         .dock("Entities", Docked::LeftOf("Viewport"))
+        .dock("Scenes", Docked::Below("Entities"))
         .dock("Performance", Docked::Below("Inspector"))
         .dock("Logs", Docked::Below("Viewport"))
         .dock("Assets", Docked::With("Logs"));
     let inspector = Inspector::remote(CLIENT);
-    let game = Game::new(dir, inspector.link());
+    let mut game = Game::new(dir, inspector.link());
+    game.hub = Hub::new(workspace);
     app.layer(game).overlay(PerfPanel).overlay(inspector)
 }
 
@@ -135,15 +144,24 @@ pub(crate) fn app(dir: Option<PathBuf>) -> App {
 const CLIENT: &str = "editor";
 
 /// The editor's layer: the `gg run` of the project's game, the connection to the game that serves,
-/// the memory its view is shared through, how the game runs, and what the Logs and Assets panels
-/// and the title bar show; the game's open scene, what the File menu asks of it, and how far a
-/// close has got; and the view's tools, the picks they ask of the game and the look they keep with
-/// it.
+/// the memory its view is shared through, how the game runs, and what the Logs, Assets and Scenes
+/// panels and the title bar show; the game's open scene, what the File menu asks of it, and how far
+/// a close has got; the view's tools, the picks they ask of the game and the look they keep with
+/// it; and the hub, with the runs of the projects it switched from that are ending.
 struct Game {
-    /// The project's directory, if the editor was started in one.
+    /// The project's directory, while one's open: the one it was started in, or the hub opened.
     dir: Option<PathBuf>,
     /// `gg run`, until it ends, with its stdin, which the editor closes as it ends.
     run: Option<(Child, ChildStdin)>,
+    /// The `gg run`s of the projects open before, each with its project's directory, which go on
+    /// ending once their stdins are closed, until they've ended; and whether this project's waits
+    /// to start until the one in its directory has, as [`start`](Self::start) says.
+    ending: Vec<(PathBuf, Child)>,
+    waiting: bool,
+    hub: Hub,
+    /// The project a close under way opens in place of the one open, rather than closing the
+    /// editor, as [`switch_to`](Self::switch_to) says.
+    switching: Option<PathBuf>,
     /// What `gg run` prints, a line at a time.
     lines: Receiver<Line>,
     /// What the threads reading `gg run`'s output send `lines`, until the run starts.
@@ -203,9 +221,10 @@ struct Game {
     statusing: bool,
     polled: Option<Instant>,
     logs: VecDeque<Logged>,
-    /// The Assets panel, at the project's asset root, and the project's folders; none outside a
-    /// project.
+    /// The Assets panel, at the project's asset root, the Scenes panel, of its scenes folders, and
+    /// the project's folders; none outside a project.
     assets: Option<Assets>,
+    scenes: Option<Scenes>,
     folders: Option<Folders>,
     /// Whether a game has served since the editor started, from when a close asks whether to save.
     served: bool,
@@ -230,10 +249,12 @@ struct Game {
 }
 
 /// The project's folders, as its manifest names them: its asset root, which the open scene's file
-/// is named from, and its scene folders, where the dialogs start without an open scene's file.
+/// is named from, and its scene folders, where the dialogs start without an open scene's file; and
+/// its start scene.
 struct Folders {
     root: PathBuf,
     scenes: Vec<PathBuf>,
+    start: Option<PathBuf>,
 }
 
 /// A `scene` request of the File menu's, and whether it's sent: once the Inspector has nothing
@@ -376,9 +397,17 @@ impl Game {
         let wants = wants(&view);
         let folders = dir.as_deref().map(folders);
         let assets = (folders.as_ref()).map(|folders| Assets::new(folders.root.clone()));
+        let scenes = (folders.as_ref()).map(|folders| {
+            let (root, scenes) = (folders.root.clone(), folders.scenes.clone());
+            Scenes::new(root, scenes, folders.start.as_deref())
+        });
         Self {
             dir,
             run: None,
+            ending: Vec::new(),
+            waiting: false,
+            hub: Hub::default(),
+            switching: None,
             lines,
             send: Some(send),
             talker: None,
@@ -407,6 +436,7 @@ impl Game {
             polled: None,
             logs: VecDeque::new(),
             assets,
+            scenes,
             folders,
             served: false,
             scene: None,
@@ -421,17 +451,19 @@ impl Game {
         }
     }
 
-    /// Starts `cargo gg run --embedded -- --stopped` in the project's directory, with threads that
-    /// read what it prints; outside a project, starts nothing, and says why, as it does if it
-    /// can't start it.
+    /// Starts `cargo gg run --embedded -- --stopped` in the project's directory, once, with threads
+    /// that read what it prints, saying why if it can't start it; but nothing outside a project,
+    /// and while the run of the project open before in the same directory goes on ending, it waits,
+    /// each update starting it again, until that has ended.
     fn start(&mut self) {
-        let Some(send) = self.send.take() else {
+        let Some(dir) = &self.dir else {
             return;
         };
-        let Some(dir) = &self.dir else {
-            warn!(code = "editor.no_project", "The editor is {NO_PROJECT}");
-            self.log(Level::Warn, NO_PROJECT.to_owned());
-            self.run_state = RunState::Ended(NO_PROJECT.to_owned());
+        self.waiting = self.ending.iter().any(|(ending, _)| hub::same(ending, dir));
+        if self.waiting {
+            return;
+        }
+        let Some(send) = self.send.take() else {
             return;
         };
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
@@ -797,8 +829,15 @@ impl Game {
     }
 
     /// What the title bar says: while a game serves, how it runs, as [`mode`](Self::mode) says,
-    /// and whether it's paused; otherwise how the run goes.
+    /// and whether it's paused; otherwise how the run goes, or that it waits for the run before it
+    /// to end, as [`start`](Self::start) does.
     fn label(&self) -> String {
+        if self.dir.is_none() {
+            return "No project open".to_owned();
+        }
+        if self.waiting {
+            return "Waiting for the last run to end…".to_owned();
+        }
         let running = match self.mode() {
             Mode::Edit => "Stopped",
             Mode::Play => "Playing",
@@ -830,11 +869,106 @@ impl Game {
         scene.rsplit('/').next()
     }
 
-    /// Whether the File menu's items but Quit, and their shortcuts, do anything: while a game
-    /// serves, which needs a project, and neither a prompt, a request of theirs nor a close waits.
+    /// Whether the File menu's items on the open scene, their shortcuts and the Scenes panel do
+    /// anything: while a game serves, which needs a project, the hub doesn't show, and neither a
+    /// prompt, a request of theirs nor a close waits.
     fn files(&self) -> bool {
         let waits = self.prompt.is_some() || self.request.is_some() || self.due.is_some();
-        self.talker.is_some() && !waits && self.closing == Closing::No
+        self.talker.is_some() && !waits && self.closing == Closing::No && !self.hub_shows()
+    }
+
+    /// Whether the hub shows over the panels: while no project is open, and from the File menu's
+    /// Open Project until it's gone back from, or another project opens.
+    fn hub_shows(&self) -> bool {
+        self.dir.is_none() || self.hub.asked
+    }
+
+    /// Opens the project in `dir`, as the hub picked it, in place of the one open: at once while
+    /// no game has served; otherwise as a close of the editor goes, as [`close`](Self::close)
+    /// says, the prompt asking whether to save the open scene's unsaved edits before the project
+    /// opens, and the switch going, as [`switch`](Self::switch) does, once the close is granted.
+    /// The project open itself opens nothing, the hub giving way to it; and none opens while a
+    /// close is under way.
+    fn switch_to(&mut self, dir: PathBuf) {
+        if self
+            .dir
+            .as_deref()
+            .is_some_and(|open| hub::same(open, &dir))
+        {
+            self.hub.asked = false;
+            return;
+        }
+        if self.closing != Closing::No {
+            return;
+        }
+        self.switching = Some(dir);
+        if self.close().is_continue() {
+            self.closing = Closing::Granted;
+        }
+    }
+
+    /// Opens the project in `dir` in place of the one open, if one is: lets go of its game, closing
+    /// its run's stdin, which ends it, the run going on ending meanwhile; logs what was measured of
+    /// its view; and makes the layer the new project's, as it starts but for the hub, the Logs and
+    /// the runs ending, noting the project opened, and starting its run, as
+    /// [`start`](Self::start) does.
+    fn switch(&mut self, cx: &mut Context, dir: PathBuf) {
+        self.disconnect();
+        if let Some((child, stdin)) = self.run.take() {
+            drop(stdin);
+            let ran = self.dir.clone().unwrap_or_default();
+            self.ending.push((ran, child));
+        }
+        self.measures.report();
+        let mut opened = Game::new(Some(dir.clone()), self.view.link.clone());
+        opened.hub = mem::take(&mut self.hub);
+        opened.ending = mem::take(&mut self.ending);
+        opened.logs = mem::take(&mut self.logs);
+        *self = opened;
+        info!(code = "editor.project", dir = %dir.display(), "Opened a project");
+        self.log(
+            Level::Info,
+            format!("Opened the project in {}", dir.display()),
+        );
+        self.hub.opened(&dir);
+        self.hub.save(cx);
+        self.start();
+    }
+
+    /// Picks a project's manifest with the OS's dialog, from [`Layer::ui`], and opens its project,
+    /// as [`switch_to`](Self::switch_to) does; the hub says why if the folder it's in isn't a
+    /// project's, or its manifest doesn't read.
+    fn browse(&mut self, cx: &mut Context) {
+        let games = self.hub_games();
+        let picked = cx.pick_file(&FileDialog {
+            title: "Open a project's manifest",
+            save: false,
+            filter: Some(("Project manifests", &["ron"])),
+            directory: games.as_deref(),
+            file_name: Some(gg_api::Project::FILE),
+        });
+        let Some(picked) = picked else {
+            return;
+        };
+        let dir = picked.parent().map(Path::to_owned).unwrap_or_default();
+        let found = gg_api::Project::find(&dir).is_some_and(|found| found == dir);
+        let read = gg_api::Project::read(&dir);
+        match read {
+            Ok(_) if found => self.switch_to(dir),
+            Ok(_) => self.hub.refuse(format!(
+                "{} isn't a game's project: its folder holds no Cargo.toml beside its manifest",
+                dir.display()
+            )),
+            Err(failure) => self
+                .hub
+                .refuse(format!("[{}] {}", failure.code, failure.message)),
+        }
+    }
+
+    /// The folder Open's dialog starts in: the open project's parent, or else the workspace's games.
+    fn hub_games(&self) -> Option<PathBuf> {
+        let parent = self.dir.as_deref().and_then(Path::parent);
+        parent.map(Path::to_owned).or_else(|| self.hub.games())
     }
 
     /// Does what the File menu's `item` does, from [`Layer::ui`], as the menu, a shortcut or a
@@ -950,8 +1084,8 @@ impl Game {
     /// Does what `choice` answers the prompt with, for what it asks about: Save saves the open
     /// scene, or saves it as, then does it once the game has saved, a New or an Open again and a
     /// close going ahead, but does nothing while no game serves; Don't Save does it, discarding the
-    /// unsaved edits, as a close going ahead does; Cancel does nothing, and a close goes back to
-    /// none.
+    /// unsaved edits, as a close going ahead does; Cancel does nothing, and a close, or a switch to
+    /// another project, goes back to none.
     fn answer(&mut self, choice: Choice) {
         let Some(action) = self.prompt.take() else {
             return;
@@ -966,7 +1100,7 @@ impl Game {
                 Some(scene) => self.request(scene),
                 None => self.closing = Closing::Granted,
             },
-            Choice::Cancel if action == Action::Close => self.closing = Closing::No,
+            Choice::Cancel if action == Action::Close => self.cancel_close(),
             Choice::Cancel => {}
         }
     }
@@ -974,8 +1108,14 @@ impl Game {
     /// Cancels what was to follow a save that won't be made: a close going back to none.
     fn cancel_then(&mut self) {
         if self.then.take() == Some(Action::Close) {
-            self.closing = Closing::No;
+            self.cancel_close();
         }
+    }
+
+    /// Has a close under way, or a switch to another project, go back to none.
+    fn cancel_close(&mut self) {
+        self.closing = Closing::No;
+        self.switching = None;
     }
 
     /// Goes on from the File menu's request, `scene`, that the game did: from a save, to what was
@@ -1058,7 +1198,13 @@ impl Game {
                 let name = path.file_name().map(OsStr::to_string_lossy);
                 format!("{} opens", name.unwrap_or_default())
             }
-            Action::Close => "the editor closes".to_owned(),
+            Action::Close => match &self.switching {
+                Some(dir) => {
+                    let name = dir.file_name().map(OsStr::to_string_lossy);
+                    format!("the project {} opens", name.unwrap_or_default())
+                }
+                None => "the editor closes".to_owned(),
+            },
         };
         let text = format!("Its unsaved edits are lost unless they're saved before {then}.");
         (title, text)
@@ -1073,7 +1219,8 @@ impl Game {
     /// for a rebuild or the game crashed, only the last status answers: granted if it said none,
     /// and otherwise prompted for without Save, which no game would do; and a close being checked,
     /// or prompted for, as the game goes goes the same way. A close while the window is minimized
-    /// waits until it's restored, since no frames run meanwhile.
+    /// waits until it's restored, since no frames run meanwhile. A switch to another project goes
+    /// the same way, as [`switch_to`](Self::switch_to) says.
     fn close(&mut self) -> ControlFlow<()> {
         match self.closing {
             Closing::Granted => return ControlFlow::Continue(()),
@@ -1490,13 +1637,13 @@ fn folders(dir: &Path) -> Folders {
     match gg_api::Project::read(dir) {
         Ok(project) => Folders {
             root: project.assets_dir(dir),
-            scenes: (project.scenes.iter())
-                .map(|scenes| under(dir, scenes))
-                .collect(),
+            scenes: project.scene_dirs(dir),
+            start: Some(project.start_path(dir)),
         },
         Err(_) => Folders {
             root: dir.to_owned(),
             scenes: Vec::new(),
+            start: None,
         },
     }
 }
@@ -1627,11 +1774,31 @@ fn engine_plane(given: gg_api::Plane) -> Plane {
 }
 
 impl Layer for Game {
-    fn attach(&mut self, _: &mut Context) {
-        self.start();
+    /// Reads the projects the hub keeps, and opens the project the editor was started in, noting
+    /// it, or else the latest opened, if the hub's to skip to it; or, with neither, opens none,
+    /// the hub showing.
+    fn attach(&mut self, cx: &mut Context) {
+        self.hub.read(cx);
+        match self.dir.clone() {
+            Some(dir) => {
+                self.hub.opened(&dir);
+                self.hub.save(cx);
+                self.start();
+            }
+            None => {
+                if let Some(latest) = self.hub.skip_to() {
+                    self.switch(cx, latest);
+                }
+            }
+        }
     }
 
     fn update(&mut self, cx: &mut Context, dt: Duration) {
+        // The runs of the projects open before, which may hold up this project's.
+        (self.ending).retain_mut(|(_, child)| matches!(child.try_wait(), Ok(None)));
+        if self.waiting {
+            self.start();
+        }
         // Before `gg run`'s lines, which may say the game has gone, letting go of what it logged.
         self.take_logged();
         self.take_lines();
@@ -1695,9 +1862,11 @@ impl Layer for Game {
     }
 
     /// Has the view's tools see what the view gets, or in Play the game, as [`route`](Game::route)
-    /// says; and vetoes a close of the editor until it's granted, as [`close`](Game::close) says.
+    /// says; and vetoes a close of the editor until it's granted, as [`close`](Game::close) says, a
+    /// switch to another project under way becoming the close.
     fn event(&mut self, cx: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
         if *event == Event::CloseRequested {
+            self.switching = None;
             return self.close();
         }
         let reading = view::reading(cx, self.screen(cx.view()));
@@ -1706,7 +1875,8 @@ impl Layer for Game {
 
     fn ui(&mut self, cx: &mut Context, ui: &mut Ui<'_>) {
         let files = self.files();
-        let mut clicked = None;
+        let projects = self.closing == Closing::No && self.prompt.is_none() && !self.hub_shows();
+        let (mut clicked, mut to_hub) = (None, false);
         ui.menu("File", |ui| {
             ui.add_enabled_ui(files, |ui| {
                 for item in Item::MENU {
@@ -1718,11 +1888,30 @@ impl Layer for Game {
                 }
             });
             ui.separator();
+            let open = ui.add_enabled(projects, egui::Button::new("Open Project..."));
+            let tip = "Show the projects, to open another in this one's place";
+            to_hub = open.on_hover_text(tip).clicked();
+            ui.separator();
             if ui.button("Quit").clicked() {
                 ui.ctx()
                     .send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Close);
             }
         });
+        if to_hub {
+            self.hub.asked = true;
+        }
+        // The hub, over the panels, which go on showing the project open, if one is, behind it.
+        if self.hub_shows() {
+            let current = self.dir.clone();
+            let hub = &mut self.hub;
+            match ui.cover(|ui| hub.show(ui, current.as_deref())) {
+                Some(hub::Chosen::Open(dir)) => self.switch_to(dir),
+                Some(hub::Chosen::Browse) => self.browse(cx),
+                Some(hub::Chosen::Back) => self.hub.asked = false,
+                None => {}
+            }
+            self.hub.save(cx);
+        }
         // The shortcuts, whichever panel of the main window has the keys. What's chosen is done
         // once the menu is drawn, since Open and Save As show a dialog, which takes the context
         // and blocks the frame.
@@ -1748,7 +1937,9 @@ impl Layer for Game {
         });
         let paused = self.paused;
         let talker = self.talker.as_ref();
-        let clicked = ui.title_bar(|ui| {
+        // None over the hub, where the bar shows the editor's title.
+        let bar = !self.hub_shows();
+        let title_bar = |ui: &mut egui::Ui| {
             if let Some((scene, tip)) = scene {
                 ui.label(scene).on_hover_text(tip);
             }
@@ -1786,9 +1977,25 @@ impl Layer for Game {
                 talker.ask("step", Value::Null);
             }
             clicked.inner
-        });
+        };
+        let clicked = bar.then(|| ui.title_bar(title_bar)).flatten();
         if let Some(to) = clicked.flatten() {
             self.run(to);
+        }
+        // A click on a scene, once the menus' choices are done, as a New of the File menu.
+        let (open, unsaved, enabled) = (self.scene.clone(), self.unsaved, self.files());
+        let scenes = &mut self.scenes;
+        let mut chosen = None;
+        ui.panel("Scenes", |ui| match scenes {
+            Some(scenes) => chosen = scenes.show(ui, open.as_deref(), unsaved, enabled),
+            None => {
+                ui.weak("Not in a game's project");
+            }
+        });
+        match chosen {
+            Some(scenes::Chosen::Open(path)) => self.open(path),
+            Some(scenes::Chosen::New) => self.act(Action::New),
+            None => {}
         }
         let assets = &mut self.assets;
         ui.panel("Assets", |ui| match assets {
@@ -1862,10 +2069,15 @@ impl Layer for Game {
         {
             self.message = None;
         }
-        // A close granted, which the main window's close makes again, to go ahead.
+        // A close granted: a switch to another project, which goes now, or the editor's, which the
+        // main window's close makes again, to go ahead.
         if self.closing == Closing::Granted {
-            ui.egui()
-                .send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Close);
+            match self.switching.take() {
+                Some(dir) => self.switch(cx, dir),
+                None => ui
+                    .egui()
+                    .send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Close),
+            }
         }
     }
 
@@ -3008,20 +3220,73 @@ mod tests {
         assert_eq!(game.input, expected);
     }
 
-    /// Started outside a project, the layer runs nothing, and says why, in the Logs and the title
-    /// bar, the Assets panel having no folder to show.
+    /// Started outside a project, with none opened before, the layer opens none as it attaches,
+    /// and runs nothing: the hub shows, the File menu's items on the open scene and the Scenes
+    /// panel doing nothing, and the Assets and Scenes panels have no folder to show.
     #[test]
-    fn outside_a_project_it_runs_nothing_and_says_why() {
+    fn outside_a_project_it_runs_nothing_and_shows_the_hub() {
         let mut game = Game::new(None, Inspector::remote(CLIENT).link());
-        game.start();
-        assert!(game.run.is_none() && game.talker.is_none());
-        assert_eq!(game.run_state, RunState::Ended(NO_PROJECT.to_owned()));
-        assert_eq!(game.label(), format!("Ended: {NO_PROJECT}"));
-        let logs: Vec<_> = (game.logs.iter())
-            .map(|logged| (logged.level, logged.text.as_str()))
-            .collect();
-        assert_eq!(logs, [(Level::Warn, NO_PROJECT)]);
-        assert!(game.assets.is_none());
+        game.attach(&mut Context::seeded(1));
+        assert!(game.run.is_none() && game.talker.is_none() && game.dir.is_none());
+        assert!(game.hub_shows() && !game.files());
+        assert_eq!(game.label(), "No project open");
+        assert!(game.assets.is_none() && game.scenes.is_none());
+    }
+
+    /// The hub's pick of another project goes as a close does: at once before any game has served;
+    /// otherwise, while the open scene has unsaved edits, as a fresh status says, the prompt asks
+    /// whether to save them before that project opens, Cancel keeping the project open, and Don't
+    /// Save granting the switch, to that project rather than the editor's close. A close of the
+    /// editor while the prompt shows is the editor's own. A pick of the project open opens
+    /// nothing, the hub giving way to it.
+    #[test]
+    fn another_project_opens_as_a_close_goes() {
+        let other = PathBuf::from("other");
+        let mut fresh = Game::new(Some(PathBuf::from(".")), Inspector::remote(CLIENT).link());
+        fresh.switch_to(other.clone());
+        assert_eq!(fresh.closing, Closing::Granted, "no game has served");
+        assert_eq!(fresh.switching.as_ref(), Some(&other));
+        let mut cx = Context::seeded(1);
+        let status = |unsaved| {
+            let scene = scene_status(Some("scenes/arena.ron"), unsaved);
+            ("status".to_owned(), scene)
+        };
+        let prompted = |game: &mut Game, ends: &Ends, cx: &mut Context| {
+            game.switch_to(other.clone());
+            game.update(cx, Duration::ZERO);
+            assert_eq!(methods(ends), ["status"]);
+            ends.answer.send(status(true)).expect("sent");
+            game.update(cx, Duration::ZERO);
+            assert_eq!(game.prompt, Some(Action::Close));
+        };
+        let (mut game, ends) = serving();
+        (game.stopped, game.told) = (true, false);
+        game.hub.asked = true;
+        game.switch_to(PathBuf::from("."));
+        assert!(
+            !game.hub.asked && game.closing == Closing::No,
+            "the project open"
+        );
+        prompted(&mut game, &ends, &mut cx);
+        let (_, text) = game.asks(&Action::Close);
+        assert!(text.contains("the project other opens"), "{text}");
+        game.answer(Choice::Cancel);
+        assert_eq!((game.closing, game.switching.as_ref()), (Closing::No, None));
+        prompted(&mut game, &ends, &mut cx);
+        game.answer(Choice::DontSave);
+        assert_eq!(game.closing, Closing::Granted);
+        assert_eq!(game.switching.as_ref(), Some(&other));
+
+        let (mut game, ends) = serving();
+        (game.stopped, game.told) = (true, false);
+        prompted(&mut game, &ends, &mut cx);
+        let close = Event::CloseRequested;
+        assert_eq!(game.event(&mut cx, &close), ControlFlow::Break(()));
+        assert_eq!(game.switching, None);
+        let (_, text) = game.asks(&Action::Close);
+        assert!(text.contains("the editor closes"), "{text}");
+        game.answer(Choice::DontSave);
+        assert_eq!(game.event(&mut cx, &close), ControlFlow::Continue(()));
     }
 
     /// A part of the look goes to the game only as the user changes it: not as the editor's camera

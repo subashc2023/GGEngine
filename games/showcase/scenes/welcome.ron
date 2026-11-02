@@ -1,0 +1,247 @@
+(
+    entities: {
+        "0af2ca49573d14a5": (
+            Bob: (
+                height: 0.35,
+                period: 2.05,
+            ),
+            Name: ("Glow"),
+            Sprite: (
+                color: (1.0, 0.42, 0.1, 0.9),
+                texture: Some("378f7dddb11ce002"),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.0, -3.2, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.1, 1.1, 1.0),
+            ),
+        ),
+        "26241ed671918950": (
+            Bob: (
+                height: 0.35,
+                period: 2.2,
+            ),
+            Name: ("Glow"),
+            Sprite: (
+                color: (1.0, 0.8, 0.15, 0.9),
+                texture: Some("378f7dddb11ce002"),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (1.5, -3.2, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.1, 1.1, 1.0),
+            ),
+        ),
+        "2fc03dfe187ae1d8": (
+            Bob: (
+                height: 0.35,
+                period: 1.75,
+            ),
+            Name: ("Glow"),
+            Sprite: (
+                color: (0.5, 0.3, 1.0, 0.9),
+                texture: Some("378f7dddb11ce002"),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-3.0, -3.2, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.1, 1.1, 1.0),
+            ),
+        ),
+        "4841d5caac73e9e1": (
+            Bob: (
+                height: 0.35,
+                period: 2.35,
+            ),
+            Name: ("Glow"),
+            Sprite: (
+                color: (0.2, 0.8, 0.35, 0.9),
+                texture: Some("378f7dddb11ce002"),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (3.0, -3.2, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.1, 1.1, 1.0),
+            ),
+        ),
+        "4eaf695aa4b531de": (
+            Bob: (
+                height: 0.35,
+                period: 1.6,
+            ),
+            Name: ("Glow"),
+            Sprite: (
+                color: (0.15, 0.45, 1.0, 0.9),
+                texture: Some("378f7dddb11ce002"),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-4.5, -3.2, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.1, 1.1, 1.0),
+            ),
+        ),
+        "51d0d163ee2bc093": (
+            ModelRoot: ("48899f3b379ae447"),
+            Name: ("Crystal"),
+            Spin: (
+                axis: (0.0, 1.0, 0.0),
+                speed: 1.2217305,
+            ),
+            Transform: (
+                translation: (-5.6, 1.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.3, 1.3, 1.3),
+            ),
+        ),
+        "5fdbef4a2ef0f814": (
+            ModelRoot: ("48899f3b379ae447"),
+            Name: ("Crystal"),
+            Spin: (
+                axis: (0.0, 1.0, 0.0),
+                speed: -1.2217305,
+            ),
+            Transform: (
+                translation: (5.6, 1.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.3, 1.3, 1.3),
+            ),
+        ),
+        "63588cecf0028036": (
+            Name: ("Hint"),
+            Text: (
+                text: "Open a scene in the Scenes panel, below the Entities, then press Play to run it.\nsprites  ·  shapes  ·  text  ·  hierarchy  ·  physics  ·  models",
+                font: None,
+                size: 0.26,
+                color: (0.45, 0.5, 0.62, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, -1.2, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "6607e1cdc016dda8": (
+            Name: ("Title"),
+            Text: (
+                text: "GGEngine",
+                font: Some("d2f1930c7b1ab233"),
+                size: 1.4,
+                color: (0.95, 0.96, 1.0, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 1.5, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "aa2b7f16d201a361": (
+            Name: ("Subtitle"),
+            Text: (
+                text: "SHOWCASE",
+                font: Some("d2f1930c7b1ab233"),
+                size: 0.42,
+                color: (0.15, 0.45, 1.0, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 0.35, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "bfddc1ea5f9c3bad": (
+            Bob: (
+                height: 0.35,
+                period: 1.9000001,
+            ),
+            Name: ("Glow"),
+            Sprite: (
+                color: (0.95, 0.25, 0.55, 0.9),
+                texture: Some("378f7dddb11ce002"),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (-1.5, -3.2, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.1, 1.1, 1.0),
+            ),
+        ),
+        "cb72221e9a1edce9": (
+            Bob: (
+                height: 0.35,
+                period: 2.5,
+            ),
+            Name: ("Glow"),
+            Sprite: (
+                color: (0.15, 0.45, 1.0, 0.9),
+                texture: Some("378f7dddb11ce002"),
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (4.5, -3.2, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.1, 1.1, 1.0),
+            ),
+        ),
+        "e6018546d3d9debb": (
+            Camera: (
+                projection: Orthographic(
+                    height: 10.0,
+                    near: 0.1,
+                    far: 100.0,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (0.0, 0.0, 10.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+    },
+)

@@ -1,0 +1,118 @@
+{
+  "asset": {
+    "version": "2.0",
+    "generator": "Shards' crystal script"
+  },
+  "extensionsUsed": [
+    "KHR_materials_unlit"
+  ],
+  "scene": 0,
+  "scenes": [
+    {
+      "nodes": [
+        0
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "name": "Crystal",
+      "mesh": 0,
+      "children": [
+        1
+      ]
+    },
+    {
+      "name": "Splinter",
+      "mesh": 0,
+      "translation": [
+        0.62,
+        -0.38,
+        0.0
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.2164396,
+        0.976296
+      ],
+      "scale": [
+        0.45,
+        0.45,
+        0.45
+      ]
+    }
+  ],
+  "meshes": [
+    {
+      "name": "bipyramid",
+      "primitives": [
+        {
+          "attributes": {
+            "POSITION": 0,
+            "COLOR_0": 1
+          },
+          "material": 0
+        }
+      ]
+    }
+  ],
+  "materials": [
+    {
+      "name": "ice",
+      "pbrMetallicRoughness": {
+        "baseColorFactor": [
+          0.45,
+          0.85,
+          1.0,
+          1.0
+        ]
+      },
+      "extensions": {
+        "KHR_materials_unlit": {}
+      }
+    }
+  ],
+  "accessors": [
+    {
+      "bufferView": 0,
+      "componentType": 5126,
+      "count": 36,
+      "type": "VEC3",
+      "min": [
+        -0.5,
+        -0.4330127018922193,
+        -0.6
+      ],
+      "max": [
+        0.5,
+        0.43301270189221935,
+        0.6
+      ]
+    },
+    {
+      "bufferView": 1,
+      "componentType": 5126,
+      "count": 36,
+      "type": "VEC4"
+    }
+  ],
+  "bufferViews": [
+    {
+      "buffer": 0,
+      "byteOffset": 0,
+      "byteLength": 432
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 432,
+      "byteLength": 576
+    }
+  ],
+  "buffers": [
+    {
+      "byteLength": 1008,
+      "uri": "data:application/octet-stream;base64,AAAAPwAAAAAAAAAAAACAPtez3T4AAAAAAAAAAAAAAACamRk/AACAPtez3T4AAAAAAAAAPwAAAAAAAAAAAAAAAAAAAACamRm/AACAPtez3T4AAAAAAACAvtez3T4AAAAAAAAAAAAAAACamRk/AACAvtez3T4AAAAAAACAPtez3T4AAAAAAAAAAAAAAACamRm/AACAvtez3T4AAAAAAAAAvzIxjSQAAAAAAAAAAAAAAACamRk/AAAAvzIxjSQAAAAAAACAvtez3T4AAAAAAAAAAAAAAACamRm/AAAAvzIxjSQAAAAAAACAvtez3b4AAAAAAAAAAAAAAACamRk/AACAvtez3b4AAAAAAAAAvzIxjSQAAAAAAAAAAAAAAACamRm/AACAvtez3b4AAAAAAACAPtez3b4AAAAAAAAAAAAAAACamRk/AACAPtez3b4AAAAAAACAvtez3b4AAAAAAAAAAAAAAACamRm/AACAPtez3b4AAAAAAAAAPwAAAAAAAAAAAAAAAAAAAACamRk/AAAAPwAAAAAAAAAAAACAPtez3b4AAAAAAAAAAAAAAACamRm/AACAPwAAgD8AAIA/AACAPwAAgD8AAIA/AACAPwAAgD8AAIA/AACAPwAAgD8AAIA/AAAAPwAAAD8AAAA/AACAPwAAAD8AAAA/AAAAPwAAgD8AAAA/AAAAPwAAAD8AAIA/9ihcP/YoXD/2KFw/AACAP/YoXD/2KFw/9ihcPwAAgD/2KFw/9ihcP/YoXD8AAIA/ZmbmPmZm5j5mZuY+AACAP2Zm5j5mZuY+ZmbmPgAAgD9mZuY+ZmbmPmZm5j4AAIA/w/UoP8P1KD/D9Sg/AACAP8P1KD/D9Sg/w/UoPwAAgD/D9Sg/w/UoP8P1KD8AAIA/zczMPs3MzD7NzMw+AACAP83MzD7NzMw+zczMPgAAgD/NzMw+zczMPs3MzD4AAIA/4XoUP+F6FD/hehQ/AACAP+F6FD/hehQ/4XoUPwAAgD/hehQ/4XoUP+F6FD8AAIA/XI/CPlyPwj5cj8I+AACAP1yPwj5cj8I+XI/CPgAAgD9cj8I+XI/CPlyPwj4AAIA/7FE4P+xROD/sUTg/AACAP+xROD/sUTg/7FE4PwAAgD/sUTg/7FE4P+xROD8AAIA/PQrXPj0K1z49Ctc+AACAPz0K1z49Ctc+PQrXPgAAgD89Ctc+PQrXPj0K1z4AAIA/H4VrPx+Faz8fhWs/AACAPx+Faz8fhWs/H4VrPwAAgD8fhWs/H4VrPx+Faz8AAIA/j8L1Po/C9T6PwvU+AACAP4/C9T6PwvU+j8L1PgAAgD+PwvU+j8L1Po/C9T4AAIA/"
+    }
+  ]
+}

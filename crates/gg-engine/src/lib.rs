@@ -527,9 +527,9 @@ impl Manifest {
     }
 }
 
-/// The name of the font family [`egui_context`] binds to Inter's bold weight, which the
-/// Inspector's axis buttons draw in.
-pub(crate) const BOLD: &str = "Bold";
+/// The name of the font family the UI binds to Inter's bold weight, which the Inspector's axis
+/// buttons draw in, and a tool's headings may: `egui::FontFamily::Name(BOLD.into())`.
+pub const BOLD: &str = "Bold";
 
 /// egui in the engine's UI font, Inter: its regular weight for proportional text, its digits and
 /// minus sign tabular, all as wide as a figure space, so that numbers that change hold still; and

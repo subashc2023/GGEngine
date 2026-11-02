@@ -1,0 +1,8 @@
+(
+    game: "showcase",
+    assets: ".",
+    scenes: [
+        "scenes",
+    ],
+    start: "scenes/welcome.ron",
+)

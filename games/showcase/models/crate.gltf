@@ -1,0 +1,128 @@
+{
+  "asset": {
+    "version": "2.0",
+    "generator": "The showcase's asset script"
+  },
+  "extensionsUsed": [
+    "KHR_materials_unlit"
+  ],
+  "scene": 0,
+  "scenes": [
+    {
+      "nodes": [
+        0
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "name": "Crate",
+      "mesh": 0
+    }
+  ],
+  "meshes": [
+    {
+      "name": "crate",
+      "primitives": [
+        {
+          "attributes": {
+            "POSITION": 0,
+            "COLOR_0": 1,
+            "TEXCOORD_0": 2
+          },
+          "material": 0
+        }
+      ]
+    }
+  ],
+  "materials": [
+    {
+      "name": "wood",
+      "pbrMetallicRoughness": {
+        "baseColorFactor": [
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "baseColorTexture": {
+          "index": 0
+        }
+      },
+      "extensions": {
+        "KHR_materials_unlit": {}
+      }
+    }
+  ],
+  "accessors": [
+    {
+      "bufferView": 0,
+      "componentType": 5126,
+      "count": 36,
+      "type": "VEC3",
+      "min": [
+        -0.5,
+        -0.5,
+        -0.5
+      ],
+      "max": [
+        0.5,
+        0.5,
+        0.5
+      ]
+    },
+    {
+      "bufferView": 1,
+      "componentType": 5126,
+      "count": 36,
+      "type": "VEC4"
+    },
+    {
+      "bufferView": 2,
+      "componentType": 5126,
+      "count": 36,
+      "type": "VEC2"
+    }
+  ],
+  "bufferViews": [
+    {
+      "buffer": 0,
+      "byteOffset": 0,
+      "byteLength": 432
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 432,
+      "byteLength": 576
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 1008,
+      "byteLength": 288
+    }
+  ],
+  "buffers": [
+    {
+      "byteLength": 1296,
+      "uri": "data:application/octet-stream;base64,AAAAPwAAAL8AAAA/AAAAPwAAAL8AAAC/AAAAPwAAAD8AAAC/AAAAPwAAAL8AAAA/AAAAPwAAAD8AAAC/AAAAPwAAAD8AAAA/AAAAvwAAAL8AAAC/AAAAvwAAAL8AAAA/AAAAvwAAAD8AAAA/AAAAvwAAAL8AAAC/AAAAvwAAAD8AAAA/AAAAvwAAAD8AAAC/AAAAvwAAAD8AAAA/AAAAPwAAAD8AAAA/AAAAPwAAAD8AAAC/AAAAvwAAAD8AAAA/AAAAPwAAAD8AAAC/AAAAvwAAAD8AAAC/AAAAvwAAAL8AAAC/AAAAPwAAAL8AAAC/AAAAPwAAAL8AAAA/AAAAvwAAAL8AAAC/AAAAPwAAAL8AAAA/AAAAvwAAAL8AAAA/AAAAvwAAAL8AAAA/AAAAPwAAAL8AAAA/AAAAPwAAAD8AAAA/AAAAvwAAAL8AAAA/AAAAPwAAAD8AAAA/AAAAvwAAAD8AAAA/AAAAPwAAAL8AAAC/AAAAvwAAAL8AAAC/AAAAvwAAAD8AAAC/AAAAPwAAAL8AAAC/AAAAvwAAAD8AAAC/AAAAPwAAAD8AAAC/sxMcP7MTHD+zExw/AACAP7MTHD+zExw/sxMcPwAAgD+zExw/sxMcP7MTHD8AAIA/sxMcP7MTHD+zExw/AACAP7MTHD+zExw/sxMcPwAAgD+zExw/sxMcP7MTHD8AAIA/MzOzPjMzsz4zM7M+AACAPzMzsz4zM7M+MzOzPgAAgD8zM7M+MzOzPjMzsz4AAIA/MzOzPjMzsz4zM7M+AACAPzMzsz4zM7M+MzOzPgAAgD8zM7M+MzOzPjMzsz4AAIA/zY1eP82NXj/NjV4/AACAP82NXj/NjV4/zY1ePwAAgD/NjV4/zY1eP82NXj8AAIA/zY1eP82NXj/NjV4/AACAP82NXj/NjV4/zY1ePwAAgD/NjV4/zY1eP82NXj8AAIA/MzOzPjMzsz4zM7M+AACAPzMzsz4zM7M+MzOzPgAAgD8zM7M+MzOzPjMzsz4AAIA/MzOzPjMzsz4zM7M+AACAPzMzsz4zM7M+MzOzPgAAgD8zM7M+MzOzPjMzsz4AAIA/92IkP/diJD/3YiQ/AACAP/diJD/3YiQ/92IkPwAAgD/3YiQ/92IkP/diJD8AAIA/92IkP/diJD/3YiQ/AACAP/diJD/3YiQ/92IkPwAAgD/3YiQ/92IkP/diJD8AAIA/MzOzPjMzsz4zM7M+AACAPzMzsz4zM7M+MzOzPgAAgD8zM7M+MzOzPjMzsz4AAIA/MzOzPjMzsz4zM7M+AACAPzMzsz4zM7M+MzOzPgAAgD8zM7M+MzOzPjMzsz4AAIA/AAAAAAAAgD8AAIA/AACAPwAAgD8AAAAAAAAAAAAAgD8AAIA/AAAAAAAAAAAAAAAAAAAAAAAAgD8AAIA/AACAPwAAgD8AAAAAAAAAAAAAgD8AAIA/AAAAAAAAAAAAAAAAAAAAAAAAgD8AAIA/AACAPwAAgD8AAAAAAAAAAAAAgD8AAIA/AAAAAAAAAAAAAAAAAAAAAAAAgD8AAIA/AACAPwAAgD8AAAAAAAAAAAAAgD8AAIA/AAAAAAAAAAAAAAAAAAAAAAAAgD8AAIA/AACAPwAAgD8AAAAAAAAAAAAAgD8AAIA/AAAAAAAAAAAAAAAAAAAAAAAAgD8AAIA/AACAPwAAgD8AAAAAAAAAAAAAgD8AAIA/AAAAAAAAAAAAAAAA"
+    }
+  ],
+  "images": [
+    {
+      "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAxklEQVR42mPIc1H6P5CYYdQByJxrCxLAeEOZHU0wzHyCDqCFI5DNxukAdIW0sBzEx+mAaUlGYIysASZGLsZmFt4QwOVqavgcholyAKWOwKeXaAeQ6whCekhyAKmOIEYtyQ4g1mBiHUowF5CSosnJOWSFAD5fkppOKHIAuoXkJFKKHYDNEaToHfoOoFkUkFu2k1p3kB0C+HxLSkgM3oJoUBbFA1oZ0b06JrdsJ7XuIBgC1GwXYjNr8DZKB7xZPuAdk9G+4UBgAJJf+IHj8F3iAAAAAElFTkSuQmCC"
+    }
+  ],
+  "samplers": [
+    {
+      "magFilter": 9728,
+      "wrapS": 33071,
+      "wrapT": 33071
+    }
+  ],
+  "textures": [
+    {
+      "source": 0,
+      "sampler": 0
+    }
+  ]
+}

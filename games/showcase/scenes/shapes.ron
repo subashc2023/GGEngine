@@ -1,0 +1,384 @@
+(
+    entities: {
+        "08a38102a816acd8": (
+            Name: ("Label: Thin ring"),
+            Text: (
+                text: "Thin ring",
+                font: None,
+                size: 0.24,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (1.75, -0.1, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "0915030a28dee2e0": (
+            Name: ("Label: Stretched"),
+            Text: (
+                text: "Stretched",
+                font: None,
+                size: 0.24,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (-5.0, -3.5, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "0f90f857c828e6c9": (
+            Circle: (
+                color: (1.0, 0.8, 0.15, 1.0),
+                thickness: 0.3,
+                fade: 0.0,
+            ),
+            Name: ("Ring"),
+            Transform: (
+                translation: (0.0, -2.2, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (2.2, 2.2, 1.0),
+            ),
+        ),
+        "223a6f0e441d15c7": (
+            Name: ("Hint"),
+            Text: (
+                text: "Circles: discs and rings, crisp and faded, stretched into ellipses",
+                font: None,
+                size: 0.24,
+                color: (0.45, 0.5, 0.62, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 3.4, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "26df89f144fc3abf": (
+            Circle: (
+                color: (0.2, 0.8, 0.35, 1.0),
+                thickness: 0.06,
+                fade: 0.0,
+            ),
+            Name: ("Thin ring"),
+            Transform: (
+                translation: (1.75, 1.2, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.8, 1.8, 1.0),
+            ),
+        ),
+        "2f8d1757762fe3a4": (
+            Circle: (
+                color: (1.0, 0.42, 0.1, 1.0),
+                thickness: 0.3,
+                fade: 0.0,
+            ),
+            Name: ("Ring"),
+            Transform: (
+                translation: (0.0, -2.2, 0.15),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.7, 1.7, 1.0),
+            ),
+        ),
+        "3158fda3823067c6": (
+            Name: ("Label: Disc"),
+            Text: (
+                text: "Disc",
+                font: None,
+                size: 0.24,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (-5.25, -0.1, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "4f3872307113b577": (
+            Name: ("Label: Bobbing, a script"),
+            Text: (
+                text: "Bobbing, a script",
+                font: None,
+                size: 0.24,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (4.6, -3.5, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "56bc2f95047e7125": (
+            Bob: (
+                height: 0.45,
+                period: 1.6,
+            ),
+            Circle: (
+                color: (0.17500001, 0.625, 0.675, 1.0),
+                thickness: 1.0,
+                fade: 0.15,
+            ),
+            Name: ("Bobbing disc"),
+            Transform: (
+                translation: (4.6, -2.2, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.6, 0.6, 1.0),
+            ),
+        ),
+        "76bef0650b633467": (
+            Bob: (
+                height: 0.45,
+                period: 2.0,
+            ),
+            Circle: (
+                color: (0.2, 0.8, 0.35, 1.0),
+                thickness: 1.0,
+                fade: 0.15,
+            ),
+            Name: ("Bobbing disc"),
+            Transform: (
+                translation: (6.3999996, -2.2, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.6, 0.6, 1.0),
+            ),
+        ),
+        "815e469b592561e0": (
+            Circle: (
+                color: (1.0, 0.42, 0.1, 1.0),
+                thickness: 0.25,
+                fade: 0.0,
+            ),
+            Name: ("Ring"),
+            Transform: (
+                translation: (-1.75, 1.2, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.8, 1.8, 1.0),
+            ),
+        ),
+        "862f1e245ba9e719": (
+            Bob: (
+                height: 0.45,
+                period: 1.8000001,
+            ),
+            Circle: (
+                color: (0.1875, 0.71250004, 0.5125, 1.0),
+                thickness: 1.0,
+                fade: 0.15,
+            ),
+            Name: ("Bobbing disc"),
+            Transform: (
+                translation: (5.5, -2.2, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.6, 0.6, 1.0),
+            ),
+        ),
+        "8951f207bafa8572": (
+            Name: ("Title"),
+            Text: (
+                text: "Shapes",
+                font: Some("d2f1930c7b1ab233"),
+                size: 0.6,
+                color: (0.95, 0.96, 1.0, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 4.1, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "bc1c74fbbd48ed2c": (
+            Bob: (
+                height: 0.45,
+                period: 1.4000001,
+            ),
+            Circle: (
+                color: (0.16250001, 0.53749996, 0.8375, 1.0),
+                thickness: 1.0,
+                fade: 0.15,
+            ),
+            Name: ("Bobbing disc"),
+            Transform: (
+                translation: (3.6999998, -2.2, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.6, 0.6, 1.0),
+            ),
+        ),
+        "be9a414c5fd82ae5": (
+            Camera: (
+                projection: Orthographic(
+                    height: 10.0,
+                    near: 0.1,
+                    far: 100.0,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (0.0, 0.0, 10.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "c653619b5c1f5b4e": (
+            Circle: (
+                color: (0.15, 0.45, 1.0, 1.0),
+                thickness: 1.0,
+                fade: 0.0,
+            ),
+            Name: ("Disc"),
+            Transform: (
+                translation: (-5.25, 1.2, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.8, 1.8, 1.0),
+            ),
+        ),
+        "c7f8639295feff12": (
+            Circle: (
+                color: (0.95, 0.25, 0.55, 1.0),
+                thickness: 1.0,
+                fade: 0.7,
+            ),
+            Name: ("Faded disc"),
+            Transform: (
+                translation: (5.25, 1.2, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.8, 1.8, 1.0),
+            ),
+        ),
+        "d7c23bf9fb06b392": (
+            Circle: (
+                color: (0.5, 0.3, 1.0, 1.0),
+                thickness: 0.3,
+                fade: 0.0,
+            ),
+            Name: ("Ring"),
+            Transform: (
+                translation: (0.0, -2.2, 0.25),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.70000005, 0.70000005, 1.0),
+            ),
+        ),
+        "e1a2874c07de8147": (
+            Bob: (
+                height: 0.45,
+                period: 1.2,
+            ),
+            Circle: (
+                color: (0.15, 0.45, 1.0, 1.0),
+                thickness: 1.0,
+                fade: 0.15,
+            ),
+            Name: ("Bobbing disc"),
+            Transform: (
+                translation: (2.8, -2.2, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.6, 0.6, 1.0),
+            ),
+        ),
+        "e8934946b163bacb": (
+            Name: ("Label: Faded disc"),
+            Text: (
+                text: "Faded disc",
+                font: None,
+                size: 0.24,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (5.25, -0.1, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "e905256340f922bb": (
+            Name: ("Label: Nested"),
+            Text: (
+                text: "Nested",
+                font: None,
+                size: 0.24,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, -3.5, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "f2cefb5584a2429b": (
+            Circle: (
+                color: (0.95, 0.25, 0.55, 1.0),
+                thickness: 0.3,
+                fade: 0.0,
+            ),
+            Name: ("Ring"),
+            Transform: (
+                translation: (0.0, -2.2, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.2, 1.2, 1.0),
+            ),
+        ),
+        "f30650a182ea4a32": (
+            Circle: (
+                color: (0.5, 0.3, 1.0, 1.0),
+                thickness: 1.0,
+                fade: 0.0,
+            ),
+            Name: ("Ellipse"),
+            Transform: (
+                translation: (-5.0, -2.2, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (3.0, 1.3, 1.0),
+            ),
+        ),
+        "fb9792e3b818c6b8": (
+            Name: ("Label: Ring"),
+            Text: (
+                text: "Ring",
+                font: None,
+                size: 0.24,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (-1.75, -0.1, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+    },
+)

@@ -94,15 +94,23 @@ The editor uses `gg-api` too, beside `gg-engine`, as a client of the tool API, a
   The toolbar's camera switch is that switch while the game plays; stopped, it shows what the
   game's camera sees, the input staying the editor's, until the editor's camera takes some. A Stop
   turns the view to the editor's camera, which carries on from where the view was, as it does
-  whenever it takes the view over. The editor has no world of its own: started elsewhere, it runs
-  no game, and says it needs a project. [game.rs](apps/editor/src/game.rs) describes the rest.
+  whenever it takes the view over. Its Scenes panel, below the Entities, lists the scene files in
+  the project's scenes folders, a click opening one as the File menu's Open does. The editor has no
+  world of its own: started outside a project, it shows its hub, a start screen over its panels,
+  as Unity Hub is a launcher of its own, listing the projects opened lately, which it keeps for the
+  user as the dock keeps its layout, and those in the workspace's `games`, opening the one picked,
+  or the latest as it starts if the user chose to skip the hub; its File menu's Open Project shows
+  the hub again, and another project opens in place of the one open as a close of the editor goes,
+  asking before unsaved edits go. [game.rs](apps/editor/src/game.rs) describes the rest.
 - **`player`:** the reference player. It runs a cooked scene without game code and shows how a
   game builds its own player.
 - **`tools/gg`:** the command-line tool, a client of the tool API, which `cargo gg` runs.
 
 Games depend on `gg-engine` the same way the apps do; see [Game code](#game-code). The first, in
 `games/shards`, is a demo of two players, alone or networked in lockstep, as
-[Networking](#networking) describes, which the v0.1 loop is tested on. Executables are
+[Networking](#networking) describes, which the v0.1 loop is tested on. The second, in
+`games/showcase`, is a scene for each of what the engine draws and simulates, opened from the
+editor's Scenes panel, which grows as the engine does. Executables are
 named `gg-` and the app, such as `gg-sandbox`: GPU drivers apply per-game settings by executable
 name, and a generic name can match one.
 

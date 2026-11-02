@@ -161,6 +161,15 @@ impl<'a> Ui<'a> {
             .show_over_view(self.root.ctx(), id, align, add_contents)
     }
 
+    /// Shows what `add_contents` draws over the main window below its title bar this frame, in
+    /// front of the dock, its groups floating as well as docked and the game's view, which take
+    /// no input while it shows: such as an editor's start screen, before it has a project to edit.
+    /// The title bar, its menus and its controls stay at hand above it, and popups, menus and
+    /// tooltips show in front of it. Returns what `add_contents` returned.
+    pub fn cover<R>(&mut self, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
+        self.dock.cover(self.root.ctx(), add_contents)
+    }
+
     /// What egui makes of the game's view this frame, in apps with
     /// [`App::view_panel`](crate::App::view_panel): its rect, in the main window's points; whether
     /// the pointer is on it, rather than on what's over it (`hovered`); and whether a drag that
@@ -194,8 +203,10 @@ pub(crate) struct Dock {
     layout: Layout,
     /// Where the layout is saved; `None` keeps it in memory only, as headless runs do.
     file: Option<PathBuf>,
-    /// The main window's title bar, or the bar below the OS's.
+    /// The main window's title bar, or the bar below the OS's, and the rest of the main window
+    /// below it this frame, in its points.
     bar: TitleBar,
+    below_bar: Rect,
     /// Who draws the frames of the windows of their own.
     chrome: Chrome,
     /// The panels shown last frame, which tab bars list, and those shown this frame so far.
@@ -359,6 +370,7 @@ impl Dock {
             layout,
             file,
             bar: TitleBar::new(chrome),
+            below_bar: Rect::NOTHING,
             chrome,
             shown: HashSet::new(),
             showing: HashSet::new(),
@@ -459,6 +471,29 @@ impl Dock {
         Some(shown.inner)
     }
 
+    /// Shows UI over the dock, as [`Ui::cover`] says, in an area of the middle order, as floating
+    /// groups are: above them all as it first shows, since egui raises an area as it does, and
+    /// while it shows, since none under it is pressed to rise; and with its own presses, so that
+    /// none goes through it.
+    fn cover<R>(&self, ctx: &Context, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
+        let rect = self.below_bar;
+        let shown = Area::new(Id::unique("gg dock cover"))
+            .order(Order::Middle)
+            .fixed_pos(rect.min)
+            .constrain(false)
+            .sense(Sense::CLICK | Sense::DRAG)
+            .show(ctx, |ui| {
+                ui.painter().rect_filled(rect, 0.0, ui.visuals().panel_fill);
+                ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
+                    ui.set_clip_rect(rect);
+                    ui.set_min_size(rect.size());
+                    add_contents(ui)
+                })
+                .inner
+            });
+        shown.inner
+    }
+
     /// Where the title bar was right-clicked since this was last asked, in the main window's
     /// points, for the OS's window menu.
     pub(crate) fn take_window_menu(&mut self) -> Option<Pos2> {
@@ -484,6 +519,7 @@ impl Dock {
     /// first.
     pub(crate) fn begin(&mut self, root: &mut egui::Ui) {
         self.bar.begin(root);
+        self.below_bar = root.available_rect_before_wrap();
         let view = self.layout.view;
         let embedded = root.ctx().embed_viewports();
         for floating in &mut self.layout.floating {
@@ -1647,6 +1683,10 @@ mod tests {
         shown: Option<Rect>,
         view: Option<Response>,
         viewport: Option<Viewport>,
+        /// Whether frames show a cover holding a button, Covered; and what egui made of the button
+        /// last frame.
+        cover: bool,
+        covered: Option<Response>,
         /// What the main window's pass drew in the last frame, and the windows of their own egui
         /// showed, with what it asked of them.
         shapes: Vec<ClippedShape>,
@@ -1703,6 +1743,8 @@ mod tests {
                 shown: None,
                 view: None,
                 viewport: None,
+                cover: false,
+                covered: None,
                 shapes: Vec::new(),
                 windows: Vec::new(),
             };
@@ -1809,8 +1851,8 @@ mod tests {
             }
             self.frame += 1;
             let (dock, panels, menus) = (&mut self.dock, &self.panels, &self.menus);
-            let toolbar = self.toolbar;
-            let (mut shown, mut view, mut viewport) = (None, None, None);
+            let (toolbar, cover) = (self.toolbar, self.cover);
+            let (mut shown, mut view, mut viewport, mut covered) = (None, None, None, None);
             let mut output = self.ctx.run_ui(input, |root| {
                 dock.begin(root);
                 let mut ui = Ui::new(root, dock);
@@ -1830,9 +1872,13 @@ mod tests {
                         ui.allocate_exact_size(vec2(100.0, 30.0), Sense::click()).0
                     });
                 }
+                if cover {
+                    covered = Some(ui.cover(|ui| ui.button("Covered")));
+                }
                 dock.end(root);
             });
             (self.shown, self.view, self.viewport) = (shown, view, viewport);
+            self.covered = covered;
             output.textures_delta.clear();
             self.shapes = mem::take(&mut output.shapes);
             let windows = output.viewport_output.iter();
@@ -2558,6 +2604,33 @@ mod tests {
         run.button(true);
         run.button(false);
         assert_eq!(run.dock.under(&run.ctx, covered), Under::Overlay);
+    }
+
+    /// A cover fills the main window below the title bar, in front of the view and the groups
+    /// floating over it, which the pointer doesn't reach while it shows: what's under it there is
+    /// the cover's, and a click reaches what the cover shows. The bar above stays the bar's, and
+    /// once the cover's gone, the view is the view's again.
+    #[test]
+    fn a_cover_shows_over_the_dock_below_the_title_bar() {
+        let mut run = Run::dockspace(Chrome::Drawn);
+        run.cover = true;
+        run.frames(2);
+        let button = run.covered.as_ref().expect("the cover shows").rect;
+        assert!(button.min.y >= BAR, "below the bar: {button:?}");
+        let cover = Id::unique("gg dock cover");
+        // On the view, clear of A and B; on A, floating over it at (48, 48); and on the button.
+        for at in [pos2(600.0, 450.0), pos2(100.0, 100.0), button.center()] {
+            assert_eq!(run.dock.under(&run.ctx, at), Under::Other, "at {at:?}");
+            let layer = run.ctx.layer_id_at(at).map(|layer| layer.id);
+            assert_eq!(layer, Some(cover), "at {at:?}");
+        }
+        let on_bar = run.ctx.layer_id_at(pos2(400.0, BAR / 2.0));
+        assert_ne!(on_bar.map(|layer| layer.id), Some(cover));
+        run.click_with(PointerButton::Primary, button.center());
+        assert!(run.covered.as_ref().is_some_and(Response::clicked));
+        run.cover = false;
+        run.frames(2);
+        assert_eq!(run.dock.under(&run.ctx, pos2(600.0, 450.0)), Under::View);
     }
 
     #[test]

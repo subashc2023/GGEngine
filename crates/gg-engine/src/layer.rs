@@ -32,6 +32,7 @@ use crate::assets::{Catalog, Prints};
 use crate::audio::{self, Audio, Bus, Music, Place, Sound};
 use crate::camera::{self, Camera, Tie};
 use crate::canvas::{self, Canvas};
+use crate::dirs;
 use crate::draw::{self, Poses, Scratch};
 use crate::edits::{Authors, Done, Edit};
 use crate::font::{self, Align, Font, Fonts, TextStyle};
@@ -304,6 +305,9 @@ pub struct Context {
     /// The project's scenes folders, which the tool API's `scene` opens and saves scene files in.
     #[cfg(feature = "dev")]
     pub(crate) folders: Vec<PathBuf>,
+    /// The directory of what the app keeps for the user from run to run, beside the dock's layout,
+    /// as [`read_state`](Self::read_state) says: a windowed run's alone.
+    state: Option<PathBuf>,
     /// The assets the layers added: the world's, which a world that a layer puts in its place
     /// takes again, as [`share_assets`](Self::share_assets) says.
     assets: Arc<Assets>,
@@ -375,7 +379,13 @@ impl Context {
     /// `aloud`, as a windowed or embedded run does, as [`add_sound`](Self::add_sound) says.
     pub(crate) fn of_run(window: Option<Window>, app: &App, aloud: bool) -> Self {
         let world = app.seed.map_or_else(World::default, World::seeded);
+        let state = window.as_ref().and_then(|_| {
+            dirs::dir(app.name, dirs::Kind::State, std::env::consts::OS, |name| {
+                std::env::var_os(name)
+            })
+        });
         let mut cx = Self::with_world(window, world);
+        cx.state = state;
         if aloud {
             cx.audio = Audio::aloud();
         }
@@ -493,6 +503,7 @@ impl Context {
             start: None,
             #[cfg(feature = "dev")]
             folders: Vec::new(),
+            state: None,
             assets,
             loaded: Loaded::default(),
             #[cfg(feature = "dev")]
@@ -532,6 +543,57 @@ impl Context {
     /// headless run.
     pub fn scale(&self) -> f64 {
         self.window.as_ref().map_or(1.0, Window::scale)
+    }
+
+    /// What the app keeps for the user as file `name`, such as its settings: what
+    /// [`save_state`](Self::save_state) last saved there, in a windowed run of the app as
+    /// [`App::new`] names it, by this user on this machine; `None` if it saved nothing there, and
+    /// in headless runs, which keep nothing for the user, as their dock keeps no layout. `name` is
+    /// a file's name, such as `projects.json`, in the OS's directory for the app's state, beside
+    /// the dock's layout: on Windows, `%LOCALAPPDATA%\GGEngine\<app>`.
+    ///
+    /// Fails with `engine.state`, naming the file, if `name` isn't a file's name alone, or if the
+    /// file is there but can't be read or isn't a regular file.
+    pub fn read_state(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        let Some(path) = self.state_path(name)? else {
+            return Ok(None);
+        };
+        match dirs::read_file(&path, u64::MAX) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => {
+                let message = format!("can't read what the app kept in {}", path.display());
+                Err(Error::new("engine.state", message).with_source(e))
+            }
+        }
+    }
+
+    /// Keeps `data` for the user as file `name`, which [`read_state`](Self::read_state) reads in
+    /// the app's later runs, written whole or not at all, so that a crash while it's written
+    /// leaves what it held before; and keeps nothing in headless runs.
+    ///
+    /// Fails with `engine.state`, naming the file, if `name` isn't a file's name alone, or if it
+    /// can't be written.
+    pub fn save_state(&self, name: &str, data: &[u8]) -> Result<()> {
+        let Some(path) = self.state_path(name)? else {
+            return Ok(());
+        };
+        dirs::write(&path, data).map_err(|e| {
+            let message = format!("can't keep what the app keeps in {}", path.display());
+            Error::new("engine.state", message).with_source(e)
+        })
+    }
+
+    /// The path of the app's state file `name`, as [`read_state`](Self::read_state) says; `None`
+    /// in a run that keeps none.
+    fn state_path(&self, name: &str) -> Result<Option<PathBuf>> {
+        let alone = Path::new(name).file_name() == Some(std::ffi::OsStr::new(name));
+        if !alone {
+            let message =
+                format!("{name:?} isn't a file's name alone, which the app's state takes");
+            return Err(Error::new("engine.state", message));
+        }
+        Ok(self.state.as_ref().map(|dir| dir.join(name)))
     }
 
     /// What's held down and where the cursor is, for layers that poll input rather than
@@ -3581,6 +3643,39 @@ mod tests {
         );
         assert_eq!(stack.names(), ["Probe"; 3]);
         assert_eq!(short_name::<Vec<crate::inspector::Inspector>>(), "Vec");
+    }
+
+    /// What the app keeps for the user reads back as it was saved, from the next run's context
+    /// too, a file not saved reading as none; a name that isn't a file's alone is refused, saving
+    /// nothing; and a headless run's context reads none and keeps nothing.
+    #[test]
+    fn the_apps_state_reads_back_as_it_was_kept() {
+        let scratch = crate::dirs::tests::Scratch::new("app-state");
+        let mut cx = Context::new(None);
+        cx.state = Some(scratch.0.clone());
+        assert_eq!(cx.read_state("projects.json").expect("read"), None);
+        cx.save_state("projects.json", b"first").expect("kept");
+        cx.save_state("projects.json", b"second")
+            .expect("kept again");
+        let mut next = Context::new(None);
+        next.state = Some(scratch.0.clone());
+        let read = next.read_state("projects.json").expect("read");
+        assert_eq!(read.as_deref(), Some(&b"second"[..]));
+        for name in ["", "..", "nested/projects.json", "../projects.json"] {
+            let refused = cx.save_state(name, b"x").expect_err(name);
+            assert_eq!(refused.code(), "engine.state", "{name:?}");
+            assert_eq!(
+                cx.read_state(name).err().map(|e| e.code()),
+                Some("engine.state")
+            );
+        }
+        let headless = Context::new(None);
+        headless
+            .save_state("projects.json", b"x")
+            .expect("nothing kept");
+        assert_eq!(headless.read_state("projects.json").expect("read"), None);
+        let kept = std::fs::read_dir(&scratch.0).expect("listed").count();
+        assert_eq!(kept, 1, "projects.json alone");
     }
 
     /// Puts a new world in the context's place at each tick.

@@ -1,0 +1,346 @@
+(
+    entities: {
+        "015d2decd06945a6": (
+            Name: ("Sun"),
+            Spin: (
+                axis: (0.0, 0.0, 1.0),
+                speed: 0.31415927,
+            ),
+            Transform: (
+                translation: (-3.0, -0.6, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "1784953e974a7f34": (
+            Circle: (
+                color: (0.95, 0.96, 1.0, 1.0),
+                thickness: 1.0,
+                fade: 0.0,
+            ),
+            Name: ("Knuckle"),
+            Parent: ("56c90a879226add1"),
+            Transform: (
+                translation: (0.0, 0.0, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.32, 0.32, 1.0),
+            ),
+        ),
+        "1ea22d2e0b5402f9": (
+            Name: ("Bone 1"),
+            Parent: ("fcb23cadd04a063b"),
+            Sprite: (
+                color: (0.5, 0.3, 1.0, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.5, 0.0, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 0.2, 1.0),
+            ),
+        ),
+        "1eb319c2c30a62b1": (
+            Name: ("Hint"),
+            Text: (
+                text: "Each child moves with its parent: press Play, and each turns what it carries",
+                font: None,
+                size: 0.24,
+                color: (0.45, 0.5, 0.62, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 3.4, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "2f893918fd385652": (
+            Circle: (
+                color: (0.15, 0.45, 1.0, 1.0),
+                thickness: 1.0,
+                fade: 0.0,
+            ),
+            Name: ("Earth's disc"),
+            Parent: ("d7826376425eb72d"),
+            Transform: (
+                translation: (0.0, 0.0, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.55, 0.55, 1.0),
+            ),
+        ),
+        "35cc61294f61bdef": (
+            Circle: (
+                color: (0.3, 0.34, 0.45, 1.0),
+                thickness: 0.012499999,
+                fade: 0.0,
+            ),
+            Name: ("Mars's orbit"),
+            Transform: (
+                translation: (-3.0, -0.6, 0.05),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (6.4, 6.4, 1.0),
+            ),
+        ),
+        "3d30009d91d705b1": (
+            Circle: (
+                color: (0.7, 0.72, 0.8, 1.0),
+                thickness: 1.0,
+                fade: 0.0,
+            ),
+            Name: ("Moon"),
+            Parent: ("d7826376425eb72d"),
+            Transform: (
+                translation: (0.65, 0.0, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.2, 0.2, 1.0),
+            ),
+        ),
+        "415f949b76a82a2a": (
+            Circle: (
+                color: (0.95, 0.96, 1.0, 1.0),
+                thickness: 1.0,
+                fade: 0.0,
+            ),
+            Name: ("Knuckle"),
+            Parent: ("fcb23cadd04a063b"),
+            Transform: (
+                translation: (0.0, 0.0, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.32, 0.32, 1.0),
+            ),
+        ),
+        "4b933a19d543e993": (
+            Name: ("Joint 3"),
+            Parent: ("56c90a879226add1"),
+            Spin: (
+                axis: (0.0, 0.0, 1.0),
+                speed: 1.3962634,
+            ),
+            Transform: (
+                translation: (1.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "52cf56bd3d2496e6": (
+            Circle: (
+                color: (1.0, 0.42, 0.1, 1.0),
+                thickness: 1.0,
+                fade: 0.0,
+            ),
+            Name: ("Mars's disc"),
+            Parent: ("7dbc982ed5ba5296"),
+            Transform: (
+                translation: (0.0, 0.0, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.4, 0.4, 1.0),
+            ),
+        ),
+        "56c90a879226add1": (
+            Name: ("Joint 2"),
+            Parent: ("fcb23cadd04a063b"),
+            Spin: (
+                axis: (0.0, 0.0, 1.0),
+                speed: -0.87266463,
+            ),
+            Transform: (
+                translation: (1.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "6fe7412cd639e7fa": (
+            Circle: (
+                color: (0.3, 0.34, 0.45, 1.0),
+                thickness: 0.018181818,
+                fade: 0.0,
+            ),
+            Name: ("Earth's orbit"),
+            Transform: (
+                translation: (-3.0, -0.6, 0.05),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (4.4, 4.4, 1.0),
+            ),
+        ),
+        "7dbc982ed5ba5296": (
+            Name: ("Mars"),
+            Parent: ("015d2decd06945a6"),
+            Spin: (
+                axis: (0.0, 0.0, 1.0),
+                speed: -0.5235988,
+            ),
+            Transform: (
+                translation: (-3.2, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "922181665725168e": (
+            Name: ("Title"),
+            Text: (
+                text: "Hierarchy",
+                font: Some("d2f1930c7b1ab233"),
+                size: 0.6,
+                color: (0.95, 0.96, 1.0, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 4.1, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "c1d0a829817b729b": (
+            Name: ("Bone 2"),
+            Parent: ("56c90a879226add1"),
+            Sprite: (
+                color: (0.95, 0.25, 0.55, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.5, 0.0, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 0.2, 1.0),
+            ),
+        ),
+        "cef19ea82ea2b04e": (
+            Name: ("Label: A sun carrying planets, carrying a moon"),
+            Text: (
+                text: "A sun carrying planets, carrying a moon",
+                font: None,
+                size: 0.24,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (-3.0, -4.3, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "d60cdc8d7c9acce1": (
+            Camera: (
+                projection: Orthographic(
+                    height: 10.0,
+                    near: 0.1,
+                    far: 100.0,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (0.0, 0.0, 10.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "d7826376425eb72d": (
+            Name: ("Earth"),
+            Parent: ("015d2decd06945a6"),
+            Spin: (
+                axis: (0.0, 0.0, 1.0),
+                speed: 1.3962634,
+            ),
+            Transform: (
+                translation: (2.2, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "dc660a952b457412": (
+            Name: ("Bone 3"),
+            Parent: ("4b933a19d543e993"),
+            Sprite: (
+                color: (1.0, 0.8, 0.15, 1.0),
+                texture: None,
+                rect: [
+                    (0.0, 0.0),
+                    (1.0, 1.0),
+                ],
+                sampler: LinearClamp,
+            ),
+            Transform: (
+                translation: (0.5, 0.0, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 0.2, 1.0),
+            ),
+        ),
+        "e364650ea286fe52": (
+            Circle: (
+                color: (0.95, 0.96, 1.0, 1.0),
+                thickness: 1.0,
+                fade: 0.0,
+            ),
+            Name: ("Knuckle"),
+            Parent: ("4b933a19d543e993"),
+            Transform: (
+                translation: (0.0, 0.0, 0.2),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.32, 0.32, 1.0),
+            ),
+        ),
+        "f3fd9c53c37a3417": (
+            Name: ("Label: A chain of joints"),
+            Text: (
+                text: "A chain of joints",
+                font: None,
+                size: 0.24,
+                color: (0.62, 0.66, 0.78, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (4.0, -4.3, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "fc85aeef36bca7d3": (
+            Circle: (
+                color: (1.0, 0.8, 0.15, 1.0),
+                thickness: 1.0,
+                fade: 0.0,
+            ),
+            Name: ("Sun's disc"),
+            Parent: ("015d2decd06945a6"),
+            Transform: (
+                translation: (0.0, 0.0, 0.1),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.4, 1.4, 1.0),
+            ),
+        ),
+        "fcb23cadd04a063b": (
+            Name: ("Joint 1"),
+            Spin: (
+                axis: (0.0, 0.0, 1.0),
+                speed: 0.43633232,
+            ),
+            Transform: (
+                translation: (4.0, -1.4, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+    },
+)

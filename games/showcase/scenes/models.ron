@@ -1,0 +1,196 @@
+(
+    entities: {
+        "0a1f3dc12b66bf20": (
+            Name: ("Hint"),
+            Text: (
+                text: "glTF, unlit: vertex colors, a texture, and a model of two nodes, through a camera with perspective",
+                font: None,
+                size: 0.2,
+                color: (0.45, 0.5, 0.62, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 2.3, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "14a9051c0b2b60c7": (
+            Name: ("Floor"),
+            Sprite: (
+                color: (0.13, 0.15, 0.21, 1.0),
+                texture: Some("e8674894b18ef1d3"),
+                rect: [
+                    (0.0, 0.0),
+                    (7.0, 5.0),
+                ],
+                sampler: NearestRepeat,
+            ),
+            Transform: (
+                translation: (0.0, -1.4, -2.0),
+                rotation: (-0.70710677, 0.0, 0.0, 0.70710677),
+                scale: (14.0, 10.0, 1.0),
+            ),
+        ),
+        "48ea1872cf32d8d0": (
+            Name: ("Label: A texture"),
+            Text: (
+                text: "A texture",
+                font: None,
+                size: 0.24,
+                color: (0.95, 0.96, 1.0, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (-1.1, -1.05, 0.8),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "5c0d2b268314373b": (
+            ModelRoot: ("48899f3b379ae447"),
+            Name: ("Crystal"),
+            Spin: (
+                axis: (0.0, 1.0, 0.0),
+                speed: 1.0471976,
+            ),
+            Transform: (
+                translation: (3.3, 0.3, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.1, 1.1, 1.1),
+            ),
+        ),
+        "5d5f476a4a7c73bb": (
+            ModelRoot: ("11d32c53785146e8"),
+            Name: ("Crate"),
+            Spin: (
+                axis: (0.0, 1.0, 0.0),
+                speed: 0.5235988,
+            ),
+            Transform: (
+                translation: (-1.1, 0.3, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.2, 1.2, 1.2),
+            ),
+        ),
+        "7491b8e19d6ad231": (
+            Name: ("Label: Vertex colors"),
+            Text: (
+                text: "Vertex colors",
+                font: None,
+                size: 0.24,
+                color: (0.95, 0.96, 1.0, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (-3.3, -1.05, 0.8),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "9e5882c643150cde": (
+            ModelRoot: ("cb44b1a97866f432"),
+            Name: ("Cube"),
+            Spin: (
+                axis: (0.4, 1.0, 0.2),
+                speed: 0.7853982,
+            ),
+            Transform: (
+                translation: (-3.3, 0.3, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.2, 1.2, 1.2),
+            ),
+        ),
+        "9f8c5deff1fd776a": (
+            ModelRoot: ("25ea9ac40f5d8623"),
+            Name: ("Torus"),
+            Spin: (
+                axis: (1.0, 0.5, 0.0),
+                speed: 0.87266463,
+            ),
+            Transform: (
+                translation: (1.1, 0.3, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.6, 1.6, 1.6),
+            ),
+        ),
+        "c7ac2a11486c9257": (
+            Name: ("Label: Indexed, smooth"),
+            Text: (
+                text: "Indexed, smooth",
+                font: None,
+                size: 0.24,
+                color: (0.95, 0.96, 1.0, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (1.1, -1.05, 0.8),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "cdf343ab1ecfcb8a": (
+            Name: ("Label: Two nodes"),
+            Text: (
+                text: "Two nodes",
+                font: None,
+                size: 0.24,
+                color: (0.95, 0.96, 1.0, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (3.3, -1.05, 0.8),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "e64346d64dc5a156": (
+            Camera: (
+                projection: Perspective(
+                    fov: 0.87266463,
+                    near: 0.1,
+                ),
+                primary: true,
+            ),
+            Name: ("Camera"),
+            Transform: (
+                translation: (0.0, 1.6, 8.0),
+                rotation: (-0.09983342, 0.0, 0.0, 0.9950042),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+        "f94bf85b9d47299e": (
+            Name: ("Title"),
+            Text: (
+                text: "Models",
+                font: Some("d2f1930c7b1ab233"),
+                size: 0.55,
+                color: (0.95, 0.96, 1.0, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 2.9, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
+    },
+)

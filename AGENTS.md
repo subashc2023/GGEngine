@@ -25,6 +25,7 @@ apps/             executables
   editor/         the editor: a project's game, embedded, in a panel among dockable panels
   player/         reference player, with no layers; runs cooked scenes without game code (to come)
 games/shards/     the first demo, a project: two players, alone or in lockstep (`--host`, `--join`)
+games/showcase/   a project of a scene for each feature: add one as a feature lands
 tools/gg/         the command-line tool, which `cargo gg` runs
 docs/PLAN.md      the roadmap (see Workflow)
 docs/DEFECTS.md   known defects of the code that exists (see Workflow)
@@ -41,7 +42,7 @@ check a change against the rest yourself.
 ```sh
 cargo build                       # the whole workspace
 cargo run -p sandbox
-cargo run -p editor               # in games/shards, the editor on Shards, its game embedded
+cargo run -p editor               # its hub, which opens a project; in games/shards, Shards
 cargo run -p sandbox -- --help    # the flags every app shares
 cargo run -p sandbox -- --headless --frames 60   # does the engine run? 0 means cleanly
 cargo run -p sandbox -- --record target/run.recording   # a run's seed, commands and hashes
