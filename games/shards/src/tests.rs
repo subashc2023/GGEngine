@@ -187,6 +187,107 @@ fn the_keys_queue_commands_for_the_runs_own_player() {
     assert_eq!(player_at(world, 0), STARTS[0]);
 }
 
+/// Escape opens the menu over the match, letting go of the disc's steer, and while it's open the
+/// keys move its focus, round from either end, and choose, rather than steer and dash: Enter
+/// chooses New match, which queues a new match and closes it, and Space Resume, which closes it
+/// without a dash, each closing steering the disc again as the keys are held; Escape opens it and
+/// closes it; and Quit asks the run to end.
+#[test]
+fn the_menu_takes_the_keys_while_its_open() {
+    let (mut cx, mut shards) = attached(0x5eed);
+    let key = |key, pressed| Event::Key {
+        key,
+        pressed,
+        repeat: false,
+    };
+    let press = |shards: &mut Shards, cx: &mut Context, name: Key| {
+        for pressed in [true, false] {
+            assert_eq!(
+                shards.event(cx, &key(name, pressed)),
+                ControlFlow::Continue(())
+            );
+        }
+    };
+    // Held throughout, so that each opening lets go of its steer and each closing takes it up.
+    let _ = shards.event(&mut cx, &key(Key::KeyD, true));
+    press(&mut shards, &mut cx, Key::Escape);
+    assert_eq!(shards.menu, Some(0));
+    for (name, focus) in [
+        (Key::ArrowDown, 1),
+        (Key::KeyS, 2),
+        (Key::ArrowDown, 0),
+        (Key::KeyW, 2),
+        (Key::ArrowUp, 1),
+    ] {
+        press(&mut shards, &mut cx, name);
+        assert_eq!(shards.menu, Some(focus), "after {name:?}");
+    }
+    press(&mut shards, &mut cx, Key::Enter);
+    assert_eq!(shards.menu, None);
+    press(&mut shards, &mut cx, Key::Escape);
+    press(&mut shards, &mut cx, Key::Space);
+    assert_eq!(shards.menu, None);
+    press(&mut shards, &mut cx, Key::Escape);
+    press(&mut shards, &mut cx, Key::Escape);
+    assert_eq!(shards.menu, None);
+    let player = 0;
+    let [steer, stop] = [Vec2::X, Vec2::ZERO].map(|heading| Command::Steer { player, heading });
+    let expected = [
+        steer.clone(),
+        stop.clone(),
+        Command::NewMatch,
+        steer.clone(),
+        stop.clone(),
+        steer.clone(),
+        stop.clone(),
+        steer.clone(),
+    ];
+    assert_eq!(shards.commands, expected);
+    assert!(!cx.exiting());
+    press(&mut shards, &mut cx, Key::Escape);
+    press(&mut shards, &mut cx, Key::ArrowUp);
+    press(&mut shards, &mut cx, Key::Enter);
+    assert!(cx.exiting(), "Quit ends the run");
+}
+
+/// A new match puts both players back at their starts, at rest, and every score and match won at
+/// 0.
+#[test]
+fn a_new_match_starts_afresh() {
+    let (mut cx, mut shards) = attached(0x5eed);
+    let world = cx.world_mut();
+    let found = world.query_mut::<&mut Match>().next().expect("the match");
+    (found.scores, found.wins) = ([7, 3], [2, 1]);
+    for (_, at, body) in world.query_mut::<(&Player, &mut Transform, &mut RigidBody2D)>() {
+        at.translation.y += 2.0;
+        body.velocity = Vec2::new(3.0, -1.0);
+    }
+    shards.commands.push(Command::NewMatch);
+    shards.tick(world, Tick { number: 0 });
+    let found = *world.query::<&Match>().next().expect("the match");
+    assert_eq!((found.scores, found.wins), ([0; 2], [0; 2]));
+    for player in [0, 1] {
+        let at = player_at(world, player);
+        assert!(at.distance(STARTS[usize::from(player)]) < 0.2, "{at}");
+    }
+}
+
+/// The cursor finds each of the menu's items over its button, to its corners, and none beside them
+/// or between them.
+#[test]
+fn the_menu_finds_the_item_under_the_cursor() {
+    for index in 0..ITEMS.len() {
+        let middle = item_middle(index);
+        let inside = BUTTON / 2.0 - 1.0;
+        for at in [middle, middle - inside, middle + inside] {
+            assert_eq!(item_at(at), Some(index), "{at}");
+        }
+        let beside = middle + Vec2::new(BUTTON.x / 2.0 + 1.0, 0.0);
+        assert_eq!(item_at(beside), None);
+    }
+    assert_eq!(item_at((item_middle(0) + item_middle(1)) / 2.0), None);
+}
+
 /// A world restored from a snapshot simulates as it did from there, through steers, dashes, bumps
 /// and shards collected: the game keeps nothing of the match but in the world.
 #[test]

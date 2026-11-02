@@ -1,9 +1,9 @@
 //! Turns the render data the engine hands it each frame into images, built on `gg-gpu`: meshes,
 //! sprites, circles, lines, grids and text drawn in the game's view, as its camera sees them, with
-//! games' shaders and textures and the engine's own, models' unlit materials among them, and the UI
-//! over them; picks, which read back the ID of the draw the view shows at a pixel; an outline round
-//! what the view shows of an ID; and the render graph, lighting, PBR materials and post-processing
-//! to come.
+//! games' shaders and textures and the engine's own, models' unlit materials among them, a game's
+//! UI over them in the view's own space, and the UI over the view; picks, which read back the ID of
+//! the draw the view shows at a pixel; an outline round what the view shows of an ID; and the
+//! render graph, lighting, PBR materials and post-processing to come.
 //!
 //! It knows nothing about the scene, ECS or gameplay. It receives plain data, so rendering
 //! can run on its own thread, a frame behind simulation.
@@ -28,6 +28,7 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Duration;
 
+use gg_core::math::{Mat4, Vec4};
 use gg_core::{Error, Result};
 use gg_gpu::{
     ColorImage, DepthImage, Device, Frames, IdImage, Instance, InstanceDesc, Surface, Swapchain,
@@ -95,6 +96,19 @@ fn halves(id: u64) -> [u32; 2] {
     [id as u32, (id >> 32) as u32]
 }
 
+/// The matrix from the canvas's space, as [`RenderData::canvas`] has it, of a view `size` pixels
+/// across and down, to Vulkan's clip space, whose Y points down: every point at the near plane,
+/// where reversed depth is 1, which every draw's depth test passes.
+fn canvas_projection(size: [u32; 2]) -> Mat4 {
+    let [width, height] = size.map(|side| side as f32);
+    Mat4::from_cols(
+        Vec4::new(2.0 / width, 0.0, 0.0, 0.0),
+        Vec4::new(0.0, -2.0 / height, 0.0, 0.0),
+        Vec4::ZERO,
+        Vec4::new(-1.0, 1.0, 1.0, 1.0),
+    )
+}
+
 /// What a frame drew in the game's view, which [`Renderer::drawn`] tells.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DrawCounts {
@@ -105,6 +119,14 @@ pub struct DrawCounts {
     pub instances: usize,
     /// The triangles of those meshes, culled ones among them: the GPU's work in drawing them.
     pub triangles: usize,
+}
+
+impl std::ops::AddAssign for DrawCounts {
+    fn add_assign(&mut self, other: Self) {
+        self.draws += other.draws;
+        self.instances += other.instances;
+        self.triangles += other.triangles;
+    }
 }
 
 /// What's been added to a [`Meshes`], [`Shaders`] and [`Textures`], or replaced in them, since it
@@ -145,6 +167,10 @@ pub struct RenderData<'a> {
     pub uploads: &'a mut Uploads,
     /// What to draw.
     pub draws: &'a Draws,
+    /// What to draw after `draws`, in the view's own space, as a game's UI is: each transform takes
+    /// a draw's space to the view's pixels, from its bottom left, +Y up, at its near plane, so that
+    /// each draw shows over everything before it, the nearest of `draws` too.
+    pub canvas: &'a Draws,
     /// What the frame asks of the view, at most [`MAX_PICKS`], which [`Renderer::picked`] answers,
     /// as the frame two after the one that reads them begins: the frame reads them as it renders
     /// the view, after those a frame with nothing to render into, or that read none, left, up to
@@ -556,9 +582,11 @@ impl Renderer {
                     .begin_pass(view_target, c"view", clear, depth, Some(&mut *ids))
                     .expect("an offscreen image is always there");
                 let size = data.viewport.size;
-                let counts = self
+                let mut counts = self
                     .meshes
                     .draw(&mut pass, view_projection, size, data.draws)?;
+                counts +=
+                    (self.meshes).draw(&mut pass, canvas_projection(size), size, data.canvas)?;
                 drop(pass);
                 let picked = if data.read_picks {
                     self.picks.take(frame.number(), Some(ids.size()))
@@ -717,6 +745,17 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The canvas's corners are the view's, its bottom left at clip space's bottom left, whose Y
+    /// points down, and every point at the near plane.
+    #[test]
+    fn the_canvas_spans_the_views_pixels_at_its_near_plane() {
+        let clip = canvas_projection([400, 300]);
+        let at = |x: f32, y: f32, z: f32| clip * Vec4::new(x, y, z, 1.0);
+        assert_eq!(at(0.0, 0.0, 0.0), Vec4::new(-1.0, 1.0, 1.0, 1.0));
+        assert_eq!(at(400.0, 300.0, -7.0), Vec4::new(1.0, -1.0, 1.0, 1.0));
+        assert_eq!(at(100.0, 225.0, 3.0), Vec4::new(-0.5, -0.5, 1.0, 1.0));
+    }
 
     #[test]
     fn the_games_view_is_the_central_area_in_pixels() {

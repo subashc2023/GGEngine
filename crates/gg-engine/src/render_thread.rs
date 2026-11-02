@@ -30,6 +30,8 @@ pub(crate) struct Extracted {
     pub(crate) viewport: Viewport,
     pub(crate) viewpoint: Viewpoint,
     pub(crate) draws: Draws,
+    /// What the layers drew on the canvas, in the view's pixels.
+    pub(crate) canvas: Draws,
     pub(crate) uploads: Uploads,
     /// What the frame asks of the view, each pick's tag the number of the context's ticket.
     pub(crate) picks: Vec<Pick>,
@@ -103,6 +105,7 @@ impl Default for Extracted {
             },
             viewpoint: Viewpoint::default(),
             draws: Draws::default(),
+            canvas: Draws::default(),
             uploads: Uploads::default(),
             picks: Vec::new(),
             outline: None,
@@ -184,6 +187,7 @@ impl Render for Renderer {
             viewpoint: frame.viewpoint,
             uploads: &mut frame.uploads,
             draws: &frame.draws,
+            canvas: &frame.canvas,
             picks: &frame.picks,
             read_picks,
             outline: frame.outline,

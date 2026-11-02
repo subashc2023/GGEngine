@@ -56,8 +56,8 @@ The editor uses `gg-api` too, beside `gg-engine`, as a client of the tool API, a
 - **`gg-renderer`:** the render graph, passes, materials, lighting and post-processing. It owns
   the GPU resources and hands out handles to them.
 - **`gg-engine`:** the main loop, window and input, the job system and the render thread, scene
-  and assets, fonts and text, plus hot reload and the tool API in development builds: what apps and
-  games build on.
+  and assets, fonts and text, a game's UI, plus hot reload and the tool API in development builds:
+  what apps and games build on.
 - **`gg-macros`:** the derives `gg-engine` re-exports beside its traits of the same names,
   `Reflect` and `Component`. Rust builds a derive as a crate of its own; only `gg-engine`
   depends on it, and games derive through `gg-engine`.
@@ -804,10 +804,16 @@ it wants, such as a click on one of its panels, but no key's or button's release
 draws its meshes over the frame.
 
 egui is the development UI. A game's own, its HUDs and menus, is immediate too, but apart from it:
-layers lay it out as they update, each frame, in the view's own space, anchored to its edges and
-scaled with it, as text and quads that the engine draws into the view, so that captures and the
-editor's view show it. Its state, such as which button has the focus, is the layer's, so that each
-lockstep peer has its own, and a choice that changes the game queues a command, as input does.
+layers lay it out as they update, each frame, on the view's canvas, `Context::canvas`, as text and
+sprites placed from an anchor, one of the view's edges, its corners or its middle, which the engine
+places them from as it hands the frame off, at the view's size then, so that a resize moves them in
+the frame it comes in. The canvas scales with the view, `CANVAS_HEIGHT`, 1,080 of its units, to its
+height, and draws into it over everything else there, so that captures and the editor's view show
+it; it's of no entity, so a pick there finds none. A layer finds the cursor on the canvas as the
+last frame showed it, to tell what it's over; the engine has no widgets, so a game draws its buttons
+itself. Its state, such as which button has the focus, is the layer's, so that each lockstep peer
+has its own, and a choice that changes the game queues a command, as input does; a Quit asks the
+run to end through `Context::exit`, as closing the window does.
 
 Layers draw UI through `Ui`: dockable panels, and egui itself for anything else. The dock is the
 engine's own, since egui's docking crates can't put a panel in a window of its own. Panels sit in
@@ -1071,7 +1077,10 @@ draw's lines are all one width, widths past a pixel are an optional feature, and
 them: as quads, a run of lines of any widths is one instanced draw, as sprites are, and draws the
 same on every device. Lines go in a list of draws of their own, which the frame draws after
 everything else, the world's draws too, so that they show over all of it but where an opaque mesh is
-nearer, as debugging wants.
+nearer, as debugging wants. The canvas, a game's UI, as [Events and layers](#events-and-layers)
+says, is a list after those, in the view's pixels rather than through its viewpoint, all at the near
+plane, where depth is 1, which every depth test passes, so that each of its draws goes over all
+before it.
 
 Text is drawn from fonts' fields, which `Context::add_font` bakes as a TrueType or OpenType font
 loads, or the engine as text names one, until Phase 10 cooks them: a texture of data, which shaders

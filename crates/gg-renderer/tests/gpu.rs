@@ -74,6 +74,7 @@ fn main() -> ExitCode {
         batches_match_their_reference,
         circles_match_their_reference,
         text_matches_its_reference,
+        the_canvas_matches_its_reference,
         outlines_match_their_reference,
         lines_match_their_reference,
         grids_match_their_reference,
@@ -228,18 +229,20 @@ fn shader(file: &str) -> PathBuf {
 }
 
 /// What a test adds meshes, shaders and textures to, and the uploads that take them to its
-/// renderer.
+/// renderer; and no draws, for a frame's canvas.
 #[derive(Default)]
 struct Stores {
     meshes: Meshes,
     shaders: Shaders,
     textures: Textures,
     uploads: Uploads,
+    none: Draws,
 }
 
 impl Stores {
     /// A frame of `draws` into `viewport`, as `viewpoint` sees them, cleared to [`CLEAR`], that
-    /// picks and outlines nothing, with the uploads of what's been added since the last frame's.
+    /// draws nothing on its canvas and picks and outlines nothing, with the uploads of what's been
+    /// added since the last frame's.
     fn data<'a>(
         &'a mut self,
         viewport: Viewport,
@@ -251,6 +254,7 @@ impl Stores {
             shaders,
             textures,
             uploads,
+            none,
         } = self;
         uploads.take(meshes, shaders, textures);
         RenderData {
@@ -259,6 +263,7 @@ impl Stores {
             viewpoint,
             uploads,
             draws,
+            canvas: none,
             picks: &[],
             read_picks: true,
             outline: None,
@@ -771,6 +776,95 @@ fn text_matches_its_reference() {
         render_without_ui(&mut renderer, data);
     }
     check(renderer, "text", WIDTH, HEIGHT);
+}
+
+/// Draws on the canvas of a view in part of a frame, over the world, and compares it with its
+/// reference image: squares 16 pixels across in the view's corners, red at its bottom left, green
+/// at its bottom right, blue at its top left and yellow at its top right, a white bar half
+/// transparent across its middle and an orange disc above its left, all over an opaque gray square
+/// near a camera with perspective, which covers the view but its right edge, and a cyan sprite
+/// nearer still, which the bar goes over too. Canvas draws at the far plane, which the square would
+/// hide, make 3,360 pixels differ.
+fn the_canvas_matches_its_reference() {
+    const WIDTH: u32 = 240;
+    const HEIGHT: u32 = 160;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores::default();
+    let viewport = Viewport {
+        origin: [40, 20],
+        size: [160, 120],
+    };
+    let viewpoint = Viewpoint {
+        position: Vec3::new(0.0, 0.0, 4.0),
+        projection: Projection::Perspective {
+            fov: PI / 3.0,
+            near: 0.5,
+        },
+        ..Viewpoint::default()
+    };
+    let flat = (stores.shaders)
+        .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+        .expect("a shader");
+    let square = square(&mut stores.meshes);
+    let mut draws = Draws::default();
+    // 0.7 in front of the camera, where its view is about 0.81 high and 1.08 across, shifted left.
+    let near = Mat4::from_scale_rotation_translation(
+        Vec3::new(1.0, 0.85, 1.0),
+        Quat::IDENTITY,
+        Vec3::new(-0.1, 0.0, 3.3),
+    );
+    draws.push(square, flat, near, Vec4::new(0.4, 0.4, 0.4, 1.0));
+    let cyan = Sprite {
+        color: Vec4::new(0.1, 0.8, 0.9, 1.0),
+        ..Sprite::default()
+    };
+    // 0.55 in front of the camera, about 15 pixels across.
+    let in_front = Mat4::from_scale_rotation_translation(
+        Vec3::new(0.08, 0.08, 1.0),
+        Quat::IDENTITY,
+        Vec3::new(0.04, 0.0, 3.45),
+    );
+    draws.push_sprite(in_front, cyan);
+    // `size` pixels across and up, centered at (`x`, `y`) from the view's bottom left.
+    let place = |[x, y]: [f32; 2], [width, height]: [f32; 2]| {
+        Mat4::from_translation(Vec3::new(x, y, 0.0))
+            * Mat4::from_scale(Vec3::new(width, height, 1.0))
+    };
+    let colored = |color: [f32; 4]| Sprite {
+        color: Vec4::from(color),
+        ..Sprite::default()
+    };
+    let mut canvas = Draws::default();
+    for (at, color) in [
+        ([8.0, 8.0], [0.9, 0.1, 0.1, 1.0]),
+        ([152.0, 8.0], [0.1, 0.8, 0.2, 1.0]),
+        ([8.0, 112.0], [0.1, 0.2, 0.9, 1.0]),
+        ([152.0, 112.0], [0.9, 0.8, 0.1, 1.0]),
+    ] {
+        canvas.push_sprite(place(at, [16.0, 16.0]), colored(color));
+    }
+    canvas.push_sprite(
+        place([80.0, 60.0], [120.0, 20.0]),
+        colored([1.0, 1.0, 1.0, 0.5]),
+    );
+    let orange = Circle {
+        color: Vec4::new(0.9, 0.5, 0.1, 1.0),
+        ..Circle::default()
+    };
+    canvas.push_circle(
+        &mut stores.shaders,
+        place([40.0, 90.0], [24.0, 24.0]),
+        orange,
+    );
+    // More frames than are in flight.
+    for _ in 0..3 {
+        let data = RenderData {
+            canvas: &canvas,
+            ..stores.data(viewport, viewpoint, &draws)
+        };
+        render_without_ui(&mut renderer, data);
+    }
+    check(renderer, "canvas", WIDTH, HEIGHT);
 }
 
 /// Outlines what the view shows of one ID, 3 pixels wide, and compares it with its reference image:

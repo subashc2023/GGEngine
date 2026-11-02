@@ -78,6 +78,10 @@ pub(crate) fn run_headless(
                 debug!("A tool asked the run to end");
                 break;
             }
+            if cx.exiting() {
+                debug!("A layer asked the run to end");
+                break;
+            }
             // One point is one pixel, as on a display without scaling.
             let input = egui_runs.then(|| egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
@@ -757,12 +761,18 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::{
-        Camera, Entity, Inspector, Layer, Projection, Sprite, Transform, Viewpoint, World,
+        Align, Camera, Entity, Inspector, Layer, Projection, Sprite, Transform, Viewpoint, World,
         render_thread,
     };
 
-    /// Spawns a red sprite as it attaches, and draws a sprite of its own each update.
+    /// Spawns a red sprite as it attaches, and draws a sprite of its own each update, and another
+    /// on the canvas, 100 units across, 50 left of and below the view's top right.
     struct Drawer;
+
+    /// Where [`Drawer`]'s sprite on the canvas is from the view's top right.
+    fn top_right() -> Mat4 {
+        Mat4::from_translation(Vec3::new(-50.0, -50.0, 0.0)) * Mat4::from_scale(Vec3::splat(100.0))
+    }
 
     pub(crate) fn red() -> Sprite {
         Sprite {
@@ -778,6 +788,8 @@ pub(crate) mod tests {
 
         fn update(&mut self, cx: &mut Context, _: Duration) {
             cx.draw_sprite(Mat4::IDENTITY, Sprite::default());
+            let mut canvas = cx.canvas([Align::End, Align::Start]);
+            canvas.draw_sprite(top_right(), Sprite::default());
         }
     }
 
@@ -1185,11 +1197,17 @@ pub(crate) mod tests {
         let mut frame = render_thread::Extracted::default();
         cx.extract(&mut frame, viewport);
         assert_eq!(frame.draws, expected);
-        // The context's buffer and the one the frame's draws come back in both start empty.
+        // Apart, in the view's pixels from its top right, a third of a pixel a unit.
+        let mut canvas = Draws::default();
+        let anchor = Mat4::from_translation(Vec3::new(640.0, 360.0, 0.0));
+        let scale = Mat4::from_scale(Vec3::new(1.0 / 3.0, 1.0 / 3.0, 1.0));
+        canvas.push_sprite(anchor * scale * top_right(), Sprite::default());
+        assert_eq!(frame.canvas, canvas);
+        // The context's buffers and those the frame's draws come back in all start empty.
         for _ in 0..2 {
             cx.extract(&mut frame, viewport);
             assert!(
-                frame.draws.is_empty(),
+                frame.draws.is_empty() && frame.canvas.is_empty(),
                 "the context keeps none of a frame's draws for the next"
             );
         }

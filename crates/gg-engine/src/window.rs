@@ -246,6 +246,11 @@ impl Handler<'_> {
             event_loop.exit();
             return;
         }
+        if self.cx.exiting() {
+            debug!("A layer asked the run to end");
+            event_loop.exit();
+            return;
+        }
         let (Some(window), Some(render), Some(egui_winit), Some(viewports)) = (
             &self.window,
             &mut self.render,

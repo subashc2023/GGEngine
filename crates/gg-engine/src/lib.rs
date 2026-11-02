@@ -1,8 +1,9 @@
 //! What apps build on: the main loop, which steps the simulation at a fixed rate whatever the frame
 //! rate, window and input, and the actions that name what a game does with it, and layers, which
-//! change the world at its ticks, and their UI; the world of entities and their components, which
-//! it draws between its ticks, handing each frame's render data to `gg-renderer` on a thread of its
-//! own, a frame behind, and the job system, which a tick's systems split a query's rows across;
+//! change the world at its ticks, and their UI, a game's own on the view's canvas; the world of
+//! entities and their components, which it draws between its ticks, handing each frame's render
+//! data to `gg-renderer` on a thread of its own, a frame behind, and the job system, which a tick's
+//! systems split a query's rows across;
 //! reflection, which describes the components' types so that tools reach them by name, and the
 //! Inspector, which edits them; scripts, components that act at ticks; 2D physics, through rapier,
 //! whose state is a resource of the world; scenes and prefabs, the world's entities as canonical
@@ -30,6 +31,7 @@ mod args;
 mod asset_watch;
 mod assets;
 mod camera;
+mod canvas;
 mod chrome;
 // In development builds alone, as `dev` has it.
 #[cfg(feature = "dev")]
@@ -101,6 +103,7 @@ pub use actions::{Actions, Binding, Change, Source, Toward};
 pub use camera::{
     Camera, CameraAction, FlyAction, FlyCameraController, OrthographicCameraController,
 };
+pub use canvas::{CANVAS_HEIGHT, Canvas};
 #[cfg(feature = "dev")]
 pub use dialog::FileDialog;
 pub use dock::{Docked, Ui};

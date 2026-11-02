@@ -82,11 +82,13 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Phase 7, assets** (2026-11-01)
 - **Fonts and text** (2026-11-01)
 - **Text in the world** (2026-11-01)
+- **A game's UI** (2026-11-01)
 
 ## Now
 
-**A game's UI**, Phase 8's third milestone: HUDs and menus that layers lay out as they update, in
-the view's own space, anchored to its edges, with the demo's menu; its plan says when it's done.
+**Sounds**, Phase 8's fourth milestone: sounds, loaded as assets, which ticks queue and layers
+play, positioned in 2D, with the demo's; it decides how a sound a tick queues on an entity follows
+it as it moves.
 
 ## Next
 
@@ -162,6 +164,12 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Pushing and popping layers while the app runs; `App` fixes the stack before it starts | A tool or game needs a layer for only part of a run |
 | Composed text from an input method (winit's `Ime` events), for languages typed through one | A game takes text input, such as chat |
 | Frames that draw UI and allocate nothing: egui allocates as it lays out and tessellates, and as it collects its input, where winit reads the window's title, and so do the dock, the Inspector, and the render thread while a panel has a window of its own | A game's shipping frames draw UI, or Phase 10 puts egui behind `dev` |
+| Widgets for a game's UI: buttons, lists and their focus, moved by keys, pads and the mouse; Shards draws its menu's buttons, finds what the cursor is over, and keeps their focus itself | A game other than Shards writes the same |
+| The canvas scaled by the view's width or its smaller side, or to a height a game sets, rather than 1,080 units to the view's height: a view much narrower than 16:9 crowds what's anchored to its sides, and a portrait one overlaps it | A game runs in portrait, or at aspect ratios far from 16:9 |
+| Stretching what's drawn on the canvas between anchors, as a backdrop filling the view: each draw is placed from one anchor, and scaled with the view's height alone | A game's UI fills the view, as a dim behind a menu |
+| Circles, meshes and lines on the canvas, and clipping to a rectangle, as a list that scrolls needs: it draws sprites and text | A game's UI draws them |
+| Measuring text for laying it out, as a button sized to its label needs: a layer sizes its buttons itself | A game's UI lays out text of lengths it doesn't know, such as translations |
+| Hiding a game's UI from the editor's view while it edits, as Unity's Scene view leaves out a canvas over the screen: the canvas draws through the look's viewpoint too, and hides what's under it from picks | Someone edits under a game's HUD |
 | Counting what the Vulkan loader, the drivers, the validation layer and VMA allocate beneath the engine, through `VkAllocationCallbacks`, which drivers may bypass for their own: the `frames` test counts Rust's allocator | A profile shows them allocating each frame |
 | Keeping within the GPU's memory budget (`VK_EXT_memory_budget` through VMA) | Phase 10, with streaming |
 | Removing meshes, shaders and textures, which last until the app ends; a reload replaces them in place | Phase 10, with streaming |

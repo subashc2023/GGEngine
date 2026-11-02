@@ -4,7 +4,9 @@
 //! `--host <address>` steering player 0 and one given `--join <address>` player 1, each with its own
 //! keys. The arena's walls are its scene file, `scenes/arena.ron`, which a development build
 //! applies as it's saved; its floor is its shader, `shaders/floor.slang`, which it reloads as it's
-//! saved; and its scores are text in its font, `fonts/Inter-Bold.ttf`.
+//! saved; its scores are text in its font, `fonts/Inter-Bold.ttf`, on the view's canvas, in its top
+//! corners; and Escape or a pad's Start opens its menu there, over the match, which goes on
+//! meanwhile: Resume; New match, a command that both lockstep peers apply; and Quit.
 
 use std::fmt::Write as _;
 use std::ops::ControlFlow;
@@ -16,9 +18,9 @@ use bytemuck::NoUninit;
 use gg_engine::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_engine::{
     Actions, Align, App, Binding, Blend, BodyType, Camera, Change, Circle, CircleCollider2D,
-    Commands, Component, Context, Entity, Event, Font, Key, Layer, Mesh, Name, PadButton,
-    Physics2D, Projection, Reflect, RigidBody2D, Shader, Source, Sprite, Stick, TextStyle, Tick,
-    Transform, World, step_physics,
+    Commands, Component, Context, Entity, Event, Font, Key, Layer, Mesh, MouseButton, Name,
+    PadButton, Physics2D, Projection, Reflect, RigidBody2D, Shader, Source, Sprite, Stick,
+    TextStyle, Tick, Transform, World, step_physics,
 };
 
 fn main() -> ExitCode {
@@ -36,7 +38,7 @@ fn app() -> App {
 /// How far the arena's inside reaches from its middle, across and up.
 const ARENA: Vec2 = Vec2::new(8.0, 4.5);
 
-/// How high the view is, in units: the arena, its walls and the scores above it.
+/// How high the view is, in units: the arena, its walls and its Target above it.
 const VIEW_HEIGHT: f32 = 11.5;
 
 /// Each player's color, in linear RGB: blue and orange.
@@ -76,6 +78,27 @@ const FLOOR_Z: f32 = 0.0;
 const SHARD_Z: f32 = 0.2;
 const PLAYER_Z: f32 = 0.3;
 
+/// The scores on the canvas, in its units: how far they are from the view's top corners, and how
+/// tall a score's em is and its matches won's, below it.
+const HUD_INSET: f32 = 40.0;
+const SCORE_SIZE: f32 = 80.0;
+const WINS_SIZE: f32 = 32.0;
+
+/// The menu's items, top to bottom, and what each says.
+const ITEMS: [(Item, &str); 3] = [
+    (Item::Resume, "RESUME"),
+    (Item::NewMatch, "NEW MATCH"),
+    (Item::Quit, "QUIT"),
+];
+
+/// The menu on the canvas, in its units from the view's middle: how large each item's button is,
+/// across and up, how far above the middle the first's middle is, and how far below it each next
+/// one's is; and its title's middle.
+const BUTTON: Vec2 = Vec2::new(440.0, 84.0);
+const FIRST_ITEM: f32 = 50.0;
+const ITEM_STEP: f32 = 104.0;
+const TITLE: f32 = 180.0;
+
 /// A player's disc: which player steers it, which way it's steered, and its dash, the ticks left
 /// of it and until the next.
 #[derive(Clone, Copy, Debug, PartialEq, Component)]
@@ -110,15 +133,37 @@ enum Command {
     Steer { player: u8, heading: Vec2 },
     /// Has the player dash, if it can.
     Dash { player: u8 },
+    /// Starts a match afresh, for both players, as the menu's New match chooses.
+    NewMatch,
 }
 
-/// What the keys and pads do.
+/// What the keys and pads do: in the match, steer and dash; in the menu, move up and down its items
+/// and choose one; and open and close it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Act {
     /// W, A, S and D, the arrows, the left stick and the D-pad.
     Steer,
     /// Space and South.
     Dash,
+    /// Escape and Start.
+    Menu,
+    /// W, the up arrow and the D-pad's up.
+    Up,
+    /// S, the down arrow and the D-pad's down.
+    Down,
+    /// Enter, Space and South.
+    Choose,
+}
+
+/// What the menu's items do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Item {
+    /// Closes the menu.
+    Resume,
+    /// Closes it, and queues [`Command::NewMatch`].
+    NewMatch,
+    /// Ends the run.
+    Quit,
 }
 
 /// A corner of the floor's square, which `shaders/floor.slang` reads: its position in the square's
@@ -145,12 +190,15 @@ struct Floor {
 
 /// The game's layer: it builds the arena as it attaches, applies each player's commands at each
 /// tick, steering the discs, which 2D physics moves, and collecting the shards they touch; and
-/// draws the floor and the scores between ticks.
+/// draws the floor, the scores and the menu between ticks.
 struct Shards {
     /// The player this run's keys steer: 0, unless it joined a lockstep session.
     player: u8,
     actions: Actions<Act>,
     commands: Vec<Command>,
+    /// The item of the menu that has the focus, while it's open: this run's own, as a lockstep
+    /// peer's is its own.
+    menu: Option<usize>,
     /// The floor's square and shader, once the game loads.
     floor: Option<(Mesh<Corner>, Shader<Corner, Floor>)>,
     /// The font the scores are drawn in, once the game loads.
@@ -170,16 +218,26 @@ impl Shards {
             x: [PadButton::DPadLeft, PadButton::DPadRight].map(Source::PadButton),
             y: [PadButton::DPadDown, PadButton::DPadUp].map(Source::PadButton),
         };
+        let key = |key| Binding::Button(Source::Key(key));
+        let pad = |button| Binding::Button(Source::PadButton(button));
         let bound = [
             (Act::Steer, Binding::WASD),
             (Act::Steer, arrows),
             (Act::Steer, Binding::stick(Stick::Left)),
             (Act::Steer, d_pad),
-            (Act::Dash, Binding::Button(Source::Key(Key::Space))),
-            (
-                Act::Dash,
-                Binding::Button(Source::PadButton(PadButton::South)),
-            ),
+            (Act::Dash, key(Key::Space)),
+            (Act::Dash, pad(PadButton::South)),
+            (Act::Menu, key(Key::Escape)),
+            (Act::Menu, pad(PadButton::Start)),
+            (Act::Up, key(Key::KeyW)),
+            (Act::Up, key(Key::ArrowUp)),
+            (Act::Up, pad(PadButton::DPadUp)),
+            (Act::Down, key(Key::KeyS)),
+            (Act::Down, key(Key::ArrowDown)),
+            (Act::Down, pad(PadButton::DPadDown)),
+            (Act::Choose, key(Key::Enter)),
+            (Act::Choose, key(Key::Space)),
+            (Act::Choose, pad(PadButton::South)),
         ]
         .into_iter()
         .try_for_each(|(action, binding)| actions.bind(action, binding));
@@ -188,6 +246,7 @@ impl Shards {
             player: 0,
             actions,
             commands: Vec::new(),
+            menu: None,
             floor: None,
             font: None,
             text: String::new(),
@@ -239,6 +298,14 @@ impl Layer for Shards {
             let (player, dash) = match command {
                 Command::Steer { player, heading } => (player, Some(heading)),
                 Command::Dash { player } => (player, None),
+                Command::NewMatch => {
+                    if let Some(found) = world.query_mut::<&mut Match>().next() {
+                        found.scores = [0; 2];
+                        found.wins = [0; 2];
+                    }
+                    to_starts(world);
+                    continue;
+                }
             };
             let players = world.query_mut::<&mut Player>();
             for disc in players.filter(|disc| disc.index == player) {
@@ -283,23 +350,69 @@ impl Layer for Shards {
         };
         if let Some(font) = self.font {
             draw_scores(cx, &found, font, &mut self.text);
+            match self.menu {
+                Some(focus) => draw_menu(cx, font, focus, COLORS[usize::from(self.player)]),
+                None => draw_hint(cx, font),
+            }
         }
     }
 
-    fn event(&mut self, _: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
+    fn event(&mut self, cx: &mut Context, event: &Event<'_>) -> ControlFlow<()> {
         // Queued now, rather than at the next update, so that the next tick applies them.
         let Self {
             player,
             actions,
             commands,
+            menu,
             ..
         } = self;
         let player = *player;
-        actions.event(event, |change| match change {
-            Change::Axis2(Act::Steer, heading) => commands.push(Command::Steer { player, heading }),
-            Change::Pressed(Act::Dash) => commands.push(Command::Dash { player }),
+        // Whether the menu opens or closes, and what's chosen in it.
+        let (mut toggled, mut chosen) = (false, None);
+        actions.event(event, |change| match (*menu, change) {
+            (_, Change::Pressed(Act::Menu)) => toggled = true,
+            (None, Change::Axis2(Act::Steer, heading)) => {
+                commands.push(Command::Steer { player, heading });
+            }
+            (None, Change::Pressed(Act::Dash)) => commands.push(Command::Dash { player }),
+            (Some(focus), Change::Pressed(Act::Up)) => {
+                *menu = Some((focus + ITEMS.len() - 1) % ITEMS.len());
+            }
+            (Some(focus), Change::Pressed(Act::Down)) => *menu = Some((focus + 1) % ITEMS.len()),
+            (Some(focus), Change::Pressed(Act::Choose)) => chosen = Some(ITEMS[focus].0),
             _ => {}
         });
+        // The mouse over an item focuses it, and a click chooses it.
+        if let Some(focus) = menu {
+            let over = cx.canvas([Align::Center; 2]).cursor().and_then(item_at);
+            match (event, over) {
+                (Event::CursorMoved { .. }, Some(over)) => *focus = over,
+                (
+                    Event::MouseButton {
+                        button: MouseButton::Left,
+                        pressed: true,
+                    },
+                    Some(over),
+                ) => chosen = Some(ITEMS[over].0),
+                _ => {}
+            }
+        }
+        match chosen {
+            Some(Item::NewMatch) => commands.push(Command::NewMatch),
+            Some(Item::Quit) => cx.exit(),
+            _ => {}
+        }
+        let resumed = matches!(chosen, Some(Item::Resume | Item::NewMatch));
+        if resumed || toggled && menu.is_some() {
+            *menu = None;
+            // As the keys and sticks are held now, which the disc let go of as the menu opened.
+            let heading = actions.axis2(Act::Steer);
+            commands.push(Command::Steer { player, heading });
+        } else if toggled {
+            *menu = Some(0);
+            let heading = Vec2::ZERO;
+            commands.push(Command::Steer { player, heading });
+        }
         ControlFlow::Continue(())
     }
 }
@@ -478,11 +591,16 @@ fn collect(world: &mut World) {
         place(world, shard);
     }
     if won.is_some() {
-        let players = world.query_mut::<(&Player, &mut Transform, &mut RigidBody2D)>();
-        for (player, at, body) in players {
-            at.translation = STARTS[usize::from(player.index)].extend(PLAYER_Z);
-            body.velocity = Vec2::ZERO;
-        }
+        to_starts(world);
+    }
+}
+
+/// Puts each player back at its start, at rest.
+fn to_starts(world: &mut World) {
+    let players = world.query_mut::<(&Player, &mut Transform, &mut RigidBody2D)>();
+    for (player, at, body) in players {
+        at.translation = STARTS[usize::from(player.index)].extend(PLAYER_Z);
+        body.velocity = Vec2::ZERO;
     }
 }
 
@@ -494,39 +612,97 @@ fn spin(world: &mut World, dt: Duration) {
     }
 }
 
-/// Draws the match's scores above the arena, in `font`, writing each text into `text`: each
-/// player's shards in its color at its side, and the matches it has won beside them, toward the
-/// middle, where the arena's Target says how many shards win a match.
+/// Draws the match's scores on the canvas, in `font`, writing each text into `text`: each player's
+/// shards in its color in the view's top corner on its side, and below them the matches it has won,
+/// each growing from its corner toward the middle, where the arena's Target says how many shards
+/// win a match.
 fn draw_scores(cx: &mut Context, found: &Match, font: Font, text: &mut String) {
-    // Between the top wall and the view's top, as the Target is.
-    let y = ARENA.y + 0.9;
-    let at = |x: f32| Mat4::from_translation(Vec3::new(x, y, 0.5));
-    let style = |size: f32, color: Vec4, across: Align| TextStyle {
-        font: Some(font),
-        size,
-        color,
-        align: [across, Align::Center],
-    };
     for (index, &color) in COLORS.iter().enumerate() {
-        // Each side's text grows from its edge toward the middle.
-        let (side, across) = if index == 0 {
-            (-1.0, Align::Start)
+        let (corner, inward) = if index == 0 {
+            (Align::Start, 1.0)
         } else {
-            (1.0, Align::End)
+            (Align::End, -1.0)
         };
-        let color = Vec3::from(color);
+        let mut canvas = cx.canvas([corner, Align::Start]);
+        let at = |down: f32| Mat4::from_translation(Vec3::new(inward * HUD_INSET, -down, 0.0));
+        let style = |size: f32, alpha: f32| TextStyle {
+            font: Some(font),
+            size,
+            color: Vec3::from(color).extend(alpha),
+            align: [corner, Align::Start],
+        };
         let write = |text: &mut String, value: u32, then: &str| {
             text.clear();
             write!(text, "{value}{then}").expect("a string takes any text");
         };
         write(text, found.scores[index], "");
-        let edge = side * ARENA.x;
-        cx.draw_text(at(edge), text, &style(0.55, color.extend(1.0), across));
+        canvas.draw_text(at(HUD_INSET), text, &style(SCORE_SIZE, 1.0));
         let won = found.wins[index];
         write(text, won, if won == 1 { " WIN" } else { " WINS" });
-        let beside = style(0.3, color.extend(0.7), across);
-        cx.draw_text(at(edge - side * 0.65), text, &beside);
+        let below = HUD_INSET + SCORE_SIZE * 1.25;
+        canvas.draw_text(at(below), text, &style(WINS_SIZE, 0.7));
     }
+}
+
+/// Draws, at the view's bottom, in `font`, the keys that open the menu.
+fn draw_hint(cx: &mut Context, font: Font) {
+    let style = TextStyle {
+        font: Some(font),
+        size: 28.0,
+        color: Vec4::new(1.0, 1.0, 1.0, 0.45),
+        align: [Align::Center, Align::End],
+    };
+    let at = Mat4::from_translation(Vec3::new(0.0, 24.0, 0.0));
+    let mut canvas = cx.canvas([Align::Center, Align::End]);
+    canvas.draw_text(at, "ESC / START: MENU", &style);
+}
+
+/// Draws the menu in the view's middle, in `font`: a dark panel, its title, and each item's button,
+/// the one with the focus, `focus`, lit in `lit`, linear RGB.
+fn draw_menu(cx: &mut Context, font: Font, focus: usize, lit: [f32; 3]) {
+    let mut canvas = cx.canvas([Align::Center; 2]);
+    let rect = |middle: Vec2, size: Vec2| {
+        Mat4::from_translation(middle.extend(0.0)) * Mat4::from_scale(size.extend(1.0))
+    };
+    let filled = |color: Vec4| Sprite {
+        color,
+        ..Sprite::default()
+    };
+    let panel = filled(Vec4::new(0.01, 0.012, 0.02, 0.92));
+    canvas.draw_sprite(rect(Vec2::new(0.0, 10.0), Vec2::new(560.0, 480.0)), panel);
+    let style = |size: f32, color: Vec4| TextStyle {
+        font: Some(font),
+        size,
+        color,
+        align: [Align::Center; 2],
+    };
+    let at = |middle: Vec2| Mat4::from_translation(middle.extend(0.0));
+    let title = style(64.0, Vec4::ONE);
+    canvas.draw_text(at(Vec2::new(0.0, TITLE)), "SHARDS", &title);
+    for (index, &(_, label)) in ITEMS.iter().enumerate() {
+        let middle = item_middle(index);
+        let (fill, ink) = if index == focus {
+            (Vec3::from(lit).extend(1.0), Vec4::ONE)
+        } else {
+            (
+                Vec4::new(1.0, 1.0, 1.0, 0.06),
+                Vec4::new(1.0, 1.0, 1.0, 0.7),
+            )
+        };
+        canvas.draw_sprite(rect(middle, BUTTON), filled(fill));
+        canvas.draw_text(at(middle), label, &style(36.0, ink));
+    }
+}
+
+/// Where the middle of the menu's item `index` is on the canvas, from the view's middle.
+fn item_middle(index: usize) -> Vec2 {
+    Vec2::new(0.0, FIRST_ITEM - ITEM_STEP * index as f32)
+}
+
+/// The menu's item whose button is at `at` on the canvas, from the view's middle, if one's is.
+fn item_at(at: Vec2) -> Option<usize> {
+    let over = |index| (at - item_middle(index)).abs().cmple(BUTTON / 2.0).all();
+    (0..ITEMS.len()).find(|&index| over(index))
 }
 
 #[cfg(test)]

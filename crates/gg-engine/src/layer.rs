@@ -30,9 +30,10 @@ use crate::assets::{self, Asset, Assets, Loaded};
 #[cfg(feature = "dev")]
 use crate::assets::{Catalog, Prints};
 use crate::camera::{self, Camera, Tie};
+use crate::canvas::{self, Canvas};
 use crate::draw::{self, Poses, Scratch};
 use crate::edits::{Authors, Done, Edit};
-use crate::font::{self, Font, Fonts, TextStyle};
+use crate::font::{self, Align, Font, Fonts, TextStyle};
 use crate::gltf;
 use crate::grid::{self, Plane};
 #[cfg(feature = "dev")]
@@ -247,6 +248,8 @@ pub struct Context {
     draws: Draws,
     /// What to draw this frame over the rest, after the world: lines.
     over: Draws,
+    /// What the layers drew on the canvas this frame, which draws over all of it.
+    canvas: canvas::Drawn,
     /// Whether the world's colliders' outlines draw, over the rest.
     colliders: bool,
     /// What to outline in the view this frame, if anything.
@@ -332,6 +335,8 @@ pub struct Context {
     /// file dialog, until the main loop takes it to restart its clock, so that no frame's time
     /// counts the pause.
     pub(crate) paused: bool,
+    /// Set once a layer has asked the run to end, as [`exit`](Self::exit) says.
+    exiting: bool,
     /// The edits of the authors outside the layers, the tool API's clients and the scene files a
     /// game loaded, each undoing its own.
     pub(crate) authors: Authors,
@@ -456,6 +461,7 @@ impl Context {
             fonts,
             draws: Draws::default(),
             over: Draws::default(),
+            canvas: canvas::Drawn::default(),
             colliders: false,
             outline: None,
             view: None,
@@ -491,6 +497,7 @@ impl Context {
             hot_reload: None,
             perf: Perf::default(),
             paused: false,
+            exiting: false,
             authors: Authors::default(),
             scenes: SceneFiles::default(),
             #[cfg(feature = "dev")]
@@ -2114,6 +2121,41 @@ impl Context {
             .push_rect(&mut self.shaders, transform, color, width, 0);
     }
 
+    /// Draws on the game's view's canvas this frame, from `anchor`: a game's own UI, its HUDs and
+    /// menus, apart from the development UI, which a layer lays out as it updates, each frame, in
+    /// the view's own space. `anchor` is one of the view's edges, its corners or its middle, across
+    /// then down, as text's alignment says, such as `[Align::End, Align::Start]` for its top right,
+    /// which the canvas's origin is at, +Y up; and the canvas scales with the view,
+    /// [`CANVAS_HEIGHT`](crate::CANVAS_HEIGHT) units to its height, as the frame handed off finds
+    /// it, whatever its size in pixels. What's drawn on it draws over everything else in the view,
+    /// the world's nearest entities and lines too, in the order it's drawn, so that captures and
+    /// the editor's view show it, but under the development UI. Its state, such as which button has
+    /// the focus, is the layer's, so that each lockstep peer has its own, and a choice that changes
+    /// the game queues a command, as input does.
+    pub fn canvas(&mut self, anchor: [Align; 2]) -> Canvas<'_> {
+        let (view, cursor) = (self.view, self.input.cursor());
+        let shaders = &mut self.shaders;
+        Canvas::new(
+            &mut self.canvas,
+            &mut self.fonts,
+            shaders,
+            anchor,
+            view,
+            cursor,
+        )
+    }
+
+    /// Ends the run before its next frame, as closing its window does when no layer handles that:
+    /// a game's own Quit, such as its menu's.
+    pub fn exit(&mut self) {
+        self.exiting = true;
+    }
+
+    /// Whether a layer has asked the run to end, as [`exit`](Self::exit) says.
+    pub fn exiting(&self) -> bool {
+        self.exiting
+    }
+
     /// Draws a grid this frame as `viewpoint` sees it, fitted to the game's view as the last frame
     /// handed it off, which [`view`](Self::view) gives: lines a power of ten apart on the world's
     /// axis plane `plane`, or on the one an orthographic viewpoint along an axis faces, as
@@ -2351,8 +2393,9 @@ impl Context {
     }
 
     /// Fills in `frame` with this frame's render data, with the game's view at `viewport`, which
-    /// [`view`](Self::view) gives from then on: its draws, those over the rest last, for the last
-    /// frame's, which it forgets, keeping their memory for the next; the viewpoint a layer set this
+    /// [`view`](Self::view) gives from then on: its draws, those over the rest last, and its
+    /// canvas's, placed from their anchors in the view's pixels, for the last frame's, which it
+    /// forgets, keeping their memory for the next; the viewpoint a layer set this
     /// frame, which it forgets too, or else where the world's camera sees from, or else the
     /// default; what a layer outlined this frame, which it forgets too; the pixels the view shows,
     /// if it shows any, swapping new ones for those `frame` had; what's been added since a frame
@@ -2393,6 +2436,7 @@ impl Context {
         self.draws.append(&mut self.over);
         mem::swap(&mut frame.draws, &mut self.draws);
         self.draws.clear();
+        self.canvas.place(viewport.size, &mut frame.canvas);
         self.fonts.place(&mut self.textures);
         (frame.uploads).take(&mut self.meshes, &mut self.shaders, &mut self.textures);
         frame.picks.clear();

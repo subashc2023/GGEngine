@@ -3,8 +3,8 @@
 //! rings, games' meshes with parameters, opaque and blended, a glTF model and a mirrored copy of
 //! it, a turning hierarchy and drifters that wrap, whose ticks despawn and spawn entities, with
 //! colliders, whose outlines draw over the rest, as a layer's own lines and square's outline do,
-//! text, written and shaped again each frame, and an outline round the turning parent, as the
-//! editor outlines what's picked, seen through a
+//! text, written and shaped again each frame, a sprite and that text on the view's canvas, and an
+//! outline round the turning parent, as the editor outlines what's picked, seen through a
 //! camera of the world's that a pivot the ticks turn carries round, run through the engine's main
 //! loop headless, without the tool API, whose development runs' watchers of the assets' files
 //! allocate as they look, three fifths of a tick apart, so that they draw between ticks, once its
@@ -402,6 +402,24 @@ impl Layer for Scene {
         };
         let corner = Mat4::from_translation(Vec3::new(-6.0, -6.0, 0.0));
         cx.draw_text(corner, &self.text, &style);
+        // On the canvas, from the view's top right, away from its middle, where the cursor is
+        // found too, as a menu finds what it's over.
+        let mut canvas = cx.canvas([Align::End, Align::Start]);
+        let backing = Mat4::from_translation(Vec3::new(-200.0, -80.0, 0.0))
+            * Mat4::from_scale(Vec3::new(360.0, 120.0, 1.0));
+        let shade = Sprite {
+            color: Vec4::new(0.0, 0.0, 0.0, 0.5),
+            ..Sprite::default()
+        };
+        canvas.draw_sprite(backing, shade);
+        let on_canvas = TextStyle {
+            size: 40.0,
+            align: [Align::End, Align::Center],
+            ..style
+        };
+        let inset = Mat4::from_translation(Vec3::new(-40.0, -80.0, 0.0));
+        canvas.draw_text(inset, &self.text, &on_canvas);
+        let _ = canvas.cursor();
         let turning = self.turning.expect("attached");
         let turning = cx.world().id(turning).expect("alive");
         cx.outline(turning, Vec4::new(1.0, 0.6, 0.1, 1.0), 1.0);

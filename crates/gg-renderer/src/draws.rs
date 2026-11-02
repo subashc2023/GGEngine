@@ -272,6 +272,24 @@ impl Draws {
         }
     }
 
+    /// How many draws there are: one for each mesh drawn, of whichever run.
+    pub fn len(&self) -> usize {
+        self.transforms.len()
+    }
+
+    /// Places draws `draws`, as they're counted from the first, in the space `transform` takes
+    /// theirs to: each one's transform becomes `transform` times its own. It changes no run, so a
+    /// `transform` that mirrors leaves a draw that culls culling the faces it culled before.
+    ///
+    /// # Panics
+    ///
+    /// If `draws` reaches past them.
+    pub fn place(&mut self, draws: Range<usize>, transform: Mat4) {
+        for at in &mut self.transforms[draws] {
+            *at = transform * *at;
+        }
+    }
+
     /// Whether there are none.
     pub fn is_empty(&self) -> bool {
         self.runs.is_empty()
@@ -418,6 +436,29 @@ mod tests {
         assert_eq!(ends[2] - ends[1], 2 * sizes[2]);
         assert!(over.is_empty());
         assert_eq!([over.transforms.capacity(), over.ids.capacity()], held);
+    }
+
+    /// Placing draws counted from the first moves those alone into the space a transform takes
+    /// them to, across their runs, which stay as they were.
+    #[test]
+    fn placed_draws_go_where_a_transform_takes_them() {
+        let at = |x: f32| Mat4::from_translation(Vec3::new(x, 0.0, 0.0));
+        let mut draws = Draws::default();
+        let sprites = [0.0, 1.0, 2.0].map(|x| (at(x), Sprite::default(), 0));
+        draws.extend_sprites(sprites.into_iter());
+        draws.push_circle(&mut Shaders::default(), at(3.0), Circle::default());
+        assert_eq!(draws.len(), 4);
+        let before = runs(&draws);
+        let scaled = Mat4::from_scale(Vec3::splat(2.0));
+        draws.place(1..4, scaled);
+        assert_eq!(runs(&draws), before);
+        let placed = [
+            at(0.0),
+            scaled * at(1.0),
+            scaled * at(2.0),
+            scaled * at(3.0),
+        ];
+        assert_eq!(draws.transforms, placed);
     }
 
     /// Grids are runs of a mesh and a shader of the engine's own, which `Meshes` and `Shaders` add
