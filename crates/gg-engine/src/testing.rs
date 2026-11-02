@@ -57,7 +57,6 @@ impl Visit for Code {
 
 /// The codes of the events logged on a thread while it's kept, as [`logged`] starts it: the
 /// receiver first, so that the guards drop after it, the later set first.
-#[cfg(feature = "dev")]
 pub(crate) struct Logged {
     pub(crate) codes: std::sync::mpsc::Receiver<String>,
     _codes: tracing::subscriber::DefaultGuard,
@@ -69,7 +68,6 @@ pub(crate) struct Logged {
 /// stay registered, so that tracing-core combines every live one's interest in a callsite another
 /// thread registers first, where with one registered it would ask that thread's alone, which has
 /// none, and keep the callsite off for good (tracing-core 0.1.36's `has_just_one`).
-#[cfg(feature = "dev")]
 pub(crate) fn logged() -> Logged {
     use tracing_subscriber::layer::SubscriberExt;
 

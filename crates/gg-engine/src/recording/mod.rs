@@ -950,17 +950,20 @@ mod tests {
     }
 
     /// A command of [`Painter`]'s: spawns a sprite of this texture.
+    #[cfg(feature = "dev")]
     #[derive(Reflect)]
     struct Paint(crate::Texture);
 
     /// Adds the texture `assets/stone.png` under the app's root as it loads, and queues a sprite of
     /// it as it attaches, which its next tick spawns.
+    #[cfg(feature = "dev")]
     #[derive(Default)]
     struct Painter {
         stone: Option<crate::Texture>,
         commands: Vec<Paint>,
     }
 
+    #[cfg(feature = "dev")]
     impl Layer for Painter {
         fn load(&mut self, cx: &mut Context) {
             let root = cx.root.clone().expect("a root");

@@ -1782,6 +1782,7 @@ pub(crate) mod tests {
 
     /// A `.gltf` of [`triangle`]'s model, its buffer in a data URI, with `edit` made to its JSON:
     /// for tests that edit a model's file as people do.
+    #[cfg(feature = "dev")]
     pub(crate) fn triangle_gltf(edit: impl FnOnce(&mut Value)) -> String {
         let (mut gltf, bin) = triangle();
         let uri = format!("data:application/octet-stream;base64,{}", encode(&bin));
