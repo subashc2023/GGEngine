@@ -230,8 +230,8 @@ pub(crate) struct Lockstep {
     hashes: [BTreeMap<u64, WorldHash>; 2],
     #[cfg(feature = "dev")]
     patches: Patches,
-    /// The host's: how many textures and models there were as it last told its joiner their names,
-    /// the engine's white texture among them.
+    /// The host's: how many textures, models and fonts there were as it last told its joiner their
+    /// names, the engine's white texture among them.
     #[cfg(feature = "dev")]
     named: Counts,
     /// The joiner's: the names its host gave the textures it added, each with the path it names,
@@ -322,7 +322,7 @@ impl Lockstep {
             #[cfg(feature = "dev")]
             patches: Patches::default(),
             #[cfg(feature = "dev")]
-            named: (0, 0),
+            named: (0, 0, 0),
             #[cfg(feature = "dev")]
             names: Vec::new(),
         })

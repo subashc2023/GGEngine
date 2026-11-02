@@ -79,8 +79,8 @@ pub(crate) struct Recorder {
     /// Why the recording stopped, after which nothing more is written: the first write that failed,
     /// or the first command that wouldn't replay.
     failed: Option<Error>,
-    /// How many textures and models there were as it last wrote their names, the engine's white
-    /// texture among them.
+    /// How many textures, models and fonts there were as it last wrote their names, the engine's
+    /// white texture among them.
     named: Counts,
 }
 
@@ -99,7 +99,7 @@ impl Recorder {
             app,
             line: String::new(),
             failed: None,
-            named: (0, 0),
+            named: (0, 0, 0),
         })
     }
 
@@ -132,8 +132,9 @@ impl Recorder {
         self.flush();
     }
 
-    /// Writes a `named` line for each texture and model of `world`'s that the layers added since it
-    /// last wrote them and that's named otherwise than by its path, before a line that may name it.
+    /// Writes a `named` line for each texture, model and font of `world`'s that the layers added
+    /// since it last wrote them and that's named otherwise than by its path, before a line that may
+    /// name it.
     fn names(&mut self, world: &World) {
         let assets = world.assets();
         if assets.counts() == self.named {

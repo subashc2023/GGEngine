@@ -125,13 +125,13 @@ Talk to a running game, through its tool API:
                                  what's wrong with its ID file, and the ID files left without their
                                  assets; the game, but a lockstep session's joiner, whose host
                                  does, writes each one's ID in a file beside it, `<file>.meta`, as
-                                 it starts and as it finds new files: commit it with its file. A file renamed or moved alone
-                                 keeps its ID, the game moving its ID file after it, unless it's
-                                 edited in the same step. A file of a texture or a model the game
-                                 has added, edited, reloads in it, as a shader's does, the nodes
-                                 its `ModelRoot`s spawn with it, but in a recorded run or a lockstep
-                                 session, where a model's nodes and materials change as it next
-                                 starts
+                                 it starts and as it finds new files: commit it with its file. A
+                                 file renamed or moved alone keeps its ID, the game moving its ID
+                                 file after it, unless it's edited in the same step. A file of a
+                                 texture, a model or a font the game has added, edited, reloads in
+                                 it, as a shader's does, the nodes its `ModelRoot`s spawn with it,
+                                 but in a recorded run or a lockstep session, where a model's nodes
+                                 and materials change as it next starts
   apply <OPERATIONS>             Apply OPERATIONS, a JSON array of the API's operations, as one edit:
                                  all or none, between ticks, which `undo` takes back
   set <ID> <COMPONENT> <PATH> <VALUE>

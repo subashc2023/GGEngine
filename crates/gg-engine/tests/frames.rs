@@ -44,7 +44,8 @@ use gg_engine::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_engine::{
     Actions, Align, App, Binding, Blend, BoxCollider2D, Camera, Change, Circle, CircleCollider2D,
     Component, Context, Entity, Event, Font, Key, Layer, Mesh, MeshDraw, Model, MouseButton, Pick,
-    Projection, Shader, Source, Sprite, SpriteSheet, TextStyle, Texture, Tick, Transform, World,
+    Projection, Shader, Source, Sprite, SpriteSheet, Text, TextStyle, Texture, Tick, Transform,
+    World,
 };
 use serde_json::json;
 
@@ -278,7 +279,15 @@ impl Layer for Scene {
         let glass = world.spawn((at(1.5, 0.0, 0.0), glass));
         let sprite = world.spawn((at(-1.5, 0.0, 0.0), assets.sheet.sprite([0, 1], [1, 1])));
         let grandchild = world.spawn((at(0.0, 1.0, 0.0), Sprite::default()));
-        for (child, parent) in [(glass, parent), (sprite, parent), (grandchild, sprite)] {
+        // Text in the engine's own font, which bakes as the first frame draws it.
+        let label = Text {
+            text: "Turning".to_owned(),
+            size: 0.4,
+            ..Text::default()
+        };
+        let label = world.spawn((at(0.0, -1.0, 0.0), label));
+        let children = [(glass, parent), (sprite, parent), (grandchild, sprite)];
+        for (child, parent) in children.into_iter().chain([(label, parent)]) {
             world.set_parent(child, Some(parent)).expect("both alive");
         }
         self.turning = Some(parent);
@@ -386,7 +395,7 @@ impl Layer for Scene {
         let written = write!(self.text, "Frame {:06}\nAVA Æ€ ‘f’ \u{7}漢", self.frames);
         written.expect("a string takes any text");
         let style = TextStyle {
-            font: self.assets().font,
+            font: Some(self.assets().font),
             size: 0.5,
             color: Vec4::new(0.9, 0.9, 0.9, 1.0),
             align: [Align::Start, Align::End],

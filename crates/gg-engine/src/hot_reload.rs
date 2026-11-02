@@ -1,14 +1,15 @@
-//! Hot reload of games' assets, shaders, textures and models, in development runs that serve the
-//! tool API. A thread of its own, `gg-watch`, watches the files each one read as it was loaded, a
-//! shader's own and those it includes, a texture's image, a model's glTF file and those it names,
-//! and reads it again as they change, off the main thread: compiles the shader, decodes the image,
-//! reads the model. The main thread puts what it read in place of the asset, under the same handle,
-//! which the next frame it hands the renderer draws. A change that doesn't compile, decode or read,
-//! or a shader's that breaks the contract that `Shaders::add` describes, warns, and the asset keeps
-//! drawing as it did; until one reads, a change to any file beside its files reads it again too,
-//! such as an include it couldn't find, since a compile that fails lists none of the files it read.
-//! The thread follows a texture or a model whose file is renamed or moved, as the asset database
-//! has it, which the main thread tells it of.
+//! Hot reload of games' assets, shaders, textures, models and fonts, in development runs that serve
+//! the tool API. A thread of its own, `gg-watch`, watches the files each one read as it was loaded,
+//! a shader's own and those it includes, a texture's image, a model's glTF file and those it names,
+//! a font's file, and reads it again as they change, off the main thread: compiles the shader,
+//! decodes the image, reads the model, bakes the font. The main thread puts what it read in place
+//! of the asset, under the same handle, which the next frame it hands the renderer draws. A change
+//! that doesn't compile, decode, read or bake, or a shader's that breaks the contract that
+//! `Shaders::add` describes, warns, and the asset keeps drawing as it did; until one reads, a
+//! change to any file beside its files reads it again too, such as an include it couldn't find,
+//! since a compile that fails lists none of the files it read. The thread follows a texture, a
+//! model or a font whose file is renamed or moved, as the asset database has it, which the main
+//! thread tells it of.
 
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -24,7 +25,9 @@ use gg_core::{Error, Result};
 use gg_renderer::{Compiled, ShaderSource, Shaders, Texture};
 use tracing::{debug, warn};
 
+use crate::Font;
 use crate::assets::Catalog;
+use crate::font::{self, Bake};
 use crate::gltf::{self, Imported};
 use crate::image::{self, Image};
 
@@ -68,13 +71,20 @@ pub(crate) enum Source {
         files: Vec<PathBuf>,
         read_at: SystemTime,
     },
+    /// `font`, loaded as `name` from the font file at `path`, by a read begun at `read_at`.
+    Font {
+        font: Font,
+        name: String,
+        path: PathBuf,
+        read_at: SystemTime,
+    },
 }
 
 impl Source {
     fn name(&self) -> &str {
         match self {
             Self::Shader(shader) => shader.name(),
-            Self::Texture { name, .. } | Self::Model { name, .. } => name,
+            Self::Texture { name, .. } | Self::Model { name, .. } | Self::Font { name, .. } => name,
         }
     }
 
@@ -82,7 +92,7 @@ impl Source {
     fn path(&self) -> &Path {
         match self {
             Self::Shader(shader) => shader.path(),
-            Self::Texture { path, .. } | Self::Model { path, .. } => path,
+            Self::Texture { path, .. } | Self::Model { path, .. } | Self::Font { path, .. } => path,
         }
     }
 
@@ -90,7 +100,7 @@ impl Source {
     fn files(&self) -> &[PathBuf] {
         match self {
             Self::Shader(shader) => shader.files(),
-            Self::Texture { path, .. } => slice::from_ref(path),
+            Self::Texture { path, .. } | Self::Font { path, .. } => slice::from_ref(path),
             Self::Model { files, .. } => files,
         }
     }
@@ -99,22 +109,25 @@ impl Source {
     fn read_at(&self) -> SystemTime {
         match self {
             Self::Shader(shader) => shader.compiled_at(),
-            Self::Texture { read_at, .. } | Self::Model { read_at, .. } => *read_at,
+            Self::Texture { read_at, .. }
+            | Self::Model { read_at, .. }
+            | Self::Font { read_at, .. } => *read_at,
         }
     }
 
-    /// Which texture or model it is; `None` for a shader.
+    /// Which texture, model or font it is; `None` for a shader.
     fn asset(&self) -> Option<Asset> {
         match self {
             Self::Shader(_) => None,
             Self::Texture { texture, .. } => Some(Asset::Texture(*texture)),
             Self::Model { file, .. } => Some(Asset::Model(file.clone())),
+            Self::Font { font, .. } => Some(Asset::Font(*font)),
         }
     }
 
     /// Reads it again from its files, as it was loaded: compiles a shader and checks it against
-    /// the contract for the types it was added for, decodes a texture's image, and reads a model.
-    /// Returns what it read, and the files it read, its own first.
+    /// the contract for the types it was added for, decodes a texture's image, reads a model, and
+    /// bakes a font. Returns what it read, and the files it read, its own first.
     ///
     /// Fails as loading it does.
     fn read(&self) -> Result<(Reloaded, Vec<PathBuf>)> {
@@ -149,16 +162,29 @@ impl Source {
                 };
                 Ok((reloaded, files))
             }
+            Self::Font {
+                font, name, path, ..
+            } => {
+                let bake = Box::new(font::bake(name, path)?);
+                let reloaded = Reloaded::Font {
+                    font: *font,
+                    path: path.clone(),
+                    bake,
+                };
+                Ok((reloaded, vec![path.clone()]))
+            }
         }
     }
 }
 
-/// A texture or a model that the thread watches, as the main thread knows it: a texture by its
-/// handle, and a model by the file it resolved to as it was loaded, which the context keeps it by.
+/// A texture, a model or a font that the thread watches, as the main thread knows it: a texture
+/// and a font by its handle, and a model by the file it resolved to as it was loaded, which the
+/// context keeps it by.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Asset {
     Texture(Texture),
     Model(PathBuf),
+    Font(Font),
 }
 
 /// An asset that the thread read again, which the main thread puts in place of the one loaded.
@@ -176,13 +202,20 @@ pub(crate) enum Reloaded {
         path: PathBuf,
         imported: Imported,
     },
+    /// What `font` baked again from `path`, boxed, as a bake is over 2 KiB and the rest are small.
+    Font {
+        font: Font,
+        path: PathBuf,
+        bake: Box<Bake>,
+    },
 }
 
 /// What the main thread sends the thread.
 enum Message {
     /// An asset to watch.
     Watch(Source),
-    /// A texture or a model whose file is at a path anew, renamed or moved, as what it holds.
+    /// A texture, a model or a font whose file is at a path anew, renamed or moved, as what it
+    /// holds.
     Moved(Asset, PathBuf),
 }
 
@@ -193,12 +226,13 @@ pub(crate) struct HotReload {
     /// `None` once it's dropping.
     messages: Option<Sender<Message>>,
     reloaded: Receiver<Reloaded>,
-    /// The textures and models it watches whose files are under the asset root, or will be, which
-    /// it follows by their asset IDs as the files are renamed or moved.
+    /// The textures, models and fonts it watches whose files are under the asset root, or will be,
+    /// which it follows by their asset IDs as the files are renamed or moved.
     followed: Vec<Followed>,
 }
 
-/// A texture or a model whose file is under the asset root, which [`HotReload::follow`] follows.
+/// A texture, a model or a font whose file is under the asset root, which [`HotReload::follow`]
+/// follows.
 struct Followed {
     asset: Asset,
     /// The name it was loaded as.
@@ -259,19 +293,19 @@ impl HotReload {
         self.send(Message::Watch(source));
     }
 
-    /// Has the thread watch `texture`, loaded as `name`, a stand-in for the texture whose asset ID
-    /// is `id`, which no asset has, once one has it, as [`follow`](Self::follow) finds it: its file
-    /// is read then, in the stand-in's place.
-    pub(crate) fn watch_for(&mut self, texture: Texture, name: &str, id: AssetId) {
+    /// Has the thread watch `asset`, a texture or a font loaded as `name`, a stand-in for the one
+    /// whose asset ID is `id`, which no asset has, once one has it, as [`follow`](Self::follow)
+    /// finds it: its file is read then, in the stand-in's place.
+    pub(crate) fn watch_for(&mut self, asset: Asset, name: &str, id: AssetId) {
         self.followed.push(Followed {
-            asset: Asset::Texture(texture),
+            asset,
             name: name.to_owned(),
             id: Some(id),
             at: None,
         });
     }
 
-    /// Has the thread follow each texture and model it watches whose file the asset database
+    /// Has the thread follow each texture, model and font it watches whose file the asset database
     /// `catalog`, of the asset root `root`, has elsewhere since it last did, by its ID, which one
     /// without takes from the database once it has one for the file: watching it at that path from
     /// then on, as a file renamed or moved holds what it held; or, for a stand-in, whose ID no
@@ -289,13 +323,21 @@ impl HotReload {
                 continue;
             }
             let path = root.join(at);
+            let name = followed.name.clone();
+            // Never read: it's read as it's first looked at.
+            let read_at = SystemTime::UNIX_EPOCH;
             messages.push(match (&followed.at, &followed.asset) {
                 (None, &Asset::Texture(texture)) => Message::Watch(Source::Texture {
                     texture,
-                    name: followed.name.clone(),
+                    name,
                     path,
-                    // Never read: it's read as it's first looked at.
-                    read_at: SystemTime::UNIX_EPOCH,
+                    read_at,
+                }),
+                (None, &Asset::Font(font)) => Message::Watch(Source::Font {
+                    font,
+                    name,
+                    path,
+                    read_at,
                 }),
                 (_, asset) => Message::Moved(asset.clone(), path),
             });
@@ -378,9 +420,9 @@ fn take(message: Message, watched: &mut Vec<(Source, Files)>) {
                 files.moved(&path);
                 match source {
                     Source::Shader(_) => {}
-                    Source::Texture { path: was, .. } | Source::Model { path: was, .. } => {
-                        *was = path
-                    }
+                    Source::Texture { path: was, .. }
+                    | Source::Model { path: was, .. }
+                    | Source::Font { path: was, .. } => *was = path,
                 }
             }
         }
@@ -433,6 +475,12 @@ fn read(source: &Source, files: &mut Files, back: &Sender<Reloaded>) {
                     model = name,
                     path = %path,
                     "{why}; the model keeps drawing as it did"
+                ),
+                Source::Font { name, .. } if news => warn!(
+                    code,
+                    font = name,
+                    path = %path,
+                    "{why}; the font keeps drawing as it did"
                 ),
                 _ => debug!(code, asset = source.name(), path = %path, "Fails as it did"),
             }

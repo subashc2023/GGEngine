@@ -81,13 +81,12 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Dropping from the Assets panel** (2026-11-01)
 - **Phase 7, assets** (2026-11-01)
 - **Fonts and text** (2026-11-01)
+- **Text in the world** (2026-11-01)
 
 ## Now
 
-**Text in the world**, Phase 8's second milestone: a `Text` component the world draws as it draws
-sprites, which scenes save and the Inspector and tools edit, naming its font by its asset ID; fonts
-loaded wherever text names them, and baked again as their files change; its plan says when it's
-done.
+**A game's UI**, Phase 8's third milestone: HUDs and menus that layers lay out as they update, in
+the view's own space, anchored to its edges, with the demo's menu; its plan says when it's done.
 
 ## Next
 
@@ -173,7 +172,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | A model's nodes as its file changed while its game was down, as between a crash and its restart: a world restored from a snapshot keeps them as the snapshot did, but for the draws a run of other assets left out, until the model's next change; and an undone delete of a model's root, or a redone create, brings back its nodes as they were before its model changed since. Refitting there would undo what code did to them, and lockstep peers would part, without a print of each model's nodes in the snapshot and the undo to tell a model changed since | Someone edits a model while its game is down, or between deleting its root and undoing that |
 | A model standing in for a following run with its nodes, so that the hash still matches: a replay or a joiner that can't load a model stands in with one of no nodes, and its hash parts from its run's where the nodes were | A replay or a joiner runs without a game's model files, as a bug report's might |
 | A sprite sheet's texture reloaded at another size, which keeps drawing as it did (`asset.sheet_resized`): its sprites hold its cells as fractions of its size, which a layer cut it by as it added it | A game's sheets grow as they're drawn, as frames added to an animation's |
-| Following a texture's or a model's file outside the asset root, which has no asset ID, as it's renamed or moved: it's watched where it was, missing there, and reloads no more | Someone moves such files while their game runs |
+| Following a texture's, a model's or a font's file outside the asset root, which has no asset ID, as it's renamed or moved: it's watched where it was, missing there, and reloads no more | Someone moves such files while their game runs |
 | Per-frame data in a buffer: shaders get the camera's view and projection as one matrix, and see the world through each draw's transform, but not the camera's position, the time or the lights | Phase 12, with lighting |
 | Materials: parameters kept on the GPU and written when they change, rather than copied every frame with each instance; `MeshDraw`'s cap of 64 bytes of parameters, past which a shader draws through `Context::draw`, goes with it | Phase 12, with materials |
 | Games' textures of data rather than color, such as normal maps, which shaders read as stored rather than decoded from sRGB, as they read fonts' fields: `Context::add_texture` adds color alone | Phase 12, with PBR's maps |
@@ -181,7 +180,9 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Shaping's features that put glyphs in place of others, such as ligatures and contextual alternates, which text is shaped without, as its font's field may not hold what they'd substitute; and the scripts that need them, those written right to left, and lines of more than one direction | A game's font relies on them, or a game writes such a script |
 | Text wrapped to a width, and fallback fonts, a character one lacks drawn from another | A game's UI lays out paragraphs, or mixes scripts in a line |
 | Outlines, shadows and glows round text, from the true distance field its field holds in its alpha | A game's text needs one to read over what's behind it |
-| Fonts' fields kept between runs, or cooked: each font bakes as it loads, Inter Bold's 218 glyphs in about 50 ms in release and 140 ms in a debug build, on the job system's threads | Phase 10, which cooks them |
+| Fonts' fields kept between runs, or cooked: each font bakes as it loads, Inter Bold's 218 glyphs in about 50 ms in release and 140 ms in a debug build, on the job system's threads, and the engine's own as text is first drawn in it, inside that frame; a font's file read again bakes on the watcher's thread alone | Phase 10, which cooks them |
+| Text that faces the camera, as labels over 3D entities do: a `Text` lies in its entity's XY plane, as a sprite does | A 3D game labels its entities |
+| Text of several lines edited in the Inspector, whose field for a string is a line's: a text's other lines come from scenes, code and tools | Someone writes text of several lines in the Inspector |
 | Fonts other than a file's default instance of outlines: a variable font draws at its axes' defaults, unhinted, and collections (`.ttc`, `.otc`), color fonts and fonts of bitmaps alone don't load | A game needs one |
 | Premultiplied alpha for games' textures: with straight alpha, as PNGs store it, a linear filter at an edge mixes in the color of the transparent pixels beside it | A game's art shows dark or colored fringes |
 | Sorting what blends back to front by its depth in the view, rather than by its z in the world, which orders it rightly only as seen from in front, as [Rendering](../ARCHITECTURE.md#rendering) says; and what layers draw themselves goes in the order given. Sorting coplanar sprites each by its own depth would sort the swarm's 100,000 every frame the camera turns, and swap overlapping ones as it does | A game blends in 3D, such as particles or glass |
@@ -275,9 +276,9 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | `MeshDraw`'s mesh and shader named, as `Sprite.texture` is: opaque until then, shown but not set, saved in scenes or hashed, and carried across a restart by their indices only where the layers added the same assets in the same order; and setting them by name | A game builds its draws from data |
 | Watching the asset root through the OS's notifications of changes: its thread scans it every second, walking it whole and reading every ID file, about 70 ms for 1,000 assets on Windows, and reads whole each asset's file that changed, for its print, every one in a clone's first run, which delays its next scans but no answer; and a run's start scans it on the main thread, before its layers load, flushing each ID file it writes to the disk, about 6 ms apiece | A project's asset root of tens of thousands of files |
 | IDs for shaders, scenes, sounds and other kinds, for assets outside the asset root, and for assets reached through links: the scan gives textures, models and fonts under the root alone, never through a link | Each kind as something first names it by ID |
-| Builds without `dev` naming textures by their IDs: they read no ID file, so they name every texture by its path, and a scene, a recording or a snapshot that names one by its ID finds none there | Phase 10, whose cooked package gives each asset its ID |
-| Loading the textures that scene text names where a layer loads it into a world itself, as inside a tick, as the sandbox's grid reload does: a world can't reach the renderer's textures, which are the context's, so `World::load_scene` finds only those loaded, while `Context::load_scene_file`, the tool API and the engine's other reads load them | A game loads scene text in a tick that names textures no layer adds |
-| A lockstep joiner loading for its tool API a texture its host hasn't named (`asset.not_given`), whose name could differ from the host's; the host's edits load any | Someone edits a joiner's textures from its own editor |
+| Builds without `dev` naming assets by their IDs: they read no ID file, so they name every texture, model and font by its path, and a scene, a recording or a snapshot that names one by its ID finds none there | Phase 10, whose cooked package gives each asset its ID |
+| Loading the textures, models and fonts that scene text names where a layer loads it into a world itself, as inside a tick, as the sandbox's grid reload does: a world can't reach the renderer's textures, which are the context's, so `World::load_scene` finds only those loaded, while `Context::load_scene_file`, the tool API and the engine's other reads load them | A game loads scene text in a tick that names assets no layer adds |
+| A lockstep joiner loading for its tool API an asset its host hasn't named (`asset.not_given`), whose name could differ from the host's; the host's edits load any | Someone edits a joiner's assets from its own editor |
 | `gg mv` and an MCP `mv`, moving an asset and its ID file in one step: a file renamed alone keeps its ID by what it holds, but not one edited in the same step, nor one renamed in a fresh clone before its first run, which has no cache of prints | An agent's renames lose IDs that pairing by content can't keep |
 | A lockstep joiner that joins after its host's texture was renamed finding its file where it is now: it loads it by the path its host loaded it from, as the host names it, standing in where that's gone, as it is on one machine | Someone renames assets during a lockstep session |
 | Following a rename in case alone, as Windows' and macOS's file systems allow, of an asset whose ID file keeps the old case: the ID file matches only when case is ignored (`asset.meta_case`), so the asset keeps its ID for the run, then goes without until its ID file is renamed too | Someone renames assets in case alone |
@@ -341,8 +342,8 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Comments in scene files, which a save drops | People annotate scenes |
 | A list of recent scenes in the editor's File menu | Someone keeps opening the same few scenes |
 | Opening a scene from the editor's Assets panel, by a double click or a drag onto the view, as the drag of the editor's own world did; the File menu's Open opens one | Someone opens scenes often |
-| A texture from the Assets panel let go where no sprite takes it making one: on empty space a sprite of its own, on an entity without one a `Sprite`; the Logs, and the Inspector, say it took nothing | Someone lays out a 2D scene from the Assets panel |
-| Drops from the Assets panel onto the Entities panel's rows, as a child of the entity there, and onto the Inspector's texture fields: the view alone takes them | Someone drops onto them |
+| A texture from the Assets panel let go where no sprite takes it making one: on empty space a sprite of its own, on an entity without one a `Sprite`; and a font so a `Text`; the Logs, and the Inspector, say it took nothing | Someone lays out a 2D scene from the Assets panel |
+| Drops from the Assets panel onto the Entities panel's rows, as a child of the entity there, and onto the Inspector's texture and font fields: the view alone takes them | Someone drops onto them |
 | Dragging from the Assets panel torn off into a window of its own: a drag stays in the window it started in, which takes the button's release, so it never reaches the view | Someone keeps the Assets panel in a window of its own |
 | Listing the Assets panel's folder off the main thread, as a thread watching it would: it's listed on the main thread each second it shows, which a folder of many thousands of files would hold up for milliseconds | A project's asset folder that big |
 | Keeping edits made while a copy plays, which go with it at Stop, as Unity's do, but a scene file's save; and showing that the game plays beyond the lit Play or Simulate, such as a tint round the view | Someone loses an edit made while the world runs, or edits a running world for the scene |

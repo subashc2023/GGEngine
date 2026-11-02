@@ -462,6 +462,9 @@ fn same(a: &Value, ours: &World, b: &Value, theirs: &World) -> bool {
         (&Value::Model(x), &Value::Model(y)) => {
             ours.assets().model_name(x) == theirs.assets().model_name(y)
         }
+        (&Value::Font(x), &Value::Font(y)) => {
+            ours.assets().font_name(x) == theirs.assets().font_name(y)
+        }
         (Value::Option(x), Value::Option(y)) => match (x, y) {
             (Some(x), Some(y)) => same(x, ours, y, theirs),
             (x, y) => x.is_none() && y.is_none(),

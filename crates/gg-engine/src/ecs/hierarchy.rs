@@ -683,9 +683,10 @@ pub(super) mod tests {
     #[test]
     fn a_pose_is_where_drawing_draws_an_entity() {
         use gg_core::math::Vec3;
-        use gg_renderer::{Draws, Shaders, Sprite};
+        use gg_renderer::{Draws, Shaders, Sprite, Textures};
 
         use crate::draw::{self, Poses, Scratch};
+        use crate::font::Fonts;
         use crate::interpolation::Past;
 
         let placed = |x: f32, turn: f32, scale: [f32; 3]| Transform {
@@ -714,6 +715,7 @@ pub(super) mod tests {
             1.0,
             &mut draws,
             shaders,
+            &mut Fonts::new(&mut Textures::default()),
             &mut Scratch::default(),
         );
         // Its one sprite's transform, which `Debug` shows to the bit, a zero's sign too.

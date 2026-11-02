@@ -1,7 +1,7 @@
 //! The text of a recording's values: reflection's [`Value`]s, each on one line, every part tagged
 //! with its kind, so that they read back without their types, with their floats' bits, with the
-//! entities they hold by their IDs and with the textures and models by their names, their IDs or
-//! else their paths. The engine writes the text itself, and `ron` only reads it.
+//! entities they hold by their IDs and with the textures, models and fonts by their names, their
+//! IDs or else their paths. The engine writes the text itself, and `ron` only reads it.
 
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -105,6 +105,11 @@ fn put(out: &mut String, value: &Value, world: &World, fold: bool) {
             quote(out, world.assets().model_name(model));
             out.push(')');
         }
+        &Value::Font(font) => {
+            out.push_str("Font(");
+            quote(out, world.assets().font_name(font));
+            out.push(')');
+        }
         Value::Option(None) => out.push_str("None"),
         Value::Option(Some(value)) => {
             out.push_str("Some(");
@@ -182,6 +187,8 @@ pub(crate) enum Text {
     Texture(String),
     /// A model, as a texture.
     Model(String),
+    /// A font, as a texture.
+    Font(String),
     None,
     Some(Box<Text>),
     List(Vec<Text>),
@@ -222,6 +229,7 @@ impl Text {
             Self::Dead => "Dead",
             Self::Texture(_) => "Texture",
             Self::Model(_) => "Model",
+            Self::Font(_) => "Font",
             Self::None => "None",
             Self::Some(_) => "Some",
             Self::List(_) => "List",
@@ -231,7 +239,7 @@ impl Text {
         }
     }
 
-    /// Adds each texture and model it holds to `names`, in order.
+    /// Adds each texture, model and font it holds to `names`, in order.
     pub(crate) fn assets<'t>(&'t self, names: &mut Vec<Asset<&'t str>>) {
         let fields = |given: &'t [(String, Text)], names: &mut Vec<Asset<&'t str>>| {
             for (_, text) in given {
@@ -241,6 +249,7 @@ impl Text {
         match self {
             Self::Texture(name) => names.push(Asset::Texture(name)),
             Self::Model(name) => names.push(Asset::Model(name)),
+            Self::Font(name) => names.push(Asset::Font(name)),
             Self::Some(text) => text.assets(names),
             Self::List(items) => items.iter().for_each(|item| item.assets(names)),
             Self::Struct(given) | Self::Variant(_, given) => fields(given, names),
@@ -304,6 +313,7 @@ impl Text {
                 (world.assets().texture(name)).map_or(Value::Opaque, Value::Texture)
             }
             Self::Model(name) => (world.assets().model(name)).map_or(Value::Opaque, Value::Model),
+            Self::Font(name) => (world.assets().font(name)).map_or(Value::Opaque, Value::Font),
             Self::None => Value::Option(None),
             Self::Some(text) => Value::Option(Some(Box::new(text.value(world)))),
             Self::List(items) => Value::List(items.iter().map(|item| item.value(world)).collect()),

@@ -313,17 +313,17 @@ A project's state is text that people and agents edit, diff and merge with ordin
   line and paragraph separators and default-ignorable code points; names ASCII identifiers; at
   most 64 levels deep. The engine writes the text itself, so that the bytes depend on no
   library's formatting, line endings or Rust release, and `ron` only reads it, through seeds
-  that reflection's descriptions drive, never its untyped values. A texture or a model is saved as
-  its name, its asset ID or else its path relative to the app's root (`App::root`), as Asset IDs
-  says below, which a load finds it by, as it finds it by a path to its file, as a scene written by
-  hand may name it, loading it where no layer has; what's opaque, such as a `MeshDraw`, isn't saved:
-  a load builds each component on its type's `Component::base`, which gives it that, or from the
-  scene alone. A field a scene leaves out, as one saved before its type had the field does, takes
-  its default, and saves again whole. A child's `Parent` is saved as its parent's ID, and a root's
-  isn't. A save makes each component again as a load would, so that every scene saved loads; a
-  load checks everything before it spawns anything, all or nothing, and a refusal begins with the
-  line and column where the text is refused, and, but for a syntax error, names the entity, the
-  component and the field.
+  that reflection's descriptions drive, never its untyped values. A texture, a model or a font is
+  saved as its name, its asset ID or else its path relative to the app's root (`App::root`), as
+  Asset IDs says below, which a load finds it by, as it finds it by a path to its file, as a scene
+  written by hand may name it, loading it where no layer has; what's opaque, such as a `MeshDraw`,
+  isn't saved: a load builds each component on its type's `Component::base`, which gives it that,
+  or from the scene alone. A field a scene leaves out, as one saved before its type had the field
+  does, takes its default, and saves again whole. A child's `Parent` is saved as its parent's ID,
+  and a root's isn't. A save makes each component again as a load would, so that every scene saved
+  loads; a load checks everything before it spawns anything, all or nothing, and a refusal begins
+  with the line and column where the text is refused, and, but for a syntax error, names the
+  entity, the component and the field.
 - **Prefabs.** A prefab is a scene of one subtree, placed as a copy under a parent. Each of the
   copy's IDs is mixed from one drawn for the copy and the prefab's own, `mix64(local ^
   mix64(instance ^ PLACE))`, a permutation of the prefab's IDs for each copy, fixed for good, so
@@ -407,48 +407,51 @@ A project's state is text that people and agents edit, diff and merge with ordin
     run has, its ID file with it, takes that one's place, keeping its ID for the run, as any ID file
     changed does. A texture loaded from an asset's file before it was renamed is the one its new
     path gives, loaded once.
-  - Scenes, the world's hash, recordings, snapshots, lockstep inputs and the tool API name a texture
-    or a model by its name: its asset ID, or a model's image by its model's and its place in it,
-    such as `5f3c9a1e07b2d846#0`, so that a file renamed with its ID file changes none of them; or
-    else its path, as for an asset outside the root, or whose ID file is missing in a run that
-    writes none. Nothing names a font yet: layers load fonts by their paths. Each is read by a name or by a path to the asset's file. An asset is named as it's
-    added, by the ID its run's database holds for its file then, and keeps that name for the run,
-    but in a replay or a lockstep joiner, which go by the names they're given, as below.
-  - A texture or a model that a scene, the tool API's edit or `scene open`, or a recorded or a
-    lockstep peer's command or edit names, and no layer has added, loads there, before the text is
-    read, as `Context::add_texture` and `add_model` load a file, and is named as they name one, its
-    file found by the name: in a run that follows another, a replay or a lockstep joiner, at the
-    path the name was given; else by an ID, as the run's database has it, which a joiner has but a
-    replay, reading no ID file, doesn't; else by a path from the asset root, which mustn't be
-    absolute or lead outside it, as through `..` or a link. A model's image loads with its model,
-    which a name of the image loads. A name that doesn't load refuses what names it where it's
-    asked for (`asset.no_texture` or `asset.no_model`, the API's `api.no_texture` or
-    `api.no_model`), saying why: `asset.model_image` for an image the model hasn't,
-    `asset.unknown_id`, `asset.outside_root`, or the add's own, as `engine.bad_texture`. In a run
-    that follows another, and in a restore, a stand-in takes its place instead, of magenta and
-    black squares for a texture, of no nodes for a model, named as named, warning `asset.stand_in`,
-    so that the run goes as the other did, its hash reading names alone, but for a model's nodes,
+  - Scenes, the world's hash, recordings, snapshots, lockstep inputs and the tool API name a
+    texture, a model or a font by its name: its asset ID, or a model's image by its model's and its
+    place in it, such as `5f3c9a1e07b2d846#0`, so that a file renamed with its ID file changes none
+    of them; or else its path, as for an asset outside the root, or whose ID file is missing in a
+    run that writes none. Each is read by a name or by a path to the asset's file. An asset is
+    named as it's added, by the ID its run's database holds for its file then, and keeps that name
+    for the run, but in a replay or a lockstep joiner, which go by the names they're given, as
+    below.
+  - A texture, a model or a font that a scene, the tool API's edit or `scene open`, or a recorded
+    or a lockstep peer's command or edit names, and no layer has added, loads there, before the
+    text is read, as `Context::add_texture`, `add_model` and `add_font` load a file, and is named as
+    they name one, its file found by the name: in a run that follows another, a replay or a
+    lockstep joiner, at the path the name was given; else by an ID, as the run's database has it,
+    which a joiner has but a replay, reading no ID file, doesn't; else by a path from the asset
+    root, which mustn't be absolute or lead outside it, as through `..` or a link. A model's image
+    loads with its model, which a name of the image loads. A name that doesn't load refuses what
+    names it where it's asked for (`asset.no_texture`, `asset.no_model` or `asset.no_font`, the
+    API's `api.no_texture`, `api.no_model` or `api.no_font`), saying why: `asset.model_image` for
+    an image the model hasn't, `asset.unknown_id`, `asset.outside_root`, or the add's own, as
+    `engine.bad_texture`. In a run that follows another, and in a restore, a stand-in takes its
+    place instead, of magenta and black squares for a texture, of no nodes for a model, and for a
+    font one whose text draws in the engine's own, named as named, warning `asset.stand_in`, so
+    that the run goes as the other did, its hash reading names alone, but for a model's nodes,
     which its roots spawn none of then. What's loaded so is noted among what the layers added, so
-    that a snapshot's `asset` lines list it, and a run restored from one loads each texture and
-    model its run had, in order, before it reads the world. A lockstep host loads what a scene
+    that a snapshot's `asset` lines list it, and a run restored from one loads each texture, model
+    and font its run had, in order, before it reads the world. A lockstep host loads what a scene
     file's save names before it offers it, so that their names go out first, and offers none
     naming an asset it can't load; a joiner loads for its tool API only what its host named
     (`asset.not_given`). Scene text that a layer loads into a world itself, as inside a tick, finds
-    only what's loaded. Each decodes on the main thread as it's named, as a layer's add does.
+    only what's loaded. Each decodes, or bakes, on the main thread as it's named, as a layer's add
+    does.
   - Builds without `dev`, which read no ID file, name every asset by its path, so that a scene, a
     recording or a snapshot naming one by its ID finds none there; cooked data will give them IDs.
   - A run's names travel with what another process reads of it, so that the other goes as it did
     whatever ID files its disk holds, as a checkout without those not yet committed. A recording
-    has a `named` line for each texture and model named otherwise than by its path, the name and
-    the path, by which its replay, reading no ID file, names its assets. A snapshot file has them
-    too, by which a run restored from it reads its values, an asset whose ID changed since coming
-    back by its path, though the run names it its own way, and one whose file was renamed since,
-    its ID file moved with it, from where the run's database has that ID now, its `asset` line
-    following it, so that what's opaque comes back. A lockstep joiner names every asset as its host
-    does, by its path until the host's world comes with its names, which rename those it has added,
-    as each world the host sends again does, and by the names the host sends of those it adds
-    after, before the inputs that may name them; so a joiner's names may be IDs its own disk holds
-    no ID file for, which its `assets` doesn't list.
+    has a `named` line for each texture, model and font named otherwise than by its path, the name
+    and the path, by which its replay, reading no ID file, names its assets. A snapshot file has
+    them too, by which a run restored from it reads its values, an asset whose ID changed since
+    coming back by its path, though the run names it its own way, and one whose file was renamed
+    since, its ID file moved with it, from where the run's database has that ID now, its `asset`
+    line following it, so that what's opaque comes back. A lockstep joiner names every asset as its
+    host does, by its path until the host's world comes with its names, which rename those it has
+    added, as each world the host sends again does, and by the names the host sends of those it
+    adds after, before the inputs that may name them; so a joiner's names may be IDs its own disk
+    holds no ID file for, which its `assets` doesn't list.
   - A test's context reads the ID files under the root it's given, writing none, as a run that
     serves no tool API does, so that a game's reference hashes name its assets as its runs do.
   [asset.rs](crates/gg-api/src/asset.rs), [assets.rs](crates/gg-engine/src/assets.rs) and
@@ -902,19 +905,19 @@ what's drawn there or nearer, so that at one depth the later goes over, as 2D dr
 
 Layers add shaders, meshes and textures and draw them through their `Context`, and the renderer's
 `Shaders`, `Meshes` and `Textures` hand out their handles at once, on the main thread; each frame's
-render data carries what's been added to them, or replaced in them, since, in order. After the frame's ticks and the
-layers' updates, the engine draws the world's entities that have a `Transform` and a sprite, a
-circle or a `MeshDraw`, a mesh with its shader and parameters held without their types, after what
-the layers drew, children where their ancestors carry them: first the meshes whose shaders are
-opaque, whose depth hides what's behind them whatever order they draw in, by shader, then mesh, so
-that each mesh with each shader is one instanced draw, and their z's never sort them; then what
-blends, back to front by their z's in the world, those at one z drawing sprites, then circles, under
-meshes; each batch and each z in the order of their IDs, which overlapping entities keep as others
-come and go. World z orders what blends rightly as seen from in front of layers parallel to XY, as
-2D cameras see them; from behind or the side, what blends draws in the wrong order among itself,
-though rightly against what's opaque. At one depth, an opaque mesh goes under what blends; a layer's
-opaque draws hide the world's behind them, and its draws that blend go under the world's opaque ones
-behind them.
+render data carries what's been added to them, or replaced in them, since, in order. After the
+frame's ticks and the layers' updates, the engine draws the world's entities that have a `Transform`
+and a sprite, a circle, a `Text` or a `MeshDraw`, a mesh with its shader and parameters held without
+their types, after what the layers drew, children where their ancestors carry them: first the
+meshes whose shaders are opaque, whose depth hides what's behind them whatever order they draw in,
+by shader, then mesh, so that each mesh with each shader is one instanced draw, and their z's never
+sort them; then what blends, back to front by their z's in the world, those at one z drawing
+sprites, then circles, then text, under meshes; each batch and each z in the order of their IDs,
+which overlapping entities keep as others come and go. World z orders what blends rightly as seen
+from in front of layers parallel to XY, as 2D cameras see them; from behind or the side, what blends
+draws in the wrong order among itself, though rightly against what's opaque. At one depth, an opaque
+mesh goes under what blends; a layer's opaque draws hide the world's behind them, and its draws
+that blend go under the world's opaque ones behind them.
 
 Every draw into the view writes its ID beside its color, into an image of IDs the view's size, a
 64-bit number as two 32-bit halves, which each frame clears to 0: the world's draws their entities'
@@ -976,15 +979,16 @@ breaks it, naming each way (`renderer.shader_mismatch`). It reads the SPIR-V bec
 reflection names what a pointer points at but none of its fields.
 
 In a development run that serves the tool API, a thread of its own, `gg-watch`, watches the files
-each game's shader, texture and model read as it was loaded, a shader's own and those it includes as
-slangc lists them, a texture's image, and a model's glTF file and the buffers and images it names,
-by their times and lengths every tenth of a second, and reads the asset again as they change and
-then hold for a look, off the main thread: compiles the shader, decodes the image, reads the model.
-As the next frame starts, the main thread puts what it read in place of the asset, under the same
-handle, so that whatever draws it draws what's new from that frame: a shader's old pipeline and a
-mesh's old buffers retire until the GPU is done with them, and a texture's new image takes its slot
-in the bindless set once the GPU has finished the frames before, which may sample the old, so the
-frame that takes it waits for them, a frame's time at most. A texture takes an image of any size,
+each game's shader, texture, model and font read as it was loaded, a shader's own and those it
+includes as slangc lists them, a texture's image, a model's glTF file and the buffers and images it
+names, and a font's file, by their times and lengths every tenth of a second, and reads the asset
+again as they change and then hold for a look, off the main thread: compiles the shader, decodes the
+image, reads the model, bakes the font. As the next frame starts, the main thread puts what it read
+in place of the asset, under the same handle, so that whatever draws it draws what's new from that
+frame: a shader's old pipeline and a mesh's old buffers retire until the GPU is done with them, and
+a texture's new image takes its slot in the bindless set once the GPU has finished the frames
+before, which may sample the old, so the frame that takes it waits for them, a frame's time at
+most. A texture takes an image of any size,
 but one cut into a sprite sheet, whose cells a layer has where its size put them, keeps drawing as
 it did rather than take one of another (`asset.sheet_resized`). A model takes each primitive's
 vertices and indices and each image, which its entities draw at once, and its nodes and materials,
@@ -995,14 +999,15 @@ that's recorded or in a lockstep session, whose world changes only as the run it
 it, a model takes its vertices, indices and images alone: its nodes and materials stay as they were
 until the run starts again (`asset.model_changed`), and a model of other numbers of primitives or
 images takes nothing. The engine adds its model shader for every alpha mode with a run's first
-model, so that a material read again adds none. A
-stand-in takes its file's image once the file comes, or the file of the asset whose ID it stands
-for, once one has it, but never a file outside the asset root (`asset.outside_root`); and a texture
-or a model whose file under the root is renamed or moved, as the asset database finds it by the ID
-it has, or that the database gives its file once it has one, is watched where it is, a rename
-alone reading nothing again. A change that
-doesn't compile, decode or read, or breaks a shader's contract, warns, and the asset keeps drawing
-as it did. The engine's own shaders don't reload, nor do the meshes layers make themselves.
+model, so that a material read again adds none. A font takes what it baked, its field's texels at
+any size, which its text is laid out by from that frame. A texture's or a font's stand-in takes its
+file's once the file comes, or the file of the asset whose ID it stands for, once one has it, but
+never a file outside the asset root (`asset.outside_root`); and a texture, a model or a font whose
+file under the root is renamed or moved, as the asset database finds it by the ID it has, or that
+the database gives its file once it has one, is watched where it is, a rename alone reading nothing
+again. A change that doesn't compile, decode, read or bake, or breaks a shader's contract, warns,
+and the asset keeps drawing as it did. The engine's own shaders and font don't reload, nor do the
+meshes layers make themselves.
 
 Windowed runs keep a pipeline cache, which they load from the OS's per-user directory for caches as
 the renderer starts and save as it ends, so that pipelines an earlier run made are made again in a
@@ -1067,20 +1072,27 @@ everything else, the world's draws too, so that they show over all of it but whe
 nearer, as debugging wants.
 
 Text is drawn from fonts' fields, which `Context::add_font` bakes as a TrueType or OpenType font
-loads, until Phase 10 cooks them: a texture of data, which shaders read as stored rather than
-decoded from sRGB, holding a multi-channel signed distance field of each glyph of the characters
-Windows-1252 prints that the font has, and of its `.notdef`, which draws in place of any other
-character but whitespace and controls, 48 texels to an em, its distances reaching 4 texels either
-side of each glyph's edge, and in its alpha the true distance, which outlines and shadows will
-read. The median of a texel's three distances keeps a glyph's corners sharp at any size, where a
-single distance would round them off. fdsm generates each glyph's field from the outline skrifa
-reads, unhinted, on the job system's threads, a fixed seed coloring its edges so that a font bakes
-the same field every time, and corrects its errors. `Context::draw_text` shapes each line of a
-text with harfrust, for the font's kerning and its marks' places, but without the features that
-put glyphs in place of others, as ligatures and contextual alternates, whose glyphs the field may
-not hold; and draws each glyph on the engine's quad with the text shader, an instanced draw for a
-run of them, as sprites are, which smooths a glyph's edge over a pixel by how many of the view's
-pixels the field's range spans there, so that text is as crisp drawn large as small.
+loads, or the engine as text names one, until Phase 10 cooks them: a texture of data, which shaders
+read as stored rather than decoded from sRGB, holding a multi-channel signed distance field of each
+glyph of the characters Windows-1252 prints that the font has, and of its `.notdef`, which draws in
+place of any other character but whitespace and controls, 48 texels to an em, its distances
+reaching 4 texels either side of each glyph's edge, and in its alpha the true distance, which
+outlines and shadows will read. The median of a texel's three distances keeps a glyph's corners
+sharp at any size, where a single distance would round them off. fdsm generates each glyph's field
+from the outline skrifa reads, unhinted, on the job system's threads, a fixed seed coloring its
+edges so that a font bakes the same field every time, and corrects its errors. `Context::draw_text`
+shapes each line of a text with harfrust, for the font's kerning and its marks' places, but without
+the features that put glyphs in place of others, as ligatures and contextual alternates, whose
+glyphs the field may not hold; and draws each glyph on the engine's quad with the text shader, an
+instanced draw for a run of them, as sprites are, which smooths a glyph's edge over a pixel by how
+many of the view's pixels the field's range spans there, so that text is as crisp drawn large as
+small. Text that names no font is in the engine's own, Inter, as the UI is, which bakes the first
+time text is drawn in it, into a texture every context keeps for its field from the start, so that
+no texture's index depends on when; a font's stand-in draws in it too. The world draws an entity's
+`Text`, its text in a font, an em of a size, a color and an alignment, where its entity draws, as
+`Context::draw_text` draws text, each glyph its entity's draw, so that a pick of it finds the
+entity; scenes save it, naming its font as [Project state](#project-state) says, and the Inspector
+and tools edit it, as any component.
 
 `Context::draw_grid` draws a grid on one of the world's axis planes as a viewpoint sees it, as the
 editor's view shows one: lines a power of ten apart, fading as they near each other and toward

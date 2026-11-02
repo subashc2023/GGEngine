@@ -39,6 +39,24 @@
                 scale: (0.5, 10.0, 1.0),
             ),
         ),
+        "2830add8b39b88d5": (
+            Name: ("Target"),
+            Text: (
+                text: "FIRST TO 10",
+                font: Some("083349a64f1c0990"),
+                size: 0.3,
+                color: (0.55, 0.6, 0.7, 1.0),
+                align: [
+                    Center,
+                    Center,
+                ],
+            ),
+            Transform: (
+                translation: (0.0, 5.4, 0.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+        ),
         "285651506b245f15": (
             BoxCollider2D: (
                 offset: (0.0, 0.0),

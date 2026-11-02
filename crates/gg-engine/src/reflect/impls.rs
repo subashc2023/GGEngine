@@ -1,14 +1,14 @@
 //! Reflection of the types fields hold: `bool`, the integers of fixed sizes, `f32`, `f64` and
-//! `String`; glam's vectors and quaternion; entities and textures; and options, lists and arrays
-//! of any reflected type. `usize` and `isize` aren't, since their size differs by platform, and a
-//! value saved or sent must mean the same everywhere.
+//! `String`; glam's vectors and quaternion; entities, textures, models and fonts; and options,
+//! lists and arrays of any reflected type. `usize` and `isize` aren't, since their size differs by
+//! platform, and a value saved or sent must mean the same everywhere.
 
 use gg_core::math::{Quat, Vec2, Vec3, Vec4};
 
 use super::{
     Angle, Color, Digest, Error, Ranged, Reflect, Result, Type, Types, Value, within, wrong_kind,
 };
-use crate::{Entity, Model, Texture};
+use crate::{Entity, Font, Model, Texture};
 
 /// `set_value` as all of them have it, and no parts.
 macro_rules! whole {
@@ -118,6 +118,7 @@ plain! {
     Entity => Entity entity,
     Texture => Texture texture,
     Model => Model model,
+    Font => Font font,
 }
 
 impl Reflect for String {

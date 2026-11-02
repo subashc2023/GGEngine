@@ -36,7 +36,7 @@ use crate::font::{self, Font, Fonts, TextStyle};
 use crate::gltf;
 use crate::grid::{self, Plane};
 #[cfg(feature = "dev")]
-use crate::hot_reload::{HotReload, Reloaded, Source};
+use crate::hot_reload::{Asset as HotAsset, HotReload, Reloaded, Source};
 use crate::image::{self, Image};
 use crate::interpolation::Past;
 #[cfg(feature = "dev")]
@@ -300,8 +300,8 @@ pub struct Context {
     /// The assets the layers added: the world's, which a world that a layer puts in its place
     /// takes again, as [`share_assets`](Self::share_assets) says.
     assets: Arc<Assets>,
-    /// The textures, models and shaders the layers added, by the file each resolves to, which a
-    /// second add of that file, by whatever path, gives again.
+    /// The textures, models, fonts and shaders the layers added, by the file each resolves to,
+    /// which a second add of that file, by whatever path, gives again.
     loaded: Loaded,
     /// The names given the textures the layers add, by their paths, in place of the IDs the asset
     /// database holds, as [`name_as`](Self::name_as) says: `None` while the run names its textures
@@ -320,8 +320,9 @@ pub struct Context {
     /// API, as [`start_assets`](Self::start_assets) starts it.
     #[cfg(feature = "dev")]
     asset_watch: Option<AssetWatch>,
-    /// The thread that reads the layers' shaders, textures and models again as their files change,
-    /// in a run that serves the tool API, as [`start_assets`](Self::start_assets) starts it.
+    /// The thread that reads the layers' shaders, textures, models and fonts again as their files
+    /// change, in a run that serves the tool API, as [`start_assets`](Self::start_assets) starts
+    /// it.
     #[cfg(feature = "dev")]
     hot_reload: Option<HotReload>,
     /// How long frames take, which the main loop measures and
@@ -432,10 +433,15 @@ impl Context {
             world.register::<CircleCollider2D>()?;
             world.register::<ModelRoot>()?;
             world.register::<ModelNode>()?;
+            world.register::<font::Text>()?;
             world.register_saved::<Physics2D>()
         });
         registered.expect("the engine's components describe themselves");
-        let assets = Arc::default();
+        let mut textures = Textures::default();
+        let fonts = Fonts::new(&mut textures);
+        let mut assets = Assets::default();
+        assets.add_unnamed(fonts.inter_field());
+        let assets = Arc::new(assets);
         world.share_assets(&assets);
         Self {
             window,
@@ -446,8 +452,8 @@ impl Context {
             tie: None,
             meshes: Meshes::default(),
             shaders: Shaders::default(),
-            textures: Textures::default(),
-            fonts: Fonts::default(),
+            textures,
+            fonts,
             draws: Draws::default(),
             over: Draws::default(),
             colliders: false,
@@ -906,7 +912,10 @@ impl Context {
     /// font's at its axes' defaults, unhinted, since the field draws them at any size. `name` names
     /// the font in errors and its field in GPU captures, as `<name> field`; the GPU has it from the
     /// next frame that renders. A file added again, by whatever form of its path, gives the font it
-    /// gave first, without baking it again.
+    /// gave first, without baking it again, as does an asset's file renamed or moved since, by the
+    /// ID that names it. Scenes, snapshots, recordings and the tool API name it by its asset ID,
+    /// where its file has one, and otherwise by its path, as a texture is. In a development run
+    /// that serves the tool API, it bakes again as its file changes, off the main thread.
     ///
     /// Fails with `engine.bad_font` if the file can't be read, isn't a regular file, is more than
     /// 256 MiB, or isn't a TrueType or OpenType font with outlines, as a font of bitmaps alone
@@ -915,17 +924,32 @@ impl Context {
         let path = path.as_ref();
         let named = assets::name_of(self.root.as_deref(), path);
         let file = assets::file_of(path);
-        let loaded = file.as_ref().and_then(|file| self.loaded.fonts.get(file));
-        let font = match loaded.copied() {
-            Some(font) => font,
+        let font = match self.loaded_font(&named, path, file.as_deref()) {
+            Some(font) => {
+                if self.assets.font(&named).is_none() {
+                    self.add_assets(|assets| assets.alias_font(font, named.clone()));
+                }
+                font
+            }
             None => {
-                let textures = &mut self.textures;
-                let baked = font::bake(name, path, |size, pixels| {
-                    textures.add(&format!("{name} field"), size, pixels, Texels::Data)
-                })?;
-                let field = baked.field();
-                self.add_assets(|assets| assets.add_unnamed(field));
-                let font = self.fonts.push(baked);
+                #[cfg(feature = "dev")]
+                let read_at = SystemTime::now();
+                let font::Bake {
+                    size,
+                    pixels,
+                    baked,
+                } = font::bake(name, path)?;
+                let field =
+                    (self.textures).add(&format!("{name} field"), size, pixels, Texels::Data);
+                let field = field?;
+                let id = self.texture_name(&named, path, file.as_deref(), None);
+                let font = self.fonts.push(field, Some(baked));
+                #[cfg(feature = "dev")]
+                self.watch_font(font, name, path, read_at, &id);
+                self.add_assets(|assets| {
+                    assets.add_unnamed(field);
+                    assets.add_font(font, named.clone(), id);
+                });
                 if let Some(file) = file {
                     self.loaded.fonts.insert(file, font);
                 }
@@ -952,18 +976,20 @@ impl Context {
         }
     }
 
-    /// Loads, as [`add_texture`](Self::add_texture) and [`add_model`](Self::add_model) load a
-    /// file, each texture and model that `names` names, as text names one, that none loaded has:
-    /// where a scene, the tool API, or a recorded or a lockstep peer's command or edit names it,
-    /// before it's read, as ARCHITECTURE.md's Project state says; a model's image with its model. A
-    /// name finds its file as [`asset_path`](Self::asset_path) says, inside the asset root. In a
-    /// run that follows another, the asset takes the name its text gave it, that run's, and its
-    /// file is found by the names it was given first.
+    /// Loads, as [`add_texture`](Self::add_texture), [`add_model`](Self::add_model) and
+    /// [`add_font`](Self::add_font) load a file, each texture, model and font that `names` names,
+    /// as text names one, that none loaded has: where a scene, the tool API, or a recorded or a
+    /// lockstep peer's command or edit names it, before it's read, as ARCHITECTURE.md's Project
+    /// state says; a model's image with its model. A name finds its file as
+    /// [`asset_path`](Self::asset_path) says, inside the asset root. In a run that follows another,
+    /// the asset takes the name its text gave it, that run's, and its file is found by the names it
+    /// was given first.
     ///
     /// One that can't be loaded stands in, if `stand_in`, as for a run that follows another, so
-    /// that its texts read as that run's did: a texture of magenta and black squares, or a model of
-    /// no nodes, named as the name, warning `asset.stand_in` with why. Otherwise it stays unloaded,
-    /// and the refusal of what names it says why, as [`Assets::not_found`] does.
+    /// that its texts read as that run's did: a texture of magenta and black squares, a model of no
+    /// nodes, or a font that draws in the engine's, named as the name, warning `asset.stand_in`
+    /// with why. Otherwise it stays unloaded, and the refusal of what names it says why, as
+    /// [`Assets::not_found`] does.
     pub(crate) fn load_named<S: AsRef<str>>(
         &mut self,
         names: impl IntoIterator<Item = Asset<S>>,
@@ -978,10 +1004,11 @@ impl Context {
                 continue;
             }
             tried.push(named);
-            let (Asset::Texture(name) | Asset::Model(name)) = named;
+            let (Asset::Texture(name) | Asset::Model(name) | Asset::Font(name)) = named;
             let (path, loaded) = match named {
                 Asset::Texture(_) => self.load_texture_named(name, stand_in),
                 Asset::Model(_) => self.load_model_named(name, stand_in),
+                Asset::Font(_) => self.load_font_named(name, stand_in),
             };
             match (loaded, named) {
                 (Ok(()), _) => {}
@@ -990,6 +1017,9 @@ impl Context {
                 }
                 (Err(error), Asset::Model(_)) if stand_in => {
                     self.stand_in_model(name, path.as_deref(), &error);
+                }
+                (Err(error), Asset::Font(_)) if stand_in => {
+                    self.stand_in_font(name, path.as_deref(), &error);
                 }
                 (Err(error), _) => failed.push((name, error)),
             }
@@ -1063,18 +1093,38 @@ impl Context {
         (Some(path), loaded)
     }
 
-    /// Loads, as [`load_named`](Self::load_named) does with `stand_in`, each texture and model
-    /// whose path from the asset root `assets` gives that none loaded has: as a run restored from a
-    /// snapshot loads those its `asset` lines say its run had, before it reads the world, so that
-    /// its values find every asset they name, and in the order that run loaded them, so that a
-    /// texture's index, which what's opaque holds, is what it was where the layers added the same
+    /// Loads the font that text names `name`, as [`load_named`](Self::load_named) does. Gives the
+    /// path from the asset root its name led to, if it led to one.
+    ///
+    /// Fails as [`asset_path`](Self::asset_path) and [`add_font`](Self::add_font) do, and with
+    /// `asset.outside_root` for a file outside the root, as through `..` or a link.
+    fn load_font_named(&mut self, name: &str, stand_in: bool) -> (Option<Arc<str>>, Result<()>) {
+        let path = match self.asset_path(name, "font", stand_in) {
+            Ok(path) => path,
+            Err(error) => return (None, Err(error)),
+        };
+        let loaded = self.named_file(name, &path).and_then(|file| {
+            let font = self.add_font(&path, &file)?;
+            if self.assets.font(name).is_none() {
+                self.add_assets(|assets| assets.alias_font(font, name.into()));
+            }
+            Ok(())
+        });
+        (Some(path), loaded)
+    }
+
+    /// Loads, as [`load_named`](Self::load_named) does with `stand_in`, each texture, model and
+    /// font whose path from the asset root `assets` gives that none loaded has: as a run restored
+    /// from a snapshot loads those its `asset` lines say its run had, before it reads the world, so
+    /// that its values find every asset they name, and in the order that run loaded them, so that
+    /// a texture's index, which what's opaque holds, is what it was where the layers added the same
     /// before. A path outside the root, as only a layer gives one, stands in, as one text names
     /// does.
     pub(crate) fn load_restored<'p>(&mut self, assets: impl IntoIterator<Item = Asset<&'p str>>) {
         self.load_named(assets, true);
     }
 
-    /// Loads each texture and model scene `text` names that none loaded has, as
+    /// Loads each texture, model and font scene `text` names that none loaded has, as
     /// [`load_named`](Self::load_named) does, standing in for what can't be in a run that follows
     /// another; and returns the names of those still missing.
     ///
@@ -1086,9 +1136,10 @@ impl Context {
         Ok(missing.map(|asset| asset.name().to_owned()).collect())
     }
 
-    /// Loads each texture and model `text`, a value as a recording writes it, names that none
-    /// loaded has, standing in for what can't be, as [`load_named`](Self::load_named) does: a value
-    /// that a recording or a lockstep peer gives, which names assets as the run that wrote it did.
+    /// Loads each texture, model and font `text`, a value as a recording writes it, names that
+    /// none loaded has, standing in for what can't be, as [`load_named`](Self::load_named) does: a
+    /// value that a recording or a lockstep peer gives, which names assets as the run that wrote it
+    /// did.
     pub(crate) fn load_followed(&mut self, text: &Text) {
         let mut names = Vec::new();
         text.assets(&mut names);
@@ -1097,13 +1148,13 @@ impl Context {
         }
     }
 
-    /// The path from the asset root of the file whose texture or model, as `kind` says, text names
-    /// `name`, as [`load_named`](Self::load_named) loads it: in a run that follows another, the
-    /// path given that name, as [`name_as`](Self::name_as) gives them; in a development build, the
-    /// asset's whose ID it is, as the asset database holds it; and else `name` itself, as a path. A
-    /// run that follows another and isn't to stand in for what it can't load, as a lockstep joiner
-    /// asked by the tool API, finds only what it was given, so that it names the asset as its host
-    /// would.
+    /// The path from the asset root of the file whose texture, model or font, as `kind` says, text
+    /// names `name`, as [`load_named`](Self::load_named) loads it: in a run that follows another,
+    /// the path given that name, as [`name_as`](Self::name_as) gives them; in a development build,
+    /// the asset's whose ID it is, as the asset database holds it; and else `name` itself, as a
+    /// path. A run that follows another and isn't to stand in for what it can't load, as a lockstep
+    /// joiner asked by the tool API, finds only what it was given, so that it names the asset as
+    /// its host would.
     ///
     /// Fails with `asset.not_given` for what such a run wasn't given; `asset.unknown_id` for an ID
     /// no asset has this run, or any ID in a build without `dev`, which reads no ID file; and
@@ -1300,6 +1351,61 @@ impl Context {
         );
     }
 
+    /// Has a stand-in, a font that draws in the engine's, take the place of the font text names
+    /// `name`, as [`stand_in`](Self::stand_in) has one take a texture's: its field a texture of a
+    /// texel, which its file's takes once it bakes, as after a checkout brings it, or that of the
+    /// asset whose ID `name` is, once one has it, in a run that reloads assets.
+    fn stand_in_font(&mut self, name: &str, path: Option<&str>, why: &Error) {
+        let field = (self.textures).add(
+            &format!("{name} field"),
+            [1, 1],
+            [0; 4].as_slice(),
+            Texels::Data,
+        );
+        let field = match field {
+            Ok(field) => field,
+            Err(error) => {
+                warn!(
+                    code = error.code(),
+                    name, "Can't stand in for font `{name}`: {error:#}"
+                );
+                return;
+            }
+        };
+        let font = self.fonts.push(field, None);
+        let (path, named, file): (Arc<str>, Arc<str>, _) = match path {
+            Some(path) => {
+                let root = self.root.as_deref();
+                let file = root.map_or(PathBuf::from(path), |root| root.join(path));
+                let named = self.texture_name(path, &file, None, None);
+                (path.into(), named, Some(file))
+            }
+            None => (name.into(), name.into(), None),
+        };
+        #[cfg(feature = "dev")]
+        match &file {
+            Some(_) if why.code() == "asset.outside_root" => {}
+            Some(file) => self.watch_font(font, name, file, SystemTime::now(), &named),
+            None => self.watch_font_for(font, name),
+        }
+        #[cfg(not(feature = "dev"))]
+        let _ = file;
+        self.add_assets(|assets| {
+            assets.add_unnamed(field);
+            assets.add_font(font, path.clone(), named);
+            assets.alias_font(font, name.into());
+        });
+        self.added("font", &path);
+        warn!(
+            code = "asset.stand_in",
+            name,
+            path = &*path,
+            cause = why.code(),
+            "Font `{name}` can't be loaded, so text in it draws in the engine's own font, Inter, \
+             as the run follows another, which names it: {why:#}"
+        );
+    }
+
     /// What names the texture or the model loaded from `file`, which a layer gave as `path`, whose
     /// path among assets is `named`, as [`Assets`] says, or with `image`, its image of that place
     /// in the model: in a development build, the name given its path, if the run is given its
@@ -1375,6 +1481,24 @@ impl Context {
             self.loaded.models.insert(file.to_owned(), model);
         }
         Some(model)
+    }
+
+    /// The font loaded from `file`, which a layer gave as `path`, whose path among assets is
+    /// `named`, if one was, as [`loaded_texture`](Self::loaded_texture) finds a texture.
+    fn loaded_font(&mut self, named: &str, path: &Path, file: Option<&Path>) -> Option<Font> {
+        if let Some(&found) = file.and_then(|file| self.loaded.fonts.get(file)) {
+            return Some(found);
+        }
+        let id = self.texture_name(named, path, file, None);
+        let font = self.assets.font(&id).filter(|_| assets::is_id(&id))?;
+        // Only one loaded from a file, which a stand-in wasn't until its file came.
+        if !self.loaded.fonts.values().any(|&loaded| loaded == font) {
+            return None;
+        }
+        if let Some(file) = file {
+            self.loaded.fonts.insert(file.to_owned(), font);
+        }
+        Some(font)
     }
 
     /// The ID the asset database holds for `file`, which a layer gave as `path`: by that path
@@ -1473,7 +1597,7 @@ impl Context {
     }
 
     /// Has the worlds share `catalog`, the asset database as a scan left it, and the thread that
-    /// reloads assets follow each texture and model whose file it has elsewhere since, as
+    /// reloads assets follow each texture, model and font whose file it has elsewhere since, as
     /// [`HotReload::follow`] says.
     #[cfg(feature = "dev")]
     fn set_catalog(&mut self, catalog: Catalog) {
@@ -1484,7 +1608,7 @@ impl Context {
     }
 
     /// As a run starts, before the layers load, if a tool API `serves` the run, starts the thread
-    /// that reloads the layers' shaders, textures and models as their files change, as
+    /// that reloads the layers' shaders, textures, models and fonts as their files change, as
     /// `hot_reload` says, warning if it can't; then scans the assets under the app's root, as
     /// [`scan_assets`](Self::scan_assets) does, writing the ID files missing if `writes`, and
     /// moving those that renames made since the last run left behind beside their assets, by the
@@ -1536,11 +1660,12 @@ impl Context {
     }
 
     /// Sends the thread that reloads assets the shaders the layers added since, and puts each
-    /// shader, texture and model it read again since in place of the one loaded, under the same
-    /// handle, as [`reload_texture`](Self::reload_texture) and
-    /// [`reload_model`](Self::reload_model) say, which the next frame handed off draws: as a frame
-    /// starts, `recorded` saying whether a recording follows the run. Once it has sent the shaders,
-    /// it allocates nothing unless something came back.
+    /// shader, texture, model and font it read again since in place of the one loaded, under the
+    /// same handle, as [`reload_texture`](Self::reload_texture),
+    /// [`reload_model`](Self::reload_model) and [`reload_font`](Self::reload_font) say, which the
+    /// next frame handed off draws: as a frame starts, `recorded` saying whether a recording
+    /// follows the run. Once it has sent the shaders, it allocates nothing unless something came
+    /// back.
     #[cfg(feature = "dev")]
     pub(crate) fn take_reloaded(&mut self, recorded: bool) {
         let Some(hot_reload) = &mut self.hot_reload else {
@@ -1565,8 +1690,51 @@ impl Context {
                     path,
                     imported,
                 } => self.reload_model(&file, &path, imported, recorded),
+                Reloaded::Font { font, path, bake } => self.reload_font(font, &path, *bake),
             }
         }
+    }
+
+    /// Puts what `font` baked again from `path`, `bake`, in place of what it drew, its field taking
+    /// the new one's texels at whatever size they are, logging `Font reloaded`, and has a later add
+    /// of its file, by whatever path, give the font, as for a stand-in whose file came; but a
+    /// stand-in keeps its place rather than take a file that came outside the asset root, as a
+    /// texture's does, warning `asset.outside_root`. Text in it is laid out by what it baked from
+    /// the next frame.
+    #[cfg(feature = "dev")]
+    fn reload_font(&mut self, font: Font, path: &Path, bake: font::Bake) {
+        let named = assets::name_of(self.root.as_deref(), path);
+        let was_loaded = self.loaded.fonts.values().any(|&loaded| loaded == font);
+        if !was_loaded && let Err(error) = self.within_root(&named, path) {
+            let consequence = "the stand-in keeps its place";
+            warn!(
+                code = error.code(),
+                font = &*named,
+                "{error:#}; {consequence}"
+            );
+            return;
+        }
+        let font::Bake {
+            size,
+            pixels,
+            baked,
+        } = bake;
+        let field = self.fonts.field(font);
+        let replaced = (self.textures).replace(&named, field, size, pixels, Texels::Data);
+        if let Err(error) = replaced {
+            let consequence = "the font keeps drawing as it did";
+            warn!(
+                code = error.code(),
+                font = &*named,
+                "{error:#}; {consequence}"
+            );
+            return;
+        }
+        self.fonts.set(font, baked);
+        if let Some(file) = assets::file_of(path) {
+            self.loaded.fonts.entry(file).or_insert(font);
+        }
+        info!(font = &*named, ?size, "Font reloaded");
     }
 
     /// Puts `image`, read again from `path`, in place of `texture`'s pixels, at whatever size it
@@ -1732,7 +1900,7 @@ impl Context {
     fn watch_for(&mut self, texture: Texture, name: &str) {
         let id = name.parse::<AssetId>().ok().filter(|_| assets::is_id(name));
         if let (Some(hot_reload), Some(id)) = (&mut self.hot_reload, id) {
-            hot_reload.watch_for(texture, name, id);
+            hot_reload.watch_for(HotAsset::Texture(texture), name, id);
         }
     }
 
@@ -1758,6 +1926,44 @@ impl Context {
                 read_at,
             };
             hot_reload.watch(source, id, at);
+        }
+    }
+
+    /// Has the thread that reloads assets, if one does, watch `font`, loaded as `name` from the
+    /// file at `path` by a read begun at `read_at`, as [`watch_texture`](Self::watch_texture) has
+    /// it watch a texture.
+    #[cfg(feature = "dev")]
+    fn watch_font(
+        &mut self,
+        font: Font,
+        name: &str,
+        path: &Path,
+        read_at: SystemTime,
+        named: &str,
+    ) {
+        let id = named
+            .parse::<AssetId>()
+            .ok()
+            .filter(|_| assets::is_id(named));
+        let (id, at) = self.followed(id, path);
+        if let Some(hot_reload) = &mut self.hot_reload {
+            let source = Source::Font {
+                font,
+                name: name.to_owned(),
+                path: path.to_owned(),
+                read_at,
+            };
+            hot_reload.watch(source, id, at);
+        }
+    }
+
+    /// Has the thread that reloads assets, if one does, bake the file of the asset whose ID `name`
+    /// is, if it's one, in place of `font`, which stands in for it, once one has it.
+    #[cfg(feature = "dev")]
+    fn watch_font_for(&mut self, font: Font, name: &str) {
+        let id = name.parse::<AssetId>().ok().filter(|_| assets::is_id(name));
+        if let (Some(hot_reload), Some(id)) = (&mut self.hot_reload, id) {
+            hot_reload.watch_for(HotAsset::Font(font), name, id);
         }
     }
 
@@ -1870,14 +2076,16 @@ impl Context {
     /// of the transform's units, and its origin the point of its box `style.align` says, in the
     /// transform's XY plane, +Y up, facing +Z, as a sprite is. Each glyph is drawn crisp at any
     /// size from the font's field, as [`Glyph`](gg_renderer::Glyph) says, by straight alpha, and
-    /// it's of no entity, so a [pick](Self::pick) where it's on top finds none. Once a text as long
-    /// has been drawn, drawing text allocates nothing.
+    /// it's of no entity, so a [pick](Self::pick) where it's on top finds none. A style that names
+    /// no font draws in the engine's own, Inter, as the UI does, which bakes the first time text is
+    /// drawn in it, about 50 ms in release and 140 ms in a debug build. Once a text as long has
+    /// been drawn, drawing text allocates nothing.
     ///
     /// # Panics
     ///
     /// If `style.font` is another context's.
     pub fn draw_text(&mut self, transform: Mat4, text: &str, style: &TextStyle) {
-        let glyphs = self.fonts.lay_out(transform, text, style);
+        let glyphs = self.fonts.lay_out(transform, text, style, 0);
         self.draws.extend_glyphs(&mut self.shaders, glyphs);
     }
 
@@ -1964,12 +2172,12 @@ impl Context {
 
     /// The world: its entities and their components, as the frame's ticks left it. After the
     /// layers' updates each frame, the engine draws those with a [`Transform`] and a [`Sprite`], a
-    /// [`Circle`] or a [`MeshDraw`], after what the layers drew themselves: the meshes whose
-    /// shaders are opaque first, whatever their z's, by shader, then mesh, then the rest back to
-    /// front by their z's in the world, at one z sprites, then circles, under meshes, each in the
-    /// order of their IDs, children where their parents carry them; each on its way from where it
-    /// was as the latest tick started to where the tick left it, so up to a tick behind the world
-    /// here.
+    /// [`Circle`], a [`Text`](crate::Text) or a [`MeshDraw`], after what the layers drew
+    /// themselves: the meshes whose shaders are opaque first, whatever their z's, by shader, then
+    /// mesh, then the rest back to front by their z's in the world, at one z sprites, then circles,
+    /// then text, under meshes, each in the order of their IDs, children where their parents carry
+    /// them; each on its way from where it was as the latest tick started to where the tick left
+    /// it, so up to a tick behind the world here.
     pub fn world(&self) -> &World {
         &self.world
     }
@@ -1988,9 +2196,10 @@ impl Context {
 
     /// Loads the scene file at `path` into the world as the layer attaches, as [`World::load_scene`]
     /// loads the text [`read_scene`](crate::read_scene) reads, and returns its roots; first loading
-    /// each texture and model it names, by its ID or its path from the asset root, that no layer
-    /// has added, as [`add_texture`](Self::add_texture) and [`add_model`](Self::add_model) load a
-    /// file, and a model's image with its model. A development build watches the file
+    /// each texture, model and font it names, by its ID or its path from the asset root, that no
+    /// layer has added, as [`add_texture`](Self::add_texture), [`add_model`](Self::add_model) and
+    /// [`add_font`](Self::add_font) load a file, and a model's image with its model. A development
+    /// build watches the file
     /// from then on: saved while the game runs, it applies to the world as the operations that take
     /// the world's entities from what the file held to what it holds, between ticks, which keeps
     /// what the file doesn't change, as where the game has moved an entity; an edit whose author is
@@ -2000,11 +2209,11 @@ impl Context {
     /// is the open scene too.
     ///
     /// Fails as `read_scene` does, and as `load_scene` does, the path beginning its message, as for
-    /// a texture or a model that can't be loaded, `asset.no_texture` or `asset.no_model`, with
-    /// why: an image its model hasn't, or one named by an absolute path or one leading outside the
-    /// asset root, by an ID no asset has, or by a path to a file that doesn't load as `add_texture`
-    /// or `add_model` loads it. In a replay or a lockstep joiner, which goes as another run went,
-    /// such an asset stands in, warning `asset.stand_in`.
+    /// a texture, a model or a font that can't be loaded, `asset.no_texture`, `asset.no_model` or
+    /// `asset.no_font`, with why: an image its model hasn't, or one named by an absolute path or
+    /// one leading outside the asset root, by an ID no asset has, or by a path to a file that
+    /// doesn't load as `add_texture`, `add_model` or `add_font` loads it. In a replay or a lockstep
+    /// joiner, which goes as another run went, such an asset stands in, warning `asset.stand_in`.
     ///
     /// # Panics
     ///
@@ -2015,10 +2224,12 @@ impl Context {
         let mut loaded = self.world_mut().load_scene(&text);
         // Read again once what it names that isn't loaded is, which is seldom, so that a scene that
         // names what's loaded is read once.
-        if loaded
-            .as_ref()
-            .is_err_and(|error| matches!(error.code(), "asset.no_texture" | "asset.no_model"))
-        {
+        if loaded.as_ref().is_err_and(|error| {
+            matches!(
+                error.code(),
+                "asset.no_texture" | "asset.no_model" | "asset.no_font"
+            )
+        }) {
             loaded =
                 (self.load_scene_assets(&text)).and_then(|_| self.world_mut().load_scene(&text));
         }
@@ -2117,8 +2328,8 @@ impl Context {
             self.draw_grid(&viewpoint.unwrap_or_default(), plane);
         }
         let (world, past) = (&self.world, &self.past);
-        let (draws, shaders) = (&mut self.draws, &mut self.shaders);
-        draw::draw_world(world, past, alpha, draws, shaders, &mut self.scratch);
+        let (draws, shaders, fonts) = (&mut self.draws, &mut self.shaders, &mut self.fonts);
+        draw::draw_world(world, past, alpha, draws, shaders, fonts, &mut self.scratch);
         if self.colliders_drawn()
             && let Some(poses) = Poses::new(world, past, alpha)
         {
@@ -2182,6 +2393,7 @@ impl Context {
         self.draws.append(&mut self.over);
         mem::swap(&mut frame.draws, &mut self.draws);
         self.draws.clear();
+        self.fonts.place(&mut self.textures);
         (frame.uploads).take(&mut self.meshes, &mut self.shaders, &mut self.textures);
         frame.picks.clear();
         #[cfg(feature = "dev")]
@@ -3481,7 +3693,7 @@ mod tests {
             [Some(textured); 2]
         );
         assert_eq!(assets.name(plain), Some("assets/plain.png"));
-        let named: Vec<_> = assets.named_from((0, 0)).collect();
+        let named: Vec<_> = assets.named_from((0, 0, 0)).collect();
         let images = &named[1..named.len() - 1];
         assert_eq!(named[0], (stone, dotted));
         assert!(!images.is_empty(), "{named:?}");
@@ -3998,6 +4210,103 @@ mod tests {
         );
         let roots = cx.world_mut().load_scene(&text).expect("loaded");
         assert_eq!(cx.world().children(roots[0]).expect("alive").count(), 0);
+    }
+
+    /// A scene that names a text's font by its ID loads the font, and saves it by that ID, a text
+    /// that names none saving none; and edited, the font bakes again, under its handle, its text
+    /// laid out by what its file holds now.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_scene_names_a_texts_font_by_its_id_which_bakes_again_as_it_changes() {
+        use gg_api::asset::Meta;
+
+        let scratch = crate::dirs::tests::Scratch::new("font-by-id");
+        let root = scratch.0.join("game");
+        for dir in ["fonts", "scenes"] {
+            std::fs::create_dir_all(root.join(dir)).expect("a directory");
+        }
+        let path = root.join("fonts/title.ttf");
+        std::fs::write(&path, font::INTER).expect("a font");
+        // Dated an hour back, so that it loads as it is.
+        let an_hour_ago = std::time::SystemTime::now() - Duration::from_secs(60 * 60);
+        let file = std::fs::File::options().write(true).open(&path);
+        (file.and_then(|file| file.set_modified(an_hour_ago))).expect("its time");
+        let id = "4d5e6f708192a3b4";
+        let meta = Meta {
+            id: id.parse().expect("an ID"),
+        };
+        std::fs::write(root.join("fonts/title.ttf.meta"), meta.text()).expect("its ID file");
+        let scene = root.join("scenes/s.ron");
+        let text = format!(
+            "(\n    entities: {{\n        \"0000000000000100\": (\n            Text: (\n\
+             \x20               text: \"W\",\n                font: Some(\"{id}\"),\n\
+             \x20           ),\n            Transform: (),\n        ),\n\
+             \x20       \"0000000000000200\": (\n            Text: (),\n\
+             \x20           Transform: (),\n        ),\n    }},\n)\n"
+        );
+        std::fs::write(&scene, text).expect("written");
+
+        let mut cx = Context::seeded(0).root(root.clone());
+        cx.hot_reload = Some(HotReload::start().expect("the thread"));
+        let roots = cx.load_scene_file(&scene).expect("loaded");
+        let title = cx.assets.font(id).expect("loaded by its ID");
+        assert_eq!(cx.assets.font_path(title), "fonts/title.ttf");
+        let saved = cx.world().save_scene(&roots).expect("saved");
+        assert!(saved.contains(&format!("font: Some(\"{id}\")")), "{saved}");
+        assert!(saved.contains("font: None"), "{saved}");
+
+        // How wide its W is.
+        let width = |cx: &mut Context| {
+            let style = TextStyle {
+                font: Some(title),
+                size: 1.0,
+                color: Vec4::ONE,
+                align: [font::Align::Start; 2],
+            };
+            let mut glyphs = cx.fonts.lay_out(Mat4::IDENTITY, "W", &style, 0);
+            glyphs.next().expect("a W").0.x_axis.x
+        };
+        let regular = width(&mut cx);
+        let bold = include_bytes!("../assets/fonts/Inter/Inter-Bold.ttf");
+        std::fs::write(&path, bold).expect("an edit");
+        let until = std::time::Instant::now() + Duration::from_secs(30);
+        while width(&mut cx) == regular {
+            assert!(std::time::Instant::now() < until, "the font bakes again");
+            std::thread::sleep(Duration::from_millis(5));
+            cx.take_reloaded(false);
+        }
+        assert!(width(&mut cx) > regular, "bold is wider");
+        assert_eq!(cx.assets.font(id), Some(title), "under its handle");
+    }
+
+    /// A font that a run following another can't load stands in, named as named, so that a scene
+    /// naming it loads, its text drawing in the engine's own font.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_font_that_cant_be_loaded_stands_in_for_a_following_run() {
+        let logged = crate::testing::logged();
+        let mut cx = Context::seeded(0);
+        cx.follows = true;
+        let name = "fonts/none.ttf";
+        cx.load_named([Asset::Font(name)], true);
+        let stand_in = cx.assets.font(name).expect("a stand-in");
+        let stood_in = logged
+            .codes
+            .try_iter()
+            .filter(|code| code == "asset.stand_in");
+        assert_eq!(stood_in.count(), 1);
+        let text = format!(
+            "(\n    entities: {{\n        \"0000000000000100\": (\n            Text: (\n\
+             \x20               font: Some(\"{name}\"),\n            ),\n        ),\n    }},\n)\n"
+        );
+        cx.world_mut().load_scene(&text).expect("loaded");
+        let style = TextStyle {
+            font: Some(stand_in),
+            ..font::Text::default().style()
+        };
+        let inter = cx.fonts.inter_field();
+        let mut glyphs = cx.fonts.lay_out(Mat4::IDENTITY, "Hi", &style, 0);
+        assert!(glyphs.all(|(_, glyph, _)| glyph.field == inter));
     }
 
     /// A model's file added again gives the model it gave first, adding none of its meshes or

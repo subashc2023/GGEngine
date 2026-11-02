@@ -57,7 +57,7 @@ use crate::render_thread::{Extracted, Publish, Shot};
 use crate::scene_files::{self, Open, SceneFile};
 use crate::snapshot::Run;
 use crate::{
-    Context, Entity, EntityId, Event, Key, Model, MouseButton, Name, Operation, Pose, Scroll,
+    Context, Entity, EntityId, Event, Font, Key, Model, MouseButton, Name, Operation, Pose, Scroll,
     Texture, World, patch, snapshot,
 };
 
@@ -1216,9 +1216,9 @@ fn field(world: &World, id: EntityId, component: &str, path: &str) -> Result<Str
     Ok(out)
 }
 
-/// The textures and models that the values of the operations `given` asks for name that none
-/// loaded has, as [`operations`] reads them in `world`: which a client's edit names, to load before
-/// it's read.
+/// The textures, models and fonts that the values of the operations `given` asks for name that
+/// none loaded has, as [`operations`] reads them in `world`: which a client's edit names, to load
+/// before it's read.
 fn assets_named(world: &World, given: &[gg_api::Operation]) -> Vec<Asset<String>> {
     let gathering = Gathering {
         world,
@@ -1228,9 +1228,9 @@ fn assets_named(world: &World, given: &[gg_api::Operation]) -> Vec<Asset<String>
     gathering.missing.into_inner()
 }
 
-/// What reads values as a world does, `world`, but for a texture or a model that none loaded has,
-/// which it keeps the name of, reading on as though it were the engine's white texture, or the
-/// first model.
+/// What reads values as a world does, `world`, but for a texture, a model or a font that none
+/// loaded has, which it keeps the name of, reading on as though it were the engine's white
+/// texture, or the first model or font.
 struct Gathering<'w> {
     world: &'w World,
     missing: RefCell<Vec<Asset<String>>>,
@@ -1281,6 +1281,18 @@ impl json::Names for Gathering<'_> {
         }
         self.missed(Asset::Model(name));
         Ok(reflect::Value::Model(Model::new(0)))
+    }
+
+    fn font_name(&self, font: Font) -> Option<&str> {
+        Some(self.world.assets().font_name(font))
+    }
+
+    fn font(&self, name: &str) -> Result<reflect::Value> {
+        if let Some(font) = self.world.assets().font(name) {
+            return Ok(reflect::Value::Font(font));
+        }
+        self.missed(Asset::Font(name));
+        Ok(reflect::Value::Font(Font::new(0)))
     }
 }
 

@@ -607,6 +607,10 @@ fn migrate(
             Some(model) => Value::Model(model),
             None => return Err(world.assets().not_found("model", at)),
         },
+        (Type::Font, Text::Font(at)) => match world.assets().font(at) {
+            Some(font) => Value::Font(font),
+            None => return Err(world.assets().not_found("font", at)),
+        },
         (Type::Option(_), Text::None) => Value::Option(None),
         (Type::Option(inner), Text::Some(text)) => {
             match migrate(world, inner, hints, text, path, changes) {

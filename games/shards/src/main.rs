@@ -65,7 +65,7 @@ const DASH_SPEED: f32 = 2.5;
 const DASH_TICKS: u32 = 10;
 const DASH_EVERY: u32 = 64;
 
-/// How many shards win a match.
+/// How many shards win a match, as the arena's Target says.
 const WINS_AT: u32 = 10;
 
 /// How fast shards turn, in radians a second.
@@ -496,13 +496,13 @@ fn spin(world: &mut World, dt: Duration) {
 
 /// Draws the match's scores above the arena, in `font`, writing each text into `text`: each
 /// player's shards in its color at its side, and the matches it has won beside them, toward the
-/// middle, where the shards that win a match are named.
+/// middle, where the arena's Target says how many shards win a match.
 fn draw_scores(cx: &mut Context, found: &Match, font: Font, text: &mut String) {
-    // Between the top wall and the view's top.
+    // Between the top wall and the view's top, as the Target is.
     let y = ARENA.y + 0.9;
     let at = |x: f32| Mat4::from_translation(Vec3::new(x, y, 0.5));
     let style = |size: f32, color: Vec4, across: Align| TextStyle {
-        font,
+        font: Some(font),
         size,
         color,
         align: [across, Align::Center],
@@ -527,10 +527,6 @@ fn draw_scores(cx: &mut Context, found: &Match, font: Font, text: &mut String) {
         let beside = style(0.3, color.extend(0.7), across);
         cx.draw_text(at(edge - side * 0.65), text, &beside);
     }
-    text.clear();
-    write!(text, "FIRST TO {WINS_AT}").expect("a string takes any text");
-    let gray = Vec4::new(0.55, 0.6, 0.7, 1.0);
-    cx.draw_text(at(0.0), text, &style(0.3, gray, Align::Center));
 }
 
 #[cfg(test)]

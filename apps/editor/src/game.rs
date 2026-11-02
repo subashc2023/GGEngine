@@ -34,12 +34,13 @@
 //! the game as parts of its look, as [`look`](crate::look) says: each as the user changes it, the
 //! editor taking the parts another client, such as an agent, sets.
 //!
-//! A texture or a model dragged from the Assets panel outlines the view while it's held over it,
-//! and is let go there as an edit of the editor's, through the Inspector's link, which names it by
-//! its asset ID: a texture sets the texture of the sprite the game's view shows there, as the API's
-//! `pick` finds it, which the panels show picked, and whose refusal, as of an entity without a
-//! sprite, the Inspector shows; and a model is a root, named after its file, where the cursor
-//! shows the grid's plane, as [`landing`](Game::landing) says, which the panels show picked.
+//! A texture, a model or a font dragged from the Assets panel outlines the view while it's held
+//! over it, and is let go there as an edit of the editor's, through the Inspector's link, which
+//! names it by its asset ID: a texture sets the texture of the sprite the game's view shows there,
+//! as the API's `pick` finds it, and a font the font of the text there, which the panels show
+//! picked, and whose refusal, as of an entity without a sprite or a text, the Inspector shows; and
+//! a model is a root, named after its file, where the cursor shows the grid's plane, as
+//! [`landing`](Game::landing) says, which the panels show picked.
 //!
 //! The File menu acts on the game's open scene through the API's `scene`, never reading or writing
 //! a scene file itself: New empties it, Open opens a scene the OS's dialog picks in its place, and
@@ -156,7 +157,8 @@ struct Game {
     tickets: u64,
     /// The ticket of the pick at the cursor that waits for its answer, if one does: one at a time.
     hovering: Option<u64>,
-    /// The texture let go over the view whose pick waits for its answer, if one does: the latest.
+    /// The texture or font let go over the view whose pick waits for its answer, if one does: the
+    /// latest.
     dropping: Option<Dropping>,
     /// The answers to picks that came back since the last update, each with its ticket.
     answered: Vec<(u64, Option<Found>)>,
@@ -284,11 +286,12 @@ enum Closing {
     Granted,
 }
 
-/// A texture let go over the view: the ticket of the pick at where it was let go, its name, as the
-/// game takes it, and its file's name, as the Logs say it.
+/// A texture or a font let go over the view: the ticket of the pick at where it was let go, which
+/// it is, its name, as the game takes it, and its file's name, as the Logs say it.
 #[derive(Debug, PartialEq)]
 struct Dropping {
     ticket: u64,
+    kind: AssetKind,
     name: String,
     file: String,
 }
@@ -1169,9 +1172,9 @@ impl Game {
     }
 
     /// Takes the answers to picks that came back since: the latest click's, which the Inspector
-    /// picks; a dropped texture's, which [`take_texture`](Self::take_texture) takes; and all of
-    /// them for what's under the cursor, which [`ui`](Layer::ui) reads; and failures, which it
-    /// logs.
+    /// picks; a dropped texture's or font's, which [`take_dropped`](Self::take_dropped) takes; and
+    /// all of them for what's under the cursor, which [`ui`](Layer::ui) reads; and failures, which
+    /// it logs.
     fn take_picks(&mut self) {
         self.answered.clear();
         let Some(talker) = &self.talker else {
@@ -1187,7 +1190,7 @@ impl Game {
                 Ok(picked) => {
                     let found = Found::of(picked);
                     if let Some(dropped) = dropped {
-                        self.take_texture(dropped, found.clone());
+                        self.take_dropped(dropped, found.clone());
                     }
                     self.answered.push((ticket, found));
                 }
@@ -1212,7 +1215,7 @@ impl Game {
 
     /// Takes what the Assets panel let go over `response`, the view's, this frame, while a game
     /// serves, as [`let_go`](Self::let_go) says, with the view at `view` and the window at `scale`
-    /// pixels a point; and outlines the view while a texture or a model is held over it.
+    /// pixels a point; and outlines the view while an asset is held over it.
     fn take_drop(
         &mut self,
         egui: &egui::Context,
@@ -1241,20 +1244,25 @@ impl Game {
 
     /// Takes `dropped`, let go at `at`, in the main window's pixels, over the view, at `view`,
     /// with the window at `scale` pixels a point, as the module says, naming it as [`asset_name`]
-    /// does: a texture asks the game for a pick there, whose answer
+    /// does: a texture or a font asks the game for a pick there, whose answer
     /// [`take_picks`](Self::take_picks) takes; a model is a root the Inspector's link creates where
     /// it [`lands`](Self::landing), named after its file, or where it can't land yet, before a
-    /// frame has come, is logged as taken by nothing, as a font is.
+    /// frame has come, is logged as taken by nothing.
     fn let_go(&mut self, dropped: &Dragged, at: [f64; 2], view: Option<Viewport>, scale: f32) {
         let root = self.folders.as_ref().map(|folders| folders.root.as_path());
         let name = asset_name(root, &dropped.path);
         let file = dropped.path.file_name().unwrap_or_default();
         let file = file.to_string_lossy().into_owned();
         match dropped.kind {
-            AssetKind::Texture => {
+            kind @ (AssetKind::Texture | AssetKind::Font) => {
                 let origin = view.map_or([0, 0], |view| view.origin);
                 if let Some(ticket) = self.ask_pick(at, origin) {
-                    self.dropping = Some(Dropping { ticket, name, file });
+                    self.dropping = Some(Dropping {
+                        ticket,
+                        kind,
+                        name,
+                        file,
+                    });
                 }
             }
             AssetKind::Model => {
@@ -1277,29 +1285,30 @@ impl Game {
                     ("ModelRoot".into(), reflect::Value::Struct(root)),
                 ]);
             }
-            AssetKind::Font => {
-                let why = "nothing in the view takes a font";
-                self.log(Level::Info, format!("{file} was let go, but {why}"));
-            }
         }
     }
 
-    /// Takes `found`, what the game's view shows where `dropped`'s texture was let go: the entity
-    /// there, which the Inspector picks, its sprite's texture set through the Inspector's link as
-    /// an edit of its own, which the game refuses for an entity without a sprite, the Inspector
-    /// showing why; and where no entity draws, nothing, which the Logs say.
-    fn take_texture(&mut self, dropped: Dropping, found: Option<Found>) {
+    /// Takes `found`, what the game's view shows where `dropped`, a texture or a font, was let go:
+    /// the entity there, which the Inspector picks, its sprite's texture or its text's font set
+    /// through the Inspector's link as an edit of its own, which the game refuses for an entity
+    /// without one, the Inspector showing why; and where no entity draws, nothing, which the Logs
+    /// say.
+    fn take_dropped(&mut self, dropped: Dropping, found: Option<Found>) {
         let Some(found) = found else {
             let said = format!("{} was let go where no entity draws", dropped.file);
             self.log(Level::Info, said);
             return;
         };
+        let (component, field) = match dropped.kind {
+            AssetKind::Font => ("Text", "font"),
+            AssetKind::Texture | AssetKind::Model => ("Sprite", "texture"),
+        };
         let link = &self.view.link;
         link.pick(Some(found.id));
         self.took_pick = None;
-        let texture = reflect::Value::String(dropped.name);
-        let texture = reflect::Value::Option(Some(Box::new(texture)));
-        link.set(found.id, "Sprite", "texture", texture);
+        let asset = reflect::Value::String(dropped.name);
+        let asset = reflect::Value::Option(Some(Box::new(asset)));
+        link.set(found.id, component, field, asset);
         link.seal();
     }
 
@@ -3521,6 +3530,33 @@ mod tests {
         game.take_picks();
         let pending = game.view.link.pending();
         assert_eq!(pending[2..], [set("textures/new.png"), None]);
+    }
+
+    /// A font let go over the view, as a texture is, sets the font of the text the game's view
+    /// shows there through the link, as an edit of its own: by its path from the asset root,
+    /// without an ID file.
+    #[test]
+    fn a_font_let_go_on_the_view_sets_the_font_of_the_text_there() {
+        let scratch = Scratch::new("font-let-go");
+        let (mut game, ends) = serving();
+        game.folders = Some(folders(&scratch.0));
+        let title = Dragged {
+            path: scratch.0.join("fonts").join("title.ttf"),
+            kind: AssetKind::Font,
+        };
+        let entity: EntityId = "0123456789abcdef".parse().expect("an ID");
+        game.let_go(&title, [300.0, 200.0], Some(VIEW), SCALE);
+        let (ticket, _) = ends.picks.try_recv().expect("a pick");
+        let found = gg_api::Picked {
+            id: Some(entity.to_string()),
+            name: Some("Target".to_owned()),
+        };
+        ends.found.send((ticket, Ok(found))).expect("sent");
+        game.take_picks();
+        let font = reflect::Value::String("fonts/title.ttf".to_owned());
+        let font = reflect::Value::Option(Some(Box::new(font)));
+        let set = Some((entity, "Text".to_owned(), "font".to_owned(), font));
+        assert_eq!(game.view.link.pending(), [set, None]);
     }
 
     /// A model let go over the view is a root the link creates, named after its file, by its path

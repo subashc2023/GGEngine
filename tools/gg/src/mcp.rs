@@ -43,14 +43,16 @@ it, `<file>.meta`, such as `stone.png.meta`, as it starts and as it finds new fi
 with its file. Rename or move a file with its ID file or alone: the game moves an ID file left behind \
 beside the file it was renamed to, by what the file holds, as it runs or as it next starts, so \
 that it keeps its ID, unless you edit it in the same step, or rename it in a clone the game hasn't \
-run in yet; a warning then names the ID left behind. A texture's or a model's value is its ID \
-where its file has one, as scenes save it, a lockstep joiner's its host's, and else its path; a \
-value you give may name it either way, by its path from the asset root, and the game loads one it \
-hasn't loaded yet. A model is placed as an entity with a `ModelRoot` of it, under which the game \
-spawns the model's nodes, which you change through the model's file or the root, never \
-themselves. Edit the file of a shader, a texture or a model the game has loaded, and it reloads \
-within a second or so, warning in its logs if it doesn't compile or decode; in a recorded run or \
-a lockstep session, a model's nodes and materials change only as the game next starts.";
+run in yet; a warning then names the ID left behind. A texture's, a model's or a font's value is \
+its ID where its file has one, as scenes save it, a lockstep joiner's its host's, and else its \
+path; a value you give may name it either way, by its path from the asset root, and the game loads \
+one it hasn't loaded yet. A model is placed as an entity with a `ModelRoot` of it, under which the \
+game spawns the model's nodes, which you change through the model's file or the root, never \
+themselves. An entity's `Text` draws its text where the entity is, in its font, or the engine's \
+own for none. Edit the file of a shader, a texture, a model or a font the game has loaded, and it \
+reloads within a second or so, warning in its logs if it doesn't compile, decode or bake; in a \
+recorded run or a lockstep session, a model's nodes and materials change only as the game next \
+starts.";
 
 /// Serves MCP on stdin and stdout until stdin ends, reaching the game `pick` picks.
 ///

@@ -61,7 +61,7 @@ pub(super) trait Inspected {
     /// What a field of an entity holding `value` shows.
     fn entity_label(&self, value: &Value) -> String;
 
-    /// What a field of a texture or a model holding `value` shows.
+    /// What a field of a texture, a model or a font holding `value` shows.
     fn asset_label(&self, value: &Value) -> String;
 
     /// Why the world isn't shown yet, if it isn't, as while another process is reached.
@@ -175,6 +175,7 @@ impl Inspected for World {
                 None => format!("texture {}", texture.index()),
             },
             Value::Model(model) => self.assets().model_path(model).to_owned(),
+            Value::Font(font) => self.assets().font_path(font).to_owned(),
             _ => "?".to_owned(),
         }
     }

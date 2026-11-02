@@ -65,6 +65,10 @@ pub(crate) struct Assets {
     /// Each model, by its name and by each path the layers gave its file, as a texture by
     /// `by_name`.
     model_names: HashMap<Arc<str>, Model>,
+    /// Each font's name and path, as a texture's, by its index.
+    fonts: Vec<(Arc<str>, Arc<str>)>,
+    /// Each font, by its name and by each path the layers gave its file, as a texture by `by_name`.
+    font_names: HashMap<Arc<str>, Font>,
     /// What the layers added, and the textures loaded where text named them, and stand-ins, in
     /// order, each with how many meshes, shaders and textures there were after it, as
     /// `texture 1 1 2 assets/logo.png`: what names the meshes, shaders and textures by their
@@ -105,22 +109,23 @@ struct NamedModel {
     nodes: Nodes,
 }
 
-/// How many textures and models there are, the engine's white texture among them: the indices the
-/// next added take, from which [`Assets::named_from`] goes on.
-pub(crate) type Counts = (usize, usize);
+/// How many textures, models and fonts there are, the engine's white texture among them: the
+/// indices the next added take, from which [`Assets::named_from`] goes on.
+pub(crate) type Counts = (usize, usize, usize);
 
-/// An asset that text names, by its name or a path to its file: a texture, or a model.
+/// An asset that text names, by its name or a path to its file: a texture, a model or a font.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Asset<S> {
     Texture(S),
     Model(S),
+    Font(S),
 }
 
 impl<S: AsRef<str>> Asset<S> {
     /// The name or path that names it.
     pub(crate) fn name(&self) -> &str {
         match self {
-            Self::Texture(name) | Self::Model(name) => name.as_ref(),
+            Self::Texture(name) | Self::Model(name) | Self::Font(name) => name.as_ref(),
         }
     }
 
@@ -129,6 +134,7 @@ impl<S: AsRef<str>> Asset<S> {
         match self {
             Self::Texture(name) => Asset::Texture(name.as_ref()),
             Self::Model(name) => Asset::Model(name.as_ref()),
+            Self::Font(name) => Asset::Font(name.as_ref()),
         }
     }
 
@@ -137,6 +143,7 @@ impl<S: AsRef<str>> Asset<S> {
         match self {
             Self::Texture(name) => Asset::Texture(name.as_ref().to_owned()),
             Self::Model(name) => Asset::Model(name.as_ref().to_owned()),
+            Self::Font(name) => Asset::Font(name.as_ref().to_owned()),
         }
     }
 
@@ -145,6 +152,7 @@ impl<S: AsRef<str>> Asset<S> {
         match self {
             Self::Texture(_) => "texture",
             Self::Model(_) => "model",
+            Self::Font(_) => "font",
         }
     }
 }
@@ -157,6 +165,8 @@ impl Default for Assets {
             by_name: HashMap::new(),
             models: Vec::new(),
             model_names: HashMap::new(),
+            fonts: Vec::new(),
+            font_names: HashMap::new(),
             added: Vec::new(),
             failed: HashMap::new(),
             #[cfg(feature = "dev")]
@@ -193,15 +203,15 @@ impl Assets {
         self.by_name.get(name).copied()
     }
 
-    /// How many textures and models there are, as [`Counts`] says.
+    /// How many textures, models and fonts there are, as [`Counts`] says.
     pub(crate) fn counts(&self) -> Counts {
-        (self.textures.len(), self.models.len())
+        (self.textures.len(), self.models.len(), self.fonts.len())
     }
 
-    /// The name and path of each texture and then each model from `from` on, as [`counts`] gave it,
-    /// that's named otherwise than by its path, as by its ID, in the order they were added: what a
-    /// run that names its assets by IDs tells those that follow it, as a recording does its replay
-    /// and a lockstep host its joiner.
+    /// The name and path of each texture, then each model, then each font from `from` on, as
+    /// [`counts`] gave it, that's named otherwise than by its path, as by its ID, in the order they
+    /// were added: what a run that names its assets by IDs tells those that follow it, as a
+    /// recording does its replay and a lockstep host its joiner.
     ///
     /// [`counts`]: Self::counts
     pub(crate) fn named_from(&self, from: Counts) -> impl Iterator<Item = (&str, &str)> {
@@ -209,8 +219,46 @@ impl Assets {
         let textures = textures.map(|named| (&named.name, &named.path));
         let models = self.models.iter().skip(from.1);
         let models = models.map(|model| (&model.name, &model.path));
-        let named = textures.chain(models).filter(|(name, path)| name != path);
+        let fonts = self
+            .fonts
+            .iter()
+            .skip(from.2)
+            .map(|(name, path)| (name, path));
+        let named = (textures.chain(models).chain(fonts)).filter(|(name, path)| name != path);
         named.map(|(name, path)| (&**name, &**path))
+    }
+
+    /// The name of `font`, which text names it by.
+    pub(crate) fn font_name(&self, font: Font) -> &str {
+        &self.fonts[font.index()].0
+    }
+
+    /// The path of `font`'s file: for people, whom a path tells more than an ID.
+    pub(crate) fn font_path(&self, font: Font) -> &str {
+        &self.fonts[font.index()].1
+    }
+
+    /// The font that `name` names, by its name or a path to its file, if one does.
+    pub(crate) fn font(&self, name: &str) -> Option<Font> {
+        self.font_names.get(name).copied()
+    }
+
+    /// Adds `font`, the next font added, loaded from the file `path` names, named `name`.
+    pub(crate) fn add_font(&mut self, font: Font, path: Arc<str>, name: Arc<str>) {
+        assert_eq!(
+            font.index(),
+            self.fonts.len(),
+            "fonts are named in the order they're added"
+        );
+        self.font_names.entry(name.clone()).or_insert(font);
+        self.font_names.entry(path.clone()).or_insert(font);
+        self.fonts.push((name, path));
+    }
+
+    /// Has `path` name `font` too, added before from another path to its file, unless it names one
+    /// already.
+    pub(crate) fn alias_font(&mut self, font: Font, path: Arc<str>) {
+        self.font_names.entry(path).or_insert(font);
     }
 
     /// The name of `model`, which text names it by.
@@ -289,8 +337,8 @@ impl Assets {
         self.by_name.entry(path).or_insert(texture);
     }
 
-    /// What a refusal of text that names a texture or a model, as `kind` says, `name`, which none
-    /// has, says of it: that none is loaded, and why it couldn't be, if it was tried.
+    /// What a refusal of text that names a texture, a model or a font, as `kind` says, `name`,
+    /// which none has, says of it: that none is loaded, and why it couldn't be, if it was tried.
     pub(crate) fn not_found(&self, kind: &str, name: &str) -> String {
         match self.failed.get(name) {
             Some((code, why)) => {
@@ -323,12 +371,13 @@ impl Assets {
         match asset {
             Asset::Texture(name) => self.texture(name.as_ref()).is_some(),
             Asset::Model(name) => self.model(name.as_ref()).is_some(),
+            Asset::Font(name) => self.font(name.as_ref()).is_some(),
         }
     }
 
-    /// Names each texture and model as `names` gives its path a name, and every other by its path,
-    /// in place of what named it before: as a run takes the names its recording's run, or its
-    /// lockstep host, gave its assets.
+    /// Names each texture, model and font as `names` gives its path a name, and every other by its
+    /// path, in place of what named it before: as a run takes the names its recording's run, or
+    /// its lockstep host, gave its assets.
     #[cfg(feature = "dev")]
     pub(crate) fn rename(&mut self, names: &HashMap<Arc<str>, Arc<str>>) {
         let Self {
@@ -336,8 +385,20 @@ impl Assets {
             by_name,
             models,
             model_names,
+            fonts,
+            font_names,
             ..
         } = self;
+        for (index, (name, path)) in fonts.iter_mut().enumerate() {
+            let at = Font::new(index);
+            if name != path && font_names.get(name) == Some(&at) {
+                font_names.remove(name);
+            }
+            *name = names.get(path).unwrap_or(path).clone();
+        }
+        for (index, (name, _)) in fonts.iter().enumerate() {
+            font_names.entry(name.clone()).or_insert(Font::new(index));
+        }
         for (index, model) in models.iter_mut().enumerate() {
             let at = Model::new(index);
             if model.name != model.path && model_names.get(&model.name) == Some(&at) {

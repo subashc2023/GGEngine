@@ -584,10 +584,11 @@ impl FlyCameraController {
 mod tests {
     use std::panic;
 
-    use gg_renderer::{Draws, Shaders, Sprite};
+    use gg_renderer::{Draws, Shaders, Sprite, Textures};
 
     use super::*;
     use crate::draw::{Scratch, draw_world};
+    use crate::font::Fonts;
     use crate::{Entity, Log, Name, Operation, Scroll};
 
     /// Without perspective, `height` tall, from 1 behind it to 1 in front.
@@ -766,6 +767,7 @@ mod tests {
             0.5,
             &mut draws,
             shaders,
+            &mut Fonts::new(&mut Textures::default()),
             &mut Scratch::default(),
         );
         assert_eq!(draws, want);

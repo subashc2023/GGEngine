@@ -68,8 +68,8 @@ pub fn read_scene(path: &Path) -> Result<String> {
 impl World {
     /// `roots` and their descendants as a scene's canonical text: a prefab, for one root. Each
     /// component is saved but those that are opaque as a whole, such as a
-    /// [`MeshDraw`](crate::MeshDraw), and the fields that are opaque; a texture or a model as its
-    /// name, its asset ID, or else its path as [`App::root`](crate::App::root) names it, as
+    /// [`MeshDraw`](crate::MeshDraw), and the fields that are opaque; a texture, a model or a font
+    /// as its name, its asset ID, or else its path as [`App::root`](crate::App::root) names it, as
     /// [`Context::add_texture`](crate::Context::add_texture) says; a root's [`Parent`] isn't, since
     /// its parent isn't saved; and a model's nodes aren't, which its root's load spawns again, as
     /// [`ModelRoot`] says. Each component is checked as [`World::set_field`] checks a value,
@@ -115,11 +115,11 @@ impl World {
     /// the order of their IDs: all of them, or, if it's refused, none. Each parent's children are
     /// in the order of their IDs. Every component type it names must be registered, since a world
     /// knows a type by name once it has; what's opaque, which scenes leave out, comes from
-    /// [`Component::base`](crate::Component::base); a texture or a model is found by its name or a
-    /// path to its file among those loaded, as this loads none, where `Context::load_scene_file`
-    /// loads those a scene names first; a field that isn't given, as in a scene saved before its
-    /// type had it, takes its default; and each entity with a [`ModelRoot`] has its model's nodes
-    /// spawned under it.
+    /// [`Component::base`](crate::Component::base); a texture, a model or a font is found by its
+    /// name or a path to its file among those loaded, as this loads none, where
+    /// `Context::load_scene_file` loads those a scene names first; a field that isn't given, as in
+    /// a scene saved before its type had it, takes its default; and each entity with a
+    /// [`ModelRoot`] has its model's nodes spawned under it.
     ///
     /// Fails, changing nothing, with an error that begins with the line and column where the text
     /// is refused: `scene.syntax` for text that isn't a scene's RON, or enables RON's extensions;
@@ -127,11 +127,12 @@ impl World {
     /// that isn't one; `scene.duplicate_id` for an entity, and `reflect.duplicate_component` for an
     /// entity's component, given twice; `ecs.id_taken` for an ID a living entity has;
     /// `scene.unknown_id` for a reference to an entity the scene doesn't give; `ecs.parent_cycle`
-    /// for entities that would be their own ancestors; `asset.no_texture` or `asset.no_model` for
-    /// a name or path no texture or model loaded has; `reflect.read_only` for a `ModelNode`, which
-    /// the world keeps; `scene.too_deep` for a value nested more than 64 levels; and as
-    /// [`World::set_field`] does for a value it refuses, such as `reflect.no_field` for a field the
-    /// type hasn't, and with `reflect.missing_field` for one that isn't given and has no default.
+    /// for entities that would be their own ancestors; `asset.no_texture`, `asset.no_model` or
+    /// `asset.no_font` for a name or path no texture, model or font loaded has; `reflect.read_only`
+    /// for a `ModelNode`, which the world keeps; `scene.too_deep` for a value nested more than 64
+    /// levels; and as [`World::set_field`] does for a value it refuses, such as `reflect.no_field`
+    /// for a field the type hasn't, and with `reflect.missing_field` for one that isn't given and
+    /// has no default.
     /// Every error but `scene.syntax` names the entity it's about, and the component and the path
     /// if it's about one.
     pub fn load_scene(&mut self, text: &str) -> Result<Vec<Entity>> {
@@ -141,9 +142,9 @@ impl World {
         Ok(self.commit(entities, ids, None))
     }
 
-    /// The textures and models scene `text` names that none loaded has, each once, in the order
-    /// it first names them: those [`load_scene`](Self::load_scene) would refuse it for, which the
-    /// engine loads before it loads a scene, as `Context::load_scene_file` does.
+    /// The textures, models and fonts scene `text` names that none loaded has, each once, in the
+    /// order it first names them: those [`load_scene`](Self::load_scene) would refuse it for, which
+    /// the engine loads before it loads a scene, as `Context::load_scene_file` does.
     ///
     /// Fails as `load_scene` does into the world without its entities, but for those.
     pub(crate) fn scene_assets(&self, text: &str) -> Result<Vec<Asset<String>>> {

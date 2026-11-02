@@ -17,8 +17,8 @@ use crate::{EntityId, Pose, Transform};
 /// layer keeps it, cloned, on the main thread, as layers are.
 ///
 /// The values it's given are those of the world the Inspector shows: a remote Inspector's, as it
-/// reads a game's, hold an entity by its ID and a texture or a model by its name or a path to its
-/// file, each as a [`Value::String`], which the game reads by its own world.
+/// reads a game's, hold an entity by its ID and a texture, a model or a font by its name or a path
+/// to its file, each as a [`Value::String`], which the game reads by its own world.
 ///
 /// [`Inspector`]: super::Inspector
 /// [`Inspector::link`]: super::Inspector::link

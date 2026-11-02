@@ -246,10 +246,11 @@ pub(crate) fn between(from: &Transform, to: &Transform, alpha: f32) -> Transform
 #[cfg(test)]
 mod tests {
     use gg_core::math::Vec4;
-    use gg_renderer::{Draws, Shaders, Sprite};
+    use gg_renderer::{Draws, Shaders, Sprite, Textures};
 
     use super::*;
     use crate::draw::{Scratch, draw_world};
+    use crate::font::Fonts;
     use crate::{Log, Operation};
 
     /// A transform at `x` and `z`, which tell the cases apart.
@@ -282,6 +283,7 @@ mod tests {
             0.5,
             &mut draws,
             shaders,
+            &mut Fonts::new(&mut Textures::default()),
             &mut Scratch::default(),
         );
         draws

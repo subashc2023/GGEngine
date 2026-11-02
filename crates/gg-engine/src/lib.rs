@@ -15,8 +15,8 @@
 //! lockstep between two peers, each tick run on both peers' inputs; the pipeline cache's file,
 //! which windowed runs keep;
 //! and in development builds, behind `dev`, reading a game's project's manifest and its assets' ID
-//! files, reloading games' shaders, textures and models as their files change, and the OS's file
-//! dialogs.
+//! files, reloading games' shaders, textures, models and fonts as their files change, and the OS's
+//! file dialogs.
 //!
 //! An app's `main` starts the engine; there is no separate entry-point crate.
 
@@ -113,7 +113,7 @@ pub use ecs::{
 /// share the engine's version.
 pub use egui;
 pub use event::{Event, Key, MouseButton, Pad, PadButton, Scroll, Stick, Trigger};
-pub use font::{Align, Font, TextStyle};
+pub use font::{Align, Font, Text, TextStyle};
 /// The engine's vectors, matrices and quaternions; apps use them from here, so that they share
 /// the engine's version.
 pub use gg_core::math;
@@ -544,11 +544,7 @@ fn egui_context() -> egui::Context {
         // those code points, in each cmap subtable, to the font's tnum lookups' substitute for
         // it, read from a copy of its own so that its GSUB saves unchanged; the head table's
         // checksum and date are fontTools' as it saves.
-        (
-            egui::FontFamily::Proportional,
-            "Inter",
-            include_bytes!("../assets/fonts/Inter/Inter-Regular.ttf"),
-        ),
+        (egui::FontFamily::Proportional, "Inter", font::INTER),
         (
             egui::FontFamily::Name(BOLD.into()),
             "Inter Bold",

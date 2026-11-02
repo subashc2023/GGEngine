@@ -1,7 +1,8 @@
-//! Fonts: TrueType and OpenType files that layers load, each baked as it loads into its field, a
-//! texture of data holding a multi-channel signed distance field of each glyph of the characters
-//! Windows-1252 prints, which draws them crisp at any size; and text, shaped with the font's
-//! kerning, laid out in lines and drawn as those glyphs, as [`Context::draw_text`] draws it.
+//! Fonts: TrueType and OpenType files that layers load, or that text names, and the engine's own,
+//! Inter, each baked as it loads into its field, a texture of data holding a multi-channel signed
+//! distance field of each glyph of the characters Windows-1252 prints, which draws them crisp at
+//! any size; and text, shaped with the font's kerning, laid out in lines and drawn as those glyphs,
+//! as [`Context::draw_text`] draws it and the world draws a [`Text`].
 //!
 //! [`Context::draw_text`]: crate::Context::draw_text
 
@@ -18,7 +19,7 @@ use fdsm::render::correct_sign_mtsdf;
 use fdsm::shape::{Contour, Shape};
 use gg_core::math::{Mat4, Vec2, Vec4};
 use gg_core::{Error, Result};
-use gg_renderer::{Glyph, MAX_TEXTURE_SIZE, Texture};
+use gg_renderer::{Glyph, MAX_TEXTURE_SIZE, Texels, Texture, Textures};
 use harfrust::{Direction, Feature, ShapeOptions, ShapePlan, ShaperData, Tag, UnicodeBuffer};
 use image::{ImageBuffer, Rgba};
 use skrifa::instance::{LocationRef, Size};
@@ -26,18 +27,37 @@ use skrifa::outline::{DrawSettings, OutlinePen};
 use skrifa::{FontRef, GlyphId, MetadataProvider};
 use tracing::debug;
 
-use crate::{dirs, jobs};
+use crate::{Component, Reflect, dirs, jobs};
 
-/// A font that [`Context::add_font`](crate::Context::add_font) loaded, which text is drawn in
-/// through its handle, as a [`TextStyle`]'s.
+/// The engine's own font, Inter's regular weight, its digits tabular, as the UI draws in it: what
+/// text that names no font is drawn in.
+pub(crate) static INTER: &[u8] = include_bytes!("../assets/fonts/Inter/Inter-Regular.ttf");
+
+/// A font that [`Context::add_font`](crate::Context::add_font) loaded, or that text named and the
+/// engine loaded: its index among its context's, which a [`TextStyle`] and a [`Text`] hold, and
+/// which scenes, recordings, snapshots and the tool API name as they name a texture, by its asset
+/// ID, or else its path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Font(u32);
+
+impl Font {
+    /// The font that's `index`th among its context's.
+    pub(crate) fn new(index: usize) -> Self {
+        Self(u32::try_from(index).expect("fewer than 2^32 fonts"))
+    }
+
+    /// Its index among its context's fonts.
+    pub(crate) fn index(self) -> usize {
+        self.0 as usize
+    }
+}
 
 /// How text is drawn: in which font, how large, in what color, and which point of it its origin
 /// is.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TextStyle {
-    pub font: Font,
+    /// None for the engine's own, Inter, as the UI draws in it.
+    pub font: Option<Font>,
     /// How tall the font's em is, in the units of the space the text is drawn in, as its transform
     /// takes them: a line of text is about 1.2 of it from one baseline to the next, as fonts go.
     pub size: f32,
@@ -50,7 +70,7 @@ pub struct TextStyle {
 }
 
 /// Where along an axis of a text's box its origin is, as [`TextStyle::align`] says.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Reflect)]
 pub enum Align {
     /// Its left, or its top.
     #[default]
@@ -59,6 +79,57 @@ pub enum Align {
     Center,
     /// Its right, or its bottom.
     End,
+}
+
+/// Text in the world, which the world draws where its entity is, as
+/// [`Context::draw_text`](crate::Context::draw_text) draws text in a [`TextStyle`] of its fields,
+/// its glyphs in its transform's XY plane, facing +Z, as a sprite is, and a pick of them finding
+/// its entity. By default, "Text" in the engine's font, an em a unit tall, white, centered on its
+/// entity.
+#[derive(Clone, Debug, PartialEq, Component)]
+pub struct Text {
+    /// What it says: a line for each of its own, which `\n` ends.
+    #[reflect(default = String::from("Text"))]
+    pub text: String,
+    /// The font it's in, by its ID or its path: none for the engine's own, Inter.
+    pub font: Option<Font>,
+    /// How tall its font's em is, in its transform's units.
+    #[reflect(min = 0.0, default = 1.0)]
+    pub size: f32,
+    /// In linear RGBA, alpha not multiplied in.
+    #[reflect(color, default = Vec4::ONE)]
+    pub color: Vec4,
+    /// Which point of its box is at its entity's origin, across, then down: its start, its middle
+    /// or its end, as a text style's alignment says.
+    #[reflect(default = CENTERED)]
+    pub align: [Align; 2],
+}
+
+/// A text's box's middle, both ways, where a text's origin is by default.
+const CENTERED: [Align; 2] = [Align::Center; 2];
+
+impl Default for Text {
+    fn default() -> Self {
+        Self {
+            text: "Text".to_owned(),
+            font: None,
+            size: 1.0,
+            color: Vec4::ONE,
+            align: CENTERED,
+        }
+    }
+}
+
+impl Text {
+    /// How it's drawn, as [`TextStyle`] says.
+    pub fn style(&self) -> TextStyle {
+        TextStyle {
+            font: self.font,
+            size: self.size,
+            color: self.color,
+            align: self.align,
+        }
+    }
 }
 
 /// How many of a field's texels an em spans: enough that text larger than about this many pixels
@@ -111,14 +182,13 @@ fn features() -> [Feature; 5] {
     ]
 }
 
-/// A font as it baked: its file's bytes, which text is shaped by, and how; its field and where each
-/// glyph is in it; and its lines' metrics, in ems.
+/// A font as it baked: its file's bytes, which text is shaped by, and how; where each glyph is in
+/// its field; and its lines' metrics, in ems.
 pub(crate) struct Baked {
     bytes: Box<[u8]>,
     shaping: ShaperData,
     /// For text left to right, in Latin script, without [`features`].
     plan: ShapePlan,
-    field: Texture,
     /// The glyphs of [`characters`] and the font's `.notdef`.
     glyphs: Glyphs,
     /// Font units in an em.
@@ -157,11 +227,6 @@ impl Lines {
 }
 
 impl Baked {
-    /// Its field's texture.
-    pub(crate) fn field(&self) -> Texture {
-        self.field
-    }
-
     /// Where the glyph `id` is in the field, which shaping gave the character of `line` at byte
     /// `cluster`: `None` if it has no outline, as a space's; the `.notdef`'s for a glyph the field
     /// doesn't hold, or for a character the font lacks, but none for whitespace or a control
@@ -182,26 +247,84 @@ impl Baked {
     }
 }
 
-/// The fonts a context's layers loaded, by their handles' indices, and what drawing text shapes
-/// into, kept from one text to the next, so that drawing text allocates nothing once a text as long
-/// has been drawn.
-#[derive(Default)]
+/// A font's field's texture, and what the font baked, once it has: `None` for the engine's own
+/// until text is drawn in it, and for a stand-in, which draws in the engine's until its file comes.
+struct Slot {
+    field: Texture,
+    baked: Option<Baked>,
+}
+
+/// The fonts a context's layers loaded, or that text named, by their handles' indices, and the
+/// engine's own; and what drawing text shapes into, kept from one text to the next, so that drawing
+/// text allocates nothing once a text as long has been drawn.
 pub(crate) struct Fonts {
-    baked: Vec<Baked>,
+    /// Inter, whose field's texture every context keeps from the start, so that no texture's index
+    /// depends on when text is first drawn in it, which bakes it.
+    inter: Slot,
+    /// Inter's field's size and texels, from when it bakes until [`place`](Self::place) puts them
+    /// in its texture.
+    unplaced: Option<([u32; 2], Vec<u8>)>,
+    fonts: Vec<Slot>,
     buffer: Option<UnicodeBuffer>,
     glyphs: Vec<(Mat4, Glyph, u64)>,
 }
 
 impl Fonts {
-    /// Takes `baked`, and hands out its handle.
-    pub(crate) fn push(&mut self, baked: Baked) -> Font {
-        let font = Font(self.baked.len() as u32);
-        self.baked.push(baked);
+    /// No fonts but the engine's, which keeps a texture of `textures` for its field, a texel of
+    /// nothing until it bakes.
+    pub(crate) fn new(textures: &mut Textures) -> Self {
+        let field = textures.add("Inter field", [1, 1], [0; 4].as_slice(), Texels::Data);
+        let field = field.expect("a texel takes a texture");
+        Self {
+            inter: Slot { field, baked: None },
+            unplaced: None,
+            fonts: Vec::new(),
+            buffer: None,
+            glyphs: Vec::new(),
+        }
+    }
+
+    /// Puts the engine's font's field in its texture of `textures`, if it's baked since this was
+    /// last called: as a frame is handed off, so that the frame that draws text in it has it.
+    pub(crate) fn place(&mut self, textures: &mut Textures) {
+        if let Some((size, pixels)) = self.unplaced.take() {
+            let field = self.inter.field;
+            let replaced = textures.replace("Inter field", field, size, pixels, Texels::Data);
+            replaced.expect("its field fits a texture");
+        }
+    }
+
+    /// The texture of the engine's font's field.
+    pub(crate) fn inter_field(&self) -> Texture {
+        self.inter.field
+    }
+
+    /// Takes the font whose field is `field`, and which baked `baked`, or a stand-in's, which bakes
+    /// nothing until its file comes, and hands out its handle.
+    pub(crate) fn push(&mut self, field: Texture, baked: Option<Baked>) -> Font {
+        let font = Font::new(self.fonts.len());
+        self.fonts.push(Slot { field, baked });
         font
     }
 
+    /// The texture of `font`'s field.
+    #[cfg(feature = "dev")]
+    pub(crate) fn field(&self, font: Font) -> Texture {
+        self.fonts[font.index()].field
+    }
+
+    /// Has `font` draw as `baked` from now on, as its file read again baked, its field's texture
+    /// replaced already.
+    #[cfg(feature = "dev")]
+    pub(crate) fn set(&mut self, font: Font, baked: Baked) {
+        self.fonts[font.index()].baked = Some(baked);
+    }
+
     /// The glyphs that draw `text` in `style`, where `transform` places its origin in the world,
-    /// each a transform and a glyph, of no entity, as [`Context::draw_text`] says.
+    /// each a transform and a glyph, each the draw of the entity of ID `id`, or of none for 0, as
+    /// [`Context::draw_text`] says: in the engine's font if the style names none, or a stand-in,
+    /// which bakes the first time, about 50 ms in release and 140 ms in a debug build, its field
+    /// waiting for [`place`](Self::place).
     ///
     /// # Panics
     ///
@@ -213,14 +336,34 @@ impl Fonts {
         transform: Mat4,
         text: &str,
         style: &TextStyle,
+        id: u64,
     ) -> Drain<'_, (Mat4, Glyph, u64)> {
         let Self {
-            baked,
+            inter,
+            unplaced,
+            fonts,
             buffer,
             glyphs,
         } = self;
-        let Some(baked) = baked.get(style.font.0 as usize) else {
-            panic!("{:?} is a font of another context", style.font);
+        let slot = style.font.map(|font| match fonts.get(font.index()) {
+            Some(slot) => slot,
+            None => panic!("{font:?} is a font of another context"),
+        });
+        let found = slot.and_then(|slot| Some((slot.field, slot.baked.as_ref()?)));
+        let (field, baked) = match found {
+            Some(found) => found,
+            None => {
+                let baked = inter.baked.get_or_insert_with(|| {
+                    let Bake {
+                        size,
+                        pixels,
+                        baked,
+                    } = bake_inter();
+                    *unplaced = Some((size, pixels));
+                    baked
+                });
+                (inter.field, &*baked)
+            }
         };
         let font = FontRef::new(&baked.bytes).expect("it read as it baked");
         let shaper = baked.shaping.shaper(&font).build();
@@ -267,11 +410,11 @@ impl Fonts {
                     Mat4::from_translation(middle.extend(0.0)) * Mat4::from_scale(size.extend(1.0));
                 let glyph = Glyph {
                     color: style.color,
-                    field: baked.field,
+                    field,
                     rect: placed.rect,
                     range: RANGE as f32,
                 };
-                glyphs.push((transform * quad, glyph, 0));
+                glyphs.push((transform * quad, glyph, id));
             }
             unshaped = shaped.clear();
             baseline -= lines.advance();
@@ -281,21 +424,23 @@ impl Fonts {
     }
 }
 
-/// Reads the font file at `path`, font `name`'s, and bakes its field, which `add` adds as a
-/// texture of data from its size and its pixels, as [`Context::add_font`] says.
+/// What a font bakes into: its field's size and its rows of RGBA8, as [`Field`] has them, which a
+/// texture of data takes, and the font, which draws through that texture.
+pub(crate) struct Bake {
+    pub(crate) size: [u32; 2],
+    pub(crate) pixels: Vec<u8>,
+    pub(crate) baked: Baked,
+}
+
+/// Reads the font file at `path`, font `name`'s, and bakes it, as [`Context::add_font`] says.
 ///
 /// Fails with `engine.bad_font` if the file can't be read, isn't a regular file, is more than
-/// 256 MiB, or isn't a TrueType or OpenType font with outlines; and as `add` does.
+/// 256 MiB, or isn't a TrueType or OpenType font with outlines.
 ///
 /// [`Context::add_font`]: crate::Context::add_font
-pub(crate) fn bake(
-    name: &str,
-    path: &Path,
-    add: impl FnOnce([u32; 2], Vec<u8>) -> Result<Texture>,
-) -> Result<Baked> {
+pub(crate) fn bake(name: &str, path: &Path) -> Result<Bake> {
     let zone = gg_core::zone!();
     zone.text(path.display());
-    let start = Instant::now();
     let bad = |problem: String| {
         let message = format!("font {name:?} at {} {problem}", path.display());
         Error::new("engine.bad_font", message)
@@ -306,7 +451,22 @@ pub(crate) fn bake(
     if bytes.len() as u64 > MAX_FILE {
         return Err(bad(format!("is more than {} MiB", MAX_FILE >> 20)));
     }
-    let bytes = bytes.into_boxed_slice();
+    bake_bytes(name, path, bytes.into_boxed_slice())
+}
+
+/// Bakes the engine's font, as [`bake`] does.
+fn bake_inter() -> Bake {
+    let path = Path::new("gg-engine/assets/fonts/Inter/Inter-Regular.ttf");
+    bake_bytes("Inter", path, INTER.into()).expect("the engine's font bakes")
+}
+
+/// Bakes the font in `bytes`, font `name`'s, read from `path`, as [`bake`] does.
+fn bake_bytes(name: &str, path: &Path, bytes: Box<[u8]>) -> Result<Bake> {
+    let start = Instant::now();
+    let bad = |problem: String| {
+        let message = format!("font {name:?} at {} {problem}", path.display());
+        Error::new("engine.bad_font", message)
+    };
     // fdsm and harfrust can panic on a malformed font, as reading files is, so that's the file's
     // doing: the font fails as one that doesn't read does. gg-core's panic hook still logs it.
     let baked = panic::catch_unwind(AssertUnwindSafe(|| {
@@ -332,15 +492,18 @@ pub(crate) fn bake(
         ms = start.elapsed().as_millis() as u64,
         "Font baked"
     );
-    let texture = add(field.size, field.pixels)?;
-    Ok(Baked {
+    let baked = Baked {
         bytes,
         shaping,
         plan,
-        field: texture,
         glyphs: field.glyphs,
         units_per_em: field.units_per_em,
         lines: field.lines,
+    };
+    Ok(Bake {
+        size: field.size,
+        pixels: field.pixels,
+        baked,
     })
 }
 
@@ -641,10 +804,7 @@ impl OutlinePen for Pen {
 mod tests {
     use super::*;
 
-    /// The engine's own font, which egui draws its UI in.
-    const INTER: &[u8] = include_bytes!("../assets/fonts/Inter/Inter-Regular.ttf");
-
-    /// Inter, baked, and its field's texture the first after the engine's white one.
+    /// Inter, baked.
     fn inter() -> (Baked, Field) {
         let field = super::field(INTER).expect("Inter bakes");
         let font = FontRef::new(INTER).expect("Inter reads");
@@ -656,7 +816,6 @@ mod tests {
             bytes: INTER.into(),
             shaping,
             plan,
-            field: Texture::WHITE,
             glyphs: field.glyphs.clone(),
             units_per_em: field.units_per_em,
             lines: field.lines,
@@ -811,17 +970,17 @@ mod tests {
     #[test]
     fn text_lays_out_in_aligned_lines_kerned() {
         let (baked, _) = inter();
-        let mut fonts = Fonts::default();
-        let font = fonts.push(baked);
+        let mut fonts = Fonts::new(&mut Textures::default());
+        let font = fonts.push(Texture::WHITE, Some(baked));
         let style = |align| TextStyle {
-            font,
+            font: Some(font),
             size: 2.0,
             color: Vec4::ONE,
             align,
         };
         // Each glyph's middle, across and up.
         let middles = |fonts: &mut Fonts, text: &str, align| -> Vec<Vec2> {
-            let glyphs = fonts.lay_out(Mat4::IDENTITY, text, &style(align));
+            let glyphs = fonts.lay_out(Mat4::IDENTITY, text, &style(align), 0);
             glyphs
                 .map(|(at, ..)| at.w_axis.truncate().truncate())
                 .collect()
@@ -836,7 +995,7 @@ mod tests {
         assert_eq!(a, a_kerned);
         assert!(v_kerned.x < v.x, "{v_kerned} is kerned toward the A");
         // Its first line's ascent at the top, and the next line's baseline a line below.
-        let lines = fonts.baked[0].lines;
+        let lines = fonts.fonts[0].baked.as_ref().expect("baked").lines;
         assert!(a.y < 0.0 && a.y > -lines.ascent * 2.0, "{a}");
         let [first, second] = middles(&mut fonts, "A\nA", start)[..] else {
             panic!("two As")
@@ -870,8 +1029,7 @@ mod tests {
             "{error}"
         );
         let path = Path::new("no such folder/title.ttf");
-        let added = |_: [u32; 2], _: Vec<u8>| -> Result<Texture> { panic!("nothing to add") };
-        let error = bake("title", path, added).err().expect("refused");
+        let error = bake("title", path).err().expect("refused");
         assert_eq!(error.code(), "engine.bad_font");
         assert!(error.to_string().contains("\"title\""), "{error}");
     }

@@ -103,7 +103,7 @@ pub(crate) fn write(
     for added in world.assets().added() {
         writeln!(out, "asset {added}").expect(written);
     }
-    for (name, path) in world.assets().named_from((0, 0)) {
+    for (name, path) in world.assets().named_from((0, 0, 0)) {
         out.push_str("named ");
         crate::recording::text::write_named(&mut out, name, path);
         out.push('\n');
@@ -207,10 +207,10 @@ fn world_hash(text: &str) -> Option<WorldHash> {
     })
 }
 
-/// The kind of asset an `asset` line names, `texture` or `model`, and the path of its file, as
-/// `texture 1 1 2 assets/logo.png` and a model's line, its two types' names and sizes after its
-/// path, whatever build wrote them, give them: `None` for a line of another kind, as a mesh's or a
-/// shader's.
+/// The kind of asset an `asset` line names, `texture`, `model` or `font`, and the path of its file,
+/// as `texture 1 1 2 assets/logo.png`, a font's line alike, and a model's line, its two types'
+/// names and sizes after its path, whatever build wrote them, give them: `None` for a line of
+/// another kind, as a mesh's or a shader's.
 fn asset_path(line: &str) -> Option<(&'static str, &str)> {
     let (kind, rest) = line.split_once(' ')?;
     // The meshes, shaders and textures there were after it, then its path.
@@ -218,6 +218,7 @@ fn asset_path(line: &str) -> Option<(&'static str, &str)> {
     match kind {
         "texture" => Some(("texture", path)),
         "model" => Some(("model", path.rsplitn(5, ' ').nth(4)?)),
+        "font" => Some(("font", path)),
         _ => None,
     }
 }
@@ -458,27 +459,29 @@ impl Snapshot {
         })
     }
 
-    /// Each texture and model the run it was taken from had loaded, by its path, as its `asset`
-    /// lines give them, in order: which a run restored from it loads, where its layers haven't,
-    /// before its world, as [`Context::load_restored`](crate::Context::load_restored) does.
+    /// Each texture, model and font the run it was taken from had loaded, by its path, as its
+    /// `asset` lines give them, in order: which a run restored from it loads, where its layers
+    /// haven't, before its world, as [`Context::load_restored`](crate::Context::load_restored)
+    /// does.
     pub(crate) fn assets(&self) -> impl Iterator<Item = Asset<&str>> {
         self.assets
             .iter()
             .filter_map(|line| match asset_path(line)? {
                 ("texture", path) => Some(Asset::Texture(path)),
                 ("model", path) => Some(Asset::Model(path)),
+                ("font", path) => Some(Asset::Font(path)),
                 _ => None,
             })
     }
 
-    /// Has the snapshot name, by the path its file is at now, each texture and model its run named
-    /// by an ID that `catalog`, the asset database of the run restored from it, holds for an asset
-    /// at another path, its file gone from the path it had, as after a rename that the snapshot's
-    /// run, or this run's start, moved its ID file for: in its `asset` lines and its names, so that
-    /// the run loads the asset from there, and its own `asset` line for it, which then is the
-    /// snapshot's, keeps what's opaque in the world. An asset whose file is where it was keeps its
-    /// path, though a copy took its ID, as its ID changed since. A model's images, which load with
-    /// their model, keep their paths.
+    /// Has the snapshot name, by the path its file is at now, each texture, model and font its run
+    /// named by an ID that `catalog`, the asset database of the run restored from it, holds for an
+    /// asset at another path, its file gone from the path it had, as after a rename that the
+    /// snapshot's run, or this run's start, moved its ID file for: in its `asset` lines and its
+    /// names, so that the run loads the asset from there, and its own `asset` line for it, which
+    /// then is the snapshot's, keeps what's opaque in the world. An asset whose file is where it
+    /// was keeps its path, though a copy took its ID, as its ID changed since. A model's images,
+    /// which load with their model, keep their paths.
     #[cfg(feature = "dev")]
     pub(crate) fn follow(&mut self, catalog: &crate::assets::Catalog) {
         let moved: HashMap<Arc<str>, Arc<str>> = (self.names.iter())
@@ -588,8 +591,8 @@ impl Snapshot {
         #[cfg(feature = "dev")]
         let own = {
             let own = Arc::clone(world.shared_assets());
-            let alike = own.named_from((0, 0)).count() == self.names.len()
-                && (own.named_from((0, 0))).all(|(name, path)| {
+            let alike = own.named_from((0, 0, 0)).count() == self.names.len()
+                && (own.named_from((0, 0, 0))).all(|(name, path)| {
                     self.names.get(path).is_some_and(|theirs| **theirs == *name)
                 });
             if !alike {
@@ -635,10 +638,10 @@ mod tests {
     use super::*;
     use crate::dirs::tests::Scratch;
     use crate::layer::Stack;
-    use crate::{Context, Layer, MeshDraw, Sprite, Transform};
+    use crate::{Context, Layer, MeshDraw, Sprite, Text, Transform};
 
-    /// An `asset` line gives a texture's or a model's path, spaces and all, and a model's whatever
-    /// types its run's build gave it; a mesh's or a shader's gives none.
+    /// An `asset` line gives a texture's, a model's or a font's path, spaces and all, and a model's
+    /// whatever types its run's build gave it; a mesh's or a shader's gives none.
     #[test]
     fn asset_lines_give_textures_and_models_paths() {
         let model = format!(
@@ -654,6 +657,10 @@ mod tests {
             (
                 "model 3 4 2 m.glb gg::Vertex 48 gg::Params 64",
                 Some(("model", "m.glb")),
+            ),
+            (
+                "font 3 4 5 fonts/a title.ttf",
+                Some(("font", "fonts/a title.ttf")),
             ),
             ("mesh 2 1 1 floor game::Corner 20", None),
         ];
@@ -1000,6 +1007,51 @@ mod tests {
             let texture = world.get::<Sprite>(shown).and_then(|sprite| sprite.texture);
             assert!(texture.is_some_and(|texture| world.assets().path(texture).is_some()));
         }
+    }
+
+    /// A font the snapshot's run loaded where text named it, by its ID, is loaded again, by the
+    /// path its `asset` line gives, by a run restored from it, whose layers don't load it, so that
+    /// a text in it comes back in it, warning of no change.
+    #[test]
+    fn a_font_loaded_where_named_comes_back() {
+        let logged = crate::testing::logged();
+        let dir = Scratch::new("snapshot-font");
+        let root = dir.0.clone();
+        fs::create_dir_all(root.join("fonts")).expect("a directory");
+        fs::write(root.join("fonts/title.ttf"), crate::font::INTER).expect("a font");
+        let id = "6f708192a3b4c5d6";
+        let meta = gg_api::asset::Meta {
+            id: id.parse().expect("an ID"),
+        };
+        fs::write(root.join("fonts/title.ttf.meta"), meta.text()).expect("its ID file");
+        let mut saved = Context::seeded(3).root(root.clone());
+        saved.load_named([Asset::Font(id)], false);
+        let title = saved.world().assets().font(id).expect("loaded");
+        let text = Text {
+            font: Some(title),
+            ..Text::default()
+        };
+        let shown = saved.world_mut().spawn((Transform::IDENTITY, text));
+        let none = Open::default();
+        let text = write(saved.world(), &[], &none, &Run::Playing, "Tested", &[], 0);
+        let snapshot = Snapshot::parse(text.expect("written"), "a test".to_owned(), "Tested");
+        let snapshot = snapshot.expect("read");
+        assert_eq!(
+            snapshot.assets().collect::<Vec<_>>(),
+            [Asset::Font("fonts/title.ttf")]
+        );
+        let mut restored = Context::seeded(3).root(root);
+        let _ = logged.codes.try_iter().count();
+        let restoring = Stack::default().restore(&mut restored, &snapshot, false);
+        restoring.expect("restored");
+        let codes: Vec<String> = logged.codes.try_iter().collect();
+        assert!(
+            !codes.iter().any(|code| code.starts_with("snapshot.")),
+            "{codes:?}"
+        );
+        let world = restored.world();
+        let font = world.get::<Text>(shown).and_then(|text| text.font);
+        assert_eq!(font.map(|font| world.assets().font_name(font)), Some(id));
     }
 
     /// A texture loaded where named, its file renamed since with its ID file, as the watcher moves

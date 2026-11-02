@@ -202,6 +202,7 @@ impl Writer<'_> {
                 quote(out, name);
             }
             (_, &Value::Model(model)) => quote(out, self.world.assets().model_name(model)),
+            (_, &Value::Font(font)) => quote(out, self.world.assets().font_name(font)),
             (Type::Option(_), Value::Option(None)) => out.push_str("None"),
             (Type::Option(inner), Value::Option(Some(value))) => {
                 if **value == Value::Opaque {

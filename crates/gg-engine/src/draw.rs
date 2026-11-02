@@ -6,9 +6,10 @@ use gg_core::math::{Mat4, Quat, Vec3};
 use gg_renderer::{Circle, Draws, MeshDraw, Shaders, Sprite};
 
 use crate::ecs::ComponentId;
+use crate::font::Fonts;
 use crate::interpolation::{self, Past};
 use crate::jobs;
-use crate::{EntityId, Parent, Transform, World};
+use crate::{EntityId, Parent, Text, Transform, World};
 
 /// What drawing the world sorts and computes, kept from frame to frame so that it allocates nothing
 /// once it's grown, and so that a frame that changes no entity's row, no z and no batch draws in
@@ -47,7 +48,7 @@ struct Segment {
     /// Its rows' [`MeshDraw::batch`], for opaque meshes, or 0.
     batch: u64,
     /// Which segment it was found as: tables in the order they were made, then a table's sprites,
-    /// circles and meshes, then its rows in order.
+    /// circles, texts and meshes, then its rows in order.
     order: u32,
     kind: Kind,
     table: u32,
@@ -76,12 +77,13 @@ impl PartialEq for Segment {
 const ROOTS: u32 = u32::MAX;
 
 /// What a row draws: opaque meshes first, whatever their z, then, at one z, sprites, then circles,
-/// under the meshes that blend.
+/// then text, under the meshes that blend.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Kind {
     Opaque,
     Sprite,
     Circle,
+    Text,
     Mesh,
 }
 
@@ -101,21 +103,22 @@ struct Group {
     items: Range<u32>,
 }
 
-/// Draws into `draws` every entity of `world` with a [`Transform`] and a [`Sprite`], a [`Circle`]
-/// or a [`MeshDraw`]: first the meshes whose shaders are opaque, whose depth hides what's behind
-/// them whatever order they draw in, by their [`MeshDraw::batch`], so that each mesh with each
-/// shader is one instanced draw, split only where a culling mesh's draws change between mirrored
-/// and not; then the rest, which blend, back to front by z in the world, as the latest tick left
-/// them, -0.0 and 0.0 one z, at one z sprites, then circles, under meshes; each batch and each z in
-/// the order of their entities' IDs, so that entities that overlap at one depth keep how they stack
-/// as others come and go. Circles draw with the engine's circle shader, which `shaders` adds the
-/// first time any do. Each draws `alpha` of the way from what `past` has it draw from to where the
-/// tick left it, while it draws between ticks; at 1, where the tick left it. Each draw's ID is its
-/// entity's, which picks read back where it shows. A child draws where its ancestors carry it, by
-/// its world matrix, its transform's and each of theirs drawn so, which it computes into `scratch`
-/// for each child once a frame; roots, in tables without a [`Parent`], draw by their transforms
-/// alone, which those that draw between ticks blend first, in their tables' order, in runs of rows
-/// that the job system's threads take.
+/// Draws into `draws` every entity of `world` with a [`Transform`] and a [`Sprite`], a [`Circle`],
+/// a [`Text`] or a [`MeshDraw`]: first the meshes whose shaders are opaque, whose depth hides
+/// what's behind them whatever order they draw in, by their [`MeshDraw::batch`], so that each mesh
+/// with each shader is one instanced draw, split only where a culling mesh's draws change between
+/// mirrored and not; then the rest, which blend, back to front by z in the world, as the latest
+/// tick left them, -0.0 and 0.0 one z, at one z sprites, then circles, then text, under meshes;
+/// each batch and each z in the order of their entities' IDs, so that entities that overlap at one
+/// depth keep how they stack as others come and go. Circles draw with the engine's circle shader
+/// and text with its text shader, which `shaders` adds the first time any do; text is laid out in
+/// its font of `fonts`, as [`Fonts::lay_out`] says. Each draws `alpha` of the way from what `past`
+/// has it draw from to where the tick left it, while it draws between ticks; at 1, where the tick
+/// left it. Each draw's ID is its entity's, which picks read back where it shows. A child draws
+/// where its ancestors carry it, by its world matrix, its transform's and each of theirs drawn so,
+/// which it computes into `scratch` for each child once a frame; roots, in tables without a
+/// [`Parent`], draw by their transforms alone, which those that draw between ticks blend first, in
+/// their tables' order, in runs of rows that the job system's threads take.
 ///
 /// It sorts runs of consecutive rows of one batch or at one z every frame, so it's quick while each
 /// table's rows at one z stay together, as opaque meshes do whatever their z's. Spawning entities
@@ -132,6 +135,7 @@ pub(crate) fn draw_world(
     alpha: f32,
     draws: &mut Draws,
     shaders: &mut Shaders,
+    fonts: &mut Fonts,
     scratch: &mut Scratch,
 ) {
     let _zone = gg_core::zone!();
@@ -156,6 +160,7 @@ pub(crate) fn draw_world(
     let transform = poses.transform;
     let sprite = world.component::<Sprite>();
     let circle = world.component::<Circle>();
+    let text = world.component::<Text>();
     let mesh = world.component::<MeshDraw>();
     let parent = world.component::<Parent>();
     // How many of `blended`'s matrices the frame's roots take.
@@ -167,6 +172,7 @@ pub(crate) fn draw_world(
         let drawn = [
             (Kind::Sprite, sprite),
             (Kind::Circle, circle),
+            (Kind::Text, text),
             (Kind::Mesh, mesh),
         ]
         .map(|(kind, id)| (kind, id.is_some_and(|id| rows.has(id))));
@@ -250,6 +256,7 @@ pub(crate) fn draw_world(
     // Kept across groups, whose segments' indices differ.
     let mut sprites_at = [None; AT_HAND];
     let (mut circles_at, mut meshes_at) = ([None; AT_HAND], [None; AT_HAND]);
+    let mut texts_at = [None; AT_HAND];
     for group in groups.iter() {
         let items = &items[group.items.start as usize..group.items.end as usize];
         match group.kind {
@@ -281,6 +288,24 @@ pub(crate) fn draw_world(
                     (matrix(transforms, drawn, row), circles[row], item.id.get())
                 });
                 draws.extend_circles(shaders, circles);
+            }
+            Kind::Text => {
+                let text = text.expect("a table has texts");
+                let columns = |index: u32| {
+                    let (table, transforms, drawn) = placed(index);
+                    let texts = table.column::<Text>(text).expect("it has texts");
+                    (transforms, texts, drawn)
+                };
+                for item in items {
+                    let found = found(&mut texts_at, item.segment, columns);
+                    let (transforms, texts, drawn) = found;
+                    let row = item.row as usize;
+                    let at = matrix(transforms, drawn, row);
+                    let shown = &texts[row];
+                    let style = shown.style();
+                    let glyphs = fonts.lay_out(at, &shown.text, &style, item.id.get());
+                    draws.extend_glyphs(shaders, glyphs);
+                }
             }
             Kind::Opaque | Kind::Mesh => {
                 let mesh = mesh.expect("a table has meshes");
@@ -556,7 +581,7 @@ mod tests {
     use std::path::Path;
 
     use gg_core::math::{Quat, Vec3, Vec4};
-    use gg_renderer::{Blend, Mesh, Meshes, Shader, Shaders};
+    use gg_renderer::{Blend, Mesh, Meshes, Shader, Shaders, Textures};
 
     use super::*;
     use crate::{Component, Entity};
@@ -701,6 +726,7 @@ mod tests {
             1.0,
             &mut draws,
             &mut Shaders::default(),
+            &mut Fonts::new(&mut Textures::default()),
             &mut Scratch::default(),
         );
         assert_eq!(draws, want);
@@ -739,7 +765,15 @@ mod tests {
         let drawn = |world: &World, scratch: &mut Scratch| {
             let mut draws = Draws::default();
             let shaders = &mut Shaders::default();
-            draw_world(world, &Past::default(), 1.0, &mut draws, shaders, scratch);
+            draw_world(
+                world,
+                &Past::default(),
+                1.0,
+                &mut draws,
+                shaders,
+                &mut Fonts::new(&mut Textures::default()),
+                scratch,
+            );
             draws
         };
         let mut kept = Scratch::default();
@@ -837,6 +871,7 @@ mod tests {
             1.0,
             &mut draws,
             shaders,
+            &mut Fonts::new(&mut Textures::default()),
             &mut scratch,
         );
         assert_eq!(draws, want);
@@ -848,6 +883,7 @@ mod tests {
             1.0,
             &mut again,
             shaders,
+            &mut Fonts::new(&mut Textures::default()),
             &mut scratch,
         );
         assert_eq!(again, want);
@@ -896,7 +932,15 @@ mod tests {
         let step = |world: &World, kept: &mut Scratch, what: &str| {
             let mut draws = Draws::default();
             let shaders = &mut Shaders::default();
-            draw_world(world, &Past::default(), 1.0, &mut draws, shaders, kept);
+            draw_world(
+                world,
+                &Past::default(),
+                1.0,
+                &mut draws,
+                shaders,
+                &mut Fonts::new(&mut Textures::default()),
+                kept,
+            );
             let mut fresh = Draws::default();
             draw_world(
                 world,
@@ -904,6 +948,7 @@ mod tests {
                 1.0,
                 &mut fresh,
                 &mut Shaders::default(),
+                &mut Fonts::new(&mut Textures::default()),
                 &mut Scratch::default(),
             );
             assert_eq!(draws, fresh, "after {what}");
@@ -1008,7 +1053,15 @@ mod tests {
         let drawn = |world: &World, scratch: &mut Scratch| {
             let mut draws = Draws::default();
             let shaders = &mut Shaders::default();
-            draw_world(world, &Past::default(), 1.0, &mut draws, shaders, scratch);
+            draw_world(
+                world,
+                &Past::default(),
+                1.0,
+                &mut draws,
+                shaders,
+                &mut Fonts::new(&mut Textures::default()),
+                scratch,
+            );
             draws
         };
         let mut kept = Scratch::default();
@@ -1082,6 +1135,7 @@ mod tests {
             1.0,
             &mut draws,
             &mut Shaders::default(),
+            &mut Fonts::new(&mut Textures::default()),
             &mut Scratch::default(),
         );
         assert_eq!(draws, expected);
@@ -1135,7 +1189,64 @@ mod tests {
             1.0,
             &mut draws,
             &mut Shaders::default(),
+            &mut Fonts::new(&mut Textures::default()),
             &mut Scratch::default(),
+        );
+        assert_eq!(draws, want);
+    }
+
+    /// Text draws among the rest back to front by z, at one z over circles and under the meshes
+    /// that blend, its glyphs its entity's draws, where its transform places it; one that names no
+    /// font draws in the engine's own, which bakes as it's first drawn, its field waiting to be put
+    /// in the texture every context keeps for it.
+    #[test]
+    fn text_draws_over_circles_and_under_meshes() {
+        let (triangle, flat) = flat_triangle();
+        let mesh = MeshDraw::new(triangle, flat, Vec4::ONE);
+        let text = Text {
+            text: "Hi".to_owned(),
+            ..Text::default()
+        };
+        let mut world = World::default();
+        let all = world.spawn((at_x(2.0, 0.5), Circle::default(), text.clone(), mesh));
+        let far = world.spawn((at_x(1.0, 0.2), text.clone()));
+        let id = |entity: Entity| world.id(entity).expect("alive").get();
+        let mut textures = Textures::default();
+        let mut fonts = Fonts::new(&mut textures);
+        let mut shaders = Shaders::default();
+        let mut want = Draws::default();
+        let glyphs = |fonts: &mut Fonts, at: Transform, entity| {
+            let laid: Vec<_> = fonts
+                .lay_out(at.matrix(), &text.text, &text.style(), id(entity))
+                .collect();
+            assert_eq!(laid.len(), 2, "a glyph a letter");
+            assert!(
+                laid.iter()
+                    .all(|(_, glyph, _)| glyph.field == fonts.inter_field())
+            );
+            laid
+        };
+        want.extend_glyphs(
+            &mut shaders,
+            glyphs(&mut fonts, at_x(1.0, 0.2), far).into_iter(),
+        );
+        let circle = (at_x(2.0, 0.5).matrix(), Circle::default(), id(all));
+        want.extend_circles(&mut shaders, iter::once(circle));
+        want.extend_glyphs(
+            &mut shaders,
+            glyphs(&mut fonts, at_x(2.0, 0.5), all).into_iter(),
+        );
+        want.push_draw(at_x(2.0, 0.5).matrix(), &mesh, id(all));
+        let mut draws = Draws::default();
+        let scratch = &mut Scratch::default();
+        draw_world(
+            &world,
+            &Past::default(),
+            1.0,
+            &mut draws,
+            &mut Shaders::default(),
+            &mut fonts,
+            scratch,
         );
         assert_eq!(draws, want);
     }
@@ -1158,6 +1269,7 @@ mod tests {
             alpha,
             &mut draws,
             &mut Shaders::default(),
+            &mut Fonts::new(&mut Textures::default()),
             scratch,
         );
         draws

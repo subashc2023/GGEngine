@@ -164,15 +164,15 @@
 //! or `NaN`; an entity its ID, a string of 16 hex digits, or `null` if it isn't alive; a texture
 //! its name, its asset ID where its file has one, such as `5f3c9a1e07b2d846`, a model's image the
 //! model's and its place, such as `5f3c9a1e07b2d846#0`, or else its path, such as
-//! `assets/logo.png`, or `null` for one without; a model its name, as a texture's; an option `null`
-//! or its value; a list an array; a struct an object of its fields, in their order, a tuple
-//! struct's named `0`, `1` and so on; an enum's variant its name, as a string, or for a variant
-//! with fields an object of one key, its name, whose value is an object of the fields; and what
-//! reflection doesn't read, such as a `MeshDraw`, the string `(opaque)`. A value given, as an
+//! `assets/logo.png`, or `null` for one without; a model or a font its name, as a texture's; an
+//! option `null` or its value; a list an array; a struct an object of its fields, in their order, a
+//! tuple struct's named `0`, `1` and so on; an enum's variant its name, as a string, or for a
+//! variant with fields an object of one key, its name, whose value is an object of the fields; and
+//! what reflection doesn't read, such as a `MeshDraw`, the string `(opaque)`. A value given, as an
 //! operation's, is read the same way, by the type of the field it goes in, as a component's
-//! description gives it: an integer where a float goes, a texture or a model by its name or a path
-//! to its file, which the game loads from the file under its asset root if it hasn't, its model's
-//! image with its model, an entity by the ID of one that's alive, or `null` for none
+//! description gives it: an integer where a float goes, a texture, a model or a font by its name or
+//! a path to its file, which the game loads from the file under its asset root if it hasn't, its
+//! model's image with its model, an entity by the ID of one that's alive, or `null` for none
 //! alive, and a struct, or a variant's fields, missing a field, which takes its default, as in a
 //! scene; what's opaque is kept as it is, or made as the type's own is, as an `(opaque)` that a
 //! create or an add gives says.
@@ -848,9 +848,9 @@ pub struct VariantInfo {
 }
 
 /// A field's type: `"bool"`, `{"int":{"bits":32,"signed":true}}`, `"f32"`, `"f64"`, `"string"`,
-/// `"vec2"`, `"vec3"`, `"vec4"`, `"quat"`, `"entity"`, `"texture"`, `"model"`, `{"option":...}`,
-/// `{"list":...}`, `{"array":[..., 4]}`, `{"named":"Transform"}`, a type `types` describes, or
-/// `"opaque"`, a field reflection leaves as it is.
+/// `"vec2"`, `"vec3"`, `"vec4"`, `"quat"`, `"entity"`, `"texture"`, `"model"`, `"font"`,
+/// `{"option":...}`, `{"list":...}`, `{"array":[..., 4]}`, `{"named":"Transform"}`, a type `types`
+/// describes, or `"opaque"`, a field reflection leaves as it is.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Type {
@@ -866,6 +866,7 @@ pub enum Type {
     Entity,
     Texture,
     Model,
+    Font,
     Option(Box<Type>),
     List(Box<Type>),
     Array(Box<Type>, u32),

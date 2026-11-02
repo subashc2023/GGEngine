@@ -24,7 +24,7 @@ use crate::ecs::id::Named;
 use crate::ecs::table::{AnyColumn, ComponentId, Row};
 use crate::ecs::{Entity, EntityId, Parent, World};
 use crate::reflect::{self, Field, Ident, Meta, Shape, Type, Types, Value, Variant};
-use crate::{Model, ModelNode, Reflect, Texture};
+use crate::{Font, Model, ModelNode, Reflect, Texture};
 
 /// A scene's entity, as the parse reads it.
 pub(super) struct Loaded {
@@ -97,8 +97,8 @@ pub(super) fn parse(world: &World, text: &str, prefab: bool) -> Result<Vec<Loade
     Ok(entities)
 }
 
-/// The textures and models scene `text` names that none loaded has, each once, in the order it
-/// first names them, as [`parse`] reads it into `world`, but on past them.
+/// The textures, models and fonts scene `text` names that none loaded has, each once, in the order
+/// it first names them, as [`parse`] reads it into `world`, but on past them.
 ///
 /// Fails as the parse does, but for those.
 pub(super) fn assets(world: &World, text: &str) -> Result<Vec<Asset<String>>> {
@@ -217,9 +217,9 @@ fn syntax(error: &SpannedError) -> Error {
 }
 
 /// `refusal`, at item `item`, saying where it is: the text is parsed again, as it was, past the
-/// textures and models none loaded has if `collect`, up to the item, where the parser is at its first
-/// character, and the refusal is carried out from there, gathering the entity, the component and
-/// the path.
+/// textures, models and fonts none loaded has if `collect`, up to the item, where the parser is at
+/// its first character, and the refusal is carried out from there, gathering the entity, the
+/// component and the path.
 fn locate(
     world: &World,
     text: &str,
@@ -263,8 +263,8 @@ struct Load<'w> {
     /// out from there as `carried`.
     stop: Option<(u32, Error)>,
     carried: Option<Error>,
-    /// The textures and models named that none loaded has, while the parse reads on past them, as
-    /// [`assets`] does, rather than refusing them.
+    /// The textures, models and fonts named that none loaded has, while the parse reads on past
+    /// them, as [`assets`] does, rather than refusing them.
     missing: Option<Vec<Asset<String>>>,
 }
 
@@ -688,7 +688,8 @@ impl<'de> DeserializeSeed<'de> for Read<'_, '_> {
             | Type::String
             | Type::Entity
             | Type::Texture
-            | Type::Model => {
+            | Type::Model
+            | Type::Font => {
                 let leaf = Leaf {
                     load,
                     item,
@@ -898,16 +899,20 @@ impl Visitor<'_> for Leaf<'_, '_> {
                 let id = id.map_err(|error| self.load.refuse(self.item, error))?;
                 Ok(Value::Entity(self.load.reference(id, self.item)))
             }
-            Type::Texture | Type::Model => {
+            Type::Texture | Type::Model | Type::Font => {
                 let assets = self.load.world.assets();
                 let (found, asset, code) = match self.ty {
                     Type::Texture => {
                         let found = assets.texture(text).map(Value::Texture);
                         (found, Asset::Texture(text), "asset.no_texture")
                     }
-                    _ => {
+                    Type::Model => {
                         let found = assets.model(text).map(Value::Model);
                         (found, Asset::Model(text), "asset.no_model")
+                    }
+                    _ => {
+                        let found = assets.font(text).map(Value::Font);
+                        (found, Asset::Font(text), "asset.no_font")
                     }
                 };
                 match (found, &mut self.load.missing) {
@@ -920,6 +925,7 @@ impl Visitor<'_> for Leaf<'_, '_> {
                         Ok(match asset {
                             Asset::Texture(_) => Value::Texture(Texture::WHITE),
                             Asset::Model(_) => Value::Model(Model::new(0)),
+                            Asset::Font(_) => Value::Font(Font::new(0)),
                         })
                     }
                     (None, None) => {
@@ -943,7 +949,7 @@ impl Visitor<'_> for Leaf<'_, '_> {
 
     fn visit_string<E: de::Error>(self, text: String) -> Result<Value, E> {
         match self.ty {
-            Type::Entity | Type::Texture | Type::Model => self.visit_str(&text),
+            Type::Entity | Type::Texture | Type::Model | Type::Font => self.visit_str(&text),
             _ => Ok(Value::String(text)),
         }
     }

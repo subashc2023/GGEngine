@@ -16,7 +16,7 @@ use serde_json::{Map, Value as JsonValue};
 
 use crate::ecs::MAX_DEPTH;
 use crate::reflect::{self, Bound, Field, Ident, Meta, Shape, Show, Type, Types, Value, Variant};
-use crate::{Entity, EntityId, Model, Texture, World};
+use crate::{Entity, EntityId, Font, Model, Texture, World};
 
 /// What finds the entities and textures values hold as JSON names them, by their IDs and names,
 /// and names them back: a game's [`World`], or a client's [`Remote`].
@@ -41,6 +41,12 @@ pub(crate) trait Names {
     ///
     /// Fails with `api.no_model` if none is.
     fn model(&self, name: &str) -> Result<Value>;
+    /// The name of `font`, as a texture's.
+    fn font_name(&self, font: Font) -> Option<&str>;
+    /// The value of the font `name` names, by its name or a path to its file.
+    ///
+    /// Fails with `api.no_font` if none is.
+    fn font(&self, name: &str) -> Result<Value>;
 }
 
 impl Names for World {
@@ -81,6 +87,18 @@ impl Names for World {
         })?;
         Ok(Value::Model(model))
     }
+
+    fn font_name(&self, font: Font) -> Option<&str> {
+        Some(self.assets().font_name(font))
+    }
+
+    fn font(&self, name: &str) -> Result<Value> {
+        let font = self.assets().font(name).ok_or_else(|| {
+            let message = self.assets().not_found("font", name);
+            Error::new("api.no_font", message)
+        })?;
+        Ok(Value::Font(font))
+    }
 }
 
 /// Another process's values, as a client of its API keeps them, by the types it described: an
@@ -115,6 +133,14 @@ impl Names for Remote<'_> {
     }
 
     fn model(&self, name: &str) -> Result<Value> {
+        Ok(Value::String(name.to_owned()))
+    }
+
+    fn font_name(&self, _: Font) -> Option<&str> {
+        None
+    }
+
+    fn font(&self, name: &str) -> Result<Value> {
         Ok(Value::String(name.to_owned()))
     }
 }
@@ -152,6 +178,10 @@ pub(crate) fn write(out: &mut String, value: &Value, names: &dyn Names) {
             Some(name) => string(out, name),
             None => out.push_str("null"),
         },
+        &Value::Font(font) => match names.font_name(font) {
+            Some(name) => string(out, name),
+            None => out.push_str("null"),
+        },
         Value::Option(None) => out.push_str("null"),
         Value::Option(Some(value)) => write(out, value, names),
         Value::List(items) => {
@@ -179,17 +209,16 @@ pub(crate) fn write(out: &mut String, value: &Value, names: &dyn Names) {
 
 /// The value `json` gives a field of type `ty`, as gg-api's docs describe: with the entities it
 /// names by their IDs, alive as `names` finds them, or `null` for a dead one, as one that isn't
-/// alive writes, and the textures and models by their names or paths to their files, as `names`
-/// finds them;
-/// a struct, or a variant's fields, missing a field takes its default, or is opaque, which keeps
-/// or makes it as its type's own is; and a whole number an `Int` for a signed field, as
-/// reflection reads one, and a `UInt` for an unsigned one, if it can be.
+/// alive writes, and the textures, models and fonts by their names or paths to their files, as
+/// `names` finds them; a struct, or a variant's fields, missing a field takes its default, or is
+/// opaque, which keeps or makes it as its type's own is; and a whole number an `Int` for a signed
+/// field, as reflection reads one, and a `UInt` for an unsigned one, if it can be.
 ///
 /// Fails, saying where in the value, with `reflect.wrong_kind` for JSON of another kind than the
 /// type's, `reflect.no_variant` and `reflect.no_field` for a variant or a field the type hasn't,
 /// `ecs.bad_id` and `ecs.no_entity` for an ID that isn't one or names no living entity,
-/// `api.no_texture` or `api.no_model` for a name or path no texture or model has, and
-/// `api.too_deep` for a value nested more than a scene's values may be.
+/// `api.no_texture`, `api.no_model` or `api.no_font` for a name or path no texture, model or font
+/// has, and `api.too_deep` for a value nested more than a scene's values may be.
 pub(crate) fn read(json: &JsonValue, ty: &Type, names: &dyn Names) -> Result<Value> {
     read_at(json, ty, names, 1)
 }
@@ -277,6 +306,10 @@ fn read_at(json: &JsonValue, ty: &Type, names: &dyn Names, depth: u32) -> Result
         Type::Model => match json {
             JsonValue::String(name) => names.model(name)?,
             _ => return Err(wrong("a model's ID or path, a string")),
+        },
+        Type::Font => match json {
+            JsonValue::String(name) => names.font(name)?,
+            _ => return Err(wrong("a font's ID or path, a string")),
         },
         Type::Option(inner) => match json {
             JsonValue::Null => Value::Option(None),
@@ -526,6 +559,7 @@ fn api_type(types: &Types, ty: &Type) -> gg_api::Type {
         Type::Entity => Api::Entity,
         Type::Texture => Api::Texture,
         Type::Model => Api::Model,
+        Type::Font => Api::Font,
         Type::Option(of) => Api::Option(inner(of)),
         Type::List(of) => Api::List(inner(of)),
         Type::Array(of, n) => Api::Array(inner(of), *n),
@@ -681,6 +715,7 @@ fn own_type(types: &Types, ty: &gg_api::Type) -> std::result::Result<Type, Strin
         Api::Entity => Type::Entity,
         Api::Texture => Type::Texture,
         Api::Model => Type::Model,
+        Api::Font => Type::Font,
         Api::Option(of) => Type::Option(inner(of)?),
         Api::List(of) => Type::List(inner(of)?),
         Api::Array(of, n) => Type::Array(inner(of)?, *n),
@@ -855,6 +890,11 @@ mod tests {
         let error =
             read_json(&world, &sprite, r#"{"texture": "assets/none.png"}"#).expect_err("none");
         assert_eq!(error.code(), "api.no_texture", "{error}");
+        // And a text's font, as a texture.
+        world.register::<crate::Text>().expect("registered");
+        let text = Type::Named(world.types().find("Text").expect("registered"));
+        let error = read_json(&world, &text, r#"{"font": "fonts/none.ttf"}"#).expect_err("none");
+        assert_eq!(error.code(), "api.no_font", "{error}");
     }
 
     /// A whole number reads as reflection reads its field's: an `Int` for a signed one, and a
