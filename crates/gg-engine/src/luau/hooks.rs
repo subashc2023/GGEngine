@@ -1,7 +1,8 @@
 //! Luau's hooks, which mlua reaches through its raw API alone: the interrupt, which keeps each call
 //! into a script to its budget and, in development builds, stops there as a pause asks; and, in
 //! development builds, breakpoints, steps, and the stack a stop reads. The engine's side of each,
-//! what to do, is [`super`]'s; this module reads and sets what it needs of Luau's state.
+//! what to do, is [`super`]'s; this module reads and sets what it needs of Luau's state, as it
+//! reads a function's upvalues for [`super`]'s check of what a script's chunk keeps.
 
 use std::ffi::{CStr, c_int};
 #[cfg(feature = "dev")]
@@ -10,9 +11,7 @@ use std::{panic, process};
 
 #[cfg(feature = "dev")]
 use gg_api::StopReason;
-#[cfg(feature = "dev")]
-use mlua::Function;
-use mlua::{Lua, ffi};
+use mlua::{Function, Lua, Value, Variadic, ffi};
 
 use super::Interrupt;
 
@@ -271,6 +270,30 @@ pub(super) fn breakpoint(lua: &Lua, chunk: &Function, line: u32, on: bool) -> Op
     };
     ran.ok()?;
     u32::try_from(placed).ok()
+}
+
+/// The values `function`'s upvalues hold, in order; of a C function's, the coroutines and buffers
+/// alone, as `coroutine.wrap`'s hold its coroutine, while mlua's functions hold its own values.
+pub(super) fn upvalues(lua: &Lua, function: &Function) -> mlua::Result<Variadic<Value>> {
+    // SAFETY: `exec_raw` runs the closure with `function` alone on the stack, and returns what the
+    // stack holds after, which is each upvalue `lua_getupvalue` pushed and kept once the function
+    // is gone.
+    unsafe {
+        lua.exec_raw(function, |state| {
+            let c = ffi::lua_iscfunction(state, 1) != 0;
+            for n in 1.. {
+                ffi::lua_rawcheckstack(state, 1);
+                if ffi::lua_getupvalue(state, 1, n).is_null() {
+                    break;
+                }
+                let kind = ffi::lua_type(state, -1);
+                if c && kind != ffi::LUA_TTHREAD && kind != ffi::LUA_TBUFFER {
+                    ffi::lua_pop(state, 1);
+                }
+            }
+            ffi::lua_remove(state, 1);
+        })
+    }
 }
 
 /// Has the VM's main thread, which runs the scripts, enter the calls into them stepping, calling

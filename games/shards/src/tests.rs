@@ -31,6 +31,58 @@ fn scene(name: &str) -> PathBuf {
         .join(name)
 }
 
+/// The sample mod, `mods/rainbow`, runs with what the game grants mods, giving each shard its
+/// `Rainbow` and turning its color through the hues; a mod that asks for more than the game grants
+/// is refused, and the game runs without it.
+#[test]
+fn the_sample_mod_cycles_the_shards_colors_and_a_greedy_one_is_refused() {
+    let game = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let dir = std::env::temp_dir().join(format!("shards-mods-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    for name in ["rainbow", "greedy"] {
+        fs::create_dir_all(dir.join(name)).expect("a directory");
+    }
+    for file in ["mod.ron", "rainbow.luau"] {
+        let from = game.join("mods/rainbow").join(file);
+        fs::copy(from, dir.join("rainbow").join(file)).expect("copied");
+    }
+    let greedy = fs::read_to_string(game.join("mods/rainbow/mod.ron")).expect("the manifest");
+    let greedy = greedy.replace("\"rainbow\"", "\"greedy\"");
+    let greedy = greedy.replace("\"write:Sprite\"", "\"write:Match\"");
+    fs::write(dir.join("greedy/mod.ron"), greedy).expect("written");
+    fs::copy(
+        game.join("mods/rainbow/rainbow.luau"),
+        dir.join("greedy/rainbow.luau"),
+    )
+    .expect("copied");
+    let cx = Context::seeded(1).project(game).expect("the project reads");
+    let mut cx = cx.mods("Shards", &dir);
+    let mut shards = Shards::new();
+    shards.load(&mut cx);
+    shards.attach(&mut cx);
+    for number in 0..16 {
+        shards.tick(cx.world_mut(), Tick { number });
+    }
+    let world = cx.world();
+    let shards: Vec<Entity> = world
+        .query::<(Entity, &Shard)>()
+        .map(|(entity, _)| entity)
+        .collect();
+    assert_eq!(shards.len(), SHARDS);
+    // A turn of a quarter a second, once a tick: the greedy mod, which would turn it too, refused.
+    let hue = 0.25 * 16.0 * Tick::DT.as_secs_f64();
+    let colored = Vec4::new(1.0, (hue * 6.0) as f32, 0.0, 1.0);
+    for shard in shards {
+        let rainbow = world
+            .get_field(shard, "Rainbow", "hue")
+            .expect("its own Rainbow");
+        assert_eq!(rainbow, gg_engine::reflect::Value::F64(hue));
+        let color = world.get::<Sprite>(shard).expect("a sprite").color;
+        assert!(color.abs_diff_eq(colored, 1e-6), "{color}");
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// The game's project's manifest is canonical, writing back to its own bytes, and starts the game
 /// in the arena.
 #[test]

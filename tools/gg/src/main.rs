@@ -184,12 +184,15 @@ Serve agents:
                                  `logs --follow` and the PATHs of `capture` and `snapshot`, with
                                  `scene`'s PATH from the game's asset root, which reaches the game
                                  the options choose at each call, as the agent, its MCP client's
-                                 name, the author of the edits it applies
+                                 name, the author of the edits it applies, kept to what `--grant`
+                                 grants
 
 Options for talking to a game:
   --pid <PID>           The game in process PID, when more than one runs
   --app <NAME>          The game whose app is NAME, when more than one runs
   --timeout <SECONDS>   How long to wait for its answer (30)
+  --grant <LIST>        Keep the connection to the capabilities LIST names, between commas, as
+                        `read,view`, which the tool API's `hello` takes, rather than every one
 
 Options for every command but `new`:
   --project <PATH>      Work in the project PATH names, by its directory or its `project.ron`,
@@ -315,8 +318,9 @@ fn absolute(path: &str) -> Result<PathBuf, Failure> {
 }
 
 /// The flags that take a value: `--name value` or `--name=value`.
-const VALUED: [&str; 15] = [
+const VALUED: [&str; 16] = [
     "--project",
+    "--grant",
     "--peers",
     "--author",
     "--pid",
@@ -417,6 +421,12 @@ impl Parsed {
             app: self.value("--app"),
             timeout: self.seconds("--timeout", 30)?,
             client: "gg".to_owned(),
+            grant: (self.value("--grant")).map(|grant| {
+                grant
+                    .split(',')
+                    .map(|capability| capability.trim().to_owned())
+                    .collect()
+            }),
             project: self.scope()?.map(|scope| scope.manifest),
         })
     }
@@ -800,6 +810,19 @@ mod tests {
     fn parsed(args: &[&str]) -> Result<Command, Failure> {
         let args: Vec<String> = args.iter().map(|&arg| arg.to_owned()).collect();
         parse(&args)
+    }
+
+    /// `--grant` keeps a command's connection, or `mcp`'s, to the capabilities it names.
+    #[test]
+    fn grant_names_the_capabilities_a_connection_is_kept_to() {
+        let granted = |args: &[&str]| match parsed(args) {
+            Ok(Command::Call { pick, .. } | Command::Mcp(pick)) => pick.grant,
+            _ => panic!("{args:?}"),
+        };
+        let read_view = Some(vec!["read".to_owned(), "view".to_owned()]);
+        assert_eq!(granted(&["mcp", "--grant", "read, view"]), read_view);
+        assert_eq!(granted(&["status", "--grant=read,view"]), read_view);
+        assert_eq!(granted(&["status"]), None);
     }
 
     #[test]

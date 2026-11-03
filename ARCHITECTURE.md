@@ -228,10 +228,18 @@ makes; anyone else's game depends on the engine from its own repository.
   API's `stop` brings back and the components an undo puts back, migrates as it comes back. A
   reload doesn't rename the component, nor does an undo take a reload back: saving the file as it
   was does, the fields it dropped coming back at their defaults. A script keeps its state in its
-  components, as a game keeps its in the world, and its ticks don't allocate, as steady-state
-  frames don't: the engine's bindings allocate nothing, so a table, string or closure a script
-  makes at each tick breaks the rule as Rust code making one would. Luau doesn't guard against
-  crafted bytecode, so mods ship as source and only a game's own packages hold bytecode.
+  components, as a game keeps its in the world, since a lockstep joiner and a run restored from a
+  snapshot run its chunk afresh: once the chunk has run, every table it reaches is frozen and its
+  globals are read only, and a script is refused (`script.state`) whose functions assign a local of
+  its chunk, as its compiled bytecode shows, or whose chunk keeps a coroutine or a buffer, which
+  hold state too; and the metatable that entities share is frozen, as Luau's sandbox freezes its
+  libraries' and vectors'. Every VM collects its garbage at set points between calls, as much as
+  its scripts have allocated since calls for, rather than when Luau paces it by the clock, so that
+  what a weak table still holds, and the memory a VM takes, are alike everywhere. Its ticks don't
+  allocate, as steady-state frames don't: the engine's bindings allocate nothing, so a table,
+  string or closure a script makes at each tick breaks the rule as Rust code making one would. Luau
+  doesn't guard against crafted bytecode, so mods ship as source and only a game's own packages
+  hold bytecode.
 - **Scripts are debugged where they run.** A development build debugs its scripts through the
   [tool API](#agents-and-tools), with Luau's own debugger hooks: breakpoints, each a script's path
   from the project's root and a line, which Luau moves to the next line with code, kept as the
@@ -258,6 +266,27 @@ makes; anyone else's game depends on the engine from its own repository.
   a loop, past which the call fails as an error does: a loop that never ends fails alike on every
   peer and in every replay, rather than hanging the game, which `gg run` would restart into it
   again.
+- **Mods are scripts a player installs.** A mod is a folder holding a manifest, `mod.ron`, which
+  names the mod, its version, the game it's for and the capabilities it asks for, and the Luau
+  scripts it lists, as source; installed in `mods` in its game's per-user folder, where the dock
+  keeps its layout, which a windowed run reads, or in the folder a run's `--mods` names in its
+  place, each loads as the run starts, in the order of their names. A game takes mods by loading
+  them through `Mods` in a layer's `load`, with the most it grants any, and runs them where that
+  layer's tick chooses, as it runs its own scripts: a mod that asks for more, or whose manifest or
+  a script doesn't load, is refused, warning, and the game runs on without it. A mod's scripts are
+  scripts as a game's are, run in a VM of the mod's own and kept to its capabilities, `read` and
+  `write` of the whole world or of the component types they name, as `read:Shard` or
+  `write:Sprite`, which `gg.component` and an entity's fields check, its own components, which no
+  other script's are, always its own; within a memory limit, past which a call fails as an error does, at the same allocation on
+  every platform and in every build, for runs that went alike; with one budget of interrupts for
+  all of the mod's calls in a tick, past which they fail until the next, so that a mod slows a
+  tick by no more than one call can; and with its prints held to a rate. A script, a game's or a
+  mod's, reaches the game's entities through a component of the game's that its own rides on, as
+  `gg.declare`'s `on` names it, which gives each entity with that component its own, at its
+  defaults, as its scripts run. A run's mods, their manifests and scripts, go whole in its
+  snapshots and its recording, so that a lockstep joiner runs its host's in place of its own and a
+  replay its recording's, whatever is installed, each granted no more than its own game grants; a
+  run restored from a snapshot loads those installed, as it reads its scripts' files.
 
 ## Agents and tools
 
@@ -324,9 +353,15 @@ in the editor is out of an agent's reach.
   among it, or, asked to, as the game shows it on its own, from a bare frame, which draws without
   the look, isn't shared and leaves the picks asked to the next frame, so that none reads a view a
   client isn't shown. A pick answers which entity the view shows at a pixel, and its name, once the
-  frame that read it comes back. Each client will get only the capabilities it's granted, such as
-  reading the world or editing one scene, as Phase 9 grants them: until then, a client that says
-  hello with the token reaches everything, `patch` among it.
+  frame that read it comes back. A connection is kept to the capabilities it's granted: `read` and
+  `write` of the world, whole or of the component types they name, as a mod's scripts are kept;
+  and the API's own, `play`, which plays, stops, pauses and steps, `input`, `view`, which captures,
+  shares the view, picks and sets the look, `scene`, `snapshot`, `debug`, `patch`, `files`, which
+  writes a capture or a snapshot where a request names, `note` and `quit`. The session file's
+  token grants them all, `patch`, which runs code the client gives, among them, unless the `hello`
+  names fewer, as `gg --grant` and `gg mcp --grant` ask for an agent kept to them; a request beyond
+  them fails with `api.ungranted`. Any process that reads the session file reaches everything, so a
+  grant keeps to it only a client that can't, such as an agent sandboxed away from that file.
 - **Clients.** The command-line tool, `tools/gg`, builds and runs games, supervising them: it
   runs a copy of a game's executable, so that the game builds again meanwhile, removing those runs
   it killed left; patches it as its code changes, and rebuilds it at any other change, as [Game
@@ -803,8 +838,8 @@ them, since each peer runs both players' world.
   peer has run; it tells its joiner, which waits at that tick for its own patch if it hasn't it yet.
 - **A joiner starts from the host's world.** As a joiner connects, the host sends its world as a
   snapshot file's text, as it stands between two ticks, with how many patches its code is on, the
-  scripts it runs, and its inputs for the ticks after, up to the first the joiner can reach; the
-  joiner runs those scripts in place of its own files', restores the world in place of its own, as
+  scripts and mods it runs, and its inputs for the ticks after, up to the first the joiner can
+  reach; the joiner runs those in place of its own, restores the world in place of its own, as
   a run restored from a snapshot does, applies the patches the host had, and
   goes on from that tick, its own inputs empty until the first it can reach. So a restart of
   either peer, after a crash or a rebuild, rejoins: a joiner that loses its host waits for it,

@@ -12,7 +12,7 @@
 //! each a line. A connection's first request is `hello`, with the session's token. The methods:
 //!
 //! - `hello`, [`Hello`]: answers [`Welcome`]; names the client, whose edits the connection's
-//!   `apply`, `undo` and `redo` are.
+//!   `apply`, `undo` and `redo` are, and the capabilities the connection is kept to.
 //! - `ping`: answers [`Pulse`] at once, even while the game's main thread is busy.
 //! - `status`, `pause`, `resume`, `play` and `stop`: answer [`Status`].
 //!
@@ -176,6 +176,15 @@
 //! stopped, they wait. The connection's own thread answers `hello`, `ping`, `logs`, `note` and
 //! `debug` as it reads them, so that a `logs` or a `debug` that waits holds up the connection's
 //! later requests: follow the logs, or wait for a script to stop, on a connection of their own.
+//!
+//! A connection is kept to what its `hello` grants, [`Hello::grant`], every capability without it:
+//! a request its grant doesn't cover fails with `api.ungranted`, naming the capability it needs.
+//! `ping` and `status` need none; `logs`, `entities`, `entity`, `types`, `hash`, `assets` and
+//! `edits` need `read`, and `get` `read` of its component's type; `apply` needs `write` of the type
+//! each set, add and remove names, and `write` for any other operation, as `undo` and `redo` need;
+//! `pause`, `resume`, `play`, `stop` and `step` need `play`; `capture`, `view`, `look` and `pick`
+//! need `view`; `input`, `scene`, `snapshot`, `patch`, `note`, `debug` and `quit` need theirs; and
+//! a `capture` or a `snapshot` given a path needs `files` too.
 //!
 //! A value is JSON as its kind is: a number, a string, a `bool`; a vector or a quaternion an array
 //! of numbers, `[x, y, z, w]` for a quaternion; a float that isn't finite the string `inf`, `-inf`
@@ -392,8 +401,9 @@ impl fmt::Display for Failure {
 
 impl std::error::Error for Failure {}
 
-/// What `hello` takes: the session's token. Any other first request, or another token, is refused
-/// with `api.unauthorized`, and the connection closes.
+/// What `hello` takes: the session's token, the client's name and the capabilities the connection
+/// is kept to. Any other first request, or another token, is refused with `api.unauthorized`, and
+/// the connection closes.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Hello {
@@ -404,6 +414,13 @@ pub struct Hello {
     /// own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client: Option<String>,
+    /// The capabilities the connection is kept to, as ARCHITECTURE.md's Agents and tools says:
+    /// `read` and `write` of the world, whole, or of one component type's, as `read:Shard`, and
+    /// `play`, `input`, `view`, `scene`, `snapshot`, `debug`, `patch`, `files`, `note` and `quit`;
+    /// every one without it. A capability there's none of fails the `hello` with `grant.unknown`,
+    /// and the connection closes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant: Option<Vec<String>>,
 }
 
 /// What `hello` answers: the game the connection reaches.
@@ -1347,6 +1364,19 @@ impl Client {
     /// `api.unauthorized` if the session's token isn't the game's; and as [`call`](Self::call)
     /// does.
     pub fn connect(session: &Session, name: &str, timeout: Duration) -> Result<Self, Failure> {
+        Self::connect_granted(session, name, None, timeout)
+    }
+
+    /// As [`connect`](Self::connect), the connection kept to the capabilities `grant` names, as
+    /// [`Hello::grant`] says, or granted every one for `None`.
+    ///
+    /// Fails as `connect` does, and with `grant.unknown` for a capability there's none of.
+    pub fn connect_granted(
+        session: &Session,
+        name: &str,
+        grant: Option<Vec<String>>,
+        timeout: Duration,
+    ) -> Result<Self, Failure> {
         let stream = TcpStream::connect_timeout(&session.address, timeout).map_err(|error| {
             let message = format!(
                 "can't connect to {} (process {}) at {}: {error}; it has ended, unless it's still \
@@ -1374,6 +1404,7 @@ impl Client {
         let hello = Hello {
             token: session.token.clone(),
             client: Some(name.to_owned()),
+            grant,
         };
         client.welcome = client.call_as("hello", hello)?;
         Ok(client)

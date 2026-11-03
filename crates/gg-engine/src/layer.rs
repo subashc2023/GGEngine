@@ -356,6 +356,9 @@ pub struct Context {
     /// What runs the layers' scripts, which a script reloads through as an edit asks, and a world
     /// brought back migrates through, as [`Scripts`](crate::Scripts) says.
     pub(crate) hosts: crate::luau::Hosts,
+    /// The run's mods: where they come from, and those the layers loaded, as
+    /// [`Mods`](crate::Mods) says.
+    pub(crate) mods: crate::luau::RunMods,
     /// The world as edited, while a copy of it plays in its place, as [`Stack::play`] holds it.
     #[cfg(feature = "dev")]
     pub(crate) edited: Option<Edited>,
@@ -391,6 +394,8 @@ impl Context {
             })
         });
         let mut cx = Self::with_world(window, world);
+        cx.mods.game = app.name.to_owned();
+        cx.mods.dir = (app.mods.clone()).or_else(|| Some(state.as_ref()?.join("mods")));
         cx.state = state;
         if aloud {
             cx.audio = Audio::aloud();
@@ -446,6 +451,17 @@ impl Context {
             cx.folders = manifest.scenes;
         }
         Ok(cx)
+    }
+
+    /// Has the layers' [`Mods`](crate::Mods) load the mods in `dir`, as a run given `--mods` does,
+    /// for game `game`, as [`App::new`](crate::App::new) names it: for a
+    /// [`seeded`](Self::seeded) context.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn mods(mut self, game: &str, dir: impl Into<PathBuf>) -> Self {
+        self.mods.game = game.to_owned();
+        self.mods.dir = Some(dir.into());
+        self
     }
 
     fn with_world(window: Option<Window>, mut world: World) -> Self {
@@ -529,6 +545,7 @@ impl Context {
             #[cfg(feature = "dev")]
             scripts: crate::luau::Files::default(),
             hosts: crate::luau::Hosts::default(),
+            mods: crate::luau::RunMods::default(),
             #[cfg(feature = "dev")]
             edited: None,
             player: None,
@@ -2932,11 +2949,13 @@ impl Stack {
             Turn::None => {}
             Turn::Send => {
                 let scripts = cx.hosts.applied();
+                let mods = cx.mods.applied();
                 let of = crate::snapshot::Of {
                     world: &cx.world,
                     scenes: &cx.scenes.files,
                     open: &cx.scenes.open,
                     scripts: &scripts,
+                    mods: &mods,
                 };
                 let text = crate::snapshot::write(&of, &Run::Playing, net.app(), &self.names, next);
                 match text {
@@ -2960,8 +2979,9 @@ impl Stack {
                     );
                     cx.load_restored(snapshot.assets());
                     // Its host's scripts, which its world's components are as, in place of its
-                    // own files'.
+                    // own files', and its host's mods in place of its own.
                     cx.hosts.take(&mut cx.world, &snapshot.scripts);
+                    cx.mods.take(&mut cx.world, &snapshot.mods);
                     self.restore_in_place(cx, &snapshot)
                 });
                 match ticks {
@@ -3114,7 +3134,7 @@ impl Stack {
         }
         cx.attached = true;
         if let Some(recorder) = &mut self.recorder {
-            recorder.attached(&cx.world);
+            recorder.attached(&cx.world, &cx.mods.applied());
         }
     }
 

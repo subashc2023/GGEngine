@@ -1699,6 +1699,7 @@ pub(crate) mod tests {
             scenes: &cx.scenes.files,
             open: &played,
             scripts: &[],
+            mods: &[],
         };
         let text = snapshot::write(&of, &run, "Tested", &[], 3).expect("written");
         assert_eq!(stack.stop(&mut cx), Some(0));

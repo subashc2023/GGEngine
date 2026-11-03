@@ -4,9 +4,11 @@
 //! `--host <address>` steering player 0 and one given `--join <address>` player 1, each with its own
 //! keys. The arena's walls are its scene file, `scenes/arena.ron`, which a development build
 //! applies as it's saved; its shards spin by a Luau script, `scripts/spin.luau`, which it reloads as
-//! it's saved; its floor is its shader, `shaders/floor.slang`, which it reloads as it's saved; its
-//! scores are text in its font, `fonts/Inter-Bold.ttf`, on the view's canvas, in its top
-//! corners; Escape or a pad's Start opens its menu there, over the match, which goes on meanwhile:
+//! it's saved, and the mods installed run, which may read the world and write sprites, as its
+//! sample, `mods/rainbow`, given `--mods mods`, cycles the shards' colors; its floor is its shader,
+//! `shaders/floor.slang`, which it reloads as it's saved; its scores are text in its font,
+//! `fonts/Inter-Bold.ttf`, on the view's canvas, in its top corners; Escape or a pad's Start opens
+//! its menu there, over the match, which goes on meanwhile:
 //! Resume; New match, a command that both lockstep peers apply; and Quit; its sounds,
 //! `sounds/*.wav`, play as a disc dashes, following it, as a shard is collected, where it was, as a
 //! match is won, and as the menu's focus moves and an item is chosen; and its music,
@@ -22,9 +24,9 @@ use bytemuck::NoUninit;
 use gg_engine::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_engine::{
     Actions, Align, App, Binding, Blend, BodyType, Bus, Camera, Change, Circle, CircleCollider2D,
-    Commands, Component, Context, Entity, Event, Font, Key, Layer, Mesh, MouseButton, Name,
-    PadButton, Physics2D, Place, Projection, Reflect, RigidBody2D, Scripts, Shader, Sound, Source,
-    Sprite, Stick, TextStyle, Tick, Transform, World, step_physics,
+    Commands, Component, Context, Entity, Event, Font, Grant, Key, Layer, Mesh, Mods, MouseButton,
+    Name, PadButton, Physics2D, Place, Projection, Reflect, RigidBody2D, Scripts, Shader, Sound,
+    Source, Sprite, Stick, TextStyle, Tick, Transform, World, step_physics,
 };
 
 fn main() -> ExitCode {
@@ -225,6 +227,8 @@ struct Shards {
     sounds: Option<Sounds>,
     /// The game's scripts: the shards' spin.
     scripts: Scripts,
+    /// The mods the player installed, once the game loads.
+    mods: Option<Mods>,
     /// The scores' text, written again in its memory each frame.
     text: String,
 }
@@ -273,6 +277,7 @@ impl Shards {
             font: None,
             sounds: None,
             scripts: Scripts::new().expect("Luau starts"),
+            mods: None,
             text: String::new(),
         }
     }
@@ -312,6 +317,9 @@ impl Layer for Shards {
         // A script that doesn't load stops the game, with what went wrong.
         let spin = self.scripts.load(cx, root.join("scripts/spin.luau"));
         spin.unwrap_or_else(|error| panic!("{error:#}"));
+        // Mods read the world, and write sprites alone, as the rainbow writes the shards' colors.
+        let grant = Grant::parse(["read", "write:Sprite"]).expect("capabilities");
+        self.mods = Some(Mods::load(cx, grant));
     }
 
     fn attach(&mut self, cx: &mut Context) {
@@ -369,6 +377,9 @@ impl Layer for Shards {
         step_physics(world);
         collect(world, self.sounds);
         self.scripts.run(world);
+        if let Some(mods) = &mut self.mods {
+            mods.run(world);
+        }
     }
 
     fn commands(&mut self) -> Option<&mut dyn Commands> {

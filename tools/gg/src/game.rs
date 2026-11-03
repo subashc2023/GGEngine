@@ -20,14 +20,15 @@ const CONNECT: Duration = Duration::from_secs(2);
 const FOLLOWING_MS: u64 = 1_000;
 
 /// Which running game to talk to, how long to wait for its answers, the client to say hello as,
-/// the author of the edits it applies, and the project whose games alone it reaches, by its
-/// manifest's path, inside one.
+/// the author of the edits it applies, the capabilities its connection is kept to, every one
+/// without them, and the project whose games alone it reaches, by its manifest's path, inside one.
 #[derive(Clone)]
 pub(crate) struct Pick {
     pub(crate) pid: Option<u32>,
     pub(crate) app: Option<String>,
     pub(crate) timeout: Duration,
     pub(crate) client: String,
+    pub(crate) grant: Option<Vec<String>>,
     pub(crate) project: Option<PathBuf>,
 }
 
@@ -73,10 +74,16 @@ fn sessions_in(target: &Path) -> Vec<(PathBuf, Session)> {
     sessions.collect()
 }
 
-/// Connects to the game that `session`, read from the file at `path`, names, as `client`, removing
-/// the file if the game has ended, which a crash or a kill leaves it behind for.
-fn connect_to(path: &Path, session: &Session, client: &str) -> Result<Option<Client>, Failure> {
-    match Client::connect(session, client, CONNECT) {
+/// Connects to the game that `session`, read from the file at `path`, names, as `client`, kept
+/// to `grant`, if it's given, removing the file if the game has ended, which a crash or a kill
+/// leaves it behind for.
+fn connect_to(
+    path: &Path,
+    session: &Session,
+    client: &str,
+    grant: Option<&[String]>,
+) -> Result<Option<Client>, Failure> {
+    match Client::connect_granted(session, client, grant.map(<[String]>::to_vec), CONNECT) {
         Ok(client) => Ok(Some(client)),
         Err(failure) if failure.code == "api.connect" => {
             let _ = fs::remove_file(path);
@@ -86,20 +93,21 @@ fn connect_to(path: &Path, session: &Session, client: &str) -> Result<Option<Cli
     }
 }
 
-/// Connects to each game of `sessions`, each read from its file, as `client`, as [`connect_to`]
-/// does, and returns those that answered, each with its session. One that fails otherwise than by
-/// having ended is left out if another answers, as a file that a kill left naming a port that
-/// another game, or another process, has since been given fails, which then mustn't fail every
-/// command; its file stays, as its game may yet answer.
+/// Connects to each game of `sessions`, each read from its file, as `client`, kept to `grant`, as
+/// [`connect_to`] does, and returns those that answered, each with its session. One that fails
+/// otherwise than by having ended is left out if another answers, as a file that a kill left naming
+/// a port that another game, or another process, has since been given fails, which then mustn't
+/// fail every command; its file stays, as its game may yet answer.
 ///
 /// Fails as the first that failed so did, if none answered.
 fn answering(
     sessions: impl IntoIterator<Item = (PathBuf, Session)>,
     client: &str,
+    grant: Option<&[String]>,
 ) -> Result<Vec<(Session, Client)>, Failure> {
     let (mut answering, mut failed) = (Vec::new(), None);
     for (path, session) in sessions {
-        match connect_to(&path, &session, client) {
+        match connect_to(&path, &session, client, grant) {
             Ok(Some(client)) => answering.push((session, client)),
             Ok(None) => {}
             Err(failure) => {
@@ -124,7 +132,7 @@ pub(crate) fn connect(pick: &Pick) -> Result<Client, Failure> {
             pick.pid.is_none_or(|pid| session.pid == pid)
                 && (pick.app.as_ref()).is_none_or(|app| session.app.eq_ignore_ascii_case(app))
         });
-    let answered = answering(picked, &pick.client)?.into_iter();
+    let answered = answering(picked, &pick.client, pick.grant.as_deref())?.into_iter();
     let mut running: Vec<_> = answered
         .map(|(session, client)| (session.player, client))
         .collect();
@@ -217,7 +225,7 @@ fn waits(pick: &Pick, method: &str, failure: Failure) -> Failure {
 /// Fails as [`answering`] does, and as a game's ping fails.
 pub(crate) fn sessions(project: Option<&Path>) -> Result<Value, Failure> {
     let mut games = Vec::new();
-    for (session, mut client) in answering(session_files(project)?, "gg")? {
+    for (session, mut client) in answering(session_files(project)?, "gg", None)? {
         let pulse: Pulse = client.call_as("ping", Value::Null)?;
         games.push(json!({
             "app": session.app,
@@ -469,10 +477,10 @@ mod tests {
             answered.iter().map(|(session, _)| session.pid).collect()
         };
         let all = [stale.clone(), live.clone(), ended.clone()];
-        let answered = answering(all, "test").expect("one answers");
+        let answered = answering(all, "test", None).expect("one answers");
         let left = [&stale, &live, &ended].map(|(path, _)| path.exists());
-        let refused = answering([stale.clone()], "test").err();
-        let none = answering(Vec::new(), "test").expect("none to fail");
+        let refused = answering([stale.clone()], "test", None).err();
+        let none = answering(Vec::new(), "test", None).expect("none to fail");
         let _ = fs::remove_dir_all(&dir);
         assert_eq!(pids(answered), [1]);
         assert_eq!(left, [true, true, false]);

@@ -48,6 +48,7 @@ use tracing::{Level, debug, info, warn};
 use super::{Waiting, json};
 use crate::assets::Asset;
 use crate::edits::{Done, Edit};
+use crate::grant::{Capability, Grant};
 use crate::grid::Plane;
 use crate::layer::{Offered, Stack};
 use crate::luau::Debugger;
@@ -282,8 +283,9 @@ struct Taken {
     /// The scene files the layers loaded, which the restored run watches, and its open scene.
     scenes: Vec<SceneFile>,
     open: Open,
-    /// The scripts the layers loaded, each a path and its text as last applied.
+    /// The scripts the layers loaded, each a path and its text as last applied, and the mods.
     scripts: Vec<(String, String)>,
+    mods: Vec<crate::luau::ModText>,
     /// What the run was doing, with a copy of the world as edited it held, if any, which the
     /// restored run goes on doing.
     run: Run,
@@ -719,6 +721,7 @@ impl Api {
                         scenes: cx.scenes.files.clone(),
                         open: cx.scenes.open.clone(),
                         scripts: cx.hosts.applied(),
+                        mods: cx.mods.applied(),
                         run,
                         ticks: stepper.ticks,
                         path,
@@ -1557,10 +1560,19 @@ fn connection(
     let given = (hello.method == "hello")
         .then(|| serde_json::from_value::<Hello>(hello.params).ok())
         .flatten();
-    let Some(Hello { client, .. }) = given.filter(|hello| same_token(&hello.token, token)) else {
+    let Some(Hello { client, grant, .. }) = given.filter(|hello| same_token(&hello.token, token))
+    else {
         let message = "a connection's first request is `hello`, with the session file's token";
         reply.send(Err(Failure::new("api.unauthorized", message)));
         return;
+    };
+    let grant = match grant.map(Grant::parse) {
+        None => Grant::all(),
+        Some(Ok(grant)) => grant,
+        Some(Err(error)) => {
+            reply.send(Err(Failure::new(error.code(), format!("{error:#}"))));
+            return;
+        }
     };
     let client: Arc<str> = client.as_deref().unwrap_or(UNNAMED).into();
     reply.send(Ok(welcome.to_owned()));
@@ -1570,6 +1582,16 @@ fn connection(
             id: request.id,
             to: to.clone(),
         };
+        let own = match request.method.as_str() {
+            "logs" => Some(Capability::Read(None)),
+            "note" => Some(Capability::Note),
+            "debug" => Some(Capability::Debug),
+            _ => None,
+        };
+        if let Some(Err(failure)) = own.map(|own| granted(&grant, &request.method, &[own])) {
+            reply.send(Err(failure));
+            continue;
+        }
         if request.method == "ping" {
             let waiting = Waiting::now().map(Waiting::name);
             let stopped = || shared.debugger.stopped().then_some("breakpoint");
@@ -1592,7 +1614,11 @@ fn connection(
             reply.send(debug(&request.params, shared));
             continue;
         }
-        match parse(&request) {
+        let parsed = parse(&request).and_then(|call| {
+            granted(&grant, &request.method, &needs(&call))?;
+            Ok(call)
+        });
+        match parsed {
             Ok(call) => {
                 let client = client.clone();
                 let incoming = Incoming {
@@ -1618,6 +1644,66 @@ fn connection(
             }
             Err(failure) => reply.send(Err(failure)),
         }
+    }
+}
+
+/// What `call` needs of its connection's grant: of the world, `read` or `write` of the type it
+/// names alone, or else of the whole world; or the tool API's own capability its method needs,
+/// with `files` for a path to write at.
+fn needs(call: &Call) -> Vec<Capability> {
+    use Capability::{Files, Input, Patch, Play, Quit, Read, Scene, Snapshot, View, Write};
+
+    match call {
+        Call::Status => Vec::new(),
+        Call::Pause | Call::Resume | Call::Play | Call::Stop | Call::Step(_) => vec![Play],
+        Call::Scene(_) => vec![Scene],
+        Call::Capture { path, .. } => [Some(View), path.as_ref().map(|_| Files)]
+            .into_iter()
+            .flatten()
+            .collect(),
+        Call::View(_) | Call::Look(_) | Call::Pick(_) => vec![View],
+        Call::Input(_) => vec![Input],
+        Call::Get { component, .. } => vec![Read(Some(component.clone()))],
+        Call::Entities { .. }
+        | Call::Entity(_)
+        | Call::Types
+        | Call::Hash
+        | Call::Assets { .. }
+        | Call::Edits(_) => {
+            vec![Read(None)]
+        }
+        Call::Snapshot(path) => [Some(Snapshot), path.as_ref().map(|_| Files)]
+            .into_iter()
+            .flatten()
+            .collect(),
+        Call::Patch(_) => vec![Patch],
+        Call::Apply(operations, _) => operations
+            .iter()
+            .map(|operation| match operation {
+                gg_api::Operation::Add { component, .. }
+                | gg_api::Operation::Remove { component, .. }
+                | gg_api::Operation::Set { component, .. } => Write(Some(component.clone())),
+                _ => Write(None),
+            })
+            .collect(),
+        Call::Undo { .. } => vec![Write(None)],
+        Call::Quit => vec![Quit],
+    }
+}
+
+/// Whether `grant`, a connection's, covers each of `needs`, what a request of `method` needs.
+///
+/// Fails with `api.ungranted`, naming the first it doesn't.
+fn granted(grant: &Grant, method: &str, needs: &[Capability]) -> Result<(), Failure> {
+    match needs.iter().find(|need| !grant.has(need)) {
+        None => Ok(()),
+        Some(need) => Err(Failure::new(
+            "api.ungranted",
+            format!(
+                "`{method}` needs `{need}`, which the connection isn't granted: its `hello` \
+                 granted `{grant}`"
+            ),
+        )),
     }
 }
 
@@ -1853,6 +1939,7 @@ fn write_snapshots(taken: &Receiver<Taken>, app: &str, layers: &[String]) {
         scenes,
         open,
         scripts,
+        mods,
         run,
         ticks,
         path,
@@ -1864,6 +1951,7 @@ fn write_snapshots(taken: &Receiver<Taken>, app: &str, layers: &[String]) {
             scenes: &scenes,
             open: &open,
             scripts: &scripts,
+            mods: &mods,
         };
         let written = snapshot::write(&of, &run, app, &layers, ticks);
         let written = written.and_then(|text| {
@@ -2447,6 +2535,86 @@ mod tests {
         let pulse: Pulse = client.call_as("ping", ()).expect("a pulse");
         assert_eq!(pulse.waiting.as_deref(), Some("menu"));
         drop(waiting);
+    }
+
+    /// A connection is kept to what its `hello` grants: a request beyond it is refused, with
+    /// `api.ungranted`, by the connection's own thread, and a capability there's none of refuses
+    /// the `hello`, with `grant.unknown`.
+    #[test]
+    fn a_connection_is_kept_to_what_its_hello_grants() {
+        let (_api, session) = started("Api Grants");
+        let grant = |names: &[&str]| Some(names.iter().map(|&name| name.to_owned()).collect());
+        let unknown = Client::connect_granted(&session, "test", grant(&["reed"]), DEADLINE);
+        assert_eq!(
+            unknown.err().map(|failure| failure.code).as_deref(),
+            Some("grant.unknown")
+        );
+        let granted = Client::connect_granted(&session, "test", grant(&["read", "view"]), DEADLINE);
+        let mut client = granted.expect("it connects");
+        let set = json!({"operations": [{"set": {
+            "id": "00000000000000ff", "component": "Transform", "path": "", "value": {},
+        }}]});
+        let note = json!({"code": "test.noted", "message": "noted"});
+        for (method, params) in [("apply", set), ("note", note), ("quit", Value::Null)] {
+            let refused = client.call(method, params).expect_err(method);
+            assert_eq!(
+                refused.code, "api.ungranted",
+                "{method}: {}",
+                refused.message
+            );
+        }
+        let pulse: Pulse = client.call_as("ping", ()).expect("a pulse");
+        assert_eq!(pulse.frames, 0);
+    }
+
+    /// Each request needs its own capability, or `read` or `write` of the world, of the one type it
+    /// names alone, as gg-api's docs say.
+    #[test]
+    fn a_request_needs_what_its_method_and_the_types_it_names_need() {
+        let grant = Grant::parse(["read:Transform", "view", "write:Sprite"]).expect("a grant");
+        let path = std::env::temp_dir().join("granted.png");
+        let set = |component: &str| {
+            json!({"operations": [{"set": {
+                "id": "00000000000000ff", "component": component, "path": "", "value": {},
+            }}]})
+        };
+        let get = |component: &str| json!({"id": "00000000000000ff", "component": component});
+        let delete = json!({"operations": [{"delete": {"id": "00000000000000ff"}}]});
+        let asked = [
+            ("status", Value::Null, None),
+            ("get", get("Transform"), None),
+            ("get", get("Sprite"), Some("read:Sprite")),
+            ("entities", Value::Null, Some("read")),
+            ("capture", Value::Null, None),
+            ("capture", json!({ "path": path }), Some("files")),
+            ("look", Value::Null, None),
+            ("apply", set("Sprite"), None),
+            ("apply", set("Transform"), Some("write:Transform")),
+            ("apply", delete, Some("write")),
+            ("undo", Value::Null, Some("write")),
+            ("step", json!({"ticks": 1}), Some("play")),
+            ("snapshot", Value::Null, Some("snapshot")),
+            ("quit", Value::Null, Some("quit")),
+        ];
+        for (method, params, needed) in asked {
+            let request = Request {
+                id: 1,
+                method: method.to_owned(),
+                params,
+            };
+            let call = parse(&request).expect("a call");
+            let refused = granted(&grant, method, &needs(&call)).err();
+            let named = needed.map(|needed| format!("`{method}` needs `{needed}`,"));
+            let message = refused.map(|failure| (failure.code, failure.message));
+            match (named, message) {
+                (None, None) => {}
+                (Some(named), Some((code, message))) => {
+                    assert_eq!(code, "api.ungranted");
+                    assert!(message.starts_with(&named), "{message}");
+                }
+                (named, message) => panic!("{method}: {named:?}, {message:?}"),
+            }
+        }
     }
 
     /// What [`a_client_debugs_a_script_while_the_game_waits_at_its_stop`]'s client gets.

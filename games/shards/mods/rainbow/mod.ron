@@ -1,0 +1,7 @@
+(
+    name: "rainbow",
+    version: "1.0.0",
+    game: "Shards",
+    capabilities: ["read:Shard", "write:Sprite"],
+    scripts: ["rainbow.luau"],
+)

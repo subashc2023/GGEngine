@@ -35,6 +35,8 @@ pub(crate) struct Args {
     pub(crate) stopped: bool,
     /// The lockstep session the run hosts or joins, if it's networked.
     pub(crate) net: Option<Net>,
+    /// The folder of the mods the run runs, in place of those installed.
+    pub(crate) mods: Option<PathBuf>,
 }
 
 /// A lockstep session's end a run takes, and the address it listens at or connects to, as given.
@@ -53,7 +55,7 @@ pub(crate) enum Dump {
 
 /// The flags of a run that a replay, which renders nothing, records nothing and serves no tools,
 /// refuses.
-const NOT_REPLAYED: [&str; 14] = [
+const NOT_REPLAYED: [&str; 15] = [
     "--record",
     "--restore",
     "--headless",
@@ -68,6 +70,7 @@ const NOT_REPLAYED: [&str; 14] = [
     "--stopped",
     "--host",
     "--join",
+    "--mods",
 ];
 
 /// The help text, for the program called `program`.
@@ -100,6 +103,8 @@ Options:
                     as the snapshot's run was
   --host <ADDRESS>  Host a lockstep session at ADDRESS, such as `0.0.0.0:7700`, as player 0
   --join <ADDRESS>  Join the lockstep session at ADDRESS as player 1, from the host's world
+  --mods <DIR>      Run the mods in the folder DIR, in place of those installed in the game's
+                    per-user folder, which a windowed run runs
   -h, --help        Print this help
 
 Environment:
@@ -133,6 +138,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
         restore: None,
         stopped: false,
         net: None,
+        mods: None,
     };
     // The first flag given that a replay refuses.
     let mut not_replayed = None;
@@ -203,6 +209,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
             }
             "--host" => parsed.net = Some(Net::Host(value_of(flag)?)),
             "--join" => parsed.net = Some(Net::Join(value_of(flag)?)),
+            "--mods" => parsed.mods = Some(value_of(flag)?.into()),
             "--dump" => {
                 let at = value_of(flag)?;
                 let dump = match at.as_str() {
@@ -396,6 +403,7 @@ mod tests {
                 "--restore",
                 "--host",
                 "--join",
+                "--mods",
             ]
             .contains(&flag);
             let refused = if takes_value { &args[..] } else { &args[..3] };

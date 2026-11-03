@@ -1140,12 +1140,20 @@ mod tests {
         commands: Vec<Command>,
         scene: Option<PathBuf>,
         script: Option<(crate::Scripts, PathBuf)>,
+        /// Whether it runs the run's mods, and the mods once it has loaded them.
+        modded: bool,
+        mods: Option<crate::Mods>,
     }
 
     impl Layer for Game {
         fn load(&mut self, cx: &mut Context) {
             if let Some((scripts, path)) = &mut self.script {
                 scripts.load(cx, path).expect("loaded");
+            }
+            if self.modded {
+                // Before the mods, which ride on it.
+                cx.world_mut().register::<Score>().expect("described");
+                self.mods = Some(crate::Mods::load(cx, crate::Grant::all()));
             }
         }
 
@@ -1167,6 +1175,9 @@ mod tests {
             }
             if let Some((scripts, _)) = &mut self.script {
                 scripts.run(world);
+            }
+            if let Some(mods) = &mut self.mods {
+                mods.run(world);
             }
         }
 
@@ -1557,6 +1568,58 @@ mod tests {
         let applied = vec![("scripts/spin.luau".to_owned(), saved)];
         assert_eq!(host.cx.hosts.applied(), applied);
         assert_eq!(joiner.cx.hosts.applied(), applied);
+    }
+
+    /// A joiner without its host's mod runs the host's, which comes with its world, the peers going
+    /// on alike.
+    #[test]
+    fn a_joiner_without_its_host_s_mod_runs_the_host_s() {
+        use std::fs;
+
+        use crate::dirs::tests::Scratch;
+
+        let installed = Scratch::new("net-mods-host");
+        let folder = installed.0.join("tally");
+        fs::create_dir_all(&folder).expect("a directory");
+        let manifest = "(name: \"tally\", version: \"1.0.0\", game: \"Tested\", \
+            capabilities: [\"read:Score\"], scripts: [\"tally.luau\"])";
+        fs::write(folder.join("mod.ron"), manifest).expect("written");
+        let script = "local Tally = gg.declare(\"Tally\", { count = 0 }, { on = \"Score\" })\n\
+            function Tally.tick(entity, dt)\n\
+                entity[Tally.count] = entity[Tally.count] + 1\n\
+            end\n\
+            return Tally\n";
+        fs::write(folder.join("tally.luau"), script).expect("written");
+        let none = Scratch::new("net-mods-joiner");
+        let modded = |dir: &Scratch, seed| {
+            let mut cx = Context::seeded(seed);
+            cx.mods.game = "Tested".to_owned();
+            cx.mods.dir = Some(dir.0.clone());
+            let game = Game {
+                modded: true,
+                ..Game::default()
+            };
+            (cx, game)
+        };
+        let (cx, game) = modded(&installed, 1);
+        let mut host = Peer::host(cx, game, 10);
+        let address = host.net().listening.expect("listening").to_string();
+        let (cx, game) = modded(&none, 2);
+        let mut joiner = Peer::new(&Net::Join(address), cx, game);
+        assert!(joiner.cx.mods.applied().is_empty());
+        join(&mut host, &mut joiner);
+        assert_eq!(joiner.cx.mods.applied(), host.cx.mods.applied());
+        assert_eq!(host.cx.mods.applied().len(), 1);
+        let at = host.next.max(joiner.next) + 5;
+        meet(&mut host, &mut joiner, at);
+        assert_eq!(host.cx.world().hash(), joiner.cx.world().hash());
+        let world = joiner.cx.world();
+        let tallied = world.entities(Some("Tally")).expect("a type").next();
+        let count = world.get_field(tallied.expect("one"), "Tally", "count");
+        assert_eq!(
+            count.expect("its field"),
+            crate::reflect::Value::F64(at as f64)
+        );
     }
 
     /// Patches `gg run` gives both peers alike: the host's, alone, applies before the tick

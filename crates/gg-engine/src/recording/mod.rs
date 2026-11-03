@@ -6,11 +6,12 @@
 //! A recording is text, a line at a time:
 //!
 //! ```text
-//! gg-recording 3
+//! gg-recording 4
 //! app Sandbox
 //! engine 0.1.0 debug
 //! layers Sandbox PerfPanel Inspector
 //! seed 3f8a6c2e9b1d4057
+//! mod List([String("(name: \"rainbow\", ..."), String("rainbow.luau"), String("local ...")])
 //! named List([String("55bcfa88ac30e5a5"), String("assets/sheet.png")])
 //! attach 58183b6352a09a44 fb695ce29daa8479
 //! > 0 Variant("Swarm", [("0", UInt(10000))])
@@ -19,10 +20,12 @@
 //! ```
 //!
 //! Its header names the format and its version, the app, the engine and its build, the layers from
-//! the bottom up and the seed its world drew its IDs from; then come the world's hash once the
-//! layers attached, its content then its layout, and each tick's commands, `>`, the index of the
-//! layer whose tick applied them and their value as [`text`] writes it, before the tick's number
-//! and the world's hash after it; and `end`, once the run ended. Before the first line that may
+//! the bottom up and the seed its world drew its IDs from; then each mod its layers loaded, its
+//! manifest's text and each of its scripts' path and text, which a replay runs in place of those
+//! installed; then come the world's hash once the layers attached, its content then its layout,
+//! and each tick's commands, `>`, the index of the layer whose tick applied them and their value as
+//! [`text`] writes it, before the tick's number and the world's hash after it; and `end`, once the
+//! run ended. Before the first line that may
 //! name it, each texture the run named otherwise than by its path, as by its ID, has a `named` line,
 //! its name and the path it names, which a replay names it by, scanning no ID file, so that it goes
 //! as the run went wherever the ID files differ.
@@ -45,12 +48,17 @@ use crate::args::Dump;
 use crate::assets::Counts;
 use crate::edits::Edit;
 use crate::layer::Commands;
+use crate::luau::ModText;
 use crate::{App, BUILD, Context, Tick, World, WorldHash, perf};
 use text::Text;
 
 /// A recording's first line: its format, and the format's version, which a change to its lines or
 /// to its values' text takes to the next.
-const FORMAT: &str = "gg-recording 3";
+const FORMAT: &str = "gg-recording 4";
+
+/// The format of the recordings before mods, `mod` lines, which this engine reads too, as runs
+/// without mods.
+const BEFORE_MODS: &str = "gg-recording 3";
 
 /// The format of the recordings before textures' names, `named` lines, whose values name every
 /// texture by its path, which this engine reads too.
@@ -123,8 +131,16 @@ impl Recorder {
         self.flush();
     }
 
-    /// Writes the world's hash once the layers have attached.
-    pub(crate) fn attached(&mut self, world: &World) {
+    /// Writes the mods the layers loaded, `mods`, and the world's hash, once the layers have
+    /// attached.
+    pub(crate) fn attached(&mut self, world: &World, mods: &[ModText]) {
+        for mod_text in mods {
+            self.line.clear();
+            self.line.push_str("mod ");
+            text::write_mod(&mut self.line, mod_text);
+            self.line.push('\n');
+            self.flush();
+        }
         self.names(world);
         self.line.clear();
         let hash = world.hash();
@@ -243,6 +259,8 @@ struct Recording {
     /// The names of the layers' types, from the bottom up.
     layers: Vec<String>,
     seed: u64,
+    /// The mods its run's layers loaded, which a replay runs in place of those installed.
+    mods: Vec<ModText>,
     /// The name its run gave each texture it named otherwise than by its path, with the path it
     /// names.
     #[cfg_attr(
@@ -324,7 +342,7 @@ impl Recording {
     fn parse(text: &str) -> Result<Self> {
         let mut lines = whole_lines(text).peekable();
         match lines.next() {
-            Some((_, FORMAT | BEFORE_NAMES | BEFORE_EDITS)) => {}
+            Some((_, FORMAT | BEFORE_MODS | BEFORE_NAMES | BEFORE_EDITS)) => {}
             Some((_, line)) if line.starts_with("gg-recording ") => {
                 return Err(format_error(format!(
                     "it's a recording of format `{line}`, but this engine reads `{FORMAT}`"
@@ -357,6 +375,13 @@ impl Recording {
         let layers: Vec<String> = layers.map(str::to_owned).collect();
         let (number, seed) = header(&mut lines, "seed")?;
         let seed = hex16(seed).ok_or_else(|| syntax(number, "a seed is 16 hex digits"))?;
+        let mut mods = Vec::new();
+        while let Some((number, line)) = lines.next_if(|(_, line)| line.starts_with("mod ")) {
+            let read = text::read_mod(&line["mod ".len()..], "mod ".len() + 1);
+            let what = "a mod is a list of its manifest's text, then each of its scripts' path and \
+                        text";
+            mods.push(read.ok_or_else(|| syntax(number, what))?);
+        }
         let named = |number: usize, named: &str| {
             let read = text::read_named(named, "named ".len() + 1);
             let what = "a texture's name is a list of it and the path it names";
@@ -375,6 +400,7 @@ impl Recording {
             engine,
             layers,
             seed,
+            mods,
             names,
             attach: (attach, number),
             ticks: Vec::new(),
@@ -508,6 +534,8 @@ impl Replay {
             )));
         }
         let mut cx = Context::seeded(recording.seed);
+        cx.mods.game = app.name.to_owned();
+        cx.mods.recorded = Some(recording.mods.clone());
         // So that its textures are named as the run's were, by the names the recording gives them
         // or by their paths from the root, scanning no ID file, one that can't be loaded standing
         // in, and it starts in the run's scene.
@@ -1006,7 +1034,17 @@ mod tests {
     /// As [`recorded`], with `between` sending the stack events before each frame, given the ticks
     /// run before it; and the world as it ended.
     fn recorded_with(
+        app: App,
+        frames: &[Duration],
+        between: impl FnMut(&mut Stack, &mut Context, u64),
+    ) -> (String, u64, World) {
+        recorded_in(app, Context::new(None), frames, between)
+    }
+
+    /// As [`recorded_with`], in `cx`.
+    fn recorded_in(
         mut app: App,
+        mut cx: Context,
         frames: &[Duration],
         mut between: impl FnMut(&mut Stack, &mut Context, u64),
     ) -> (String, u64, World) {
@@ -1018,7 +1056,6 @@ mod tests {
         let path = dir.0.join("run.recording");
         let recorder = Recorder::create(&path, app.name).expect("created");
         app.stack.record(recorder);
-        let mut cx = Context::new(None);
         app.stack.attach(&mut cx);
         let mut stepper = Stepper::default();
         for &dt in frames {
@@ -1426,6 +1463,65 @@ mod tests {
         assert_eq!(replayed, Ok((ticks, ended.hash())));
     }
 
+    /// A layer that runs the mods installed, granting them everything, and has an entity they ride
+    /// on.
+    struct Modded(Option<crate::Mods>);
+
+    impl Layer for Modded {
+        fn load(&mut self, cx: &mut Context) {
+            self.0 = Some(crate::Mods::load(cx, crate::Grant::all()));
+        }
+
+        fn attach(&mut self, cx: &mut Context) {
+            cx.world_mut().spawn(Transform::IDENTITY);
+        }
+
+        fn tick(&mut self, world: &mut World, _: Tick) {
+            if let Some(mods) = &mut self.0 {
+                mods.run(world);
+            }
+        }
+    }
+
+    /// A run's mods go whole in its recording, whose replay runs them where they aren't installed,
+    /// to the hashes recorded.
+    #[test]
+    fn a_recording_replays_its_mods_where_they_aren_t_installed() {
+        let dir = Scratch::new("recording-mods");
+        let folder = dir.0.join("mover");
+        fs::create_dir_all(&folder).expect("a directory");
+        let manifest = "(name: \"mover\", version: \"1.0.0\", game: \"Modded\", \
+            capabilities: [\"read:Transform\", \"write:Transform\"], scripts: [\"mover.luau\"])";
+        fs::write(folder.join("mod.ron"), manifest).expect("written");
+        let script = "local Transform = gg.component(\"Transform\")\n\
+            local Mover = gg.declare(\"Mover\", { by = 2 }, { on = \"Transform\" })\n\
+            function Mover.tick(entity, dt)\n\
+                entity[Transform.translation] = entity[Transform.translation]\n\
+                    + vector.create(entity[Mover.by], 0, 0)\n\
+            end\n\
+            return Mover\n";
+        fs::write(folder.join("mover.luau"), script).expect("written");
+        let app = || App::new("Modded").layer(Modded(None));
+        let mut cx = Context::new(None);
+        cx.mods.game = "Modded".to_owned();
+        cx.mods.dir = Some(dir.0.clone());
+        let (text, ticks, ended) = recorded_in(app(), cx, &[Tick::DT; 4], |_, _, _| {});
+        assert!(
+            text.lines()
+                .nth(5)
+                .is_some_and(|line| line.starts_with("mod ")),
+            "{text}"
+        );
+        let x = ended
+            .query::<&Transform>()
+            .next()
+            .map(|at| at.translation.x);
+        assert_eq!(x, Some(2.0 * ticks as f32));
+        fs::remove_dir_all(&folder).expect("removed");
+        let replayed = replay_all(app(), &text).map_err(|(_, error)| error.to_string());
+        assert_eq!(replayed, Ok((ticks, ended.hash())));
+    }
+
     /// A recording of an app without layers, as the player is, replays too.
     #[test]
     fn a_recording_of_no_layers_replays() {
@@ -1458,7 +1554,7 @@ mod tests {
         let after_end = format!("{text}0 {hash}\n");
         let named = |line: &str| changed(&text, 4, &format!("{}\n{line}", lines[4]));
         let cases = [
-            (changed(&text, 0, "gg-recording 4"), "replay.format", None),
+            (changed(&text, 0, "gg-recording 5"), "replay.format", None),
             (changed(&text, 0, "(entities: {})"), "replay.format", None),
             (
                 lines[..3].iter().map(|line| format!("{line}\n")).collect(),

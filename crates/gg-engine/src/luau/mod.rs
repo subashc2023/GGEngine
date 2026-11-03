@@ -1,8 +1,9 @@
 //! Luau scripts: components that scripts declare, which act, each for the entity it's on, at its
-//! layer's ticks, as [`Scripts`] says.
+//! layer's ticks, as [`Scripts`] says; and mods, scripts a player installs, as [`Mods`] says.
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 #[cfg(feature = "dev")]
 use std::ffi::c_int;
 use std::path::Path;
@@ -23,18 +24,23 @@ use mlua::{
 use tracing::{info, warn};
 
 use crate::ecs::{ComponentId, Kind};
+use crate::grant::Grant;
 use crate::reflect::{Ident, Reflect, Type, Value, list};
 use crate::{Context, Entity, Tick, World};
 
+mod bytecode;
 #[cfg(feature = "dev")]
 mod debugger;
 // Luau's hooks, its interrupt and its debugger's, which mlua reaches through its raw API alone:
 // this module alone may use unsafe code for them.
 #[allow(unsafe_code)]
 mod hooks;
+mod mods;
 
 #[cfg(feature = "dev")]
 pub(crate) use debugger::Debugger;
+pub use mods::Mods;
+pub(crate) use mods::{ModText, RunMods};
 
 // An entity's 64 bits are a script's light userdata, a pointer's.
 const _: () = assert!(
@@ -59,6 +65,10 @@ const LIBM: [&str; 14] = [
     "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh", "exp", "log",
     "log10", "pow",
 ];
+
+/// The least garbage a VM gathers before a set point collects it, as [`Host::collect`] says, which
+/// a VM whose live heap is larger lets grow to its size.
+const LEAST_GARBAGE: usize = 1 << 20;
 
 /// The globals scripts go without: what reads the clock, the VM's own state or its garbage, what
 /// loads code or files, and what would let a script's chunk change how others' are compiled.
@@ -91,8 +101,10 @@ const REMOVED: [&str; 7] = [
 /// reaches components' fields, Rust's and scripts', by handles, `gg.component("Shard").angle`, and
 /// its own's, `Spin.speed`, which an entity reads and writes as `entity[Shard.angle]`: a number,
 /// a bool, a vector, a quaternion as a vector, or an entity. It keeps its state in its components,
-/// as a game keeps its in the world: what its chunk's locals hold from tick to tick, no snapshot,
-/// reload or peer joining keeps.
+/// as a game keeps its in the world, since no snapshot, reload or peer joining keeps what its
+/// chunk's locals hold: once its chunk has run, every table the chunk keeps, its globals among
+/// them, is frozen, and a script is refused, `script.state`, whose functions assign a local of its
+/// chunk, as its compiled bytecode shows, or whose chunk keeps a coroutine or a buffer.
 ///
 /// ```lua
 /// local Shard = gg.component("Shard")
@@ -105,6 +117,9 @@ const REMOVED: [&str; 7] = [
 /// return Spin
 /// ```
 ///
+/// `gg.declare`'s third argument, `{ on = "Shard" }`, has the component ride on another: each
+/// entity with a `Shard` is given its own, at its defaults, as the scripts run, before its tick.
+///
 /// Scripts run alike on every platform, as the simulation must. Luau's C++ fuses no
 /// multiplication into an addition, as `.cargo/config.toml` builds it. The functions of `math`
 /// whose precision is the platform's are libm's, which the compiler is told aren't builtins: it
@@ -113,7 +128,10 @@ const REMOVED: [&str; 7] = [
 /// refused. `math.random`, whose state the VM holds outside the world and seeds from the clock,
 /// isn't there, nor are `os`, `debug`, `collectgarbage`, `gcinfo`, `getfenv`, `setfenv`,
 /// `loadstring`, `newproxy`, `require` and `vector.angle`. And an entity is light userdata, its 64
-/// bits, which tables hash and compare by them rather than by an address.
+/// bits, which tables hash and compare by them rather than by an address, and whose metatable is
+/// frozen. The VM collects its garbage at set points, after a chunk runs and after the ticks once
+/// the scripts have allocated as much as the VM holds alive, rather than when Luau's clock paces
+/// it, so that what a weak table holds is alike everywhere.
 ///
 /// Each call into a script, a tick or its chunk as it loads, takes at most a million of Luau's
 /// interrupts, which come at each call and each turn of a loop, past which it fails, alike on every
@@ -129,7 +147,7 @@ pub struct Scripts {
     host: Rc<RefCell<Host>>,
 }
 
-/// What runs a layer's scripts.
+/// What runs a layer's scripts, or a mod's.
 struct Host {
     lua: Lua,
     shared: Shared,
@@ -137,6 +155,72 @@ struct Host {
     scripts: Vec<Loaded>,
     /// The world whose component types the handles name, by its serial.
     serial: Option<u64>,
+    /// The memory the VM may hold, if it's held to a limit, as a mod's is.
+    limit: Option<usize>,
+    /// What the VM may hold before the next set point collects its garbage.
+    goal: usize,
+}
+
+/// What a mod's scripts are held to, as [`Mods`] says: the mod's name; its grant; the component
+/// types its scripts declared, which are its own; and its prints, those left to it this second of
+/// ticks and those it went without, with the ticks of the second.
+struct Held {
+    name: String,
+    grant: Grant,
+    own: RefCell<Vec<String>>,
+    prints: Cell<u32>,
+    unprinted: Cell<u32>,
+    ticks: Cell<u32>,
+}
+
+/// The most lines a mod prints a second of ticks, past which its prints go unprinted.
+const PRINTS: u32 = 32;
+
+/// The ticks of a second.
+const TICKS_A_SECOND: u32 = (1_000_000_000 / Tick::DT.as_nanos()) as u32;
+
+impl Held {
+    fn new(name: String, grant: Grant) -> Self {
+        Self {
+            name,
+            grant,
+            own: RefCell::new(Vec::new()),
+            prints: Cell::new(PRINTS),
+            unprinted: Cell::new(0),
+            ticks: Cell::new(0),
+        }
+    }
+
+    /// Whether a print prints, as it's the mod's this second of ticks, counting it.
+    fn prints(&self) -> bool {
+        let left = self.prints.get();
+        if left == 0 {
+            self.unprinted.set(self.unprinted.get() + 1);
+        }
+        self.prints.set(left.saturating_sub(1));
+        left > 0
+    }
+
+    /// Counts a tick of the mod's, after which, as a second of them ends, its prints start again,
+    /// warning of those that went unprinted, `mod.unprinted`.
+    fn ticked(&self) {
+        let ticks = self.ticks.get() + 1;
+        self.ticks.set(ticks % TICKS_A_SECOND);
+        if ticks < TICKS_A_SECOND {
+            return;
+        }
+        self.prints.set(PRINTS);
+        let unprinted = self.unprinted.replace(0);
+        if unprinted > 0 {
+            warn!(
+                code = "mod.unprinted",
+                "mod" = self.name,
+                unprinted,
+                "The mod printed more than {PRINTS} lines in a second of ticks: the {unprinted} \
+                 past them went unprinted"
+            );
+        }
+    }
 }
 
 /// The hosts of the layers' scripts, which a context reloads a script through as an edit asks, and
@@ -151,17 +235,32 @@ pub(crate) struct Hosts {
 
 /// What the functions Luau calls and its hooks reach: the world, lent in place of the one kept here
 /// as scripts run or load, what the handles of fields name, the budget of the call into a script
-/// running, and what the VM keeps for the debugger.
+/// running, what a mod's scripts are held to, and what the VM keeps for the debugger.
 struct Shared {
     world: RefCell<World>,
     /// By handle.
     fields: RefCell<Vec<FieldRef>>,
     /// The script loading, while one is.
     loading: RefCell<Option<Loading>>,
-    /// The interrupts left to the call into a script that runs, of its [`BUDGET`].
+    /// The interrupts left to the call into a script that runs, of its [`BUDGET`], or, a mod's, to
+    /// its calls this tick.
     budget: Cell<u32>,
+    /// `None` for a game's own scripts, which reach everything.
+    held: Option<Held>,
     #[cfg(feature = "dev")]
     hooked: debugger::Hooked,
+}
+
+impl Shared {
+    /// Whether the scripts may read, and may write, the components of type `component`: a mod's,
+    /// those its grant names and its own.
+    fn may(&self, component: &str) -> (bool, bool) {
+        match &self.held {
+            None => (true, true),
+            Some(held) if held.own.borrow().iter().any(|own| own == component) => (true, true),
+            Some(held) => (held.grant.reads(component), held.grant.writes(component)),
+        }
+    }
 }
 
 /// What an interrupt does, as [`interrupted`] says.
@@ -194,12 +293,18 @@ fn interrupted() -> Interrupt {
     })
 }
 
-/// The error of a call into a script that ran past its budget at `line` of `script`.
+/// The error of a call into a script that ran past its budget at `line` of `script`, or, a mod's,
+/// past its mod's for the tick.
 fn over_budget(script: &str, line: u32) -> String {
+    let held = SHARED.is_set() && SHARED.with(|shared| shared.held.is_some());
+    let what = if held {
+        "the mod's calls this tick ran past their budget"
+    } else {
+        "the call into the script ran past its budget"
+    };
     format!(
-        "{script}:{line}: the call into the script ran past its budget of {BUDGET} of Luau's \
-         interrupts, which come at each call and each turn of a loop, as a loop that never ends \
-         would"
+        "{script}:{line}: {what} of {BUDGET} of Luau's interrupts, which come at each call and \
+         each turn of a loop, as a loop that never ends would"
     )
 }
 
@@ -226,7 +331,8 @@ fn stopped(why: StopReason, depth: c_int, frames: Vec<hooks::Frame>) {
     });
 }
 
-/// A field a handle names: field `name` of component type `component`, which holds `ty`.
+/// A field a handle names: field `name` of component type `component`, which holds `ty`; and
+/// whether the scripts may read it and write it, as [`Shared::may`] says.
 struct FieldRef {
     component: Ident,
     /// The type's id in the world scripts last ran in, and the field's index there; `None` if it
@@ -235,6 +341,8 @@ struct FieldRef {
     index: u32,
     name: Ident,
     ty: Field,
+    reads: bool,
+    writes: bool,
 }
 
 /// What a field a script reaches holds.
@@ -280,7 +388,13 @@ struct Loaded {
     component: String,
     fields: Vec<(Ident, Kind, Value)>,
     id: Option<ComponentId>,
+    /// The component type it rides on, as `gg.declare`'s `on` names it, and its id there.
+    on: Option<String>,
+    on_id: Option<ComponentId>,
     tick: Option<Function>,
+    /// Its chunk, as [`Chunk`] says, which a development build's debugger keeps in its place.
+    #[cfg(not(feature = "dev"))]
+    chunk: Function,
     /// Whether it has failed since it last loaded, which warns once.
     failed: bool,
 }
@@ -296,24 +410,26 @@ struct Loading {
 }
 
 /// The component type a script loading declared: its id, its name, the script's table, its
-/// fields, and whether they're other than the world's type of its name has, which the world's
-/// type takes once the script has loaded.
+/// fields, whether they're other than the world's type of its name has, which the world's type
+/// takes once the script has loaded, and the type it rides on.
 struct Declaring {
     id: ComponentId,
     component: String,
     table: Table,
     fields: Vec<(Ident, Kind, Value)>,
     changed: bool,
+    on: Option<String>,
 }
 
-/// A script's chunk, run: the component it declared, its fields, its tick, and, in a development
-/// build, the chunk, which breakpoints are placed in.
+/// A script's chunk, run: the component it declared, its fields, the type it rides on, its tick,
+/// and the chunk, which lives as long as the script, so that its VM holds as much in every build: a
+/// development build's debugger keeps it, placing breakpoints in it, and the script any other's.
 struct Chunk {
     component: String,
     fields: Vec<(Ident, Kind, Value)>,
     id: ComponentId,
+    on: Option<String>,
     tick: Option<Function>,
-    #[cfg(feature = "dev")]
     function: Function,
 }
 
@@ -322,23 +438,8 @@ impl Scripts {
     ///
     /// Fails with `script.vm` if Luau can't start, as for want of memory.
     pub fn new() -> Result<Self> {
-        let vm = |error: mlua::Error| Error::new("script.vm", format!("Luau can't start: {error}"));
-        let lua = Host::vm().map_err(vm)?;
-        let host = Host {
-            shared: Shared {
-                world: RefCell::new(World::default()),
-                fields: RefCell::new(Vec::new()),
-                loading: RefCell::new(None),
-                budget: Cell::new(BUDGET),
-                #[cfg(feature = "dev")]
-                hooked: debugger::Hooked::new(lua.clone()),
-            },
-            lua,
-            scripts: Vec::new(),
-            serial: None,
-        };
         Ok(Self {
-            host: Rc::new(RefCell::new(host)),
+            host: Rc::new(RefCell::new(Host::new(None)?)),
         })
     }
 
@@ -487,6 +588,37 @@ impl Hosts {
 }
 
 impl Host {
+    /// A VM for scripts, with the globals [`Scripts`] says: a game's, or, held to what `held` and
+    /// `limit` say, a mod's.
+    ///
+    /// Fails with `script.vm` if Luau can't start, as for want of memory.
+    fn new(held: Option<(Held, usize)>) -> Result<Self> {
+        let vm = |error: mlua::Error| Error::new("script.vm", format!("Luau can't start: {error}"));
+        let lua = Self::vm().map_err(vm)?;
+        let (held, limit) = held.unzip();
+        if let Some(limit) = limit {
+            lua.set_memory_limit(limit).map_err(vm)?;
+        }
+        let mut host = Self {
+            shared: Shared {
+                world: RefCell::new(World::default()),
+                fields: RefCell::new(Vec::new()),
+                loading: RefCell::new(None),
+                budget: Cell::new(BUDGET),
+                held,
+                #[cfg(feature = "dev")]
+                hooked: debugger::Hooked::new(lua.clone()),
+            },
+            lua,
+            scripts: Vec::new(),
+            serial: None,
+            limit,
+            goal: 0,
+        };
+        host.collect(true);
+        Ok(host)
+    }
+
     fn vm() -> mlua::Result<Lua> {
         let libs = StdLib::COROUTINE
             | StdLib::TABLE
@@ -544,6 +676,8 @@ impl Host {
         entities.raw_set("__index", lua.create_function(read)?)?;
         entities.raw_set("__newindex", lua.create_function(write)?)?;
         entities.raw_set("__tostring", lua.create_function(describe)?)?;
+        // Shared by every script's entities, as Luau's sandbox freezes its libraries' and vectors'.
+        entities.set_readonly(true);
         lua.set_type_metatable::<LightUserData>(Some(entities));
 
         let gg = lua.create_table()?;
@@ -573,7 +707,29 @@ impl Host {
         globals.raw_set("gg", gg)?;
         lua.sandbox(true)?;
         hooks::install(&lua)?;
+        // Collected at set points alone, as [`collect`](Self::collect) does: Luau paces its own
+        // collections by the clock.
+        lua.gc_stop();
         Ok(lua)
+    }
+
+    /// A set point, between calls into the scripts: collects the VM's garbage, whole, `now`, or
+    /// once it holds as much as its [`goal`](Self::goal), which is then what it holds alive and as
+    /// much again, or [`LEAST_GARBAGE`] more if that's more, but no more than halfway to its limit.
+    /// A collection's pause grows with what the VM holds alive, which collecting in steps would
+    /// spread, once a game's scripts hold enough that it shows.
+    fn collect(&mut self, now: bool) {
+        if !now && self.lua.used_memory() < self.goal {
+            return;
+        }
+        let _zone = gg_core::zone!();
+        // It fails only as a finalizer would, and scripts make none.
+        let _ = self.lua.gc_collect();
+        // A collection sets Luau's own pace again.
+        self.lua.gc_stop();
+        let alive = self.lua.used_memory();
+        let goal = alive + alive.max(LEAST_GARBAGE);
+        self.goal = (self.limit).map_or(goal, |limit| goal.min(alive.midpoint(limit.max(alive))));
     }
 
     /// Loads the script at `name`, a path from the project's root, whose text is `text`, in
@@ -582,6 +738,8 @@ impl Host {
     fn load(&mut self, world: &mut World, name: &str, text: String) -> Result<String> {
         let chunk = self.run_chunk(world, name, &text, None);
         self.resolve(world);
+        // A set point, so that what a weak table the chunk keeps holds is alike everywhere.
+        self.collect(true);
         let chunk = chunk?;
         #[cfg(feature = "dev")]
         self.shared.hooked.loaded(name, chunk.function);
@@ -598,7 +756,11 @@ impl Host {
                 component: chunk.component,
                 fields: chunk.fields,
                 id: Some(chunk.id),
+                on_id: (chunk.on.as_deref()).and_then(|on| world.component_named(on)),
+                on: chunk.on,
                 tick: chunk.tick,
+                #[cfg(not(feature = "dev"))]
+                chunk: chunk.function,
                 failed: false,
             },
         );
@@ -623,9 +785,24 @@ impl Host {
         let Self {
             shared, scripts, ..
         } = self;
+        // A mod's calls this tick share one budget.
+        shared.budget.set(BUDGET);
         lent(shared, world, || {
             for script in scripts.iter_mut() {
-                let (Some(tick), Some(id)) = (&script.tick, script.id) else {
+                let Some(id) = script.id else {
+                    continue;
+                };
+                if let Some(on) = script.on_id {
+                    let mut world = shared.world.borrow_mut();
+                    world.list_with(on, &mut list);
+                    for &entity in &list {
+                        if !world.has(entity, id) {
+                            let added = world.add_default(entity, &script.component);
+                            added.expect("an entity alive is given a component it hasn't");
+                        }
+                    }
+                }
+                let Some(tick) = &script.tick else {
                     continue;
                 };
                 shared.world.borrow().list_with(id, &mut list);
@@ -634,7 +811,9 @@ impl Host {
                     if !shared.world.borrow().has(entity, id) {
                         continue;
                     }
-                    shared.budget.set(BUDGET);
+                    if shared.held.is_none() {
+                        shared.budget.set(BUDGET);
+                    }
                     #[cfg(feature = "dev")]
                     shared.hooked.call();
                     let ran = tick.call::<()>((handle(entity.to_bits()), dt));
@@ -654,6 +833,10 @@ impl Host {
             }
         });
         world.keep_list(list);
+        if let Some(held) = &self.shared.held {
+            held.ticked();
+        }
+        self.collect(false);
     }
 
     /// Reloads the script loaded at `path`, its text now `text`, in `world`, as [`Hosts::reload`]
@@ -667,6 +850,7 @@ impl Host {
         let chunk = self.run_chunk(world, path, &text, Some(&declared));
         // Its handles found again, as the chunk ran, and the fields as they are now.
         self.resolve(world);
+        self.collect(true);
         let chunk = chunk?;
         #[cfg(feature = "dev")]
         self.shared.hooked.loaded(path, chunk.function);
@@ -674,7 +858,13 @@ impl Host {
         loaded.text = text;
         loaded.fields = chunk.fields;
         loaded.id = Some(chunk.id);
+        loaded.on_id = (chunk.on.as_deref()).and_then(|on| world.component_named(on));
+        loaded.on = chunk.on;
         loaded.tick = chunk.tick;
+        #[cfg(not(feature = "dev"))]
+        {
+            loaded.chunk = chunk.function;
+        }
         loaded.failed = false;
         info!(script = path, "Script reloaded");
         Ok(())
@@ -697,7 +887,9 @@ impl Host {
                 continue;
             }
             let (path, component) = (&script.path, &script.component);
-            if let Err(error) = redeclare(world, path, id, component, script.fields.clone()) {
+            let held = self.shared.held.as_ref();
+            let fields = script.fields.clone();
+            if let Err(error) = redeclare(world, held, path, id, component, fields) {
                 warn!(code = error.code(), script = path, "{error:#}");
             }
         }
@@ -715,10 +907,7 @@ impl Host {
         before: Option<&str>,
     ) -> Result<Chunk> {
         let _zone = gg_core::zone!();
-        check(text).map_err(|error| {
-            let message = format!("{path}:{error}");
-            error.with_message(message)
-        })?;
+        let bytecode = compiled(path, text)?;
         let env = self.environment().map_err(|error| bad(path, &error))?;
         *self.shared.loading.borrow_mut() = Some(Loading {
             path: path.to_owned(),
@@ -728,8 +917,11 @@ impl Host {
         });
         let (lua, shared) = (&self.lua, &self.shared);
         let ran = lent(shared, world, || {
-            let chunk = lua.load(text).set_name(format!("={path}"));
-            let chunk = chunk.set_mode(ChunkMode::Text).set_environment(env);
+            // The engine's compiler's, from the text, which is all a script may be.
+            let chunk = lua.load(&bytecode[..]).set_name(format!("={path}"));
+            let chunk = chunk
+                .set_mode(ChunkMode::Binary)
+                .set_environment(env.clone());
             let function = chunk.into_function()?;
             shared.budget.set(BUDGET);
             #[cfg(feature = "dev")]
@@ -743,15 +935,13 @@ impl Host {
             Ok(ran) => ran,
             Err(error) => return Err(loading.refused.unwrap_or_else(|| bad(path, &error))),
         };
-        // Kept only for the debugger.
-        #[cfg(not(feature = "dev"))]
-        drop(function);
         let Some(Declaring {
             id,
             component,
             table,
             fields,
             changed,
+            on,
         }) = loading.declared
         else {
             return Err(Error::new(
@@ -790,16 +980,17 @@ impl Host {
             }
             Err(error) => return Err(bad(path, &error)),
         };
-        table.set_readonly(true);
+        settle(&self.lua, path, &env, &table)?;
         if changed {
-            redeclare(world, path, id, &component, fields.clone())?;
+            let held = self.shared.held.as_ref();
+            redeclare(world, held, path, id, &component, fields.clone())?;
         }
         Ok(Chunk {
             component,
             fields,
             id,
+            on,
             tick,
-            #[cfg(feature = "dev")]
             function,
         })
     }
@@ -838,9 +1029,55 @@ impl Host {
             script.id = world
                 .component_named(&script.component)
                 .filter(|&id| world.declared(id).is_some());
+            script.on_id = (script.on.as_deref()).and_then(|on| world.component_named(on));
         }
         self.serial = Some(world.serial());
     }
+}
+
+/// Freezes what a script's chunk keeps once it has run, as [`Scripts`] says: every table that
+/// `env`, its globals, and `component`, its component's table, reach, through tables' keys, values
+/// and metatables and functions' upvalues, `env` and `component` among them.
+///
+/// Fails with `script.state` if they reach a coroutine or a buffer.
+fn settle(lua: &Lua, path: &str, env: &Table, component: &Table) -> Result<()> {
+    let state = |kept: &str| {
+        Error::new(
+            "script.state",
+            format!(
+                "{path}: its chunk keeps a {kept}, whose state no snapshot, reload or peer joining \
+                 keeps: keep it in a component's fields"
+            ),
+        )
+    };
+    let mut seen = HashSet::new();
+    let mut left = vec![Lua_::Table(env.clone()), Lua_::Table(component.clone())];
+    while let Some(value) = left.pop() {
+        match value {
+            Lua_::Table(table) => {
+                if !seen.insert(table.to_pointer()) {
+                    continue;
+                }
+                left.extend(table.metatable().map(Lua_::Table));
+                let pairs = table.for_each::<Lua_, Lua_>(|key, value| {
+                    left.extend([key, value]);
+                    Ok(())
+                });
+                pairs.map_err(|error| bad(path, &error))?;
+                table.set_readonly(true);
+            }
+            Lua_::Function(function) => {
+                if seen.insert(function.to_pointer()) {
+                    let upvalues = hooks::upvalues(lua, &function);
+                    left.extend(upvalues.map_err(|error| bad(path, &error))?);
+                }
+            }
+            Lua_::Thread(_) => return Err(state("coroutine")),
+            Lua_::Buffer(_) => return Err(state("buffer")),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// Runs `f` with `world` lent to the functions Luau calls, in place of `shared`'s, which it takes
@@ -870,18 +1107,37 @@ fn compiler() -> Compiler {
         .set_disabled_builtins(LIBM.map(|name| format!("math.{name}")))
 }
 
-/// Checks that `text` compiles, as a script loads it: refused as [`check`] refuses it, or as it
-/// doesn't compile, `script.bad`, where the message is the compiler's.
+/// Checks that `text` compiles, as a script loads it, as [`compiled`] says.
 #[cfg(feature = "dev")]
 pub(crate) fn compiles(path: &str, text: &str) -> Result<()> {
+    compiled(path, text).map(drop)
+}
+
+/// `text`, the script at `path`'s, compiled: refused as [`check`] refuses it; as it doesn't
+/// compile, `script.bad`, where the message is the compiler's; or, `script.state`, if one of its
+/// functions assigns a local of its chunk, as [`Scripts`] says.
+fn compiled(path: &str, text: &str) -> Result<Vec<u8>> {
     check(text).map_err(|error| {
         let message = format!("{path}:{error}");
         error.with_message(message)
     })?;
-    match compiler().compile(text) {
-        Ok(_) => Ok(()),
-        Err(error) => Err(bad(path, &error)),
+    let bytecode = compiler()
+        .compile(text)
+        .map_err(|error| bad(path, &error))?;
+    let assigned = bytecode::assigned(&bytecode).map_err(|why| {
+        let what = format!("{path}: the engine can't read Luau's bytecode: {why}");
+        Error::new("script.vm", what)
+    })?;
+    if let Some(bytecode::Assigned { line, local }) = assigned {
+        return Err(Error::new(
+            "script.state",
+            format!(
+                "{path}:{line}: a function assigns `{local}`, a local of the script's chunk, whose \
+                 value no snapshot, reload or peer joining keeps: keep it in a component's fields"
+            ),
+        ));
     }
+    Ok(bytecode)
 }
 
 /// Checks what the compiler doesn't of `text`, a script's: that it uses no `^`, with
@@ -1028,9 +1284,13 @@ fn returns(path: &str, component: &str) -> Error {
     )
 }
 
-/// The doc of the component type the script at `path` declares.
-fn doc(path: &str) -> String {
-    format!("Declared by `{path}`.")
+/// The doc of the component type the script at `path` declares, a game's or, as `held` says, a
+/// mod's, which names its mod, as no game's script's doc does.
+fn doc(held: Option<&Held>, path: &str) -> String {
+    match held {
+        Some(held) => format!("Declared by mod `{}`'s `{path}`.", held.name),
+        None => format!("Declared by `{path}`."),
+    }
 }
 
 /// Declares `component`, type `id` of `world`, which the script at `path` declared, again, of
@@ -1040,6 +1300,7 @@ fn doc(path: &str) -> String {
 /// Fails as [`World::redeclare`] does, changing nothing.
 fn redeclare(
     world: &mut World,
+    held: Option<&Held>,
     path: &str,
     id: ComponentId,
     component: &str,
@@ -1059,7 +1320,7 @@ fn redeclare(
         .map(|(name, ..)| name)
         .collect();
     let reset = (!reset.is_empty()).then(|| list(reset));
-    world.redeclare(id, &doc(path), fields)?;
+    world.redeclare(id, &doc(held, path), fields)?;
     info!(
         script = path,
         component,
@@ -1109,14 +1370,14 @@ fn field_of(key: &Lua_) -> mlua::Result<usize> {
 }
 
 /// The handle of field `name` of component type `id`, named `component`, which is its field `index`
-/// and holds `ty`: the one `fields` has, or one made.
+/// and holds `ty`, and which the scripts may read and write as `may` says: the one `fields` has, or
+/// one made.
 fn handle_of(
     fields: &mut Vec<FieldRef>,
     component: &str,
     id: ComponentId,
-    index: u32,
-    name: &Ident,
-    ty: Field,
+    (index, name, ty): (u32, &Ident, Field),
+    (reads, writes): (bool, bool),
 ) -> LightUserData {
     let at = fields
         .iter()
@@ -1128,10 +1389,17 @@ fn handle_of(
             index,
             name: name.clone(),
             ty,
+            reads,
+            writes,
         });
         fields.len() - 1
     });
     handle(at as u64 + 1)
+}
+
+/// The error that a mod's scripts aren't granted what `capability` names, which `what` needs.
+fn ungranted(capability: &str, what: &str) -> String {
+    format!("the mod isn't granted `{capability}`, which {what} needs")
 }
 
 /// What the functions Luau calls reach, as they run only as scripts run or load.
@@ -1145,11 +1413,21 @@ fn shared<R>(f: impl FnOnce(&Shared) -> mlua::Result<R>) -> mlua::Result<R> {
 }
 
 /// `gg.component(name)`: a table of the handles of component type `name`'s fields, by name, those
-/// of the kinds scripts reach.
+/// of the kinds scripts reach; for a mod's scripts, of a type they may read or write, as
+/// [`Shared::may`] says, or a refusal, `mod.ungranted`, of the script loading.
 fn component(lua: &Lua, name: LuaString) -> mlua::Result<Table> {
     shared(|shared| {
         let world = shared.world.borrow();
         let name = name.to_str()?;
+        if shared.may(&name) == (false, false) {
+            let what = format!("`gg.component(\"{}\")`", &*name);
+            let message = ungranted(&format!("read:{}` or `write:{}", &*name, &*name), &what);
+            if let Some(loading) = shared.loading.borrow_mut().as_mut() {
+                let error = Error::new("mod.ungranted", format!("{}: {message}", loading.path));
+                loading.refused = Some(error);
+            }
+            return Err(mlua::Error::runtime(message));
+        }
         let Some(id) = world.component_named(&name) else {
             let names = crate::reflect::list(world.component_types());
             return Err(mlua::Error::runtime(format!(
@@ -1174,23 +1452,29 @@ fn handles<'f>(
     fields: impl Iterator<Item = (&'f Ident, Type)>,
 ) -> mlua::Result<Table> {
     let table = lua.create_table()?;
+    let may = shared.may(name);
     let mut refs = shared.fields.borrow_mut();
     for (index, (field, ty)) in fields.enumerate() {
         let Some(ty) = Field::of(&ty) else {
             continue;
         };
         let index = u32::try_from(index).expect("fewer than 2^32 fields");
-        let handle = handle_of(&mut refs, name, id, index, field, ty);
+        let handle = handle_of(&mut refs, name, id, (index, field, ty), may);
         table.raw_set(&**field, handle)?;
     }
     Ok(table)
 }
 
-/// `gg.declare(name, fields)`: declares the component type the script loading is, `name`, of
-/// `fields`, each a name and a default, as [`Scripts`] says, and returns the script's
-/// table, of its fields' handles, which its tick goes in. A script loading again declares the type
-/// it declared, its fields as they were or otherwise, which the type takes once it has loaded.
-fn declare(lua: &Lua, (name, fields): (LuaString, Table)) -> mlua::Result<Table> {
+/// `gg.declare(name, fields, options)`: declares the component type the script loading is, `name`,
+/// of `fields`, each a name and a default, riding on the type `options`' `on` names, if it names
+/// one, as [`Scripts`] says, and returns the script's table, of its fields' handles, which its tick
+/// goes in. A script loading again declares the type it declared, its fields as they were or
+/// otherwise, which the type takes once it has loaded. A mod's scripts' types are their own, and
+/// a type they ride on is one they may read.
+fn declare(
+    lua: &Lua,
+    (name, fields, options): (LuaString, Table, Option<Table>),
+) -> mlua::Result<Table> {
     shared(|shared| {
         let name = name.to_str()?.to_owned();
         let mut loading = shared.loading.borrow_mut();
@@ -1248,9 +1532,43 @@ fn declare(lua: &Lua, (name, fields): (LuaString, Table)) -> mlua::Result<Table>
         }
         // By name, as a table's pairs come in no order its text gives.
         declared.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut on = None;
+        for pair in options.iter().flat_map(Table::pairs::<Lua_, Lua_>) {
+            match pair? {
+                (Lua_::String(key), Lua_::String(ridden)) if key.as_bytes() == b"on" => {
+                    on = Some(ridden.to_str()?.to_owned());
+                }
+                _ => {
+                    let what = format!(
+                        "`{name}`'s options are `on`, the name of the component type it rides on"
+                    );
+                    return refuse(loading, "script.bad", what);
+                }
+            }
+        }
+        if let Some(ridden) = &on {
+            if *ridden == name || shared.world.borrow().component_named(ridden).is_none() {
+                let what = format!("`{name}` rides on `{ridden}`, which isn't another type");
+                return refuse(loading, "script.bad", what);
+            }
+            if !shared.may(ridden).0 {
+                let what = format!("`{name}` riding on `{ridden}`");
+                return refuse(
+                    loading,
+                    "mod.ungranted",
+                    ungranted(&format!("read:{ridden}"), &what),
+                );
+            }
+        }
+        let own_doc = doc(shared.held.as_ref(), &loading.path);
         let mut world = shared.world.borrow_mut();
         let (id, changed) = match world.component_named(&name) {
-            None => match world.declare(&name, &doc(&loading.path), declared.clone()) {
+            // Another script's, which a mod's would take as its own.
+            Some(id) if shared.held.is_some() && world.doc_of(id) != own_doc => {
+                let what = format!("`{name}` is another script's component type");
+                return refuse(loading, "reflect.name_taken", what);
+            }
+            None => match world.declare(&name, &own_doc, declared.clone()) {
                 Ok(id) => (id, false),
                 Err(error) => {
                     let message = format!("{}: {error:#}", loading.path);
@@ -1269,6 +1587,11 @@ fn declare(lua: &Lua, (name, fields): (LuaString, Table)) -> mlua::Result<Table>
             },
         };
         drop(world);
+        if let Some(held) = &shared.held
+            && !held.own.borrow().contains(&name)
+        {
+            held.own.borrow_mut().push(name.clone());
+        }
         let own = declared.iter().map(|(field, kind, _)| (field, kind.ty()));
         let table = handles(lua, shared, &name, id, own)?;
         loading.declared = Some(Declaring {
@@ -1277,6 +1600,7 @@ fn declare(lua: &Lua, (name, fields): (LuaString, Table)) -> mlua::Result<Table>
             table: table.clone(),
             fields: declared,
             changed,
+            on,
         });
         Ok(table)
     })
@@ -1288,6 +1612,14 @@ fn read(_: &Lua, (entity, key): (LightUserData, Lua_)) -> mlua::Result<Lua_> {
         let entity = entity_of(entity)?;
         let fields = shared.fields.borrow();
         let field = &fields[field_of(&key)?];
+        if !field.reads {
+            let (component, name) = (&field.component, &field.name);
+            let what = format!("reading `{component}.{name}`");
+            return Err(mlua::Error::runtime(ungranted(
+                &format!("read:{component}"),
+                &what,
+            )));
+        }
         let world = shared.world.borrow();
         let reached = world.field_at(entity, missing(field)?, field.index);
         let reached = reached.map_err(|error| reaching(&world, entity, field, &error))?;
@@ -1301,6 +1633,14 @@ fn write(_: &Lua, (entity, key, value): (LightUserData, Lua_, Lua_)) -> mlua::Re
         let entity = entity_of(entity)?;
         let fields = shared.fields.borrow();
         let field = &fields[field_of(&key)?];
+        if !field.writes {
+            let (component, name) = (&field.component, &field.name);
+            let what = format!("writing `{component}.{name}`");
+            return Err(mlua::Error::runtime(ungranted(
+                &format!("write:{component}"),
+                &what,
+            )));
+        }
         let mut world = shared.world.borrow_mut();
         let id = missing(field)?;
         let set = match world.field_at_mut(entity, id, field.index) {
@@ -1320,14 +1660,23 @@ fn describe(_: &Lua, data: LightUserData) -> mlua::Result<String> {
     })
 }
 
-/// `print(...)`: logs what it's given, as `tostring` writes each, between tabs.
+/// `print(...)`: logs what it's given, as `tostring` writes each, between tabs; a mod's, naming
+/// it, unless it has printed as much as it may this second of ticks, as [`Mods`] says.
 fn print(_: &Lua, values: Variadic<Lua_>) -> mlua::Result<()> {
-    let texts: Vec<String> = values
-        .iter()
-        .map(|value| value.to_string())
-        .collect::<mlua::Result<_>>()?;
-    info!("{}", texts.join("\t"));
-    Ok(())
+    shared(|shared| {
+        if shared.held.as_ref().is_some_and(|held| !held.prints()) {
+            return Ok(());
+        }
+        let texts: Vec<String> = values
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<mlua::Result<_>>()?;
+        match &shared.held {
+            Some(held) => info!("mod" = held.name, "{}", texts.join("\t")),
+            None => info!("{}", texts.join("\t")),
+        }
+        Ok(())
+    })
 }
 
 /// The id of the component type `field` is of, in the world scripts run in.
@@ -2157,5 +2506,133 @@ return Spin
             .expect("loads");
         assert_eq!(changed.hash(), world.hash());
         assert_eq!(whole(&changed), whole(world));
+    }
+
+    /// Declares `name`, after `chunk`, whose tick runs `tick` then sets its mover's steps to 7.
+    fn keeper(name: &str, chunk: &str, tick: &str) -> String {
+        format!(
+            "local Mover = gg.component(\"Mover\")\n{chunk}\n\
+             local Kept = gg.declare(\"{name}\", {{}})\n\
+             function Kept.tick(entity, dt)\n{tick}\nentity[Mover.steps] = 7\nend\n\
+             return Kept\n"
+        )
+    }
+
+    /// A script's chunk keeps nothing that changes: a script whose functions assign a local of its
+    /// chunk, directly or through a function between, or whose chunk keeps a coroutine or a
+    /// buffer, is refused, `script.state`, saying where; once its chunk has run, its tables and its
+    /// globals are frozen, which a tick that writes them fails at; and the metatable entities share
+    /// is frozen as the chunk runs. A function may assign its own locals, and its enclosing
+    /// function's.
+    #[test]
+    fn a_script_keeps_its_state_in_its_components() {
+        let between = "local count = 0\n\
+            local function add() return function() count += 1 end end";
+        let refusals = [
+            (
+                "assigned",
+                keeper("K", "local count = 0", "count = count + 1"),
+            ),
+            ("between", keeper("K", between, "add()()")),
+            (
+                "coroutine",
+                keeper(
+                    "K",
+                    "local co = coroutine.create(function() end)",
+                    "local _ = co",
+                ),
+            ),
+            (
+                "wrapped",
+                keeper(
+                    "K",
+                    "local step = coroutine.wrap(function() end)",
+                    "local _ = step",
+                ),
+            ),
+            ("buffer", keeper("K", "Bytes = buffer.create(4)", "")),
+        ];
+        for (name, text) in refusals {
+            let refused = refused(name, &text);
+            assert_eq!(refused.code(), "script.state", "{name}: {refused}");
+        }
+        let assigned = refused("line", &keeper("K", "local count = 0", "count = count + 1"));
+        let message = assigned.to_string();
+        assert!(
+            message.starts_with("scripts/refused.luau:5: a function assigns `count`"),
+            "{message}"
+        );
+        let hijack = "getmetatable(gg.entity).__tostring = nil\nreturn gg.declare(\"H\", {})";
+        let hijack = refused("hijack", hijack);
+        assert!(hijack.to_string().contains("readonly"), "{hijack}");
+        let dir = Scratch::new("luau-state");
+        let own = keeper(
+            "Own",
+            "local cache = { n = 0 }",
+            "local n = 0\nlocal function more() n += 1 end\nmore()\nentity[Mover.angle] = n",
+        );
+        let table = keeper("Table", "local cache = { n = 0 }", "cache.n = 1");
+        let global = keeper("Global", "Total = 0", "Total = 1");
+        let scripts = [
+            ("scripts/own.luau", &*own),
+            ("scripts/table.luau", &*table),
+            ("scripts/global.luau", &*global),
+        ];
+        let (mut cx, mut host) = loaded(&dir, &scripts);
+        let world = cx.world_mut();
+        let movers = ["Own", "Table", "Global"].map(|component| {
+            let mover = world.spawn(Mover::new());
+            world.add_default(mover, component).expect("added");
+            mover
+        });
+        host.run(cx.world_mut());
+        let steps = movers.map(|mover| cx.world().get::<Mover>(mover).expect("a mover").steps);
+        assert_eq!(steps, [7, 0, 0]);
+        let angle = cx.world().get::<Mover>(movers[0]).expect("a mover").angle;
+        assert_eq!(angle, 1.0);
+    }
+
+    /// A component that rides on another is given to each entity with that one, at its defaults,
+    /// as the scripts run, before its tick.
+    #[test]
+    fn a_component_riding_on_another_is_given_to_each_entity_with_it() {
+        let dir = Scratch::new("luau-on");
+        let rider = "local Mover = gg.component(\"Mover\")\n\
+            local Rider = gg.declare(\"Rider\", { by = 3 }, { on = \"Mover\" })\n\
+            function Rider.tick(entity, dt)\n\
+                entity[Mover.steps] = entity[Mover.steps] + entity[Rider.by]\n\
+            end\n\
+            return Rider\n";
+        let (mut cx, mut host) = loaded(&dir, &[("scripts/rider.luau", rider)]);
+        let world = cx.world_mut();
+        let [first, bare] = [world.spawn(Mover::new()), world.spawn(())];
+        host.run(cx.world_mut());
+        let later = cx.world_mut().spawn(Mover::new());
+        host.run(cx.world_mut());
+        let world = cx.world();
+        let steps = |mover| world.get::<Mover>(mover).expect("a mover").steps;
+        assert_eq!((steps(first), steps(later)), (6, 3));
+        let by = world.get_field(later, "Rider", "by").expect("its own");
+        assert_eq!(by, Value::F64(3.0));
+        assert!(world.get_field(bare, "Rider", "by").is_err());
+        for (name, options) in [
+            ("on-unknown", "{ on = \"Nope\" }"),
+            ("on-itself", "{ on = \"Riding\" }"),
+            ("on-other", "{ under = \"Mover\" }"),
+        ] {
+            let text = format!("return gg.declare(\"Riding\", {{}}, {options})");
+            assert_eq!(refused(name, &text).code(), "script.bad", "{name}");
+        }
+    }
+
+    /// A string pattern that backtracks without end fails past its call's budget, as Luau's matcher
+    /// comes to the interrupt.
+    #[test]
+    fn a_pattern_that_backtracks_fails_past_its_budget() {
+        let text = "local a = string.rep(\"a\", 40)\n\
+            local found = string.find(a, \"a*a*a*a*a*a*a*a*b\")\n\
+            return gg.declare(\"Matched\", {})";
+        let error = refused("pattern", text);
+        assert!(error.to_string().contains("ran past its budget"), "{error}");
     }
 }

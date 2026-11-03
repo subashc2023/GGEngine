@@ -318,6 +318,15 @@ impl World {
         }
     }
 
+    /// The doc of component type `id`, as its description gives it: a declared type's names the
+    /// script that declared it.
+    pub(crate) fn doc_of(&self, id: ComponentId) -> &str {
+        match self.components.ty(id) {
+            Type::Named(index) => &self.types().info(index).doc,
+            _ => "",
+        }
+    }
+
     /// Field `index` of `entity`'s component `id`, of a struct with named fields, as reflection
     /// reads it: without allocating, as a script reads one at its ticks.
     ///

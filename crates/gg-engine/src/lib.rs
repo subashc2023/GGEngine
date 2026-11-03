@@ -47,6 +47,7 @@ mod edits;
 mod event;
 mod font;
 mod gltf;
+mod grant;
 pub mod grid;
 // In development builds alone, as `dev` has it.
 #[cfg(feature = "dev")]
@@ -148,13 +149,14 @@ pub use gg_renderer::{
     Blend, Circle, Mesh, Projection, Sampler, Shader, Sprite, SpriteSheet, Texture, Viewpoint,
     Viewport,
 };
+pub use grant::{Capability, Grant};
 pub use input::Input;
 pub use inspector::{Inspector, InspectorLink, Placed};
 #[doc(hidden)]
 pub use jobs::{on_threads, start as start_jobs};
 use layer::Stack;
 pub use layer::{Commands, Context, Layer, Pick, Tick, Window};
-pub use luau::Scripts;
+pub use luau::{Mods, Scripts};
 use main_loop::run_headless;
 pub use model::{Model, ModelNode, ModelRoot};
 pub use name::Name;
@@ -194,6 +196,8 @@ pub struct App {
     root: Option<PathBuf>,
     /// The project's manifest, as [`project`](Self::project) read it, or why it couldn't.
     project: Option<Result<Manifest>>,
+    /// The folder of the mods the run runs, as `--mods` names it, in place of those installed.
+    mods: Option<PathBuf>,
 }
 
 impl App {
@@ -209,6 +213,7 @@ impl App {
             headless_step: None,
             root: None,
             project: None,
+            mods: None,
         }
     }
 
@@ -425,6 +430,7 @@ fn run_args(
         error!(code = error.code(), "{error:#}");
         return ExitCode::FAILURE;
     }
+    app.mods.clone_from(&args.mods);
     // Before the replay too, which ticks on them as a run does.
     if let Err(error) = jobs::start(args.threads) {
         error!(code = error.code(), "{error:#}");

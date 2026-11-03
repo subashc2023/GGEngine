@@ -91,28 +91,17 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Luau scripts** (2026-11-02)
 - **Scripts in the editor and in lockstep** (2026-11-02)
 - **Debugging scripts** (2026-11-02)
+- **Mods** (2026-11-03)
+- **Phase 9, scripting** (2026-11-03)
 
 ## Now
 
-**Mods**, Phase 9's fourth milestone: scripts a player installs, sandboxed, reaching only what the
-tool API's capabilities grant them; its plan says when it's done.
+**Phase 10's first milestone**, chosen as [Phase 10](#next) starts; its plan says when it's done.
 
 ## Next
 
 Each phase ends in something you can run and check.
 
-9. **Scripting.** Luau, as [Game code](../ARCHITECTURE.md#game-code) describes: scripts as assets,
-   attached to entities, their fields in the Inspector, reaching other entities and Rust components
-   through reflection, reloaded as they're saved with the world kept, deterministic for lockstep
-   and replays, and debugged with breakpoints, pause and step; and the tool API's capabilities, so
-   that a mod's scripts reach only what they're granted. *Done when* a game's behavior written in
-   Luau reloads as it's saved, in sync on both peers of the demo, and a mod runs sandboxed. Its
-   milestones, in order: Luau scripts, components scripts declare and act as, run alike on every
-   platform and reloaded as they're saved, at a tick, with the demo's shards spun by one; scripts in
-   the editor and in lockstep, a reload that changes a script's fields migrating its components in
-   place, the Inspector and the tool API following, and both peers reloading at the tick the host
-   chooses; debugging, breakpoints, pause and step in a script, the game waiting rather than hung;
-   and mods, sandboxed, reaching only what the tool API's capabilities grant them.
 10. **Cooking and the player.** `tools/cook` turns glTF into engine meshes (meshoptimizer: vertex
     and index optimization, meshlets, LODs), textures into BC-compressed KTX2, fonts into their
     fields and games' shaders into SPIR-V, packed into a memory-mappable package; an async
@@ -158,7 +147,12 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Checking captures in CI, under RenderDoc on Linux with lavapipe: captures are checked by hand, replayed through qrenderdoc's Python for their names and labels | A name or a label is lost unseen, or the tool API checks captures |
 | RenderDoc captures from code or through the tool API, and more than one a run: `--capture` names one frame as the run starts, and the tool API's `capture` writes the view's pixels alone | An agent needs a frame's GPU work as well as its pixels |
 | `gg build` and `gg test`, with their results as data: `run` and `check` build through cargo, passing on its messages about the code as it renders them, and cargo's test harness writes JSON on nightly alone | An agent needs a build's or the tests' results as data, or libtest's JSON output is stable |
-| Capabilities each client of the tool API is granted, as [Agents and tools](../ARCHITECTURE.md#agents-and-tools) describes: a connection that says hello with the session's token reaches everything, which only processes that can read the session file beside the game, the user's own, do | A client the user doesn't run as their own, such as one on another machine or a mod's, or an agent kept to one scene |
+| Tokens of fewer capabilities, minted for clients that can't read the session file, and grants kept to one scene: a connection's `hello` narrows its own grant, as [Agents and tools](../ARCHITECTURE.md#agents-and-tools) describes, but any process that reads the session file reaches everything | A client the user doesn't run as their own, such as one on another machine, an agent that can read the file but mustn't reach everything, or one kept to one scene |
+| `gg mcp --grant` listing only the tools its grant covers: it lists them all, and the game refuses the rest with `api.ungranted` | An agent's tools list misleads it |
+| A mods menu, where the player turns mods on and off and approves what each asks for: installing one is consent, and the game's limits cap what any gets | A game's players install mods from strangers |
+| Mods that ship assets, or that replace a game's scripts and assets: a mod's scripts ride on the game's components | A mod needs textures of its own, or to change a game's own behavior |
+| Dependencies between mods, their settings, and a migration as a mod's version changes, as Factorio's `on_configuration_changed`: a mod's `version` is read, and nothing follows from it | Mods build on each other, or a mod's components change between its versions |
+| Mods' files reloaded as they're saved, as a game's scripts are, and mods' scripts debugged, as the debugger debugs the game's alone; and a run's mods listed in `status` or the editor, where a run logs `Mod loaded` for each | Someone writes a mod against a running game |
 | MCP beyond tools: resources, prompts, progress, cancellation and the client's roots; `gg mcp`'s tools are the API's methods but `hello`, `ping`, `view`, `patch`, `note` and `quit`, and the paths of `capture` and `snapshot`, a capture's PNG coming inline | An agent needs one of them |
 | Steps and captures while the window is minimized, which fail with `api.paused`, and requests while a file dialog or Windows' window menu holds the main thread, which wait; `ping` says which. An `assets` while it's minimized answers from the asset database as its thread last sent it, up to a second old | A tool needs them then |
 | Labels inside passes: each run of draws labeled by what it draws, and the frame pass's view and UI apart; a capture shows a label for each pass | Phase 12, with the render graph |
@@ -305,7 +299,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | A recording's scripts as they were as it started, which its replay reads from their files, as it reads scene files', so that a script changed since makes it go another way at its first tick | A recording travels without its game's files, as a bug report does |
 | Scripts that spawn and despawn entities, or give and take their components, which Rust code alone does | A game's behavior in Luau makes or unmakes what it acts on |
 | Random numbers for scripts, from a state the world holds, in place of `math.random`, which they go without | A script draws random numbers, as Shards' `collect` would |
-| A budget for all of a tick's calls into scripts together, or, in development builds alone, one by time: each call fails past its million interrupts, about 0.9 s of a debug build in a loop that reads a field each turn, so a script that runs past it in every call slows the game to a crawl rather than hanging it | A runaway script's crawl gets in the way, or mods, whose scripts aren't the game's own |
+| A budget for all of a tick's calls into a game's own scripts together, as a mod's calls share one, or, in development builds alone, one by time: each call fails past its million interrupts, about 0.9 s of a debug build in a loop that reads a field each turn, so a script that runs past it in every call slows the game to a crawl rather than hanging it | A runaway script's crawl gets in the way |
 | Debugging scripts from a code editor, through the Debug Adapter Protocol, as a `gg dap` beside `gg mcp` and a VS Code extension that names it: the tool API's `debug`, `gg debug`, its MCP tool and the editor's Debugger panel debug them | Someone debugs scripts where they write them |
 | Evaluating expressions where a script has stopped, watches, and the fields of a table or an entity a local holds: a stop shows each local's and upvalue's value, a table as `(table)` and an entity as its ID, which `gg entity` reads once the game goes on | Someone needs more of what a local holds than its value |
 | Breakpoints with conditions or hit counts, and logpoints | Someone stops too often at one |

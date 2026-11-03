@@ -7,8 +7,10 @@
 //! changed, and taken as its own by a lockstep joiner, whose host's world comes so, the scripts the
 //! layers had loaded, each its path from the project's root and its text as last applied, which a
 //! lockstep joiner runs in place of its own files', a run restored from it reading its files, the
-//! scene files the layers had loaded, each its path, its author and its text as last applied, as a
-//! recording's values write them, which the restored run watches, the open scene, its file's
+//! mods the layers had loaded, each its manifest's text, then each script's path in its folder and
+//! text, which a lockstep joiner runs in place of its own, a run restored from it loading those
+//! installed, the scene files the layers had loaded, each its path, its author and its text as last
+//! applied, as a recording's values write them, which the restored run watches, the open scene, its file's
 //! author or none and the IDs it made, written so too, and the world, as [`World::save_whole`]
 //! writes it; then, of a run the tool API had stopped, `stopped`, or of one playing a copy of the
 //! world as edited, which it held aside, `edited`, the ticks that world was at and its hash,
@@ -26,6 +28,7 @@
 //! asset texture 1 1 2 assets/checkerboard.png
 //! named List([String("5f3c9a1e07b2d846"), String("assets/checkerboard.png")])
 //! script List([String("scripts/spin.luau"), String("local Spin = ...")])
+//! mod List([String("(name: \"rainbow\", ..."), String("rainbow.luau"), String("local ...")])
 //! scene List([String("/game/scenes/grid.ron"), String("scenes/grid.ron"), String("(entities: ...")])
 //! open List([Some(String("scenes/grid.ron")), List([String("1a2b3c4d5e6f7081")])])
 //! stream 3f8a6c2e9b1d4057
@@ -49,7 +52,8 @@ use gg_core::{Error, Result};
 use tracing::{info, warn};
 
 use crate::assets::Asset;
-use crate::recording::text::{Text, read_named};
+use crate::luau::ModText;
+use crate::recording::text::{Text, read_mod, read_named};
 use crate::reflect::Value;
 use crate::scene_files::{Open, SceneFile};
 use crate::{World, WorldHash};
@@ -78,12 +82,13 @@ pub(crate) enum Run {
 }
 
 /// What a snapshot is of: a run's world, with its scene files as last applied and its open scene,
-/// and the scripts its layers loaded, each a path and its text as last applied.
+/// the scripts its layers loaded, each a path and its text as last applied, and its mods.
 pub(crate) struct Of<'r> {
     pub(crate) world: &'r World,
     pub(crate) scenes: &'r [SceneFile],
     pub(crate) open: &'r Open,
     pub(crate) scripts: &'r [(String, String)],
+    pub(crate) mods: &'r [ModText],
 }
 
 /// The text of the snapshot file of what `of` says, app `app`'s, whose layers are `layers`, from
@@ -101,6 +106,7 @@ pub(crate) fn write(of: &Of, run: &Run, app: &str, layers: &[&str], ticks: u64) 
         scenes,
         open,
         scripts,
+        mods,
     } = *of;
     let mut out = String::new();
     let written = "a string takes any text";
@@ -122,6 +128,11 @@ pub(crate) fn write(of: &Of, run: &Run, app: &str, layers: &[&str], ticks: u64) 
         let strings = [path, text].map(|string| Value::String(string.clone()));
         out.push_str("script ");
         crate::recording::text::write(&mut out, &Value::List(strings.into()), world);
+        out.push('\n');
+    }
+    for text in mods {
+        out.push_str("mod ");
+        crate::recording::text::write_mod(&mut out, text);
         out.push('\n');
     }
     write_scenes(&mut out, scenes, open, world);
@@ -276,6 +287,8 @@ pub(crate) struct Snapshot {
     /// The scripts that run's layers had loaded, each a path from the project's root and its text
     /// as last applied.
     pub(crate) scripts: Vec<(String, String)>,
+    /// The mods that run's layers had loaded.
+    pub(crate) mods: Vec<ModText>,
     /// The scene files that run's layers had loaded, as last applied.
     pub(crate) scenes: Vec<SceneFile>,
     /// That run's open scene; `None` for a snapshot written before the open scene was.
@@ -404,6 +417,17 @@ impl Snapshot {
             })?);
             world += 1;
         }
+        let mut mods = Vec::new();
+        while let Some(text) = lines.get(world).and_then(|line| line.strip_prefix("mod ")) {
+            mods.push(read_mod(text, "mod ".len() + 1).ok_or_else(|| {
+                refused(format!(
+                    "line {}: a mod is a list of its manifest's text, then each of its scripts' \
+                     path and text",
+                    world + 1
+                ))
+            })?);
+            world += 1;
+        }
         // The scene lines from line `at` on, then the open scene's line, if there's one, and the
         // index of the line after them.
         let read_scenes = |mut at: usize| {
@@ -496,6 +520,7 @@ impl Snapshot {
             assets,
             names,
             scripts,
+            mods,
             scenes,
             open,
             world: world..end,
@@ -686,7 +711,8 @@ mod tests {
     use crate::layer::Stack;
     use crate::{Context, Layer, MeshDraw, Sprite, Text, Transform};
 
-    /// The text of the snapshot file of `world`, of no scripts, as [`super::write`] writes it.
+    /// The text of the snapshot file of `world`, of no scripts or mods, as [`super::write`] writes
+    /// it.
     fn write(
         world: &World,
         scenes: &[SceneFile],
@@ -701,6 +727,7 @@ mod tests {
             scenes,
             open,
             scripts: &[],
+            mods: &[],
         };
         super::write(&of, run, app, layers, ticks)
     }
@@ -735,9 +762,9 @@ mod tests {
     }
 
     /// A snapshot written and read back restores the world it was taken of, at its ticks, into a
-    /// world its layers loaded, with its scripts, its scene files and its open scene; one written
-    /// before the open scene was holds none; and one of another app, of another format, cut short,
-    /// or whose open scene's line or a script's isn't one, is refused.
+    /// world its layers loaded, with its scripts, its mods, its scene files and its open scene; one
+    /// written before the open scene was holds none; and one of another app, of another format, cut
+    /// short, or whose open scene's line, a script's or a mod's isn't one, is refused.
     #[test]
     fn a_snapshot_restores_the_world_it_was_taken_of() {
         let mut saved = Context::seeded(1);
@@ -758,11 +785,16 @@ mod tests {
             "scripts/a \"spin\".luau".to_owned(),
             "return gg.declare(\"Spin\", {})\n".to_owned(),
         )];
+        let mods = [ModText {
+            manifest: "(name: \"a \\\"mod\\\"\")\n".to_owned(),
+            scripts: vec![("a.luau".to_owned(), "return 1\n".to_owned())],
+        }];
         let of = Of {
             world: saved.world(),
             scenes: &scenes,
             open: &open,
             scripts: &scripts,
+            mods: &mods,
         };
         let text = super::write(&of, &Run::Playing, "Tested", &["Tester"], 77);
         let text = text.expect("written");
@@ -776,6 +808,11 @@ mod tests {
             (&snapshot.scripts[..], &snapshot.scenes[..], &snapshot.open),
             (&scripts[..], &scenes[..], &Some(open))
         );
+        assert_eq!(snapshot.mods, mods);
+        let mod_line = text.lines().find(|line| line.starts_with("mod "));
+        let mod_line = format!("{}\n", mod_line.expect("a mod line"));
+        // A script's path without its text.
+        let textless = "mod List([String(\"(name: \\\"a\\\")\"), String(\"a.luau\")])\n";
         let script_line = text.lines().find(|line| line.starts_with("script "));
         let script_line = format!("{}\n", script_line.expect("a script line"));
         let pathless = "script List([String(\"scripts/spin.luau\")])\n";
@@ -798,6 +835,7 @@ mod tests {
             text.replace(&open_line, "open List([None])\n"),
             text.replace(&open_line, "open List([None, List([String(\"nope\")])])\n"),
             text.replace(&script_line, pathless),
+            text.replace(&mod_line, textless),
         ] {
             save(&path, &broken).expect("saved");
             let refused = Snapshot::read(&path, "Tested")

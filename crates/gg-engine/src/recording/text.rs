@@ -15,6 +15,7 @@ use serde::de::{self, Deserializer};
 
 use crate::assets::Asset;
 use crate::ecs::{MAX_DEPTH, float, quote};
+use crate::luau::ModText;
 use crate::reflect::{Ident, Value};
 use crate::{Entity, EntityId, World};
 
@@ -164,6 +165,40 @@ pub(crate) fn read_named(text: &str, from: usize) -> Option<(Arc<str>, Arc<str>)
         [Text::String(name), Text::String(path)] => Some((name.into(), path.into())),
         _ => None,
     }
+}
+
+/// Writes `text`, a mod as a snapshot's or a recording's `mod` line has it, after `out`: a list of
+/// its manifest's text, then each of its scripts' path and text.
+pub(crate) fn write_mod(out: &mut String, text: &ModText) {
+    out.push_str("List([String(");
+    quote(out, &text.manifest);
+    out.push(')');
+    for (path, script) in &text.scripts {
+        for string in [path, script] {
+            out.push_str(", String(");
+            quote(out, string);
+            out.push(')');
+        }
+    }
+    out.push_str("])");
+}
+
+/// The mod that `text`, written by [`write_mod`] and starting at column `from` of its line, gives,
+/// if it's that.
+pub(crate) fn read_mod(text: &str, from: usize) -> Option<ModText> {
+    let Text::List(parts) = Text::parse(text, from).ok()? else {
+        return None;
+    };
+    let mut strings = parts.into_iter().map(|part| match part {
+        Text::String(string) => Some(string),
+        _ => None,
+    });
+    let manifest = strings.next()??;
+    let mut scripts = Vec::new();
+    while let Some(path) = strings.next() {
+        scripts.push((path?, strings.next()??));
+    }
+    Some(ModText { manifest, scripts })
 }
 
 /// A value as a recording's text gives it: a [`Value`], but with each entity it holds by its ID,

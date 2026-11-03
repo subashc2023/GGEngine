@@ -729,6 +729,7 @@ mod tests {
             app: None,
             timeout: Duration::from_secs(1),
             client: "mcp".to_owned(),
+            grant: None,
             project: None,
         }
     }

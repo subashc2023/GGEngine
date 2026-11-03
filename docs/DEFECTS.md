@@ -80,6 +80,13 @@ file, under Workflow.
 | Peers check each other's app, engine and layers, not the game's build: two builds of one game join, and if their simulations differ at all, part at every tick and resync without end | Give the hello a hash of the game's executable, or of its crate's sources | Peers on two machines run builds of their own |
 | A world that doesn't come back from its snapshot's text as it went never resyncs: a body's rotation drifted off unit length, as Physics has it, comes back normalized on the joiner alone, so that their hashes part after every world the host sends. No game here turns a dynamic body freely | Have the host restore its own world from the text it sends, as its joiner does; or normalize rotations as Physics' row says | A networked game's bodies turn freely for minutes |
 
+## Scripts
+
+| Defect | Fix | Worth it when |
+|---|---|---|
+| `pairs` over a table keyed by tables or functions goes in an order its keys' addresses give, as Luau hashes them, so a script that iterates one acts in another order in another run, on another peer or platform, and the table grows, its memory with it, at another key: entities and vectors, light userdata and values, hash alike everywhere | Hash a table, a function or a coroutine by a number each gets as it's made, in Luau's `luaH`, or refuse such keys as a script sets them | A script iterates a table keyed by tables or functions |
+| A lockstep joiner's mods start afresh as it joins, while its host's have run since the host started, so the memory each mod's VM counts can differ, its pages filled otherwise: a mod whose calls come near its memory limit can fail on one peer alone, and the peers part (`net.desync`) | Restart the host's mods as it sends its world, through an edit its recording keeps, so that both peers' start alike at that tick | A mod runs near its memory limit in a lockstep session |
+
 ## Physics
 
 | Defect | Fix | Worth it when |
