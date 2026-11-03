@@ -123,11 +123,7 @@ the hash reads, or to glam, libm or rapier2d changes them, and `GG_UPDATE_REFERE
 sandbox -p shards` rewrites them alone, with those of the demo's live recording,
 `games/shards/tests/references/live.recording`. gg-engine's `physics.rs` holds another, edited by
 hand. A difference on some platforms only is a bug, not a reference to rewrite. Some changes need a
-new recording, since rewriting the hashes would keep what they break: a change to the demo's layers,
-to a command's type that its lines no longer read as, or to the arena's types, whose edits would
-then be refused at their ticks. Make one with a windowed run of the demo and `--record` that steers
-and dashes with the keys, sets a field through `cargo gg set`, then `undo` and `redo`, saves
-`scenes/arena.ron` changed and puts it back, and closes.
+new recording, not its hashes rewritten: [the demo's AGENTS.md](games/shards/AGENTS.md) says which.
 
 CI ([ci.yml](.github/workflows/ci.yml)) runs the gates on every push, on Windows and Linux, x86-64
 and ARM64, and on macOS ARM64, the shipping gate, gg-engine's without `dev` and the doc gate on
@@ -171,11 +167,7 @@ push a branch to probe CI only for a change another platform could break.
   error and warning a stable code and the thing it is about, as
   [ARCHITECTURE.md](ARCHITECTURE.md#diagnostics) describes.
 - Steady-state frames don't allocate: per-frame data lives in frame arenas and ring buffers.
-  gg-engine's `ticks` test checks ticks on every thread, entities coming and going, but no physics,
-  which allocates as contacts come and go; its GPU test `frames`, headless frames of an app without
-  UI, as egui allocates. After changing the windowed loop, run `cargo test -p gg-engine --test
-  frames -- --windowed` without `dev`, `tracy` or a gamepad, with the mouse over its window: gilrs
-  allocates as it reads a pad, winit for each key on Windows, and Tracy's client as it records.
+  [gg-engine's AGENTS.md](crates/gg-engine/AGENTS.md) says how it's checked.
 
 ## Workflow
 
