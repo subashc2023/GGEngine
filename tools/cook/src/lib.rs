@@ -1,7 +1,12 @@
 //! The offline asset cooker, as ARCHITECTURE.md's Project state says: a game's project into the
 //! package its builds without `dev` run from, of the files under its asset root that its runs load,
 //! each as the engine makes it as it loads it where that takes more than reading it, a font baked
-//! into its field and a shader compiled to SPIR-V, and the rest as they are.
+//! into its field and a shader compiled to SPIR-V; a texture compressed to BC7, and a model's
+//! meshes optimized, with levels of detail, and its images compressed with their mip levels, so
+//! that they load and draw faster; and the rest as they are.
+
+mod mesh;
+mod texture;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -9,7 +14,7 @@ use std::path::{Component, Path};
 
 use gg_api::Project;
 use gg_api::asset::{self, Found};
-use gg_engine::cook::{self, Kind, Writer};
+use gg_engine::cook::{self, Kind, Lod, Mipmaps, Writer};
 use gg_engine::{Error, Result};
 
 /// A file a package holds, as [`cook()`] cooked it.
@@ -27,9 +32,10 @@ pub struct Cooked {
 /// What [`cook()`] makes of a file under the asset root, by its extension.
 #[derive(Clone, Copy, PartialEq)]
 enum Take {
-    /// As it is: a texture, a sound or music, a scene or other RON, or a script.
+    /// As it is: a sound or music, a scene or other RON, or a script.
     File,
-    /// As it is, with the files it names.
+    Texture,
+    /// With the files it names.
     Model,
     Font,
     Shader,
@@ -37,11 +43,13 @@ enum Take {
 
 impl Take {
     /// What a file at `path` is taken as, by its extension, whatever its case; `None` for one that
-    /// no run loads, which the package leaves out, as a game's code or docs.
+    /// no run loads, which the package leaves out, as a game's code or docs, or a model's buffers,
+    /// which its model holds.
     fn of(path: &str) -> Option<Self> {
         let extension = Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
         Some(match extension.as_str() {
-            "png" | "jpg" | "jpeg" | "wav" | "ogg" | "flac" | "mp3" | "ron" | "luau" => Self::File,
+            "wav" | "ogg" | "flac" | "mp3" | "ron" | "luau" => Self::File,
+            "png" | "jpg" | "jpeg" => Self::Texture,
             "gltf" | "glb" => Self::Model,
             "ttf" | "otf" => Self::Font,
             "slang" => Self::Shader,
@@ -55,17 +63,20 @@ impl Take {
 ///
 /// The package holds the files under the asset root, through the folders gg-api's scan goes
 /// through, but those in a mod's folder, which holds a `mod.ron`, as mods are the player's, and the
-/// manifest: textures, sounds and music, scenes and other RON, and scripts, as they are; models as
-/// they are, with the buffers and images they name; fonts baked into their fields; and shaders
-/// compiled, but for a file that doesn't compile alone that another includes. Each texture, model
-/// and font whose ID file holds its ID has it there.
+/// manifest: sounds and music, scenes and other RON, and scripts, as they are; textures compressed
+/// to BC7, of one level, as a layer's texture has; models read as a run reads them, with the
+/// buffers and images they name, their primitives' triangles optimized and given levels of detail,
+/// and their images compressed to BC7 with their full chains of mip levels, made as a run makes
+/// them; fonts baked into their fields; and shaders compiled, but for a file that doesn't compile
+/// alone that another includes. Each texture, model and font whose ID file holds its ID has it
+/// there.
 ///
 /// Fails, writing nothing, as the manifest's reading does; with `cook.unread` for a folder or a
 /// file it can't read; with `asset.bad_meta` or `asset.meta_case` for an asset whose ID file doesn't
 /// read, as gg-api's scan finds it, and `asset.duplicate_id` for an ID two assets' ID files hold;
-/// with `asset.outside_root` for a model naming a file outside the asset root; as adding a model,
-/// a font or a shader fails; with `cook.no_start` if the start scene isn't among what it holds, as
-/// in a folder the scan doesn't go through; and with `package.unwritten` if the package can't be
+/// as adding a texture, a model, a font or a shader fails; with `cook.uncompressed` for a texture
+/// that doesn't compress; with `cook.no_start` if the start scene isn't among what it holds, as in
+/// a folder the scan doesn't go through; and with `package.unwritten` if the package can't be
 /// written.
 pub fn cook(dir: &Path, out: &Path) -> Result<Vec<Cooked>> {
     let project = Project::read(dir).map_err(|failure| {
@@ -104,35 +115,20 @@ pub fn cook(dir: &Path, out: &Path) -> Result<Vec<Cooked>> {
         writer: Writer::new(&project.assets, Some(&project.start)),
         cooked: BTreeMap::new(),
     };
-    let (mut models, mut shaders) = (Vec::new(), Vec::new());
+    let mut shaders = Vec::new();
     for (found, take) in taken {
         let Found { path, file } = found;
         let id = ids.get(path).copied();
         match take {
             Take::File => package.add(path, id, Kind::File, read(file)?)?,
-            Take::Model => {
-                package.add(path, id, Kind::File, read(file)?)?;
-                models.push((path, file));
+            Take::Texture => {
+                let image = cook::read_image(path, file)?;
+                let ktx2 = texture::bc7(path, image.size, &image.pixels, false)?;
+                package.add(path, id, Kind::Texture, ktx2)?;
             }
+            Take::Model => package.add(path, id, Kind::Model, model(path, file)?)?,
             Take::Font => package.add(path, id, Kind::Font, cook::bake_font(path, file)?)?,
             Take::Shader => shaders.push((path, file)),
-        }
-    }
-    // A model's buffers and images, by their paths as the model names them, which a run reads
-    // them by; a texture with an ID may be one, which the package holds once, with its ID.
-    for (path, file) in models {
-        for named in cook::model_files(path, file)?.into_iter().skip(1) {
-            let within = within(&root, &named).ok_or_else(|| {
-                let message = format!(
-                    "model `{path}` names {}, outside the asset root, {}",
-                    named.display(),
-                    root.display()
-                );
-                Error::new("asset.outside_root", message)
-            })?;
-            if !package.cooked.contains_key(&within) {
-                package.add(&within, None, Kind::File, read(&named)?)?;
-            }
         }
     }
     // A file that doesn't compile alone may be a module that others include, which slangc lists
@@ -166,6 +162,43 @@ pub fn cook(dir: &Path, out: &Path) -> Result<Vec<Cooked>> {
     }
     package.writer.write(out)?;
     Ok(package.cooked.into_values().collect())
+}
+
+/// Model `path`'s file at `file`, cooked as a run from the package reads it: read as a run reads
+/// it, each primitive's triangles optimized and given levels of detail, keeping their order where
+/// its material blends, and each image compressed to BC7 with the full chain of mip levels a run
+/// gives it, made as a run makes them.
+///
+/// Fails as adding the model fails, and with `cook.uncompressed` for an image that doesn't
+/// compress.
+fn model(path: &str, file: &Path) -> Result<Vec<u8>> {
+    let mut model = cook::read_model(path, file)?;
+    let images = (model.images.iter().enumerate())
+        .map(|(i, image)| {
+            let mipmaps = cook::mipmaps(&model, i);
+            let levels = cook::levels(image, mipmaps);
+            let name = format!("{path}#{i}");
+            texture::bc7(&name, image.size, &levels, mipmaps != Mipmaps::None)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    for primitive in &mut model.primitives {
+        let blends = primitive.blends();
+        let lods = mesh::optimize(
+            &mut primitive.positions,
+            &mut primitive.uvs,
+            &mut primitive.colors,
+            &mut primitive.indices,
+            blends,
+        );
+        primitive.lods = (lods.into_iter())
+            .map(|lod| Lod {
+                start: lod.start,
+                count: lod.count,
+                error: lod.error,
+            })
+            .collect();
+    }
+    Ok(cook::model_bytes(&model, &images))
 }
 
 /// A package as [`cook()`] makes it, and what it holds so far.
@@ -240,8 +273,7 @@ fn read(file: &Path) -> Result<Vec<u8>> {
 }
 
 /// The path from `root` of `file`, as written, `/` between its parts, as the package names it and
-/// a run asks for it; `None` for a file outside it, or a path through `..`, which a model's URI
-/// can't have.
+/// a run asks for it; `None` for a file outside it, or a path through `..`.
 fn within(root: &Path, file: &Path) -> Option<String> {
     let mut parts = Vec::new();
     for part in file.strip_prefix(root).ok()?.components() {
@@ -317,10 +349,38 @@ Targets fragment_main(Varyings input) {
         }
     }
 
+    impl Fixture {
+        /// Writes `bytes` at `path` from its directory.
+        fn write(&self, path: &str, bytes: &[u8]) {
+            let path = self.0.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, bytes).unwrap();
+        }
+    }
+
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// A PNG `size` texels across and down, every one `texel`.
+    fn png(size: [u32; 2], texel: [u8; 4]) -> Vec<u8> {
+        let mut file = Vec::new();
+        let mut encoder = png::Encoder::new(&mut file, size[0], size[1]);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().unwrap();
+        let texels = texel.repeat(size[0] as usize * size[1] as usize);
+        writer.write_image_data(&texels).unwrap();
+        writer.finish().unwrap();
+        file
+    }
+
+    /// The file of one of the showcase's models, `name`.
+    fn showcase_model(name: &str) -> PathBuf {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../games/showcase/models");
+        dir.join(name)
     }
 
     fn id_file(id: &str) -> String {
@@ -330,11 +390,11 @@ Targets fragment_main(Varyings input) {
         .text()
     }
 
-    /// A package holds what a game's runs load, by their paths from the asset root: a texture as
-    /// it is, with the ID its ID file holds; a scene and a script as they are; and a shader
-    /// compiled, but the module it includes, which doesn't compile alone; and leaves out the
-    /// manifest, a mod's folder, and what no run loads, as code and notes. Cooked again, it's the
-    /// same bytes.
+    /// A package holds what a game's runs load, by their paths from the asset root: a texture
+    /// compressed, with the ID its ID file holds; a model cooked; a scene and a script as they
+    /// are; and a shader compiled, but the module it includes, which doesn't compile alone; and
+    /// leaves out the manifest, a mod's folder, and what no run loads, as code and notes. Cooked
+    /// again, it's the same bytes.
     #[test]
     fn a_package_holds_what_runs_load() {
         let stone = id_file("5f3c9a1e07b2d846");
@@ -343,7 +403,6 @@ Targets fragment_main(Varyings input) {
             &[
                 ("project.ron", PROJECT),
                 ("scenes/main.ron", SCENE),
-                ("textures/stone.png", "not decoded as it's cooked"),
                 ("textures/stone.png.meta", &stone),
                 ("shaders/flat.slang", FLAT),
                 ("shaders/common.slang", COMMON),
@@ -354,26 +413,61 @@ Targets fragment_main(Varyings input) {
                 ("notes.md", "# Notes\n"),
             ],
         );
+        fixture.write("textures/stone.png", &png([5, 3], [90, 80, 70, 255]));
+        let crate_model = fs::read(showcase_model("crate.gltf")).unwrap();
+        fixture.write("models/crate.gltf", &crate_model);
         let out = fixture.0.join("target/game.ggpk");
         let cooked = cook(&fixture.0, &out).unwrap_or_else(|error| panic!("{error:#}"));
         let held: Vec<(&str, Kind, Option<u64>)> = (cooked.iter())
             .map(|cooked| (&*cooked.path, cooked.kind, cooked.id))
             .collect();
         let expected = [
+            ("models/crate.gltf", Kind::Model, None),
             ("scenes/main.ron", Kind::File, None),
             ("scripts/spin.luau", Kind::File, None),
             ("shaders/flat.slang", Kind::Shader, None),
             (
                 "textures/stone.png",
-                Kind::File,
+                Kind::Texture,
                 Some(0x5f3c_9a1e_07b2_d846),
             ),
         ];
         assert_eq!(held, expected);
-        assert_eq!(cooked[3].bytes, "not decoded as it's cooked".len());
         let first = fs::read(&out).unwrap();
         cook(&fixture.0, &out).unwrap_or_else(|error| panic!("{error:#}"));
         assert_eq!(fs::read(&out).unwrap(), first, "the same bytes");
+    }
+
+    /// A model cooks to what a run from the package reads: as many primitives and images as it
+    /// read, each primitive with levels of detail among its indices, the first its own triangles,
+    /// and each image compressed to BC7 with its full chain of levels.
+    #[test]
+    fn a_model_cooks_to_what_a_run_reads() {
+        for name in ["crate.gltf", "torus.gltf"] {
+            let file = showcase_model(name);
+            let read = cook::read_model(name, &file).unwrap_or_else(|error| panic!("{error:#}"));
+            let bytes = model(name, &file).unwrap_or_else(|error| panic!("{error:#}"));
+            let cooked = cook::read_cooked_model(name, &bytes)
+                .unwrap_or_else(|error| panic!("{name}: {error:#}"));
+            assert_eq!(cooked.primitives.len(), read.primitives.len(), "{name}");
+            for (cooked, read) in cooked.primitives.iter().zip(&read.primitives) {
+                let finest = cooked.lods.first().expect("a level");
+                assert_eq!(finest.start, 0, "{name}");
+                assert_eq!(finest.count as usize, read.indices.len(), "{name}");
+                assert_eq!(finest.error, 0.0, "{name}");
+            }
+            assert_eq!(cooked.images.len(), read.images.len(), "{name}");
+            for (cooked, read) in cooked.images.iter().zip(&read.images) {
+                assert_eq!(cooked.size, read.size, "{name}");
+                assert_eq!(cooked.format, cook::Format::Bc7 { mipmapped: true });
+            }
+        }
+        // The torus is enough triangles to simplify.
+        let torus = showcase_model("torus.gltf");
+        let bytes = model("torus.gltf", &torus).unwrap();
+        let cooked = cook::read_cooked_model("torus.gltf", &bytes).unwrap();
+        let lods = &cooked.primitives[0].lods;
+        assert!(lods.len() > 1, "{lods:?}");
     }
 
     /// A project whose package couldn't name its assets alike, or whose shader doesn't compile, is
@@ -395,6 +489,8 @@ Targets fragment_main(Varyings input) {
             &[("broken.slang", "not a shader")],
             "renderer.bad_shader",
         );
+        refused("undecoded", &[("a.png", "not a PNG")], "engine.bad_texture");
+        refused("unread_model", &[("a.gltf", "{}")], "engine.bad_model");
         // A start scene where the scan doesn't look, as in `tests` at the root.
         let project = PROJECT.replace("\"scenes", "\"tests");
         let files = [("project.ron", &*project), ("tests/main.ron", SCENE)];

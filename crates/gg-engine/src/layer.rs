@@ -32,6 +32,7 @@ use crate::assets::{Catalog, Prints};
 use crate::audio::{self, Audio, Bus, Music, Place, Sound};
 use crate::camera::{self, Camera, Tie};
 use crate::canvas::{self, Canvas};
+use crate::cooked;
 use crate::dirs;
 use crate::draw::{self, Poses, Scratch};
 use crate::edits::{Authors, Done, Edit};
@@ -809,7 +810,8 @@ impl Context {
     /// or gamma it holds, as glTF requires, and its alpha as not multiplied into them, and shaders
     /// sample its colors decoded to linear, with texture coordinates from (0, 0) at its top left to
     /// (1, 1) at its bottom right. `name` names the texture in errors and GPU captures. The GPU has
-    /// it from the next frame that renders. In a development run that serves the tool API, the
+    /// it from the next frame that renders. A run from a game's package reads it as the cooker
+    /// compressed it, to BC7. In a development run that serves the tool API, the
     /// texture takes its file's image again as the file changes, at whatever size, from the next
     /// frame on, as ARCHITECTURE.md's Rendering says; one that doesn't decode warns, and the
     /// texture keeps drawing as it did.
@@ -838,8 +840,8 @@ impl Context {
                 #[cfg(feature = "dev")]
                 let read_at = SystemTime::now();
                 let image = image::load_image(name, path, &self.files)?;
-                let size = image.size;
-                let texture = self.textures.add(name, size, image.pixels, Mipmaps::None)?;
+                let (size, texels) = (image.size, image.texels(Mipmaps::None));
+                let texture = self.textures.add(name, size, image.pixels, texels)?;
                 let id = self.texture_name(&named, path, file.as_deref(), None);
                 #[cfg(feature = "dev")]
                 self.watch_texture(texture, name, path, read_at, &id);
@@ -930,7 +932,10 @@ impl Context {
     /// model, as scenes do by its name. Its meshes and images are added once, as
     /// [`add_mesh`](Self::add_mesh) and [`add_texture`](Self::add_texture) add them, but each image
     /// with mip levels, made as a frame copies it to the GPU; the GPU has them from the next frame
-    /// that renders. `name` names the model in errors and GPU captures.
+    /// that renders. `name` names the model in errors and GPU captures. A run from a game's package
+    /// reads the model as the cooker cooked it instead, its meshes optimized, with levels of detail
+    /// that each draw picks by its size on screen, and its images compressed to BC7 with their
+    /// levels, as ARCHITECTURE.md's Project state says.
     ///
     /// Of each node it takes the transform, a matrix or a translation, rotation and scale; of each
     /// primitive its mesh draws, the positions, the texture coordinates its base color texture
@@ -986,7 +991,12 @@ impl Context {
             None => {
                 #[cfg(feature = "dev")]
                 let read_at = SystemTime::now();
-                let (imported, files) = gltf::read_listing(name, path, &self.files)?;
+                // A package's run watches nothing, so it lists no files.
+                let (imported, files) = if self.reads_package() {
+                    (cooked::read(name, path, &self.files)?, Vec::new())
+                } else {
+                    gltf::read_listing(name, path, &self.files)?
+                };
                 if !imported.ignored.is_empty() {
                     info!(
                         code = "engine.model_ignored",
@@ -2072,7 +2082,8 @@ impl Context {
     #[cfg(feature = "dev")]
     fn reload_texture(&mut self, texture: Texture, path: &Path, image: Image) {
         let named = assets::name_of(self.root.as_deref(), path);
-        let Image { size, pixels } = image;
+        let texels = image.texels(Mipmaps::None);
+        let Image { size, pixels, .. } = image;
         let loaded = self.loaded.textures.values();
         let was = loaded.copied().find(|&(loaded, _)| loaded == texture);
         // Only a stand-in was loaded from no file.
@@ -2100,10 +2111,7 @@ impl Context {
             );
             return;
         }
-        if let Err(error) = self
-            .textures
-            .replace(&named, texture, size, pixels, Mipmaps::None)
-        {
+        if let Err(error) = self.textures.replace(&named, texture, size, pixels, texels) {
             let consequence = "the texture keeps drawing as it did";
             warn!(
                 code = error.code(),
@@ -2839,7 +2847,8 @@ fn add_sheet(
     cell: [u32; 2],
 ) -> Result<SpriteSheet> {
     fits(name, path, image.size, cell)?;
-    let texture = textures.add(name, image.size, image.pixels, Mipmaps::None)?;
+    let texels = image.texels(Mipmaps::None);
+    let texture = textures.add(name, image.size, image.pixels, texels)?;
     Ok(SpriteSheet {
         texture,
         size: image.size,
@@ -4017,27 +4026,53 @@ mod tests {
     }
 
     /// A run that reads a package loads from it what layers add and text names, though no file of
-    /// theirs is on the disk: a texture by its path, however it's written, named by its ID, and by
-    /// that ID, as text names it; a scene's text; and a script.
+    /// theirs is on the disk: a texture, compressed, by its path, however it's written, named by
+    /// its ID, and by that ID, as text names it; a model, cooked, its primitives with levels of
+    /// detail and its images compressed; a scene's text; and a script.
     #[test]
     fn a_run_loads_from_its_package_with_no_file_on_the_disk() {
+        use crate::image::tests::ktx2;
         use crate::package::{Kind, Package, Writer};
 
         let dir = crate::dirs::tests::Scratch::new("package-loads");
         // Never made: what loads, loads from the package.
         let root = dir.0.join("game");
-        let png = crate::image::tests::png(
-            png::ColorType::Rgba,
-            png::BitDepth::Eight,
-            1,
-            &[255, 0, 0, 255],
-            None,
-        );
+        // A block of BC7, in KTX2.
+        let block = |size| ktx2(ktx2::Format::BC7_SRGB_BLOCK, size, &[vec![0; 16]], true);
+        // The glTF tests' model, cooked: each primitive's triangles twice, its second level, and
+        // each image a block.
+        let glb = crate::gltf::tests::model();
+        let read = |_: &Path, _: u64| Ok(glb.clone());
+        let mut model = (crate::gltf::read("m", Path::new("m.glb"), read, u64::MAX))
+            .unwrap_or_else(|error| panic!("{error:#}"));
+        for primitive in &mut model.primitives {
+            let count = primitive.indices.len() as u32;
+            primitive.indices.extend_from_within(..);
+            primitive.lods = vec![
+                gg_renderer::Lod {
+                    start: 0,
+                    count,
+                    error: 0.0,
+                },
+                gg_renderer::Lod {
+                    start: count,
+                    count,
+                    error: 0.5,
+                },
+            ];
+        }
+        let images: Vec<_> = (model.images.iter())
+            .map(|image| block(image.size.map(|side| side.min(4))))
+            .collect();
         let still = "local Still = gg.declare(\"Still\", { rate = 1 })\nreturn Still\n";
         let mut writer = Writer::new(".", Some("scenes/main.ron"));
         let id = 0x5f3c_9a1e_07b2_d846;
         writer
-            .add("textures/stone.png", Some(id), Kind::File, png)
+            .add("textures/stone.png", Some(id), Kind::Texture, block([1, 1]))
+            .unwrap();
+        let cooked = crate::cooked::encode(&model, &images);
+        writer
+            .add("models/m.glb", None, Kind::Model, cooked)
             .unwrap();
         let scene = b"(\n    entities: {},\n)\n".to_vec();
         writer
@@ -4067,6 +4102,14 @@ mod tests {
         assert_eq!(
             gone.expect_err("not in the package").code(),
             "engine.bad_texture"
+        );
+        let (meshes, textures) = (cx.meshes.count(), cx.textures.count());
+        (cx.add_model("m", root.join("models/m.glb"))).unwrap_or_else(|error| panic!("{error:#}"));
+        let added = (cx.meshes.count() - meshes, cx.textures.count() - textures);
+        let counts = (model.primitives.len() as u32, model.images.len() as u32);
+        assert_eq!(
+            added, counts,
+            "a mesh for each primitive, a texture for each image"
         );
         // As text names it, by its ID, which a run without `dev` finds in the package alone.
         cx.load_named([Asset::Texture("5f3c9a1e07b2d846")], false);
@@ -4100,6 +4143,7 @@ mod tests {
         let image = || Image {
             size: [64, 32],
             pixels: vec![0; 64 * 32 * 4],
+            format: image::Format::Rgba8,
         };
         for cell in [[0, 16], [16, 0], [65, 16], [16, 33]] {
             let error = add_sheet(&mut textures, "tiles", path, image(), cell)

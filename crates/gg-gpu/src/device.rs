@@ -199,11 +199,13 @@ impl Device {
             .synchronization2(true);
         let mut host_image_copy =
             vk::PhysicalDeviceHostImageCopyFeaturesEXT::default().host_image_copy(true);
-        // For models' textures, which recede from the camera; and for passes that render IDs
-        // beside colors, whose targets blend apart, since integers don't blend.
+        // For models' textures, which recede from the camera; for passes that render IDs beside
+        // colors, whose targets blend apart, since integers don't blend; and for games' cooked
+        // textures, which are compressed as BC7.
         let features = vk::PhysicalDeviceFeatures::default()
             .sampler_anisotropy(true)
-            .independent_blend(true);
+            .independent_blend(true)
+            .texture_compression_bc(true);
         let mut create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
             .enabled_extension_names(&extensions)
@@ -214,9 +216,10 @@ impl Device {
             create_info = create_info.push_next(&mut host_image_copy);
         }
         // SAFETY: the physical device came from this instance, every Vulkan 1.4 device has these
-        // features but the bindless ones and host image copy, which `Candidate::new` checked
-        // (Vulkan 1.4 requires sampler anisotropy and independent blending, in vk.xml's feature
-        // requirements), and the create info's pointers outlive the call.
+        // features but the bindless ones, BC texture compression and host image copy, which
+        // `Candidate::new` checked (Vulkan 1.4 requires sampler anisotropy and independent
+        // blending, in vk.xml's feature requirements), and the create info's pointers outlive the
+        // call.
         let raw =
             unsafe { instance.raw().create_device(physical, &create_info, None) }.map_err(|e| {
                 let device = format_args!("device {:?}, uploading by {uploads}", chosen.name);

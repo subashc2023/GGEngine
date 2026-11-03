@@ -13,23 +13,23 @@ use std::path::{Path, PathBuf};
 
 use gg_core::math::{Mat4, Quat, Vec3, Vec4};
 use gg_core::{Error, Result};
-use gg_renderer::{AlphaMode, Wrap};
+use gg_renderer::{AlphaMode, Lod, Wrap};
 
 use crate::Transform;
 use crate::image::{self, Image};
 use crate::package::Files;
 
 /// What `read` gives: the default scene's parts, the primitives they draw and the images those
-/// sample.
+/// sample. The cooker reads it through [`cook`](crate::cook), and cooks its primitives and images.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct Imported {
+pub struct Imported {
     /// The scene's nodes, and a child for each primitive of a mesh with more than one, in
     /// pre-order: each part after its parent.
     pub(crate) parts: Vec<Part>,
     /// Each primitive the scene draws, once, in the order the walk first reaches it.
-    pub(crate) primitives: Vec<Primitive>,
+    pub primitives: Vec<Primitive>,
     /// Each image a reached material samples, decoded, once, in the order first reached.
-    pub(crate) images: Vec<Image>,
+    pub images: Vec<Image>,
     /// What the file has that the engine ignores, for an info event, such as "1 animation" or
     /// "extension KHR_texture_transform".
     pub(crate) ignored: Vec<String>,
@@ -48,17 +48,28 @@ pub(crate) struct Part {
 
 /// Triangles, with what their vertices and their material give them.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Primitive {
+pub struct Primitive {
     /// The mesh's name, or its index, then the primitive's index, such as "Cesium_Milk_Truck/2".
     pub(crate) name: String,
-    pub(crate) positions: Vec<[f32; 3]>,
+    pub positions: Vec<[f32; 3]>,
     /// As many as the positions: (0, 0) where the material samples no texture.
-    pub(crate) uvs: Vec<[f32; 2]>,
+    pub uvs: Vec<[f32; 2]>,
     /// As many as the positions, linear RGBA: white without COLOR_0, alpha 1 for a VEC3.
-    pub(crate) colors: Vec<[f32; 4]>,
+    pub colors: Vec<[f32; 4]>,
     /// Three for each triangle; 0..count where the primitive has none.
-    pub(crate) indices: Vec<u32>,
+    pub indices: Vec<u32>,
+    /// Its levels of detail among its indices, finest first, as the cooker makes them, the first
+    /// its own triangles; none as glTF is read, which draws all of its indices.
+    pub lods: Vec<Lod>,
     pub(crate) material: Material,
+}
+
+impl Primitive {
+    /// Whether its material blends, so that its triangles cover each other in the order they draw
+    /// in, which the cooker keeps.
+    pub fn blends(&self) -> bool {
+        matches!(self.material.alpha, AlphaMode::Blend)
+    }
 }
 
 /// How a primitive looks: its base color, which the material's factor and texture and the
@@ -617,6 +628,7 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
             uvs,
             colors,
             indices,
+            lods: Vec::new(),
             material,
         }))
     }
@@ -1495,6 +1507,7 @@ pub(crate) mod tests {
                     uvs: uvs.clone(),
                     colors: white,
                     indices: vec![0, 1, 2],
+                    lods: Vec::new(),
                     material: Material {
                         color: [1.0, 0.5, 0.25, 1.0],
                         image: Some(0),
@@ -1514,6 +1527,7 @@ pub(crate) mod tests {
                         [0.0, 0.0, 1.0, 1.0]
                     ],
                     indices: vec![2, 1, 0],
+                    lods: Vec::new(),
                     material: Material {
                         image: Some(0),
                         alpha: AlphaMode::Blend,
@@ -1531,6 +1545,7 @@ pub(crate) mod tests {
                         [half, half, half, 0.0]
                     ],
                     indices: vec![0, 1, 2],
+                    lods: Vec::new(),
                     material: Material::default(),
                 },
             ]
@@ -1538,6 +1553,7 @@ pub(crate) mod tests {
         let image = Image {
             size: [2, 1],
             pixels: PIXELS.to_vec(),
+            format: image::Format::Rgba8,
         };
         assert_eq!(imported.images, [image]);
         assert_eq!(
@@ -1629,6 +1645,7 @@ pub(crate) mod tests {
             uvs: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
             colors: vec![[1.0; 4]; 3],
             indices: vec![0, 2, 1],
+            lods: Vec::new(),
             material: Material {
                 image: Some(0),
                 ..Material::default()

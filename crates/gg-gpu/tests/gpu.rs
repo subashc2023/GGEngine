@@ -10,14 +10,15 @@
 
 use std::mem;
 use std::panic::{self, AssertUnwindSafe};
-use std::path::Path;
-use std::process::ExitCode;
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitCode};
 use std::sync::Arc;
 
 use ash::vk;
 use gg_gpu::{
-    ColorImage, DepthImage, Device, Frames, GpuBuffer, IdImage, Instance, InstanceDesc, MAX_READS,
-    PLACED_TEXTURES, Target, Texture, TextureFormat, UploadPath, Validation,
+    Blend, ColorImage, DepthImage, Device, Frame, Frames, GpuBuffer, GraphicsDesc, IdImage,
+    Instance, InstanceDesc, MAX_READS, PLACED_TEXTURES, Pipeline, Sampler, Target, Texture,
+    TextureFormat, UploadPath, Validation, mip_sizes,
 };
 
 /// Runs each test through `tests`, by the name it's written with, given the arguments written
@@ -68,6 +69,8 @@ fn main() -> ExitCode {
         depth_clears_in_every_pass,
         ids_read_back_two_frames_later,
         filled_textures_can_be_written_over_on_every_path,
+        bc7_textures_fill_and_decode_on_every_path,
+        textures_refill_between_rgba8_and_bc7_on_every_path,
         refills_come_before_the_frames_passes,
         forgotten_frames_and_passes_are_caught(&log),
         another_devices_objects_are_refused,
@@ -191,6 +194,193 @@ fn check(validation: &Validation) {
         0,
         "validation reported problems; the log above says what"
     );
+}
+
+/// A point of a texture, and the color the GPU should read there.
+struct Probe {
+    level: u32,
+    uv: [f32; 2],
+    expected: [u8; 4],
+}
+
+/// A color for block or level `n` of a texture, distinct among 128 of them. Its channels share a
+/// low bit, `n`'s, which BC7's mode 6 needs to hold it exactly.
+fn color_of(n: u32) -> [u8; 4] {
+    let low = (n % 2) as u8;
+    // Each step is odd, so that its channel takes all 128 values in turn.
+    let channel = |step: u32, start: u32| ((((n * step + start) % 128) as u8) << 1) | low;
+    [channel(53, 0), channel(91, 17), channel(29, 101), 254 | low]
+}
+
+/// A BC7 block of mode 6 that holds `color` in all 16 pixels. The mode gives each endpoint's
+/// channels 7 bits and the endpoint one more, the low bit of all four, so `color`'s channels must
+/// share one. Both endpoints are `color`, so that every pixel is, whatever weight its index picks.
+fn bc7_solid(color: [u8; 4]) -> [u8; 16] {
+    let low = color[0] & 1;
+    assert!(color.iter().all(|&channel| channel & 1 == low), "{color:?}");
+    // The 128 bits, least significant first: the mode, six zeros then a one; each channel's two
+    // endpoints; the endpoints' low bits, P0 and P1; and the indices.
+    let mut bits = 1u128 << 6;
+    let mut at = 7;
+    for channel in color {
+        for _endpoint in 0..2 {
+            bits |= u128::from(channel >> 1) << at;
+            at += 7;
+        }
+    }
+    bits |= (u128::from(low) << at) | (u128::from(low) << (at + 1));
+    bits.to_le_bytes()
+}
+
+/// The BC7 pixels of a `size` texture, a solid block of a color of its own to each, and a probe
+/// for each block, at the middle of its pixels or the last row or column of its level if that ends
+/// first, so that a block put in the wrong place, or the wrong level, shows.
+fn bc7_blocks(size: [u32; 2], mipmapped: bool) -> (Vec<u8>, Vec<Probe>) {
+    let mut pixels = Vec::new();
+    let mut probes = Vec::new();
+    let levels = if mipmapped { usize::MAX } else { 1 };
+    for (level, [width, height]) in mip_sizes(size[0], size[1]).take(levels).enumerate() {
+        for by in 0..height.div_ceil(4) {
+            for bx in 0..width.div_ceil(4) {
+                let color = color_of(probes.len() as u32);
+                pixels.extend_from_slice(&bc7_solid(color));
+                let x = (bx * 4 + 2).min(width - 1);
+                let y = (by * 4 + 2).min(height - 1);
+                probes.push(Probe {
+                    level: level as u32,
+                    uv: [
+                        (x as f32 + 0.5) / width as f32,
+                        (y as f32 + 0.5) / height as f32,
+                    ],
+                    expected: color,
+                });
+            }
+        }
+    }
+    (pixels, probes)
+}
+
+/// The RGBA8 pixels of a `size` texture, a color of its own to each mip level, and a probe for
+/// each level.
+fn rgba8_levels(size: [u32; 2], mipmapped: bool) -> (Vec<u8>, Vec<Probe>) {
+    let mut pixels = Vec::new();
+    let mut probes = Vec::new();
+    let levels = if mipmapped { usize::MAX } else { 1 };
+    for (level, [width, height]) in mip_sizes(size[0], size[1]).take(levels).enumerate() {
+        let color = color_of(level as u32);
+        pixels.extend(color.repeat((width * height) as usize));
+        probes.push(Probe {
+            level: level as u32,
+            uv: [0.5, 0.5],
+            expected: color,
+        });
+    }
+    (pixels, probes)
+}
+
+/// The SPIR-V of `tests/shaders/sample.slang`, compiled as the renderer's build compiles its
+/// shaders, with the slangc that `SLANGC` names, else the Vulkan SDK's, under `VULKAN_SDK`, else
+/// the first on the path.
+fn sampling_spirv() -> Vec<u8> {
+    let exe = if cfg!(windows) {
+        "slangc.exe"
+    } else {
+        "slangc"
+    };
+    // The SDK's tools are in `Bin` on Windows and `bin` elsewhere.
+    let in_sdk = |dir| {
+        let sdk = std::env::var_os("VULKAN_SDK")?;
+        Some(PathBuf::from(sdk).join(dir).join(exe)).filter(|path| path.exists())
+    };
+    let slangc = std::env::var_os("SLANGC")
+        .map(PathBuf::from)
+        .or_else(|| in_sdk("Bin"))
+        .or_else(|| in_sdk("bin"))
+        .unwrap_or_else(|| exe.into());
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/shaders/sample.slang");
+    let spirv = Path::new(env!("CARGO_TARGET_TMPDIR")).join("sample.spv");
+    let output = Command::new(&slangc)
+        .arg(&source)
+        .args(["-target", "spirv", "-fvk-use-entrypoint-name"])
+        .args(["-warnings-as-errors", "38006"])
+        .args(["-entry", "vertex_main", "-stage", "vertex"])
+        .args(["-entry", "fragment_main", "-stage", "fragment"])
+        .arg("-o")
+        .arg(&spirv)
+        .output()
+        .unwrap_or_else(|error| {
+            panic!(
+                "can't run {}: {error}; install the Vulkan SDK, or set SLANGC to slangc's path",
+                slangc.display()
+            )
+        });
+    assert!(
+        output.status.success(),
+        "slangc failed on {}:\n{}{}",
+        source.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::read(&spirv).expect("the SPIR-V slangc wrote")
+}
+
+/// The pipeline that draws a probe of a texture, from `spirv`.
+fn sampling_pipeline(device: &Arc<Device>, spirv: &[u8]) -> Pipeline {
+    let desc = GraphicsDesc {
+        name: "sample probes",
+        spirv,
+        vertex: c"vertex_main",
+        fragment: c"fragment_main",
+        format: ColorImage::FORMAT,
+        blend: Blend::Opaque,
+        depth_write: false,
+    };
+    Pipeline::graphics(device, &desc).expect("a pipeline")
+}
+
+/// A pass over target `target` of `frame`, an image a pixel across for each of `probes`, in which
+/// the GPU samples `texture` at each probe, into a pixel of its own.
+fn draw_probes(
+    frame: &mut Frame<'_>,
+    target: usize,
+    pipeline: &Pipeline,
+    texture: &Texture,
+    probes: &[Probe],
+) {
+    let pass = frame.begin_pass(target, c"probes", [0.0; 4], None, None);
+    let mut pass = pass.expect("an offscreen image is always there");
+    pass.set_pipeline(pipeline);
+    for (x, probe) in (0..).zip(probes) {
+        pass.set_viewport([x, 0], [1, 1]);
+        // As `sample.slang` takes them.
+        let words = [
+            texture.index(),
+            Sampler::NearestClamp.index(),
+            (probe.level as f32).to_bits(),
+            probe.uv[0].to_bits(),
+            probe.uv[1].to_bits(),
+        ];
+        pass.push_constants(&words.map(u32::to_ne_bytes).concat());
+        pass.draw(3, 1);
+    }
+}
+
+/// Reads `image` back, and checks that its pixels are what `probes` expect, to within the 1 that
+/// sRGB's encoding may round by; `what` says which texture.
+fn check_probes(image: &mut ColorImage, probes: &[Probe], what: &str) {
+    let pixels = image.read_back().expect("the image's pixels");
+    for (pixel, probe) in pixels.as_chunks::<4>().0.iter().zip(probes) {
+        let close = (pixel.iter().zip(probe.expected)).all(|(&got, want)| got.abs_diff(want) <= 1);
+        let Probe {
+            level,
+            uv,
+            expected,
+        } = probe;
+        assert!(
+            close,
+            "{what}: level {level} at {uv:?} reads {pixel:?}, expected {expected:?}"
+        );
+    }
 }
 
 /// Clears two offscreen images in the same frames, each to a color of its own, over more frames
@@ -537,6 +727,151 @@ fn filled_textures_can_be_written_over_on_every_path() {
     check(&validation);
 }
 
+/// Fills BC7 textures in a frame, once for each way of uploading that the GPU has: one of 13x5
+/// pixels, whose 4 by 2 blocks reach past its sides; another of 13x5 with its full chain of mip
+/// levels, 6x2, 3x1 and 1x1 below it, which copies and validation check against each level's
+/// blocks and the staged bytes; and one of a pixel. Each block is solid and of a color of its own,
+/// and the GPU samples each in the frame that fills them, and again in the two after it, which
+/// finds each block decoded, in the level and at the place it was filled. A BC7 texture can't be
+/// written, which is refused before anything is recorded.
+fn bc7_textures_fill_and_decode_on_every_path() {
+    let instance = instance();
+    let validation = instance.validation();
+    let spirv = sampling_spirv();
+    for path in UploadPath::ALL {
+        let device = match Device::new(&instance, None, None, Some(path)) {
+            Ok(device) => device,
+            Err(error) => {
+                assert_eq!(error.code(), "gpu.no_upload_path", "{error:#}");
+                println!("uploading by {path} skipped: {error}");
+                continue;
+            }
+        };
+        let pipeline = sampling_pipeline(&device, &spirv);
+        let format = TextureFormat::Bc7Srgb;
+        let cases = [
+            ("bc7 single level", [13, 5], false),
+            ("bc7 chain", [13, 5], true),
+            ("bc7 pixel", [1, 1], true),
+        ];
+        let mut textures = Vec::new();
+        let mut images = Vec::new();
+        let mut fills = Vec::new();
+        for (name, size, mipmapped) in cases {
+            let texture = Texture::new(&device, size[0], size[1], format, mipmapped, name);
+            textures.push(texture.expect("a texture"));
+            let fill = bc7_blocks(size, mipmapped);
+            assert_eq!(fill.0.len() as u64, format.bytes(size, mipmapped), "{name}");
+            let image = ColorImage::new(&device, fill.1.len() as u32, 1, "bc7 probes");
+            images.push(image.expect("an image"));
+            fills.push(fill);
+        }
+        let mut frames = Frames::new(&device).expect("frames");
+        for i in 0..3 {
+            let mut frame = frames
+                .begin(images.iter_mut().map(Target::Image))
+                .expect("a frame")
+                .expect("an offscreen image can always be rendered into");
+            if i == 0 {
+                for (texture, (pixels, _)) in textures.iter_mut().zip(&fills) {
+                    frame.fill_texture(texture, pixels).expect("a fill");
+                }
+            } else if i == 1 {
+                let message = panics(|| {
+                    let _ = frame.write_texture(&mut textures[0], [0, 0], [1, 1], &[0; 4]);
+                });
+                assert!(message.contains("BC7 texture is filled"), "{message}");
+            }
+            for (target, (texture, (_, probes))) in textures.iter().zip(&fills).enumerate() {
+                draw_probes(&mut frame, target, &pipeline, texture, probes);
+            }
+            frame.submit().expect("the frame's submission");
+            for ((image, (_, probes)), (name, ..)) in images.iter_mut().zip(&fills).zip(cases) {
+                check_probes(
+                    image,
+                    probes,
+                    &format!("{name}, uploading by {path}, frame {i}"),
+                );
+            }
+        }
+        drop((frames, textures, images, pipeline, device));
+    }
+
+    drop(instance);
+    check(&validation);
+}
+
+/// Refills one texture in turn, one frame to each, as BC7 of 13x5 with its mip levels, as RGBA8 of
+/// 5x3 with its, as BC7 of 4x4 and of a pixel, after it was filled as RGBA8 of 2x2, once for each
+/// way of uploading that the GPU has: each refill makes the image anew in its format, which
+/// validation checks the copies into against, and the texture's slot shows it, found by the GPU
+/// sampling it in the frame of each refill. A refill whose pixels are another format's size is
+/// refused before anything changes.
+fn textures_refill_between_rgba8_and_bc7_on_every_path() {
+    let instance = instance();
+    let validation = instance.validation();
+    let spirv = sampling_spirv();
+    for path in UploadPath::ALL {
+        let device = match Device::new(&instance, None, None, Some(path)) {
+            Ok(device) => device,
+            Err(error) => {
+                assert_eq!(error.code(), "gpu.no_upload_path", "{error:#}");
+                println!("uploading by {path} skipped: {error}");
+                continue;
+            }
+        };
+        let pipeline = sampling_pipeline(&device, &spirv);
+        let (rgba8, bc7) = (TextureFormat::Rgba8Srgb, TextureFormat::Bc7Srgb);
+        let steps = [
+            (rgba8, [2, 2], false),
+            (bc7, [13, 5], true),
+            (rgba8, [5, 3], true),
+            (bc7, [4, 4], false),
+            (bc7, [1, 1], false),
+        ];
+        // Wide enough for the most probes a step has, the 12 of 13x5's blocks in four levels.
+        let mut image = ColorImage::new(&device, 12, 1, "refill probes").expect("an image");
+        let texture = Texture::new(&device, 2, 2, rgba8, false, "refilled format test texture");
+        let mut texture = texture.expect("a texture");
+        let mut frames = Frames::new(&device).expect("frames");
+        for (i, (format, size, mipmapped)) in steps.into_iter().enumerate() {
+            let (pixels, probes) = if format == bc7 {
+                bc7_blocks(size, mipmapped)
+            } else {
+                rgba8_levels(size, mipmapped)
+            };
+            let mut frame = frames
+                .begin([Target::Image(&mut image)])
+                .expect("a frame")
+                .expect("an offscreen image can always be rendered into");
+            if i == 0 {
+                frame.fill_texture(&mut texture, &pixels).expect("a fill");
+            } else {
+                // Pixels of RGBA8's size for BC7's, and of BC7's for RGBA8's.
+                let other = if format == bc7 { rgba8 } else { bc7 };
+                let wrong = vec![0; other.bytes(size, mipmapped) as usize];
+                let before = texture.size();
+                let message = panics(|| {
+                    let _ = frame.refill_texture(&mut texture, format, size, mipmapped, &wrong);
+                });
+                assert!(message.contains("don't fill"), "{message}");
+                assert_eq!(texture.size(), before, "a refused refill changes nothing");
+                let refill = frame.refill_texture(&mut texture, format, size, mipmapped, &pixels);
+                refill.expect("a refill");
+            }
+            assert_eq!(texture.size(), size);
+            draw_probes(&mut frame, 0, &pipeline, &texture, &probes);
+            frame.submit().expect("the frame's submission");
+            let what = format!("{format:?} {size:?}, uploading by {path}, step {i}");
+            check_probes(&mut image, &probes, &what);
+        }
+        drop((frames, texture, image, pipeline, device));
+    }
+
+    drop(instance);
+    check(&validation);
+}
+
 /// Fills a texture in one frame and refills it at another size in the next, before its pass, which
 /// validation checks the copy into the new image of; then refills it again after that pass, which
 /// is refused before anything changes, since the pass would sample the new image before its copy:
@@ -563,11 +898,11 @@ fn refills_come_before_the_frames_passes() {
         .begin([Target::Image(&mut image)])
         .expect("a frame")
         .expect("an offscreen image can always be rendered into");
-    let refill = frame.refill_texture(&mut texture, [3, 1], false, &[127; 3 * 4]);
+    let refill = frame.refill_texture(&mut texture, format, [3, 1], false, &[127; 3 * 4]);
     refill.expect("a refill");
     drop(frame.begin_pass(0, c"clear", black, None, None));
     let message = panics(|| {
-        let _ = frame.refill_texture(&mut texture, [1, 1], false, &[0; 4]);
+        let _ = frame.refill_texture(&mut texture, format, [1, 1], false, &[0; 4]);
     });
     assert!(message.contains("before the frame's passes"), "{message}");
     assert_eq!(texture.size(), [3, 1], "a refused refill changes nothing");

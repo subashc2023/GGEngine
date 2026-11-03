@@ -38,6 +38,7 @@ mod canvas;
 mod chrome;
 #[doc(hidden)]
 pub mod cook;
+mod cooked;
 // In development builds alone, as `dev` has it.
 #[cfg(feature = "dev")]
 mod dialog;

@@ -9,7 +9,7 @@
 // For setting the environment; see the SAFETY comment.
 #![allow(unsafe_code)]
 
-use std::f32::consts::{FRAC_PI_2, PI};
+use std::f32::consts::{FRAC_PI_2, PI, SQRT_2};
 use std::fs::{self, File};
 use std::io::BufWriter;
 use std::num::NonZeroU64;
@@ -21,8 +21,8 @@ use std::sync::Arc;
 use bytemuck::NoUninit;
 use gg_core::math::{self, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{
-    AlphaMode, Blend, Circle, DrawCounts, Draws, Glyph, Grid, GridLines, Line, Material, Mesh,
-    MeshDraw, Meshes, Mipmaps, ModelVertex, Outline, Pick, Pixels, Projection, RenderData,
+    AlphaMode, Blend, Circle, DrawCounts, Draws, Glyph, Grid, GridLines, Line, Lod, Lods, Material,
+    Mesh, MeshDraw, Meshes, Mipmaps, ModelVertex, Outline, Pick, Pixels, Projection, RenderData,
     Renderer, Sampler, Settings, Shaders, Sprite, SpriteSheet, Texels, Texture, Textures, Ui,
     UploadPath, Uploads, ViewCallback, Viewpoint, Viewport, Wrap,
 };
@@ -86,6 +86,7 @@ fn main() -> ExitCode {
         pipelines_go_through_the_cache,
         capturing_needs_renderdoc,
         depth_matches_its_reference,
+        levels_of_detail_match_their_reference,
         models_match_their_reference,
         mixed_textures_match_their_reference,
         picks_answer_what_their_frame_drew,
@@ -104,6 +105,7 @@ fn main() -> ExitCode {
             textures_match_their_reference,
             sheets_match_their_reference,
             a_large_texture_draws_in_the_frame_that_adds_it,
+            bc7_textures_sample_as_their_blocks,
             replaced_meshes_and_textures_draw_from_the_frame_that_takes_them,
             mipmaps_match_their_reference,
         );
@@ -1657,6 +1659,168 @@ fn depth_matches_its_reference() {
     check(renderer, "depth", WIDTH, HEIGHT);
 }
 
+/// Draws ten instances of a square with two levels of detail, as a camera with perspective sees
+/// them, and compares it with its reference image. The square is 2 across: level 0 is its two
+/// triangles, and level 1 one other triangle on its own, the lower left half, whose error spans a
+/// pixel where its sphere's nearest point is 5 away, 6.4 from the camera. Along the top, five
+/// instances through an opaque shader, 4 to 12 away, in the order near, far, near, far, far, so
+/// that drawing them by level takes two draws, not four; along the bottom, five through a shader
+/// that blends, far, near, near, far, near, which draw in that order, so that the same takes four.
+/// Each is a color of its own, and an ID, which picks read back. The near ones show whole squares,
+/// and the far ones the lower left halves of theirs; the draws and triangles counted are the
+/// levels' (6 draws, 10 instances, 15 triangles), where the first level alone makes 20 triangles
+/// and 2 draws, and the second 10 and 2.
+fn levels_of_detail_match_their_reference() {
+    const WIDTH: u32 = 320;
+    const HEIGHT: u32 = 200;
+    let mut renderer = renderer(WIDTH, HEIGHT);
+    let mut stores = Stores::default();
+    // A quarter turn from the view's bottom to its top, over 200 pixels, and as far across over
+    // 320: 100 pixels a unit where the distance ahead is 1, and 100 / distance where it is more.
+    let viewpoint = Viewpoint {
+        projection: Projection::Perspective {
+            fov: FRAC_PI_2,
+            near: 0.5,
+        },
+        ..Viewpoint::default()
+    };
+    let flat = |stores: &mut Stores, name, blend| {
+        (stores.shaders)
+            .add::<[f32; 3], Vec4>(name, &shader("flat_color.slang"), blend)
+            .expect("a shader")
+    };
+    let opaque = flat(&mut stores, "flat color", Blend::Opaque);
+    let blended = flat(&mut stores, "flat color blended", Blend::Alpha);
+    let corners = [
+        [-1.0, -1.0, 0.0],
+        [1.0, -1.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [-1.0, 1.0, 0.0],
+    ];
+    // Counterclockwise: level 0's two halves, the lower right and the upper left, then level 1's
+    // lower left half, which neither of them is, so that the wrong start shows.
+    let indices = [0, 1, 2, 2, 3, 0, 3, 0, 1];
+    let lods = Lods {
+        levels: vec![
+            Lod {
+                start: 0,
+                count: 6,
+                error: 0.0,
+            },
+            Lod {
+                start: 6,
+                count: 3,
+                error: 0.05,
+            },
+        ],
+        center: Vec3::ZERO,
+        radius: SQRT_2,
+    };
+    let square = (stores.meshes)
+        .add_lods("square", &corners, &indices, lods)
+        .expect("a mesh");
+    // Each instance's center in the view's pixels, its distance ahead, color and level. The
+    // second level's error spans 0.05 * 100 / (distance - 1.41) pixels: 1.6 at 4.5, 0.66 at 9.
+    let blue = Vec4::new(0.1, 0.2, 0.8, 1.0);
+    let orange = Vec4::new(0.9, 0.4, 0.1, 1.0);
+    let green = Vec4::new(0.1, 0.7, 0.2, 1.0);
+    let yellow = Vec4::new(0.8, 0.7, 0.1, 1.0);
+    let violet = Vec4::new(0.6, 0.2, 0.9, 1.0);
+    let see_through = |color: Vec4| Vec4::new(color.x, color.y, color.z, 0.6);
+    let top = [
+        ([30.0, 55.0], 4.5, orange, 0),
+        ([95.0, 55.0], 9.0, green, 1),
+        ([160.0, 55.0], 4.0, blue, 0),
+        ([225.0, 55.0], 12.0, yellow, 1),
+        ([290.0, 55.0], 10.0, violet, 1),
+    ];
+    let bottom = [
+        ([30.0, 150.0], 9.0, see_through(violet), 1),
+        ([95.0, 150.0], 4.5, see_through(orange), 0),
+        ([160.0, 150.0], 4.0, see_through(green), 0),
+        ([225.0, 150.0], 12.0, see_through(blue), 1),
+        ([290.0, 150.0], 5.0, see_through(yellow), 0),
+    ];
+    let rows = [(opaque, top), (blended, bottom)];
+    let instances = (rows.into_iter()).flat_map(|(shader, row)| row.map(|row| (shader, row)));
+    let mut draws = Draws::default();
+    let mut picks = Vec::new();
+    // What each instance shows, by its ID, its draw's number from 1: its pixels at (-0.7, -0.2) in
+    // the square's own space, inside level 1's triangle, and at (0.2, 0.7), outside it, both off
+    // the diagonal that level 0's halves meet at, by 3 pixels or more at a distance of 12; its
+    // color; and its level.
+    let mut shows = Vec::new();
+    for (id, (shader, ([x, y], depth, color, level))) in (1..).zip(instances) {
+        // The world point that shows at the center, `depth` ahead.
+        let at = Vec3::new(
+            (x - 160.0) * depth / 100.0,
+            (100.0 - y) * depth / 100.0,
+            -depth,
+        );
+        let draw = MeshDraw::new(square, shader, color);
+        draws.push_draw(Mat4::from_translation(at), &draw, id);
+        let pixels = |[mesh_x, mesh_y]: [f32; 2]| {
+            let at = [x + mesh_x * 100.0 / depth, y - mesh_y * 100.0 / depth];
+            at.map(|side| side as u32)
+        };
+        let (inside, outside) = (pixels([-0.7, -0.2]), pixels([0.2, 0.7]));
+        picks.push(Pick {
+            tag: id,
+            pixel: inside,
+        });
+        shows.push((id, inside, outside, color, level));
+    }
+    // Three frames, more than the picks of the first need to be answered.
+    let drew = DrawCounts {
+        draws: 6,
+        instances: 10,
+        triangles: 15,
+    };
+    for frame in 0..3 {
+        let asked: &[Pick] = if frame == 0 { &picks } else { &[] };
+        let data = RenderData {
+            picks: asked,
+            ..stores.data(filling([WIDTH, HEIGHT]), viewpoint, &draws)
+        };
+        render_without_ui(&mut renderer, data);
+        assert_eq!(renderer.drawn(), drew, "frame {frame}");
+    }
+    let found: Vec<(u64, u64)> = shows.iter().map(|&(id, ..)| (id, id)).collect();
+    assert_eq!(renderer.picked(), found, "each pick found its instance");
+
+    let frame = frame_pixels(&mut renderer);
+    shut_down(renderer);
+    let pixel = |[x, y]: [u32; 2]| {
+        let at = ((y * WIDTH + x) * 4) as usize;
+        <[u8; 3]>::try_from(&frame[at..at + 3]).expect("a pixel")
+    };
+    let clear = pixel([2, 2]);
+    // The 8-bit sRGB of a linear channel.
+    let encode = |linear: f32| {
+        let encoded = if linear <= 0.003_130_8 {
+            linear * 12.92
+        } else {
+            1.055 * math::libm::powf(linear, 1.0 / 2.4) - 0.055
+        };
+        (encoded * 255.0).round() as u8
+    };
+    for (id, inside, outside, color, level) in shows {
+        // Its color over the clear color, as the target blends them, in linear space.
+        let over = |channel: usize| color[channel] * color.w + CLEAR[channel] * (1.0 - color.w);
+        let expected = [0, 1, 2].map(over).map(encode);
+        let shown = pixel(inside);
+        let close = (shown.iter().zip(expected)).all(|(&got, want)| got.abs_diff(want) <= 3);
+        assert!(close, "instance {id} shows {shown:?}, not {expected:?}");
+        // Level 0 draws the square's other half, and level 1 leaves it clear.
+        let other = pixel(outside);
+        match level {
+            0 => assert_eq!(other, shown, "instance {id}'s other half"),
+            _ => assert_eq!(other, clear, "instance {id}'s other half"),
+        }
+    }
+    compare("levels", WIDTH, HEIGHT, &frame);
+}
+
 /// Fills the view with a texture of 4,096 by 4,096 texels of one color, 64 MiB, in the frame that
 /// adds it, and checks that every pixel shows that color: staged, it takes more than the least
 /// staging buffer, 16 MiB, so that staging grows to hold it, and every texel the view samples must
@@ -1714,6 +1878,127 @@ fn a_large_texture_draws_in_the_frame_that_adds_it(path: UploadPath) {
             .all(|(&got, want)| got.abs_diff(want) <= 1);
         assert!(close, "read back {pixel:?}, expected {COLOR:?}");
     }
+}
+
+/// A BC7 block of 4 by 4 texels all of one sRGB-encoded `color`, whose channels are odd: mode 6,
+/// whose endpoints are 7 bits a channel and a bit shared by them all, the low one, with both
+/// endpoints `color` and every texel's index 0. Its 128 bits go least significant first: the mode,
+/// its 7th bit set; then each channel's two endpoints, red, green, blue and alpha; then the shared
+/// bits, then the indices.
+fn bc7_block(color: [u8; 4]) -> [u8; 16] {
+    assert!(color.iter().all(|channel| channel % 2 == 1), "{color:?}");
+    let mut bits = 1u128 << 6;
+    for (i, channel) in color.into_iter().enumerate() {
+        let high = u128::from(channel >> 1);
+        bits |= high << (7 + 14 * i) | high << (14 + 14 * i);
+    }
+    // Both endpoints' shared low bits.
+    bits |= 0b11 << 63;
+    bits.to_le_bytes()
+}
+
+/// A square of BC7 textures, sampled as their blocks decode, on the way of uploading `path`: one of
+/// a level, 13 by 5 texels, whose blocks cover its edges, filling a view of `SIDE` pixels a side at
+/// its nearest texels; then one of a full chain, 64 texels a side, whose first level is one color
+/// and the rest another, filling it trilinearly, so that it samples its third level; then the
+/// first replaced by RGBA8, and that by BC7 of a chain, each sampled from the frame that takes it.
+fn bc7_textures_sample_as_their_blocks(path: UploadPath) {
+    const SIDE: u32 = 16;
+    const COLORS: [[u8; 4]; 4] = [
+        [201, 81, 41, 255],
+        [21, 161, 61, 255],
+        [41, 91, 221, 255],
+        [233, 211, 33, 255],
+    ];
+    let mut renderer = renderer_uploading(SIDE, SIDE, Some(path));
+    let mut stores = Stores::default();
+    let textured = (stores.shaders)
+        .add::<[f32; 5], Sampling>("textured", &shader("textured.slang"), Blend::Opaque)
+        .expect("a shader");
+    // The whole view, which is 2 units high and as wide: positions, then texture coordinates.
+    let corners = [
+        [-1.0, -1.0, 0.0, 0.0, 1.0],
+        [1.0, -1.0, 0.0, 1.0, 1.0],
+        [1.0, 1.0, 0.0, 1.0, 0.0],
+        [-1.0, 1.0, 0.0, 0.0, 0.0],
+    ];
+    let square = (stores.meshes)
+        .add("square", &corners, &[0, 1, 2, 2, 3, 0])
+        .expect("a mesh");
+    let blocks = |count: usize, color| bc7_block(color).repeat(count);
+    let one = Texels::Bc7 { mipmapped: false };
+    let chain = Texels::Bc7 { mipmapped: true };
+    // 4x2 blocks.
+    let level = (stores.textures)
+        .add("level", [13, 5], blocks(8, COLORS[0]), one)
+        .expect("a texture");
+    // Its first level 16x16 blocks, then 8x8, 4x4, 2x2 and three of a block each.
+    let rest = [64, 16, 4, 1, 1, 1]
+        .map(|count| blocks(count, COLORS[2]))
+        .concat();
+    let levels = [blocks(256, COLORS[1]), rest].concat();
+    let chained = (stores.textures)
+        .add("chain", [64, 64], levels, chain)
+        .expect("a texture");
+    let viewpoint = Viewpoint {
+        projection: Projection::Orthographic {
+            height: 2.0,
+            near: -1.0,
+            far: 1.0,
+        },
+        ..Viewpoint::default()
+    };
+    let mut frame = |stores: &mut Stores, texture, sampler, expected: [u8; 4], what: &str| {
+        let mut draws = Draws::default();
+        let sampling = Sampling { texture, sampler };
+        draws.push(square, textured, Mat4::IDENTITY, sampling);
+        let data = stores.data(filling([SIDE, SIDE]), viewpoint, &draws);
+        render_without_ui(&mut renderer, data);
+        let pixels = renderer
+            .read_back()
+            .expect("the frame's pixels")
+            .expect("a headless renderer's frame can be read back");
+        for pixel in pixels.as_chunks::<4>().0 {
+            let close = (pixel.iter().zip(expected)).all(|(&got, want)| got.abs_diff(want) <= 1);
+            assert!(close, "{what}: read back {pixel:?}, expected {expected:?}");
+        }
+    };
+    let nearest = Sampler::NearestClamp.index();
+    frame(&mut stores, level, nearest, COLORS[0], "a level");
+    let trilinear = Wrap::Clamp.anisotropic();
+    frame(
+        &mut stores,
+        chained,
+        trilinear,
+        COLORS[2],
+        "a chain's third level",
+    );
+    let replaced =
+        (stores.textures).replace("level", level, [2, 2], COLORS[3].repeat(4), Mipmaps::None);
+    replaced.expect("RGBA8 in place of BC7");
+    frame(
+        &mut stores,
+        level,
+        nearest,
+        COLORS[3],
+        "RGBA8 in place of BC7",
+    );
+    let replaced = (stores.textures).replace(
+        "level",
+        level,
+        [5, 5],
+        [blocks(4, COLORS[1]), blocks(2, COLORS[1])].concat(),
+        chain,
+    );
+    replaced.expect("BC7 in place of RGBA8");
+    frame(
+        &mut stores,
+        level,
+        nearest,
+        COLORS[1],
+        "BC7 in place of RGBA8",
+    );
+    shut_down(renderer);
 }
 
 /// A textured square that covers a view of `SIZE` pixels a side, red, whose mesh and texture are

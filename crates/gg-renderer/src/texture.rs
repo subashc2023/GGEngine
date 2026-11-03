@@ -7,7 +7,7 @@ use std::borrow::Cow;
 use bytemuck::NoUninit;
 use gg_core::math::libm;
 use gg_core::{Error, Result};
-use gg_gpu::{MAX_TEXTURE_SIZE, PLACED_TEXTURES, mip_sizes};
+use gg_gpu::{MAX_TEXTURE_SIZE, PLACED_TEXTURES, TextureFormat, mip_sizes};
 
 /// A texture that [`Textures::add`] handed out, or the engine's white one. It's a field of a
 /// shader's parameters as it is: a `uint` in the shader, the texture's index in the bindless set,
@@ -47,12 +47,20 @@ pub enum Mipmaps {
 
 /// What a texture's texels are: colors, sRGB-encoded as images store them, which shaders sample
 /// decoded to linear, with smaller mip levels as [`Mipmaps`] says, which a `Mipmaps` stands for;
-/// or data, such as a font's distance field, which shaders read as stored, each channel a byte
-/// from 0 to 1, with one level.
+/// data, such as a font's distance field, which shaders read as stored, each channel a byte from 0
+/// to 1, with one level; or colors compressed as BC7, as a game's package holds its textures.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Texels {
     Color(Mipmaps),
     Data,
+    /// Colors as [`Color`](Self::Color)'s are, sRGB-encoded and alpha not multiplied into them,
+    /// compressed as BC7: blocks of 4 by 4 texels, 16 bytes each, row after row, top row first,
+    /// of each of its levels, largest first, a block covering a level's edge where its side isn't
+    /// a multiple of 4. Its first level alone, or, if `mipmapped`, the full chain [`mip_sizes`]
+    /// gives, which the cooker made: a frame makes none.
+    Bc7 {
+        mipmapped: bool,
+    },
 }
 
 impl From<Mipmaps> for Texels {
@@ -62,11 +70,39 @@ impl From<Mipmaps> for Texels {
 }
 
 impl Texels {
-    /// The levels a frame makes from the first: none for data.
+    /// The levels a frame makes from the first: none for data, nor for BC7, which comes with them.
     pub(crate) fn mipmaps(self) -> Mipmaps {
         match self {
             Self::Color(mipmaps) => mipmaps,
-            Self::Data => Mipmaps::None,
+            Self::Data | Self::Bc7 { .. } => Mipmaps::None,
+        }
+    }
+
+    /// Whether the texture has the full chain of mip levels, which a frame makes or BC7 comes with.
+    pub(crate) fn mipmapped(self) -> bool {
+        match self {
+            Self::Color(mipmaps) => mipmaps != Mipmaps::None,
+            Self::Data => false,
+            Self::Bc7 { mipmapped } => mipmapped,
+        }
+    }
+
+    /// The format of the texture's image on the GPU.
+    pub(crate) fn format(self) -> TextureFormat {
+        match self {
+            Self::Color(_) => TextureFormat::Rgba8Srgb,
+            Self::Data => TextureFormat::Rgba8Unorm,
+            Self::Bc7 { .. } => TextureFormat::Bc7Srgb,
+        }
+    }
+
+    /// How many bytes a texture `size` texels across and down takes of these: its first level's
+    /// RGBA8 for colors and data, from which a frame makes the rest, and every level's blocks for
+    /// BC7.
+    fn bytes(self, size: [u32; 2]) -> u64 {
+        match self {
+            Self::Color(_) | Self::Data => TextureFormat::Rgba8Srgb.bytes(size, false),
+            Self::Bc7 { mipmapped } => TextureFormat::Bc7Srgb.bytes(size, mipmapped),
         }
     }
 }
@@ -98,9 +134,10 @@ impl Textures {
     /// packed, top row first, as images store them, which are colors or data as `texels` says: for
     /// colors, sRGB-encoded, and alpha not multiplied into them, which shaders sample decoded to
     /// linear, with smaller levels too if the [`Mipmaps`] it gives say so, made from it as a frame
-    /// copies it to the GPU, and how; for data, read as stored. It keeps a `Vec` of pixels as it
-    /// is, and copies borrowed ones. Shaders sample it with texture coordinates from (0, 0) at its
-    /// top left to (1, 1) at its bottom right. `name` names it in errors and GPU captures.
+    /// copies it to the GPU, and how; for data, read as stored; and for BC7, its levels' blocks
+    /// instead, as [`Texels::Bc7`] says. It keeps a `Vec` of pixels as it is, and copies borrowed
+    /// ones. Shaders sample it with texture coordinates from (0, 0) at its top left to (1, 1) at
+    /// its bottom right. `name` names it in errors and GPU captures.
     ///
     /// Fails with `renderer.bad_texture` if a side is 0 or more than 8,192 pixels, the most every
     /// Vulkan 1.4 device takes, or `pixels` doesn't fill it exactly; and with
@@ -114,7 +151,7 @@ impl Textures {
         texels: impl Into<Texels>,
     ) -> Result<Texture> {
         let (pixels, texels) = (pixels.into(), texels.into());
-        check(name, size, &pixels)?;
+        check(name, size, &pixels, texels)?;
         // Its handle is its slot, so a renderer holds as many as the bindless set has placed slots.
         let index = self.count();
         if index == PLACED_TEXTURES {
@@ -150,8 +187,8 @@ impl Textures {
     /// # Panics
     ///
     /// If `texture` isn't one of these textures, as another `Textures`' handles can be past them,
-    /// or `texels` are data where its texels are colors, or colors where they're data: a texture
-    /// keeps the kind it was added as.
+    /// or `texels` are data where its texels are colors, or colors, compressed or not, where
+    /// they're data: a texture keeps the kind it was added as.
     pub fn replace<'a>(
         &mut self,
         name: &str,
@@ -170,7 +207,7 @@ impl Textures {
             "texture {name:?} is replaced by texels of the other kind"
         );
         let pixels = pixels.into();
-        check(name, size, &pixels)?;
+        check(name, size, &pixels, texels)?;
         let pixels = pixels.into_owned();
         match (self.added.iter_mut()).find(|added| added.index == texture.index) {
             Some(waiting) => {
@@ -202,9 +239,9 @@ impl Textures {
     }
 }
 
-/// Checks that `pixels` fill a texture named `name`, `size` pixels across and down, that every
-/// Vulkan 1.4 device takes, as [`Textures::add`] says.
-fn check(name: &str, size: [u32; 2], pixels: &[u8]) -> Result<()> {
+/// Checks that `pixels` fill a texture of `texels` named `name`, `size` pixels across and down,
+/// that every Vulkan 1.4 device takes, as [`Textures::add`] says.
+fn check(name: &str, size: [u32; 2], pixels: &[u8], texels: Texels) -> Result<()> {
     let bad = |problem: String| {
         Error::new(
             "renderer.bad_texture",
@@ -218,10 +255,15 @@ fn check(name: &str, size: [u32; 2], pixels: &[u8]) -> Result<()> {
             "is {width}x{height} pixels, but textures are 1 to {MAX_TEXTURE_SIZE} pixels a side"
         )));
     }
-    let bytes = u64::from(width) * u64::from(height) * 4;
+    let bytes = texels.bytes(size);
     if pixels.len() as u64 != bytes {
+        let of = match texels {
+            Texels::Color(_) | Texels::Data => "RGBA8",
+            Texels::Bc7 { mipmapped: false } => "BC7 blocks",
+            Texels::Bc7 { mipmapped: true } => "BC7 blocks in its levels",
+        };
         return Err(bad(format!(
-            "is {width}x{height} pixels, {bytes} bytes of RGBA8, but has {} bytes",
+            "is {width}x{height} pixels, {bytes} bytes of {of}, but has {} bytes",
             pixels.len()
         )));
     }
@@ -234,8 +276,10 @@ fn check(name: &str, size: [u32; 2], pixels: &[u8]) -> Result<()> {
 /// it covers, wholly or in part, in linear space, as shaders filter them. The levels are kept as
 /// floats until each is encoded, so that each comes from the first's exact colors rather than from
 /// the level before's rounded bytes. The first stays bytes, as it's the largest: a level of floats
-/// takes four times the memory, 16 MiB for a 2,048 by 2,048 texture's second.
-pub(crate) fn add_mipmaps(pixels: &mut Vec<u8>, size: [u32; 2], mipmaps: Mipmaps) {
+/// takes four times the memory, 16 MiB for a 2,048 by 2,048 texture's second. The cooker makes a
+/// texture's levels with it before it compresses them, as a frame makes those of one it doesn't.
+#[doc(hidden)]
+pub fn add_mipmaps(pixels: &mut Vec<u8>, size: [u32; 2], mipmaps: Mipmaps) {
     let weighted = match mipmaps {
         Mipmaps::None => return,
         Mipmaps::Averaged => false,
@@ -467,6 +511,32 @@ mod tests {
         replaced.expect("other data");
         let data = (2, false, [2, 1], Texels::Data);
         assert_eq!(waiting(&textures), [(1, true, [1, 2], none), data]);
+    }
+
+    #[test]
+    fn a_bc7_texture_is_filled_by_its_levels_blocks() {
+        let mut textures = Textures::default();
+        // 13x5 texels are 4x2 blocks; its chain's 6x2, 3x1 and 1x1 levels a block or two each.
+        let (one, chain) = (
+            Texels::Bc7 { mipmapped: false },
+            Texels::Bc7 { mipmapped: true },
+        );
+        let blocks = |count: usize| vec![0; count * 16];
+        let texture = textures.add("one", [13, 5], blocks(8), one);
+        let texture = texture.expect("a level's blocks");
+        textures
+            .add("chain", [13, 5], blocks(12), chain)
+            .expect("every level's blocks");
+        for (texels, count) in [(one, 12), (chain, 8), (one, 7)] {
+            let error = (textures.add("short", [13, 5], blocks(count), texels))
+                .expect_err("blocks that don't fill it");
+            assert_eq!(error.code(), "renderer.bad_texture", "{texels:?}, {count}");
+        }
+        // A texture of colors takes colors compressed in its place, and back.
+        let replaced = textures.replace("one", texture, [2, 2], &[0; 16], Mipmaps::None);
+        replaced.expect("RGBA8 in place of BC7");
+        let replaced = textures.replace("one", texture, [1, 1], blocks(1), chain);
+        replaced.expect("BC7 in place of RGBA8");
     }
 
     #[test]

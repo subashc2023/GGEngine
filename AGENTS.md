@@ -55,7 +55,7 @@ cargo gg run --peers 2            # in games/shards, its project: a lockstep hos
 cargo gg new <NAME>               # a new game, games/NAME, a project with an empty start scene
 ```
 
-Building needs a C++ compiler, for the Vulkan Memory Allocator and Luau, and `slangc` for the
+Building needs a C and C++ compiler, for VMA, Luau, zstd and meshoptimizer, and `slangc` for the
 shaders: the one `SLANGC` names, else the Vulkan SDK's, else the first on the `PATH`. Games' shaders
 compile with that slangc as development builds run, so it stays where the build found it; builds
 without `dev` run those their package holds compiled. On Linux, gamepads and sound need pkg-config,

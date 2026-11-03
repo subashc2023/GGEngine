@@ -29,33 +29,81 @@ pub fn mip_sizes(width: u32, height: u32) -> impl Iterator<Item = [u32; 2]> {
 }
 
 /// The sizes of the first `count` levels of a `width` by `height` image's mip chain, and where each
-/// one's pixels start among all of theirs, a level's after the one before's.
-fn levels(width: u32, height: u32, count: u32) -> impl Iterator<Item = ([u32; 2], u64)> {
+/// one's pixels, stored in `format`, start among all of theirs, a level's after the one before's.
+fn levels(
+    format: TextureFormat,
+    width: u32,
+    height: u32,
+    count: u32,
+) -> impl Iterator<Item = ([u32; 2], u64)> {
     let mut offset = 0;
     mip_sizes(width, height)
         .take(count as usize)
-        .map(move |size @ [width, height]| {
+        .map(move |size| {
             let at = offset;
-            offset += u64::from(width) * u64::from(height) * 4;
+            offset += format.level_bytes(size);
             (size, at)
         })
 }
 
-/// How a texture's 8-bit RGBA channels read in shaders.
+/// How a texture's pixels are stored, and how they read in shaders.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextureFormat {
-    /// Shaders read the bytes as they are, scaled to 0 to 1: for data, and for color a shader
-    /// decodes itself.
+    /// 8-bit RGBA channels, which shaders read as they are, scaled to 0 to 1: for data, and for
+    /// color a shader decodes itself.
     Rgba8Unorm,
-    /// Shaders read color decoded from sRGB to linear, before it's filtered, and alpha as it is:
-    /// for color as images store it.
+    /// 8-bit RGBA channels, which shaders read as color decoded from sRGB to linear, before it's
+    /// filtered, and alpha as it is: for color as images store it.
     Rgba8Srgb,
+    /// Colors compressed as BC7, in blocks of 4 by 4 pixels of 16 bytes each, sRGB-encoded as
+    /// [`TextureFormat::Rgba8Srgb`]'s are: shaders read them decoded to linear, before they're
+    /// filtered, and alpha as it is. For color as games' cooked textures store it. A side that
+    /// isn't a multiple of 4, as a mip level's may not be, ends in a block that is whole all the
+    /// same.
+    Bc7Srgb,
 }
 
-/// An RGBA image with 8-bit channels, with one mip level or a full chain of them, that shaders
-/// sample through its index in the bindless set. Frames fill its pixels, may write over those of
-/// one with one level, and may refill it with another image, and they're undefined until then.
-/// Dropping it retires it until the GPU is done with it.
+impl TextureFormat {
+    /// Every format.
+    pub const ALL: [Self; 3] = [Self::Rgba8Unorm, Self::Rgba8Srgb, Self::Bc7Srgb];
+
+    pub(crate) fn raw(self) -> vk::Format {
+        match self {
+            Self::Rgba8Unorm => vk::Format::R8G8B8A8_UNORM,
+            Self::Rgba8Srgb => vk::Format::R8G8B8A8_SRGB,
+            Self::Bc7Srgb => vk::Format::BC7_SRGB_BLOCK,
+        }
+    }
+
+    /// How many bytes fill a texture of `size` pixels in this format, as [`Frame::fill_texture`]
+    /// takes them: its levels packed largest first, the first level alone unless `mipmapped`, and
+    /// otherwise every level that [`mip_sizes`] gives. A level of RGBA8 has 4 bytes a pixel. A level
+    /// of BC7 has 16 bytes for each block of 4 by 4 pixels, its sides rounded up to whole blocks, so
+    /// that a level of a pixel has a block. A level's bytes are a multiple of 4 for RGBA8 and of 16
+    /// for BC7, so that each level starts as aligned as the first, as copies need.
+    ///
+    /// [`Frame::fill_texture`]: crate::Frame::fill_texture
+    pub fn bytes(self, size: [u32; 2], mipmapped: bool) -> u64 {
+        let levels = if mipmapped { usize::MAX } else { 1 };
+        (mip_sizes(size[0], size[1]).take(levels))
+            .map(|level| self.level_bytes(level))
+            .sum()
+    }
+
+    /// How many bytes fill one mip level of `size` pixels.
+    fn level_bytes(self, [width, height]: [u32; 2]) -> u64 {
+        let (width, height) = (u64::from(width), u64::from(height));
+        match self {
+            Self::Rgba8Unorm | Self::Rgba8Srgb => width * height * 4,
+            Self::Bc7Srgb => width.div_ceil(4) * height.div_ceil(4) * 16,
+        }
+    }
+}
+
+/// An image with one mip level or a full chain of them, in one of the [`TextureFormat`]s, that
+/// shaders sample through its index in the bindless set. Frames fill its pixels, may write over
+/// those of an RGBA8 one with one level, and may refill it with another image, and they're
+/// undefined until then. Dropping it retires it until the GPU is done with it.
 pub struct Texture {
     device: Arc<Device>,
     raw: vk::Image,
@@ -65,7 +113,7 @@ pub struct Texture {
     extent: vk::Extent2D,
     /// How many mip levels it has.
     levels: u32,
-    format: vk::Format,
+    format: TextureFormat,
     index: u32,
     /// Whether a frame has filled or written it, which leaves it in the shader-read-only layout.
     written: bool,
@@ -125,10 +173,6 @@ impl Texture {
         mipmapped: bool,
         name: &str,
     ) -> Result<Self> {
-        let format = match format {
-            TextureFormat::Rgba8Unorm => vk::Format::R8G8B8A8_UNORM,
-            TextureFormat::Rgba8Srgb => vk::Format::R8G8B8A8_SRGB,
-        };
         let (info, levels) = image_info(device, width, height, format, mipmapped);
         // The slot first: a refused one panics, which must leave no image behind.
         let bindless = device.bindless();
@@ -159,7 +203,7 @@ impl Texture {
     }
 
     /// Makes the texture's image anew, `width` by `height` pixels, with the full chain of mip
-    /// levels that [`mip_sizes`] gives if `mipmapped` and otherwise one, in its format, its slot
+    /// levels that [`mip_sizes`] gives if `mipmapped` and otherwise one, in `format`, its slot
     /// taking its view at once: a frame then fills it as one no frame has written. The old image
     /// retires until the GPU is done with the frames that may use it. If it fails, the texture is
     /// as it was.
@@ -172,8 +216,14 @@ impl Texture {
     /// # Panics
     ///
     /// If a side is 0, or more than [`MAX_TEXTURE_SIZE`].
-    pub(crate) unsafe fn remake(&mut self, width: u32, height: u32, mipmapped: bool) -> Result<()> {
-        let (info, levels) = image_info(&self.device, width, height, self.format, mipmapped);
+    pub(crate) unsafe fn remake(
+        &mut self,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+        mipmapped: bool,
+    ) -> Result<()> {
+        let (info, levels) = image_info(&self.device, width, height, format, mipmapped);
         let (raw, allocation, view) = make_image(&self.device, &info, &self.name)?;
         let bindless = self.device.bindless();
         // SAFETY: the view is of a live sampled image, which frames fill before any shader samples
@@ -188,6 +238,7 @@ impl Texture {
         self.device.retire(Retired::Image(old_raw, old_view, old));
         self.extent = vk::Extent2D { width, height };
         self.levels = levels;
+        self.format = format;
         self.written = false;
         Ok(())
     }
@@ -202,23 +253,31 @@ impl Texture {
         [self.extent.width, self.extent.height]
     }
 
+    /// How its pixels are stored.
+    pub(crate) fn format(&self) -> TextureFormat {
+        self.format
+    }
+
     /// How many mip levels it has.
     pub(crate) fn level_count(&self) -> u32 {
         self.levels
     }
 
     /// Its mip levels' sizes, largest first, and where each one's pixels start among all of
-    /// theirs, packed a level after the one before.
+    /// theirs, packed a level after the one before. Each level has a multiple of 16 bytes if it's
+    /// BC7 and of 4 if it's RGBA8, so each starts as aligned as the first.
     pub(crate) fn levels(&self) -> impl Iterator<Item = ([u32; 2], u64)> {
-        levels(self.extent.width, self.extent.height, self.levels)
+        levels(
+            self.format,
+            self.extent.width,
+            self.extent.height,
+            self.levels,
+        )
     }
 
-    /// How many bytes of RGBA8 fill all its levels.
+    /// How many bytes of its format fill all its levels.
     pub(crate) fn bytes(&self) -> u64 {
-        let last = self.levels().last();
-        last.map_or(0, |([width, height], at)| {
-            at + u64::from(width) * u64::from(height) * 4
-        })
+        self.format.bytes(self.size(), self.levels > 1)
     }
 
     pub(crate) fn raw(&self) -> vk::Image {
@@ -238,10 +297,10 @@ impl Texture {
         self.written = true;
     }
 
-    /// Writes `pixels`, every one of the texture's, its levels' packed largest first, from the CPU
-    /// straight into its image, and leaves it in the shader-read-only layout: host image copy, on
-    /// a device that uploads that way. The device's next submission makes the writes visible to
-    /// it.
+    /// Writes `pixels`, every one of the texture's, in its format, its levels' packed largest
+    /// first, from the CPU straight into its image, and leaves it in the shader-read-only layout:
+    /// host image copy, on a device that uploads that way. The device's next submission makes the
+    /// writes visible to it.
     ///
     /// # Panics
     ///
@@ -277,7 +336,10 @@ impl Texture {
         // has used it, since no frame has written it, and `&mut` keeps the engine off it.
         unsafe { functions.transition_image_layout(slice::from_ref(&transition)) }
             .map_err(|e| vk_error("vkTransitionImageLayoutEXT", texture, e))?;
-        // A region for each level, each from where its pixels start.
+        // A region for each level, each from where its pixels start. A row length and image height
+        // of 0 pack rows tightly, in whole blocks for BC7. A level's extent is its own size, which
+        // needn't be a multiple of a block's sides, as a copy that reaches the level's edge may end
+        // inside a block (VUID-VkCopyMemoryToImageInfo-dstImage-00207 and -00208).
         let mut regions = [vk::MemoryToImageCopyEXT::default(); MAX_LEVELS];
         for ((level, ([width, height], at)), region) in self.levels().enumerate().zip(&mut regions)
         {
@@ -295,8 +357,8 @@ impl Texture {
             .dst_image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
             .regions(&regions[..self.levels as usize]);
         // SAFETY: as above, in the layout just changed to; the regions are the image's levels,
-        // whose every texel `pixels`, tightly packed a level after another, was just checked to
-        // hold.
+        // whose every texel, or block, `pixels`, tightly packed a level after another, was just
+        // checked to hold.
         unsafe { functions.copy_memory_to_image(&info) }
             .map_err(|e| vk_error("vkCopyMemoryToImageEXT", texture, e))
     }
@@ -313,7 +375,7 @@ fn image_info(
     device: &Device,
     width: u32,
     height: u32,
-    format: vk::Format,
+    format: TextureFormat,
     mipmapped: bool,
 ) -> (vk::ImageCreateInfo<'static>, u32) {
     let sides = 1..=MAX_TEXTURE_SIZE;
@@ -335,7 +397,7 @@ fn image_info(
     };
     let info = vk::ImageCreateInfo::default()
         .image_type(vk::ImageType::TYPE_2D)
-        .format(format)
+        .format(format.raw())
         .extent(vk::Extent3D {
             width,
             height,
@@ -412,9 +474,53 @@ mod tests {
 
     #[test]
     fn each_levels_pixels_start_after_the_ones_before() {
-        let at: Vec<_> = levels(5, 3, 3).collect();
+        let at: Vec<_> = levels(TextureFormat::Rgba8Srgb, 5, 3, 3).collect();
         assert_eq!(at, [([5, 3], 0), ([2, 1], 60), ([1, 1], 68)]);
         // One level of a texture that isn't mipmapped.
-        assert_eq!(levels(5, 3, 1).collect::<Vec<_>>(), [([5, 3], 0)]);
+        let first = levels(TextureFormat::Rgba8Unorm, 5, 3, 1);
+        assert_eq!(first.collect::<Vec<_>>(), [([5, 3], 0)]);
+    }
+
+    #[test]
+    fn bc7_levels_are_whole_blocks_whatever_their_sides() {
+        let bc7 = TextureFormat::Bc7Srgb;
+        // 13x5 is 4 by 2 blocks, 6x2 is 2 by 1, and 3x1 and 1x1 are a block each.
+        let at: Vec<_> = levels(bc7, 13, 5, 4).collect();
+        assert_eq!(
+            at,
+            [([13, 5], 0), ([6, 2], 128), ([3, 1], 160), ([1, 1], 176)]
+        );
+        assert_eq!(bc7.bytes([13, 5], true), 192);
+        assert_eq!(bc7.bytes([13, 5], false), 128);
+        // A pixel, and a block's sides and one past them.
+        assert_eq!(levels(bc7, 1, 1, 1).collect::<Vec<_>>(), [([1, 1], 0)]);
+        assert_eq!(bc7.bytes([1, 1], false), 16);
+        assert_eq!(bc7.bytes([1, 1], true), 16);
+        assert_eq!(bc7.bytes([4, 4], false), 16);
+        assert_eq!(bc7.bytes([5, 4], false), 32);
+        assert_eq!(bc7.bytes([5, 5], false), 64);
+        assert_eq!(bc7.bytes([8192, 8192], false), 8192 * 8192);
+    }
+
+    #[test]
+    fn bytes_fill_the_last_level_and_start_every_level_aligned() {
+        for format in TextureFormat::ALL {
+            // What a copy needs each level's pixels aligned to: the format's texel block size.
+            let alignment = match format {
+                TextureFormat::Rgba8Unorm | TextureFormat::Rgba8Srgb => 4,
+                TextureFormat::Bc7Srgb => 16,
+            };
+            for size in [[1, 1], [2, 2], [3, 7], [4, 4], [13, 5], [64, 1], [211, 5]] {
+                let count = mip_sizes(size[0], size[1]).count() as u32;
+                let all: Vec<_> = levels(format, size[0], size[1], count).collect();
+                let ([width, height], at) = *all.last().expect("a level");
+                let last = format.bytes([width, height], false);
+                assert_eq!(at + last, format.bytes(size, true), "{format:?} {size:?}");
+                // The first level alone is what the second's pixels start after.
+                let first = all.get(1).map_or(at + last, |&(_, second)| second);
+                assert_eq!(first, format.bytes(size, false), "{format:?} {size:?}");
+                assert!(all.iter().all(|&(_, at)| at % alignment == 0), "{all:?}");
+            }
+        }
     }
 }

@@ -10,11 +10,20 @@ name = "gg-cook"
 path = "src/main.rs"
 
 [dependencies]
+# Compresses textures to BC7, in KTX2.
+ctt.workspace = true
 # Reads the project's manifest and its assets' ID files, and walks its asset root.
 gg-api.workspace = true
 # What the engine makes of a file as it loads it, so that the package holds the same.
 gg-engine.workspace = true
+# Optimizes meshes' triangles and builds their levels of detail.
+meshopt.workspace = true
 serde_json.workspace = true
+
+# The tests' textures, and the BC7 they compress to, decoded on the CPU.
+[dev-dependencies]
+bcdec_rs.workspace = true
+png.workspace = true
 
 [lints]
 workspace = true

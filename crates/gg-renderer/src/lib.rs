@@ -39,11 +39,11 @@ use tracing::{info, trace};
 pub use circle::Circle;
 pub use draws::Draws;
 pub use gg_gpu::{
-    Blend, ImageRead, MAX_TEXTURE_SIZE, Sampler, UploadPath, Validation, Window, Wrap,
+    Blend, ImageRead, MAX_TEXTURE_SIZE, Sampler, UploadPath, Validation, Window, Wrap, mip_sizes,
 };
 pub use grid::{Grid, GridLines};
 pub use line::Line;
-pub use mesh::{Mesh, MeshDraw, Meshes};
+pub use mesh::{Lod, Lods, Mesh, MeshDraw, Meshes};
 #[doc(hidden)]
 pub use model::Params as ModelParams;
 pub use model::{AlphaMode, Material, ModelVertex};
@@ -51,6 +51,8 @@ pub use pick::{MAX_PICKS, Pick};
 pub use shader::{Compiled, Shader, ShaderSource, Shaders, compile_shader};
 pub use sprite::{Sprite, SpriteSheet};
 pub use text::Glyph;
+#[doc(hidden)]
+pub use texture::add_mipmaps;
 pub use texture::{Mipmaps, Texels, Texture, Textures};
 pub use ui::Ui;
 pub use view::{Outline, ViewCallback};
@@ -113,11 +115,13 @@ fn canvas_projection(size: [u32; 2]) -> Mat4 {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DrawCounts {
     /// Instanced draws: one for each run of consecutive draws of one mesh with one shader that draw
-    /// the same faces.
+    /// the same faces, or, of a mesh with levels of detail, one for each level its run's instances
+    /// drew at, or each stretch of them in a row that did, if its shader blends.
     pub draws: usize,
     /// The meshes they drew, one for each draw pushed to [`Draws`].
     pub instances: usize,
-    /// The triangles of those meshes, culled ones among them: the GPU's work in drawing them.
+    /// The triangles of those meshes, at the levels they drew, culled ones among them: the GPU's
+    /// work in drawing them.
     pub triangles: usize,
 }
 

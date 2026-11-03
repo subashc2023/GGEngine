@@ -6,7 +6,8 @@
 use gg_core::math::{Vec2, Vec3, Vec4};
 use gg_core::{Error, Result};
 use gg_renderer::{
-    AlphaMode, Material, Mesh, MeshDraw, Meshes, Mipmaps, ModelVertex, Shaders, Texture, Textures,
+    AlphaMode, Lods, Material, Mesh, MeshDraw, Meshes, Mipmaps, ModelVertex, Shaders, Texture,
+    Textures,
 };
 
 use crate::gltf::{self, Imported, Part, Primitive};
@@ -125,12 +126,9 @@ pub(crate) fn add(
     let images: Vec<_> = (images.into_iter().enumerate())
         .map(|(i, image)| {
             let mipmaps = mipmaps(&primitives, i);
-            let added = textures.add(
-                &format!("{name} image {i}"),
-                image.size,
-                image.pixels,
-                mipmaps,
-            );
+            let texels = image.texels(mipmaps);
+            let name = format!("{name} image {i}");
+            let added = textures.add(&name, image.size, image.pixels, texels);
             let texture = added.expect("a decoded image fits a texture, and there's room for it");
             (texture, mipmaps)
         })
@@ -138,8 +136,12 @@ pub(crate) fn add(
     let meshes: Vec<_> = (primitives.iter())
         .map(|primitive| {
             let name = format!("{name} {}", primitive.name);
-            let mesh = meshes.add(&name, &vertices(primitive), &primitive.indices);
-            mesh.expect("a primitive is whole triangles of its own vertices")
+            let vertices = vertices(primitive);
+            let mesh = match lods(primitive) {
+                Some(lods) => meshes.add_lods(&name, &vertices, &primitive.indices, lods),
+                None => meshes.add(&name, &vertices, finest(primitive)),
+            };
+            mesh.expect("a primitive is whole triangles of its own vertices, in its levels")
         })
         .collect();
     let made = Made {
@@ -227,14 +229,15 @@ pub(crate) fn reload(
     for (i, image) in images.into_iter().enumerate() {
         let name = format!("{name} image {i}");
         let mipmaps = mipmaps(&primitives, i);
+        let texels = image.texels(mipmaps);
         match made.images.get_mut(i) {
             Some((texture, was)) => {
-                let replaced = textures.replace(&name, *texture, image.size, image.pixels, mipmaps);
+                let replaced = textures.replace(&name, *texture, image.size, image.pixels, texels);
                 replaced.expect("a decoded image fits a texture");
                 *was = mipmaps;
             }
             None => {
-                let texture = textures.add(&name, image.size, image.pixels, mipmaps);
+                let texture = textures.add(&name, image.size, image.pixels, texels);
                 let texture = texture.expect("a decoded image fits a texture, and there's room");
                 made.images.push((texture, mipmaps));
                 added.push((i, texture));
@@ -244,13 +247,14 @@ pub(crate) fn reload(
     for (i, primitive) in primitives.iter().enumerate() {
         let name = format!("{name} {}", primitive.name);
         let vertices = vertices(primitive);
+        // Read again from its files, as a development run does, it has one level.
         match made.meshes.get(i) {
             Some(&mesh) => {
-                let replaced = meshes.replace(&name, mesh, &vertices, &primitive.indices);
+                let replaced = meshes.replace(&name, mesh, &vertices, finest(primitive));
                 replaced.expect("a primitive is whole triangles of its own vertices");
             }
             None => {
-                let mesh = meshes.add(&name, &vertices, &primitive.indices);
+                let mesh = meshes.add(&name, &vertices, finest(primitive));
                 made.meshes
                     .push(mesh.expect("whole triangles of its own vertices"));
             }
@@ -293,6 +297,41 @@ fn draws(primitives: &[Primitive], made: &Made, shaders: &mut Shaders) -> Vec<Me
         .collect()
 }
 
+/// The levels of detail of `primitive`, as the cooker made them, with the sphere round its vertices
+/// that a draw picks one by; `None` for a primitive of one level, and for one whose vertices aren't
+/// all finite, which no sphere holds.
+fn lods(primitive: &Primitive) -> Option<Lods> {
+    if primitive.lods.len() < 2 {
+        return None;
+    }
+    let positions = primitive
+        .positions
+        .iter()
+        .map(|&position| Vec3::from(position));
+    let (low, high) = (positions.clone())
+        .fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(low, high), p| {
+            (low.min(p), high.max(p))
+        });
+    let center = (low + high) / 2.0;
+    let radius = positions.map(|p| p.distance(center)).fold(0.0, f32::max);
+    (center.is_finite() && radius.is_finite()).then(|| Lods {
+        levels: primitive.lods.clone(),
+        center,
+        radius,
+    })
+}
+
+/// The indices of `primitive`'s finest level, all of them for one read from glTF.
+fn finest(primitive: &Primitive) -> &[u32] {
+    match primitive.lods.first() {
+        Some(lod) => {
+            let start = lod.start as usize;
+            &primitive.indices[start..start + lod.count as usize]
+        }
+        None => &primitive.indices,
+    }
+}
+
 /// The vertices of `primitive`, as the model shader reads them.
 fn vertices(primitive: &Primitive) -> Vec<ModelVertex> {
     (primitive.positions.iter())
@@ -321,7 +360,7 @@ fn material(read: &gltf::Material, images: &[(Texture, Mipmaps)]) -> Material {
 /// How image `image` of `primitives`' model gets its mip levels: weighted by alpha where a masked
 /// or blended material samples it, since its alpha is then how much it covers, and plainly averaged
 /// where opaque ones alone do, as glTF has them ignore its alpha.
-fn mipmaps(primitives: &[Primitive], image: usize) -> Mipmaps {
+pub(crate) fn mipmaps(primitives: &[Primitive], image: usize) -> Mipmaps {
     let covers = primitives.iter().any(|primitive| {
         let material = &primitive.material;
         let blends = matches!(material.alpha, AlphaMode::Mask { .. } | AlphaMode::Blend);
@@ -339,7 +378,7 @@ pub(crate) mod tests {
     use gg_core::math::Quat;
 
     use super::*;
-    use crate::image::Image;
+    use crate::image::{Format, Image};
     use crate::{Context, gltf};
 
     fn turned() -> Transform {
@@ -367,6 +406,7 @@ pub(crate) mod tests {
             uvs: vec![[0.0; 2]; 3],
             colors: vec![[1.0; 4]; 3],
             indices: vec![0, 1, 2],
+            lods: Vec::new(),
             material,
         };
         let masked = gltf::Material {
@@ -386,6 +426,7 @@ pub(crate) mod tests {
         let image = Image {
             size: [1, 1],
             pixels: vec![255; 4],
+            format: Format::Rgba8,
         };
         Imported {
             parts: vec![

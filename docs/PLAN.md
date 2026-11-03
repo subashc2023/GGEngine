@@ -94,12 +94,13 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Mods** (2026-11-03)
 - **Phase 9, scripting** (2026-11-03)
 - **The cooker and its package** (2026-11-03)
+- **Cooked textures and meshes** (2026-11-03)
 
 ## Now
 
-**Cooked textures and meshes**, Phase 10's second milestone: textures cooked into BC7 in KTX2,
-zstd-compressed, with the cooker's mips, every device needing BC; meshes optimized by meshoptimizer,
-with LODs that a draw picks by its size on screen; its plan says when it's done.
+**Streaming**, Phase 10's third milestone: what the simulation reads loaded as it's named, and the
+rest uploaded within a budget each frame, without the frame waiting, and within the GPU's memory
+budget, assets removed; its plan says when it's done.
 
 ## Next
 
@@ -245,10 +246,10 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Tiling one cell of a sheet: a repeating sampler repeats the whole texture | A game tiles part of an atlas, such as a background |
 | A sprite that samples past its rectangle, so that a seamless texture tiled across sprites side by side blends across their edges under a linear sampler | A game tiles one texture across sprites |
 | A tile map in the engine, which scenes save; the sandbox's map is code of its own, its tiles sprites that snapshots and scenes save each with its texture's name | A game edits its map |
-| glTF that `Context::add_model` refuses or ignores, as it lists: lighting and the material's other textures, skins and animations, morph targets, cameras, models without a scene and scenes other than the default, sparse accessors and accessors without a buffer view, primitives other than triangle lists, samplers that wrap across and down differently, minification filters, texture transforms, quantized or compressed meshes and textures (KHR_mesh_quantization, Draco, meshopt, Basis Universal), and integers written as floats, such as `1.0`, which glTF allows | Each with the first model that needs it; lighting and the other textures in Phase 12, compression with Phase 10's cooker |
+| glTF that `Context::add_model` refuses or ignores, as it lists: lighting and the material's other textures, skins and animations, morph targets, cameras, models without a scene and scenes other than the default, sparse accessors and accessors without a buffer view, primitives other than triangle lists, samplers that wrap across and down differently, minification filters, texture transforms, quantized or compressed meshes and textures (KHR_mesh_quantization, Draco, meshopt, Basis Universal), and integers written as floats, such as `1.0`, which glTF allows | Each with the first model that needs it; lighting and the other textures in Phase 12 |
 | Decoding images and sounds off the main thread as they're added, and reading music; `Context::add_texture`, `add_model` and `add_sound` decode before they return, `add_music` reads its file whole, up to 64 MiB, and a texture loaded where text names it decodes before the text is read, a lockstep peer's tick waiting for it; a reload decodes on its watcher's thread | Phase 10, with the streaming loader |
 | Models that take more than 4 GiB to read, of their buffers, decoded images, vertices and nodes, which `add_model` refuses with `engine.unsupported_model` | Phase 10, with streaming and the GPU's memory budget |
-| Mip levels made on the CPU, on the render thread, as the frame that uploads a model's texture renders: a 2,048 by 2,048 texture's take about 0.3 s of that frame in a debug build | Phase 10, which cooks them; or blits on the GPU, if a hitch shows first |
+| Mip levels made on the CPU, on the render thread, as the frame that uploads a model's texture renders, in development runs: a 2,048 by 2,048 texture's take about 0.3 s of that frame in a debug build; a package's come cooked | Blits on the GPU, if a development run's hitch matters |
 | Layers making textures from their own pixels; `Textures::add` takes pixels, but `Context` adds only PNGs and JPEGs | A game makes its own textures |
 | Keeping the frames' arenas near their frames' peak, within the GPU's memory budget: an arena grows by a buffer at least twice its last, and merges them as it resets, so it can hold a few times what its largest frame took, in memory the CPU writes, of instances' transforms, IDs and parameters and the UI's vertices, indices and texture changes | Phase 10, with the GPU's memory budget |
 | A frame's copies through a transfer queue start only once it's submitted, after its passes are recorded, and the frame waits for them | A profile shows a frame waiting for its uploads |
@@ -341,6 +342,17 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Warning, in a development run, of a path whose case differs from its file's, or on macOS its Unicode form, which Windows' and macOS's file systems find but a package doesn't | A game's path runs in development and fails from its package |
 | Checking that a package holds every file a game's code loads, as by listing those a development run read: the cooker holds what the scan of ID files finds, and checks the start scene alone | A file a game loads is left out of its package unseen |
 | 8- and 16-bit vertex fields, whose features Vulkan 1.4 guarantees but the device doesn't enable | Phase 13, whose cooker packs vertices |
+| Levels of detail in development runs: a model read from its glTF draws one level, the cooker's levels showing from a package alone, as `--package` gives a development build | Someone tunes a model's levels without cooking it |
+| Picking levels of detail on the GPU, with culling: the render thread picks each draw's level as it records the frame, at a pixel of error in every view, without hysteresis or a blend between levels, so a draw at a threshold can flip between two from frame to frame | Phase 13's GPU culling, or a level's pop shows |
+| Gathering an opaque run's draws by level in one pass, by a counting sort, rather than a pass over the run for each level between the finest and coarsest its draws picked | A profile shows it |
+| Simplifying meshes by their colors and texture coordinates too, through meshoptimizer's attribute-aware simplification: levels are simplified by their positions alone, keeping seams, so a coarse level of a model colored by its vertices may shift its colors | A model's coarser levels look off where their error doesn't say so |
+| Pruning the small parts a mesh's coarser levels could drop: meshoptimizer's Prune, without an error limit, drops whole parts that should stay, so the cooker doesn't prune | A model of many small parts keeps too many triangles far away |
+| Locking the borders a node's primitives share as they simplify, so that their coarser levels meet: each simplifies apart, so their seams may open by as much as the pixel each level's error allows | A model shows gaps between its parts |
+| Compressing a package's meshes, by meshoptimizer's vertex and index codecs and zstd: a cooked model holds its vertices and indices as they are, its images alone supercompressed | A package's size matters, as for a download |
+| Choosing a texture's compression for each texture, as RGBA8 for pixel art BC7 changes, and BC4 or BC5 for data: every texture cooks to BC7, by bc7enc_rdo at its default effort | A game's art suffers, or Phase 12's maps |
+| A texture that's both a layer's and a model's image held once: a cooked model holds its images, with their chains of levels, and the package the files layers load apart, of one level, so a PNG that's both is held twice | A package's size matters |
+| Compressing textures on several threads: the cooker compresses one image at a time, as ctt does without rayon, which deny.toml keeps to gg-engine | Cooking takes long enough to matter |
+| Cooking to the same bytes on every OS and architecture, as on one machine: bc7enc_rdo's ISPC picks its instruction set as it runs, and each platform's compiler builds meshoptimizer's C++ | Packages' bytes are compared across machines, as a build cache would |
 | Splits in a torn-off window, which holds one tab group | A tool wants panels side by side outside the main window |
 | Reordering tabs by dragging them along their bar; a drop among the tabs adds one at the end | Someone reorders tabs |
 | A minimum width for each panel, as Hazel keeps its Properties panel 370 pixels wide: a split keeps each side 48 points, and the Inspector's rows of axes clip in a narrower panel | Someone narrows the Inspector past its rows |

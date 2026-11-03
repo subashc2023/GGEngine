@@ -61,7 +61,8 @@ const fn color_layers(level: u32) -> vk::ImageSubresourceLayers {
 }
 
 /// The region of a copy of `size` pixels between `offset` in a buffer and mip level `level` of a
-/// color image, at `origin` in it.
+/// color image, at `origin` in it. The buffer's rows are tightly packed, a row length and image
+/// height of 0, in whole blocks for a compressed image.
 fn copy_region(offset: u64, origin: [u32; 2], size: [u32; 2], level: u32) -> vk::BufferImageCopy {
     vk::BufferImageCopy::default()
         .buffer_offset(offset)

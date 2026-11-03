@@ -16,9 +16,10 @@ Usage: gg-cook <PROJECT> <PACKAGE>
 Cooks the game's project in the directory PROJECT, which holds its `project.ron`, into the package
 at PACKAGE, which a build of the game without `dev` runs from as `<executable>.ggpk` beside its
 executable, or as `--package <PATH>` names it: the files under its asset root that its runs load,
-fonts baked into their fields, shaders compiled to SPIR-V, the rest as they are, and each asset's
-ID. Prints a line of JSON for each file the package holds, its path, kind, ID and size, then one
-for the package; and an error as a line of JSON on stderr.
+textures compressed to BC7, models' meshes optimized with levels of detail and their images
+compressed, fonts baked into their fields, shaders compiled to SPIR-V, the rest as they are, and
+each asset's ID. Prints a line of JSON for each file the package holds, its path, kind, ID and
+size, then one for the package; and an error as a line of JSON on stderr.
 
 Exits 0 once the package is written, 1 on an error, and 2 on bad arguments.";
 
@@ -53,6 +54,8 @@ fn main() -> ExitCode {
             Kind::File => "file",
             Kind::Font => "font",
             Kind::Shader => "shader",
+            Kind::Texture => "texture",
+            Kind::Model => "model",
         };
         let id = cooked.id.map(|id| format!("{id:016x}"));
         let line = json!({"cooked": cooked.path, "kind": kind, "id": id, "bytes": cooked.bytes});

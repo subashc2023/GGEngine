@@ -23,7 +23,7 @@ use super::{Frame, begin_recording};
 use crate::buffer::Buffer;
 use crate::texture::MAX_LEVELS;
 use crate::vma::Memory;
-use crate::{COLOR_RANGE, Device, GpuBuffer, Texture, UploadPath, copy_region};
+use crate::{COLOR_RANGE, Device, GpuBuffer, Texture, TextureFormat, UploadPath, copy_region};
 
 /// The stages that read textures: fragment shaders sample them, and vertex shaders may too, as
 /// the sprite shader queries their sizes.
@@ -56,13 +56,15 @@ impl<'a> Frame<'a> {
     /// keep what they had, except on its first write, which leaves them undefined. Shaders see
     /// the new pixels from this frame's passes on. The pixels go through the frame's arena and
     /// the graphics queue, which suits small changes the frame uses at once, such as the UI's;
-    /// [`Frame::fill_texture`] fills a whole new texture by the device's upload path.
+    /// [`Frame::fill_texture`] fills a whole new texture by the device's upload path. Only RGBA8
+    /// textures are written: a BC7 texture is filled, as its blocks of 4 by 4 pixels can't be
+    /// written a pixel at a time.
     ///
     /// # Panics
     ///
-    /// If a forgotten pass is still open, another device made the texture, it has mip levels,
-    /// whose others a write would leave undefined, the region doesn't fit in it, or `pixels`
-    /// doesn't fill the region exactly.
+    /// If a forgotten pass is still open, another device made the texture, it's a BC7 texture, it
+    /// has mip levels, whose others a write would leave undefined, the region doesn't fit in it,
+    /// or `pixels` doesn't fill the region exactly.
     pub fn write_texture(
         &mut self,
         texture: &mut Texture,
@@ -74,6 +76,11 @@ impl<'a> Frame<'a> {
         self.frames
             .device
             .check_made("the texture written", texture.device());
+        assert!(
+            texture.format() != TextureFormat::Bc7Srgb,
+            "a BC7 texture is filled, not written, as its blocks of 4x4 pixels can't be written a \
+             pixel at a time"
+        );
         assert_eq!(
             texture.level_count(),
             1,
@@ -106,10 +113,12 @@ impl<'a> Frame<'a> {
     }
 
     /// Fills `texture`, which no frame has written, with `pixels`: all of it, each of its mip
-    /// levels, largest first, as rows of RGBA8 in the texture's format, tightly packed, top row
-    /// first, after the level before. Shaders see them from this frame's passes on, whichever way
-    /// the device uploads: through a transfer queue, the frame waits for the copy. What's staged
-    /// for a copy is freed once the frame has finished.
+    /// levels, largest first, in the texture's format, tightly packed, after the level before.
+    /// A level of RGBA8 is its rows of pixels, top row first; a level of BC7 is its rows of blocks
+    /// of 4 by 4 pixels, 16 bytes each, top row first, a side that isn't a multiple of 4 ending in
+    /// a whole block ([`TextureFormat::bytes`] says how many bytes that makes). Shaders see them
+    /// from this frame's passes on, whichever way the device uploads: through a transfer queue, the
+    /// frame waits for the copy. What's staged for a copy is freed once the frame has finished.
     ///
     /// # Panics
     ///
@@ -187,16 +196,16 @@ impl<'a> Frame<'a> {
         Ok(())
     }
 
-    /// Fills `texture` anew with the pixels of another image, `size` pixels across and down, with
-    /// the full chain of mip levels that [`mip_sizes`](crate::mip_sizes) gives if `mipmapped` and
-    /// otherwise one, packed as [`Frame::fill_texture`] takes them: in place of what it held,
-    /// whether or not a frame has filled or written it, in an image made for them, which keeps the
-    /// texture's index, so that shaders that sample it by its index see them in each of this
-    /// frame's passes, which all begin after it: the new image takes the texture's slot at once,
-    /// which a pass recorded before would sample too, as the frame is submitted, before its copy.
-    /// Frames before this one may still sample it, so it first waits for the GPU to finish them, a
-    /// frame's time at most: it's for an asset reloaded as its file changes, not for every frame.
-    /// The old image retires until this frame has finished.
+    /// Fills `texture` anew with the pixels of another image, in `format`, `size` pixels across
+    /// and down, with the full chain of mip levels that [`mip_sizes`](crate::mip_sizes) gives if
+    /// `mipmapped` and otherwise one, packed as [`Frame::fill_texture`] takes them: in place of
+    /// what it held, whether or not a frame has filled or written it, in an image made for them,
+    /// which keeps the texture's index, so that shaders that sample it by its index see them in
+    /// each of this frame's passes, which all begin after it: the new image takes the texture's
+    /// slot at once, which a pass recorded before would sample too, as the frame is submitted,
+    /// before its copy. Frames before this one may still sample it, so it first waits for the GPU
+    /// to finish them, a frame's time at most: it's for an asset reloaded as its file changes, not
+    /// for every frame. The old image retires until this frame has finished.
     ///
     /// # Panics
     ///
@@ -206,6 +215,7 @@ impl<'a> Frame<'a> {
     pub fn refill_texture(
         &mut self,
         texture: &mut Texture,
+        format: TextureFormat,
         size: [u32; 2],
         mipmapped: bool,
         pixels: &[u8],
@@ -220,15 +230,11 @@ impl<'a> Frame<'a> {
             .device
             .check_made("the texture refilled", texture.device());
         let [width, height] = size;
-        let levels = if mipmapped { usize::MAX } else { 1 };
-        let bytes: u64 = (crate::mip_sizes(width, height).take(levels))
-            .map(|[width, height]| u64::from(width) * u64::from(height) * 4)
-            .sum();
         // Before anything changes, so that the texture is never left unfilled.
         assert_eq!(
             pixels.len() as u64,
-            bytes,
-            "the pixels don't fill a {width}x{height} texture's levels"
+            format.bytes(size, mipmapped),
+            "the pixels don't fill a {width}x{height} texture's levels in {format:?}"
         );
         let before = self.frames.submitted;
         if before > 0 {
@@ -237,7 +243,7 @@ impl<'a> Frame<'a> {
         }
         // SAFETY: the GPU has finished every frame before this one, and this one, still recording,
         // takes the texture's slot as it's written.
-        unsafe { texture.remake(width, height, mipmapped) }?;
+        unsafe { texture.remake(width, height, format, mipmapped) }?;
         self.fill_texture(texture, pixels)
     }
 
@@ -434,9 +440,12 @@ impl<'a> Frame<'a> {
 /// The regions, the first `count` of them, of a copy of every level of `texture` from its pixels
 /// at `offset` in a buffer, packed a level after another, largest first. Each is a whole level,
 /// which any queue copies whatever its transfer granularity, AMD's 16 by 16 by 8 among them:
-/// Vulkan lets a copy that reaches the image's edges ignore it (`minImageTransferGranularity`).
-/// Each level's pixels start a multiple of 4 bytes after the staged ones, which start 16-byte
-/// aligned, as a queue for transfers alone needs (VUID-vkCmdCopyBufferToImage-commandBuffer-07737).
+/// Vulkan lets a copy that reaches the image's edges ignore it (`minImageTransferGranularity`),
+/// and lets a copy of a compressed image that reaches them end inside a block
+/// (VUID-vkCmdCopyBufferToImage-dstImage-00207 and -00208). Each level's pixels start a multiple
+/// of the format's texel block size after the staged ones, which start 16-byte aligned: 4 bytes
+/// for RGBA8 and 16 for BC7 (VUID-vkCmdCopyBufferToImage-dstImage-07975), where a queue for
+/// transfers alone needs only 4 (VUID-vkCmdCopyBufferToImage-commandBuffer-07737).
 fn level_regions(texture: &Texture, offset: u64) -> ([vk::BufferImageCopy; MAX_LEVELS], usize) {
     let mut regions = [vk::BufferImageCopy::default(); MAX_LEVELS];
     for ((level, (size, at)), region) in texture.levels().enumerate().zip(&mut regions) {
@@ -543,8 +552,8 @@ pub(super) struct Arena {
 }
 
 impl Arena {
-    /// Every upload starts at a multiple of this, which covers index buffers, texture copies, a
-    /// transfer queue's copies and the data types shaders read.
+    /// Every upload starts at a multiple of this, which covers index buffers, texture copies, BC7's
+    /// 16-byte blocks among them, a transfer queue's copies and the data types shaders read.
     const ALIGNMENT: u64 = 16;
 
     /// The arena of slot `slot`'s frames, whose first buffer holds 1 MiB.

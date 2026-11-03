@@ -547,9 +547,9 @@ fn live_recording() -> PathBuf {
 }
 
 /// The game's package, as `tools/cook` cooks it, holds what its runs load, but its mods: its scene,
-/// script, textures, model, sounds and music as they are, its font baked and its shader compiled,
-/// its assets by their IDs; and the live recording replays from it to its hashes, as a build
-/// without `dev` runs from it.
+/// script, sounds and music as they are, its texture compressed, its model cooked, its font baked
+/// and its shader compiled, its assets by their IDs; and the live recording replays from it to its
+/// hashes, as a build without `dev` runs from it.
 #[test]
 fn the_live_recording_replays_from_the_games_package() {
     if std::env::var_os("GG_UPDATE_REFERENCES").is_some_and(|value| value == "1") {
@@ -564,7 +564,7 @@ fn the_live_recording_replays_from_the_games_package() {
         .collect();
     let expected = [
         ("fonts/Inter-Bold.ttf", Kind::Font, true),
-        ("models/crystal.gltf", Kind::File, true),
+        ("models/crystal.gltf", Kind::Model, true),
         ("music/match.ogg", Kind::File, false),
         ("scenes/arena.ron", Kind::File, false),
         ("scripts/spin.luau", Kind::File, false),
@@ -574,7 +574,7 @@ fn the_live_recording_replays_from_the_games_package() {
         ("sounds/dash.wav", Kind::File, false),
         ("sounds/focus.wav", Kind::File, false),
         ("sounds/win.wav", Kind::File, false),
-        ("textures/pillar.png", Kind::File, true),
+        ("textures/pillar.png", Kind::Texture, true),
     ];
     assert_eq!(held, expected);
     let text = fs::read_to_string(live_recording()).expect("the live recording");

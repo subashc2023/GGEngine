@@ -8,7 +8,10 @@ use gg_core::{Error, Result};
 use super::{UploadPath, has_bindless};
 use crate::capture;
 use crate::pipeline_cache::Identity;
-use crate::{DepthImage, Instance, MAX_TEXTURE_SIZE, REQUIRED_VERSION, Surface, Texture, Version};
+use crate::{
+    DepthImage, Instance, MAX_TEXTURE_SIZE, REQUIRED_VERSION, Surface, Texture, TextureFormat,
+    Version,
+};
 
 /// A GPU the loader found, and what keeps the engine from using it, if anything.
 pub(super) struct Candidate {
@@ -57,11 +60,12 @@ impl Candidate {
     ) -> Self {
         let raw = instance.raw();
         // SAFETY: the physical device came from this instance.
-        let (properties, memory, families) = unsafe {
+        let (properties, memory, families, core) = unsafe {
             (
                 raw.get_physical_device_properties(physical),
                 raw.get_physical_device_memory_properties(physical),
                 raw.get_physical_device_queue_family_properties(physical),
+                raw.get_physical_device_features(physical),
             )
         };
         let vulkan12 = (properties.api_version >= vk::API_VERSION_1_2).then(|| {
@@ -148,6 +152,16 @@ impl Candidate {
             Some("doesn't support the descriptor indexing that bindless textures need".to_owned())
         } else if !has_depth(instance, physical) {
             Some("can't render depth into D32_SFLOAT images".to_owned())
+        } else if core.texture_compression_bc != vk::TRUE {
+            // Games' cooked textures are BC7, so every device must take them. Unlike depth, this
+            // needs no query of the format's features: Vulkan requires the feature to give BC7
+            // images sampling, linear filtering and copies into them (the Features chapter's
+            // textureCompressionBC, and the Formats chapter's required format support).
+            Some(
+                "doesn't support BC texture compression (textureCompressionBC), which games' \
+                 cooked textures need"
+                    .to_owned(),
+            )
         } else {
             None
         };
@@ -206,7 +220,7 @@ impl Candidate {
                 "has no queue family for transfers apart from graphics"
             }
             UploadPath::HostImageCopy if self.host_copy == HostCopy::Unsupported => {
-                "can't write RGBA8 textures from the CPU"
+                "can't write every texture format from the CPU"
             }
             _ => return Ok(wanted),
         };
@@ -279,9 +293,9 @@ fn transfer_family(families: &[vk::QueueFamilyProperties]) -> Option<u32> {
 }
 
 /// Whether the device can write the engine's textures from the CPU, and at what cost: host image
-/// copy for both texture formats, at every size a texture has, into the shader-read-only layout
-/// the bindless set declares textures in. Nothing past the extension's name is queried unless
-/// the device lists the extension.
+/// copy for every texture format, BC7 among them, at every size a texture has, into the
+/// shader-read-only layout the bindless set declares textures in. Nothing past the extension's
+/// name is queried unless the device lists the extension.
 fn host_copy_support(
     instance: &Instance,
     physical: vk::PhysicalDevice,
@@ -313,8 +327,7 @@ fn host_copy_support(
         return HostCopy::Unsupported;
     }
     let mut free = true;
-    // Both texture formats.
-    for format in [vk::Format::R8G8B8A8_UNORM, vk::Format::R8G8B8A8_SRGB] {
+    for format in TextureFormat::ALL.map(TextureFormat::raw) {
         let mut format_features = vk::FormatProperties3::default();
         let mut properties = vk::FormatProperties2::default().push_next(&mut format_features);
         // SAFETY: as above; the third format properties are core in Vulkan 1.3.

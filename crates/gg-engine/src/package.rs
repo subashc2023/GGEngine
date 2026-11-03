@@ -1,13 +1,14 @@
 //! A game's package: the files under its project's asset root that its runs read, in one file,
 //! cooked where the engine would otherwise make something of them as they load, as a font's field
-//! or a shader's SPIR-V, which `tools/cook` writes and a build without `dev` runs from, as
+//! or a shader's SPIR-V, or where they draw faster cooked, as a texture compressed or a model's
+//! meshes optimized, which `tools/cook` writes and a build without `dev` runs from, as
 //! ARCHITECTURE.md's Project state says; and [`Files`], where a run reads them, its package or the
 //! disk.
 //!
 //! The format, every number little-endian:
 //!
 //! ```text
-//! header   32 bytes: "GGPK", the version (1), the number of entries, the string table's length,
+//! header   32 bytes: "GGPK", the version (2), the number of entries, the string table's length,
 //!          then the asset root's path and the start scene's, each from the project's directory,
 //!          as its manifest gives them, and each its start and length in the string table, the
 //!          start's 0 long for none
@@ -33,7 +34,7 @@ use gg_core::{Error, Result};
 use crate::dirs;
 
 const MAGIC: &[u8; 4] = b"GGPK";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const HEADER: usize = 32;
 const ENTRY: usize = 32;
 /// What each entry's data starts at a multiple of, so that data mapped into memory is aligned for
@@ -50,6 +51,14 @@ pub enum Kind {
     /// A game's shader, compiled to SPIR-V as
     /// [`Context::add_shader`](crate::Context::add_shader) compiles it.
     Shader,
+    /// A texture's PNG or JPEG, compressed to BC7 in KTX2, as
+    /// [`decode_ktx2`](crate::image::decode_ktx2) reads it, of the one level that
+    /// [`Context::add_texture`](crate::Context::add_texture) gives a texture.
+    Texture,
+    /// A model's glTF file and the files it names, read as
+    /// [`Context::add_model`](crate::Context::add_model) reads them, its meshes optimized and given
+    /// levels of detail and its images compressed, as gg-engine's `cooked` module says.
+    Model,
 }
 
 impl Kind {
@@ -58,6 +67,8 @@ impl Kind {
             Self::File => 0,
             Self::Font => 1,
             Self::Shader => 2,
+            Self::Texture => 3,
+            Self::Model => 4,
         }
     }
 
@@ -66,6 +77,8 @@ impl Kind {
             0 => Self::File,
             1 => Self::Font,
             2 => Self::Shader,
+            3 => Self::Texture,
+            4 => Self::Model,
             _ => return None,
         })
     }
@@ -76,6 +89,8 @@ impl Kind {
             Self::File => "a file",
             Self::Font => "a baked font",
             Self::Shader => "a compiled shader",
+            Self::Texture => "a compressed texture",
+            Self::Model => "a cooked model",
         }
     }
 }
@@ -656,7 +671,7 @@ mod tests {
         magic[0] = b'X';
         cases.push(("magic", magic));
         let mut version = good.clone();
-        version[4] = 2;
+        version[4] = VERSION as u8 + 1;
         cases.push(("version", version));
         cases.push(("short", good[..HEADER + ENTRY].to_vec()));
         // The second entry's ID made the first's.

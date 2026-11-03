@@ -15,7 +15,8 @@ use crate::{
 /// before it is nearer: meshes, each with a shader for its vertex type, the parameters that shader
 /// takes, and where it is in the world. Each run of consecutive draws of one mesh with one shader
 /// that draw the same [`Faces`] renders as one instanced draw, whatever their transforms, IDs and
-/// parameters, a texture among them: every draw draws both faces of its mesh's triangles but a
+/// parameters, a texture among them, or, of a mesh with levels of detail, as one for each level its
+/// instances draw at: every draw draws both faces of its mesh's triangles but a
 /// material's that isn't double-sided. Each draw has an ID, a 64-bit number that the view writes
 /// where it shows, which [picks](crate::Pick) read back: what the engine gives it, an entity's ID
 /// for a draw of the world's; 0 for a draw of no entity, as [`push`](Self::push),

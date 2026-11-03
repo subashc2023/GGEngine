@@ -17,6 +17,7 @@ gg-renderer.workspace = true
 harfrust.workspace = true
 image.workspace = true
 kira.workspace = true
+ktx2.workspace = true
 mlua.workspace = true
 png.workspace = true
 rapier2d.workspace = true
@@ -31,6 +32,7 @@ subsecond = { workspace = true, optional = true }
 symphonia.workspace = true
 tracing.workspace = true
 winit.workspace = true
+zstd.workspace = true
 zune-jpeg.workspace = true
 
 # Hot reload's tests wait for the warnings its thread logs.

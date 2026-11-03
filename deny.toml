@@ -37,6 +37,10 @@ deny = [
     { crate = "mlua", wrappers = ["gg-engine"], reason = "gg-engine's script module runs Luau, alike on every platform" },
     { crate = "mlua-sys", wrappers = ["mlua"], reason = "gg-engine's script module runs Luau, through mlua" },
     { crate = "luau0-src", wrappers = ["mlua-sys"], reason = "gg-engine's script module runs Luau, through mlua" },
+    { crate = "ctt", wrappers = ["cook"], reason = "the cooker compresses games' textures, which runs read compressed" },
+    { crate = "meshopt", wrappers = ["cook"], reason = "the cooker optimizes games' meshes, which runs draw as cooked" },
+    { crate = "ktx2", wrappers = ["gg-engine", "ctt"], reason = "gg-engine's image module reads the KTX2 that ctt writes for the cooker" },
+    { crate = "zstd", wrappers = ["gg-engine", "ctt"], reason = "gg-engine's image module decompresses the KTX2 that ctt supercompresses for the cooker" },
     { crate = "tracy-client", wrappers = ["gg-core"], reason = "gg-core's profile module is the way into Tracy" },
     { crate = "tracy-client-sys", wrappers = ["tracy-client", "gg-core"], reason = "gg-core's profile module is the way into Tracy" },
 ]

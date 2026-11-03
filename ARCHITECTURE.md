@@ -113,8 +113,10 @@ The editor uses `gg-api` too, beside `gg-engine`, as a client of the tool API, a
   game builds its own player.
 - **`tools/gg`:** the command-line tool, a client of the tool API, which `cargo gg` runs.
 - **`tools/cook`:** the offline asset cooker, `gg-cook`, which writes a game's
-  [package](#project-state) from its project. It depends on `gg-engine`, whose code bakes fonts and
-  compiles shaders as runs do, and on `gg-api`, for the manifest and the scan of the asset root.
+  [package](#project-state) from its project. It depends on `gg-engine`, whose code bakes fonts,
+  compiles shaders, decodes images, reads models and makes mip levels as runs do and writes and
+  reads the package's formats; on `gg-api`, for the manifest and the scan of the asset root; and
+  on `ctt` and `meshopt`, which compress textures and optimize meshes, which runs don't.
 
 Games depend on `gg-engine` the same way the apps do; see [Game code](#game-code). The first, in
 `games/shards`, is a demo of two players, alone or networked in lockstep, as
@@ -417,12 +419,20 @@ A project's state is text that people and agents edit, diff and merge with ordin
   It holds the files under the asset root that runs load, by their paths from the root, found
   through the folders the scan of ID files below goes through: a font
   baked into its field and a shader compiled to SPIR-V, which are what the engine makes of them as
-  they load, so that a shipping run needs no slangc; and the rest as they are, textures, sounds and
-  music, scenes and other RON, scripts, and models with the files they name. It leaves out the
+  they load, so that a shipping run needs no slangc; a texture compressed to BC7, of the one level
+  a layer's texture has, in KTX2, supercompressed by zstd; a model as the engine reads it, with
+  the files it names, each primitive's triangles optimized by meshoptimizer for the GPU's vertex
+  cache, overdraw and fetches, but those of a material that blends, which cover each other in
+  their order and keep it, with levels of detail it simplified, each about half the triangles
+  of the one before, and each image compressed to BC7 with the full chain of mip levels a run makes
+  for it, made as a run makes them, so that a run neither decodes PNGs nor makes levels; and the
+  rest as they are, sounds and music, scenes and other RON, and scripts. It leaves out the
   manifest, mods' folders, whose scripts a player installs, a module that shaders include rather
-  than one that compiles alone, and what no run loads, as code and docs, by its extension. Which of
+  than one that compiles alone, and what no run loads, as code and docs, by its extension, a
+  model's buffers among them, which its model holds. Which of
   the rest a game's code loads the cooker can't know, but it refuses a project whose package
-  wouldn't hold its start scene (`cook.no_start`). It gives
+  wouldn't hold its start scene (`cook.no_start`), and, as it takes every PNG and JPEG under the
+  root for a texture, one of them that doesn't load as a texture (`engine.bad_texture`). It gives
   each asset the ID its ID file holds, and the cooker refuses a project whose ID files a development
   run would warn of (`asset.bad_meta`, `asset.meta_case`, `asset.duplicate_id`), so that a run from
   the package names its assets as a development run does, and replays what one recorded to every
@@ -1072,7 +1082,8 @@ frame's ticks and the layers' updates, the engine draws the world's entities tha
 and a sprite, a circle, a `Text` or a `MeshDraw`, a mesh with its shader and parameters held without
 their types, after what the layers drew, children where their ancestors carry them: first the
 meshes whose shaders are opaque, whose depth hides what's behind them whatever order they draw in,
-by shader, then mesh, so that each mesh with each shader is one instanced draw, and their z's never
+by shader, then mesh, so that each mesh with each shader is one instanced draw, or one for each of
+its levels of detail drawn, and their z's never
 sort them; then what blends, back to front by their z's in the world, those at one z drawing
 sprites, then circles, then text, under meshes; each batch and each z in the order of their IDs,
 which overlapping entities keep as others come and go. World z orders what blends rightly as seen
@@ -1180,13 +1191,16 @@ A game's texture is a PNG or a JPEG that the engine decodes as a layer adds it, 
 as [Project state](#project-state) says, to RGBA8 with colors sRGB-encoded and alpha not multiplied
 into them, as images store them, whatever color profile or gamma the file holds, as glTF requires;
 the next frame that renders copies it into GPU memory, where it stays, and shaders sample its colors
-decoded to linear. The engine reads a texture, a model, a
+decoded to linear. A run from a game's package reads it as the cooker compressed it instead, BC7 of
+those colors, which stays compressed in GPU memory, a quarter of RGBA8's size, and which the GPU
+decodes as shaders sample it. The engine reads a texture, a model, a
 scene, a layout or the pipeline cache only from a regular file, so that a FIFO or a device can
 neither hang the read nor fill memory; `--replay` alone reads its recording from whatever it's
 given, so that it can come through a pipe. A texture's handle is its index in the bindless set,
 which a draw's parameters carry as it is and the shader samples by, with one of the engine's
 samplers, which it picks by its index too. A model's textures have their full chains of mip levels,
-which the CPU makes as the frame that copies them renders, until they're cooked. A layer that adds a
+which the CPU makes as the frame that copies them renders, or, from a package, the cooker made the
+same way. A layer that adds a
 file again, by whatever form of its path, as a texture or a sprite sheet, a model, or a shader of
 the same vertex and parameter types and blend, gets what the first add made, the file loaded once,
 as the OS resolves `.`, `..`, links and, where names ignore it, case; a texture keeps the path it
@@ -1237,8 +1251,9 @@ plane, where depth is 1, which every depth test passes, so that each of its draw
 before it.
 
 Text is drawn from fonts' fields, which `Context::add_font` bakes as a TrueType or OpenType font
-loads, or the engine as text names one, until Phase 10 cooks them: a texture of data, which shaders
-read as stored rather than decoded from sRGB, holding a multi-channel signed distance field of each
+loads, or the engine as text names one, or the cooker into a game's package: a texture of data,
+which shaders read as stored rather than decoded from sRGB, holding a multi-channel signed distance
+field of each
 glyph of the characters Windows-1252 prints that the font has, and of its `.notdef`, which draws in
 place of any other character but whitespace and controls, 48 texels to an em, its distances
 reaching 4 texels either side of each glyph's edge, and in its alpha the true distance, which
@@ -1289,6 +1304,16 @@ and the engine decorates as non-uniform the sampled images slangc makes of them,
 Nothing caps a run: the frame's memory grows to hold it, where a renderer with a buffer of fixed
 size would draw what it holds and start another. The renderer counts each frame's draws, instances
 and triangles; the Performance panel shows them and `engine.perf` logs their peaks.
+
+A mesh may have levels of detail, as a cooked model's primitives do: ranges of its one index buffer,
+finest first, each with how far its surface strays from the finest's, in the mesh's own units, and
+a sphere round its vertices. Each draw of it draws the coarsest level whose error, grown by its
+transform's longest axis, spans no more than a pixel of the view where the sphere comes nearest the
+camera, which the clip space's w there gives, a rigid view keeping the pixels a unit spans; a draw
+whose sphere reaches the camera's plane draws the finest. The render thread picks each draw's level
+as it records the frame. A run of a mesh with levels draws once for each level its draws picked,
+each level's draws gathered, if its shader is opaque, whose depth makes their order moot, and once
+for each stretch of draws in a row at one level, keeping their order, if it blends.
 
 An error while rendering ends the renderer, since a failed frame can leave meshes and textures
 half copied to the GPU. A game's shader compiled again whose new pipeline can't be made doesn't:
@@ -1354,9 +1379,10 @@ on the main thread.
 ## Platforms
 
 - **Vulkan 1.4, bleeding edge.** The engine requires a Vulkan 1.4 device, with the descriptor
-  indexing bindless textures need and depth in 32-bit floats, which Vulkan doesn't require but
-  every target has, and takes up newer features as drivers ship them, with a fallback wherever a
-  target lacks one.
+  indexing bindless textures need, depth in 32-bit floats, and BC texture compression, which
+  games' cooked textures are in, none of which Vulkan requires but every target has, and takes up
+  newer features as drivers ship them, with a fallback wherever a target lacks one. Phones, which
+  have ASTC rather than BC, would take a cook of their own.
 - **Windows and Linux:** native Vulkan drivers.
 - **macOS: KosmicKrisp,** LunarG's Vulkan 1.4 driver on Metal. It needs Apple Silicon and macOS 26
   or later. Not MoltenVK, which Khronos deprecated. KosmicKrisp has no mesh shaders or ray tracing,
@@ -1387,7 +1413,7 @@ on the main thread.
 | Frame captures | RenderDoc, through its in-application API, which `gg-gpu` finds in the process with `libloading` |
 | Agent access | MCP and a command-line tool, both clients of the [tool API](#agents-and-tools) |
 | Shaders | Slang, compiled to SPIR-V by the Vulkan SDK's `slangc` rather than linked in: the engine's own as it builds, games' as development builds add them and as their files change, and by the cooker into a game's package, their SPIR-V checked against the shader contract |
-| Assets | A game's package, a file of the engine's own format that its shipping build reads at offsets; glTF 2.0 in, read by the engine over `serde_json`; meshoptimizer for meshes and meshlets; BC-compressed textures in KTX2; until the cooker compresses textures, PNGs and JPEGs that `png` and `zune-jpeg` decode as layers add them |
+| Assets | A game's package, a file of the engine's own format that its shipping build reads at offsets; glTF 2.0 in, read by the engine over `serde_json`; PNGs and JPEGs that `png` and `zune-jpeg` decode as development runs add them; textures cooked to BC7 in KTX2, its levels supercompressed by zstd, by bc7enc_rdo's perceptual encoder through `ctt`, and read by runs through `ktx2` and `zstd`; meshoptimizer, through `meshopt`, for the cooker's meshes and their levels of detail, and for meshlets |
 | Text | TrueType and OpenType fonts, whose outlines `skrifa` reads and `fdsm` bakes into multi-channel signed distance fields, as development builds load fonts and as the cooker cooks them; text shaped by `harfrust`; `skrifa` and `harfrust` at the releases egui's own text takes |
 | Audio | `kira` on `cpal`, its sounds and music decoded by `symphonia` through decoders of the engine's: tracks as buses, panning and streaming, without allocating on the audio thread |
 

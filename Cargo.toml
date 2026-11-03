@@ -18,8 +18,18 @@ cook = { path = "tools/cook" }
 
 ash = "0.38.0"
 ash-window = "0.13.0"
+# Decodes BC7 on the CPU, as GPUs do, for the cooker's tests of what it compressed: bcdec's port, in
+# safe Rust alone.
+bcdec_rs = "0.2.1"
 bytemuck = "1.25.2"
 cc = "1.9.0"
+# The cooker's BC7 encoding of games' textures, into KTX2 supercompressed with zstd: bc7enc_rdo's
+# perceptual encoder alone, as ISPC objects the crate ships built for each OS and architecture CI
+# builds on, so that no ISPC compiler is needed. Runs read what it writes with ktx2 and zstd.
+ctt = { version = "0.6.1", default-features = false, features = [
+    "encoder-bc7enc",
+    "ispc-prebuilt",
+] }
 egui = { version = "0.37.0", features = ["default_fonts"] }
 # Without its default `links`, which opens a clicked link in the browser: no UI shows one.
 egui-winit = { version = "0.37.0", default-features = false, features = [
@@ -59,12 +69,18 @@ kira = { version = "0.12.6", default-features = false, features = [
     "vorbis",
     "wav",
 ] }
+# Reads the KTX2 files a game's package holds its textures in, which ctt writes as the cooker cooks
+# them.
+ktx2 = "0.5.0"
 # Finds RenderDoc's library in the process, for captures. ash's version, so that the two build
 # once.
 libloading = "0.8.9"
 # The float functions std leaves to the platform, in Rust and so the same everywhere: musl's,
 # ported. Its default `arch` feature puts only what IEEE makes exact, such as sqrt, on hardware.
 libm = "0.2.16"
+# The cooker's meshes: their triangles ordered for the GPU's caches, and their levels of detail.
+# meshoptimizer 1.3's C++, which needs a C++ compiler, as VMA and Luau do.
+meshopt = "0.7.0"
 # Luau, for games' scripts: its VM and compiler, built from luau0-src's C++, which needs a C++
 # compiler, as VMA does. luau-vector4, so that a quaternion crosses into a script as a vector, by
 # value. Without luau-jit, whose native code nothing checks for the same bits on every platform, and
@@ -142,6 +158,10 @@ tracy-client-sys = { version = "=0.30.1", default-features = false }
 # winit's version, so that the two build once.
 windows-sys = "0.52.0"
 winit = "0.30.13"
+# Decompresses the levels of a game's package's textures, which the cooker supercompresses through
+# ctt, whose version this is. Without its defaults, zstd's legacy formats and dictionary building,
+# which runs need neither of.
+zstd = { version = "0.14.3", default-features = false }
 # JPEGs, as textures and models' images may be: a decoder in Rust alone, the image crate's.
 zune-jpeg = "0.5.15"
 
