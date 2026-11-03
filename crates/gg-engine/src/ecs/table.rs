@@ -3,13 +3,16 @@
 //! world needs no unsafe code; and the component types a world has seen, described to reflection.
 
 use std::any::{Any, TypeId, type_name};
+use std::borrow::Cow;
 use std::collections::HashMap;
-use std::mem;
+use std::sync::Arc;
+use std::{iter, mem};
 
 use gg_core::{Error, Result};
 
+use super::declared::{self, Declared, Kind, is_identifier};
 use super::{Component, Entity, World, hash};
-use crate::reflect::{Ident, Reflect, Shape, Type, TypeIndex, Types, Value};
+use crate::reflect::{self, Ident, Meta, Reflect, Shape, Type, TypeIndex, TypeInfo, Types, Value};
 
 /// A component type's index among those a world has seen, in the order it first saw them: the
 /// world's own, which never leaves it.
@@ -41,7 +44,15 @@ struct Info {
     /// Its exclusive field's name, as [`Component::exclusive`] gives it.
     exclusive: Option<&'static str>,
     /// Makes an empty column of the type, for a new table.
-    new_column: fn() -> Box<dyn AnyColumn>,
+    new_column: NewColumn,
+}
+
+/// How an empty column of a component type is made: a Rust type's `Vec`, or a declared type's
+/// slots.
+#[derive(Clone)]
+enum NewColumn {
+    Rust(fn() -> Box<dyn AnyColumn>),
+    Declared(Arc<Declared>),
 }
 
 impl Components {
@@ -109,11 +120,115 @@ impl Components {
             name: name.clone(),
             index,
             exclusive,
-            new_column: || Box::new(Vec::<T>::new()),
+            new_column: NewColumn::Rust(|| Box::new(Vec::<T>::new())),
         });
         self.ids.insert(TypeId::of::<T>(), id);
         self.by_name.insert(name, id);
         Ok(id)
+    }
+
+    /// Declares a component type that a script declares, which no Rust type is: a struct named
+    /// `name`, of `fields`, in their order, each a name, a kind and a default, which its
+    /// description gives, and with `doc` for its doc. Checks everything before it records anything,
+    /// so that a type refused leaves its name free.
+    ///
+    /// Fails with `reflect.name_taken` if a type has `name` already; `reflect.bad_name` for a name,
+    /// the type's or a field's, that isn't an identifier, or a field's given twice; and
+    /// `reflect.bad_default` for a default its kind refuses, or a number that isn't finite.
+    pub fn declare(
+        &mut self,
+        name: &str,
+        doc: &str,
+        fields: Vec<(Ident, Kind, Value)>,
+    ) -> Result<ComponentId> {
+        if let Some(index) = self.types.find(name) {
+            let what = match self.by_name.get(name) {
+                Some(_) => "a component type",
+                None => "a type of fields",
+            };
+            let (_, rust) = self.types.rust_type(index);
+            return Err(Error::new(
+                "reflect.name_taken",
+                format!("`{name}` names {what} already, {rust}, but each type's name is its own"),
+            ));
+        }
+        let names = iter::once(name).chain(fields.iter().map(|(field, ..)| &**field));
+        if let Some(bad) = names.clone().find(|name| !is_identifier(name)) {
+            return Err(Error::new(
+                "reflect.bad_name",
+                format!(
+                    "`{bad}` isn't an identifier: a letter or `_`, then letters, digits or `_`"
+                ),
+            ));
+        }
+        for (i, (field, ..)) in fields.iter().enumerate() {
+            if fields[..i].iter().any(|(other, ..)| other == field) {
+                return Err(Error::new(
+                    "reflect.bad_name",
+                    format!("`{name}` has two fields named `{field}`, but each field's is its own"),
+                ));
+            }
+        }
+        for (field, kind, default) in &fields {
+            let refused = |what: &dyn std::fmt::Display| {
+                Error::new(
+                    "reflect.bad_default",
+                    format!("`{name}`'s field `{field}` defaults to a value it refuses: {what}"),
+                )
+            };
+            kind.slot(default)
+                .map_err(|error| refused(&reflect::located(&error).1))?;
+            // So that a default compares equal to itself, as a reload compares them.
+            let finite = match default {
+                Value::F64(x) => x.is_finite(),
+                Value::Vec3(v) => v.is_finite(),
+                _ => true,
+            };
+            if !finite {
+                return Err(refused(&"a number that isn't finite"));
+            }
+        }
+        let name: Ident = Cow::Owned(name.to_owned());
+        let declared = Arc::new(Declared {
+            name: name.clone(),
+            fields: fields
+                .iter()
+                .map(|(field, kind, _)| (field.clone(), *kind))
+                .collect(),
+        });
+        let index = self.types.declare(TypeInfo {
+            name: name.clone(),
+            doc: Cow::Owned(doc.to_owned()),
+            shape: Shape::Struct {
+                fields: (fields.into_iter())
+                    .map(|(name, kind, default)| reflect::Field {
+                        name,
+                        ty: kind.ty(),
+                        meta: Meta::default(),
+                        default: Some(default),
+                    })
+                    .collect(),
+                tuple: false,
+            },
+        });
+        let id = ComponentId(u32::try_from(self.infos.len()).expect("fewer than 2^32 types"));
+        self.infos.push(Info {
+            key: hash::type_key(&name),
+            name: name.clone(),
+            index,
+            exclusive: None,
+            new_column: NewColumn::Declared(declared),
+        });
+        self.by_name.insert(name, id);
+        Ok(id)
+    }
+
+    /// The fields of declared type `id`, its names and kinds; `None` if it's a Rust type.
+    pub fn declared(&self, id: ComponentId) -> Option<&Arc<Declared>> {
+        match &self.infos[id.0 as usize].new_column {
+            NewColumn::Declared(declared) => Some(declared),
+            NewColumn::Rust(_) => None,
+        }
     }
 
     /// `T`'s id, as [`register`](Self::register) gives it.
@@ -158,7 +273,10 @@ impl Components {
 
     /// An empty column of its type.
     pub fn new_column(&self, id: ComponentId) -> Box<dyn AnyColumn> {
-        (self.infos[id.0 as usize].new_column)()
+        match &self.infos[id.0 as usize].new_column {
+            NewColumn::Rust(new) => new(),
+            NewColumn::Declared(declared) => Box::new(declared::Column::new(declared)),
+        }
     }
 
     /// Its type, as reflection describes it.
@@ -193,7 +311,7 @@ impl Table {
     pub(super) fn new(signature: &[ComponentId], components: &Components) -> Self {
         let columns = signature
             .iter()
-            .map(|&id| (components.infos[id.0 as usize].new_column)())
+            .map(|&id| components.new_column(id))
             .collect();
         Self {
             components: signature.into(),
@@ -287,10 +405,20 @@ pub trait AnyColumn: Any + Send + Sync {
     /// its place.
     fn move_row(&mut self, row: usize, to: &mut dyn AnyColumn);
 
-    /// `row`'s value, for reflection.
-    fn row(&self, row: usize) -> &dyn Reflect;
+    /// `row`'s value, as reflection reads it.
+    fn value(&self, row: usize) -> Value;
 
-    fn row_mut(&mut self, row: usize) -> &mut dyn Reflect;
+    /// Part `index` of `row`'s value, as [`Reflect::part`] finds it: a field, of a component.
+    /// What reflection reaches of a row starts here, as a declared type's row is no Rust value.
+    fn part(&self, row: usize, index: u32) -> Option<&dyn Reflect>;
+
+    fn part_mut(&mut self, row: usize, index: u32) -> Option<&mut dyn Reflect>;
+
+    /// Sets `row`'s value whole, as [`Reflect::set_value`] does.
+    fn set_value(&mut self, row: usize, value: &Value) -> Result<()>;
+
+    /// Calls `each` with each entity `row`'s value holds, as [`Reflect::entities_mut`] does.
+    fn entities_mut(&mut self, row: usize, each: &mut dyn FnMut(&mut Entity));
 
     /// Pushes the component `value` makes, as a scene's is made: on its type's
     /// [`base`](Component::base), if it has one.
@@ -335,12 +463,24 @@ impl<T: Component> AnyColumn for Vec<T> {
         to.vec_mut::<T>().push(value);
     }
 
-    fn row(&self, row: usize) -> &dyn Reflect {
-        &self[row]
+    fn value(&self, row: usize) -> Value {
+        self[row].to_value()
     }
 
-    fn row_mut(&mut self, row: usize) -> &mut dyn Reflect {
-        &mut self[row]
+    fn part(&self, row: usize, index: u32) -> Option<&dyn Reflect> {
+        self[row].part(index)
+    }
+
+    fn part_mut(&mut self, row: usize, index: u32) -> Option<&mut dyn Reflect> {
+        self[row].part_mut(index)
+    }
+
+    fn set_value(&mut self, row: usize, value: &Value) -> Result<()> {
+        self[row].set_value(value)
+    }
+
+    fn entities_mut(&mut self, row: usize, each: &mut dyn FnMut(&mut Entity)) {
+        self[row].entities_mut(each);
     }
 
     fn push_value(&mut self, value: &Value) -> Result<()> {

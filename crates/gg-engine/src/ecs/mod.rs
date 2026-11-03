@@ -7,6 +7,7 @@
 //! worlds apart, field by field; and resources, what a world holds beside its entities.
 
 mod by_name;
+mod declared;
 mod diff;
 mod file;
 mod hash;
@@ -34,6 +35,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use gg_core::{Error, Result};
 
 pub use by_name::Entities;
+pub use declared::Kind;
 pub use diff::Difference;
 #[cfg(feature = "dev")]
 pub(crate) use diff::SceneEdit;
@@ -161,6 +163,20 @@ impl Entity {
     /// Its slot, which no other living entity has, as an index.
     pub(crate) fn slot(self) -> usize {
         self.index as usize
+    }
+
+    /// It as 64 bits, its slot the low 32, which no entity gives as 0 in the high 32, as its
+    /// generation is never 0: as a script holds it.
+    pub(crate) fn to_bits(self) -> u64 {
+        u64::from(self.generation.get()) << 32 | u64::from(self.index)
+    }
+
+    /// The entity whose [`to_bits`](Self::to_bits) are `bits`; `None` if no entity's are.
+    pub(crate) fn from_bits(bits: u64) -> Option<Self> {
+        Some(Self {
+            index: bits as u32,
+            generation: NonZeroU32::new((bits >> 32) as u32)?,
+        })
     }
 }
 

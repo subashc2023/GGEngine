@@ -875,7 +875,7 @@ impl World {
             let table = &mut self.tables[at.table as usize];
             let columns = table.components.iter().zip(&mut table.columns);
             for (_, column) in columns.filter(|&(&component, _)| component != parent_id) {
-                column.row_mut(at.row as usize).entities_mut(&mut retarget);
+                column.entities_mut(at.row as usize, &mut retarget);
             }
             let components = self.tables[at.table as usize].components.clone();
             for component in components.into_iter().filter(|&id| id != parent_id) {

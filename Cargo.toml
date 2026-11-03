@@ -64,6 +64,12 @@ libloading = "0.8.9"
 # The float functions std leaves to the platform, in Rust and so the same everywhere: musl's,
 # ported. Its default `arch` feature puts only what IEEE makes exact, such as sqrt, on hardware.
 libm = "0.2.16"
+# Luau, for games' scripts: its VM and compiler, built from luau0-src's C++, which needs a C++
+# compiler, as VMA does. luau-vector4, so that a quaternion crosses into a script as a vector, by
+# value. Without luau-jit, whose native code nothing checks for the same bits on every platform, and
+# without send, as the VM stays on the ticks' thread. Luau's C++ fuses no multiplications into
+# additions, as .cargo/config.toml has it built.
+mlua = { version = "0.12.2", features = ["luau", "luau-vector4"] }
 nu-ansi-term = "0.50.3"
 png = "0.18.1"
 proc-macro2 = "1.0.107"

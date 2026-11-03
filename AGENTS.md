@@ -55,11 +55,11 @@ cargo gg run --peers 2            # in games/shards, its project: a lockstep hos
 cargo gg new <NAME>               # a new game, games/NAME, a project with an empty start scene
 ```
 
-Building needs a C++ compiler, for the Vulkan Memory Allocator, and `slangc` for the shaders: the
-one `SLANGC` names, else the Vulkan SDK's, else the first on the `PATH`. Games' shaders compile
-with that slangc as they run, so it stays where the build found it. On Linux, gamepads and sound
-need pkg-config, libudev's headers and ALSA's too: `pkgconf`, `libudev-dev` and `libasound2-dev` on
-Debian or Ubuntu.
+Building needs a C++ compiler, for the Vulkan Memory Allocator and Luau, and `slangc` for the
+shaders: the one `SLANGC` names, else the Vulkan SDK's, else the first on the `PATH`. Games' shaders
+compile with that slangc as they run, so it stays where the build found it. On Linux, gamepads and
+sound need pkg-config, libudev's headers and ALSA's too: `pkgconf`, `libudev-dev` and
+`libasound2-dev` on Debian or Ubuntu.
 
 Each run writes a JSON log and logs its path as it starts; filter it on `level`, `code` or
 `vuid`. `RUST_LOG` sets what's logged: `RUST_LOG=gg_gpu=trace` adds gg-gpu's trace events to the
@@ -86,17 +86,17 @@ there. renderdoccmd exits 0 whatever the run does, so read the run's log. `rende
 <capture> -c xml -o <capture>.xml` writes the capture as XML, every object's name
 (`vkSetDebugUtilsObjectNameEXT`) and pass's label (`vkCmdBeginDebugUtilsLabelEXT`) among it.
 
-Development builds (gg-engine's `dev`, the apps' and the games') serve the tool API, apply a
-scene file a layer loaded with `Context::load_scene_file` as it's saved, and, serving the API,
-reload a game's shaders, textures, models, fonts, sounds and music as their files change (`Shader
-reloaded`, `Texture reloaded`, `Model reloaded`, `Font reloaded`, `Sound reloaded`, `Music
-reloaded`), warning at a change that fails. Windowed and embedded runs play sound, which an agent
-can't hear: each sound or music started logs `Sound started` or `Music started` at the debug level.
-Run a game under `cargo gg run`, in the background: it patches in an edit inside function bodies
-as it's saved, with Dioxus's `dx` of the root Cargo.toml's `subsecond` release (`gg` names its
-install), and restarts it from a snapshot after any other change, a crash or a hang (without `dx`,
-after a `cargo build`). `cargo gg status`, `capture` (a PNG), `set`, `undo`, `logs --follow` and
-the rest answer in JSON; `cargo gg mcp` serves them over MCP. A layer's `load` makes its assets;
+Development builds (gg-engine's `dev`, the apps' and the games') serve the tool API, apply a scene
+file or script a layer loaded (`Context::load_scene_file`, `Scripts::load`) as it's saved, and,
+serving the API, reload a game's shaders, textures, models, fonts, sounds and music as their files
+change (`Shader reloaded`, `Texture reloaded`, `Model reloaded`, `Font reloaded`, `Sound reloaded`,
+`Music reloaded`), warning at a change that fails. Windowed and embedded runs play sound, which an
+agent can't hear: each sound or music started logs `Sound started` or `Music started` at the debug
+level. Run a game under `cargo gg run`, in the background: it patches in an edit inside function
+bodies as it's saved, with Dioxus's `dx` of the root Cargo.toml's `subsecond` release (`gg` names
+its install), and restarts it from a snapshot after any other change, a crash or a hang (without
+`dx`, after a `cargo build`). `cargo gg status`, `capture` (a PNG), `set`, `undo`, `logs --follow`
+and the rest answer in JSON; `cargo gg mcp` serves them over MCP. A layer's `load` makes its assets;
 its `attach`, which a restart skips, builds the world, so an edit to it shows only in a run started
 afresh; a patch or a rebuild that fails, and such an edit, warn in its log (`gg.patch_failed`,
 `gg.rebuild_failed`, `gg.attach_changed`). Test `dev` with `--features dev -p gg-engine`.
@@ -119,8 +119,8 @@ Without a GPU, lavapipe serves: on Debian or Ubuntu, `mesa-vulkan-drivers` (Mesa
 wrote its own; after an intended change, `GG_UPDATE_REFERENCES=1` rewrites the references, which you
 look at before committing them. The sandbox's and the demo's world hashes, at each tick of a seeded
 run, are references too, which CI checks on every platform: a change to their simulations, to what
-the hash reads, or to glam, libm or rapier2d changes them, and `GG_UPDATE_REFERENCES=1 cargo test -p
-sandbox -p shards` rewrites them alone, with those of the demo's live recording,
+the hash reads, or to glam, libm, rapier2d or Luau changes them, and `GG_UPDATE_REFERENCES=1 cargo
+test -p sandbox -p shards` rewrites them alone, with those of the demo's live recording,
 `games/shards/tests/references/live.recording`. gg-engine's `physics.rs` holds another, edited by
 hand. A difference on some platforms only is a bug, not a reference to rewrite. Some changes need a
 new recording, not its hashes rewritten: [the demo's AGENTS.md](games/shards/AGENTS.md) says which.

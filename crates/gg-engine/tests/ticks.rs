@@ -1,7 +1,8 @@
 //! Steady-state ticks allocate nothing, on any thread: a layer's ticks that apply its commands,
 //! run a system on the job system's threads and another on the ticks' thread alone, and hash the
 //! world, as a recorded run's do, once their first ticks have run, with scripts that despawn their
-//! own entities and spawn others in their place among them; before the job system's threads start,
+//! own entities and spawn others in their place among them, and a Luau script that moves its
+//! entities and counts its ticks in its own component; before the job system's threads start,
 //! as in a run on one thread, and after, once each thread has waited for jobs and slept, as it
 //! allocates the first time it does; and ticks that despawn entities and spawn others in their
 //! place, as a game's bullets and particles come and go.
@@ -19,11 +20,14 @@ use std::collections::VecDeque;
 use std::hint::black_box;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::thread;
 use std::time::{Duration, Instant};
+use std::{fs, process, thread};
 
 use gg_engine::math::Vec3;
-use gg_engine::{Component, Context, Entity, Layer, Script, Tick, Transform, World, run_scripts};
+use gg_engine::reflect::Value;
+use gg_engine::{
+    Component, Context, Entity, Layer, Script, Scripts, Tick, Transform, World, run_scripts,
+};
 
 use crate::common::Counted;
 
@@ -81,6 +85,23 @@ impl Script for Ephemeral {
     }
 }
 
+/// The entities a Luau script moves.
+const DRIFTERS: u32 = 256;
+
+/// Moves its entities along x, and counts its ticks in its own component.
+const DRIFT: &str = r#"
+local Transform = gg.component("Transform")
+local Drift = gg.declare("Drift", { speed = 1, ticks = 0 })
+
+function Drift.tick(entity, dt)
+    local x = entity[Drift.speed] * dt
+    entity[Transform.translation] = entity[Transform.translation] + vector.create(x, 0, 0)
+    entity[Drift.ticks] = entity[Drift.ticks] + 1
+end
+
+return Drift
+"#;
+
 enum Command {
     Speed(f32),
 }
@@ -98,13 +119,22 @@ fn on_a_worker() -> bool {
 
 /// 5,000 movers, in tables of six chunks between them, which each tick moves at its speed on the
 /// job system's threads, and whose heavy ones it turns back on the ticks' thread alone; and
-/// `EPHEMERA` scripted entities, whose scripts it runs.
+/// `EPHEMERA` scripted entities, and `DRIFTERS` that a Luau script moves, whose scripts it runs.
 struct Movers {
     commands: Vec<Command>,
     speed: f32,
+    scripts: Scripts,
 }
 
 impl Layer for Movers {
+    fn load(&mut self, cx: &mut Context) {
+        let path = std::env::temp_dir().join(format!("gg-ticks-{}.luau", process::id()));
+        fs::write(&path, DRIFT).expect("the script is written");
+        let loaded = self.scripts.load(cx, &path);
+        let _ = fs::remove_file(&path);
+        loaded.unwrap_or_else(|error| panic!("{error:#}"));
+    }
+
     fn attach(&mut self, cx: &mut Context) {
         let world = cx.world_mut();
         for i in 0..5_000 {
@@ -118,6 +148,10 @@ impl Layer for Movers {
         for i in 0..EPHEMERA {
             let left = i % LIFETIME + 1;
             world.spawn((Transform::default(), Ephemeral { left }));
+        }
+        for _ in 0..DRIFTERS {
+            let drifter = world.spawn(Transform::default());
+            world.add_default(drifter, "Drift").expect("a drifter");
         }
     }
 
@@ -140,6 +174,7 @@ impl Layer for Movers {
             velocity.0 = -velocity.0;
         }
         run_scripts::<Ephemeral>(world, tick);
+        self.scripts.run(world);
     }
 }
 
@@ -257,7 +292,9 @@ fn main() {
     let mut movers = Movers {
         commands: Vec::new(),
         speed: 1.0,
+        scripts: Scripts::new().expect("Luau starts"),
     };
+    movers.load(&mut cx);
     movers.attach(&mut cx);
     let mut number = 0;
     for threads in [1, 4] {
@@ -291,6 +328,11 @@ fn main() {
              system's other threads"
         );
     }
+    // The Luau script ran at every tick, its counts say.
+    let world = cx.world();
+    let drifter = world.entities(Some("Drift")).expect("declared").next();
+    let ran = world.get_field(drifter.expect("a drifter"), "Drift", "ticks");
+    assert_eq!(ran.expect("its count"), Value::F64(number as f64));
     workers_are_counted(cx.world_mut());
     println!("allocations on the job system's other threads count");
 

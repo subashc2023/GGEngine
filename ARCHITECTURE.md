@@ -210,11 +210,18 @@ makes; anyone else's game depends on the engine from its own repository.
   `attach`, which builds the world as a run starts afresh, is patched, but the world a run keeps,
   as its restarts start from snapshots, never shows it: `gg run` says so, having the game log
   `gg.attach_changed`, and a run started afresh shows it.
-- **Luau comes after v0.1, for mods and quick scripts.** Players can install sandboxed mods,
-  and quests, dialogue and level events reload in milliseconds. Scripts reach Rust components
-  through reflection, without hand-written bindings, and can declare components of their own.
-  Luau doesn't guard against crafted bytecode, so mods ship as source and only a game's own
-  packages hold bytecode.
+- **Luau, in every build, for mods and quick scripts.** Players can install sandboxed mods, and
+  quests, dialogue and level events reload in milliseconds. A script file declares one component:
+  its fields, with their defaults, and a tick run for each entity that has it, as a native
+  `Script`'s is; adding the component attaches the script. It reaches Rust components through
+  reflection, without hand-written bindings. A layer's `Scripts` loads its scripts from the
+  project's files in its `load` and runs them where its tick chooses; a development build reloads
+  one as it's saved, at a tick, through an edit that a recording keeps, as it keeps a scene file's
+  save, and that a lockstep peer, for now, refuses. A script keeps its state in its components, as a
+  game keeps its in the world, and its ticks don't allocate, as steady-state frames don't: the
+  engine's bindings allocate nothing, so a table, string or closure a script makes at each tick
+  breaks the rule as Rust code making one would. Luau doesn't guard against crafted bytecode, so
+  mods ship as source and only a game's own packages hold bytecode.
 
 ## Agents and tools
 
@@ -537,7 +544,9 @@ The world lives in our own ECS, built for what the tools, hot reload and multipl
 
 - **Reflection:** every component type, whether Rust or a Luau script declares it, is registered
   at runtime with a description of its fields. Saving, operations, the inspector, hot reload's
-  snapshots, network replication and Luau's bindings all work from it.
+  snapshots, network replication and Luau's bindings all work from it. A type a script declares
+  is stored flat in its tables' columns, as a Rust type is, so that a snapshot copies it without
+  allocating for each row.
 - **Snapshots:** the whole world can be saved and restored fast enough to take one every
   frame, for rollback and client-side prediction as well as hot reload.
 - **Commands:** nothing outside the simulation changes its state except a command applied at a
@@ -556,11 +565,13 @@ The world lives in our own ECS, built for what the tools, hot reload and multipl
   gives identical results on every platform, so lockstep games and rollback netcode stay in sync.
   So glam is built without SIMD and with libm's functions, for the whole build
   ([Cargo.toml](Cargo.toml)), and clippy refuses std's float methods whose precision is the
-  platform's ([clippy.toml](clippy.toml)), for `gg_core::math`'s. A recorded run hashes the world
-  once its layers attach and after every tick, so that its replay, on another machine or after a
-  change, finds the first tick where it goes another way. `World::difference` names the entity
-  and field where two worlds part in one process; across two machines, `--dump` writes the world
-  there a field a line, and the two dumps diff to them.
+  platform's ([clippy.toml](clippy.toml)), for `gg_core::math`'s. Luau's math is held to the same:
+  its functions whose precision is the platform's are libm's, and a script that uses `^`, which
+  calls the platform's `pow` past any hook, is refused. A recorded run hashes the world once its
+  layers attach and after every tick, so that its replay, on another machine or after a change,
+  finds the first tick where it goes another way. `World::difference` names the entity and field
+  where two worlds part in one process; across two machines, `--dump` writes the world there a
+  field a line, and the two dumps diff to them.
 
 The world is a `World` of entities and their components, in safe Rust. An entity is a handle,
 its slot and which use of the slot it is, so that a despawned entity's handle never names
@@ -1250,7 +1261,7 @@ on the main thread.
 | Area | Choice |
 |---|---|
 | Language | Rust stable, edition 2024 |
-| Game code | Rust; Luau through `mlua` after v0.1, for mods and quick scripts |
+| Game code | Rust; Luau through `mlua`, in every build, for mods and quick scripts |
 | Hot patching | `subsecond`, its patches built by Dioxus's `dx` of the same release, which `gg run` checks |
 | GPU API | Vulkan through `ash`: one backend, no multi-API abstraction layer |
 | GPU memory | VMA through our own binding in `gg-gpu`, for its budgets, aliasing, pools and defragmentation |

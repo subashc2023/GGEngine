@@ -1,3 +1,15 @@
 [alias]
 # `cargo gg <command>` builds and runs tools/gg, the command-line tool: `cargo gg help`.
 gg = "run --quiet --package gg --"
+
+# Luau's C++, which mlua builds through luau0-src and the cc crate, fusing no multiplication into an
+# addition, so that scripts give the same bits on every platform: neither Luau nor luau0-src says,
+# and GCC fuses by default, clang within an expression, wherever the CPU has fused instructions, as
+# every ARM64 one does. cc reads these for each target's C++, VMA's and Tracy's too, which lose
+# nothing by it. MSVC fuses none by default, as of Visual Studio 2022, but where Luau turns its
+# precise math off around `%` and `//`, which on ARM64 it may: the reference hashes, which CI checks
+# on Windows ARM64, would show it. A flag set in the environment takes the place of these.
+[env]
+CXXFLAGS_x86_64_unknown_linux_gnu = "-ffp-contract=off"
+CXXFLAGS_aarch64_unknown_linux_gnu = "-ffp-contract=off"
+CXXFLAGS_aarch64_apple_darwin = "-ffp-contract=off"

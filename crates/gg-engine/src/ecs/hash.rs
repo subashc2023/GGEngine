@@ -136,12 +136,23 @@ pub(super) fn type_key(name: &str) -> u64 {
 /// from its entity's ID, the key and what the value writes.
 pub(super) fn terms<T: Reflect>(values: &[T], rows: &[Entity], key: u64, world: &World) -> u64 {
     values.iter().zip(rows).fold(0, |sum, (value, &entity)| {
-        let id = world.id(entity).expect("a table's rows are alive");
-        let state = absorb(absorb(TERM, id.get()), key);
-        let mut to = Digest { state, world };
-        value.digest(&mut to);
-        sum.wrapping_add(to.state)
+        sum.wrapping_add(term(entity, key, world, |to| value.digest(to)))
     })
+}
+
+/// The term of the world's hash of `entity`'s component of the type whose key is `key`, whose
+/// value `digest` writes, as [`Reflect::digest`] does.
+pub(super) fn term(
+    entity: Entity,
+    key: u64,
+    world: &World,
+    digest: impl FnOnce(&mut Digest<'_>),
+) -> u64 {
+    let id = world.id(entity).expect("a table's rows are alive");
+    let state = absorb(absorb(TERM, id.get()), key);
+    let mut to = Digest { state, world };
+    digest(&mut to);
+    to.state
 }
 
 impl World {

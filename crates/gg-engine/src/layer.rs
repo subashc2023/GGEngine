@@ -350,6 +350,9 @@ pub struct Context {
     pub(crate) authors: Authors,
     /// The scene files the layers loaded, which development builds watch.
     pub(crate) scenes: SceneFiles,
+    /// The script files the layers loaded, which development builds watch.
+    #[cfg(feature = "dev")]
+    pub(crate) scripts: crate::luau::Files,
     /// The world as edited, while a copy of it plays in its place, as [`Stack::play`] holds it.
     #[cfg(feature = "dev")]
     pub(crate) edited: Option<Edited>,
@@ -520,6 +523,8 @@ impl Context {
             exiting: false,
             authors: Authors::default(),
             scenes: SceneFiles::default(),
+            #[cfg(feature = "dev")]
+            scripts: crate::luau::Files::default(),
             #[cfg(feature = "dev")]
             edited: None,
             player: None,

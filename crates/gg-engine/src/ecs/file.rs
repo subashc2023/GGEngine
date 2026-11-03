@@ -117,7 +117,7 @@ impl World {
             for (row, &entity) in table.entities.iter().enumerate() {
                 write!(out, "row {} {} ", entity.index, id(entity)).expect(text);
                 let values: Vec<Value> = (table.columns.iter())
-                    .map(|column| column.row(row).to_value())
+                    .map(|column| column.value(row))
                     .collect();
                 let name = |at: usize| self.components.name(table.components[at]);
                 if let Some(at) = values.iter().position(|value| depth(value) > MAX_DEPTH) {

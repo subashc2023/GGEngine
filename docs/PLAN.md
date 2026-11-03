@@ -88,10 +88,14 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Phase 8, text and sound** (2026-11-01)
 - **The editor's hub, its Scenes panel and the showcase** (2026-11-02)
 - **Hardening** (2026-11-02)
+- **Luau scripts** (2026-11-02)
 
 ## Now
 
-**Phase 9's first milestone**, chosen as [Phase 9](#next) starts; its plan says when it's done.
+**Scripts in the editor and in lockstep**, Phase 9's second milestone: a reload that changes a
+script's fields migrating its components in place, the Inspector and the tool API following, and
+both peers of a lockstep session reloading at the tick the host chooses; its plan says when it's
+done.
 
 ## Next
 
@@ -102,7 +106,13 @@ Each phase ends in something you can run and check.
    through reflection, reloaded as they're saved with the world kept, deterministic for lockstep
    and replays, and debugged with breakpoints, pause and step; and the tool API's capabilities, so
    that a mod's scripts reach only what they're granted. *Done when* a game's behavior written in
-   Luau reloads as it's saved, in sync on both peers of the demo, and a mod runs sandboxed.
+   Luau reloads as it's saved, in sync on both peers of the demo, and a mod runs sandboxed. Its
+   milestones, in order: Luau scripts, components scripts declare and act as, run alike on every
+   platform and reloaded as they're saved, at a tick, with the demo's shards spun by one; scripts in
+   the editor and in lockstep, a reload that changes a script's fields migrating its components in
+   place, the Inspector and the tool API following, and both peers reloading at the tick the host
+   chooses; debugging, breakpoints, pause and step in a script, the game waiting rather than hung;
+   and mods, sandboxed, reaching only what the tool API's capabilities grant them.
 10. **Cooking and the player.** `tools/cook` turns glTF into engine meshes (meshoptimizer: vertex
     and index optimization, meshlets, LODs), textures into BC-compressed KTX2, fonts into their
     fields and games' shaders into SPIR-V, packed into a memory-mappable package; an async
@@ -292,6 +302,10 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | `MeshDraw`'s mesh and shader named, as `Sprite.texture` is: opaque until then, shown but not set, saved in scenes or hashed, and carried across a restart by their indices only where the layers added the same assets in the same order; and setting them by name | A game builds its draws from data |
 | Watching the asset root through the OS's notifications of changes: its thread scans it every second, walking it whole and reading every ID file, about 70 ms for 1,000 assets on Windows, and reads whole each asset's file that changed, for its print, every one in a clone's first run, which delays its next scans but no answer; and a run's start scans it on the main thread, before its layers load, flushing each ID file it writes to the disk, about 6 ms apiece | A project's asset root of tens of thousands of files |
 | IDs for shaders, scenes, sounds, music and other kinds, for assets outside the asset root, and for assets reached through links: the scan gives textures, models and fonts under the root alone, never through a link | Each kind as something first names it by ID |
+| A recording's scripts as they were as it started, which its replay reads from their files, as it reads scene files', so that a script changed since makes it go another way at its first tick | A recording travels without its game's files, as a bug report does |
+| Scripts that spawn and despawn entities, or give and take their components, which Rust code alone does | A game's behavior in Luau makes or unmakes what it acts on |
+| Random numbers for scripts, from a state the world holds, in place of `math.random`, which they go without | A script draws random numbers, as Shards' `collect` would |
+| A budget of Luau's interrupts for a script's tick, so that one that loops for ever fails, deterministically, rather than hanging the game, which `gg run` then restarts into the same loop | Debugging, Phase 9's third milestone, or mods, whose scripts aren't the game's own |
 | Builds without `dev` naming assets by their IDs: they read no ID file, so they name every texture, model and font by its path, and a scene, a recording or a snapshot that names one by its ID finds none there | Phase 10, whose cooked package gives each asset its ID |
 | Loading the textures, models and fonts that scene text names where a layer loads it into a world itself, as inside a tick, as the sandbox's grid reload does: a world can't reach the renderer's textures, which are the context's, so `World::load_scene` finds only those loaded, while `Context::load_scene_file`, the tool API and the engine's other reads load them | A game loads scene text in a tick that names assets no layer adds |
 | A lockstep joiner loading for its tool API an asset its host hasn't named (`asset.not_given`), whose name could differ from the host's; the host's edits load any | Someone edits a joiner's assets from its own editor |

@@ -141,7 +141,7 @@ impl Writer<'_> {
             let about = |error: Error| about(error, "save", Named::Id(id), name, "");
             let component = table.components[column];
             let ty = world.components.ty(component);
-            let value = table.columns[column].row(at.row as usize).to_value();
+            let value = table.columns[column].value(at.row as usize);
             reflect::check(self.types, &ty, &NO_HINTS, &value).map_err(about)?;
             let built = self
                 .built

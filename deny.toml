@@ -34,6 +34,9 @@ deny = [
     { crate = "cpal", wrappers = ["kira"], reason = "gg-engine's audio module plays sounds, through kira" },
     { crate = "symphonia", wrappers = ["kira", "gg-engine"], reason = "gg-engine's audio module decodes sounds through kira, and music for kira's streams itself" },
     { crate = "subsecond", wrappers = ["gg-engine"], reason = "gg-engine calls the layers, which is where patches reach a game" },
+    { crate = "mlua", wrappers = ["gg-engine"], reason = "gg-engine's script module runs Luau, alike on every platform" },
+    { crate = "mlua-sys", wrappers = ["mlua"], reason = "gg-engine's script module runs Luau, through mlua" },
+    { crate = "luau0-src", wrappers = ["mlua-sys"], reason = "gg-engine's script module runs Luau, through mlua" },
     { crate = "tracy-client", wrappers = ["gg-core"], reason = "gg-core's profile module is the way into Tracy" },
     { crate = "tracy-client-sys", wrappers = ["tracy-client", "gg-core"], reason = "gg-core's profile module is the way into Tracy" },
 ]

@@ -1343,6 +1343,85 @@ mod tests {
         assert_eq!(replay_all(two_layers(), &older).ok(), Some((ticks, hash)));
     }
 
+    /// A layer whose Luau script, at `path`, moves its entity at each tick.
+    #[cfg(feature = "dev")]
+    struct Stepped {
+        scripts: crate::Scripts,
+        path: std::path::PathBuf,
+    }
+
+    #[cfg(feature = "dev")]
+    impl Layer for Stepped {
+        fn load(&mut self, cx: &mut Context) {
+            let loaded = self.scripts.load(cx, &self.path);
+            loaded.unwrap_or_else(|error| panic!("{error:#}"));
+        }
+
+        fn attach(&mut self, cx: &mut Context) {
+            let world = cx.world_mut();
+            let stepped = world.spawn(Transform::IDENTITY);
+            world.add_default(stepped, "Step").expect("added");
+        }
+
+        fn tick(&mut self, world: &mut World, _: Tick) {
+            self.scripts.run(world);
+        }
+    }
+
+    /// A script reloaded between ticks is recorded as an edit, as it was saved, and replays to the
+    /// hashes recorded, reloading there, its file as it was as the run started.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_script_reloaded_between_ticks_replays() {
+        let dir = Scratch::new("recording-script");
+        fs::create_dir_all(&dir.0).expect("a directory");
+        let path = dir.0.join("step.luau");
+        let script = |step: u32| {
+            format!(
+                "local Transform = gg.component(\"Transform\")\n\
+                 local Step = gg.declare(\"Step\", {{}})\n\
+                 function Step.tick(entity, dt)\n\
+                     entity[Transform.translation] = entity[Transform.translation]\n\
+                         + vector.create({step}, 0, 0)\n\
+                 end\n\
+                 return Step\n"
+            )
+        };
+        fs::write(&path, script(1)).expect("written");
+        let app = || {
+            let scripts = crate::Scripts::new().expect("Luau starts");
+            let path = path.clone();
+            App::new("Recorded").layer(Stepped { scripts, path })
+        };
+        let name = crate::assets::name_of(None, &path).to_string();
+        let frames = [Tick::DT; 8];
+        let mut frame = 0;
+        let (text, ticks, ended) = recorded_with(app(), &frames, |stack, cx, _| {
+            frame += 1;
+            if frame == 4 {
+                let edit = Edit::Script {
+                    path: name.clone(),
+                    text: script(10),
+                };
+                stack.edit(cx, edit).expect("queued");
+            }
+        });
+        let edits: Vec<&str> = text.lines().filter(|line| line.starts_with("@ ")).collect();
+        assert_eq!(edits.len(), 1, "{text}");
+        assert!(edits[0].starts_with("@ Variant(\"Script\""), "{text}");
+        let x = ended
+            .query::<&Transform>()
+            .next()
+            .map(|at| at.translation.x);
+        assert_eq!(
+            x,
+            Some((3 + 10 * (ticks - 3)) as f32),
+            "reloaded at the fourth tick"
+        );
+        let replayed = replay_all(app(), &text).map_err(|(_, error)| error.to_string());
+        assert_eq!(replayed, Ok((ticks, ended.hash())));
+    }
+
     /// A recording of an app without layers, as the player is, replays too.
     #[test]
     fn a_recording_of_no_layers_replays() {

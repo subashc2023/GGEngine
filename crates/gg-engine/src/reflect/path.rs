@@ -176,17 +176,6 @@ pub(crate) fn reach<'a>(root: &'a dyn Reflect, steps: &[u32]) -> Result<&'a dyn 
     Ok(at)
 }
 
-/// Checks that the opaque part that `to` leads to in `root` is there, as [`reach`] does for any
-/// other: an opaque field isn't a part of the struct it's in, so that struct is reached in its
-/// place.
-pub(crate) fn reach_opaque(root: &dyn Reflect, to: &Resolved) -> Result<()> {
-    let steps = match to.ty {
-        Type::Opaque => to.steps.split_last().map_or(&[][..], |(_, before)| before),
-        _ => &to.steps,
-    };
-    reach(root, steps).map(drop)
-}
-
 pub(crate) fn reach_mut<'a>(
     root: &'a mut dyn Reflect,
     steps: &[u32],

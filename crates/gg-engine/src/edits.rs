@@ -2,7 +2,8 @@
 //! clients, and the scene files a game loaded, saved while it runs. Each author undoes and redoes
 //! its own, through a [`Log`] of its own, as the Inspector does through its. They apply between
 //! ticks, as a frame starts, which a recording keeps as values, the edits as their authors gave
-//! them, before the commands of the tick after, and a replay applies there.
+//! them, before the commands of the tick after, and a replay applies there. So do the reloads of
+//! scripts whose files were saved, which no author undoes.
 
 use gg_core::{Error, Result};
 
@@ -35,6 +36,9 @@ pub(crate) enum Edit {
     Undo { author: String },
     /// Redoes the last edit `author` undid.
     Redo { author: String },
+    /// Reloads the script whose path from the project's root is `path`, its text now `text`, as
+    /// the [`Scripts`](crate::Scripts) that loaded it do at their next tick.
+    Script { path: String, text: String },
 }
 
 /// What an edit did: the IDs of the entities an apply's creates and duplicates spawned, in order,
@@ -74,13 +78,17 @@ impl Authors {
         // Any other edit of the author's ends its gesture, refused or not, as the log's own end
         // its, but for a refused apply. One the API refuses as it reads it never comes here, nor
         // to a recording, and leaves it going on.
-        if !matches!(edit, Edit::Amend { .. })
+        if !matches!(edit, Edit::Amend { .. } | Edit::Script { .. })
             && let Some(author) = self.logs.iter_mut().find(|a| a.name == edit.author())
         {
             author.log.seal();
             author.gesture = None;
         }
         match edit {
+            Edit::Script { path, text } => {
+                crate::luau::queue(world, path, text);
+                Ok(Done::Applied(Vec::new()))
+            }
             Edit::Amend {
                 author,
                 gesture,
@@ -189,13 +197,14 @@ impl Edit {
             | Self::Amend { author, .. }
             | Self::Undo { author }
             | Self::Redo { author } => author,
+            Self::Script { path, .. } => path,
         }
     }
 
     /// The edit as a value, which a recording keeps: variants `Apply` and `Append`, with its author
     /// and its operations, `Amend`, with its author, its gesture and its operation, `Undo` and
-    /// `Redo`, with their author; each operation a variant named as its [`Operation`]'s, with its
-    /// entities' IDs as text.
+    /// `Redo`, with their author, and `Script`, with its path and its text; each operation a
+    /// variant named as its [`Operation`]'s, with its entities' IDs as text.
     pub(crate) fn to_value(&self) -> Value {
         let text = |text: &str| Value::String(text.to_owned());
         let author = |author: &str| ("author".into(), text(author));
@@ -233,6 +242,10 @@ impl Edit {
             }
             Self::Undo { author: by } => Value::Variant("Undo".into(), vec![author(by)]),
             Self::Redo { author: by } => Value::Variant("Redo".into(), vec![author(by)]),
+            Self::Script { path, text: script } => Value::Variant(
+                "Script".into(),
+                vec![("path".into(), text(path)), ("text".into(), text(script))],
+            ),
         }
     }
 
@@ -285,9 +298,16 @@ impl Edit {
                     Self::Redo { author }
                 })
             }
+            "Script" => {
+                let [path, script] = reflect::pick(fields, ["path", "text"])?;
+                Ok(Self::Script {
+                    path: text(path, "path")?,
+                    text: text(script, "text")?,
+                })
+            }
             other => Err(reflect::no_variant(
                 other,
-                &["Apply", "Append", "Amend", "Undo", "Redo"],
+                &["Apply", "Append", "Amend", "Undo", "Redo", "Script"],
             )),
         }
     }

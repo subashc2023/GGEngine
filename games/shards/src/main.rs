@@ -3,8 +3,9 @@
 //! them, first to ten. Run alone, the keys steer player 0; or networked, in lockstep, a run given
 //! `--host <address>` steering player 0 and one given `--join <address>` player 1, each with its own
 //! keys. The arena's walls are its scene file, `scenes/arena.ron`, which a development build
-//! applies as it's saved; its floor is its shader, `shaders/floor.slang`, which it reloads as it's
-//! saved; its scores are text in its font, `fonts/Inter-Bold.ttf`, on the view's canvas, in its top
+//! applies as it's saved; its shards spin by a Luau script, `scripts/spin.luau`, which it reloads as
+//! it's saved; its floor is its shader, `shaders/floor.slang`, which it reloads as it's saved; its
+//! scores are text in its font, `fonts/Inter-Bold.ttf`, on the view's canvas, in its top
 //! corners; Escape or a pad's Start opens its menu there, over the match, which goes on meanwhile:
 //! Resume; New match, a command that both lockstep peers apply; and Quit; its sounds,
 //! `sounds/*.wav`, play as a disc dashes, following it, as a shard is collected, where it was, as a
@@ -22,8 +23,8 @@ use gg_engine::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_engine::{
     Actions, Align, App, Binding, Blend, BodyType, Bus, Camera, Change, Circle, CircleCollider2D,
     Commands, Component, Context, Entity, Event, Font, Key, Layer, Mesh, MouseButton, Name,
-    PadButton, Physics2D, Place, Projection, Reflect, RigidBody2D, Shader, Sound, Source, Sprite,
-    Stick, TextStyle, Tick, Transform, World, step_physics,
+    PadButton, Physics2D, Place, Projection, Reflect, RigidBody2D, Scripts, Shader, Sound, Source,
+    Sprite, Stick, TextStyle, Tick, Transform, World, step_physics,
 };
 
 fn main() -> ExitCode {
@@ -72,9 +73,6 @@ const DASH_EVERY: u32 = 64;
 
 /// How many shards win a match, as the arena's Target says.
 const WINS_AT: u32 = 10;
-
-/// How fast shards turn, in radians a second.
-const SHARD_SPIN: f32 = 1.5;
 
 /// The z of what's drawn, from the back: the floor, the walls, the shards and the players.
 const FLOOR_Z: f32 = 0.0;
@@ -225,6 +223,8 @@ struct Shards {
     font: Option<Font>,
     /// The game's sounds, once it loads.
     sounds: Option<Sounds>,
+    /// The game's scripts: the shards' spin.
+    scripts: Scripts,
     /// The scores' text, written again in its memory each frame.
     text: String,
 }
@@ -272,6 +272,7 @@ impl Shards {
             floor: None,
             font: None,
             sounds: None,
+            scripts: Scripts::new().expect("Luau starts"),
             text: String::new(),
         }
     }
@@ -308,6 +309,9 @@ impl Layer for Shards {
         let music = music.expect("the game's music reads");
         cx.play_music(Some(music), MUSIC_FADE_IN);
         register(cx.world_mut());
+        // A script that doesn't load stops the game, with what went wrong.
+        let spin = self.scripts.load(cx, root.join("scripts/spin.luau"));
+        spin.unwrap_or_else(|error| panic!("{error:#}"));
     }
 
     fn attach(&mut self, cx: &mut Context) {
@@ -364,7 +368,7 @@ impl Layer for Shards {
         steer(world, Tick::DT);
         step_physics(world);
         collect(world, self.sounds);
-        spin(world, Tick::DT);
+        self.scripts.run(world);
     }
 
     fn commands(&mut self) -> Option<&mut dyn Commands> {
@@ -552,6 +556,10 @@ fn build(world: &mut World) {
             ..Sprite::default()
         };
         let shard = world.spawn((at, sprite, Shard { angle: 0.0 }));
+        // Its spin, which its script declares.
+        world
+            .add_default(shard, "Spin")
+            .expect("the game's scripts loaded");
         place(world, shard);
     }
 }
@@ -668,14 +676,6 @@ fn to_starts(world: &mut World) {
     for (player, at, body) in players {
         at.translation = STARTS[usize::from(player.index)].extend(PLAYER_Z);
         body.velocity = Vec2::ZERO;
-    }
-}
-
-/// Turns each shard `dt` on.
-fn spin(world: &mut World, dt: Duration) {
-    for (shard, at) in world.query_mut::<(&mut Shard, &mut Transform)>() {
-        shard.angle = (shard.angle + SHARD_SPIN * dt.as_secs_f32()) % std::f32::consts::TAU;
-        at.rotation = Quat::from_rotation_z(shard.angle + std::f32::consts::FRAC_PI_4);
     }
 }
 

@@ -23,7 +23,7 @@ pub use gg_macros::Reflect;
 
 pub use crate::ecs::Digest;
 use crate::{Entity, Font, Model, Texture};
-pub(crate) use path::{reach, reach_mut, reach_opaque, resolve};
+pub(crate) use path::{Resolved, reach, reach_mut, resolve};
 
 /// An identifier: a type's, a field's or a variant's name, borrowed for Rust's types, and owned
 /// where it's read from text, as a recording's values are, or copied, as operations copy theirs,
@@ -558,6 +558,23 @@ impl Types {
         &mut self.entries[index.0 as usize].info
     }
 
+    /// Describes `info`, a struct that a script declares, which no Rust type is, under its name,
+    /// which the caller has checked no type has, and returns where it is.
+    pub(crate) fn declare(&mut self, info: TypeInfo) -> TypeIndex {
+        debug_assert!(
+            !self.by_name.contains_key(&info.name),
+            "a declared type's name is its own"
+        );
+        let index = TypeIndex(u32::try_from(self.entries.len()).expect("fewer than 2^32 types"));
+        self.by_name.insert(info.name.clone(), index);
+        self.entries.push(Entry {
+            info,
+            type_id: TypeId::of::<Declared>(),
+            rust: "a type a script declared",
+        });
+        index
+    }
+
     /// The type named `name`, if there's one.
     pub fn find(&self, name: &str) -> Option<TypeIndex> {
         self.by_name.get(name).copied()
@@ -584,13 +601,21 @@ impl Types {
         entries.map(|(i, entry)| (TypeIndex(i as u32), &entry.info))
     }
 
-    /// Whether `other` has described the same Rust types as these, in the same order, so that
-    /// its indices name the same types.
+    /// Whether `other` has described the same Rust types as these, and declared the same types of
+    /// scripts', in the same order, so that its indices name the same types.
     pub(crate) fn same(&self, other: &Self) -> bool {
-        let ours = self.entries.iter().map(|entry| entry.type_id);
-        ours.eq(other.entries.iter().map(|entry| entry.type_id))
+        let same = |ours: &Entry, theirs: &Entry| {
+            ours.type_id == theirs.type_id
+                && (ours.type_id != TypeId::of::<Declared>() || ours.info == theirs.info)
+        };
+        let theirs = &other.entries;
+        self.entries.len() == theirs.len()
+            && self.entries.iter().zip(theirs).all(|(a, b)| same(a, b))
     }
 }
+
+/// What stands for the Rust type of each type a script declares, of which there's none.
+struct Declared;
 
 /// A type whose values reflection reads and sets, without its Rust type: one that describes
 /// itself to [`Types`]. Structs and enums derive it, with `#[derive(Reflect)]`, or with
@@ -758,8 +783,20 @@ pub fn pick<'v, const N: usize>(
     names: [&str; N],
 ) -> Result<[&'v Value; N]> {
     let mut found = [None; N];
+    pick_into(given, &names, &mut found)?;
+    Ok(found.map(|value| value.expect("every field is found")))
+}
+
+/// Puts the fields in `given` in `found`, in the order of `names`, as [`pick`] does: each given
+/// once, so that every place in `found` is filled.
+pub(crate) fn pick_into<'v, N: AsRef<str>>(
+    given: &'v [(Ident, Value)],
+    names: &[N],
+    found: &mut [Option<&'v Value>],
+) -> Result<()> {
     for (name, value) in given {
-        let Some(i) = names.iter().position(|known| known == name) else {
+        let Some(i) = names.iter().position(|known| known.as_ref() == name) else {
+            let names = names.iter().map(AsRef::as_ref);
             return Err(Error::new(
                 "reflect.no_field",
                 format!("there's no field `{name}`; the fields are {}", list(names)),
@@ -775,10 +812,13 @@ pub fn pick<'v, const N: usize>(
     if let Some(i) = found.iter().position(Option::is_none) {
         return Err(Error::new(
             "reflect.missing_field",
-            format!("field `{}` isn't given, but each field is", names[i]),
+            format!(
+                "field `{}` isn't given, but each field is",
+                names[i].as_ref()
+            ),
         ));
     }
-    Ok(found.map(|value| value.expect("every field is found")))
+    Ok(())
 }
 
 /// The variant `value` is, by name, and its fields; for the derives.

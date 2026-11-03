@@ -69,7 +69,8 @@ pub(crate) fn start(
 /// thread that watches the root last sent it, as `Context::take_assets` says, and the shaders,
 /// textures, models, fonts, sounds and music read again as their files changed, as
 /// `Context::take_reloaded` says,
-/// applies the scene files saved since, as [`scene_files::look`] says, and answers the requests
+/// applies the scene files saved since, as [`scene_files::look`] says, and the scripts, as
+/// `luau::look` says, and answers the requests
 /// that have come, from `cx`, whose layers are `stack`'s and whose simulation `stepper` steps, as
 /// [`Api::serve`] says; returns whether one asked the run to end.
 ///
@@ -86,7 +87,10 @@ pub(crate) fn serve(
         cx.take_reloaded(stack.records());
     }
     #[cfg(feature = "dev")]
-    crate::scene_files::look(cx, stack);
+    {
+        crate::scene_files::look(cx, stack);
+        crate::luau::look(cx, stack);
+    }
     #[cfg(feature = "dev")]
     if let Some(api) = api {
         return api.serve(cx, stack, stepper);
@@ -96,7 +100,7 @@ pub(crate) fn serve(
 }
 
 /// Between frames, while they pause, takes the asset database and the assets read again, applies
-/// the scene files saved since and answers the requests that need no frames, as [`serve`] does as
+/// the scene files and the scripts saved since and answers the requests that need no frames, as [`serve`] does as
 /// a frame starts; returns whether one asked the run to end.
 pub(crate) fn serve_paused(
     api: &mut Option<Api>,
@@ -110,7 +114,10 @@ pub(crate) fn serve_paused(
         cx.take_reloaded(stack.records());
     }
     #[cfg(feature = "dev")]
-    crate::scene_files::look(cx, stack);
+    {
+        crate::scene_files::look(cx, stack);
+        crate::luau::look(cx, stack);
+    }
     #[cfg(feature = "dev")]
     if let Some(api) = api {
         return api.serve_paused(cx, stack, stepper);

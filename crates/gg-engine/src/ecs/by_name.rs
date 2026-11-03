@@ -7,10 +7,11 @@ use std::slice;
 
 use gg_core::{Error, Result};
 
+use super::declared::{Declared, Kind};
 use super::id::Named;
-use super::table::{ComponentId, Table};
+use super::table::{AnyColumn, ComponentId, Table};
 use super::{Component, Entity, Location, Parent, World};
-use crate::reflect::{self, Types, Value};
+use crate::reflect::{self, Ident, Reflect, Resolved, Shape, Type, Types, Value};
 use crate::{ModelNode, ModelRoot};
 
 impl World {
@@ -119,12 +120,16 @@ impl World {
         let column = self.column(at, id, component).map_err(about)?;
         let types = self.components.types();
         let to = reflect::resolve(types, &self.components.ty(id), path).map_err(about)?;
-        let row = self.tables[at.table as usize].columns[column].row(at.row as usize);
+        let column = &*self.tables[at.table as usize].columns[column];
+        let row = at.row as usize;
         if to.ty.is_opaque(types) {
-            reflect::reach_opaque(row, &to).map_err(about)?;
+            reach(column, row, opaque_steps(&to)).map_err(about)?;
             return Ok(Value::Opaque);
         }
-        Ok(reflect::reach(row, &to.steps).map_err(about)?.to_value())
+        Ok(match reach(column, row, &to.steps).map_err(about)? {
+            Some(part) => part.to_value(),
+            None => column.value(row),
+        })
     }
 
     /// Sets the field at `path` of `entity`'s `component` to `value`, and returns its old value,
@@ -139,7 +144,7 @@ impl World {
     ///
     /// Fails as `get_field` does; with `reflect.read_only` for `Parent` and `ModelNode`, at any
     /// path, whether the entity has one or not; with `reflect.out_of_range` for a number outside
-    /// its field's bounds or its type's; and as [`Reflect::with_value`](crate::Reflect::with_value)
+    /// its field's bounds or its type's; and as [`Reflect::with_value`]
     /// does for a value that doesn't fit the field. Every error names the entity, by its ID while
     /// it's alive, the component and the path, down to the part refused.
     pub fn set_field(
@@ -169,19 +174,31 @@ impl World {
         let column = self.column(at, id, component).map_err(about)?;
         let types = self.components.types();
         let to = reflect::resolve(types, &self.components.ty(id), path).map_err(about)?;
+        let row = at.row as usize;
         if to.ty.is_opaque(types) {
-            let row = self.tables[at.table as usize].columns[column].row(at.row as usize);
-            reflect::reach_opaque(row, &to).map_err(about)?;
+            let column = &*self.tables[at.table as usize].columns[column];
+            reach(column, row, opaque_steps(&to)).map_err(about)?;
             return match value {
                 Value::Opaque => Ok(Value::Opaque),
                 other => Err(about(reflect::not_opaque(other))),
             };
         }
         reflect::check(types, &to.ty, &to.meta, value).map_err(about)?;
-        let row = self.tables[at.table as usize].columns[column].row_mut(at.row as usize);
-        let field = reflect::reach_mut(row, &to.steps).map_err(about)?;
-        let old = field.to_value();
-        field.set_value(value).map_err(about)?;
+        let column = &mut *self.tables[at.table as usize].columns[column];
+        let old = match to.steps.split_first() {
+            None => {
+                let old = column.value(row);
+                column.set_value(row, value).map_err(about)?;
+                old
+            }
+            Some((&first, rest)) => {
+                let field = column.part_mut(row, first).expect(FIELD);
+                let field = reflect::reach_mut(field, rest).map_err(about)?;
+                let old = field.to_value();
+                field.set_value(value).map_err(about)?;
+                old
+            }
+        };
         // Another model's nodes in place of its own.
         if Some(id) == self.components.get(TypeId::of::<ModelRoot>()) && old != *value {
             self.despawn_nodes(entity);
@@ -205,6 +222,128 @@ impl World {
                 format!("{what}; the component types are {names}"),
             )
         })
+    }
+
+    /// Gives `entity` a `component` at its default, as [`default_of`](Self::default_of) makes it:
+    /// as an entity is given a script to run, the component type the script declares, by its name,
+    /// which [`Scripts::load`](crate::Scripts::load) returns.
+    ///
+    /// Fails with `ecs.no_entity` if it isn't alive; `reflect.has_component` if it has one already;
+    /// and as `default_of` does, such as with `reflect.unknown_type` if no component type is named
+    /// `component`.
+    pub fn add_default(&mut self, entity: Entity, component: &str) -> Result<()> {
+        let value = self.default_of(component)?;
+        let id = self.named(component)?;
+        let at = self.locate(entity)?;
+        if self.tables[at.table as usize].has(id) {
+            return Err(Error::new(
+                "reflect.has_component",
+                format!(
+                    "entity {} has a `{component}` already",
+                    self.name_of(entity)
+                ),
+            ));
+        }
+        let column = self.build(id, component, &value)?;
+        self.give(entity, at, id, column);
+        Ok(())
+    }
+
+    /// Declares a component type that a script declares, as [`Components::declare`] does: `name`,
+    /// of `fields`, each a name, a kind and a default, with `doc` for its doc.
+    ///
+    /// [`Components::declare`]: super::table::Components::declare
+    pub(crate) fn declare(
+        &mut self,
+        name: &str,
+        doc: &str,
+        fields: Vec<(Ident, Kind, Value)>,
+    ) -> Result<ComponentId> {
+        self.components.declare(name, doc, fields)
+    }
+
+    /// The id of component type `name`, if there's one.
+    pub(crate) fn component_named(&self, name: &str) -> Option<ComponentId> {
+        self.components.named(name)
+    }
+
+    /// The fields of declared type `id`, its names and kinds; `None` if it's a Rust type.
+    pub(crate) fn declared(&self, id: ComponentId) -> Option<&Declared> {
+        self.components.declared(id).map(|declared| &**declared)
+    }
+
+    /// The fields of component type `id`, as its description gives them; none if it isn't a
+    /// struct with named fields.
+    pub(crate) fn fields_of(&self, id: ComponentId) -> &[reflect::Field] {
+        let Type::Named(index) = self.components.ty(id) else {
+            return &[];
+        };
+        match &self.types().info(index).shape {
+            Shape::Struct {
+                fields,
+                tuple: false,
+            } => fields,
+            _ => &[],
+        }
+    }
+
+    /// Field `index` of `entity`'s component `id`, of a struct with named fields, as reflection
+    /// reads it: without allocating, as a script reads one at its ticks.
+    ///
+    /// Fails with `ecs.no_entity` if `entity` isn't alive, and `reflect.missing_component` if it
+    /// hasn't the component.
+    pub(crate) fn field_at(
+        &self,
+        entity: Entity,
+        id: ComponentId,
+        index: u32,
+    ) -> Result<&dyn Reflect> {
+        let (table, row) = self.row_of(entity, id)?;
+        let column = &*self.tables[table].columns[self.tables[table].position(id).expect(HAS)];
+        Ok(column.part(row, index).expect(FIELD))
+    }
+
+    pub(crate) fn field_at_mut(
+        &mut self,
+        entity: Entity,
+        id: ComponentId,
+        index: u32,
+    ) -> Result<&mut dyn Reflect> {
+        let (table, row) = self.row_of(entity, id)?;
+        let table = &mut self.tables[table];
+        let column = &mut *table.columns[table.position(id).expect(HAS)];
+        Ok(column.part_mut(row, index).expect(FIELD))
+    }
+
+    /// The table and row of `entity`, which has component `id`.
+    fn row_of(&self, entity: Entity, id: ComponentId) -> Result<(usize, usize)> {
+        let at = self.location(entity).ok_or_else(|| {
+            Error::new(
+                "ecs.no_entity",
+                "the entity isn't in the world: it was despawned, or is another world's",
+            )
+        })?;
+        if !self.tables[at.table as usize].has(id) {
+            return Err(Error::new(
+                "reflect.missing_component",
+                format!("the entity has no `{}`", self.components.name(id)),
+            ));
+        }
+        Ok((at.table as usize, at.row as usize))
+    }
+
+    /// Whether `entity` is alive and has component `id`.
+    pub(crate) fn has(&self, entity: Entity, id: ComponentId) -> bool {
+        self.location(entity)
+            .is_some_and(|at| self.tables[at.table as usize].has(id))
+    }
+
+    /// Puts the entities with component `id` in `list`, in the order queries find them, as the
+    /// world's [kept list](World::take_list) holds them, without allocating once it's grown.
+    pub(crate) fn list_with(&self, id: ComponentId, list: &mut Vec<Entity>) {
+        list.clear();
+        let tables = self.tables.iter().filter(|table| table.has(id));
+        list.extend(tables.flat_map(|table| &table.entities));
     }
 
     /// Where `entity` is, and the id of component type `component`.
@@ -272,6 +411,38 @@ pub(super) fn about(
     let at = reflect::join(&reflect::join(component, path), &inner);
     let message = format!("can't {doing} `{at}` of entity {entity}: {what}");
     error.with_message(message)
+}
+
+/// Why a resolved path's first step is a part of a row: it's a field of the component, a struct,
+/// which every row of its type has.
+const FIELD: &str = "a resolved path's first step is a field of the component";
+
+/// Why a table that has a component has its column.
+const HAS: &str = "the table has the component";
+
+/// The part of `row` of `column` that `steps`, a resolved path's, lead to; `None` for the whole
+/// row, which a declared type's is no Rust value to reach.
+///
+/// Fails with `reflect.no_field` at an index past a list's end.
+fn reach<'a>(
+    column: &'a dyn AnyColumn,
+    row: usize,
+    steps: &[u32],
+) -> Result<Option<&'a dyn Reflect>> {
+    let Some((&first, rest)) = steps.split_first() else {
+        return Ok(None);
+    };
+    let field = column.part(row, first).expect(FIELD);
+    reflect::reach(field, rest).map(Some)
+}
+
+/// The steps to the opaque part that `to` leads to, which is there as any other is: an opaque field
+/// isn't a part of the struct it's in, so that struct is reached in its place.
+fn opaque_steps(to: &Resolved) -> &[u32] {
+    match to.ty {
+        Type::Opaque => to.steps.split_last().map_or(&[][..], |(_, before)| before),
+        _ => &to.steps,
+    }
 }
 
 /// Whether `table` has component `with` and hasn't `without`, of those given.

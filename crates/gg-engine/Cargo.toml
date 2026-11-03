@@ -17,6 +17,7 @@ gg-renderer.workspace = true
 harfrust.workspace = true
 image.workspace = true
 kira.workspace = true
+mlua.workspace = true
 png.workspace = true
 rapier2d.workspace = true
 rayon-core.workspace = true
