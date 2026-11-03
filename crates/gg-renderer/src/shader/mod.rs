@@ -229,6 +229,35 @@ impl Shaders {
         Ok(Shader::new(index, writes_depth(blend)))
     }
 
+    /// Adds a game's shader, `name`, as [`compile_shader`] compiled it from the file at `path`,
+    /// `spirv`, as `tools/cook` puts it in a game's package: as [`add`](Self::add) adds one it
+    /// compiles itself, checked against the contract for its types alike, but listing no files,
+    /// so that it doesn't compile again as they change.
+    ///
+    /// Fails with `renderer.shader_mismatch` and each way it breaks the contract if it breaks it,
+    /// as SPIR-V that can't be read does.
+    pub fn add_compiled<V: NoUninit, P: NoUninit>(
+        &mut self,
+        name: &str,
+        path: &Path,
+        spirv: Vec<u8>,
+        blend: Blend,
+    ) -> Result<Shader<V, P>> {
+        let types = Types::of::<V, P>();
+        check(name, path, &spirv, &types)?;
+        let index = self.push(name, spirv, blend, types);
+        self.sources.push(ShaderSource {
+            index,
+            name: name.to_owned(),
+            path: path.to_owned(),
+            blend,
+            types,
+            files: Vec::new(),
+            compiled_at: SystemTime::now(),
+        });
+        Ok(Shader::new(index, writes_depth(blend)))
+    }
+
     /// The shader [`add`](Self::add) gave for a file whose path `same` takes, drawing meshes of `V`
     /// with parameters `P` and blending as `blend` says, if one was added: its types by their names
     /// and sizes, as a snapshot's asset lines name a draw's.
@@ -468,6 +497,17 @@ fn check(name: &str, path: &Path, spirv: &[u8], types: &Types) -> Result<()> {
         breaches.join("\n")
     );
     Err(Error::new("renderer.shader_mismatch", message))
+}
+
+/// Compiles a game's shader, `name`, from the file at `path` to SPIR-V with the slangc the build
+/// found, as [`Shaders::add`] does, but unchecked, as checking it against the contract needs the
+/// types it draws with: for `tools/cook`, from whose package a run adds it through
+/// [`Shaders::add_compiled`], which checks it. Gives it with the files the shader read, its own
+/// first, then those it includes.
+///
+/// Fails as `Shaders::add` does but for the contract.
+pub fn compile_shader(name: &str, path: &Path) -> Result<(Vec<u8>, Vec<PathBuf>)> {
+    compile(Path::new(SLANGC), name, path)
 }
 
 /// Compiles the shader `name` at `path` to SPIR-V with `slangc`, and gives it with the files the

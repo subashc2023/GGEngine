@@ -306,8 +306,7 @@ pub fn scan(root: &Path) -> Scan {
             }
         }
         for (name, &entry) in &entries {
-            let unbuilt = name == "target" || (at.is_empty() && UNBUILT.contains(&&**name));
-            if entry == Entry::Folder && !unbuilt {
+            if entry == Entry::Folder && !unbuilt(&at, name) {
                 folders.push((dir.join(name), join(&at, name)));
             }
         }
@@ -316,6 +315,48 @@ pub fn scan(root: &Path) -> Scan {
     scan.orphans.sort_unstable_by(|a, b| a.path.cmp(&b.path));
     scan.unread.sort_unstable_by(|a, b| a.path.cmp(&b.path));
     scan
+}
+
+/// A regular file [`files`] found: its path from the root, with `/` between its parts, such as
+/// `sounds/dash.wav`, and the file, as the walk reached it.
+#[derive(Debug, PartialEq)]
+pub struct Found {
+    pub path: String,
+    pub file: PathBuf,
+}
+
+/// Every regular file under the asset root `root`, through the folders [`scan`] goes through, in
+/// the order of their paths, and what the walk couldn't take, as `scan` gives it: what a game's
+/// package is cooked from, as `tools/cook` picks from them.
+pub fn files(root: &Path) -> (Vec<Found>, Vec<Unread>) {
+    let (mut found, mut unread) = (Vec::new(), Vec::new());
+    let mut folders = vec![(root.to_owned(), String::new())];
+    while let Some((dir, at)) = folders.pop() {
+        let Some(entries) = entries(&dir, &at, &mut unread) else {
+            continue;
+        };
+        for (name, &entry) in &entries {
+            match entry {
+                Entry::File(_) => found.push(Found {
+                    path: join(&at, name),
+                    file: dir.join(name),
+                }),
+                Entry::Folder if !unbuilt(&at, name) => {
+                    folders.push((dir.join(name), join(&at, name)));
+                }
+                _ => {}
+            }
+        }
+    }
+    found.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+    unread.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+    (found, unread)
+}
+
+/// Whether the folder `name`, of the folder at `at` from the root, `""` for the root itself, is
+/// one a scan skips, as built rather than an asset's: every `target`, and at the top [`UNBUILT`]'s.
+fn unbuilt(at: &str, name: &str) -> bool {
+    name == "target" || (at.is_empty() && UNBUILT.contains(&name))
 }
 
 /// What an entry of a folder is, as its listing tells without following links.
@@ -600,6 +641,29 @@ mod tests {
         let length = |at: usize| found.assets[at].stamp.map(|(_, length)| length);
         assert_eq!((length(3), length(5)), (Some(0), Some(0)));
         assert_eq!(scan(&root), found, "nothing changed");
+        // Every regular file, through the folders the scan goes through, in the order of its path.
+        let (every, unread) = files(&root);
+        let paths: Vec<&str> = every.iter().map(|found| &*found.path).collect();
+        let expected = [
+            "assets/Case.png",
+            "assets/bad.png",
+            "assets/bad.png.meta",
+            "assets/case.png.meta",
+            "assets/dir.png.meta",
+            "assets/gone.png.meta",
+            "assets/new.jpg",
+            "assets/stone.png",
+            "assets/stone.png.meta",
+            "models/tree.gltf",
+            "models/truck.glb",
+            "notes.meta",
+            "shaders/a.slang",
+            "sub/tests/y.png",
+            "ui/title.otf",
+        ];
+        assert_eq!(paths, expected);
+        assert_eq!(every[7].file, file);
+        assert_eq!(unread, []);
         let Some(Err(misnamed)) = &found.assets[0].meta else {
             panic!("a misnamed ID file: {:?}", found.assets[0]);
         };

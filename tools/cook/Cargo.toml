@@ -1,0 +1,20 @@
+[package]
+name = "cook"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+# Prefixed like `gg-sandbox`, which says why.
+[[bin]]
+name = "gg-cook"
+path = "src/main.rs"
+
+[dependencies]
+# Reads the project's manifest and its assets' ID files, and walks its asset root.
+gg-api.workspace = true
+# What the engine makes of a file as it loads it, so that the package holds the same.
+gg-engine.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

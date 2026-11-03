@@ -36,6 +36,8 @@ mod audio;
 mod camera;
 mod canvas;
 mod chrome;
+#[doc(hidden)]
+pub mod cook;
 // In development builds alone, as `dev` has it.
 #[cfg(feature = "dev")]
 mod dialog;
@@ -63,6 +65,7 @@ mod main_loop;
 mod model;
 mod name;
 mod net;
+mod package;
 mod pads;
 // subsecond applies a patch of the game's code only through unsafe code: this module alone may use
 // it, in development builds alone.
@@ -106,9 +109,12 @@ mod windows_wait;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tracing::{debug, error, info, warn};
+
+use package::{Files, Package};
 
 pub use actions::{Actions, Binding, Change, Source, Toward};
 pub use audio::{Bus, Music, Place, Sound};
@@ -194,8 +200,15 @@ pub struct App {
     headless_step: Option<Duration>,
     /// What the files of the assets the layers add are named from.
     root: Option<PathBuf>,
+    /// The project's directory, as [`project`](Self::project) gives it.
+    project_dir: Option<PathBuf>,
     /// The project's manifest, as [`project`](Self::project) read it, or why it couldn't.
     project: Option<Result<Manifest>>,
+    /// The project's start scene, as its manifest or its package names it.
+    start: Option<PathBuf>,
+    /// Where the run reads the files under its asset root: its game's package, once the run has
+    /// opened it, or the disk.
+    files: Files,
     /// The folder of the mods the run runs, as `--mods` names it, in place of those installed.
     mods: Option<PathBuf>,
 }
@@ -212,7 +225,10 @@ impl App {
             seed: None,
             headless_step: None,
             root: None,
+            project_dir: None,
             project: None,
+            start: None,
+            files: Files::default(),
             mods: None,
         }
     }
@@ -236,16 +252,83 @@ impl App {
     /// state describes: names the assets the layers add from the project's asset root, as
     /// [`root`](Self::root) does; has [`Context::load_start_scene`] load its start scene; and has
     /// the tool API's session file name the manifest, which tools inside the project find the run
-    /// by. A manifest that doesn't read ends the run as it starts, with its error, as does a build
-    /// without `dev`, which reads none: shipping builds start from cooked data.
+    /// by. A manifest that doesn't read ends the run as it starts, with its error.
+    ///
+    /// A build without `dev` reads no manifest, as shipping builds start from cooked data: it runs
+    /// from the game's package, which `tools/cook` writes, the files under the asset root as the
+    /// package holds them, and its start scene the one the package names, as ARCHITECTURE.md's
+    /// Project state says; the package is `<executable>.ggpk` beside the executable, or the one
+    /// `--package` names, which a development build runs from too, in place of the files
+    /// themselves.
     #[must_use]
     pub fn project(mut self, dir: impl AsRef<Path>) -> Self {
-        let manifest = Manifest::read(dir.as_ref());
-        if let Ok(manifest) = &manifest {
-            self.root = Some(manifest.root.clone());
+        let dir = dir.as_ref();
+        self.project_dir = Some(dir.to_owned());
+        #[cfg(feature = "dev")]
+        {
+            let manifest = Manifest::read(dir);
+            if let Ok(manifest) = &manifest {
+                self.root = Some(manifest.root.clone());
+                self.start = Some(manifest.start.clone());
+            }
+            self.project = Some(manifest);
         }
-        self.project = Some(manifest);
         self
+    }
+
+    /// Has the run read the files under its asset root from the game's package at `path`, as
+    /// `--package` has it: for tests, whose arguments are their harness's.
+    ///
+    /// Fails as the run's opening it would, as [`Package::open`] does.
+    #[doc(hidden)]
+    pub fn package(mut self, path: impl AsRef<Path>) -> Result<Self> {
+        self.open_package(Some(path.as_ref()))?;
+        Ok(self)
+    }
+
+    /// Has the run read the files under its asset root from its game's package: the one at
+    /// `given`, as `--package` names it, or, in a build without `dev`, a project's game's, at
+    /// `<executable>.ggpk` beside its executable, as [`project`](Self::project) says, unless
+    /// [`package`](Self::package) gave one. The package names the asset root from the project's
+    /// directory, or from its own, for an app that isn't a project's game, and the start scene.
+    ///
+    /// Fails as [`Package::open`] does, and with `engine.no_package` for a project's game built
+    /// without `dev` without a package beside it.
+    fn open_package(&mut self, given: Option<&Path>) -> Result<()> {
+        let path = match given {
+            Some(path) => path.to_owned(),
+            None if !cfg!(feature = "dev")
+                && self.project_dir.is_some()
+                && self.files.packaged().is_none() =>
+            {
+                let path = std::env::current_exe().map(|exe| exe.with_extension("ggpk"));
+                match path {
+                    Ok(path) if path.is_file() => path,
+                    path => {
+                        let path = path.map_or_else(
+                            |_| "<executable>.ggpk".to_owned(),
+                            |path| path.display().to_string(),
+                        );
+                        let message = format!(
+                            "a build without `dev` runs from its game's package, {path}, which \
+                             isn't there: `tools/cook` writes it, or `--package` names another"
+                        );
+                        return Err(Error::new("engine.no_package", message));
+                    }
+                }
+            }
+            None => return Ok(()),
+        };
+        let package = Arc::new(Package::open(&path)?);
+        let dir = (self.project_dir.clone())
+            .or_else(|| path.parent().map(Path::to_owned))
+            .unwrap_or_default();
+        let root = package::under(&dir, package.assets());
+        self.start = package.start().map(|start| package::under(&dir, start));
+        self.files = Files::package(package, root.clone());
+        self.root = Some(root);
+        info!(path = %path.display(), "Running from the game's package");
+        Ok(())
     }
 
     /// The project's manifest, as [`project`](Self::project) read it; `None` for an app that isn't
@@ -427,6 +510,11 @@ fn run_args(
     );
 
     if let Some(Err(error)) = &app.project {
+        error!(code = error.code(), "{error:#}");
+        return ExitCode::FAILURE;
+    }
+    // Before the replay too, whose layers load what they add from it.
+    if let Err(error) = app.open_package(args.package.as_deref()) {
         error!(code = error.code(), "{error:#}");
         return ExitCode::FAILURE;
     }

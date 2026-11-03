@@ -32,7 +32,8 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::units::Timestamp;
 use tracing::{debug, warn};
 
-use crate::{Entity, World, dirs};
+use crate::package::Files;
+use crate::{Entity, World};
 
 /// The most bytes a sound's file may hold, as it's decoded whole as it loads: some 90 seconds of
 /// CD-quality WAV, more than a game's sounds need; longer audio is music, which streams.
@@ -205,7 +206,7 @@ impl World {
     }
 }
 
-/// Reads the audio file at `path`, sound `name`'s, and decodes it whole, as
+/// Reads the audio file at `path` from `files`, sound `name`'s, and decodes it whole, as
 /// [`Context::add_sound`] says.
 ///
 /// Fails with `engine.bad_sound` if the file can't be read, isn't a regular file, is more than
@@ -213,7 +214,7 @@ impl World {
 /// [`MAX_SOUND_FRAMES`].
 ///
 /// [`Context::add_sound`]: crate::Context::add_sound
-pub(crate) fn decode(name: &str, path: &Path) -> Result<StaticSoundData> {
+pub(crate) fn decode(name: &str, path: &Path, files: &Files) -> Result<StaticSoundData> {
     let zone = gg_core::zone!();
     zone.text(path.display());
     let bad = |problem: String| {
@@ -221,7 +222,7 @@ pub(crate) fn decode(name: &str, path: &Path) -> Result<StaticSoundData> {
         Error::new("engine.bad_sound", message)
     };
     // A byte past the most a sound's file holds, so that a longer one is refused.
-    let bytes = dirs::read_file(path, MAX_SOUND + 1)
+    let bytes = (files.read(path, MAX_SOUND + 1))
         .map_err(|error| bad("can't be read".to_owned()).with_source(error))?;
     if bytes.len() as u64 > MAX_SOUND {
         return Err(bad(format!("is more than {} MiB", MAX_SOUND >> 20)));
@@ -287,7 +288,7 @@ pub(crate) struct Encoded {
 /// 64 MiB, or isn't such audio.
 ///
 /// [`Context::add_music`]: crate::Context::add_music
-pub(crate) fn read_music(name: &str, path: &Path) -> Result<Encoded> {
+pub(crate) fn read_music(name: &str, path: &Path, files: &Files) -> Result<Encoded> {
     let zone = gg_core::zone!();
     zone.text(path.display());
     let bad = |problem: String| {
@@ -295,7 +296,7 @@ pub(crate) fn read_music(name: &str, path: &Path) -> Result<Encoded> {
         Error::new("engine.bad_music", message)
     };
     // A byte past the most a music's file holds, so that a longer one is refused.
-    let bytes = dirs::read_file(path, MAX_MUSIC + 1)
+    let bytes = (files.read(path, MAX_MUSIC + 1))
         .map_err(|error| bad("can't be read".to_owned()).with_source(error))?;
     if bytes.len() as u64 > MAX_MUSIC {
         return Err(bad(format!("is more than {} MiB", MAX_MUSIC >> 20)));
@@ -1137,7 +1138,12 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&scratch.0).expect("a directory");
         let tone = scratch.0.join("tone.ogg");
         std::fs::write(&tone, include_bytes!("../tests/audio/tone.ogg")).expect("a file");
-        assert_eq!(read_music("tone", &tone).expect("music").frames, 24_000);
+        assert_eq!(
+            read_music("tone", &tone, &Files::default())
+                .expect("music")
+                .frames,
+            24_000
+        );
         let empty = wav(&[]);
         let files = [
             ("noise.ogg", &b"OggS, but no more"[..], "doesn't decode"),
@@ -1145,14 +1151,14 @@ pub(crate) mod tests {
         ];
         for (file, bytes, why) in files {
             std::fs::write(scratch.0.join(file), bytes).expect("a file");
-            let Err(error) = read_music("bad", &scratch.0.join(file)) else {
+            let Err(error) = read_music("bad", &scratch.0.join(file), &Files::default()) else {
                 panic!("{file} reads as music");
             };
             assert_eq!(error.code(), "engine.bad_music");
             let message = format!("{error:#}");
             assert!(message.contains(file) && message.contains(why), "{message}");
         }
-        let Err(error) = read_music("none", &scratch.0.join("none.ogg")) else {
+        let Err(error) = read_music("none", &scratch.0.join("none.ogg"), &Files::default()) else {
             panic!("a file that isn't there reads as music");
         };
         assert_eq!(error.code(), "engine.bad_music");

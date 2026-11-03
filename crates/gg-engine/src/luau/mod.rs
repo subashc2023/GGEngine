@@ -10,7 +10,7 @@ use std::path::Path;
 use std::rc::{Rc, Weak};
 #[cfg(feature = "dev")]
 use std::sync::Arc;
-use std::{fs, mem, ptr};
+use std::{io, mem, ptr};
 
 #[cfg(feature = "dev")]
 use gg_api::StopReason;
@@ -446,9 +446,12 @@ impl Scripts {
     /// Loads the script at `path`, declaring the component type it declares in `cx`'s world, and
     /// returns that type's name, which an entity is given to run the script, as
     /// [`World::add_default`] gives it. A development build watches its file, reloading it as it's
-    /// saved, as [`Scripts`] says. A script loaded again, at the same path, takes its own place.
+    /// saved, as [`Scripts`] says, but in a run that reads its game's package, as
+    /// [`App::project`](crate::App::project) says, which reads it there. A script loaded again, at
+    /// the same path, takes its own place.
     ///
-    /// Fails with `script.unreadable` if the file can't be read; `script.pow` and
+    /// Fails with `script.unreadable` if the file can't be read, isn't a regular file or isn't
+    /// UTF-8; `script.pow` and
     /// `script.header` for a script refused as [`Scripts`] says; `script.bad` for one that
     /// doesn't compile, that fails as its chunk runs, or that returns other than the component it
     /// declares, as `gg.declare` returns it; `reflect.name_taken` for a component type another has;
@@ -456,7 +459,10 @@ impl Scripts {
     pub fn load(&mut self, cx: &mut Context, path: impl AsRef<Path>) -> Result<String> {
         let path = path.as_ref();
         let name = crate::assets::name_of(cx.root.as_deref(), path).to_string();
-        let text = fs::read_to_string(path).map_err(|error| {
+        let read = cx.files.read(path, u64::MAX).and_then(|bytes| {
+            String::from_utf8(bytes).map_err(|_| io::Error::other("it isn't UTF-8"))
+        });
+        let text = read.map_err(|error| {
             Error::new(
                 "script.unreadable",
                 format!("can't read {}: {error}", path.display()),
@@ -469,7 +475,9 @@ impl Scripts {
         let component = loaded?;
         cx.hosts.add(&self.host);
         #[cfg(feature = "dev")]
-        cx.scripts.watch(name, path, text);
+        if !cx.reads_package() {
+            cx.scripts.watch(name, path, text);
+        }
         Ok(component)
     }
 
@@ -1906,6 +1914,8 @@ mod watch {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
     use crate::Component;
     use crate::dirs::tests::Scratch;

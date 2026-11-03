@@ -3,6 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use gg_api::Project;
+use gg_engine::cook::Kind;
 
 use super::*;
 
@@ -543,6 +544,51 @@ fn the_live_recording_replays_to_its_hashes() {
 
 fn live_recording() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/references/live.recording")
+}
+
+/// The game's package, as `tools/cook` cooks it, holds what its runs load, but its mods: its scene,
+/// script, textures, model, sounds and music as they are, its font baked and its shader compiled,
+/// its assets by their IDs; and the live recording replays from it to its hashes, as a build
+/// without `dev` runs from it.
+#[test]
+fn the_live_recording_replays_from_the_games_package() {
+    if std::env::var_os("GG_UPDATE_REFERENCES").is_some_and(|value| value == "1") {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("shards-package-{}", std::process::id()));
+    let package = dir.join("gg-shards.ggpk");
+    let game = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let cooked = cook::cook(game, &package).unwrap_or_else(|error| panic!("{error:#}"));
+    let held: Vec<(&str, Kind, bool)> = (cooked.iter())
+        .map(|cooked| (&*cooked.path, cooked.kind, cooked.id.is_some()))
+        .collect();
+    let expected = [
+        ("fonts/Inter-Bold.ttf", Kind::Font, true),
+        ("models/crystal.gltf", Kind::File, true),
+        ("music/match.ogg", Kind::File, false),
+        ("scenes/arena.ron", Kind::File, false),
+        ("scripts/spin.luau", Kind::File, false),
+        ("shaders/floor.slang", Kind::Shader, false),
+        ("sounds/choose.wav", Kind::File, false),
+        ("sounds/collect.wav", Kind::File, false),
+        ("sounds/dash.wav", Kind::File, false),
+        ("sounds/focus.wav", Kind::File, false),
+        ("sounds/win.wav", Kind::File, false),
+        ("textures/pillar.png", Kind::File, true),
+    ];
+    assert_eq!(held, expected);
+    let text = fs::read_to_string(live_recording()).expect("the live recording");
+    let app = app()
+        .package(&package)
+        .unwrap_or_else(|error| panic!("{error:#}"));
+    let mut replay = gg_engine::Replay::new(app, &text);
+    let replay = replay.as_mut().unwrap_or_else(|error| panic!("{error:#}"));
+    while replay
+        .step()
+        .unwrap_or_else(|error| panic!("{error:#}"))
+        .is_some()
+    {}
+    let _ = fs::remove_dir_all(dir);
 }
 
 /// A copy of the live recording whose first steer goes another way goes another way at that

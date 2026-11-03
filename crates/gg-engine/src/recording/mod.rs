@@ -538,12 +538,13 @@ impl Replay {
         cx.mods.recorded = Some(recording.mods.clone());
         // So that its textures are named as the run's were, by the names the recording gives them
         // or by their paths from the root, scanning no ID file, one that can't be loaded standing
-        // in, and it starts in the run's scene.
+        // in, and it starts in the run's scene, read from the game's package if it has one.
         cx.root.clone_from(&app.root);
+        cx.files = app.files.clone();
         #[cfg(feature = "dev")]
         cx.name_as(recording.names.iter().cloned());
         cx.follows = true;
-        cx.start = app.manifest().map(|manifest| manifest.start.clone());
+        cx.start.clone_from(&app.start);
         app.stack.attach(&mut cx);
         Ok(Self {
             app,

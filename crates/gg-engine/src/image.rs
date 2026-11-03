@@ -13,7 +13,7 @@ use zune_jpeg::zune_core::bytestream::ZCursor;
 use zune_jpeg::zune_core::colorspace::ColorSpace;
 use zune_jpeg::zune_core::options::DecoderOptions;
 
-use crate::dirs;
+use crate::package::Files;
 
 /// The most bytes an image's file may hold: more than a PNG or a JPEG of a texture's size needs, as
 /// 8,192 pixels square of 16-bit RGBA, stored uncompressed, are 512 MiB.
@@ -27,11 +27,11 @@ pub(crate) struct Image {
     pub(crate) pixels: Vec<u8>,
 }
 
-/// Reads the image file at `path`, which is texture `name`'s: a PNG or a JPEG.
+/// Reads the image file at `path` from `files`, which is texture `name`'s: a PNG or a JPEG.
 ///
 /// Fails with `engine.bad_texture` if the file can't be read or isn't a regular file, or doesn't
 /// decode as either.
-pub(crate) fn load_image(name: &str, path: &Path) -> Result<Image> {
+pub(crate) fn load_image(name: &str, path: &Path, files: &Files) -> Result<Image> {
     let zone = gg_core::zone!();
     zone.text(path.display());
     let bad = |problem: String| {
@@ -41,7 +41,7 @@ pub(crate) fn load_image(name: &str, path: &Path) -> Result<Image> {
         )
     };
     // A byte past the most an image's file holds, so that a longer one fails to decode.
-    let bytes = dirs::read_file(path, MAX_FILE + 1)
+    let bytes = (files.read(path, MAX_FILE + 1))
         .map_err(|error| bad("can't be read".to_owned()).with_source(error))?;
     decode(&bytes).map_err(|problem| bad(format!("doesn't decode as a PNG or a JPEG: {problem}")))
 }
@@ -291,7 +291,7 @@ pub(crate) mod tests {
         let missing = Path::new("no such folder/checkerboard.png");
         let not_a_png = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
         for path in [missing, &not_a_png] {
-            let error = load_image("checkerboard", path).expect_err("no image");
+            let error = load_image("checkerboard", path, &Files::default()).expect_err("no image");
             assert_eq!(error.code(), "engine.bad_texture", "{}", path.display());
             let message = error.to_string();
             assert!(
@@ -301,7 +301,7 @@ pub(crate) mod tests {
             );
         }
         // Why it can't be read, once: as what caused the error, and not in its message too.
-        let error = load_image("checkerboard", missing).expect_err("no image");
+        let error = load_image("checkerboard", missing, &Files::default()).expect_err("no image");
         let shown = format!("{error:#}");
         assert_eq!(shown.matches("(os error").count(), 1, "{shown}");
     }

@@ -33,6 +33,7 @@ use crate::audio::{self, Encoded};
 use crate::font::{self, Bake};
 use crate::gltf::{self, Imported};
 use crate::image::{self, Image};
+use crate::package;
 use crate::{Font, Music, Sound};
 
 /// How long the thread waits between looks at the files. A change reads on the look after the one
@@ -176,7 +177,7 @@ impl Source {
                 path,
                 ..
             } => {
-                let image = image::load_image(name, path)?;
+                let image = image::load_image(name, path, &package::Files::default())?;
                 let reloaded = Reloaded::Texture {
                     texture: *texture,
                     path: path.clone(),
@@ -187,7 +188,7 @@ impl Source {
             Self::Model {
                 file, name, path, ..
             } => {
-                let (imported, files) = gltf::read_listing(name, path)?;
+                let (imported, files) = gltf::read_listing(name, path, &package::Files::default())?;
                 let reloaded = Reloaded::Model {
                     file: file.clone(),
                     path: path.clone(),
@@ -212,7 +213,7 @@ impl Source {
                 let reloaded = Reloaded::Sound {
                     sound: *sound,
                     path: path.clone(),
-                    data: Box::new(audio::decode(name, path)?),
+                    data: Box::new(audio::decode(name, path, &package::Files::default())?),
                 };
                 Ok((reloaded, vec![path.clone()]))
             }
@@ -222,7 +223,7 @@ impl Source {
                 let reloaded = Reloaded::Music {
                     music: *music,
                     path: path.clone(),
-                    encoded: audio::read_music(name, path)?,
+                    encoded: audio::read_music(name, path, &package::Files::default())?,
                 };
                 Ok((reloaded, vec![path.clone()]))
             }
@@ -1160,7 +1161,8 @@ mod tests {
         written_long_ago(&image, png(1, 9));
         written_long_ago(&model, gltf::tests::model());
         let read_at = SystemTime::now();
-        let (imported, files) = gltf::read_listing("m", &model).expect("a model");
+        let (imported, files) =
+            gltf::read_listing("m", &model, &package::Files::default()).expect("a model");
         let texture = Source::Texture {
             texture: Texture::WHITE,
             name: "a".to_owned(),

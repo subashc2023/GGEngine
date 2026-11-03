@@ -815,8 +815,9 @@ impl Api {
     /// [`scene_files::check_unsaved`] passes, stops a copy that plays, as `stop` does, and opens a
     /// scene file in its place or empties it, as [`scene_files::open`] and [`scene_files::new`] do.
     ///
-    /// Fails with `engine.no_project` in a game that isn't a project's; with `api.no_scene` for a
-    /// save in a lockstep peer, whose scene files the other's must stay as, and for an open or a
+    /// Fails with `engine.no_project` in a game that isn't a project's; with `api.no_scene` in a
+    /// game that runs from its package, which has no scene files, for a save in a lockstep peer,
+    /// whose scene files the other's must stay as, and for an open or a
     /// new in a run that can't stop, as [`Stack::refuses_stop`] says, since neither the history
     /// they restart nor a copy's stopping is recorded or sent to a peer; and as those calls do.
     fn scene(
@@ -828,6 +829,11 @@ impl Api {
     ) -> Result<()> {
         if cx.start.is_none() {
             return Err(scene_files::no_project());
+        }
+        if cx.reads_package() {
+            let message = "the game can't open, save or empty the open scene: it runs from its \
+                           package, which holds no scene files to open or save";
+            return Err(Error::new("api.no_scene", message));
         }
         let existing = scene.action == SceneAction::Open;
         let resolve = |path: &Path| scene_files::resolve(cx, path, existing);

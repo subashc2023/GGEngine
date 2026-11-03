@@ -94,11 +94,11 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # With Tracy's C++ client compiled in, as the `tracy` feature builds it.
       - run: cargo clippy --workspace --all-targets --locked --features sandbox/tracy -- -D warnings
-      # The shipping configuration, the player alone, whose gg-engine leaves out `dev`: on one
-      # runner, as what `dev` leaves out is alike on every platform.
+      # The shipping configuration, the player and the games without `dev`, whose gg-engine leaves it
+      # out: on one runner, as what `dev` leaves out is alike on every platform.
       - name: Check the shipping configuration
         if: matrix.once
-        run: cargo clippy -p player --all-targets --locked -- -D warnings
+        run: cargo clippy -p player -p shards -p showcase --no-default-features --all-targets --locked -- -D warnings
       # gg-engine without `dev`, its tests included, which the workspace's builds never compile: on
       # one runner too, apart from the player, as its tests' dev-dependencies would merge into it.
       - name: Check gg-engine without dev
@@ -159,6 +159,26 @@ jobs:
         run: cargo run -p sandbox --locked --features tracy -- --headless --frames 60
         env:
           TRACY_NO_INVARIANT_CHECK: "1"
+      # The demo as it ships: built without `dev`, from the package the cooker writes beside its
+      # executable, it replays its live recording to every hash, exiting 0, and runs headless, from a
+      # directory of its own, with neither its project nor slangc where its build found them. Last
+      # but for the new game, as the build without `dev` takes the place of the demo's own.
+      - name: Cook the demo, and run it as it ships
+        if: matrix.once
+        run: |
+          cargo build -p shards --no-default-features --locked
+          cargo run -p cook --locked -- games/shards target/debug/gg-shards.ggpk
+          shipped="$RUNNER_TEMP/shipped"
+          mkdir "$shipped"
+          cp target/debug/gg-shards target/debug/gg-shards.ggpk "$shipped"
+          cp games/shards/tests/references/live.recording "$shipped"
+          mv games/shards "$RUNNER_TEMP/shards"
+          mv "$RUNNER_TEMP/slang" "$RUNNER_TEMP/slang-away"
+          "$shipped/gg-shards" --replay "$shipped/live.recording"
+          "$shipped/gg-shards" --headless --frames 120
+          mv "$RUNNER_TEMP/slang-away" "$RUNNER_TEMP/slang"
+          mv "$RUNNER_TEMP/shards" games/shards
+          grep -q "Running from the game's package" "$shipped"/logs/shards-*.jsonl
       # `gg new`'s game builds against the engine as it is and runs headless, from the workspace and
       # from inside its project: nothing else compiles its template. Last, as the new member changes
       # the lock file, which `--locked` refuses.

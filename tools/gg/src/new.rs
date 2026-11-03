@@ -25,9 +25,13 @@ name = "gg-{name}"
 path = "src/main.rs"
 
 [dependencies]
+gg-engine.workspace = true
+
+[features]
+default = ["dev"]
 # A development build, which serves the tool API, applies its scene file's saves and reloads its
-# assets as they change.
-gg-engine = { workspace = true, features = ["dev"] }
+# assets as they change. A build without it runs from the game's package, as shipping builds do.
+dev = ["gg-engine/dev"]
 
 [lints]
 workspace = true

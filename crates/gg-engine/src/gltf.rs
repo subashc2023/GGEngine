@@ -17,6 +17,7 @@ use gg_renderer::{AlphaMode, Wrap};
 
 use crate::Transform;
 use crate::image::{self, Image};
+use crate::package::Files;
 
 /// What `read` gives: the default scene's parts, the primitives they draw and the images those
 /// sample.
@@ -100,17 +101,21 @@ impl Default for Material {
 /// times, such as one PNG's bytes as many images.
 pub(crate) const MAX_MEMORY: u64 = 4 << 30;
 
-/// Reads model `name`'s file at `path`, and the files it names, from the disk, as [`read`] does
-/// through [`dirs::read_file`](crate::dirs::read_file), and lists the files it read, its own first,
-/// each once: those that hot reload watches.
-pub(crate) fn read_listing(name: &str, path: &Path) -> Result<(Imported, Vec<PathBuf>)> {
+/// Reads model `name`'s file at `path`, and the files it names, from `from`, the disk or the game's
+/// package, as [`read`] does through [`Files::read`], and lists the files it read, its own first,
+/// each once: those that hot reload watches, and that a package holds for it.
+pub(crate) fn read_listing(
+    name: &str,
+    path: &Path,
+    from: &Files,
+) -> Result<(Imported, Vec<PathBuf>)> {
     let files: RefCell<Vec<PathBuf>> = RefCell::default();
     let read_file = |file: &Path, most: u64| {
         let mut files = files.borrow_mut();
         if !files.iter().any(|read| read == file) {
             files.push(file.to_owned());
         }
-        crate::dirs::read_file(file, most)
+        from.read(file, most)
     };
     let imported = read(name, path, read_file, MAX_MEMORY)?;
     Ok((imported, files.into_inner()))
@@ -1641,7 +1646,7 @@ pub(crate) mod tests {
         for (name, bytes) in files {
             std::fs::write(folder.join(name), bytes).expect("a file it names");
         }
-        let (read, listed) = read_listing("m", &model).expect("a model");
+        let (read, listed) = read_listing("m", &model, &Files::default()).expect("a model");
         assert_eq!(read, imported);
         let mut named: Vec<PathBuf> = listed[1..].to_vec();
         named.sort();

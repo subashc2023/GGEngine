@@ -20,6 +20,7 @@ use super::table::AnyColumn;
 use super::{Entity, Parent, World};
 use crate::ModelRoot;
 use crate::assets::Asset;
+use crate::package::Files;
 use crate::reflect::{Meta, Show};
 use read::Loaded;
 pub(crate) use write::{float, quote};
@@ -56,12 +57,20 @@ pub fn write_scene(path: &Path, text: &str) -> Result<()> {
 /// Fails with `scene.file`, naming the path, if it can't be read, isn't a regular file or isn't
 /// UTF-8.
 pub fn read_scene(path: &Path) -> Result<String> {
+    read_scene_from(path, &Files::default())
+}
+
+/// The text of the scene file at `path`, as [`read_scene`] reads it, from `files`, the disk or the
+/// game's package.
+pub(crate) fn read_scene_from(path: &Path, files: &Files) -> Result<String> {
     let _zone = gg_core::zone!();
     let error = || {
         let message = format!("can't read the scene from {}", path.display());
         Error::new("scene.file", message)
     };
-    let bytes = crate::dirs::read_file(path, u64::MAX).map_err(|e| error().with_source(e))?;
+    let bytes = files
+        .read(path, u64::MAX)
+        .map_err(|e| error().with_source(e))?;
     String::from_utf8(bytes).map_err(|e| error().with_source(e))
 }
 

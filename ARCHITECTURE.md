@@ -112,6 +112,9 @@ The editor uses `gg-api` too, beside `gg-engine`, as a client of the tool API, a
 - **`player`:** the reference player. It runs a cooked scene without game code and shows how a
   game builds its own player.
 - **`tools/gg`:** the command-line tool, a client of the tool API, which `cargo gg` runs.
+- **`tools/cook`:** the offline asset cooker, `gg-cook`, which writes a game's
+  [package](#project-state) from its project. It depends on `gg-engine`, whose code bakes fonts and
+  compiles shaders as runs do, and on `gg-api`, for the manifest and the scan of the asset root.
 
 Games depend on `gg-engine` the same way the apps do; see [Game code](#game-code). The first, in
 `games/shards`, is a demo of two players, alone or networked in lockstep, as
@@ -153,10 +156,13 @@ tool API included, belongs behind its `dev` feature, which development builds tu
 sandbox does, and shipping builds never do. [Its Cargo.toml](crates/gg-engine/Cargo.toml) says what
 `dev` gates. Shipping builds run cooked data only. Cargo merges the features of every package a
 command selects, so `--workspace`, a bare `cargo build` and `--bin gg-player` would all hand the
-player `dev`. Shipping builds therefore select the player alone, with `-p player`, and a game's
-will select the game alone the same way, once Phase 10 gives games a shipping profile: until then
-each game turns `dev` on in its manifest, as `gg new` writes it. The shipping gate,
-`cargo clippy -p player`, checks `gg-engine` as they build it. A gate of its own,
+player `dev`. Shipping builds therefore select the player alone, with `-p player`, or a game alone.
+A game turns `dev` on through a feature of its own of that name, on by default, as `gg new` writes
+its manifest, so that its development build is a plain `cargo build`, and its shipping build leaves
+it out: `cargo build -p shards --no-default-features` builds the demo as it ships, which runs from
+its [package](#project-state). The shipping gate, `cargo clippy -p player -p shards -p showcase
+--no-default-features`, checks `gg-engine` as they build it, and the games' tests without `dev`,
+which compile there but run with it, as they read their projects. A gate of its own,
 `cargo clippy -p gg-engine --all-targets`, checks `gg-engine`'s tests without `dev` too, which no
 other command builds: kept apart from the shipping gate, as their dev-dependencies' features would
 merge into the player's build.
@@ -177,8 +183,9 @@ items, fails the change that broke it.
 A module becomes its own crate once it has its own responsibility and a second user, not
 before:
 
-- `gg-assets`: cooked asset formats, shared by the cooker and the runtime.
-- `tools/cook`: the offline asset cooker.
+- `gg-assets`: cooked asset formats, shared by the cooker and the runtime, once the cooker builds
+  without the engine. It bakes fonts and compiles shaders with the engine's own code, through
+  `gg-engine`'s hidden `cook` module, so the package's format is a module of `gg-engine` until then.
 - `gg-scene`, `gg-physics`, `gg-audio` and the like: when each outgrows a module of `gg-engine`.
 
 ## Game code
@@ -403,7 +410,31 @@ A project's state is text that people and agents edit, diff and merge with ordin
   scene it starts in (`start`), which `Context::load_start_scene` loads; each path relative to the
   manifest's directory. Tools read a manifest and never rewrite it, and `gg new` writes one. A
   development build reads its game's, through `App::project`; shipping builds start from cooked
-  data, so a build without `dev` reads none.
+  data, so a build without `dev` reads none, and runs from its game's package.
+- **Packages.** A game's package is one file, which the cooker, `gg-cook`, writes from its project,
+  and a build of the game without `dev` runs from: `<executable>.ggpk` beside its executable, or the
+  one `--package` names, a run of a project without one failing as it starts (`engine.no_package`).
+  It holds the files under the asset root that runs load, by their paths from the root, found
+  through the folders the scan of ID files below goes through: a font
+  baked into its field and a shader compiled to SPIR-V, which are what the engine makes of them as
+  they load, so that a shipping run needs no slangc; and the rest as they are, textures, sounds and
+  music, scenes and other RON, scripts, and models with the files they name. It leaves out the
+  manifest, mods' folders, whose scripts a player installs, a module that shaders include rather
+  than one that compiles alone, and what no run loads, as code and docs, by its extension. Which of
+  the rest a game's code loads the cooker can't know, but it refuses a project whose package
+  wouldn't hold its start scene (`cook.no_start`). It gives
+  each asset the ID its ID file holds, and the cooker refuses a project whose ID files a development
+  run would warn of (`asset.bad_meta`, `asset.meta_case`, `asset.duplicate_id`), so that a run from
+  the package names its assets as a development run does, and replays what one recorded to every
+  hash. A run finds a file there by its path from the root, worked out from the path it's given as
+  the disk would, a relative path from the working directory, but without reading the disk, and
+  with its case, so that a package runs alike wherever it's copied. A run from a package reads
+  nothing of the disk's under its root: it scans for no ID file, watches nothing, and the API's
+  `scene` refuses (`api.no_scene`). A
+  development build runs from one too, given `--package`, as the demo's test that replays its live
+  recording from its package does. Cooking the same project gives the same bytes. The format, in
+  [package.rs](crates/gg-engine/src/package.rs), has a version, which a change to what a kind of
+  file holds there changes too, as a baked font's layout.
 - **Canonical text files.** Scenes, prefabs and project settings are saved as RON in a
   canonical form: saving what was loaded gives the same bytes, entities are ordered by ID, and
   changing a field changes only that field's lines. RON maps Rust's enums and tuples directly,
@@ -525,8 +556,9 @@ A project's state is text that people and agents edit, diff and merge with ordin
     or a lockstep peer's command or edit names, and no layer has added, loads there, before the
     text is read, as `Context::add_texture`, `add_model` and `add_font` load a file, and is named as
     they name one, its file found by the name: in a run that follows another, a replay or a
-    lockstep joiner, at the path the name was given; else by an ID, as the run's database has it,
-    which a joiner has but a replay, reading no ID file, doesn't; else by a path from the asset
+    lockstep joiner, at the path the name was given; else by an ID, as the run's package or
+    database has it, which a joiner has but a replay without a package, reading no ID file,
+    doesn't; else by a path from the asset
     root, which mustn't be absolute or lead outside it, as through `..` or a link. A model's image
     loads with its model, which a name of the image loads. A name that doesn't load refuses what
     names it where it's asked for (`asset.no_texture`, `asset.no_model` or `asset.no_font`, the
@@ -544,8 +576,10 @@ A project's state is text that people and agents edit, diff and merge with ordin
     (`asset.not_given`). Scene text that a layer loads into a world itself, as inside a tick, finds
     only what's loaded. Each decodes, or bakes, on the main thread as it's named, as a layer's add
     does.
-  - Builds without `dev`, which read no ID file, name every asset by its path, so that a scene, a
-    recording or a snapshot naming one by its ID finds none there; cooked data will give them IDs.
+  - A run from a package names each asset by the ID the package gives it, as a development run
+    names it by its ID file. A build without `dev` and without a project, as the player is until it
+    runs a package's scenes, reads no ID file, and names every asset by its path, so that a scene,
+    a recording or a snapshot naming one by its ID finds none there.
   - A run's names travel with what another process reads of it, so that the other goes as it did
     whatever ID files its disk holds, as a checkout without those not yet committed. A recording
     has a `named` line for each texture, model and font named otherwise than by its path, the name
@@ -1274,8 +1308,8 @@ play their UI's sounds as they update, with `Context::play_sound`.
 
 Music streams: a layer loads it from the same formats, read whole into memory as compressed as its
 file is and decoded as it plays, on a thread of kira's for each play, so that a long piece takes
-little memory and a play never reads the disk, as a cooked package's audio, mapped into memory,
-won't. Layers play one at a time, with `Context::play_music`, looping from its start, the music
+little memory and a play never reads the disk, whether the file is on it or in a game's package.
+Layers play one at a time, with `Context::play_music`, looping from its start, the music
 before it fading out as it fades in. Playing the music playing goes on as it was, so that a layer
 can say each frame which plays; ticks play none, since a layer that reads the world as it updates
 plays what the world calls for. The decoder is the engine's, over symphonia, as kira's leaves the
@@ -1352,9 +1386,9 @@ on the main thread.
 | Logs and profiling | `tracing` for logs; Tracy, through `tracy-client`, for CPU zones and GPU timestamps |
 | Frame captures | RenderDoc, through its in-application API, which `gg-gpu` finds in the process with `libloading` |
 | Agent access | MCP and a command-line tool, both clients of the [tool API](#agents-and-tools) |
-| Shaders | Slang, compiled to SPIR-V by the Vulkan SDK's `slangc` rather than linked in: the engine's own as it builds, games' as they're added and, in development builds, as their files change, their SPIR-V checked against the shader contract |
-| Assets | glTF 2.0 in, read by the engine over `serde_json`; meshoptimizer for meshes and meshlets; BC-compressed textures in KTX2; until cooking, PNGs and JPEGs that `png` and `zune-jpeg` decode as layers add them |
-| Text | TrueType and OpenType fonts, whose outlines `skrifa` reads and `fdsm` bakes into multi-channel signed distance fields, as fonts load until they're cooked; text shaped by `harfrust`; `skrifa` and `harfrust` at the releases egui's own text takes |
+| Shaders | Slang, compiled to SPIR-V by the Vulkan SDK's `slangc` rather than linked in: the engine's own as it builds, games' as development builds add them and as their files change, and by the cooker into a game's package, their SPIR-V checked against the shader contract |
+| Assets | A game's package, a file of the engine's own format that its shipping build reads at offsets; glTF 2.0 in, read by the engine over `serde_json`; meshoptimizer for meshes and meshlets; BC-compressed textures in KTX2; until the cooker compresses textures, PNGs and JPEGs that `png` and `zune-jpeg` decode as layers add them |
+| Text | TrueType and OpenType fonts, whose outlines `skrifa` reads and `fdsm` bakes into multi-channel signed distance fields, as development builds load fonts and as the cooker cooks them; text shaped by `harfrust`; `skrifa` and `harfrust` at the releases egui's own text takes |
 | Audio | `kira` on `cpal`, its sounds and music decoded by `symphonia` through decoders of the engine's: tracks as buses, panning and streaming, without allocating on the audio thread |
 
 Areas not listed here are undecided.

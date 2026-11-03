@@ -48,6 +48,7 @@ use crate::model::{self, Nodes};
 #[cfg(feature = "dev")]
 use crate::net::Ticket;
 use crate::net::{Lockstep, Outside, Turn};
+use crate::package::{self, Files};
 use crate::perf::Perf;
 use crate::physics::{self, CircleCollider2D, Physics2D};
 use crate::recording::Recorder;
@@ -297,6 +298,9 @@ pub struct Context {
     ///
     /// [`App::root`]: crate::App::root
     pub(crate) root: Option<PathBuf>,
+    /// Where the files under the root are read: the game's package, if the run reads one, as
+    /// [`App::project`] says, or the disk.
+    pub(crate) files: Files,
     /// The project's start scene, which [`load_start_scene`](Self::load_start_scene) loads, as
     /// [`App::project`] says.
     ///
@@ -401,15 +405,23 @@ impl Context {
             cx.audio = Audio::aloud();
         }
         cx.root.clone_from(&app.root);
-        cx.start = app.manifest().map(|manifest| manifest.start.clone());
+        cx.files = app.files.clone();
+        cx.start.clone_from(&app.start);
         #[cfg(feature = "dev")]
-        {
+        if !cx.reads_package() {
             if let Some(manifest) = app.manifest() {
                 cx.folders.clone_from(&manifest.scenes);
             }
             cx.asset_cache = (cx.root.as_deref()).and_then(|root| assets::cache(app.name, root));
         }
         cx
+    }
+
+    /// Whether the run reads the files under its asset root from its game's package, as
+    /// [`App::project`](crate::App::project) says, rather than the disk: such a run reloads none,
+    /// and has no asset database, no scene files to open or save and no ID files.
+    pub(crate) fn reads_package(&self) -> bool {
+        self.files.packaged().is_some()
     }
 
     /// A context without a window, a renderer or a stack, whose world draws its entities' IDs from
@@ -522,6 +534,7 @@ impl Context {
             past: Past::default(),
             attached: false,
             root: None,
+            files: Files::default(),
             start: None,
             #[cfg(feature = "dev")]
             folders: Vec::new(),
@@ -759,7 +772,7 @@ impl Context {
     ) -> Result<Shader<V, P>> {
         let path = path.as_ref();
         let named = assets::name_of(self.root.as_deref(), path);
-        let file = assets::file_of(path);
+        let file = self.files.file_of(path);
         let added = &self.loaded.shaders;
         let same = |by: &Path| {
             file.as_ref()
@@ -767,6 +780,18 @@ impl Context {
         };
         let shader = match self.shaders.find::<V, P>(blend, same) {
             Some(shader) => shader,
+            None if self.reads_package() => {
+                let spirv = (self.files)
+                    .read_as(path, package::Kind::Shader, u64::MAX)
+                    .map_err(|error| {
+                        let message = format!(
+                            "shader {name:?} at {} can't be read from the game's package",
+                            path.display()
+                        );
+                        Error::new("renderer.bad_shader", message).with_source(error)
+                    })?;
+                self.shaders.add_compiled(name, path, spirv, blend)?
+            }
             None => self.shaders.add(name, path, blend)?,
         };
         if let Some(file) = file {
@@ -803,7 +828,7 @@ impl Context {
     pub fn add_texture(&mut self, name: &str, path: impl AsRef<Path>) -> Result<Texture> {
         let path = path.as_ref();
         let named = assets::name_of(self.root.as_deref(), path);
-        let file = assets::file_of(path);
+        let file = self.files.file_of(path);
         let texture = match self.loaded_texture(&named, path, file.as_deref()) {
             Some((texture, _)) => {
                 self.alias(texture, &named);
@@ -812,7 +837,7 @@ impl Context {
             None => {
                 #[cfg(feature = "dev")]
                 let read_at = SystemTime::now();
-                let image = image::load_image(name, path)?;
+                let image = image::load_image(name, path, &self.files)?;
                 let size = image.size;
                 let texture = self.textures.add(name, size, image.pixels, Mipmaps::None)?;
                 let id = self.texture_name(&named, path, file.as_deref(), None);
@@ -846,7 +871,7 @@ impl Context {
     ) -> Result<SpriteSheet> {
         let path = path.as_ref();
         let named = assets::name_of(self.root.as_deref(), path);
-        let file = assets::file_of(path);
+        let file = self.files.file_of(path);
         let sheet = match self.loaded_texture(&named, path, file.as_deref()) {
             Some((texture, size)) => {
                 fits(name, path, size, cell)?;
@@ -860,7 +885,7 @@ impl Context {
             None => {
                 #[cfg(feature = "dev")]
                 let read_at = SystemTime::now();
-                let image = image::load_image(name, path)?;
+                let image = image::load_image(name, path, &self.files)?;
                 let sheet = add_sheet(&mut self.textures, name, path, image, cell)?;
                 let (texture, size) = (sheet.texture, sheet.size);
                 let id = self.texture_name(&named, path, file.as_deref(), None);
@@ -950,7 +975,7 @@ impl Context {
         let path = path.as_ref();
         zone.text(path.display());
         let named = assets::name_of(self.root.as_deref(), path);
-        let file = assets::file_of(path);
+        let file = self.files.file_of(path);
         let model = match self.loaded_model(&named, path, file.as_deref()) {
             Some(model) => {
                 if self.assets.model(&named).is_none() {
@@ -961,7 +986,7 @@ impl Context {
             None => {
                 #[cfg(feature = "dev")]
                 let read_at = SystemTime::now();
-                let (imported, files) = gltf::read_listing(name, path)?;
+                let (imported, files) = gltf::read_listing(name, path, &self.files)?;
                 if !imported.ignored.is_empty() {
                     info!(
                         code = "engine.model_ignored",
@@ -1028,7 +1053,7 @@ impl Context {
     pub fn add_font(&mut self, name: &str, path: impl AsRef<Path>) -> Result<Font> {
         let path = path.as_ref();
         let named = assets::name_of(self.root.as_deref(), path);
-        let file = assets::file_of(path);
+        let file = self.files.file_of(path);
         let font = match self.loaded_font(&named, path, file.as_deref()) {
             Some(font) => {
                 if self.assets.font(&named).is_none() {
@@ -1043,7 +1068,7 @@ impl Context {
                     size,
                     pixels,
                     baked,
-                } = font::bake(name, path)?;
+                } = font::load(name, path, &self.files)?;
                 let field =
                     (self.textures).add(&format!("{name} field"), size, pixels, Texels::Data);
                 let field = field?;
@@ -1084,13 +1109,13 @@ impl Context {
     /// streams.
     pub fn add_sound(&mut self, name: &str, path: impl AsRef<Path>) -> Result<Sound> {
         let path = path.as_ref();
-        let file = assets::file_of(path);
+        let file = self.files.file_of(path);
         if let Some(&sound) = file.as_ref().and_then(|file| self.loaded.sounds.get(file)) {
             return Ok(sound);
         }
         #[cfg(feature = "dev")]
         let read_at = SystemTime::now();
-        let data = audio::decode(name, path)?;
+        let data = audio::decode(name, path, &self.files)?;
         let sound = self.audio.add(name, data);
         #[cfg(feature = "dev")]
         self.watch_sound(sound, name, path, read_at);
@@ -1129,13 +1154,13 @@ impl Context {
     /// only as it plays: a play that fails there warns `audio.music_failed`, and stops.
     pub fn add_music(&mut self, name: &str, path: impl AsRef<Path>) -> Result<Music> {
         let path = path.as_ref();
-        let file = assets::file_of(path);
+        let file = self.files.file_of(path);
         if let Some(&music) = file.as_ref().and_then(|file| self.loaded.music.get(file)) {
             return Ok(music);
         }
         #[cfg(feature = "dev")]
         let read_at = SystemTime::now();
-        let encoded = audio::read_music(name, path)?;
+        let encoded = audio::read_music(name, path, &self.files)?;
         let music = self.audio.add_music(name, encoded);
         #[cfg(feature = "dev")]
         self.watch_music(music, name, path, read_at);
@@ -1315,7 +1340,7 @@ impl Context {
             Err(error) => return (None, Err(error)),
         };
         let loaded = self.named_file(name, &path).and_then(|file| {
-            let resolved = assets::file_of(&file);
+            let resolved = self.files.file_of(&file);
             let model = match self.loaded_model(&path, &file, resolved.as_deref()) {
                 Some(model) => model,
                 None => self.add_model(&path, &file)?,
@@ -1342,7 +1367,7 @@ impl Context {
             Err(error) => return (None, Err(error)),
         };
         let loaded = self.named_file(name, &path).and_then(|file| {
-            let resolved = assets::file_of(&file);
+            let resolved = self.files.file_of(&file);
             let font = match self.loaded_font(&path, &file, resolved.as_deref()) {
                 Some(font) => font,
                 None => self.add_font(&path, &file)?,
@@ -1394,15 +1419,15 @@ impl Context {
 
     /// The path from the asset root of the file whose texture, model or font, as `kind` says, text
     /// names `name`, as [`load_named`](Self::load_named) loads it: in a run that follows another,
-    /// the path given that name, as [`name_as`](Self::name_as) gives them; in a development build,
-    /// the asset's whose ID it is, as the asset database holds it; and else `name` itself, as a
-    /// path. A run that follows another and isn't to stand in for what it can't load, as a lockstep
-    /// joiner asked by the tool API, finds only what it was given, so that it names the asset as
-    /// its host would.
+    /// the path given that name, as [`name_as`](Self::name_as) gives them; in a run that reads its
+    /// game's package, the asset's whose ID it is there; in a development build, the asset's whose
+    /// ID it is, as the asset database holds it; and else `name` itself, as a path. A run that
+    /// follows another and isn't to stand in for what it can't load, as a lockstep joiner asked by
+    /// the tool API, finds only what it was given, so that it names the asset as its host would.
     ///
     /// Fails with `asset.not_given` for what such a run wasn't given; `asset.unknown_id` for an ID
-    /// no asset has this run, or any ID in a build without `dev`, which reads no ID file; and
-    /// `asset.outside_root` for an absolute path.
+    /// no asset has this run, or any ID in a build without `dev` that reads no package, as it reads
+    /// no ID file; and `asset.outside_root` for an absolute path.
     fn asset_path(&self, name: &str, kind: &str, stand_in: bool) -> Result<Arc<str>> {
         #[cfg(feature = "dev")]
         if let Some(given) = &self.given {
@@ -1421,6 +1446,14 @@ impl Context {
         #[cfg(not(feature = "dev"))]
         let _ = stand_in;
         if assets::is_id(name) {
+            if let Some(package) = self.files.packaged() {
+                let id = u64::from_str_radix(name, 16).ok();
+                if let Some(path) = id.and_then(|id| package.path_of(id)) {
+                    return Ok(path.into());
+                }
+                let message = format!("no asset in the game's package has the ID {name}");
+                return Err(Error::new("asset.unknown_id", message));
+            }
             #[cfg(feature = "dev")]
             {
                 let id = name.parse::<AssetId>().ok();
@@ -1434,7 +1467,7 @@ impl Context {
             {
                 let message = format!(
                     "{name} is an asset ID, but a build without `dev` reads no ID file, so it finds \
-                     a {kind} by its path alone"
+                     a {kind} by its path alone, but in its game's package"
                 );
                 return Err(Error::new("asset.unknown_id", message));
             }
@@ -1462,7 +1495,7 @@ impl Context {
     /// Fails as [`named_file`](Self::named_file) does, and as `add_texture` does.
     fn load_path(&mut self, name: &str, path: &str) -> Result<()> {
         let file = self.named_file(name, path)?;
-        let resolved = assets::file_of(&file);
+        let resolved = self.files.file_of(&file);
         let texture = match self.loaded_texture(path, &file, resolved.as_deref()) {
             Some((texture, _)) => texture,
             None => self.add_texture(path, &file)?,
@@ -1497,12 +1530,19 @@ impl Context {
     }
 
     /// Fails with `asset.outside_root` if `file`, which `path` names, resolves outside the asset
-    /// root, as through `..` or a link; one that doesn't resolve, as one that isn't there, doesn't.
+    /// root, as through `..` or a link, or, in a run that reads its game's package, as written; one
+    /// that doesn't resolve, as one that isn't there, doesn't.
     fn within_root(&self, path: &str, file: &Path) -> Result<()> {
         let within = self.root.as_deref().unwrap_or(Path::new("."));
-        if let (Some(resolved), Some(within)) = (assets::file_of(file), assets::file_of(within))
-            && !resolved.starts_with(&within)
-        {
+        let outside = if self.reads_package() {
+            self.files.within(file).is_none()
+        } else {
+            matches!(
+                (assets::file_of(file), assets::file_of(within)),
+                (Some(resolved), Some(within)) if !resolved.starts_with(&within)
+            )
+        };
+        if outside {
             let message = format!(
                 "`{path}` is outside the asset root, {}: an asset is named by its ID or by its path \
                  from the asset root",
@@ -1660,9 +1700,11 @@ impl Context {
     /// What names the texture or the model loaded from `file`, which a layer gave as `path`, whose
     /// path among assets is `named`, as [`Assets`] says, or with `image`, its image of that place
     /// in the model: in a development build, the name given its path, if the run is given its
-    /// assets' names, as [`name_as`](Self::name_as) says, and else its file's ID in the asset
-    /// database, with an image's place after the model's; and otherwise its path, as a build
-    /// without `dev`, which reads no ID file, names every one.
+    /// assets' names, as [`name_as`](Self::name_as) says; and else its ID, as [`id_of`] finds it,
+    /// with an image's place after the model's; and otherwise its path, as a build without `dev`
+    /// that reads no package, as it reads no ID file, names every one.
+    ///
+    /// [`id_of`]: Self::id_of
     fn texture_name(
         &self,
         named: &str,
@@ -1675,21 +1717,31 @@ impl Context {
             None => named.into(),
         };
         #[cfg(feature = "dev")]
-        {
-            let given = match &self.given {
-                Some(given) => given.get(&at).cloned(),
-                None => self.asset_id(path, file).map(|id| match image {
-                    Some(i) => format!("{id}#{i}").into(),
-                    None => id.to_string().into(),
-                }),
-            };
-            if let Some(name) = given {
-                return name;
-            }
+        if let Some(given) = &self.given {
+            return given.get(&at).cloned().unwrap_or(at);
         }
+        match (self.id_of(path, file), image) {
+            (Some(id), Some(i)) => format!("{id:016x}#{i}").into(),
+            (Some(id), None) => format!("{id:016x}").into(),
+            (None, _) => at,
+        }
+    }
+
+    /// The ID of the asset at `path`, whose file is `file`: in a run that reads its game's package,
+    /// the package's; else, in a development build, the asset database's, as
+    /// [`asset_id`](Self::asset_id) finds it; and else none, as a build without `dev` reads no ID
+    /// file.
+    fn id_of(&self, path: &Path, file: Option<&Path>) -> Option<u64> {
+        if let Some(package) = self.files.packaged() {
+            return package.id(&self.files.within(path)?);
+        }
+        #[cfg(feature = "dev")]
+        return self.asset_id(path, file).map(AssetId::get);
         #[cfg(not(feature = "dev"))]
-        let _ = (path, file);
-        at
+        {
+            let _ = file;
+            None
+        }
     }
 
     /// The texture loaded from `file`, which a layer gave as `path`, whose path among assets is
@@ -1822,7 +1874,8 @@ impl Context {
     /// Scans the assets under the app's root, as [`assets::scan`] says, writing the ID files
     /// missing if `writes`, and warning of each missing otherwise, and has the worlds share what it
     /// found: as a test's context is given its root, and as the tool API lists them in a run that
-    /// no thread watches them for. A context without a root has none. A texture is named by the ID
+    /// no thread watches them for. A context without a root has none, nor one that reads a package,
+    /// whose assets have the IDs the package gives them. A texture is named by the ID
     /// the database holds for it as it's added, so that a scan after names none afresh.
     ///
     /// Each scan walks the whole root and reads every ID file on the main thread, O(files), and
@@ -1838,7 +1891,8 @@ impl Context {
     /// renames by `prints`.
     #[cfg(feature = "dev")]
     fn scan_with(&mut self, prints: &mut Prints, writes: bool) {
-        let Some(root) = self.root.as_deref() else {
+        // A run from a package reads its files there alone, and its assets' IDs.
+        let Some(root) = self.root.as_deref().filter(|_| !self.reads_package()) else {
             return;
         };
         let _zone = gg_core::zone!();
@@ -1866,9 +1920,12 @@ impl Context {
     /// the prints its cache keeps, as [`assets::scanned`] says; then, if the API serves the run,
     /// starts the thread that keeps the database from then on, as `asset_watch` says, warning if it
     /// can't, so that the API's `assets` scans on the main thread instead. A context without a root
-    /// has no assets to scan.
+    /// has no assets to scan, nor does a run that reads its game's package, which reloads none.
     #[cfg(feature = "dev")]
     pub(crate) fn start_assets(&mut self, serves: bool, writes: bool) {
+        if self.reads_package() {
+            return;
+        }
         if serves {
             match HotReload::start() {
                 Ok(hot_reload) => self.hot_reload = Some(hot_reload),
@@ -2553,7 +2610,7 @@ impl Context {
     /// Outside the layers' attach and detach, as [`world_mut`](Self::world_mut) does.
     pub fn load_scene_file(&mut self, path: impl AsRef<Path>) -> Result<Vec<Entity>> {
         let path = path.as_ref();
-        let text = crate::read_scene(path)?;
+        let text = crate::ecs::read_scene_from(path, &self.files)?;
         let mut loaded = self.world_mut().load_scene(&text);
         // Read again once what it names that isn't loaded is, which is seldom, so that a scene that
         // names what's loaded is read once.
@@ -3957,6 +4014,83 @@ mod tests {
             stack.push_overlay(Blank);
         })));
         assert!(draws_ui(stack(&|stack| stack.push_layer(Wrapper(Quiet)))));
+    }
+
+    /// A run that reads a package loads from it what layers add and text names, though no file of
+    /// theirs is on the disk: a texture by its path, however it's written, named by its ID, and by
+    /// that ID, as text names it; a scene's text; and a script.
+    #[test]
+    fn a_run_loads_from_its_package_with_no_file_on_the_disk() {
+        use crate::package::{Kind, Package, Writer};
+
+        let dir = crate::dirs::tests::Scratch::new("package-loads");
+        // Never made: what loads, loads from the package.
+        let root = dir.0.join("game");
+        let png = crate::image::tests::png(
+            png::ColorType::Rgba,
+            png::BitDepth::Eight,
+            1,
+            &[255, 0, 0, 255],
+            None,
+        );
+        let still = "local Still = gg.declare(\"Still\", { rate = 1 })\nreturn Still\n";
+        let mut writer = Writer::new(".", Some("scenes/main.ron"));
+        let id = 0x5f3c_9a1e_07b2_d846;
+        writer
+            .add("textures/stone.png", Some(id), Kind::File, png)
+            .unwrap();
+        let scene = b"(\n    entities: {},\n)\n".to_vec();
+        writer
+            .add("scenes/main.ron", None, Kind::File, scene.clone())
+            .unwrap();
+        writer
+            .add("scripts/still.luau", None, Kind::File, still.into())
+            .unwrap();
+        let path = dir.0.join("game.ggpk");
+        writer.write(&path).unwrap();
+        let mut cx = Context::seeded(1);
+        cx.root = Some(root.clone());
+        cx.files = Files::package(Arc::new(Package::open(&path).unwrap()), root.clone());
+        assert!(cx.reads_package());
+
+        let stone = (cx.add_texture("stone", root.join("textures/stone.png")))
+            .unwrap_or_else(|error| panic!("{error:#}"));
+        assert_eq!(
+            cx.assets.name(stone),
+            Some("5f3c9a1e07b2d846"),
+            "named by its ID"
+        );
+        assert_eq!(cx.assets.path(stone), Some("textures/stone.png"));
+        let again = cx.add_texture("again", root.join("textures/../textures/stone.png"));
+        assert_eq!(again.expect("the same"), stone);
+        let gone = cx.add_texture("gone", root.join("textures/gone.png"));
+        assert_eq!(
+            gone.expect_err("not in the package").code(),
+            "engine.bad_texture"
+        );
+        // As text names it, by its ID, which a run without `dev` finds in the package alone.
+        cx.load_named([Asset::Texture("5f3c9a1e07b2d846")], false);
+        assert_eq!(cx.assets.texture("5f3c9a1e07b2d846"), Some(stone));
+        let unknown = cx.asset_path("0123456789abcdef", "texture", false);
+        assert_eq!(unknown.expect_err("no such ID").code(), "asset.unknown_id");
+
+        let read = crate::ecs::read_scene_from(&root.join("scenes/main.ron"), &cx.files);
+        assert_eq!(read.expect("the scene's text").as_bytes(), scene);
+        let mut scripts = crate::Scripts::new().expect("Luau starts");
+        let declared = scripts.load(&mut cx, root.join("scripts/still.luau"));
+        assert_eq!(declared.expect("the script loads"), "Still");
+        // Nor does a scan, as the tool API's `assets` asks for, read the disk under the root, or
+        // write an ID file there.
+        #[cfg(feature = "dev")]
+        {
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join("unlisted.png"), b"").unwrap();
+            cx.scan_assets(true);
+            assert!(
+                !root.join("unlisted.png.meta").exists(),
+                "an ID file written"
+            );
+        }
     }
 
     #[test]

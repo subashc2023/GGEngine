@@ -26,7 +26,7 @@ apps/             executables
   player/         reference player, with no layers; runs cooked scenes without game code (to come)
 games/shards/     the first demo, a project: two players, alone or in lockstep (`--host`, `--join`)
 games/showcase/   a project of a scene for each feature: add one as a feature lands
-tools/gg/         the command-line tool, which `cargo gg` runs
+tools/            gg/, the command-line tool `cargo gg` runs; cook/, the cooker of games' packages
 docs/PLAN.md      the roadmap (see Workflow)
 docs/DEFECTS.md   known defects of the code that exists (see Workflow)
 ```
@@ -41,7 +41,6 @@ check a change against the rest yourself.
 
 ```sh
 cargo build                       # the whole workspace
-cargo run -p sandbox
 cargo run -p editor               # its hub, which opens a project; in games/shards, Shards
 cargo run -p sandbox -- --help    # the flags every app shares
 cargo run -p sandbox -- --headless --frames 60   # does the engine run? 0 means cleanly
@@ -49,6 +48,7 @@ cargo run -p sandbox -- --record target/run.recording   # a run's seed, commands
 cargo run -p sandbox -- --replay target/run.recording   # without a GPU: 0 means every hash matched
 cargo run -p sandbox --release --features tracy   # with zones for Tracy
 cargo build -p player --release   # shipping: the player alone, as wider builds merge in dev
+cargo run -p cook -- games/shards target/debug/gg-shards.ggpk   # for a build --no-default-features
 cargo test -p gg-renderer --test gpu -- picks   # the GPU tests whose names contain picks
 cargo gg run sandbox              # supervised, serving the tool API: `cargo gg help`
 cargo gg run --peers 2            # in games/shards, its project: a lockstep host and joiner
@@ -57,9 +57,9 @@ cargo gg new <NAME>               # a new game, games/NAME, a project with an em
 
 Building needs a C++ compiler, for the Vulkan Memory Allocator and Luau, and `slangc` for the
 shaders: the one `SLANGC` names, else the Vulkan SDK's, else the first on the `PATH`. Games' shaders
-compile with that slangc as they run, so it stays where the build found it. On Linux, gamepads and
-sound need pkg-config, libudev's headers and ALSA's too: `pkgconf`, `libudev-dev` and
-`libasound2-dev` on Debian or Ubuntu.
+compile with that slangc as development builds run, so it stays where the build found it; builds
+without `dev` run those their package holds compiled. On Linux, gamepads and sound need pkg-config,
+libudev's headers and ALSA's too: `pkgconf`, `libudev-dev` and `libasound2-dev` on Debian or Ubuntu.
 
 Each run writes a JSON log and logs its path as it starts; filter it on `level`, `code` or
 `vuid`. `RUST_LOG` sets what's logged: `RUST_LOG=gg_gpu=trace` adds gg-gpu's trace events to the
@@ -107,7 +107,7 @@ A change is done when all seven pass:
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy --workspace --all-targets --features sandbox/tracy -- -D warnings
-cargo clippy -p player --all-targets -- -D warnings
+cargo clippy -p player -p shards -p showcase --no-default-features --all-targets -- -D warnings
 cargo clippy -p gg-engine --all-targets -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
 cargo test --workspace
@@ -126,13 +126,13 @@ hand. A difference on some platforms only is a bug, not a reference to rewrite. 
 new recording, not its hashes rewritten: [the demo's AGENTS.md](games/shards/AGENTS.md) says which.
 
 CI ([ci.yml](.github/workflows/ci.yml)) runs the gates on every push, on Windows and Linux, x86-64
-and ARM64, and on macOS ARM64, the shipping gate, gg-engine's without `dev` and the doc gate on
-Linux x86-64 alone, and the layering check. Only its Linux jobs run the GPU tests, on lavapipe,
-and the apps and the demo's two lockstep peers headless, grepping their logs; Windows' and macOS's
-runners have no GPU, so there `GG_SKIP_GPU_TESTS` skips the GPU tests. lavapipe has no queue for
-transfers alone, so CI never uploads through one: after changing uploads, run the GPU tests on a GPU
-that has one, as NVIDIA's do. Its minutes are billed, a macOS minute at ten times a Linux one, so
-push a branch to probe CI only for a change another platform could break.
+and ARM64, and on macOS ARM64; the shipping gate, gg-engine's without `dev`, the doc gate and the
+demo cooked and run as it ships on Linux x86-64 alone; and the layering check. Only its Linux jobs
+run the GPU tests, on lavapipe, and the apps and the demo's peers headless, grepping their logs;
+Windows' and macOS's runners have no GPU, so there `GG_SKIP_GPU_TESTS` skips the GPU tests. lavapipe
+has no queue for transfers alone, so CI never uploads through one: after changing uploads, run the
+GPU tests on a GPU that has one, as NVIDIA's do. Its minutes are billed, a macOS minute at ten times
+a Linux one, so push a branch to probe CI only for a change another platform could break.
 
 ## Rust
 

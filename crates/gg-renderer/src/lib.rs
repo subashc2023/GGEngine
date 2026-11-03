@@ -48,7 +48,7 @@ pub use mesh::{Mesh, MeshDraw, Meshes};
 pub use model::Params as ModelParams;
 pub use model::{AlphaMode, Material, ModelVertex};
 pub use pick::{MAX_PICKS, Pick};
-pub use shader::{Compiled, Shader, ShaderSource, Shaders};
+pub use shader::{Compiled, Shader, ShaderSource, Shaders, compile_shader};
 pub use sprite::{Sprite, SpriteSheet};
 pub use text::Glyph;
 pub use texture::{Mipmaps, Texels, Texture, Textures};

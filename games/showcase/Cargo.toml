@@ -11,9 +11,14 @@ name = "gg-showcase"
 path = "src/main.rs"
 
 [dependencies]
+gg-engine.workspace = true
+
+[features]
+default = ["dev"]
 # A development build, which serves the tool API, applies its scene files' saves and reloads its
-# textures, models and font as they change.
-gg-engine = { workspace = true, features = ["dev"] }
+# textures, models and font as they change. A build without it runs from the game's package, as
+# shipping builds do.
+dev = ["gg-engine/dev"]
 
 [dev-dependencies]
 # Reads the game's project manifest, as tools do, and its assets' ID files, as development

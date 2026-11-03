@@ -37,6 +37,8 @@ pub(crate) struct Args {
     pub(crate) net: Option<Net>,
     /// The folder of the mods the run runs, in place of those installed.
     pub(crate) mods: Option<PathBuf>,
+    /// The game's package the run reads the files under its asset root from.
+    pub(crate) package: Option<PathBuf>,
 }
 
 /// A lockstep session's end a run takes, and the address it listens at or connects to, as given.
@@ -105,6 +107,9 @@ Options:
   --join <ADDRESS>  Join the lockstep session at ADDRESS as player 1, from the host's world
   --mods <DIR>      Run the mods in the folder DIR, in place of those installed in the game's
                     per-user folder, which a windowed run runs
+  --package <PATH>  Read the files under the asset root from the game's package at PATH, which
+                    `tools/cook` writes, in place of the files themselves, as a build without
+                    `dev` reads `<executable>.ggpk` beside its executable
   -h, --help        Print this help
 
 Environment:
@@ -139,6 +144,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
         stopped: false,
         net: None,
         mods: None,
+        package: None,
     };
     // The first flag given that a replay refuses.
     let mut not_replayed = None;
@@ -210,6 +216,7 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
             "--host" => parsed.net = Some(Net::Host(value_of(flag)?)),
             "--join" => parsed.net = Some(Net::Join(value_of(flag)?)),
             "--mods" => parsed.mods = Some(value_of(flag)?.into()),
+            "--package" => parsed.package = Some(value_of(flag)?.into()),
             "--dump" => {
                 let at = value_of(flag)?;
                 let dump = match at.as_str() {

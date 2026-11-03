@@ -27,6 +27,7 @@ use skrifa::outline::{DrawSettings, OutlinePen};
 use skrifa::{FontRef, GlyphId, MetadataProvider};
 use tracing::debug;
 
+use crate::package::{self, Files};
 use crate::{Component, Reflect, dirs, jobs};
 
 /// The engine's own font, Inter's regular weight, its digits tabular, as the UI draws in it: what
@@ -455,6 +456,180 @@ pub(crate) fn bake(name: &str, path: &Path) -> Result<Bake> {
     bake_bytes(name, path, bytes.into_boxed_slice())
 }
 
+/// Reads font `name`'s file at `path` from `files` and bakes it, as [`bake`] does; or, from a game's
+/// package, reads it as `tools/cook` baked it, as [`Bake::bytes`] wrote it, which needs no baking.
+///
+/// Fails as `bake` does, and with `engine.bad_font` for a baked font that can't be read from the
+/// package or doesn't hold together.
+pub(crate) fn load(name: &str, path: &Path, files: &Files) -> Result<Bake> {
+    if files.packaged().is_none() {
+        return bake(name, path);
+    }
+    let bad = |problem: String| {
+        let message = format!("font {name:?} at {} {problem}", path.display());
+        Error::new("engine.bad_font", message)
+    };
+    let bytes = (files.read_as(path, package::Kind::Font, u64::MAX)).map_err(|error| {
+        bad("can't be read from the game's package".to_owned()).with_source(error)
+    })?;
+    Bake::read(&bytes).map_err(|problem| bad(format!("is baked wrong in the package: {problem}")))
+}
+
+impl Bake {
+    /// What `tools/cook` puts in a game's package for the font, which [`read`](Self::read) reads
+    /// back: every number little-endian, the field's width and height, the font's units in an em,
+    /// its ascent, descent and gap, and its number of glyphs, then each glyph, its ID and whether
+    /// it's placed, and if it is its cell's rectangle in the field and its plane, each four floats;
+    /// then the font's file, after its length, then the field's texels. A change to it needs the
+    /// package's version moved on.
+    pub(crate) fn bytes(&self) -> Vec<u8> {
+        let baked = &self.baked;
+        let mut bytes = Vec::with_capacity(self.pixels.len() + baked.bytes.len() + 64);
+        let mut put = |data: &[u8]| bytes.extend_from_slice(data);
+        put(&self.size[0].to_le_bytes());
+        put(&self.size[1].to_le_bytes());
+        let Lines {
+            ascent,
+            descent,
+            gap,
+        } = baked.lines;
+        for number in [baked.units_per_em, ascent, descent, gap] {
+            put(&number.to_le_bytes());
+        }
+        put(&(baked.glyphs.len() as u32).to_le_bytes());
+        for &(id, placed) in &baked.glyphs {
+            put(&id.to_le_bytes());
+            put(&[u8::from(placed.is_some())]);
+            if let Some(Placed { rect, plane }) = placed {
+                for corner in rect.into_iter().chain(plane) {
+                    put(&corner.x.to_le_bytes());
+                    put(&corner.y.to_le_bytes());
+                }
+            }
+        }
+        put(&(baked.bytes.len() as u64).to_le_bytes());
+        put(&baked.bytes);
+        put(&self.pixels);
+        bytes
+    }
+
+    /// The font [`bytes`](Self::bytes) wrote into `bytes`, its shaping made again from its file.
+    /// The error says what doesn't hold together: a field of no texels or wider or taller than
+    /// [`MAX_TEXTURE_SIZE`], texels other than its size's, glyphs out of order, a number that isn't
+    /// finite, bytes left over, or a file that doesn't shape.
+    fn read(bytes: &[u8]) -> std::result::Result<Self, String> {
+        let mut read = Reading { bytes, at: 0 };
+        let size = [read.u32()?, read.u32()?];
+        if size
+            .iter()
+            .any(|&side| side == 0 || side > MAX_TEXTURE_SIZE)
+        {
+            return Err(format!("its field is {} by {} texels", size[0], size[1]));
+        }
+        let units_per_em = read.float()?;
+        let lines = Lines {
+            ascent: read.float()?,
+            descent: read.float()?,
+            gap: read.float()?,
+        };
+        let count = read.u32()?;
+        let mut glyphs: Glyphs = Vec::new();
+        for _ in 0..count {
+            let id = read.u32()?;
+            if glyphs.last().is_some_and(|&(last, _)| last >= id) {
+                return Err(format!("glyph {id} is out of order"));
+            }
+            let placed = match read.take(1)? {
+                [0] => None,
+                [1] => {
+                    let mut corners = [Vec2::ZERO; 4];
+                    for corner in &mut corners {
+                        *corner = Vec2::new(read.float()?, read.float()?);
+                    }
+                    Some(Placed {
+                        rect: [corners[0], corners[1]],
+                        plane: [corners[2], corners[3]],
+                    })
+                }
+                _ => return Err(format!("glyph {id} is neither placed nor not")),
+            };
+            glyphs.push((id, placed));
+        }
+        let file_len = usize::try_from(read.u64()?).map_err(|_| "it ends too soon")?;
+        let file: Box<[u8]> = read.take(file_len)?.into();
+        let pixels = read.take(size[0] as usize * size[1] as usize * 4)?.to_vec();
+        if read.at != bytes.len() {
+            return Err("it has bytes past its field".to_owned());
+        }
+        let (shaping, plan) = shaping(&file)?;
+        Ok(Self {
+            size,
+            pixels,
+            baked: Baked {
+                bytes: file,
+                shaping,
+                plan,
+                glyphs,
+                units_per_em,
+                lines,
+            },
+        })
+    }
+}
+
+/// Where [`Bake::read`] has got to in what it reads.
+struct Reading<'b> {
+    bytes: &'b [u8],
+    at: usize,
+}
+
+impl<'b> Reading<'b> {
+    /// The next `len` bytes.
+    fn take(&mut self, len: usize) -> std::result::Result<&'b [u8], String> {
+        let end = self.at.checked_add(len).ok_or("it ends too soon")?;
+        let taken = self.bytes.get(self.at..end).ok_or("it ends too soon")?;
+        self.at = end;
+        Ok(taken)
+    }
+
+    fn u32(&mut self) -> std::result::Result<u32, String> {
+        Ok(u32::from_le_bytes(
+            self.take(4)?.try_into().expect("4 bytes"),
+        ))
+    }
+
+    fn u64(&mut self) -> std::result::Result<u64, String> {
+        Ok(u64::from_le_bytes(
+            self.take(8)?.try_into().expect("8 bytes"),
+        ))
+    }
+
+    /// The next float, which must be finite.
+    fn float(&mut self) -> std::result::Result<f32, String> {
+        let float = f32::from_le_bytes(self.take(4)?.try_into().expect("4 bytes"));
+        float
+            .is_finite()
+            .then_some(float)
+            .ok_or_else(|| "a number isn't finite".to_owned())
+    }
+}
+
+/// What shapes text in the font in `bytes`, left to right, in Latin script, without
+/// [`features`]. The error says what's wrong with the font, as a panic of its reading does.
+fn shaping(bytes: &[u8]) -> std::result::Result<(ShaperData, ShapePlan), String> {
+    // harfrust can panic on a malformed font, as reading files is, so that's the file's doing.
+    let shaping = panic::catch_unwind(AssertUnwindSafe(|| {
+        let font = FontRef::new(bytes).map_err(|error| error.to_string())?;
+        let shaping = ShaperData::new(&font);
+        let shaper = shaping.shaper(&font).build();
+        let direction = Direction::LeftToRight;
+        let latin = Some(harfrust::script::LATIN);
+        let plan = ShapePlan::new(&shaper, direction, latin, None, &features());
+        Ok((shaping, plan))
+    }));
+    shaping.unwrap_or_else(|_| Err("its reading panicked on it".to_owned()))
+}
+
 /// Bakes the engine's font, as [`bake`] does.
 fn bake_inter() -> Bake {
     let path = Path::new("gg-engine/assets/fonts/Inter/Inter-Regular.ttf");
@@ -468,21 +643,13 @@ fn bake_bytes(name: &str, path: &Path, bytes: Box<[u8]>) -> Result<Bake> {
         let message = format!("font {name:?} at {} {problem}", path.display());
         Error::new("engine.bad_font", message)
     };
-    // fdsm and harfrust can panic on a malformed font, as reading files is, so that's the file's
-    // doing: the font fails as one that doesn't read does. gg-core's panic hook still logs it.
-    let baked = panic::catch_unwind(AssertUnwindSafe(|| {
-        let field = field(&bytes)?;
-        let font = FontRef::new(&bytes).map_err(|error| error.to_string())?;
-        let shaping = ShaperData::new(&font);
-        let shaper = shaping.shaper(&font).build();
-        let direction = Direction::LeftToRight;
-        let latin = Some(harfrust::script::LATIN);
-        let plan = ShapePlan::new(&shaper, direction, latin, None, &features());
-        Ok((field, shaping, plan))
-    }));
-    let (field, shaping, plan) = baked
+    // fdsm can panic on a malformed font, as reading files is, so that's the file's doing: the font
+    // fails as one that doesn't read does. gg-core's panic hook still logs it.
+    let field = panic::catch_unwind(AssertUnwindSafe(|| field(&bytes)));
+    let field = field
         .unwrap_or_else(|_| Err("its reading panicked on it".to_owned()))
         .map_err(bad)?;
+    let (shaping, plan) = shaping(&bytes).map_err(bad)?;
     let [width, height] = field.size;
     debug!(
         font = name,
@@ -998,6 +1165,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A baked font reads back from what a game's package holds of it, its field, glyphs, metrics
+    /// and file alike, its shaping made again from its file; what's cut short or has bytes past
+    /// its field is refused.
+    #[test]
+    fn a_baked_font_reads_back_from_its_bytes() {
+        let bake = bake_inter();
+        let bytes = bake.bytes();
+        let read = Bake::read(&bytes).expect("it reads back");
+        assert_eq!(read.size, bake.size);
+        assert_eq!(read.pixels, bake.pixels);
+        assert_eq!(read.baked.glyphs, bake.baked.glyphs);
+        assert_eq!(read.baked.units_per_em, bake.baked.units_per_em);
+        assert_eq!(read.baked.lines, bake.baked.lines);
+        assert_eq!(read.baked.bytes, bake.baked.bytes);
+        assert_eq!(read.bytes(), bytes);
+        assert!(Bake::read(&bytes[..bytes.len() - 1]).is_err(), "cut short");
+        let mut longer = bytes;
+        longer.push(0);
+        assert!(Bake::read(&longer).is_err(), "a byte past its field");
     }
 
     /// A field holds a glyph for each character of Windows-1252 that the font maps, a space's

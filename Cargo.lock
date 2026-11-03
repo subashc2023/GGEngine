@@ -426,6 +426,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cook"
+version = "0.1.0"
+dependencies = [
+ "gg-api",
+ "gg-engine",
+ "serde_json",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2966,6 +2975,7 @@ name = "shards"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "cook",
  "gg-api",
  "gg-engine",
 ]

@@ -93,21 +93,34 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Debugging scripts** (2026-11-02)
 - **Mods** (2026-11-03)
 - **Phase 9, scripting** (2026-11-03)
+- **The cooker and its package** (2026-11-03)
 
 ## Now
 
-**Phase 10's first milestone**, chosen as [Phase 10](#next) starts; its plan says when it's done.
+**Cooked textures and meshes**, Phase 10's second milestone: textures cooked into BC7 in KTX2,
+zstd-compressed, with the cooker's mips, every device needing BC; meshes optimized by meshoptimizer,
+with LODs that a draw picks by its size on screen; its plan says when it's done.
 
 ## Next
 
 Each phase ends in something you can run and check.
 
 10. **Cooking and the player.** `tools/cook` turns glTF into engine meshes (meshoptimizer: vertex
-    and index optimization, meshlets, LODs), textures into BC-compressed KTX2, fonts into their
-    fields and games' shaders into SPIR-V, packed into a memory-mappable package; an async
-    streaming loader with a per-frame upload budget; the player runs a package under a shipping
-    profile (LTO, one codegen unit). *Done when* the demo ships as a cooked package its own player
-    runs on all three OSes, with load time and memory measured.
+    and index optimization, LODs), textures into BC-compressed KTX2, fonts into their fields and
+    games' shaders into SPIR-V, packed into a memory-mappable package; an async streaming loader
+    with a per-frame upload budget; the player runs a package under a shipping profile (LTO, one
+    codegen unit). *Done when* the demo ships as a cooked package its own player runs on all three
+    OSes, with load time and memory measured. Its milestones, in order: the cooker and its package,
+    a build without `dev` running from its game's package, read by positioned reads, its shaders
+    compiled and its fonts baked, the demo's replaying its live recording; cooked textures and
+    meshes, BC7 in KTX2 with the cooker's mips on every device, which needs BC, and meshes optimized
+    with LODs that a draw picks by its size on screen; streaming, what the simulation reads loaded
+    as it's named and the rest uploaded within a budget each frame, without the frame waiting, and
+    within the GPU's memory budget, assets removed; and shipping, the shipping profile, egui behind
+    `dev`, `gg ship` laying out a folder, a signed .app holding the Vulkan loader and KosmicKrisp on
+    macOS, the reference player running a package's scenes and Luau scripts, as the showcase's,
+    and load time and memory logged: checked by CI on Linux at each push, on all three OSes by a
+    workflow run on demand, and on an Apple Silicon Mac by hand.
 11. **Networking beyond lockstep.** Rollback, from the snapshots and replays the world already has,
     with a SyncTest; a server that owns the world, replicating it to clients that predict; and a
     desync debugger that names the entity and field where peers part. *Done when* the demo plays
@@ -120,8 +133,9 @@ Each phase ends in something you can run and check.
     renders lit and shadowed, synchronization validation is clean, and per-pass GPU timings
     show in Tracy.
 13. **GPU-driven rendering.** GPU culling (frustum, then two-pass occlusion against a depth
-    pyramid); indirect draws; meshlets, through mesh shaders where supported and a compute path
-    elsewhere; a visibility buffer; clustered lighting; TAA. *Done when* CPU frame time stays
+    pyramid); indirect draws; meshlets, which the cooker builds, drawn through mesh shaders where
+    supported and a compute path elsewhere; vertices the cooker packs into 8- and 16-bit fields; a
+    visibility buffer; clustered lighting; TAA. *Done when* CPU frame time stays
     flat as the instance count grows, and a cooked Amazon Lumberyard Bistro with many instances
     meets a frame-time target set in this phase on the RTX 4090 and an Apple Silicon Mac.
 
@@ -139,6 +153,11 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Optimized dependencies in dev builds (`[profile.dev.package."*"] opt-level = 3`); zune-jpeg alone is, for the reason the root Cargo.toml gives | Physics or another heavy dependency makes debug builds slow |
 | Compiling trace and debug events out of shipping builds, through `tracing`'s `release_max_level_*` features | Phase 10, with the shipping profile |
 | No console window for shipping builds on Windows (`windows_subsystem = "windows"` on the player); the JSON log still records the run | Phase 10, with the shipping profile |
+| Linux builds against an older glibc, as the Steam Runtime's: a build needs the glibc it was built against or a later one, and CI builds on Debian trixie | A game ships to players on Linux |
+| The notices a shipped game owes its dependencies' licenses, gathered from Cargo's metadata | A game ships to players |
+| Signing a macOS .app with a Developer ID and notarizing it, which take a paid Apple Developer account: Phase 10 signs it ad hoc, which Apple Silicon needs to run it, and which Gatekeeper warns of once it's downloaded | A game ships to players on macOS |
+| BC6H, for textures of high dynamic range: Phase 10 cooks BC7 alone | A game's textures hold HDR, as skies and lights' do in Phase 12 |
+| An ASTC cook, for devices without BC, as phones: Phase 10 requires BC | The engine runs on Android or iOS |
 | Checking the sandbox by hand on Linux, and on macOS with KosmicKrisp (Vulkan SDK 1.4.363.0 or later, the first conformant build), its gamepads, the file dialogs `Context::pick_file` shows and the drawn title bars too, with the menu button's inset clear of macOS's traffic lights (72 points) and a torn-off window moving by its tab bar where X11 and macOS move windows asynchronously, and the render thread there: acquiring, presenting and rebuilding swapchains as windows resize off the main thread under KosmicKrisp, and on Wayland a frame in flight presenting at its old size after a maximize; and the `frames` test on macOS, whose CI runner has no GPU to run it: std's mutexes there are boxed as they're first locked, so a mutex made each frame allocates there alone | A Linux machine and an Apple Silicon Mac are at hand |
 | Deleting old JSON logs; every run's log is kept | Logs pile up enough to matter |
 | A clean shutdown on Ctrl+C, which now ends the process at once; the JSON log keeps every line written until then, and a recording every whole line but its `end` | A headless run that goes on until it's stopped, such as a dedicated server |
@@ -200,7 +219,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Shaping's features that put glyphs in place of others, such as ligatures and contextual alternates, which text is shaped without, as its font's field may not hold what they'd substitute; and the scripts that need them, those written right to left, and lines of more than one direction | A game's font relies on them, or a game writes such a script |
 | Text wrapped to a width, and fallback fonts, a character one lacks drawn from another | A game's UI lays out paragraphs, or mixes scripts in a line |
 | Outlines, shadows and glows round text, from the true distance field its field holds in its alpha | A game's text needs one to read over what's behind it |
-| Fonts' fields kept between runs, or cooked: each font bakes as it loads, Inter Bold's 218 glyphs in about 50 ms in release and 140 ms in a debug build, on the job system's threads, and the engine's own as text is first drawn in it, inside that frame; a font's file read again bakes on the watcher's thread alone | Phase 10, which cooks them |
+| Fonts' fields kept between development runs, as a package keeps a game's baked: each font bakes as a development run loads it, Inter Bold's 218 glyphs in about 50 ms in release and 140 ms in a debug build, on the job system's threads, and the engine's own as text is first drawn in it, inside that frame; a font's file read again bakes on the watcher's thread alone | A development run starts slowly enough to matter, as with many fonts |
 | Text that faces the camera, as labels over 3D entities do: a `Text` lies in its entity's XY plane, as a sprite does | A 3D game labels its entities |
 | Text of several lines edited in the Inspector, whose field for a string is a line's: a text's other lines come from scenes, code and tools | Someone writes text of several lines in the Inspector |
 | Fonts other than a file's default instance of outlines: a variable font draws at its axes' defaults, unhinted, and collections (`.ttc`, `.otc`), color fonts and fonts of bitmaps alone don't load | A game needs one |
@@ -292,7 +311,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Saving the pipeline cache as pipelines are made rather than as the run ends, which a crash skips, so that a game `gg run` restarts after one makes its pipelines again | A restart after a crash takes noticeably longer for it |
 | Pruning the pipeline cache, which keeps every pipeline it was given, an edited shader's old ones too | It grows to tens of megabytes |
 | Requiring a slangc that decorates sampled images `NonUniform` itself, Slang 2026.11's or later, such as the Vulkan SDK 1.4.363's, and dropping gg-renderer's `decorate_non_uniform`, which does it for older ones | The engine requires the Vulkan SDK 1.4.363 or later |
-| Games' shaders compile with slangc as they're added, so running a game needs slangc where its build found it | Phase 10, which cooks shaders |
+| Development builds of games compile their shaders with slangc as they're added, so running one needs slangc where its build found it; builds without `dev` run them compiled from their package | A development build runs on a machine other than the one that built it |
 | `MeshDraw`'s mesh and shader named, as `Sprite.texture` is: opaque until then, shown but not set, saved in scenes or hashed, and carried across a restart by their indices only where the layers added the same assets in the same order; and setting them by name | A game builds its draws from data |
 | Watching the asset root through the OS's notifications of changes: its thread scans it every second, walking it whole and reading every ID file, about 70 ms for 1,000 assets on Windows, and reads whole each asset's file that changed, for its print, every one in a clone's first run, which delays its next scans but no answer; and a run's start scans it on the main thread, before its layers load, flushing each ID file it writes to the disk, about 6 ms apiece | A project's asset root of tens of thousands of files |
 | IDs for shaders, scenes, sounds, music and other kinds, for assets outside the asset root, and for assets reached through links: the scan gives textures, models and fonts under the root alone, never through a link | Each kind as something first names it by ID |
@@ -314,13 +333,14 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Breakpoints in what a script's chunk runs as it loads, which places them once it has run | Someone debugs a chunk's own code |
 | Stepping on from where a pause broke into a call entered while the debugger wasn't armed, which goes on to the next call: every call entered stepping would slow every development run | Someone pauses into long calls and steps through them |
 | Keys for the Debugger panel's buttons, as F5, F10 and F11 | Someone steps often |
-| Builds without `dev` naming assets by their IDs: they read no ID file, so they name every texture, model and font by its path, and a scene, a recording or a snapshot that names one by its ID finds none there | Phase 10, whose cooked package gives each asset its ID |
 | Loading the textures, models and fonts that scene text names where a layer loads it into a world itself, as inside a tick, as the sandbox's grid reload does: a world can't reach the renderer's textures, which are the context's, so `World::load_scene` finds only those loaded, while `Context::load_scene_file`, the tool API and the engine's other reads load them | A game loads scene text in a tick that names assets no layer adds |
 | A lockstep joiner loading for its tool API an asset its host hasn't named (`asset.not_given`), whose name could differ from the host's; the host's edits load any | Someone edits a joiner's assets from its own editor |
 | `gg mv` and an MCP `mv`, moving an asset and its ID file in one step: a file renamed alone keeps its ID by what it holds, but not one edited in the same step, nor one renamed in a fresh clone before its first run, which has no cache of prints | An agent's renames lose IDs that pairing by content can't keep |
 | A lockstep joiner that joins after its host's texture was renamed finding its file where it is now: it loads it by the path its host loaded it from, as the host names it, standing in where that's gone, as it is on one machine | Someone renames assets during a lockstep session |
 | Following a rename in case alone, as Windows' and macOS's file systems allow, of an asset whose ID file keeps the old case: the ID file matches only when case is ignored (`asset.meta_case`), so the asset keeps its ID for the run, then goes without until its ID file is renamed too | Someone renames assets in case alone |
-| 8- and 16-bit vertex fields, whose features Vulkan 1.4 guarantees but the device doesn't enable | A mesh packs its vertices, as Phase 10's cooker will |
+| Warning, in a development run, of a path whose case differs from its file's, or on macOS its Unicode form, which Windows' and macOS's file systems find but a package doesn't | A game's path runs in development and fails from its package |
+| Checking that a package holds every file a game's code loads, as by listing those a development run read: the cooker holds what the scan of ID files finds, and checks the start scene alone | A file a game loads is left out of its package unseen |
+| 8- and 16-bit vertex fields, whose features Vulkan 1.4 guarantees but the device doesn't enable | Phase 13, whose cooker packs vertices |
 | Splits in a torn-off window, which holds one tab group | A tool wants panels side by side outside the main window |
 | Reordering tabs by dragging them along their bar; a drop among the tabs adds one at the end | Someone reorders tabs |
 | A minimum width for each panel, as Hazel keeps its Properties panel 370 pixels wide: a split keeps each side 48 points, and the Inspector's rows of axes clip in a narrower panel | Someone narrows the Inspector past its rows |
@@ -431,7 +451,6 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | `gg run --peers 2`'s two windows opening apart: the OS puts them one over the other | Someone plays both peers on one screen |
 | Recording a joiner, whose world comes from the host's, which `--join` refuses with `--record`; the host's recording replays the session | A desync is worth replaying from the joiner's side |
 | Rebuilding or restarting a running game as its project's manifest changes, which `gg run` doesn't watch | Someone edits a manifest while its game runs |
-| Builds without `dev` reading their project's manifest: `App::project` ends their runs (`engine.no_project`), as shipping builds start from cooked data | Phase 10, with the cooked start scene |
 | The sandbox as a project, which names its root itself | A tool opens it as a project |
 | The project in `hello`'s answer: tools find a project's games by their session files | A client reaches a game without reading its session file, as one on another machine would |
 | An app's name and `gg run`'s defaults for it, such as `--peers 2`, in the project's manifest | A tool needs them |

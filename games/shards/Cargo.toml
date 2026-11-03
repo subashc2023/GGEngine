@@ -12,11 +12,19 @@ path = "src/main.rs"
 
 [dependencies]
 bytemuck = { workspace = true, features = ["derive"] }
+gg-engine.workspace = true
+
+[features]
+default = ["dev"]
 # A development build, which serves the tool API, applies its scene file's saves and reloads its
-# shader, textures, font, sounds and music as they change.
-gg-engine = { workspace = true, features = ["dev"] }
+# shader, textures, font, sounds and music as they change. A build without it, as
+# `cargo build -p shards --no-default-features` builds it, runs from the game's package, as
+# shipping builds do.
+dev = ["gg-engine/dev"]
 
 [dev-dependencies]
+# Cooks the game's package, which a test replays from.
+cook.workspace = true
 # Reads the game's project manifest, as tools do, and its assets' ID files, as development
 # builds do.
 gg-api.workspace = true

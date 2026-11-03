@@ -53,6 +53,7 @@ pub use ops::Operation;
 pub use query::{Query, QueryIter, QueryIterMut, ReadOnlyQuery};
 use resources::Resources;
 pub use resources::{Resource, Saved};
+pub(crate) use scene::read_scene_from;
 pub(crate) use scene::{MAX_DEPTH, float, quote};
 pub use scene::{read_scene, write_scene};
 pub(crate) use table::ComponentId;

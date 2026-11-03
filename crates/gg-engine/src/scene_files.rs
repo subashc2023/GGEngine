@@ -187,10 +187,12 @@ mod watch {
     /// One that doesn't load, or whose edit the world refuses, warns with the error's code and
     /// changes nothing, and the next save is compared with the file as last applied. In a lockstep
     /// session, the host offers each save for a tick both peers apply it before, as
-    /// [`Stack::offer_save`] says, and a joiner doesn't look.
+    /// [`Stack::offer_save`] says, and a joiner doesn't look, nor does a run that reads its game's
+    /// package, whose scenes aren't files.
     pub(crate) fn look(cx: &mut Context, stack: &mut Stack) {
         let now = Instant::now();
         if !stack.watches_files()
+            || cx.reads_package()
             || cx.scenes.files.is_empty()
             || cx
                 .scenes
