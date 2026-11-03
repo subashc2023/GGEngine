@@ -95,12 +95,6 @@ file, under Workflow.
 |---|---|---|
 | A body that turns for minutes drifts off unit length: a step multiplies its rotation by the step's turn without normalizing it, which in a model of it passed what a rotation may be after 2 to 5 minutes at 3 to 7 radians a second, so that a scene saved of the world is refused (`reflect.not_normalized`), as is an undo of a set of its rotation made once it had drifted, which drops that edit from its log, and a snapshot normalizes it, with a note | Normalize the rotation as each step turns it, writing physics' reference hash again by hand | A game's bodies turn for long, or a game saves scenes as it plays |
 
-## Layers
-
-| Defect | Fix | Worth it when |
-|---|---|---|
-| `Layer::attach` can't fail, so a layer whose shader doesn't compile, or whose texture or model doesn't load, panics, as the sandbox does, where the engine's own errors end the run with their codes | `Layer::attach` returning a `Result`, whose error ends the run as the engine's own do | A game loads assets as it starts |
-
 ## Audio
 
 | Defect | Fix | Worth it when |

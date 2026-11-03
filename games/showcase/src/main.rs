@@ -40,7 +40,9 @@ const SCRIPTS: [&str; 2] = ["scripts/bob.luau", "scripts/spin.luau"];
 
 /// The game's layer: it loads the scripts as it loads, which declares their components, so that
 /// its scenes, the Inspector's Add Component and the tool API know them before any entity has one;
-/// loads the start scene as it attaches; and at each tick runs the scripts and steps 2D physics.
+/// loads the start scene as it attaches; and at each tick runs the scripts and steps 2D physics. A
+/// script or the start scene that doesn't load ends the run with its error, through
+/// [`Context::fail`].
 struct Showcase {
     scripts: Scripts,
 }
@@ -56,18 +58,24 @@ impl Showcase {
 impl Layer for Showcase {
     fn load(&mut self, cx: &mut Context) {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        // A script that doesn't load stops the game, with what went wrong. Each is watched as the
-        // game runs, in development builds, which reload it as it's saved.
+        // Each is watched as the game runs, in development builds, which reload it as it's saved.
         for script in SCRIPTS {
-            let loaded = self.scripts.load(cx, root.join(script));
-            loaded.unwrap_or_else(|error| panic!("{error:#}"));
+            if let Err(error) = self.scripts.load(cx, root.join(script)) {
+                cx.fail(error);
+                return;
+            }
         }
     }
 
     fn attach(&mut self, cx: &mut Context) {
+        // A run that ends as it loads loads no scene, whose components the scripts declare.
+        if cx.exiting() {
+            return;
+        }
         // Watched as the game runs, in development builds, which apply its saves.
-        let loaded = cx.load_start_scene();
-        loaded.unwrap_or_else(|error| panic!("{error:#}"));
+        if let Err(error) = cx.load_start_scene() {
+            cx.fail(error);
+        }
     }
 
     fn tick(&mut self, world: &mut World, _: Tick) {

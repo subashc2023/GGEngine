@@ -28,9 +28,9 @@ use bytemuck::NoUninit;
 use gg_engine::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_engine::{
     Actions, Align, App, Binding, Blend, BodyType, Bus, Camera, Change, Circle, CircleCollider2D,
-    Commands, Component, Context, Entity, Event, Font, Grant, Key, Layer, Mesh, Mods, MouseButton,
-    Name, PadButton, Physics2D, Place, Projection, Reflect, RigidBody2D, Scripts, Shader, Sound,
-    Source, Sprite, Stick, TextStyle, Tick, Transform, World, step_physics,
+    Commands, Component, Context, Entity, Error, Event, Font, Grant, Key, Layer, Mesh, Mods,
+    MouseButton, Name, PadButton, Physics2D, Place, Projection, Reflect, RigidBody2D, Scripts,
+    Shader, Sound, Source, Sprite, Stick, TextStyle, Tick, Transform, World, step_physics,
 };
 
 fn main() -> ExitCode {
@@ -214,7 +214,8 @@ struct Sounds {
 
 /// The game's layer: it builds the arena as it attaches, applies each player's commands at each
 /// tick, steering the discs, which 2D physics moves, and collecting the shards they touch; and
-/// draws the floor, the scores and the menu between ticks.
+/// draws the floor, the scores and the menu between ticks. An asset or script of its own, or its
+/// start scene, that doesn't load ends the run with its error, through [`Context::fail`].
 struct Shards {
     /// The player this run's keys steer: 0, unless it joined a lockstep session.
     player: u8,
@@ -285,52 +286,58 @@ impl Shards {
             text: String::new(),
         }
     }
-}
 
-impl Layer for Shards {
-    fn load(&mut self, cx: &mut Context) {
-        // A shader that doesn't compile stops the game, with what went wrong.
+    /// Loads the game's floor, font, sounds, music and script, and the mods installed. Fails with
+    /// the first of the game's own that doesn't load, as a shader that doesn't compile.
+    fn load_game(&mut self, cx: &mut Context) -> Result<(), Error> {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let shader = cx.add_shader("floor", root.join("shaders/floor.slang"), Blend::Opaque);
+        let shader = cx.add_shader("floor", root.join("shaders/floor.slang"), Blend::Opaque)?;
         let corners = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]].map(|[u, v]| Corner {
             position: Vec3::new(u - 0.5, v - 0.5, 0.0),
             uv: Vec2::new(u, v),
         });
         let square = cx.add_mesh("floor", &corners, &[0, 1, 2, 0, 2, 3]);
-        self.floor = Some((
-            square.expect("the floor is two whole triangles"),
-            shader.expect("the floor's shader compiles"),
-        ));
-        let font = cx.add_font("Inter Bold", root.join("fonts/Inter-Bold.ttf"));
-        self.font = Some(font.expect("the game's font bakes"));
+        self.floor = Some((square.expect("the floor is two whole triangles"), shader));
+        self.font = Some(cx.add_font("Inter Bold", root.join("fonts/Inter-Bold.ttf"))?);
         let sound = |cx: &mut Context, name: &str| {
-            let sound = cx.add_sound(name, root.join(format!("sounds/{name}.wav")));
-            sound.expect("the game's sounds decode")
+            cx.add_sound(name, root.join(format!("sounds/{name}.wav")))
         };
         self.sounds = Some(Sounds {
-            dash: sound(cx, "dash"),
-            collect: sound(cx, "collect"),
-            win: sound(cx, "win"),
-            focus: sound(cx, "focus"),
-            choose: sound(cx, "choose"),
+            dash: sound(cx, "dash")?,
+            collect: sound(cx, "collect")?,
+            win: sound(cx, "win")?,
+            focus: sound(cx, "focus")?,
+            choose: sound(cx, "choose")?,
         });
-        let music = cx.add_music("match", root.join("music/match.ogg"));
-        let music = music.expect("the game's music reads");
+        let music = cx.add_music("match", root.join("music/match.ogg"))?;
         cx.play_music(Some(music), MUSIC_FADE_IN);
         register(cx.world_mut());
-        // A script that doesn't load stops the game, with what went wrong.
-        let spin = self.scripts.load(cx, root.join("scripts/spin.luau"));
-        spin.unwrap_or_else(|error| panic!("{error:#}"));
+        self.scripts.load(cx, root.join("scripts/spin.luau"))?;
         // Mods read the world, and write sprites alone, as the rainbow writes the shards' colors.
         let grant = Grant::parse(["read", "write:Sprite"]).expect("capabilities");
         self.mods = Some(Mods::load(cx, grant));
+        Ok(())
+    }
+}
+
+impl Layer for Shards {
+    fn load(&mut self, cx: &mut Context) {
+        if let Err(error) = self.load_game(cx) {
+            cx.fail(error);
+        }
     }
 
     fn attach(&mut self, cx: &mut Context) {
+        // A run that ends as it loads builds no arena, whose shards' spin the script declares.
+        if cx.exiting() {
+            return;
+        }
         self.player = cx.player().unwrap_or(0);
         // The arena, watched as the game runs, in development builds, which apply its saves.
-        let loaded = cx.load_start_scene();
-        loaded.unwrap_or_else(|error| panic!("{error:#}"));
+        if let Err(error) = cx.load_start_scene() {
+            cx.fail(error);
+            return;
+        }
         build(cx.world_mut());
     }
 

@@ -346,10 +346,15 @@ impl Sandbox {
 
 impl Layer for Sandbox {
     fn load(&mut self, cx: &mut Context) {
-        // A texture that doesn't load stops the sandbox, with what went wrong.
+        // A texture that doesn't load ends the run with its error.
         let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
-        let shapes = cx.add_sprite_sheet("sheet", assets.join("sheet.png"), [32, 32]);
-        let shapes = shapes.expect("the shapes load");
+        let shapes = match cx.add_sprite_sheet("sheet", assets.join("sheet.png"), [32, 32]) {
+            Ok(shapes) => shapes,
+            Err(error) => {
+                cx.fail(error);
+                return;
+            }
+        };
         self.scene = Some(SwarmShapes {
             shapes: std::array::from_fn(|i| shapes.sprite([i as u32 % 4, i as u32 / 4], [1, 1])),
         });
@@ -357,10 +362,16 @@ impl Layer for Sandbox {
     }
 
     fn attach(&mut self, cx: &mut Context) {
+        // A run that ends as it loads loads no grid, so that it ends with the load's error alone.
+        if cx.exiting() {
+            return;
+        }
         // Watched as the sandbox runs, in development builds, which apply its saves; one that's
-        // refused stops the sandbox, with what went wrong.
-        let loaded = cx.load_scene_file(scene("grid.ron"));
-        loaded.unwrap_or_else(|error| panic!("{error:#}"));
+        // refused ends the run with its error.
+        if let Err(error) = cx.load_scene_file(scene("grid.ron")) {
+            cx.fail(error);
+            return;
+        }
         color_grid(cx.world_mut(), self.grid_colors);
         // At the first tick, so that a recording holds the swarm's size, which a build's own
         // differs from another's.
