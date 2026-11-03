@@ -13,7 +13,7 @@
 //!                                                    the joiner, as it connects
 //! refused <why>                                      the host, refusing it, before it closes
 //! world 1234 2                                       the host's world, at tick 1234, its code
-//! gg-snapshot 1                                        2 patches on, as a snapshot file's text,
+//! gg-snapshot 2                                        2 patches on, as a snapshot file's text,
 //! ...                                                  to its `end`
 //! end
 //! joined 1234                                        the joiner, once it has restored it
@@ -36,7 +36,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::io::{BufRead, BufReader, Write as _};
+use std::io::{self, BufRead, BufReader, ErrorKind, Read as _, Write as _};
 use std::mem;
 #[cfg(test)]
 use std::net::SocketAddr;
@@ -65,6 +65,15 @@ pub(crate) const DELAY: u64 = 4;
 /// The hello's first part: the protocol and its version, which a change to its lines takes to the
 /// next.
 const PROTOCOL: &str = "gg-lockstep 2";
+
+/// The most bytes a line may have, its line break aside, past which the peer reading it drops the
+/// connection: a scene file's save among them, whose text is one line, as the tool API's lines are
+/// kept to the same.
+const MAX_LINE: usize = 16 << 20;
+
+/// The most bytes the host's world may have as it comes, its lines together, past which the joiner
+/// drops the connection.
+const MAX_WORLD: usize = 1 << 30;
 
 /// How long a joiner waits between tries at connecting to its host.
 const RETRY: Duration = Duration::from_millis(250);
@@ -147,18 +156,32 @@ struct Link {
 }
 
 impl Link {
-    /// Starts reading `stream`'s lines on a thread of their own.
+    /// Starts reading `stream`'s lines on a thread of their own, which ends at a line that isn't
+    /// one, as one past [`MAX_LINE`] isn't, as the connection does.
     fn new(stream: TcpStream) -> std::io::Result<Self> {
         stream.set_nodelay(true)?;
-        let reader = BufReader::new(stream.try_clone()?);
+        let mut reader = BufReader::new(stream.try_clone()?);
         let (lines, from) = mpsc::channel();
         thread::Builder::new()
             .name("gg-net".to_owned())
             .spawn(move || {
-                for line in reader.lines() {
-                    let Ok(line) = line else { break };
-                    if lines.send(line).is_err() {
-                        break;
+                loop {
+                    match read_line(&mut reader) {
+                        Ok(Some(line)) => {
+                            if lines.send(line).is_err() {
+                                break;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(error) => {
+                            if error.kind() == ErrorKind::InvalidData {
+                                warn!(
+                                    code = "net.bad_line",
+                                    "Dropping the lockstep peer's connection: {error}"
+                                );
+                            }
+                            break;
+                        }
                     }
                 }
             })?;
@@ -441,6 +464,10 @@ impl Lockstep {
     /// once its last line has come, after which the joiner takes the host's inputs.
     fn read(&mut self, line: &str) -> Option<(u64, String)> {
         if let Some((_, text)) = &mut self.coming {
+            if text.len() + line.len() >= MAX_WORLD {
+                self.lose(&format!("the host's world is more than {MAX_WORLD} bytes"));
+                return None;
+            }
             text.push_str(line);
             text.push('\n');
             if line != "end" {
@@ -1035,6 +1062,30 @@ fn connect(address: String, after: Duration) -> Receiver<TcpStream> {
     connection
 }
 
+/// Reads a line, without its line break, `\n` or `\r\n`: `None` once the stream ends, or ends
+/// partway through a line, as a connection cut short does. As `gg_api::read_line` reads the tool
+/// API's, which builds without `dev` haven't.
+///
+/// Fails with `InvalidData` for a line of more than [`MAX_LINE`] bytes, or one that isn't UTF-8.
+fn read_line(reader: &mut impl BufRead) -> io::Result<Option<String>> {
+    let mut line = Vec::new();
+    let limit = MAX_LINE as u64 + 1;
+    reader.by_ref().take(limit).read_until(b'\n', &mut line)?;
+    if line.pop() != Some(b'\n') {
+        if line.len() >= MAX_LINE {
+            let message = format!("a line of more than {MAX_LINE} bytes");
+            return Err(io::Error::new(ErrorKind::InvalidData, message));
+        }
+        return Ok(None);
+    }
+    if line.last() == Some(&b'\r') {
+        line.pop();
+    }
+    String::from_utf8(line)
+        .map(Some)
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))
+}
+
 /// Writes `inputs`, a peer's for tick `tick`, after `out`, as their lines.
 fn write_inputs(out: &mut String, tick: u64, inputs: &Inputs) {
     let written = "a string takes any text";
@@ -1311,6 +1362,40 @@ mod tests {
         // Each side's.
         assert_eq!(refused, 2);
         assert!(other.link.is_none() && host.net().link.is_none());
+    }
+
+    /// A line as long as [`MAX_LINE`] is read, and one longer, as a connection that never breaks
+    /// its line sends, drops its connection before its hello, freeing the joiner's place.
+    #[test]
+    fn a_line_past_the_most_drops_its_connection() {
+        let mut most = vec![b'x'; MAX_LINE];
+        most.push(b'\n');
+        let read = read_line(&mut &most[..]).expect("a line");
+        assert_eq!(read.map(|line| line.len()), Some(MAX_LINE));
+
+        let (codes, logged) = mpsc::channel();
+        let subscriber = tracing_subscriber::registry().with(Codes(codes));
+        let _logging = tracing::subscriber::set_default(subscriber);
+        let mut host = Peer::host(Context::seeded(1), Game::default(), 1);
+        let address = host.net().listening.expect("listening");
+        let mut stranger = TcpStream::connect(address).expect("connected");
+        // Written as the host reads it, the connection held open after.
+        let writer = thread::spawn(move || {
+            let _ = stranger.write_all(&vec![b'x'; MAX_LINE + 1]);
+            stranger
+        });
+        let start = Instant::now();
+        while !logged.try_iter().any(|code| code == "net.lost") {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "the connection was never dropped"
+            );
+            host.turn();
+            thread::sleep(Duration::from_millis(1));
+        }
+        let _stranger = writer.join().expect("written");
+        let mut joiner = Peer::joiner(&mut host);
+        join(&mut host, &mut joiner);
     }
 
     /// An edit the joiner offers, and a save of a scene file the host's game loaded, apply on both

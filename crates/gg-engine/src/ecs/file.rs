@@ -1,14 +1,15 @@
 //! The world saved whole as text, and loaded back, as a snapshot file holds it, so that a restart in
 //! another process goes on where the world was: each slot under its generation, the free ones in
-//! the order they're taken; each table in the order it was made, empty ones too, and its rows in
-//! their order, each its entity's slot, ID and components' values, as a recording's text writes
-//! values, by their fields' names; each parent's children in their order; the stream the IDs come
-//! from; and the resources that save themselves, as [`Saved`](super::Saved) says. Loaded, it's the
-//! world saved, hash for hash, but for the slots a log kept vacant, which no log in another process
-//! gives back, so that they're freed; and for what's opaque, which comes back only into a process
-//! whose layers added the same assets in the same order, and is otherwise left out. A component
-//! whose type changed since is matched to the type as it is by its fields' names, as
-//! [`World::load_whole`] says.
+//! the order they're taken, and the rest that hold no entity, those a log keeps vacant and those
+//! retired, so that every slot is named, and a load makes no more than its lines name; each table
+//! in the order it was made, empty ones too, and its rows in their order, each its entity's slot,
+//! ID and components' values, as a recording's text writes values, by their fields' names; each
+//! parent's children in their order; the stream the IDs come from; and the resources that save
+//! themselves, as [`Saved`](super::Saved) says. Loaded, it's the world saved, hash for hash, but
+//! for the slots a log kept vacant, which no log in another process gives back, so that they're
+//! freed; and for what's opaque, which comes back only into a process whose layers added the same
+//! assets in the same order, and is otherwise left out. A component whose type changed since is
+//! matched to the type as it is by its fields' names, as [`World::load_whole`] says.
 
 use std::any::{TypeId, type_name};
 use std::collections::{BTreeMap, HashMap};
@@ -93,6 +94,17 @@ impl World {
             write!(out, " {index}").expect(text);
         }
         out.push('\n');
+        let mut vacant: Vec<bool> = (self.meta.iter())
+            .map(|meta| meta.location.is_none())
+            .collect();
+        for &index in &self.free {
+            vacant[index as usize] = false;
+        }
+        out.push_str("vacant");
+        for (index, _) in vacant.iter().enumerate().filter(|&(_, &vacant)| vacant) {
+            write!(out, " {index}").expect(text);
+        }
+        out.push('\n');
         let id = |entity: Entity| self.id(entity).expect("a row's entity is alive");
         for table in &self.tables {
             out.push_str("table");
@@ -162,9 +174,9 @@ impl World {
     /// holds of a type the file holds none of stays, as the layers made it as they loaded.
     ///
     /// Fails, changing nothing, with `snapshot.syntax` for a line that isn't one, and with
-    /// `snapshot.bad` for lines that don't make a world: a slot past the slots, one given twice, an
-    /// ID given twice, a child given two parents, a parent its child doesn't name, or an entity
-    /// among its own ancestors.
+    /// `snapshot.bad` for lines that don't make a world: a count of slots other than those they
+    /// name, a slot past the slots, one given twice, an ID given twice, a child given two parents,
+    /// a parent its child doesn't name, or an entity among its own ancestors.
     pub(crate) fn load_whole<'t>(
         &mut self,
         lines: impl IntoIterator<Item = (usize, &'t str)>,
@@ -178,6 +190,7 @@ impl World {
         let (mut stream, mut slots) = (None, None);
         let mut generations = Vec::new();
         let mut free = Vec::new();
+        let mut vacant = Vec::new();
         let mut tables: Vec<ReadTable<'t>> = Vec::new();
         let mut children = Vec::new();
         let mut resources = Vec::new();
@@ -208,6 +221,11 @@ impl World {
                 "free" => {
                     for index in rest.split_whitespace() {
                         free.push((line, number(index)?));
+                    }
+                }
+                "vacant" => {
+                    for index in rest.split_whitespace() {
+                        vacant.push((line, number(index)?));
                     }
                 }
                 "table" => tables.push(ReadTable {
@@ -274,6 +292,15 @@ impl World {
                 "it has no `stream` or no `slots`",
             ));
         };
+        // The slots are as many as the lines name, checked before any is made.
+        let rows: usize = tables.iter().map(|table| table.rows.len()).sum();
+        let named = free.len() + vacant.len() + rows;
+        if named != slots {
+            return Err(Error::new(
+                "snapshot.bad",
+                format!("it has {slots} slots, but names {named}: each is free, vacant or a row's"),
+            ));
+        }
         let mut world = World {
             meta: vec![
                 Meta {
@@ -309,7 +336,7 @@ impl World {
         for (line, index, generation) in generations {
             world.meta[slot(line, index)? as usize].generation = generation;
         }
-        // Free, or a row's: each slot is one at most.
+        // Free, vacant or a row's: each slot is one at most, and so, as they're as many, one.
         let mut taken = vec![false; slots];
         for (line, index) in free {
             let index = slot(line, index)?;
@@ -318,6 +345,15 @@ impl World {
             }
             world.free.push(index);
         }
+        let mut vacant: Vec<u32> = (vacant.into_iter())
+            .map(|(line, index)| {
+                let index = slot(line, index)?;
+                if std::mem::replace(&mut taken[index as usize], true) {
+                    return Err(bad(line, format!("slot {index} is given twice")));
+                }
+                Ok(index)
+            })
+            .collect::<Result<_>>()?;
         for row in tables.iter().flat_map(|table| &table.rows) {
             let index = slot(row.line, row.slot)?;
             if std::mem::replace(&mut taken[index as usize], true) {
@@ -442,11 +478,11 @@ impl World {
                 walked[up.slot()] = 2;
             }
         }
-        // Those a log kept vacant, which no log here gives back.
-        for (index, taken) in (0..).zip(taken) {
-            if !taken {
-                world.free_slot(index);
-            }
+        // Those a log kept vacant, which no log here gives back, in their order; a retired one
+        // stays retired.
+        vacant.sort_unstable();
+        for index in vacant {
+            world.free_slot(index);
         }
         for (line, name, state) in resources {
             let Some(saved) = world.resources.saved(name) else {
@@ -1143,7 +1179,16 @@ mod tests {
             .replace(children, &format!("children {} {}", id(child), id(child)));
         for (text, code) in [
             (text.replace("slots 2", "slots 1"), "snapshot.bad"),
+            // More slots than it names, as many as a slot's index takes, refused before they're
+            // made.
+            (text.replace("slots 2", "slots 4294967295"), "snapshot.bad"),
+            (text.replace("slots 2", "slots 3"), "snapshot.bad"),
             (text.replacen("free", "free 0", 1), "snapshot.bad"),
+            (
+                text.replace("slots 2", "slots 3")
+                    .replace("vacant", "vacant 1"),
+                "snapshot.bad",
+            ),
             (text.replace(&id(child), &id(parent)), "snapshot.bad"),
             (text.replace(&format!("{children}\n"), ""), "snapshot.bad"),
             (format!("{text}{row}\n"), "snapshot.bad"),

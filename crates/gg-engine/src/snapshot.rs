@@ -15,7 +15,7 @@
 //! file is open, if its scene files hold it.
 //!
 //! ```text
-//! gg-snapshot 1
+//! gg-snapshot 2
 //! app Sandbox
 //! engine 0.1.0 debug
 //! layers Sandbox PerfPanel Inspector
@@ -28,6 +28,7 @@
 //! stream 3f8a6c2e9b1d4057
 //! slots 10530
 //! free 12 7
+//! vacant 3
 //! table MapTile Sprite Transform
 //! row 17 5f3a9c0e12b47d68 List([Struct([]), Struct([("color", Vec4(1.0, 1.0, 1.0, 1.0)), ...
 //! children 5f3a9c0e12b47d68 1a2b3c4d5e6f7081
@@ -52,7 +53,7 @@ use crate::{World, WorldHash};
 
 /// A snapshot file's first line: its format, and the format's version, which a change to its lines
 /// or to its values' text that old files can't be read by takes to the next.
-const FORMAT: &str = "gg-snapshot 1";
+const FORMAT: &str = "gg-snapshot 2";
 
 /// What the run a snapshot is taken of is doing, which a run restored from it goes on doing.
 pub(crate) enum Run {

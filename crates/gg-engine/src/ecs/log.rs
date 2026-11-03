@@ -154,8 +154,9 @@ impl Log {
     }
 
     /// As [`apply`](Self::apply), but a set of the field the last entry set, while its gesture
-    /// goes on, joins that entry: it takes the new value and keeps its inverse, so that undoing it
-    /// undoes the gesture. A set starts a gesture, which [`seal`](Self::seal) ends.
+    /// goes on, joins that entry: it takes the new value and keeps its inverse, with the exclusive
+    /// fields each set of the gesture made false, so that undoing it undoes the gesture. A set
+    /// starts a gesture, which [`seal`](Self::seal) ends.
     pub fn amend(&mut self, world: &mut World, mut operation: Operation) -> Result<()> {
         let joins = |entry: &Entry| match (entry.operations.as_slice(), &operation) {
             (
@@ -182,10 +183,12 @@ impl Log {
             self.open = set;
             return Ok(());
         }
-        let inverse = world.apply(&mut operation)?;
-        // What undoes this set undoes only the set before it, in the gesture.
-        world.release(inverse);
-        self.done.last_mut().expect("an entry joined").operations[0] = operation;
+        let later = world.apply(&mut operation)?;
+        // What undoes the gesture's first set undoes this one too, but for the exclusive fields
+        // this one made false, which the entry takes on.
+        let entry = self.done.last_mut().expect("an entry joined");
+        world.join(&mut entry.inverses[0], later);
+        entry.operations[0] = operation;
         Ok(())
     }
 
@@ -355,7 +358,7 @@ pub(super) mod tests {
     use crate::ecs::hierarchy::tests::check_links;
     use crate::ecs::id::tests::{check_ids, vacated};
     use crate::ecs::id::{IdStream, splitmix64};
-    use crate::ecs::ops::tests::{Sealed, fixture, sorted};
+    use crate::ecs::ops::tests::{Sealed, fixture, lamps, lit, sorted};
     use crate::ecs::tests::Rng;
     use crate::reflect::tests::{Everything, Handle, everything, same_snapshots};
     use crate::reflect::{Ident, Value};
@@ -635,6 +638,29 @@ pub(super) mod tests {
         assert!(log.redo(&mut x.world).expect("redone"));
         let all = x.world.get::<Everything>(x.f).expect("everything");
         assert_eq!(all.count, 3);
+    }
+
+    /// Undoing a gesture lights again every lamp its sets put out, though its first put none out.
+    #[test]
+    fn undoing_a_gesture_sets_back_the_exclusive_fields_its_later_sets_made_false() {
+        let (mut world, lamps, _) = lamps();
+        let c = world.id(lamps[2]).expect("alive");
+        let light = |lit| Operation::Set {
+            entity: c,
+            component: "Lamp".into(),
+            path: "lit".to_owned(),
+            value: Value::Bool(lit),
+        };
+        let mut log = Log::default();
+        for on in [false, true, false, true] {
+            log.amend(&mut world, light(on)).expect("set");
+        }
+        assert_eq!(log.edits().len(), 1, "one gesture");
+        assert_eq!(lit(&world, lamps), [false, false, true]);
+        assert!(log.undo(&mut world).expect("undone"));
+        assert_eq!(lit(&world, lamps), [true, true, false]);
+        assert!(log.redo(&mut world).expect("redone"));
+        assert_eq!(lit(&world, lamps), [false, false, true]);
     }
 
     #[test]

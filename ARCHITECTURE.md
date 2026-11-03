@@ -652,26 +652,28 @@ doesn't outlive a restore.
 
 A snapshot file holds a world whole as text, so that a run restored from it, in another process,
 after a crash or a rebuild, goes on where the world was: each slot under its generation, the free
-ones in their order; each table in the order it was made, empty ones too, and its rows in theirs,
-each with its entity's ID and its components' values, as a recording's text writes values, by their
-fields' names; each parent's children in their order; the stream of IDs; the resources that save
-themselves; the ticks the simulation had run; the assets the layers had added, the textures loaded
-where text named them among them, which a run restored from it loads again before its world, and
-the names its textures had, as [Project state](#project-state) says; and, of a game the tool API
+ones in their order and the rest that hold no entity, so that every slot is named and a load makes
+no more than its lines name; each table in the order it was made, empty ones too, and its rows in
+theirs, each with its entity's ID and its components' values, as a recording's text writes values,
+by their fields' names; each parent's children in their order; the stream of IDs; the resources that
+save themselves; the ticks the simulation had run; the assets the layers had added, the textures
+loaded where text named them among them, which a run restored from it loads again before its world,
+and the names its textures had, as [Project state](#project-state) says; and, of a game the tool API
 stopped, that it's stopped, or of one playing a copy, the world as edited too, which it held aside,
 with its ticks, its hash and its scene files. Loaded, it's the world saved, hash for hash, but for
 the slots a log kept vacant, which no log in the new process gives back, so that they're freed. A
 component whose type changed since is matched to the type as it is by its fields' names: a field
 added takes its default, one dropped goes, a number of another kind is taken where it's exactly a
-number of the field's, and a component that no longer reads, or whose type is gone, is left out,
-its entity going on without it, each change warned of once, by the type's path rather than by
-value (`snapshot.changed`); a rotation that rounding took off unit length is normalized. What's
-opaque, such as a `MeshDraw`'s mesh and shader, holds indices, so it comes back only into a run
-whose layers added the same assets in the same order, a file added again counting again, and the
-textures loaded where named among them, of the same types, as the file's `asset` lines check, a
-draw's bytes by its mesh's and shader's types' names and sizes, and is left out otherwise. A world no load could read, such as a value nested
-deeper than a scene's may, isn't saved. [ecs/file.rs](crates/gg-engine/src/ecs/file.rs) and
-[snapshot.rs](crates/gg-engine/src/snapshot.rs) have the rest.
+number of the field's, and a component that no longer reads, or whose type is gone, is left out, its
+entity going on without it, each change warned of once, by the type's path rather than by value
+(`snapshot.changed`); a rotation that rounding took off unit length is normalized. What's opaque,
+such as a `MeshDraw`'s mesh and shader, holds indices, so it comes back only into a run whose layers
+added the same assets in the same order, a file added again counting again, and the textures loaded
+where named among them, of the same types, as the file's `asset` lines check, a draw's bytes by its
+mesh's and shader's types' names and sizes, and is left out otherwise. A world no load could read,
+such as a value nested deeper than a scene's may, isn't saved.
+[ecs/file.rs](crates/gg-engine/src/ecs/file.rs) and [snapshot.rs](crates/gg-engine/src/snapshot.rs)
+have the rest.
 
 A world holds resources beside its entities, a value of each type, for the rest of the simulation,
 such as 2D physics' bodies and contacts. Snapshots copy them, so that a restored world steps as the

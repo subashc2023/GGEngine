@@ -241,6 +241,7 @@ mod tests {
     use gg_core::math::Vec3;
 
     use super::*;
+    use crate::ecs::id::tests::check_ids;
     use crate::model::tests::{added, imported};
     use crate::reflect::{Reflect, Value};
     use crate::{Context, Name, Operation};
@@ -460,6 +461,36 @@ mod tests {
             node_ids(world, world.entity(copy_id).expect("alive")),
             mixed
         );
+    }
+
+    /// A duplicate given its copies' IDs gives each to the copy it's given for alone: a node's copy
+    /// whose ID would mix to one of them draws one instead, as one whose mix is taken does.
+    #[test]
+    fn a_duplicates_given_ids_go_to_their_copies_alone() {
+        let (mut cx, _, root) = spawned();
+        let world = cx.world_mut();
+        // The model's root and s under e, and q under s: copied breadth-first, the nodes before q.
+        let [e, s, q] = [(); 3].map(|()| world.spawn(Transform::IDENTITY));
+        for (child, parent) in [(root, e), (s, e), (q, s)] {
+            world.set_parent(child, Some(parent)).expect("no cycle");
+        }
+        let id = |n| EntityId::new(n).expect("not zero");
+        let root_copy = id(0x2002);
+        // q's copy given the ID the copy of the root's first node would mix.
+        let crafted = node_id(root_copy, 0).expect("an ID");
+        let mut duplicate = Operation::Duplicate {
+            entity: world.id(e).expect("alive"),
+            copies: vec![id(0x2001), root_copy, id(0x2003), crafted],
+        };
+        let inverse = world.apply(&mut duplicate).expect("copied");
+        check_ids(world);
+        let q_copy = world.entity(crafted).expect("q's copy");
+        let s_copy = world.entity(id(0x2003)).expect("s's copy");
+        assert_eq!(world.parent(q_copy).expect("alive"), Some(s_copy));
+        let nodes = node_ids(world, world.entity(root_copy).expect("alive"));
+        assert_eq!(nodes.len(), 4);
+        assert!(!nodes.contains(&crafted), "{nodes:?}");
+        world.release(inverse);
     }
 
     /// As its model changes, a root's nodes keep what code gave them, taking the model's draws and,

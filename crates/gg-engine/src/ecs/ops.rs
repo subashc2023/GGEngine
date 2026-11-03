@@ -400,6 +400,31 @@ impl World {
         self.let_go(inverse.undo);
     }
 
+    /// Takes into `inverse`, a set's, what undoes `later`, a later set of the same field that joins
+    /// its gesture: the exclusive fields `later` made false, which undoing the gesture then makes
+    /// true again with those `inverse` names; the rest of `later` is let go, since what undoes the
+    /// first set undoes it too.
+    pub(super) fn join(&mut self, inverse: &mut Inverse, later: Inverse) {
+        let Inverse { world, undo } = later;
+        let Undo::Exclusive { undo, excluded, .. } = undo else {
+            self.release(Inverse { world, undo });
+            return;
+        };
+        self.release(Inverse { world, undo: *undo });
+        match &mut inverse.undo {
+            Undo::Exclusive {
+                excluded: before, ..
+            } => before.extend(excluded),
+            first => {
+                *first = Undo::Exclusive {
+                    undo: Box::new(mem::replace(first, Undo::Uncreate(Vec::new()))),
+                    excluded,
+                    to: true,
+                }
+            }
+        }
+    }
+
     /// Frees the slots `undo` keeps, and lets their IDs go.
     fn let_go(&mut self, undo: Undo) {
         match undo {
@@ -670,7 +695,7 @@ impl World {
                 self.find_by_id(id, entity);
                 id
             }
-            None => self.draw_id(entity),
+            None => self.draw_id(entity, &[]),
         };
         self.place(entity, id, row);
         if let Some(parent) = parent {
@@ -801,7 +826,8 @@ impl World {
                 row.push((parent_id, column));
                 row.sort_unstable_by_key(|&(component, _)| component);
             }
-            // A model's node's copy is its root's copy's node, its ID mixed from the copy's.
+            // A model's node's copy is its root's copy's node, its ID mixed from the copy's, or
+            // drawn where that's taken or given: a given ID goes to the copy it's given for alone.
             let part = self
                 .get::<ModelNode>(originals[at].0)
                 .map(|&ModelNode(part)| part);
@@ -810,7 +836,7 @@ impl World {
                 while let Some(above) = up {
                     if self.get::<ModelRoot>(originals[above].0).is_some() {
                         let id = nodes::node_id(made[above].1, part as usize);
-                        return id.filter(|&id| !self.reserved(id));
+                        return id.filter(|&id| !self.reserved(id) && !ids.contains(&id));
                     }
                     up = originals[above].1;
                 }
@@ -823,7 +849,7 @@ impl World {
                     self.find_by_id(id, copy);
                     id
                 }
-                None => self.draw_id(copy),
+                None => self.draw_id(copy, ids),
             };
             self.place(copy, id, row);
             if let Some(parent) = parent {
@@ -1741,7 +1767,7 @@ pub(super) mod tests {
 
     /// A lamp, of which operations keep one lit at most.
     #[derive(Clone, Debug, PartialEq, crate::Reflect)]
-    struct Lamp {
+    pub(in crate::ecs) struct Lamp {
         lit: bool,
         watts: u32,
     }
@@ -1755,7 +1781,7 @@ pub(super) mod tests {
     impl crate::Writable for Lamp {}
 
     /// Three lamps, the first two lit by code, and an entity without one.
-    fn lamps() -> (World, [Entity; 3], Entity) {
+    pub(in crate::ecs) fn lamps() -> (World, [Entity; 3], Entity) {
         let mut world = World::seeded(0x1a3b);
         let lamps = [true, true, false].map(|lit| world.spawn(Lamp { lit, watts: 40 }));
         let bare = world.spawn(());
@@ -1763,7 +1789,7 @@ pub(super) mod tests {
     }
 
     /// Whether each of `lamps` is lit.
-    fn lit(world: &World, lamps: [Entity; 3]) -> [bool; 3] {
+    pub(in crate::ecs) fn lit(world: &World, lamps: [Entity; 3]) -> [bool; 3] {
         lamps.map(|lamp| world.get::<Lamp>(lamp).expect("a lamp").lit)
     }
 

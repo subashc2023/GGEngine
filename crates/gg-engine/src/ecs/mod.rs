@@ -403,7 +403,7 @@ impl World {
                 );
                 id
             }
-            None => self.draw_id(entity),
+            None => self.draw_id(entity, &[]),
         };
         self.entity_ids[entity.index as usize] = Some(id);
         let into = &mut self.tables[table as usize];
@@ -417,11 +417,12 @@ impl World {
 
     /// An ID for `entity`, drawn from the stream, by which the world now finds it. A draw that meets
     /// a living entity's ID, as a stream that has walked into the run of the session that saved a
-    /// loaded scene does, or one a delete keeps for its undo, reseeds the stream and draws again.
-    fn draw_id(&mut self, entity: Entity) -> EntityId {
+    /// loaded scene does, or one a delete keeps for its undo, or one of `given`, which a duplicate
+    /// gives the copies it hasn't placed yet, reseeds the stream and draws again.
+    fn draw_id(&mut self, entity: Entity, given: &[EntityId]) -> EntityId {
         loop {
             let id = self.stream.draw();
-            if self.reserved(id) {
+            if self.reserved(id) || given.contains(&id) {
                 tracing::debug!(code = "ecs.reseed", id = %id, "Drew an ID that's taken");
                 self.stream.reseed();
                 continue;
