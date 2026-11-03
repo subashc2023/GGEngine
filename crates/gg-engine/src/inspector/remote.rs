@@ -47,10 +47,10 @@ mod imp {
     use crate::reflect::{Reflect, Type, Types, Value};
     use crate::{EntityId, Pose, Transform};
 
-    /// How long the connection waits to connect, and for each answer: as long as gg gives a game
-    /// to start, after which the connection is broken.
+    /// How long the connection waits to connect. It waits for each answer as long as it takes: a
+    /// script stopped in the game holds the answers for as long as it's debugged, and `gg run` ends
+    /// a game that hangs, which closes the connection.
     const CONNECT: Duration = Duration::from_secs(10);
-    const ANSWER: Duration = Duration::from_secs(120);
 
     /// How often the picked entity, and the list of entities, are read again.
     pub(super) const ENTITY_EVERY: Duration = Duration::from_millis(50);
@@ -1043,7 +1043,7 @@ mod imp {
                     return;
                 }
             };
-            if let Err(failure) = connection.set_timeout(Some(ANSWER)) {
+            if let Err(failure) = connection.set_timeout(None) {
                 let _ = hear.send(Heard::Failed(failure));
                 return;
             }

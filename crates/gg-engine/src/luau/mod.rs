@@ -2,11 +2,17 @@
 //! layer's ticks, as [`Scripts`] says.
 
 use std::any::Any;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+#[cfg(feature = "dev")]
+use std::ffi::c_int;
 use std::path::Path;
 use std::rc::{Rc, Weak};
+#[cfg(feature = "dev")]
+use std::sync::Arc;
 use std::{fs, mem, ptr};
 
+#[cfg(feature = "dev")]
+use gg_api::StopReason;
 use gg_core::math::{Quat, Vec2, Vec3, Vec4, libm};
 use gg_core::{Error, Result};
 use mlua::chunk::{ChunkMode, Compiler};
@@ -20,6 +26,16 @@ use crate::ecs::{ComponentId, Kind};
 use crate::reflect::{Ident, Reflect, Type, Value, list};
 use crate::{Context, Entity, Tick, World};
 
+#[cfg(feature = "dev")]
+mod debugger;
+// Luau's hooks, its interrupt and its debugger's, which mlua reaches through its raw API alone:
+// this module alone may use unsafe code for them.
+#[allow(unsafe_code)]
+mod hooks;
+
+#[cfg(feature = "dev")]
+pub(crate) use debugger::Debugger;
+
 // An entity's 64 bits are a script's light userdata, a pointer's.
 const _: () = assert!(
     usize::BITS == 64,
@@ -30,6 +46,12 @@ scoped_tls::scoped_thread_local! {
     /// What scripts reach as they run or load, which the functions Luau calls find here.
     static SHARED: Shared
 }
+
+/// The most of Luau's interrupts, which come at each call and each turn of a loop, that a call into
+/// a script, a tick or a chunk as it loads, takes before it fails, as [`Scripts`] says: far more
+/// than a tick's work takes, and few enough that a loop that never ends fails soon, even in a debug
+/// build.
+const BUDGET: u32 = 1_000_000;
 
 /// The functions of `math` whose precision is the platform's, which libm's take the place of: the
 /// compiler is told they aren't builtins, which it would otherwise call the C library's for.
@@ -92,6 +114,15 @@ const REMOVED: [&str; 7] = [
 /// isn't there, nor are `os`, `debug`, `collectgarbage`, `gcinfo`, `getfenv`, `setfenv`,
 /// `loadstring`, `newproxy`, `require` and `vector.angle`. And an entity is light userdata, its 64
 /// bits, which tables hash and compare by them rather than by an address.
+///
+/// Each call into a script, a tick or its chunk as it loads, takes at most a million of Luau's
+/// interrupts, which come at each call and each turn of a loop, past which it fails, alike on every
+/// platform, so that a loop that never ends fails rather than hanging the game.
+///
+/// A development build that serves the tool API debugs the scripts through it, as gg-api's `debug`
+/// says: breakpoints, by a script's path and a line, a pause and steps. A script stops inside its
+/// tick, the main thread waiting there until a client has it go on; it runs slower while the
+/// debugger is armed, a breakpoint placed or a pause or a step asked, and does nothing otherwise.
 pub struct Scripts {
     /// Shared with the context of the run, which reloads and migrates through it, as edits and
     /// restores reach the world between ticks, where the layer's tick reaches it alone.
@@ -109,18 +140,90 @@ struct Host {
 }
 
 /// The hosts of the layers' scripts, which a context reloads a script through as an edit asks, and
-/// migrates a world it brings back through, as [`Scripts`] says.
+/// migrates a world it brings back through, as [`Scripts`] says; and the run's debugger, which it
+/// gives each, in a run that serves the tool API.
 #[derive(Default)]
-pub(crate) struct Hosts(Vec<Weak<RefCell<Host>>>);
+pub(crate) struct Hosts {
+    hosts: Vec<Weak<RefCell<Host>>>,
+    #[cfg(feature = "dev")]
+    debugger: Option<Arc<Debugger>>,
+}
 
-/// What the functions Luau calls reach: the world, lent in place of the one kept here as scripts
-/// run or load, and what the handles of fields name.
+/// What the functions Luau calls and its hooks reach: the world, lent in place of the one kept here
+/// as scripts run or load, what the handles of fields name, the budget of the call into a script
+/// running, and what the VM keeps for the debugger.
 struct Shared {
     world: RefCell<World>,
     /// By handle.
     fields: RefCell<Vec<FieldRef>>,
     /// The script loading, while one is.
     loading: RefCell<Option<Loading>>,
+    /// The interrupts left to the call into a script that runs, of its [`BUDGET`].
+    budget: Cell<u32>,
+    #[cfg(feature = "dev")]
+    hooked: debugger::Hooked,
+}
+
+/// What an interrupt does, as [`interrupted`] says.
+enum Interrupt {
+    Go,
+    /// Fails the call, past its budget.
+    Over,
+    /// Stops there, as a pause asks.
+    #[cfg(feature = "dev")]
+    Pause,
+}
+
+/// Counts an interrupt against the budget of the call into a script that runs, which fails past it,
+/// and, in a development build, stops there if a pause is asked, as [`Scripts`] says.
+fn interrupted() -> Interrupt {
+    if !SHARED.is_set() {
+        return Interrupt::Go;
+    }
+    SHARED.with(|shared| {
+        let left = shared.budget.get();
+        if left == 0 {
+            return Interrupt::Over;
+        }
+        shared.budget.set(left - 1);
+        #[cfg(feature = "dev")]
+        if shared.hooked.pausing() {
+            return Interrupt::Pause;
+        }
+        Interrupt::Go
+    })
+}
+
+/// The error of a call into a script that ran past its budget at `line` of `script`.
+fn over_budget(script: &str, line: u32) -> String {
+    format!(
+        "{script}:{line}: the call into the script ran past its budget of {BUDGET} of Luau's \
+         interrupts, which come at each call and each turn of a loop, as a loop that never ends \
+         would"
+    )
+}
+
+/// Whether the step under way ends at `line`, at `depth` of the stack, and why it stops there if it
+/// does, as [`debugger::Hooked::stepped`] says.
+#[cfg(feature = "dev")]
+fn stepped(line: c_int, depth: c_int) -> Option<StopReason> {
+    if !SHARED.is_set() {
+        return None;
+    }
+    SHARED.with(|shared| shared.hooked.stepped(line, depth))
+}
+
+/// Has the script that runs stop where `frames` says, at `depth` of the stack, for `why`, until a
+/// client of the debugger says what it does next, as [`debugger::Hooked::stop`] says.
+#[cfg(feature = "dev")]
+fn stopped(why: StopReason, depth: c_int, frames: Vec<hooks::Frame>) {
+    if !SHARED.is_set() {
+        return;
+    }
+    SHARED.with(|shared| {
+        let frames = debugger::shown(frames, &shared.world.borrow());
+        shared.hooked.stop(why, depth, frames);
+    });
 }
 
 /// A field a handle names: field `name` of component type `component`, which holds `ty`.
@@ -203,12 +306,15 @@ struct Declaring {
     changed: bool,
 }
 
-/// A script's chunk, run: the component it declared, its fields, and its tick.
+/// A script's chunk, run: the component it declared, its fields, its tick, and, in a development
+/// build, the chunk, which breakpoints are placed in.
 struct Chunk {
     component: String,
     fields: Vec<(Ident, Kind, Value)>,
     id: ComponentId,
     tick: Option<Function>,
+    #[cfg(feature = "dev")]
+    function: Function,
 }
 
 impl Scripts {
@@ -219,12 +325,15 @@ impl Scripts {
         let vm = |error: mlua::Error| Error::new("script.vm", format!("Luau can't start: {error}"));
         let lua = Host::vm().map_err(vm)?;
         let host = Host {
-            lua,
             shared: Shared {
                 world: RefCell::new(World::default()),
                 fields: RefCell::new(Vec::new()),
                 loading: RefCell::new(None),
+                budget: Cell::new(BUDGET),
+                #[cfg(feature = "dev")]
+                hooked: debugger::Hooked::new(lua.clone()),
             },
+            lua,
             scripts: Vec::new(),
             serial: None,
         };
@@ -252,8 +361,11 @@ impl Scripts {
                 format!("can't read {}: {error}", path.display()),
             )
         })?;
-        let host = &mut *self.host.borrow_mut();
-        let component = host.load(cx.world_mut(), &name, text.clone())?;
+        let loaded = self
+            .host
+            .borrow_mut()
+            .load(cx.world_mut(), &name, text.clone());
+        let component = loaded?;
         cx.hosts.add(&self.host);
         #[cfg(feature = "dev")]
         cx.scripts.watch(name, path, text);
@@ -269,20 +381,51 @@ impl Scripts {
 }
 
 impl Hosts {
-    /// Keeps `host`, unless it's kept already.
+    /// Keeps `host`, unless it's kept already, giving it the run's debugger, if it has one.
     fn add(&mut self, host: &Rc<RefCell<Host>>) {
-        self.0.retain(|kept| kept.strong_count() > 0);
+        self.hosts.retain(|kept| kept.strong_count() > 0);
         if !self
-            .0
+            .hosts
             .iter()
             .any(|kept| ptr::eq(kept.as_ptr(), Rc::as_ptr(host)))
         {
-            self.0.push(Rc::downgrade(host));
+            self.hosts.push(Rc::downgrade(host));
+        }
+        #[cfg(feature = "dev")]
+        if let Some(debugger) = &self.debugger {
+            host.borrow().shared.hooked.give(debugger);
         }
     }
 
     fn hosts(&self) -> impl Iterator<Item = Rc<RefCell<Host>>> + '_ {
-        self.0.iter().filter_map(Weak::upgrade)
+        self.hosts.iter().filter_map(Weak::upgrade)
+    }
+
+    /// Has `debugger` debug the scripts of the run, each host's, from those loaded already.
+    #[cfg(feature = "dev")]
+    pub(crate) fn debug(&mut self, debugger: Arc<Debugger>) {
+        for host in self.hosts() {
+            host.borrow().shared.hooked.give(&debugger);
+        }
+        self.debugger = Some(debugger);
+    }
+
+    /// Places the breakpoints again in each host's scripts, if they've changed since they were
+    /// last placed, as a frame starts, between ticks.
+    #[cfg(feature = "dev")]
+    pub(crate) fn place(&self) {
+        for host in self.hosts() {
+            host.borrow().shared.hooked.place();
+        }
+    }
+
+    /// Whether a script has stopped since this last answered, so that no frame's time counts the
+    /// stop.
+    #[cfg(feature = "dev")]
+    pub(crate) fn took_stop(&self) -> bool {
+        self.debugger
+            .as_ref()
+            .is_some_and(|debugger| debugger.took_stop())
     }
 
     /// Reloads the script at `path`, its text now `text`, in `world`, through the host that loaded
@@ -429,6 +572,7 @@ impl Host {
         gg.set_readonly(true);
         globals.raw_set("gg", gg)?;
         lua.sandbox(true)?;
+        hooks::install(&lua)?;
         Ok(lua)
     }
 
@@ -439,6 +583,8 @@ impl Host {
         let chunk = self.run_chunk(world, name, &text, None);
         self.resolve(world);
         let chunk = chunk?;
+        #[cfg(feature = "dev")]
+        self.shared.hooked.loaded(name, chunk.function);
         self.scripts.retain(|loaded| loaded.path != name);
         let at = self
             .scripts
@@ -488,6 +634,9 @@ impl Host {
                     if !shared.world.borrow().has(entity, id) {
                         continue;
                     }
+                    shared.budget.set(BUDGET);
+                    #[cfg(feature = "dev")]
+                    shared.hooked.call();
                     let ran = tick.call::<()>((handle(entity.to_bits()), dt));
                     if let Err(error) = ran
                         && !mem::replace(&mut script.failed, true)
@@ -519,6 +668,8 @@ impl Host {
         // Its handles found again, as the chunk ran, and the fields as they are now.
         self.resolve(world);
         let chunk = chunk?;
+        #[cfg(feature = "dev")]
+        self.shared.hooked.loaded(path, chunk.function);
         let loaded = &mut self.scripts[at];
         loaded.text = text;
         loaded.fields = chunk.fields;
@@ -575,18 +726,26 @@ impl Host {
             declared: None,
             refused: None,
         });
-        let lua = &self.lua;
-        let ran = lent(&self.shared, world, || {
+        let (lua, shared) = (&self.lua, &self.shared);
+        let ran = lent(shared, world, || {
             let chunk = lua.load(text).set_name(format!("={path}"));
             let chunk = chunk.set_mode(ChunkMode::Text).set_environment(env);
-            chunk.call::<Lua_>(())
+            let function = chunk.into_function()?;
+            shared.budget.set(BUDGET);
+            #[cfg(feature = "dev")]
+            shared.hooked.call();
+            let returned = function.call::<Lua_>(())?;
+            Ok((function, returned))
         });
         let loading = self.shared.loading.borrow_mut().take();
         let loading = loading.expect("the script's loading is kept until it's run");
-        let returned = match ran {
-            Ok(returned) => returned,
+        let (function, returned) = match ran {
+            Ok(ran) => ran,
             Err(error) => return Err(loading.refused.unwrap_or_else(|| bad(path, &error))),
         };
+        // Kept only for the debugger.
+        #[cfg(not(feature = "dev"))]
+        drop(function);
         let Some(Declaring {
             id,
             component,
@@ -640,6 +799,8 @@ impl Host {
             fields,
             id,
             tick,
+            #[cfg(feature = "dev")]
+            function,
         })
     }
 
@@ -700,11 +861,12 @@ fn lent<R>(shared: &Shared, world: &mut World, f: impl FnOnce() -> R) -> R {
 }
 
 /// The compiler of scripts: at optimization level 1, whatever a script asks, with libm's math in
-/// place of the builtins the C library's would be, as [`Scripts`] says.
+/// place of the builtins the C library's would be, and Luau's full debug information, the names of
+/// locals and upvalues among it, which the debugger shows, as [`Scripts`] says.
 fn compiler() -> Compiler {
     Compiler::new()
         .set_optimization_level(1)
-        .set_debug_level(1)
+        .set_debug_level(2)
         .set_disabled_builtins(LIBM.map(|name| format!("math.{name}")))
 }
 
@@ -1731,6 +1893,233 @@ return Spin
         host.run(cx.world_mut());
         let steps = cx.world().get::<Mover>(kept).expect("a mover").steps;
         assert_eq!(steps, 4);
+    }
+
+    /// Counts a mover's steps, through a local, after a comment, so that a breakpoint asked at the
+    /// comment's line takes the function's.
+    const COUNTED: &str = "local Mover = gg.component(\"Mover\")\n\
+        local Step = gg.declare(\"Step\", { by = 1, forever = false })\n\
+        \n\
+        -- Counts.\n\
+        function Step.tick(entity, dt)\n\
+            local steps = entity[Mover.steps]\n\
+            steps = steps + entity[Step.by]\n\
+            entity[Mover.steps] = steps\n\
+            while entity[Step.forever] do end\n\
+        end\n\
+        \n\
+        return Step\n";
+
+    /// A context whose project's root is `dir` with two movers stepped by [`COUNTED`], whose
+    /// scripts `debugger` debugs, and its host.
+    #[cfg(feature = "dev")]
+    fn debugged(dir: &Scratch, debugger: &Arc<Debugger>) -> (Context, Scripts, [Entity; 2]) {
+        let (mut cx, host) = loaded(dir, &[("scripts/step.luau", COUNTED)]);
+        cx.hosts.debug(debugger.clone());
+        let world = cx.world_mut();
+        let movers = [(); 2].map(|()| world.spawn(Mover::new()));
+        for mover in movers {
+            world.add_default(mover, "Step").expect("added");
+        }
+        (cx, host, movers)
+    }
+
+    /// What a stop's frame holds as `name`, a local's.
+    #[cfg(feature = "dev")]
+    fn local(stop: &gg_api::Stop, name: &str) -> serde_json::Value {
+        let locals = &stop.frames[0].locals;
+        let found = locals.iter().find(|local| local.name == name);
+        found.map_or(serde_json::Value::Null, |local| local.value.clone())
+    }
+
+    /// A script stops at a breakpoint inside its tick, which waits there, with its stack and locals,
+    /// until it's told to go on: a step over goes to its next line, a step out from the tick to the
+    /// next entity's, and a continue to the next stop; the ticks then end as they would have.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_script_stops_at_a_breakpoint_and_steps_over_and_out_until_it_goes_on() {
+        use gg_api::{DebugAction, StopReason};
+        let dir = Scratch::new("luau-breakpoint");
+        let debugger = Arc::new(Debugger::default());
+        let (mut cx, mut host, movers) = debugged(&dir, &debugger);
+        let ids = movers.map(|mover| cx.world().id(mover).expect("alive").to_string());
+        debugger.set("scripts/step.luau".to_owned(), vec![7]);
+        cx.hosts.place();
+        let client = debugger.clone();
+        let client = std::thread::spawn(move || {
+            let mut stops = Vec::new();
+            let wait = std::time::Duration::from_secs(20);
+            let actions = [
+                DebugAction::StepOver,
+                DebugAction::StepOut,
+                DebugAction::Continue,
+            ];
+            for action in actions {
+                stops.push(client.answer(wait).stopped.expect("a stop"));
+                client.act(action).expect("it goes on");
+            }
+            stops.push(client.answer(wait).stopped.expect("a stop"));
+            client.set("scripts/step.luau".to_owned(), Vec::new());
+            client.act(DebugAction::Continue).expect("it goes on");
+            stops
+        });
+        host.run(cx.world_mut());
+        let stops = client.join().expect("the client didn't panic");
+        let at = |stop: &gg_api::Stop| (stop.number, stop.why, stop.frames[0].line);
+        let numbers: Vec<_> = stops.iter().map(at).collect();
+        assert_eq!(
+            numbers,
+            [
+                (1, StopReason::Breakpoint, 7),
+                (2, StopReason::Step, 8),
+                (3, StopReason::Step, 6),
+                (4, StopReason::Breakpoint, 7),
+            ]
+        );
+        let frame = &stops[0].frames[0];
+        assert_eq!(
+            (&*frame.script, &*frame.function),
+            ("scripts/step.luau", "tick")
+        );
+        assert_eq!(local(&stops[0], "entity"), serde_json::json!(ids[0]));
+        assert_eq!(
+            local(&stops[0], "dt"),
+            serde_json::json!(Tick::DT.as_secs_f64())
+        );
+        assert_eq!(local(&stops[0], "steps"), serde_json::json!(0.0));
+        assert_eq!(local(&stops[1], "steps"), serde_json::json!(1.0));
+        assert_eq!(local(&stops[2], "entity"), serde_json::json!(ids[1]));
+        let upvalues = &stops[0].frames[0].upvalues;
+        let names: Vec<&str> = upvalues.iter().map(|upvalue| &*upvalue.name).collect();
+        assert_eq!(names, ["Mover", "Step"]);
+        assert_eq!(upvalues[0].value, serde_json::json!("(table)"));
+        let world = cx.world();
+        for mover in movers {
+            assert_eq!(world.get::<Mover>(mover).expect("a mover").steps, 1);
+        }
+        let after = debugger.answer(std::time::Duration::ZERO);
+        assert_eq!((after.stopped, after.asked, after.stops), (None, None, 4));
+        assert!(after.breakpoints.is_empty());
+        assert!(cx.hosts.took_stop(), "the main loop learns of the stop");
+        let refused = debugger
+            .act(DebugAction::Continue)
+            .expect_err("nothing stopped");
+        assert_eq!(refused.code(), "script.not_stopped");
+    }
+
+    /// A pause asked stops the next line a script runs, its tick's first; and one asked while a call
+    /// runs, as an interrupt in it finds.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_pause_stops_the_next_line_a_script_runs() {
+        use gg_api::{DebugAction, StopReason};
+        let dir = Scratch::new("luau-pause");
+        let debugger = Arc::new(Debugger::default());
+        let (mut cx, mut host, movers) = debugged(&dir, &debugger);
+        debugger.act(DebugAction::Pause).expect("asked");
+        assert_eq!(
+            debugger.answer(std::time::Duration::ZERO).asked,
+            Some(DebugAction::Pause)
+        );
+        let client = debugger.clone();
+        let client = std::thread::spawn(move || {
+            let stop = client.answer(std::time::Duration::from_secs(20)).stopped;
+            client.act(DebugAction::Continue).expect("it goes on");
+            stop.expect("a stop")
+        });
+        host.run(cx.world_mut());
+        let stop = client.join().expect("the client didn't panic");
+        assert_eq!((stop.why, stop.frames[0].line), (StopReason::Pause, 6));
+        let id = cx.world().id(movers[0]).expect("alive").to_string();
+        assert_eq!(local(&stop, "entity"), serde_json::json!(id));
+        assert_eq!(debugger.answer(std::time::Duration::ZERO).stops, 1);
+        // Asked again, an interrupt in a call that runs finds it.
+        debugger.act(DebugAction::Pause).expect("asked");
+        let shared = &host.host.borrow().shared;
+        let interrupt = lent(shared, cx.world_mut(), interrupted);
+        assert!(matches!(interrupt, Interrupt::Pause));
+    }
+
+    /// A breakpoint takes the next line with code from the line asked, kept for a script that hasn't
+    /// loaded until it does, and is placed again in its new functions as it reloads.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_breakpoint_takes_the_next_line_with_code_and_follows_its_script_as_it_reloads() {
+        let dir = Scratch::new("luau-placed");
+        fs::create_dir_all(dir.0.join("scripts")).expect("a directory");
+        let mut cx = Context::seeded(1).root(&dir.0);
+        cx.world_mut().register::<Mover>().expect("described");
+        let debugger = Arc::new(Debugger::default());
+        cx.hosts.debug(debugger.clone());
+        debugger.set("scripts/step.luau".to_owned(), vec![12, 3, 9, 13]);
+        let placed = |debugger: &Debugger| -> Vec<(u32, Option<u32>)> {
+            let answer = debugger.answer(std::time::Duration::ZERO);
+            let breakpoints = answer.breakpoints.iter();
+            breakpoints.map(|at| (at.line, at.placed)).collect()
+        };
+        assert_eq!(
+            placed(&debugger),
+            [(3, None), (9, None), (12, None), (13, None)]
+        );
+        let path = dir.0.join("scripts/step.luau");
+        fs::write(&path, COUNTED).expect("written");
+        let mut host = Scripts::new().expect("Luau starts");
+        host.load(&mut cx, &path).expect("the script loads");
+        let scripts = debugger.answer(std::time::Duration::ZERO).scripts;
+        assert_eq!(scripts, ["scripts/step.luau"]);
+        // The comment's line takes the function's, which the chunk sets.
+        assert_eq!(
+            placed(&debugger),
+            [(3, Some(5)), (9, Some(9)), (12, Some(12)), (13, None)]
+        );
+        reload(&mut cx, format!("\n{COUNTED}")).expect("reloaded");
+        assert_eq!(
+            placed(&debugger),
+            [(3, Some(3)), (9, Some(9)), (12, Some(13)), (13, Some(13))]
+        );
+    }
+
+    /// A call into a script that never returns fails once it's past its budget, saying where it
+    /// was, and the game goes on: a tick, the others running as they do, and a chunk as it loads.
+    #[test]
+    fn a_call_into_a_script_that_never_returns_fails_past_its_budget() {
+        let dir = Scratch::new("luau-budget");
+        let (mut cx, mut host) = loaded(&dir, &[("scripts/step.luau", COUNTED)]);
+        let world = cx.world_mut();
+        let [stuck, free] = [(); 2].map(|()| world.spawn(Mover::new()));
+        for mover in [stuck, free] {
+            world.add_default(mover, "Step").expect("added");
+        }
+        let forever = Value::Bool(true);
+        world
+            .set_field(stuck, "Step", "forever", &forever)
+            .expect("set");
+        host.run(cx.world_mut());
+        host.run(cx.world_mut());
+        let steps = |mover| cx.world().get::<Mover>(mover).expect("a mover").steps;
+        assert_eq!((steps(stuck), steps(free)), (2, 2));
+        let never = refused(
+            "never",
+            "while true do end\nreturn gg.declare(\"Never\", {})",
+        );
+        assert_eq!(never.code(), "script.bad");
+        let message = never.to_string();
+        assert!(
+            message
+                .contains("scripts/refused.luau:1: the call into the script ran past its budget"),
+            "{message}"
+        );
+        // A loop that ends, of many turns, runs.
+        let looped = "local n = 0\nfor i = 1, 100000 do n += 1 end\n\
+            return gg.declare(\"Looped\", { n = n })";
+        let (cx, _host) = loaded(
+            &Scratch::new("luau-budget-ends"),
+            &[("scripts/l.luau", looped)],
+        );
+        assert_eq!(
+            default(cx.world(), "Looped", "n"),
+            Some(Value::F64(100_000.0))
+        );
     }
 
     #[test]

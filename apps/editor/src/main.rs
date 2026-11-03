@@ -3,6 +3,7 @@
 
 mod assets;
 mod camera;
+mod debugger;
 mod file;
 mod game;
 mod handles;

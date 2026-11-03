@@ -46,6 +46,7 @@ pub(crate) fn run_headless(
     let mut render = RenderThread::start(renderer)?;
     // An embedded run is the game a tool shows, as the editor plays it, which plays its sounds.
     let mut cx = Context::of_run(None, app, embedded);
+    api::debug(&api, &mut cx);
     let mut clock = Clock::default();
     let mut stepper = match app.headless_step {
         Some(_) => Stepper::default(),
@@ -94,6 +95,10 @@ pub(crate) fn run_headless(
                 time: Some(clock.elapsed().as_secs_f64()),
                 ..Default::default()
             });
+            // As a stopped script did, so that no frame's time counts the stop.
+            if mem::take(&mut cx.paused) {
+                clock.resume();
+            }
             // The clock starts every frame, even with a step set: egui and the run's end read it.
             let since_last = clock.start_frame();
             let frame_started = Instant::now();
@@ -276,6 +281,11 @@ pub(crate) fn run_frame(
         stack.tick(cx, tick)
     };
     stepper.step(dt, tick, || start.elapsed());
+    // A script that stopped in a tick paused the frames while it waited.
+    #[cfg(feature = "dev")]
+    if cx.hosts.took_stop() {
+        cx.paused = true;
+    }
     let ticked = Instant::now();
     stack.update(cx, dt);
     let alpha = stepper.alpha();

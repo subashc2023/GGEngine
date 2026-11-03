@@ -6,12 +6,17 @@
 //! (<https://docs.vulkan.org/spec/latest/chapters/VK_KHR_surface/wsi.html>).
 //!
 //! The answers run winit's window procedure inside the frame that waits, which is safe: winit holds
-//! back the events they make until the frame's handler returns.
+//! back the events they make until the frame's handler returns. A script's stop waits longer, and
+//! takes what's posted to the windows off the queue too, as [`pump`] says.
 
 use std::mem;
 use std::sync::mpsc::{Receiver, RecvError, RecvTimeoutError};
 use std::time::Duration;
 
+#[cfg(feature = "dev")]
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    DispatchMessageW, PM_REMOVE, PostQuitMessage, TranslateMessage, WM_PAINT, WM_QUIT,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     MSG, PM_NOREMOVE, PM_QS_SENDMESSAGE, PeekMessageW,
 };
@@ -39,6 +44,38 @@ fn answer_sent_messages() {
     // SAFETY: a plain call for any of the thread's windows, which dispatches the messages sent to
     // them and, with `PM_NOREMOVE`, leaves the queue as it was.
     unsafe { PeekMessageW(&mut msg, 0, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE) };
+}
+
+/// Answers the messages other threads have sent the calling thread's windows, and dispatches those
+/// posted to them, at most `most`, as a modal loop does, so that Windows takes the windows for ones
+/// that respond while a script's stop waits, as `luau::Debugger` says, rather than marking them
+/// hung after five seconds, as it does a thread that answers sent messages alone. winit holds back
+/// the events they make until the frame's handler returns. A repaint, which comes once nothing else
+/// is queued, stays queued for the event loop: winit asks for another as it can't draw meanwhile,
+/// which would come again at once. A quit is posted again, for the event loop. Development builds
+/// alone debug scripts.
+#[cfg(feature = "dev")]
+pub(crate) fn pump(most: usize) {
+    for _ in 0..most {
+        // SAFETY: an empty message for `PeekMessageW` to fill.
+        let mut msg: MSG = unsafe { mem::zeroed() };
+        // SAFETY: a plain call for any of the thread's windows, which dispatches the messages sent
+        // to them and takes the next posted to them off the queue, but a repaint, which stays.
+        if unsafe { PeekMessageW(&mut msg, 0, 0, 0, PM_REMOVE) } == 0 || msg.message == WM_PAINT {
+            return;
+        }
+        if msg.message == WM_QUIT {
+            // SAFETY: a plain call, posting the quit taken again, with its exit code.
+            unsafe { PostQuitMessage(msg.wParam as i32) };
+            return;
+        }
+        // SAFETY: the message `PeekMessageW` filled, to the window it's for, as a message loop
+        // dispatches it.
+        unsafe {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
 }
 
 #[cfg(test)]

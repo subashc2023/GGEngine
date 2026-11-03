@@ -212,6 +212,7 @@ impl Handler<'_> {
             self.chrome,
         ));
         self.cx = Context::of_run(Some(crate::Window::new(window.clone())), self.app, true);
+        api::debug(&self.api, &mut self.cx);
         self.gamepads = Gamepads::open(window.has_focus());
         self.window = Some(window);
         let snapshot = self.snapshot.take();

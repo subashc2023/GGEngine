@@ -8,10 +8,11 @@
 //! and edit it, through the API, as a remote [`Inspector`] does; the Logs panel shows `gg run`'s
 //! events, the build's errors among them, the game's events as it logs them, which the tool API's
 //! `logs` follows, and what the game and the build print; the Assets panel, the files in the
-//! project's asset root; and the title bar, how the run goes, or while a game serves, whether it's
-//! stopped, playing or simulating, and whether it's paused, as the game answers the editor's
-//! requests and the `status` it asks for every quarter second, which catches another client's; with
-//! Play, Simulate, pause and step.
+//! project's asset root; the [Debugger](crate::debugger) panel, its scripts; and the title bar, how
+//! the run goes, or while a game serves, whether it's stopped, playing or simulating, and whether
+//! it's paused, as the game answers the editor's requests and the `status` it asks for every
+//! quarter second, which catches another client's, or that it waits at a script's stop, as the
+//! Debugger panel learns; with Play, Simulate, pause and step.
 //!
 //! Started outside a project, the editor shows the [`hub`] over its panels, where a
 //! project is picked, unless it's to open the latest as it starts; and the File menu's Open Project
@@ -86,6 +87,7 @@ use serde_json::{Value, json};
 use tracing::{info, warn};
 
 use crate::assets::{Assets, Dragged};
+use crate::debugger::Debugger;
 use crate::file::{self, Choice, Item, Message};
 use crate::handles::{Picked, Reading, Sight};
 use crate::hub::{self, Hub};
@@ -97,12 +99,10 @@ use crate::view::{self, OUTLINE, OUTLINE_WIDTH, ViewTools};
 /// The most lines the Logs panel keeps, past which the oldest go.
 const LOGGED: usize = 5000;
 
-/// How long the connection to the game waits to connect.
+/// How long the connection to the game waits to connect. It waits for each answer as long as it
+/// takes: a script stopped in the game holds the answers for as long as it's debugged, and `gg run`
+/// ends a game that hangs, which closes the connection.
 const CONNECT: Duration = Duration::from_secs(10);
-
-/// How long it waits for each answer: as long as `gg run` gives a game to run its first frame,
-/// which answers the first requests.
-const ANSWER: Duration = Duration::from_secs(120);
 
 /// How long each `logs` that follows the game's events waits for them to come, in milliseconds.
 const FOLLOWING_MS: u64 = 1_000;
@@ -124,7 +124,8 @@ const STATUS_EVERY: Duration = Duration::from_millis(250);
 /// The editor of the project in directory `dir`, if it's started in one, and otherwise of the one
 /// the hub picks, the hub finding projects in `workspace`, the engine's, if it runs in one: the
 /// game's view in the Viewport, its entities left of it, above its scenes, the one picked right of
-/// it, above the Performance panel, and the Logs below it, the Assets among their tabs.
+/// it, above the Performance panel, and the Logs below it, the Assets and the Debugger among their
+/// tabs.
 pub(crate) fn app(dir: Option<PathBuf>, workspace: Option<PathBuf>) -> App {
     let app = App::new("Editor").custom_title_bar().view_panel("Viewport");
     let app = app
@@ -133,7 +134,8 @@ pub(crate) fn app(dir: Option<PathBuf>, workspace: Option<PathBuf>) -> App {
         .dock("Scenes", Docked::Below("Entities"))
         .dock("Performance", Docked::Below("Inspector"))
         .dock("Logs", Docked::Below("Viewport"))
-        .dock("Assets", Docked::With("Logs"));
+        .dock("Assets", Docked::With("Logs"))
+        .dock("Debugger", Docked::With("Logs"));
     let inspector = Inspector::remote(CLIENT);
     let mut game = Game::new(dir, inspector.link());
     game.hub = Hub::new(workspace);
@@ -226,6 +228,8 @@ struct Game {
     assets: Option<Assets>,
     scenes: Option<Scenes>,
     folders: Option<Folders>,
+    /// The Debugger panel, of the scripts of the game that serves.
+    debugger: Debugger,
     /// Whether a game has served since the editor started, from when a close asks whether to save.
     served: bool,
     /// The open scene's file, as the asset root names it, `None` while it's untitled, and whether
@@ -401,6 +405,7 @@ impl Game {
             let (root, scenes) = (folders.root.clone(), folders.scenes.clone());
             Scenes::new(root, scenes, folders.start.as_deref())
         });
+        let debugger = Debugger::new(folders.as_ref().map(|folders| folders.root.clone()), CLIENT);
         Self {
             dir,
             run: None,
@@ -438,6 +443,7 @@ impl Game {
             assets,
             scenes,
             folders,
+            debugger,
             served: false,
             scene: None,
             unsaved: false,
@@ -630,6 +636,7 @@ impl Game {
             self.settle_close();
         }
         self.talker = None;
+        self.debugger.disconnect();
         self.view.link.reach(None);
         self.input.clear();
         self.inputting = false;
@@ -662,6 +669,7 @@ impl Game {
         };
         self.disconnect();
         self.view.link.reach(Some(session.clone()));
+        self.debugger.serve(session.clone());
         self.talker = Some(Talker::connect(session));
         self.served = true;
         // The game before's memory, which this one makes anew; the view shows its last frame
@@ -851,6 +859,10 @@ impl Game {
             Mode::Simulate => "Simulating",
         };
         match &self.run_state {
+            // Its status waits too, so what it last said may be from before.
+            RunState::Running if self.debugger.stopped() => {
+                "Waiting at a script's stop: see the Debugger".to_owned()
+            }
             RunState::Running if self.paused => format!("{running}, paused"),
             RunState::Running => running.to_owned(),
             RunState::Building => "Building…".to_owned(),
@@ -1815,6 +1827,7 @@ impl Layer for Game {
         self.changes(wants(&self.view));
         self.view.settle();
         self.take_answers();
+        self.debugger.update();
         self.take_picks();
         if let Some(view) = cx.view() {
             self.fit(view.size);
@@ -2011,6 +2024,8 @@ impl Layer for Game {
                 ui.weak("Not in a game's project");
             }
         });
+        let debugger = &mut self.debugger;
+        ui.panel("Debugger", |ui| debugger.show(ui));
         // What's held over the view counts as over it, as egui's hover doesn't while another
         // widget drags, so that the corner names what would take it.
         let view = ui.view();
@@ -2256,7 +2271,7 @@ fn pick(
     send: &Sender<(u64, Result<gg_api::Picked, Failure>)>,
 ) {
     let mut connected = Client::connect(session, CLIENT, CONNECT)
-        .and_then(|mut client| client.set_timeout(Some(ANSWER)).map(|()| client));
+        .and_then(|mut client| client.set_timeout(None).map(|()| client));
     for (ticket, at) in asks {
         let answer = match &mut connected {
             Ok(client) => client.call_as("pick", gg_api::Pick { at }),
@@ -2295,7 +2310,7 @@ impl Talker {
         thread::spawn(move || pick(&picker, picking, &found));
         thread::spawn(move || {
             let connected = Client::connect(&session, CLIENT, CONNECT)
-                .and_then(|mut client| client.set_timeout(Some(ANSWER)).map(|()| client));
+                .and_then(|mut client| client.set_timeout(None).map(|()| client));
             let mut client = match connected {
                 Ok(client) => client,
                 Err(failure) => {

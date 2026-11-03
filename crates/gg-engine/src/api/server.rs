@@ -50,6 +50,7 @@ use crate::assets::Asset;
 use crate::edits::{Done, Edit};
 use crate::grid::Plane;
 use crate::layer::{Offered, Stack};
+use crate::luau::Debugger;
 use crate::main_loop::Stepper;
 use crate::net::Ticket;
 use crate::reflect::{self, Ident, Type};
@@ -62,10 +63,10 @@ use crate::{
 };
 
 /// The methods, as `api.unknown_method` lists them.
-const METHODS: [&str; 29] = [
+const METHODS: [&str; 30] = [
     "hello", "ping", "status", "pause", "resume", "play", "stop", "step", "scene", "capture",
     "view", "input", "look", "pick", "entities", "entity", "get", "types", "hash", "assets",
-    "snapshot", "patch", "apply", "undo", "redo", "edits", "logs", "note", "quit",
+    "snapshot", "patch", "apply", "undo", "redo", "edits", "logs", "note", "debug", "quit",
 ];
 
 /// The most of the clients' picks a frame asks: half as many as a frame reads back, so that the
@@ -84,7 +85,8 @@ const MOST_LISTED: usize = 10_000;
 /// How long a connection has to say hello before it's dropped.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The longest a `logs` waits for an event to come, in milliseconds.
+/// The longest a `logs` waits for an event to come, or a `debug` for a script to stop, in
+/// milliseconds.
 const MOST_WAIT_MS: u64 = 10_000;
 
 /// The levels of `tracing`, in the order [`gg_api::LEVELS`] names them.
@@ -186,6 +188,8 @@ struct Shared {
     /// its cursors from another run's.
     events: &'static Events,
     run: u64,
+    /// The debugger of the run's scripts, which `debug` asks.
+    debugger: Arc<Debugger>,
 }
 
 /// A request for the main loop to answer, the client of its connection, and where its answer goes.
@@ -353,6 +357,7 @@ impl Api {
             waker: Mutex::new(None),
             events,
             run,
+            debugger: Arc::default(),
         });
         let (pngs, to_write) = mpsc::channel();
         thread::Builder::new()
@@ -436,6 +441,11 @@ impl Api {
             .waker
             .lock()
             .expect("no thread panics holding it") = Some(wake);
+    }
+
+    /// The debugger of the run's scripts, which `debug` asks.
+    pub(crate) fn debugger(&self) -> Arc<Debugger> {
+        self.shared.debugger.clone()
     }
 
     /// As a frame starts, before its ticks, answers the requests that have come, from `cx`, whose
@@ -1514,9 +1524,9 @@ fn accept(
 }
 
 /// Serves connection `stream`: its first request must be `hello` with `token`, which it answers
-/// with `welcome`; then it answers `ping`, `logs` and `note` itself, and passes the rest on to the
-/// main loop through `to_main`, waking it, each answer going back through a thread that writes them
-/// as they come. A line that isn't a request ends it.
+/// with `welcome`; then it answers `ping`, `logs`, `note` and `debug` itself, and passes the rest on
+/// to the main loop through `to_main`, waking it, each answer going back through a thread that
+/// writes them as they come. A line that isn't a request ends it.
 fn connection(
     stream: TcpStream,
     token: &str,
@@ -1561,9 +1571,11 @@ fn connection(
             to: to.clone(),
         };
         if request.method == "ping" {
+            let waiting = Waiting::now().map(Waiting::name);
+            let stopped = || shared.debugger.stopped().then_some("breakpoint");
             let pulse = Pulse {
                 frames: shared.frames.load(Ordering::Relaxed),
-                waiting: Waiting::now().map(|waiting| waiting.name().to_owned()),
+                waiting: waiting.or_else(stopped).map(str::to_owned),
             };
             reply.result(&pulse);
             continue;
@@ -1574,6 +1586,10 @@ fn connection(
         }
         if request.method == "note" {
             reply.send(note(&request.params, &client));
+            continue;
+        }
+        if request.method == "debug" {
+            reply.send(debug(&request.params, shared));
             continue;
         }
         match parse(&request) {
@@ -1723,6 +1739,57 @@ fn note(params: &Value, client: &str) -> Result<String, Failure> {
         gg_api::NoteLevel::Warn => warn!(code, client, fields, "{message}"),
     }
     Ok("{}".to_owned())
+}
+
+/// What `debug`, given `params`, answers, as gg-api's docs say: from `shared`'s debugger, on the
+/// connection's own thread, so that it answers while a script has stopped and the main thread waits
+/// there, and which a wait holds. Breakpoints and a pause wake the main loop, which places them, or
+/// steps to the pause, as a frame starts.
+///
+/// Fails with `api.bad_params` for parameters it doesn't take, a script's path that's empty, a line
+/// of 0 or a wait of more than [`MOST_WAIT_MS`]; and with `script.not_stopped` for a continue or a
+/// step while no script has stopped.
+fn debug(params: &Value, shared: &Shared) -> Result<String, Failure> {
+    let method = "debug";
+    let gg_api::Debug {
+        breakpoints,
+        action,
+        wait_ms,
+    } = take(method, params)?;
+    if wait_ms > MOST_WAIT_MS {
+        let what = format!("waits at most {MOST_WAIT_MS} ms, not {wait_ms}");
+        return Err(bad_params(method, what));
+    }
+    if let Some(given) = &breakpoints {
+        if given.script.is_empty() {
+            return Err(bad_params(
+                method,
+                "takes a script's path from the project's root",
+            ));
+        }
+        if given.lines.contains(&0) {
+            return Err(bad_params(method, "takes lines from 1"));
+        }
+    }
+    let debugger = &shared.debugger;
+    let wake = breakpoints.is_some() || action == Some(gg_api::DebugAction::Pause);
+    if let Some(gg_api::Breakpoints { script, lines }) = breakpoints {
+        debugger.set(script, lines);
+    }
+    if let Some(action) = action {
+        debugger.act(action).map_err(|error| failure(&error))?;
+    }
+    if wake
+        && let Some(wake) = shared
+            .waker
+            .lock()
+            .expect("no thread panics holding it")
+            .as_ref()
+    {
+        wake();
+    }
+    let answer = debugger.answer(Duration::from_millis(wait_ms));
+    Ok(serde_json::to_string(&answer).expect("an answer serializes"))
 }
 
 /// Whether `code` has a stable code's shape: two or more names, joined by dots, each of lowercase
@@ -2380,6 +2447,118 @@ mod tests {
         let pulse: Pulse = client.call_as("ping", ()).expect("a pulse");
         assert_eq!(pulse.waiting.as_deref(), Some("menu"));
         drop(waiting);
+    }
+
+    /// What [`a_client_debugs_a_script_while_the_game_waits_at_its_stop`]'s client gets.
+    struct Debugged {
+        before: gg_api::Debugging,
+        stopped: gg_api::Debugging,
+        pulse: Pulse,
+        stepped: gg_api::Debugging,
+        gone_on: gg_api::Debugging,
+        refused: Vec<String>,
+    }
+
+    /// A client sets a breakpoint in a script and waits for the game to stop there, which `ping`
+    /// says it waits at, answered on the connection's own thread while the main thread waits in the
+    /// tick; steps over a line; clears it and has the game go on; and is refused, with a code,
+    /// what's wrong.
+    #[test]
+    fn a_client_debugs_a_script_while_the_game_waits_at_its_stop() {
+        let (mut api, session) = started("Api Debug");
+        let dir = Scratch::new("api-debug");
+        fs::create_dir_all(dir.0.join("scripts")).expect("a directory");
+        let path = dir.0.join("scripts/count.luau");
+        let script = "local Count = gg.declare(\"Count\", { n = 0 })\n\
+            function Count.tick(entity, dt)\n\
+                local n = entity[Count.n]\n\
+                n = n + 1\n\
+                entity[Count.n] = n\n\
+            end\n\
+            return Count\n";
+        fs::write(&path, script).expect("written");
+        let mut cx = Context::seeded(1).root(&dir.0);
+        cx.hosts.debug(api.debugger());
+        let mut host = crate::Scripts::new().expect("Luau starts");
+        host.load(&mut cx, &path).expect("the script loads");
+        let world = cx.world_mut();
+        let counted = world.spawn(());
+        world.add_default(counted, "Count").expect("added");
+        let pinging = session.clone();
+        let client = move |mut client: Client| {
+            let mut debug = |params: Value| -> gg_api::Debugging {
+                client.call_as("debug", params).expect("an answer")
+            };
+            let before = debug(json!({}));
+            let lines = json!({"script": "scripts/count.luau", "lines": [4]});
+            let stopped = debug(json!({"breakpoints": lines, "wait_ms": 10_000}));
+            let mut pinged = Client::connect(&pinging, "pinger", DEADLINE).expect("it connects");
+            let pulse = pinged.call_as("ping", ()).expect("a pulse");
+            let stepped = debug(json!({"action": "step_over", "wait_ms": 10_000}));
+            let none = json!({"script": "scripts/count.luau", "lines": []});
+            let gone_on = debug(json!({"breakpoints": none, "action": "continue"}));
+            let refused = [
+                json!({"action": "continue"}),
+                json!({"breakpoints": {"script": "", "lines": [1]}}),
+                json!({"breakpoints": {"script": "scripts/count.luau", "lines": [0]}}),
+                json!({"wait_ms": 10_001}),
+                json!({"action": "nope"}),
+            ];
+            let refused = (refused.into_iter())
+                .map(|params| client.call("debug", params).expect_err("refused").code)
+                .collect();
+            Debugged {
+                before,
+                stopped,
+                pulse,
+                stepped,
+                gone_on,
+                refused,
+            }
+        };
+        let got = serving(
+            &mut api,
+            &mut cx,
+            &mut Stack::default(),
+            &mut Stepper::default(),
+            session,
+            client,
+            |_, cx, _| {
+                cx.hosts.place();
+                host.run(cx.world_mut());
+            },
+        );
+        assert_eq!(got.before.scripts, ["scripts/count.luau"]);
+        assert_eq!((got.before.stopped, got.before.stops), (None, 0));
+        let stop = got.stopped.stopped.expect("stopped");
+        let at = |stop: &gg_api::Stop| (stop.why, stop.frames[0].line);
+        assert_eq!(at(&stop), (gg_api::StopReason::Breakpoint, 4));
+        let placed = &got.stopped.breakpoints;
+        assert_eq!((placed[0].line, placed[0].placed), (4, Some(4)));
+        assert_eq!(got.pulse.waiting.as_deref(), Some("breakpoint"));
+        let stepped = got.stepped.stopped.expect("stopped");
+        assert_eq!(at(&stepped), (gg_api::StopReason::Step, 5));
+        let n = |stop: &gg_api::Stop| {
+            let locals = &stop.frames[0].locals;
+            let n = locals
+                .iter()
+                .find(|local| local.name == "n")
+                .expect("a local");
+            n.value.as_f64().expect("a number")
+        };
+        assert_eq!(n(&stepped), n(&stop) + 1.0, "its line ran");
+        assert_eq!((got.gone_on.stopped, got.gone_on.stops), (None, 2));
+        assert!(got.gone_on.breakpoints.is_empty());
+        assert_eq!(
+            got.refused,
+            [
+                "script.not_stopped",
+                "api.bad_params",
+                "api.bad_params",
+                "api.bad_params",
+                "api.bad_params",
+            ]
+        );
     }
 
     /// A token given is the token only if every byte is: not if its first or last differs, nor if

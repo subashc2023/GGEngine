@@ -162,6 +162,19 @@ Talk to a running game, through its tool API:
                                  Its log's events at LEVEL (`warn`) and above, of the last 10,000 it
                                  keeps, each its JSON log's line; with `--follow`, then each as it's
                                  logged, until it ends
+  debug [break <SCRIPT> [<LINE>...] | pause | continue | into | over | out] [--wait <SECONDS>]
+                                 Debug its Luau scripts, and print the debugger: where a script has
+                                 stopped, with its stack and each function's locals and upvalues,
+                                 the pause or step under way, the breakpoints and the scripts.
+                                 `break` sets SCRIPT's breakpoints, by its path from the project's
+                                 root, such as `scripts/spin.luau`, at each LINE, or at the next
+                                 line with code, in place of those it had; none clears them. `pause`
+                                 stops the next line a script runs; from a stop, `continue` goes on
+                                 to the next, and `into`, `over` and `out` step. A stopped script
+                                 waits inside its tick, and the game with it, the commands but
+                                 `debug`, `logs` and `sessions` waiting too, until `debug` has it go
+                                 on; `run` doesn't take it for hung. With `--wait`, it waits up to
+                                 SECONDS, at most 10, for a script to stop, if none has
   quit                           End it cleanly, as closing its window does, unasked
   call <METHOD> [<PARAMS>]       Send METHOD with PARAMS, as JSON, and print what it answers
 
@@ -302,7 +315,7 @@ fn absolute(path: &str) -> Result<PathBuf, Failure> {
 }
 
 /// The flags that take a value: `--name value` or `--name=value`.
-const VALUED: [&str; 14] = [
+const VALUED: [&str; 15] = [
     "--project",
     "--peers",
     "--author",
@@ -317,6 +330,7 @@ const VALUED: [&str; 14] = [
     "--skip",
     "--take",
     "--level",
+    "--wait",
 ];
 
 /// The arguments after a command's name: what isn't a flag, the flags, each with its value if it
@@ -726,6 +740,34 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
             let author = parsed.value("--author");
             call(&mut parsed, method, json!({"author": author}))?
         }
+        "debug" => {
+            let usage = "debug [break <SCRIPT> [<LINE>...] | pause | continue | into | over | out] \
+                         [--wait <SECONDS>]";
+            let given = parsed.positional(0, usize::MAX, usage)?;
+            let wait: u64 = parsed.number("--wait", 0)?;
+            let mut params = json!({"wait_ms": wait.saturating_mul(1000)});
+            match given.iter().map(String::as_str).collect::<Vec<_>>()[..] {
+                [] => {}
+                ["break", script, ref lines @ ..] => {
+                    let lines = lines.iter().map(|line| {
+                        line.parse::<u32>()
+                            .ok()
+                            .filter(|&line| line > 0)
+                            .ok_or_else(|| {
+                                bad(format!("`gg debug break` takes lines from 1, not `{line}`"))
+                            })
+                    });
+                    let lines = lines.collect::<Result<Vec<u32>, Failure>>()?;
+                    params["breakpoints"] = json!({"script": script, "lines": lines});
+                }
+                [action @ ("pause" | "continue")] => params["action"] = json!(action),
+                [step @ ("into" | "over" | "out")] => {
+                    params["action"] = json!(format!("step_{step}"))
+                }
+                _ => return Err(bad(format!("it's `gg {usage}`"))),
+            }
+            call(&mut parsed, "debug", params)?
+        }
         "mcp" => {
             parsed.positional(0, 0, "mcp")?;
             // Its MCP client's name, once it says, and else its own.
@@ -909,6 +951,26 @@ mod tests {
                 &["assets", "--kind", "model", "--take", "5"],
                 json!({"kind": "model", "skip": 0, "take": 5}),
             ),
+            (&["debug"], json!({"wait_ms": 0})),
+            (
+                &["debug", "break", "scripts/spin.luau", "10", "12"],
+                json!({
+                    "wait_ms": 0,
+                    "breakpoints": {"script": "scripts/spin.luau", "lines": [10, 12]},
+                }),
+            ),
+            (
+                &["debug", "break", "scripts/spin.luau"],
+                json!({"wait_ms": 0, "breakpoints": {"script": "scripts/spin.luau", "lines": []}}),
+            ),
+            (
+                &["debug", "continue", "--wait", "5"],
+                json!({"wait_ms": 5000, "action": "continue"}),
+            ),
+            (
+                &["debug", "out"],
+                json!({"wait_ms": 0, "action": "step_out"}),
+            ),
         ] {
             let Ok(Command::Call { method, params, .. }) = parsed(args) else {
                 panic!("a call");
@@ -964,6 +1026,12 @@ mod tests {
             &["entities", "--take"],
             &["assets", "x"],
             &["logs", "--level", "loud"],
+            &["debug", "break"],
+            &["debug", "break", "scripts/spin.luau", "0"],
+            &["debug", "break", "scripts/spin.luau", "ten"],
+            &["debug", "step"],
+            &["debug", "continue", "now"],
+            &["debug", "--wait", "soon"],
             &["call", "status", "{not json"],
             &["status", "--release=yes"],
             &["status", "--", "x"],

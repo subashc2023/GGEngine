@@ -90,11 +90,12 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Hardening** (2026-11-02)
 - **Luau scripts** (2026-11-02)
 - **Scripts in the editor and in lockstep** (2026-11-02)
+- **Debugging scripts** (2026-11-02)
 
 ## Now
 
-**Debugging scripts**, Phase 9's third milestone: breakpoints, pause and step in a script, the game
-waiting rather than hung; its plan says when it's done.
+**Mods**, Phase 9's fourth milestone: scripts a player installs, sandboxed, reaching only what the
+tool API's capabilities grant them; its plan says when it's done.
 
 ## Next
 
@@ -304,7 +305,16 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | A recording's scripts as they were as it started, which its replay reads from their files, as it reads scene files', so that a script changed since makes it go another way at its first tick | A recording travels without its game's files, as a bug report does |
 | Scripts that spawn and despawn entities, or give and take their components, which Rust code alone does | A game's behavior in Luau makes or unmakes what it acts on |
 | Random numbers for scripts, from a state the world holds, in place of `math.random`, which they go without | A script draws random numbers, as Shards' `collect` would |
-| A budget of Luau's interrupts for a script's tick, so that one that loops for ever fails, deterministically, rather than hanging the game, which `gg run` then restarts into the same loop | Debugging, Phase 9's third milestone, or mods, whose scripts aren't the game's own |
+| A budget for all of a tick's calls into scripts together, or, in development builds alone, one by time: each call fails past its million interrupts, about 0.9 s of a debug build in a loop that reads a field each turn, so a script that runs past it in every call slows the game to a crawl rather than hanging it | A runaway script's crawl gets in the way, or mods, whose scripts aren't the game's own |
+| Debugging scripts from a code editor, through the Debug Adapter Protocol, as a `gg dap` beside `gg mcp` and a VS Code extension that names it: the tool API's `debug`, `gg debug`, its MCP tool and the editor's Debugger panel debug them | Someone debugs scripts where they write them |
+| Evaluating expressions where a script has stopped, watches, and the fields of a table or an entity a local holds: a stop shows each local's and upvalue's value, a table as `(table)` and an entity as its ID, which `gg entity` reads once the game goes on | Someone needs more of what a local holds than its value |
+| Breakpoints with conditions or hit counts, and logpoints | Someone stops too often at one |
+| Stopping where a script fails, or runs past its budget, rather than warning (`script.error`) and going on | Someone debugs a failure that's hard to stop before |
+| The tool API's requests that need the main thread answered while a script has stopped: they wait, as during a file dialog, so the Inspector reads the world, an edit applies, and `quit` and the window's close end the game, once it goes on; `gg run`'s end ends a game at a stop, and gg says what a request that timed out waited for | Someone inspects, edits or quits a game at a stop |
+| Answering the window system while a script has stopped on Linux and macOS, whose compositors may take a windowed game's window for one that doesn't respond; on Windows its messages are dispatched, as a modal loop does | Someone debugs a windowed game there |
+| Breakpoints in what a script's chunk runs as it loads, which places them once it has run | Someone debugs a chunk's own code |
+| Stepping on from where a pause broke into a call entered while the debugger wasn't armed, which goes on to the next call: every call entered stepping would slow every development run | Someone pauses into long calls and steps through them |
+| Keys for the Debugger panel's buttons, as F5, F10 and F11 | Someone steps often |
 | Builds without `dev` naming assets by their IDs: they read no ID file, so they name every texture, model and font by its path, and a scene, a recording or a snapshot that names one by its ID finds none there | Phase 10, whose cooked package gives each asset its ID |
 | Loading the textures, models and fonts that scene text names where a layer loads it into a world itself, as inside a tick, as the sandbox's grid reload does: a world can't reach the renderer's textures, which are the context's, so `World::load_scene` finds only those loaded, while `Context::load_scene_file`, the tool API and the engine's other reads load them | A game loads scene text in a tick that names assets no layer adds |
 | A lockstep joiner loading for its tool API an asset its host hasn't named (`asset.not_given`), whose name could differ from the host's; the host's edits load any | Someone edits a joiner's assets from its own editor |

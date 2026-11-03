@@ -180,8 +180,34 @@ pub(crate) fn connect(pick: &Pick) -> Result<Client, Failure> {
 }
 
 /// Sends `method` with `params` to the game `pick` picks, and returns what it answers.
+///
+/// Fails as the call does; an answer that didn't come in time saying what the game waits for, if
+/// it waits for something, as a script stopped in it: [`waits`] says.
 pub(crate) fn call(pick: &Pick, method: &str, params: Value) -> Result<Box<RawValue>, Failure> {
-    connect(pick)?.call(method, params)
+    let answered = connect(pick)?.call(method, params);
+    answered.map_err(|failure| waits(pick, method, failure))
+}
+
+/// `failure`, `method`'s, saying what the game `pick` picks waits for, as its `ping` answers on a
+/// connection of its own, if it's `api.timeout` and the game waits for a script that has stopped, a
+/// file dialog or its window menu, which hold its main thread, rather than that it may be hung;
+/// else as it is.
+fn waits(pick: &Pick, method: &str, failure: Failure) -> Failure {
+    if failure.code != "api.timeout" {
+        return failure;
+    }
+    let pulse = connect(pick).and_then(|mut client| client.call_as::<Pulse>("ping", Value::Null));
+    let why = match pulse.ok().and_then(|pulse| pulse.waiting).as_deref() {
+        Some("breakpoint") => {
+            "a script has stopped in it, and it waits there until `gg debug continue`, or a step, \
+             has it go on; `gg debug` shows where"
+        }
+        Some("dialog") => "it waits for a file dialog to close",
+        Some("menu") => "it waits for its window menu to close",
+        _ => return failure,
+    };
+    let message = format!("the game didn't answer `{method}` in time: {why}");
+    Failure::new(failure.code, message)
 }
 
 /// The running games, those of the project whose manifest is at `project` alone, as an array: each

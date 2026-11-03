@@ -65,14 +65,24 @@ pub(crate) fn start(
     Ok(None)
 }
 
+/// Has the API's debugger debug the scripts of `cx`'s run, as `luau::Hosts::debug` says, before the
+/// layers load them.
+pub(crate) fn debug(api: &Option<Api>, cx: &mut Context) {
+    #[cfg(feature = "dev")]
+    if let Some(api) = api {
+        cx.hosts.debug(api.debugger());
+    }
+    let _ = (api, cx);
+}
+
 /// As a frame starts, before its ticks, in a development build, takes the asset database as the
 /// thread that watches the root last sent it, as `Context::take_assets` says, and the shaders,
 /// textures, models, fonts, sounds and music read again as their files changed, as
 /// `Context::take_reloaded` says,
 /// applies the scene files saved since, as [`scene_files::look`] says, and the scripts, as
-/// `luau::look` says, and answers the requests
-/// that have come, from `cx`, whose layers are `stack`'s and whose simulation `stepper` steps, as
-/// [`Api::serve`] says; returns whether one asked the run to end.
+/// `luau::look` says, places the scripts' breakpoints again if they've changed, and answers the
+/// requests that have come, from `cx`, whose layers are `stack`'s and whose simulation `stepper`
+/// steps, as [`Api::serve`] says; returns whether one asked the run to end.
 ///
 /// [`scene_files::look`]: crate::scene_files
 pub(crate) fn serve(
@@ -90,6 +100,7 @@ pub(crate) fn serve(
     {
         crate::scene_files::look(cx, stack);
         crate::luau::look(cx, stack);
+        cx.hosts.place();
     }
     #[cfg(feature = "dev")]
     if let Some(api) = api {
@@ -117,6 +128,7 @@ pub(crate) fn serve_paused(
     {
         crate::scene_files::look(cx, stack);
         crate::luau::look(cx, stack);
+        cx.hosts.place();
     }
     #[cfg(feature = "dev")]
     if let Some(api) = api {

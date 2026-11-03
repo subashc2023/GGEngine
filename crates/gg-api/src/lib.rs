@@ -160,13 +160,22 @@
 //!   [`MOST_NOTE`] bytes.
 //! - `quit`: answers `{}`, and the run ends cleanly, as when its window closes, but without asking
 //!   its layers, which may keep a window open.
+//! - `debug`, [`Debug`](struct@Debug): debugs the game's Luau scripts, as ARCHITECTURE.md's Game
+//!   code describes,
+//!   and answers [`Debugging`]: sets a script's breakpoints, then pauses the scripts, or goes on from
+//!   where one has stopped, by a continue or a step, then waits for one to stop, as it's asked. A
+//!   script stops inside its tick: the main thread waits there, and with it the frames and the
+//!   requests the main thread answers, until a `debug` has it go on. It fails with
+//!   `script.not_stopped` for a continue or a step while no script has stopped, and with
+//!   `api.bad_params` for a script's path that's empty, a line of 0, or a wait of more than 10,000.
 //!
-//! The methods but `hello`, `ping`, `logs` and `note` are answered by the game's main thread, as a
-//! frame starts. While the window is minimized, and no frames run, it answers them between frames,
-//! but `step`, `capture` and `pick`, which need frames, fail with `api.paused`; while a file dialog
-//! or the window menu Windows runs is open, holding the main thread, they wait. The connection's
-//! own thread answers `hello`, `ping`, `logs` and `note` as it reads them, so that a `logs` that
-//! waits holds up the connection's later requests: follow the logs on a connection of their own.
+//! The methods but `hello`, `ping`, `logs`, `note` and `debug` are answered by the game's main
+//! thread, as a frame starts. While the window is minimized, and no frames run, it answers them
+//! between frames, but `step`, `capture` and `pick`, which need frames, fail with `api.paused`; while
+//! a file dialog or the window menu Windows runs is open, holding the main thread, or a script has
+//! stopped, they wait. The connection's own thread answers `hello`, `ping`, `logs`, `note` and
+//! `debug` as it reads them, so that a `logs` or a `debug` that waits holds up the connection's
+//! later requests: follow the logs, or wait for a script to stop, on a connection of their own.
 //!
 //! A value is JSON as its kind is: a number, a string, a `bool`; a vector or a quaternion an array
 //! of numbers, `[x, y, z, w]` for a quaternion; a float that isn't finite the string `inf`, `-inf`
@@ -410,8 +419,8 @@ pub struct Welcome {
 
 /// What `ping` answers: the frames the game has run, which a hung game's main thread stops
 /// counting, and what frames have paused for, if they've paused for the user: `minimized`, while
-/// the main window has no area, `dialog`, while a file dialog is open, or `menu`, while the window
-/// menu Windows runs is.
+/// the main window has no area, `dialog`, while a file dialog is open, `menu`, while the window
+/// menu Windows runs is, or `breakpoint`, while a script has stopped, as `debug` says.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pulse {
     pub frames: u64,
@@ -1201,6 +1210,121 @@ pub enum NoteLevel {
     Info,
     Warn,
 }
+
+/// What `debug` takes, each part of it optional, done in this order: the breakpoints to set in a
+/// script, in place of those it had; what to do, `action`; and how long to wait for a script to
+/// stop, if none has, `wait_ms`, in milliseconds, 0 by default and at most 10,000. `{}` answers the
+/// debugger as it is.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Debug {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breakpoints: Option<Breakpoints>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<DebugAction>,
+    #[serde(default)]
+    pub wait_ms: u64,
+}
+
+/// A script's breakpoints, as `debug` sets them: its path from the project's root, as
+/// [`Debugging::scripts`] names it, and their lines, from 1; none clears them. A script no layer has
+/// loaded keeps them until one does.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Breakpoints {
+    pub script: String,
+    pub lines: Vec<u32>,
+}
+
+/// What `debug` does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DebugAction {
+    /// Stops the next line a script runs, breaking into one that's running, such as a loop that
+    /// doesn't end; nothing while one has stopped.
+    Pause,
+    /// From a stop, goes on to the next.
+    Continue,
+    /// From a stop, stops at the next line that runs, in a function it calls too.
+    StepInto,
+    /// From a stop, stops at the next line of the function stopped in, past the calls it makes but
+    /// for a breakpoint in one, or once it returns, of its caller.
+    StepOver,
+    /// From a stop, stops at the next line once the function stopped in returns, of its caller.
+    StepOut,
+}
+
+/// What `debug` answers: where a script has stopped, while one has; what a stop to come answers,
+/// `asked`, a pause or a step under way; how many stops the run has had, which number them; the
+/// breakpoints, by script, in the order of the scripts' paths, then of the lines asked; and the
+/// scripts the game's layers have loaded, by their paths from the project's root, in order.
+///
+/// A step out of a call into a script, from a tick or a chunk as it loads, or over its last line,
+/// stops at the next line a script runs, such as the next entity's tick. A call steps only if it
+/// started while the debugger was armed, a breakpoint placed or a pause or a step asked: a step
+/// from where a pause broke into one that started otherwise stops at the next line a script runs
+/// after it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Debugging {
+    pub stopped: Option<Stop>,
+    pub asked: Option<DebugAction>,
+    pub stops: u64,
+    pub breakpoints: Vec<Breakpoint>,
+    pub scripts: Vec<String>,
+}
+
+/// A breakpoint: its script, the line asked, and the line Luau placed it at, the next with code
+/// from the line asked, or `None` while its script hasn't loaded, or has no code there or after.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Breakpoint {
+    pub script: String,
+    pub line: u32,
+    pub placed: Option<u32>,
+}
+
+/// Where a script has stopped: the stop's number, from 1; why; and the stack, the function stopped
+/// in first, then the one that called it, and so on to the call into the script.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Stop {
+    pub number: u64,
+    pub why: StopReason,
+    pub frames: Vec<StackFrame>,
+}
+
+/// Why a script stopped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StopReason {
+    Breakpoint,
+    Step,
+    Pause,
+}
+
+/// A function of the stack where a script has stopped: its name, `(chunk)` for a chunk's top level
+/// and `(anonymous)` for one without; its script's path; the line it's at; and its locals and
+/// upvalues, as their values are there.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StackFrame {
+    pub function: String,
+    pub script: String,
+    pub line: u32,
+    pub locals: Vec<Variable>,
+    pub upvalues: Vec<Variable>,
+}
+
+/// A local or an upvalue: its name, and its value as JSON: `null` for `nil`, a number or a string
+/// as its kind is, the string at most [`MOST_SHOWN`] bytes, cut; a vector `[x, y, z, w]`; an entity
+/// its ID, or `null` for `gg.entity` and for one that isn't alive; and anything else its kind in
+/// parentheses, such as `(table)`, `(function)`, or `(handle)` for a field's handle. A float that
+/// isn't finite is `inf`, `-inf` or `NaN`, as a value's is.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Variable {
+    pub name: String,
+    pub value: Value,
+}
+
+/// The most bytes of a string a [`Variable`] shows.
+pub const MOST_SHOWN: usize = 1 << 10;
 
 /// A connection to a running game's API, for tools: a request at a time, each waiting for its
 /// answer.

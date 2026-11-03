@@ -98,13 +98,17 @@ The editor uses `gg-api` too, beside `gg-engine`, as a client of the tool API, a
   game's camera sees, the input staying the editor's, until the editor's camera takes some. A Stop
   turns the view to the editor's camera, which carries on from where the view was, as it does
   whenever it takes the view over. Its Scenes panel, below the Entities, lists the scene files in
-  the project's scenes folders, a click opening one as the File menu's Open does. The editor has no
-  world of its own: started outside a project, it shows its hub, a start screen over its panels,
-  as Unity Hub is a launcher of its own, listing the projects opened lately, which it keeps for the
-  user as the dock keeps its layout, and those in the workspace's `games`, opening the one picked,
-  or the latest as it starts if the user chose to skip the hub; its File menu's Open Project shows
-  the hub again, and another project opens in place of the one open as a close of the editor goes,
-  asking before unsaved edits go. [game.rs](apps/editor/src/game.rs) describes the rest.
+  the project's scenes folders, a click opening one as the File menu's Open does. Its Debugger
+  panel debugs the game's scripts through the API: the source of each script the game runs, a click
+  on a line's number setting or clearing a breakpoint there, which the editor keeps and gives each
+  game as it serves; where a script has stopped, with its stack and each frame's locals; and
+  Continue, Pause and the steps. The editor has no world of its own: started outside a project, it
+  shows its hub, a start screen over its panels, as Unity Hub is a launcher of its own, listing the
+  projects opened lately, which it keeps for the user as the dock keeps its layout, and those in
+  the workspace's `games`, opening the one picked, or the latest as it starts if the user chose to
+  skip the hub; its File menu's Open Project shows the hub again, and another project opens in
+  place of the one open as a close of the editor goes, asking before unsaved edits go.
+  [game.rs](apps/editor/src/game.rs) describes the rest.
 - **`player`:** the reference player. It runs a cooked scene without game code and shows how a
   game builds its own player.
 - **`tools/gg`:** the command-line tool, a client of the tool API, which `cargo gg` runs.
@@ -228,6 +232,32 @@ makes; anyone else's game depends on the engine from its own repository.
   frames don't: the engine's bindings allocate nothing, so a table, string or closure a script
   makes at each tick breaks the rule as Rust code making one would. Luau doesn't guard against
   crafted bytecode, so mods ship as source and only a game's own packages hold bytecode.
+- **Scripts are debugged where they run.** A development build debugs its scripts through the
+  [tool API](#agents-and-tools), with Luau's own debugger hooks: breakpoints, each a script's path
+  from the project's root and a line, which Luau moves to the next line with code, kept as the
+  script reloads and placed again in its new functions, though never in what its chunk runs as it
+  loads; a
+  pause, which stops the next line any script runs, breaking into a call that's running; and, once
+  one has stopped, a step into, over or out, or a continue. A step out of a tick, or over its last
+  line, stops at the next line a script runs, as the next entity's tick. Luau steps only in a call
+  it entered stepping, so a call into a script enters so while the debugger is armed, a breakpoint
+  placed or a pause or a step asked, which runs it slower and changes nothing it does; a step from
+  where a pause broke into a call entered otherwise goes on to the next call. A script stops inside
+  its tick: the main thread waits there, and with it the rest of the tick, the frames and every
+  request that needs the main thread, while the connections' own threads answer the debugger's,
+  from what the stop gathered: each frame of the stack, its function, script and line, and its
+  locals and upvalues as values. `ping` says the game waits at a breakpoint, so that `gg run`
+  neither takes it for hung nor snapshots it, as for a file dialog; on Windows, the wait dispatches
+  what's sent and posted to the game's windows, as a modal loop does, so that Windows doesn't mark
+  them hung, winit holding back the events they make, a close among them, until it goes on. A stop
+  changes nothing in the world, so a recorded run replays across one, and the other peer of a
+  lockstep session waits for the stopped one's inputs, as it waits for a slow one. Every build
+  compiles scripts with Luau's full debug information, their locals' names among it, so that their
+  bytecode is the same everywhere; and every build gives each call into a script, a tick or a chunk
+  as it loads, a budget of a million of Luau's interrupts, which come at each call and each turn of
+  a loop, past which the call fails as an error does: a loop that never ends fails alike on every
+  peer and in every replay, rather than hanging the game, which `gg run` would restart into it
+  again.
 
 ## Agents and tools
 
@@ -241,10 +271,10 @@ in the editor is out of an agent's reach.
   scene](#project-state), capture frames, share the view as frames render it, set how it looks and
   pick what it shows, list the assets in the asset root with their [IDs](#project-state),
   hand the layers input as the window would, save the world whole as a snapshot file, as [ECS](#ecs)
-  describes, which a run given `--restore` starts from, apply patches of the game's code, as
-  [Game code](#game-code) describes, read [diagnostics](#diagnostics), and log a client's notes
-  among them, warnings or facts it gives with stable codes, as `gg run` tells a game of a patch or
-  a rebuild that failed. Requests and their answers are lines of JSON, as
+  describes, which a run given `--restore` starts from, apply patches of the game's code and debug
+  its scripts, as [Game code](#game-code) describes, read [diagnostics](#diagnostics), and log a
+  client's notes among them, warnings or facts it gives with stable codes, as `gg run` tells a game
+  of a patch or a rebuild that failed. Requests and their answers are lines of JSON, as
   [gg-api](crates/gg-api/src/lib.rs) describes, and a connection's first request says hello with
   the token, which the game compares in constant time, so that only processes that can read the
   file reach the game: the user's own, as the file is the user's alone from before it holds the
@@ -255,8 +285,10 @@ in the editor is out of an agent's reach.
   reads of the log, from the events the run keeps in memory as it logs them, its last 10,000, each
   numbered, which `logs` serves as they come, waiting for one if none has, so that a client follows
   them from the number it left off at, and, by the run's own number, which a restart changes, misses
-  none across a restart that the new run kept; and its notes, so that one comes through while
-  frames pause. The main loop answers the rest as each frame starts,
+  none across a restart that the new run kept; its notes, so that one comes through while frames
+  pause; and its requests to debug scripts, through what the debugger shares with the main thread,
+  so that they're answered while a script has stopped and the main thread waits there. The main
+  loop answers the rest as each frame starts,
   before its ticks: a step once its ticks have run, a capture once the render thread has read the
   frame's view back, without the UI, which a thread of the API's writes as a PNG, and a snapshot
   once a thread of the API's has written the copy of the world the main loop took, but none before

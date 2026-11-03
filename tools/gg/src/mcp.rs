@@ -53,7 +53,11 @@ own for none. Edit the file of a shader, a texture, a model, a font, a sound or 
 has loaded, and it reloads within a second or so, warning in its logs if it doesn't compile, \
 decode or bake, music playing on from where it was; in a recorded run or a lockstep session, a \
 model's nodes and materials change only as the game next starts. You can't hear the game, but its \
-logs say each sound and music it starts, `Sound started` and `Music started`, at the debug level.";
+logs say each sound and music it starts, `Sound started` and `Music started`, at the debug level. \
+`debug` debugs its Luau scripts: set a script's breakpoints by its path and lines, then wait for \
+a stop with `wait_ms`, and read the stack's locals; while a script has stopped, the game waits \
+inside its tick, and so do the other tools' requests, but `logs` and `sessions`, until `debug` \
+continues or steps.";
 
 /// Serves MCP on stdin and stdout until stdin ends, reaching the game `pick` picks.
 ///
@@ -512,6 +516,39 @@ fn tools() -> Value {
             &[],
         ),
         tool(
+            "debug",
+            "Debugs the game's Luau scripts, and answers the debugger: where a script has \
+             `stopped`, with its stack, each function's script, line, locals and upvalues; the \
+             pause or step `asked`; the `breakpoints`; and the `scripts`. Sets a script's \
+             breakpoints, at each line or the next with code, in place of those it had, none \
+             clearing them; then does `action`: `pause` stops the next line a script runs, and \
+             from a stop, `continue` goes on to the next, `step_into`, `step_over` and `step_out` \
+             step; then waits up to `wait_ms` for a script to stop, if none has. A stopped script \
+             waits inside its tick, and the game with it, the tools but `debug`, `logs` and \
+             `sessions` waiting too, until `debug` has it go on.",
+            json!({
+                "breakpoints": {
+                    "type": "object",
+                    "properties": {
+                        "script": {
+                            "type": "string",
+                            "description": "Its path from the project's root, such as \
+                                            `scripts/spin.luau`",
+                        },
+                        "lines": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+                    },
+                    "required": ["script", "lines"],
+                    "additionalProperties": false,
+                },
+                "action": {
+                    "type": "string",
+                    "enum": ["pause", "continue", "step_into", "step_over", "step_out"],
+                },
+                "wait_ms": {"type": "integer", "minimum": 0, "maximum": 10000, "default": 0},
+            }),
+            &[],
+        ),
+        tool(
             "logs",
             "The game's log's events at a level or above, each its JSON log's line: the last 200 \
              the game keeps, or those since an earlier answer's `next`, given as `from` with that \
@@ -597,7 +634,7 @@ fn run(pick: &Pick, name: &str, mut arguments: Map<String, Value>) -> Result<Ran
         }
         // `scene`'s path as given, from the game's asset root, as its status names scene files.
         "step" | "scene" | "look" | "pick" | "input" | "entities" | "entity" | "get" | "apply"
-        | "undo" | "redo" | "edits" | "assets" => call(name, Value::Object(arguments)),
+        | "undo" | "redo" | "edits" | "assets" | "debug" => call(name, Value::Object(arguments)),
         "set" => {
             arguments.entry("path").or_insert_with(|| json!(""));
             call("apply", json!({"operations": [{"set": arguments}]}))
@@ -748,6 +785,23 @@ mod tests {
         assert_eq!(unknown.expect("answered")["error"]["code"], -32601);
         let broken = super::answer(&mut pick, "{").expect("answered");
         assert_eq!(broken["error"]["code"], -32700);
+    }
+
+    /// `debug` is listed, its actions those gg-api's `debug` takes.
+    #[test]
+    fn debug_is_listed_with_the_apis_actions() {
+        use gg_api::DebugAction::{Continue, Pause, StepInto, StepOut, StepOver};
+
+        let listed = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        let listed = answer(&mut pick(), listed).expect("answered");
+        let tools = listed["result"]["tools"].as_array().expect("tools");
+        let debug = tools.iter().find(|tool| tool["name"] == "debug");
+        let actions =
+            &debug.expect("a `debug` tool")["inputSchema"]["properties"]["action"]["enum"];
+        assert_eq!(
+            *actions,
+            json!([Pause, Continue, StepInto, StepOver, StepOut])
+        );
     }
 
     /// `types` and `input` are listed, `types` taking nothing and `input` its events, each choice
