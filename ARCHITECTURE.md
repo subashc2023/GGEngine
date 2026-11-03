@@ -216,12 +216,18 @@ makes; anyone else's game depends on the engine from its own repository.
   `Script`'s is; adding the component attaches the script. It reaches Rust components through
   reflection, without hand-written bindings. A layer's `Scripts` loads its scripts from the
   project's files in its `load` and runs them where its tick chooses; a development build reloads
-  one as it's saved, at a tick, through an edit that a recording keeps, as it keeps a scene file's
-  save, and that a lockstep peer, for now, refuses. A script keeps its state in its components, as a
-  game keeps its in the world, and its ticks don't allocate, as steady-state frames don't: the
-  engine's bindings allocate nothing, so a table, string or closure a script makes at each tick
-  breaks the rule as Rust code making one would. Luau doesn't guard against crafted bytecode, so
-  mods ship as source and only a game's own packages hold bytecode.
+  one as it's saved, between ticks, through an edit that a recording keeps and lockstep peers apply
+  at one tick, as a scene file's save is. A reload that changes the component's fields migrates
+  every one in place, by field name: a field kept keeps its value, one added takes its default, one
+  dropped goes, and one whose kind changed takes its default, warning; a changed default reaches
+  components added after. What comes back from before a reload, the world as edited that the tool
+  API's `stop` brings back and the components an undo puts back, migrates as it comes back. A
+  reload doesn't rename the component, nor does an undo take a reload back: saving the file as it
+  was does, the fields it dropped coming back at their defaults. A script keeps its state in its
+  components, as a game keeps its in the world, and its ticks don't allocate, as steady-state
+  frames don't: the engine's bindings allocate nothing, so a table, string or closure a script
+  makes at each tick breaks the rule as Rust code making one would. Luau doesn't guard against
+  crafted bytecode, so mods ship as source and only a game's own packages hold bytecode.
 
 ## Agents and tools
 
@@ -630,7 +636,8 @@ Inspector reads the world through these calls, its IDs and its hierarchy, and ed
 operations, all of which the tool API serves, so that a remote Inspector shows a game's world in
 another process, as the editor's does: it reads the game's entities and the picked one's
 components through the API a few times a second, and the descriptions of its types once, and
-again as a type it hasn't comes, with one request at a time, so that what it reads after an edit's
+again as a type it hasn't comes or the types' revision moves on, as a script's reload changes
+them, with one request at a time, so that what it reads after an edit's
 answer shows the edit, and edits the world as the game's client, drawing what waits for an answer
 as it will be. Values cross as JSON, read and written by the types the game describes, an entity's
 by its ID and a texture's by its name.
@@ -757,14 +764,16 @@ them, since each peer runs both players' world.
 - **Edits and patches are inputs too.** The tool API's edits, on either peer, go out with the
   peer's inputs for the tick `DELAY` on, and apply on both before it, so that a request's answer
   comes once its edit has applied. A scene file's save is an edit of the file's text, which each
-  peer turns into operations against its own world at that tick, as both worlds are the same; the
-  host alone watches scene files. `gg run` gives both peers each patch, in the same order, and the
+  peer turns into operations against its own world at that tick, as both worlds are the same, and
+  a script's save is an edit of its text, which each peer reloads; the host alone watches scene
+  files and scripts. `gg run` gives both peers each patch, in the same order, and the
   host chooses the tick it applies before, `DELAY` on from its next as it gets it, which neither
   peer has run; it tells its joiner, which waits at that tick for its own patch if it hasn't it yet.
 - **A joiner starts from the host's world.** As a joiner connects, the host sends its world as a
-  snapshot file's text, as it stands between two ticks, with how many patches its code is on, and
-  its inputs for the ticks after, up to the first the joiner can reach; the joiner restores it in
-  place of its own, as a run restored from a snapshot does, applies the patches the host had, and
+  snapshot file's text, as it stands between two ticks, with how many patches its code is on, the
+  scripts it runs, and its inputs for the ticks after, up to the first the joiner can reach; the
+  joiner runs those scripts in place of its own files', restores the world in place of its own, as
+  a run restored from a snapshot does, applies the patches the host had, and
   goes on from that tick, its own inputs empty until the first it can reach. So a restart of
   either peer, after a crash or a rebuild, rejoins: a joiner that loses its host waits for it,
   frozen, and connects again, while a host that loses its joiner plays on alone, the joiner's

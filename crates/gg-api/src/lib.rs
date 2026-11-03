@@ -82,7 +82,8 @@
 //!   outlines nothing, and isn't refused.
 //! - `pick`, [`Pick`]: answers [`Picked`], the entity the view shows at a pixel, as it's shown, the
 //!   look among it, in the frame that reads it, about four frames after it's asked.
-//! - `entities`, [`Entities`]: answers [`EntityList`], a page of the world's entities.
+//! - `entities`, [`Entities`]: answers [`EntityList`], a page of the world's entities, with the
+//!   revision of its types, as `types` answers it.
 //! - `entity`, [`Entity`]: answers the entity: `{"id":...,"name":...,"parent":...,"children":[...],
 //!   "components":{"Transform":{...},...},"space":{"matrix":[...],"rotation":[...]}}`, its
 //!   components in the order their types registered; and `space`, where the space its `Transform`
@@ -92,8 +93,10 @@
 //! - `get`, [`Field`]: answers a component's field, as a value.
 //! - `types`: answers [`Types`], the world's component types and the descriptions of the types
 //!   they hold, which values are read and written by: a client draws and checks values by them, as
-//!   the editor's Inspector does. A type's description never changes once it's registered, but a
-//!   game rebuilt may describe its types otherwise.
+//!   the editor's Inspector does; and their revision. A type's description changes as a script
+//!   that declares it reloads with other fields, and as a game rebuilt describes its types
+//!   otherwise; the revision changes with each change to the types, so that a client reads them
+//!   again as the revision `entities` answers moves on.
 //! - `hash`: answers [`struct@Hash`], the world's.
 //! - `assets`, [`Assets`]: answers [`AssetList`], a page of the textures, models and fonts under
 //!   the game's asset root, in the order of their paths, each with its ID, which its ID file beside
@@ -743,11 +746,15 @@ fn page() -> usize {
     100
 }
 
-/// What `entities` answers: how many there are in all, and the page asked for.
+/// What `entities` answers: how many there are in all, the page asked for, and the revision of the
+/// world's types, as `types` answers it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EntityList {
     pub total: usize,
     pub entities: Vec<Listed>,
+    /// 0 from an engine older than revisions of the types.
+    #[serde(default)]
+    pub types: u64,
 }
 
 /// An entity as `entities` lists it: its ID, its name, its parent's ID, its children's, in their
@@ -783,11 +790,15 @@ pub struct Field {
 
 /// What `types` answers: the world's component types, in the order they registered, and the named
 /// types, structs and enums, that they are and hold, in the order they were described, each under
-/// a name no other has.
+/// a name no other has; and their revision, a number that names them as they are, which each
+/// change to them changes.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Types {
     pub components: Vec<ComponentInfo>,
     pub types: Vec<TypeInfo>,
+    /// 0 from an engine older than revisions of the types.
+    #[serde(default)]
+    pub revision: u64,
 }
 
 /// A component type, as `types` gives it: its name, which its description has too, and the value an

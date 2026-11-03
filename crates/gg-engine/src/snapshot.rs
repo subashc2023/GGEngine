@@ -4,8 +4,10 @@
 //! world's hash, the assets the layers had added, which name what's opaque in the world, the name
 //! of each texture its run named otherwise than by its path, as by its ID, with that path, which
 //! its values name textures by, read so in a run that names them otherwise, as after an ID file
-//! changed, and taken as its own by a lockstep joiner, whose host's world comes so, the scene
-//! files the layers had loaded, each its path, its author and its text as last applied, as a
+//! changed, and taken as its own by a lockstep joiner, whose host's world comes so, the scripts the
+//! layers had loaded, each its path from the project's root and its text as last applied, which a
+//! lockstep joiner runs in place of its own files', a run restored from it reading its files, the
+//! scene files the layers had loaded, each its path, its author and its text as last applied, as a
 //! recording's values write them, which the restored run watches, the open scene, its file's
 //! author or none and the IDs it made, written so too, and the world, as [`World::save_whole`]
 //! writes it; then, of a run the tool API had stopped, `stopped`, or of one playing a copy of the
@@ -23,6 +25,7 @@
 //! hash 58183b6352a09a44 fb695ce29daa8479
 //! asset texture 1 1 2 assets/checkerboard.png
 //! named List([String("5f3c9a1e07b2d846"), String("assets/checkerboard.png")])
+//! script List([String("scripts/spin.luau"), String("local Spin = ...")])
 //! scene List([String("/game/scenes/grid.ron"), String("scenes/grid.ron"), String("(entities: ...")])
 //! open List([Some(String("scenes/grid.ron")), List([String("1a2b3c4d5e6f7081")])])
 //! stream 3f8a6c2e9b1d4057
@@ -74,25 +77,31 @@ pub(crate) enum Run {
     },
 }
 
-/// The text of the snapshot file of `world`, app `app`'s, whose layers are `layers`, from the bottom
-/// up, as the simulation had run `ticks` ticks, with the scene files `scenes` as last applied and
-/// the open scene `open`, as its run does what `run` says.
+/// What a snapshot is of: a run's world, with its scene files as last applied and its open scene,
+/// and the scripts its layers loaded, each a path and its text as last applied.
+pub(crate) struct Of<'r> {
+    pub(crate) world: &'r World,
+    pub(crate) scenes: &'r [SceneFile],
+    pub(crate) open: &'r Open,
+    pub(crate) scripts: &'r [(String, String)],
+}
+
+/// The text of the snapshot file of what `of` says, app `app`'s, whose layers are `layers`, from
+/// the bottom up, as the simulation had run `ticks` ticks, as its run does what `run` says.
 ///
 /// Fails as [`World::save_whole`] does.
-pub(crate) fn write(
-    world: &World,
-    scenes: &[SceneFile],
-    open: &Open,
-    run: &Run,
-    app: &str,
-    layers: &[&str],
-    ticks: u64,
-) -> Result<String> {
+pub(crate) fn write(of: &Of, run: &Run, app: &str, layers: &[&str], ticks: u64) -> Result<String> {
     use std::fmt::Write as _;
 
     use crate::recording::engine;
 
     let _zone = gg_core::zone!();
+    let Of {
+        world,
+        scenes,
+        open,
+        scripts,
+    } = *of;
     let mut out = String::new();
     let written = "a string takes any text";
     writeln!(out, "{FORMAT}").expect(written);
@@ -107,6 +116,12 @@ pub(crate) fn write(
     for (name, path) in world.assets().named_from((0, 0, 0)) {
         out.push_str("named ");
         crate::recording::text::write_named(&mut out, name, path);
+        out.push('\n');
+    }
+    for (path, text) in scripts {
+        let strings = [path, text].map(|string| Value::String(string.clone()));
+        out.push_str("script ");
+        crate::recording::text::write(&mut out, &Value::List(strings.into()), world);
         out.push('\n');
     }
     write_scenes(&mut out, scenes, open, world);
@@ -258,6 +273,9 @@ pub(crate) struct Snapshot {
         )
     )]
     pub(crate) names: HashMap<Arc<str>, Arc<str>>,
+    /// The scripts that run's layers had loaded, each a path from the project's root and its text
+    /// as last applied.
+    pub(crate) scripts: Vec<(String, String)>,
     /// The scene files that run's layers had loaded, as last applied.
     pub(crate) scenes: Vec<SceneFile>,
     /// That run's open scene; `None` for a snapshot written before the open scene was.
@@ -360,6 +378,32 @@ impl Snapshot {
             names.insert(path, name);
             world += 1;
         }
+        let mut scripts = Vec::new();
+        while let Some(script) = lines
+            .get(world)
+            .and_then(|line| line.strip_prefix("script "))
+        {
+            let read = Text::parse(script, "script ".len() + 1)
+                .ok()
+                .and_then(|text| {
+                    let Value::List(strings) = text.value(&World::default()) else {
+                        return None;
+                    };
+                    let [Value::String(path), Value::String(text)] =
+                        <[Value; 2]>::try_from(strings).ok()?
+                    else {
+                        return None;
+                    };
+                    Some((path, text))
+                });
+            scripts.push(read.ok_or_else(|| {
+                refused(format!(
+                    "line {}: a script is a list of its path and its text",
+                    world + 1
+                ))
+            })?);
+            world += 1;
+        }
         // The scene lines from line `at` on, then the open scene's line, if there's one, and the
         // index of the line after them.
         let read_scenes = |mut at: usize| {
@@ -451,6 +495,7 @@ impl Snapshot {
             hash,
             assets,
             names,
+            scripts,
             scenes,
             open,
             world: world..end,
@@ -641,6 +686,25 @@ mod tests {
     use crate::layer::Stack;
     use crate::{Context, Layer, MeshDraw, Sprite, Text, Transform};
 
+    /// The text of the snapshot file of `world`, of no scripts, as [`super::write`] writes it.
+    fn write(
+        world: &World,
+        scenes: &[SceneFile],
+        open: &Open,
+        run: &Run,
+        app: &str,
+        layers: &[&str],
+        ticks: u64,
+    ) -> Result<String> {
+        let of = Of {
+            world,
+            scenes,
+            open,
+            scripts: &[],
+        };
+        super::write(&of, run, app, layers, ticks)
+    }
+
     /// An `asset` line gives a texture's, a model's or a font's path, spaces and all, and a model's
     /// whatever types its run's build gave it; a mesh's or a shader's gives none.
     #[test]
@@ -671,9 +735,9 @@ mod tests {
     }
 
     /// A snapshot written and read back restores the world it was taken of, at its ticks, into a
-    /// world its layers loaded, with its scene files and its open scene; one written before the
-    /// open scene was holds none; and one of another app, of another format, cut short, or whose
-    /// open scene's line isn't one, is refused.
+    /// world its layers loaded, with its scripts, its scene files and its open scene; one written
+    /// before the open scene was holds none; and one of another app, of another format, cut short,
+    /// or whose open scene's line or a script's isn't one, is refused.
     #[test]
     fn a_snapshot_restores_the_world_it_was_taken_of() {
         let mut saved = Context::seeded(1);
@@ -690,15 +754,17 @@ mod tests {
             author: Some("scenes/grid.ron".to_owned()),
             made: vec![saved.world().id(made).expect("alive")],
         };
-        let text = write(
-            saved.world(),
-            &scenes,
-            &open,
-            &Run::Playing,
-            "Tested",
-            &["Tester"],
-            77,
-        );
+        let scripts = [(
+            "scripts/a \"spin\".luau".to_owned(),
+            "return gg.declare(\"Spin\", {})\n".to_owned(),
+        )];
+        let of = Of {
+            world: saved.world(),
+            scenes: &scenes,
+            open: &open,
+            scripts: &scripts,
+        };
+        let text = super::write(&of, &Run::Playing, "Tested", &["Tester"], 77);
         let text = text.expect("written");
         let thread = std::thread::current().id();
         let dir = Scratch::new(&format!("snapshot-{thread:?}"));
@@ -707,9 +773,12 @@ mod tests {
         save(&path, &text).expect("saved");
         let snapshot = Snapshot::read(&path, "Tested").expect("read");
         assert_eq!(
-            (&snapshot.scenes[..], &snapshot.open),
-            (&scenes[..], &Some(open))
+            (&snapshot.scripts[..], &snapshot.scenes[..], &snapshot.open),
+            (&scripts[..], &scenes[..], &Some(open))
         );
+        let script_line = text.lines().find(|line| line.starts_with("script "));
+        let script_line = format!("{}\n", script_line.expect("a script line"));
+        let pathless = "script List([String(\"scripts/spin.luau\")])\n";
         let open_line = text.lines().find(|line| line.starts_with("open "));
         let open_line = format!("{}\n", open_line.expect("an open line"));
         let older = text.replace(&open_line, "");
@@ -728,6 +797,7 @@ mod tests {
             text.replace("\nend\n", "\n"),
             text.replace(&open_line, "open List([None])\n"),
             text.replace(&open_line, "open List([None, List([String(\"nope\")])])\n"),
+            text.replace(&script_line, pathless),
         ] {
             save(&path, &broken).expect("saved");
             let refused = Snapshot::read(&path, "Tested")

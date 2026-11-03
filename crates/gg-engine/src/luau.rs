@@ -4,6 +4,7 @@
 use std::any::Any;
 use std::cell::RefCell;
 use std::path::Path;
+use std::rc::{Rc, Weak};
 use std::{fs, mem, ptr};
 
 use gg_core::math::{Quat, Vec2, Vec3, Vec4, libm};
@@ -16,7 +17,7 @@ use mlua::{
 use tracing::{info, warn};
 
 use crate::ecs::{ComponentId, Kind};
-use crate::reflect::{Ident, Reflect, Type, Value};
+use crate::reflect::{Ident, Reflect, Type, Value, list};
 use crate::{Context, Entity, Tick, World};
 
 // An entity's 64 bits are a script's light userdata, a pointer's.
@@ -53,8 +54,14 @@ const REMOVED: [&str; 7] = [
 /// type the script declares, which entities have to run it; runs them where the layer's tick
 /// chooses, each script's tick once for each entity with its component, in the order queries find
 /// them, the scripts in the order of their components' names; and, in a development build, reloads
-/// one as its file is saved, at a tick, through an edit that a recording keeps and a replay
-/// applies there. The VM stays on the thread that made it, which runs the ticks.
+/// one as its file is saved, between ticks, through an edit that a recording keeps and a replay
+/// applies there, and that both peers of a lockstep session apply at one tick. The VM stays on the
+/// thread that made it, which runs the ticks.
+///
+/// A reload may change the component's fields, but not its name: each component of it keeps the
+/// fields of a name and a kind it had, the rest taking their defaults; and a world from before,
+/// as the tool API's `stop` brings back, does so as it comes back, as do the components an undo
+/// puts back. A changed default reaches the components added after.
 ///
 /// A script is a component: its file declares one with `gg.declare`, its fields' names and their
 /// defaults, numbers, bools, vectors, or `gg.entity` for an entity, none by default; and a `tick`
@@ -86,6 +93,13 @@ const REMOVED: [&str; 7] = [
 /// `loadstring`, `newproxy`, `require` and `vector.angle`. And an entity is light userdata, its 64
 /// bits, which tables hash and compare by them rather than by an address.
 pub struct Scripts {
+    /// Shared with the context of the run, which reloads and migrates through it, as edits and
+    /// restores reach the world between ticks, where the layer's tick reaches it alone.
+    host: Rc<RefCell<Host>>,
+}
+
+/// What runs a layer's scripts.
+struct Host {
     lua: Lua,
     shared: Shared,
     /// In the order of their components' names.
@@ -93,6 +107,11 @@ pub struct Scripts {
     /// The world whose component types the handles name, by its serial.
     serial: Option<u64>,
 }
+
+/// The hosts of the layers' scripts, which a context reloads a script through as an edit asks, and
+/// migrates a world it brings back through, as [`Scripts`] says.
+#[derive(Default)]
+pub(crate) struct Hosts(Vec<Weak<RefCell<Host>>>);
 
 /// What the functions Luau calls reach: the world, lent in place of the one kept here as scripts
 /// run or load, and what the handles of fields name.
@@ -104,10 +123,11 @@ struct Shared {
     loading: RefCell<Option<Loading>>,
 }
 
-/// A field a handle names: field `index` of component type `component`.
+/// A field a handle names: field `name` of component type `component`, which holds `ty`.
 struct FieldRef {
     component: Ident,
-    /// The type's id in the world scripts last ran in; `None` if it has no such type there.
+    /// The type's id in the world scripts last ran in, and the field's index there; `None` if it
+    /// has no such type, or no such field, there.
     id: Option<ComponentId>,
     index: u32,
     name: Ident,
@@ -153,42 +173,42 @@ struct Loaded {
     /// Its path from the project's root, which a reload names it by.
     path: String,
     text: String,
-    /// The component type it declared, and its id in the world it last ran in.
+    /// The component type it declared, its fields, and its id in the world it last ran in.
     component: String,
+    fields: Vec<(Ident, Kind, Value)>,
     id: Option<ComponentId>,
     tick: Option<Function>,
     /// Whether it has failed since it last loaded, which warns once.
     failed: bool,
 }
 
-/// The script loading: its path, and what it declared.
+/// The script loading: its path, the component it declared before, if it's reloading, and what it
+/// declares.
 struct Loading {
     path: String,
-    declared: Option<(ComponentId, String, Table)>,
+    before: Option<String>,
+    declared: Option<Declaring>,
     /// Why it's refused, if a function it called refused it.
     refused: Option<Error>,
 }
 
-/// A script's chunk, run: the component it declared, and its tick.
-struct Chunk {
-    component: String,
+/// The component type a script loading declared: its id, its name, the script's table, its
+/// fields, and whether they're other than the world's type of its name has, which the world's
+/// type takes once the script has loaded.
+struct Declaring {
     id: ComponentId,
-    tick: Option<Function>,
+    component: String,
+    table: Table,
+    fields: Vec<(Ident, Kind, Value)>,
+    changed: bool,
 }
 
-/// The scripts reloaded since the last tick, as edits queue them, by path, which the [`Scripts`]
-/// that loaded each take as their next tick starts.
-#[derive(Clone, Default)]
-pub(crate) struct Reloads(Vec<(String, String)>);
-
-/// Queues the reload of the script at `path`, its text now `text`, as an edit applies it.
-pub(crate) fn queue(world: &mut World, path: String, text: String) {
-    match world.resource_mut::<Reloads>() {
-        Some(reloads) => reloads.0.push((path, text)),
-        None => {
-            world.insert_resource(Reloads(vec![(path, text)]));
-        }
-    }
+/// A script's chunk, run: the component it declared, its fields, and its tick.
+struct Chunk {
+    component: String,
+    fields: Vec<(Ident, Kind, Value)>,
+    id: ComponentId,
+    tick: Option<Function>,
 }
 
 impl Scripts {
@@ -197,8 +217,8 @@ impl Scripts {
     /// Fails with `script.vm` if Luau can't start, as for want of memory.
     pub fn new() -> Result<Self> {
         let vm = |error: mlua::Error| Error::new("script.vm", format!("Luau can't start: {error}"));
-        let lua = Self::vm().map_err(vm)?;
-        Ok(Self {
+        let lua = Host::vm().map_err(vm)?;
+        let host = Host {
             lua,
             shared: Shared {
                 world: RefCell::new(World::default()),
@@ -207,9 +227,123 @@ impl Scripts {
             },
             scripts: Vec::new(),
             serial: None,
+        };
+        Ok(Self {
+            host: Rc::new(RefCell::new(host)),
         })
     }
 
+    /// Loads the script at `path`, declaring the component type it declares in `cx`'s world, and
+    /// returns that type's name, which an entity is given to run the script, as
+    /// [`World::add_default`] gives it. A development build watches its file, reloading it as it's
+    /// saved, as [`Scripts`] says. A script loaded again, at the same path, takes its own place.
+    ///
+    /// Fails with `script.unreadable` if the file can't be read; `script.pow` and
+    /// `script.header` for a script refused as [`Scripts`] says; `script.bad` for one that
+    /// doesn't compile, that fails as its chunk runs, or that returns other than the component it
+    /// declares, as `gg.declare` returns it; `reflect.name_taken` for a component type another has;
+    /// and as declaring it does.
+    pub fn load(&mut self, cx: &mut Context, path: impl AsRef<Path>) -> Result<String> {
+        let path = path.as_ref();
+        let name = crate::assets::name_of(cx.root.as_deref(), path).to_string();
+        let text = fs::read_to_string(path).map_err(|error| {
+            Error::new(
+                "script.unreadable",
+                format!("can't read {}: {error}", path.display()),
+            )
+        })?;
+        let host = &mut *self.host.borrow_mut();
+        let component = host.load(cx.world_mut(), &name, text.clone())?;
+        cx.hosts.add(&self.host);
+        #[cfg(feature = "dev")]
+        cx.scripts.watch(name, path, text);
+        Ok(component)
+    }
+
+    /// Runs each script's tick once for each entity with its component, as [`Scripts`] says. A
+    /// script that fails warns once, `script.error`, until it reloads, and runs on for the other
+    /// entities. Allocates nothing that the scripts themselves don't.
+    pub fn run(&mut self, world: &mut World) {
+        self.host.borrow_mut().run(world);
+    }
+}
+
+impl Hosts {
+    /// Keeps `host`, unless it's kept already.
+    fn add(&mut self, host: &Rc<RefCell<Host>>) {
+        self.0.retain(|kept| kept.strong_count() > 0);
+        if !self
+            .0
+            .iter()
+            .any(|kept| ptr::eq(kept.as_ptr(), Rc::as_ptr(host)))
+        {
+            self.0.push(Rc::downgrade(host));
+        }
+    }
+
+    fn hosts(&self) -> impl Iterator<Item = Rc<RefCell<Host>>> + '_ {
+        self.0.iter().filter_map(Weak::upgrade)
+    }
+
+    /// Reloads the script at `path`, its text now `text`, in `world`, through the host that loaded
+    /// it, between ticks, as an edit asks: it runs from the next tick, and its component's fields
+    /// change, as [`Scripts`] says. Logs `Script reloaded`, or why it's refused, the script running
+    /// as it did.
+    ///
+    /// Fails with `script.unknown` if no layer loaded a script at `path`; `script.renamed` for one
+    /// that declares another component; and as a script's load fails otherwise.
+    pub(crate) fn reload(&self, world: &mut World, path: &str, text: String) -> Result<()> {
+        let host = self
+            .hosts()
+            .find(|host| host.borrow().loaded(path).is_some());
+        let reloaded = match host {
+            Some(host) => host.borrow_mut().reload(world, path, text),
+            None => Err(Error::new(
+                "script.unknown",
+                format!("no layer loaded a script at {path}, so none reloads"),
+            )),
+        };
+        if let Err(error) = &reloaded {
+            warn!(
+                code = error.code(),
+                script = path,
+                "{error:#}; the script runs as it did"
+            );
+        }
+        reloaded
+    }
+
+    /// Has the types that the scripts declare in `world`, which has been restored or brought back,
+    /// hold their fields as the scripts declare them now, as [`Scripts`] says.
+    pub(crate) fn migrate(&self, world: &mut World) {
+        for host in self.hosts() {
+            host.borrow_mut().migrate(world);
+        }
+    }
+
+    /// Each script loaded, its path and its text as last applied, which a lockstep host's world
+    /// goes to its joiner with.
+    pub(crate) fn applied(&self) -> Vec<(String, String)> {
+        let mut applied = Vec::new();
+        for host in self.hosts() {
+            let host = host.borrow();
+            let scripts = host.scripts.iter();
+            applied.extend(scripts.map(|loaded| (loaded.path.clone(), loaded.text.clone())));
+        }
+        applied
+    }
+
+    /// Reloads each of `scripts`, each a path and a text, as [`reload`](Self::reload) does, those
+    /// whose texts are as they were staying as they are: a lockstep joiner's, as they come with its
+    /// host's world, which it runs in place of its own files'.
+    pub(crate) fn take(&self, world: &mut World, scripts: &[(String, String)]) {
+        for (path, text) in scripts {
+            let _ = self.reload(world, path, text.clone());
+        }
+    }
+}
+
+impl Host {
     fn vm() -> mlua::Result<Lua> {
         let libs = StdLib::COROUTINE
             | StdLib::TABLE
@@ -298,40 +432,13 @@ impl Scripts {
         Ok(lua)
     }
 
-    /// Loads the script at `path`, declaring the component type it declares in `cx`'s world, and
-    /// returns that type's name, which an entity is given to run the script, as
-    /// [`World::add_default`] gives it. A development build watches its file, reloading it as it's
-    /// saved, as [`Scripts`] says. A script loaded again, at the same path, takes its own place.
-    ///
-    /// Fails with `script.unreadable` if the file can't be read; `script.pow` and
-    /// `script.header` for a script refused as [`Scripts`] says; `script.bad` for one that
-    /// doesn't compile, that fails as its chunk runs, or that returns other than the component it
-    /// declares, as `gg.declare` returns it; `reflect.name_taken` for a component type another has;
-    /// and as declaring it does.
-    pub fn load(&mut self, cx: &mut Context, path: impl AsRef<Path>) -> Result<String> {
-        let path = path.as_ref();
-        let name = crate::assets::name_of(cx.root.as_deref(), path).to_string();
-        let text = fs::read_to_string(path).map_err(|error| {
-            Error::new(
-                "script.unreadable",
-                format!("can't read {}: {error}", path.display()),
-            )
-        })?;
-        let world = cx.world_mut();
-        let chunk = self.run_chunk(world, &name, &text, None)?;
-        let taken = self
-            .scripts
-            .iter()
-            .find(|loaded| loaded.component == chunk.component);
-        if let Some(other) = taken.filter(|loaded| loaded.path != name) {
-            return Err(Error::new(
-                "reflect.name_taken",
-                format!(
-                    "{name} declares `{}`, which {} declares",
-                    chunk.component, other.path
-                ),
-            ));
-        }
+    /// Loads the script at `name`, a path from the project's root, whose text is `text`, in
+    /// `world`, and returns the name of the component type it declares, as [`Scripts::load`]
+    /// says.
+    fn load(&mut self, world: &mut World, name: &str, text: String) -> Result<String> {
+        let chunk = self.run_chunk(world, name, &text, None);
+        self.resolve(world);
+        let chunk = chunk?;
         self.scripts.retain(|loaded| loaded.path != name);
         let at = self
             .scripts
@@ -340,32 +447,30 @@ impl Scripts {
         self.scripts.insert(
             at,
             Loaded {
-                path: name.clone(),
-                text: text.clone(),
+                path: name.to_owned(),
+                text,
                 component: chunk.component,
+                fields: chunk.fields,
                 id: Some(chunk.id),
                 tick: chunk.tick,
                 failed: false,
             },
         );
-        self.serial = Some(world.serial());
-        #[cfg(feature = "dev")]
-        cx.scripts.watch(name, path, text);
         Ok(component)
     }
 
-    /// Runs each script's tick once for each entity with its component, as [`Scripts`] says,
-    /// after reloading those whose reloads the world has queued since. A script that fails warns
-    /// once, `script.error`, until it reloads, and runs on for the other entities. Allocates
-    /// nothing that the scripts themselves don't.
-    pub fn run(&mut self, world: &mut World) {
+    /// The script loaded at `path`, if there's one.
+    fn loaded(&self, path: &str) -> Option<usize> {
+        self.scripts.iter().position(|loaded| loaded.path == path)
+    }
+
+    fn run(&mut self, world: &mut World) {
         let _zone = gg_core::zone!();
         if self.scripts.is_empty() {
             return;
         }
-        self.take_reloads(world);
         if self.serial != Some(world.serial()) {
-            self.resolve(world);
+            self.migrate(world);
         }
         let dt = Tick::DT.as_secs_f64();
         let mut list = world.take_list();
@@ -402,54 +507,55 @@ impl Scripts {
         world.keep_list(list);
     }
 
-    /// Reloads each of the scripts whose reloads `world` has queued, in the order they came.
-    fn take_reloads(&mut self, world: &mut World) {
-        let Some(reloads) = world.resource_mut::<Reloads>() else {
-            return;
-        };
-        if reloads.0.is_empty() {
-            return;
-        }
-        let queued = mem::take(&mut reloads.0);
-        let (ours, others): (Vec<_>, Vec<_>) = (queued.into_iter())
-            .partition(|(path, _)| self.scripts.iter().any(|loaded| loaded.path == *path));
-        if let Some(reloads) = world.resource_mut::<Reloads>() {
-            reloads.0 = others;
-        }
-        for (path, text) in ours {
-            self.reload(world, &path, text);
-        }
-    }
-
-    /// Reloads the script at `path`, its text now `text`: refused, warning, if it doesn't load or
-    /// declares its component otherwise, as for now a reload doesn't change a component's fields.
-    fn reload(&mut self, world: &mut World, path: &str, text: String) {
-        let Some(at) = self.scripts.iter().position(|loaded| loaded.path == path) else {
-            return;
-        };
+    /// Reloads the script loaded at `path`, its text now `text`, in `world`, as [`Hosts::reload`]
+    /// says; nothing changes if its text is as it was.
+    fn reload(&mut self, world: &mut World, path: &str, text: String) -> Result<()> {
+        let at = self.loaded(path).expect("the script at `path` has loaded");
         if self.scripts[at].text == text {
-            return;
+            return Ok(());
         }
         let declared = self.scripts[at].component.clone();
-        match self.run_chunk(world, path, &text, Some(&declared)) {
-            Ok(chunk) => {
-                let loaded = &mut self.scripts[at];
-                loaded.text = text;
-                loaded.id = Some(chunk.id);
-                loaded.tick = chunk.tick;
-                loaded.failed = false;
-                info!(script = path, "Script reloaded");
+        let chunk = self.run_chunk(world, path, &text, Some(&declared));
+        // Its handles found again, as the chunk ran, and the fields as they are now.
+        self.resolve(world);
+        let chunk = chunk?;
+        let loaded = &mut self.scripts[at];
+        loaded.text = text;
+        loaded.fields = chunk.fields;
+        loaded.id = Some(chunk.id);
+        loaded.tick = chunk.tick;
+        loaded.failed = false;
+        info!(script = path, "Script reloaded");
+        Ok(())
+    }
+
+    /// Has the types that the scripts declare in `world` hold their fields as the scripts declare
+    /// them, each that doesn't, as a world from before a reload doesn't, declared again, as a
+    /// reload declares it; and finds again the types and fields the handles name, as
+    /// [`resolve`](Self::resolve) does.
+    fn migrate(&mut self, world: &mut World) {
+        for script in &self.scripts {
+            let Some(id) = world.component_named(&script.component) else {
+                continue;
+            };
+            // A Rust type of its name, which the script then doesn't run for.
+            if world
+                .declared(id)
+                .is_none_or(|known| known.declares(&script.fields))
+            {
+                continue;
             }
-            Err(error) => warn!(
-                code = error.code(),
-                script = path,
-                "{error:#}; the script runs as it did"
-            ),
+            let (path, component) = (&script.path, &script.component);
+            if let Err(error) = redeclare(world, path, id, component, script.fields.clone()) {
+                warn!(code = error.code(), script = path, "{error:#}");
+            }
         }
+        self.resolve(world);
     }
 
     /// Runs the chunk of the script at `path`, whose text is `text`, in `world`, which it may
-    /// declare its component in, as its first load does; or, reloading, where it declared `before`.
+    /// declare its component in, as its first load does, or declare again with other fields; or,
+    /// reloading, where it declared `before`.
     fn run_chunk(
         &mut self,
         world: &mut World,
@@ -465,6 +571,7 @@ impl Scripts {
         let env = self.environment().map_err(|error| bad(path, &error))?;
         *self.shared.loading.borrow_mut() = Some(Loading {
             path: path.to_owned(),
+            before: before.map(str::to_owned),
             declared: None,
             refused: None,
         });
@@ -480,18 +587,27 @@ impl Scripts {
             Ok(returned) => returned,
             Err(error) => return Err(loading.refused.unwrap_or_else(|| bad(path, &error))),
         };
-        let Some((id, component, table)) = loading.declared else {
+        let Some(Declaring {
+            id,
+            component,
+            table,
+            fields,
+            changed,
+        }) = loading.declared
+        else {
             return Err(Error::new(
                 "script.bad",
                 format!("{path} declares no component, which a script does with `gg.declare`"),
             ));
         };
-        if let Some(before) = before.filter(|&before| before != component) {
+        let taken = (self.scripts.iter())
+            .find(|loaded| loaded.component == component && loaded.path != path);
+        if let Some(other) = taken {
             return Err(Error::new(
-                "script.fields_changed",
+                "reflect.name_taken",
                 format!(
-                    "{path} declares `{component}`, where it declared `{before}`, which a reload \
-                     doesn't change"
+                    "{path} declares `{component}`, which {} declares",
+                    other.path
                 ),
             ));
         }
@@ -516,8 +632,12 @@ impl Scripts {
             Err(error) => return Err(bad(path, &error)),
         };
         table.set_readonly(true);
+        if changed {
+            redeclare(world, path, id, &component, fields.clone())?;
+        }
         Ok(Chunk {
             component,
+            fields,
             id,
             tick,
         })
@@ -536,16 +656,22 @@ impl Scripts {
         Ok(env)
     }
 
-    /// Finds again in `world` the component types that the handles and the scripts name, by
-    /// name, as another world, restored or loaded, may give them other ids.
+    /// Finds again in `world` the component types that the handles and the scripts name, and the
+    /// handles' fields, by name, as another world, restored or loaded, may give them other ids,
+    /// and a type declared again its fields other places.
     fn resolve(&mut self, world: &World) {
         for field in self.shared.fields.get_mut() {
-            field.id = world.component_named(&field.component).filter(|&id| {
-                let found = world.fields_of(id).get(field.index as usize);
-                found.is_some_and(|found| {
+            let found = world.component_named(&field.component).and_then(|id| {
+                let mut fields = world.fields_of(id).iter();
+                let at = fields.position(|found| {
                     found.name == field.name && Field::of(&found.ty) == Some(field.ty)
-                })
+                })?;
+                Some((id, at))
             });
+            field.id = found.map(|(id, _)| id);
+            if let Some((_, at)) = found {
+                field.index = u32::try_from(at).expect("fewer than 2^32 fields");
+            }
         }
         for script in &mut self.scripts {
             script.id = world
@@ -740,6 +866,57 @@ fn returns(path: &str, component: &str) -> Error {
     )
 }
 
+/// The doc of the component type the script at `path` declares.
+fn doc(path: &str) -> String {
+    format!("Declared by `{path}`.")
+}
+
+/// Declares `component`, type `id` of `world`, which the script at `path` declared, again, of
+/// `fields`, as [`Scripts`] says: logs the fields added and dropped, and warns, `script.field_reset`,
+/// of those whose kinds changed.
+///
+/// Fails as [`World::redeclare`] does, changing nothing.
+fn redeclare(
+    world: &mut World,
+    path: &str,
+    id: ComponentId,
+    component: &str,
+    fields: Vec<(Ident, Kind, Value)>,
+) -> Result<()> {
+    let known = world.declared(id).expect("a type a script declared");
+    let kind = |name: &Ident| {
+        let mut known = known.fields.iter();
+        known.find_map(|(field, kind)| (field == name).then_some(*kind))
+    };
+    let added = fields.iter().filter(|(name, ..)| kind(name).is_none());
+    let added = list(added.map(|(name, ..)| name));
+    let dropped = (known.fields.iter()).filter(|(name, _)| !fields.iter().any(|(f, ..)| f == name));
+    let dropped = list(dropped.map(|(name, _)| name));
+    let reset: Vec<&Ident> = (fields.iter())
+        .filter(|(name, of, _)| kind(name).is_some_and(|kind| kind != *of))
+        .map(|(name, ..)| name)
+        .collect();
+    let reset = (!reset.is_empty()).then(|| list(reset));
+    world.redeclare(id, &doc(path), fields)?;
+    info!(
+        script = path,
+        component,
+        added,
+        dropped,
+        "Each `{component}` holds its fields as the script declares them now"
+    );
+    if let Some(reset) = reset {
+        warn!(
+            code = "script.field_reset",
+            script = path,
+            component,
+            "`{component}`'s {reset} hold another kind now: each `{component}` has them at their \
+             defaults"
+        );
+    }
+    Ok(())
+}
+
 /// Light userdata of `bits`: an entity's, a field's handle's, or `gg.entity`'s, 0.
 fn handle(bits: u64) -> LightUserData {
     LightUserData(ptr::without_provenance_mut(bits as usize))
@@ -769,8 +946,8 @@ fn field_of(key: &Lua_) -> mlua::Result<usize> {
     }
 }
 
-/// The handle of field `index` of component type `id`, named `component`, which `name` is, holding
-/// `ty`: the one `fields` has, or one made.
+/// The handle of field `name` of component type `id`, named `component`, which is its field `index`
+/// and holds `ty`: the one `fields` has, or one made.
 fn handle_of(
     fields: &mut Vec<FieldRef>,
     component: &str,
@@ -781,7 +958,7 @@ fn handle_of(
 ) -> LightUserData {
     let at = fields
         .iter()
-        .position(|field| field.component == component && field.index == index);
+        .position(|field| field.component == component && field.name == *name && field.ty == ty);
     let at = at.unwrap_or_else(|| {
         fields.push(FieldRef {
             component: Ident::Owned(component.to_owned()),
@@ -818,28 +995,31 @@ fn component(lua: &Lua, name: LuaString) -> mlua::Result<Table> {
                 &*name
             )));
         };
-        let table = handles(lua, shared, &world, &name, id)?;
+        let fields = (world.fields_of(id).iter()).map(|field| (&field.name, field.ty.clone()));
+        let table = handles(lua, shared, &name, id, fields)?;
         table.set_readonly(true);
         Ok(table)
     })
 }
 
-/// A table of the handles of component type `id`'s fields, which is named `name`.
-fn handles(
+/// A table of the handles of `fields`, each a name and a type, of component type `id`, which is
+/// named `name`: its fields, in their order.
+fn handles<'f>(
     lua: &Lua,
     shared: &Shared,
-    world: &World,
     name: &str,
     id: ComponentId,
+    fields: impl Iterator<Item = (&'f Ident, Type)>,
 ) -> mlua::Result<Table> {
     let table = lua.create_table()?;
-    let mut fields = shared.fields.borrow_mut();
-    for (index, field) in world.fields_of(id).iter().enumerate() {
-        let Some(ty) = Field::of(&field.ty) else {
+    let mut refs = shared.fields.borrow_mut();
+    for (index, (field, ty)) in fields.enumerate() {
+        let Some(ty) = Field::of(&ty) else {
             continue;
         };
-        let handle = handle_of(&mut fields, name, id, index as u32, &field.name, ty);
-        table.raw_set(&*field.name, handle)?;
+        let index = u32::try_from(index).expect("fewer than 2^32 fields");
+        let handle = handle_of(&mut refs, name, id, index, field, ty);
+        table.raw_set(&**field, handle)?;
     }
     Ok(table)
 }
@@ -847,7 +1027,7 @@ fn handles(
 /// `gg.declare(name, fields)`: declares the component type the script loading is, `name`, of
 /// `fields`, each a name and a default, as [`Scripts`] says, and returns the script's
 /// table, of its fields' handles, which its tick goes in. A script loading again declares the type
-/// it declared, its fields as they were: for now, a reload doesn't change them.
+/// it declared, its fields as they were or otherwise, which the type takes once it has loaded.
 fn declare(lua: &Lua, (name, fields): (LuaString, Table)) -> mlua::Result<Table> {
     shared(|shared| {
         let name = name.to_str()?.to_owned();
@@ -863,9 +1043,17 @@ fn declare(lua: &Lua, (name, fields): (LuaString, Table)) -> mlua::Result<Table>
             loading.refused = Some(error);
             Err(mlua::Error::runtime(message))
         };
-        if let Some((_, declared, _)) = &loading.declared {
+        if let Some(declaring) = &loading.declared {
+            let declared = &declaring.component;
             let what = format!("it declares `{name}`, but `{declared}` already: a script is one");
             return refuse(loading, "script.bad", what);
+        }
+        if let Some(before) = loading.before.as_ref().filter(|before| **before != name) {
+            let what = format!(
+                "it declares `{name}`, where it declared `{before}`, which a reload doesn't \
+                 rename: a run started afresh does"
+            );
+            return refuse(loading, "script.renamed", what);
         }
         let mut declared: Vec<(Ident, Kind, Value)> = Vec::new();
         for pair in fields.pairs::<Lua_, Lua_>() {
@@ -899,48 +1087,35 @@ fn declare(lua: &Lua, (name, fields): (LuaString, Table)) -> mlua::Result<Table>
         // By name, as a table's pairs come in no order its text gives.
         declared.sort_by(|a, b| a.0.cmp(&b.0));
         let mut world = shared.world.borrow_mut();
-        let id = match world.component_named(&name) {
-            None => {
-                let doc = format!("Declared by `{}`.", loading.path);
-                match world.declare(&name, &doc, declared) {
-                    Ok(id) => id,
-                    Err(error) => {
-                        let message = format!("{}: {error:#}", loading.path);
-                        let message = error.with_message(message);
-                        let text = message.to_string();
-                        loading.refused = Some(message);
-                        return Err(mlua::Error::runtime(text));
-                    }
+        let (id, changed) = match world.component_named(&name) {
+            None => match world.declare(&name, &doc(&loading.path), declared.clone()) {
+                Ok(id) => (id, false),
+                Err(error) => {
+                    let message = format!("{}: {error:#}", loading.path);
+                    let message = error.with_message(message);
+                    let text = message.to_string();
+                    loading.refused = Some(message);
+                    return Err(mlua::Error::runtime(text));
                 }
-            }
-            Some(id) => {
-                let same = world.declared(id).is_some_and(|known| {
-                    let fields = world.fields_of(id);
-                    known.fields.len() == declared.len()
-                        && (known.fields.iter().zip(fields).zip(&declared)).all(
-                            |(((field, kind), described), (name, given, default))| {
-                                field == name
-                                    && kind == given
-                                    && described.default.as_ref() == Some(default)
-                            },
-                        )
-                });
-                if world.declared(id).is_none() {
+            },
+            Some(id) => match world.declared(id) {
+                Some(known) => (id, !known.declares(&declared)),
+                None => {
                     let what = format!("`{name}` is a Rust component type's name");
                     return refuse(loading, "reflect.name_taken", what);
                 }
-                if !same {
-                    let what = format!(
-                        "`{name}`'s fields, their names, kinds or defaults, aren't as they were, \
-                         which for now a reload doesn't change: a run started afresh takes them"
-                    );
-                    return refuse(loading, "script.fields_changed", what);
-                }
-                id
-            }
+            },
         };
-        let table = handles(lua, shared, &world, &name, id)?;
-        loading.declared = Some((id, name, table.clone()));
+        drop(world);
+        let own = declared.iter().map(|(field, kind, _)| (field, kind.ty()));
+        let table = handles(lua, shared, &name, id, own)?;
+        loading.declared = Some(Declaring {
+            id,
+            component: name,
+            table: table.clone(),
+            fields: declared,
+            changed,
+        });
         Ok(table)
     })
 }
@@ -1131,7 +1306,6 @@ mod watch {
     use tracing::warn;
 
     use crate::Context;
-    use crate::edits::Edit;
     use crate::layer::Stack;
 
     /// How long a look waits after the last, as scene files' does.
@@ -1173,13 +1347,18 @@ mod watch {
     }
 
     /// Between ticks, as a frame starts, reloads the scripts whose files were saved since the last
-    /// look, through an edit of each, which a recording keeps, so that a replay reloads it there:
-    /// each that compiles, as [`compiles`](super::compiles) checks, a script that doesn't warning
-    /// and running as it did. A lockstep peer doesn't for now, warning `script.lockstep`.
+    /// look, through an edit of each, which a recording keeps, so that a replay reloads it there,
+    /// and which a lockstep host offers for the tick both peers apply it before, as
+    /// [`Stack::offer_script`] says: each that compiles, as [`compiles`](super::compiles) checks, a
+    /// script that doesn't warning and running as it did. A lockstep joiner doesn't look, as it
+    /// runs its host's scripts.
     pub(crate) fn look(cx: &mut Context, stack: &mut Stack) {
         let now = Instant::now();
         let files = &mut cx.scripts;
-        if files.files.is_empty() || files.looked.is_some_and(|looked| now - looked < LOOK) {
+        if !stack.watches_files()
+            || files.files.is_empty()
+            || files.looked.is_some_and(|looked| now - looked < LOOK)
+        {
             return;
         }
         files.looked = Some(now);
@@ -1206,21 +1385,10 @@ mod watch {
                 );
                 continue;
             }
-            if stack.is_peer() {
-                warn!(
-                    code = "script.lockstep",
-                    script = file.name,
-                    "a lockstep peer doesn't reload scripts yet, so that both run the same; the \
-                     script runs as it did, until a run started afresh"
-                );
-                continue;
-            }
             saves.push((file.name.clone(), text));
         }
         for (path, text) in saves {
-            if let Err(error) = stack.edit(cx, Edit::Script { path, text }) {
-                warn!(code = error.code(), "{error:#}");
-            }
+            stack.offer_script(cx, path, text);
         }
     }
 }
@@ -1230,7 +1398,7 @@ mod tests {
     use super::*;
     use crate::Component;
     use crate::dirs::tests::Scratch;
-    use crate::edits::Edit;
+    use crate::edits::{Done, Edit};
 
     /// A Rust component that scripts reach, with a field of each kind they do.
     #[derive(Clone, Component)]
@@ -1447,43 +1615,122 @@ return Spin
         assert_eq!(refused("unknown", unknown).code(), "script.bad");
     }
 
-    #[test]
-    fn a_reload_an_edit_queues_runs_from_the_next_tick_unless_it_changes_the_fields() {
-        let dir = Scratch::new("luau-reload");
-        let script = |step: u32, fields: &str| {
-            format!(
-                "local Mover = gg.component(\"Mover\")\n\
-                 local Step = gg.declare(\"Step\", {{ {fields} }})\n\
-                 function Step.tick(entity, dt)\n\
-                     entity[Mover.steps] = entity[Mover.steps] + {step}\n\
-                 end\n\
-                 return Step\n"
-            )
+    /// Steps a mover by its own field `by`, of `fields`, and by `step`.
+    fn stepper(step: u32, fields: &str) -> String {
+        format!(
+            "local Mover = gg.component(\"Mover\")\n\
+             local Step = gg.declare(\"Step\", {{ {fields} }})\n\
+             function Step.tick(entity, dt)\n\
+                 entity[Mover.steps] = entity[Mover.steps] + entity[Step.by] * {step}\n\
+             end\n\
+             return Step\n"
+        )
+    }
+
+    /// Copies a stepper's `by` into its mover's speed, through a handle of another script's field.
+    const COPY: &str = "local Mover = gg.component(\"Mover\")\n\
+        local Step = gg.component(\"Step\")\n\
+        local Copy = gg.declare(\"Copy\", {})\n\
+        function Copy.tick(entity, dt)\n\
+            entity[Mover.speed] = entity[Step.by]\n\
+        end\n\
+        return Copy\n";
+
+    /// Reloads the script `scripts/step.luau` as an edit does, its text now `text`.
+    fn reload(cx: &mut Context, text: impl Into<String>) -> Result<Done> {
+        let edit = Edit::Script {
+            path: "scripts/step.luau".to_owned(),
+            text: text.into(),
         };
-        let first = script(1, "by = 1");
-        let (mut cx, mut host) = loaded(&dir, &[("scripts/step.luau", &first)]);
+        cx.apply_edit(edit)
+    }
+
+    #[test]
+    fn a_reload_runs_from_the_next_tick_its_components_keeping_the_fields_it_keeps() {
+        let dir = Scratch::new("luau-reload");
+        let first = stepper(1, "by = 1, on = true, gone = 3");
+        let scripts = [("scripts/step.luau", &*first), ("scripts/copy.luau", COPY)];
+        let (mut cx, mut host) = loaded(&dir, &scripts);
         let world = cx.world_mut();
         let mover = world.spawn(Mover::new());
         world.add_default(mover, "Step").expect("added");
+        world.add_default(mover, "Copy").expect("added");
+        let by = Value::F64(5.0);
+        world.set_field(mover, "Step", "by", &by).expect("set");
         host.run(cx.world_mut());
-        let edit = |cx: &mut Context, text: String| {
-            let edit = Edit::Script {
-                path: "scripts/step.luau".to_owned(),
-                text,
-            };
-            cx.apply_edit(edit).expect("queued");
+        reload(&mut cx, stepper(10, "by = 1, on = true, gone = 3")).expect("reloaded");
+        host.run(cx.world_mut());
+        let steps = |cx: &Context| cx.world().get::<Mover>(mover).expect("a mover").steps;
+        assert_eq!(steps(&cx), 55);
+        // `gone` dropped, `on` of another kind, `added` added, and `by`'s default changed, which
+        // now sorts second: the other script's handle of it finds it there.
+        let fields = "by = 2, on = 7, added = vector.create(1, 2, 3)";
+        reload(&mut cx, stepper(100, fields)).expect("reloaded");
+        let world = cx.world();
+        let spun = world.get_field(mover, "Step", "").expect("a stepper");
+        let expected = Value::Struct(vec![
+            ("added".into(), Value::Vec3(Vec3::new(1.0, 2.0, 3.0))),
+            ("by".into(), Value::F64(5.0)),
+            ("on".into(), Value::F64(7.0)),
+        ]);
+        assert_eq!(spun, expected);
+        assert_eq!(default(world, "Step", "by"), Some(Value::F64(2.0)));
+        host.run(cx.world_mut());
+        assert_eq!(steps(&cx), 555);
+        let speed = cx.world().get::<Mover>(mover).expect("a mover").speed;
+        assert_eq!(speed, 5.0);
+        // Refused: one that doesn't compile, one that renames its component, and one of a script
+        // no layer loaded; the script runs as it did.
+        let refused = |result: Result<Done>| result.expect_err("refused").code().to_owned();
+        assert_eq!(refused(reload(&mut cx, "local = ")), "script.bad");
+        let renamed = stepper(1, "by = 1").replace("\"Step\"", "\"Stride\"");
+        assert_eq!(refused(reload(&mut cx, renamed)), "script.renamed");
+        let unknown = Edit::Script {
+            path: "scripts/none.luau".to_owned(),
+            text: COPY.to_owned(),
         };
-        edit(&mut cx, script(10, "by = 1"));
+        assert_eq!(refused(cx.apply_edit(unknown)), "script.unknown");
         host.run(cx.world_mut());
-        assert_eq!(cx.world().get::<Mover>(mover).expect("a mover").steps, 11);
-        // Its fields changed, and then it doesn't compile: both refused, as it runs as it did.
-        edit(&mut cx, script(100, "by = 2"));
+        assert_eq!(steps(&cx), 1055);
+    }
+
+    /// A world from before a reload that changed the fields, as `stop` brings back, holds them as
+    /// they are now once it's back; and so do the components an undo puts back.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn what_comes_back_from_before_a_reload_holds_its_fields_as_they_are_now() {
+        let dir = Scratch::new("luau-stop");
+        let first = stepper(1, "by = 1, gone = true");
+        let (mut cx, mut host) = loaded(&dir, &[("scripts/step.luau", &first)]);
+        let world = cx.world_mut();
+        let kept = world.spawn(Mover::new());
+        let deleted = world.spawn(Mover::new());
+        for entity in [kept, deleted] {
+            world.add_default(entity, "Step").expect("added");
+            let by = Value::F64(4.0);
+            world.set_field(entity, "Step", "by", &by).expect("set");
+        }
+        let deleted = world.id(deleted).expect("alive");
+        let mut log = crate::Log::default();
+        let delete = crate::Operation::Delete { entity: deleted };
+        log.apply_all(world, vec![delete]).expect("deleted");
+        let mut stack = crate::layer::Stack::default();
+        stack.play(&mut cx, 0);
+        reload(&mut cx, stepper(1, "by = 1, added = true")).expect("reloaded");
+        assert_eq!(stack.stop(&mut cx), Some(0));
+        let expected = Value::Struct(vec![
+            ("added".into(), Value::Bool(true)),
+            ("by".into(), Value::F64(4.0)),
+        ]);
+        let step = |world: &World, entity| world.get_field(entity, "Step", "").expect("a stepper");
+        assert_eq!(step(cx.world(), kept), expected);
+        log.undo(cx.world_mut()).expect("undone");
+        let world = cx.world();
+        let back = world.entity(deleted).expect("back");
+        assert_eq!(step(world, back), expected);
         host.run(cx.world_mut());
-        edit(&mut cx, "local = ".to_owned());
-        host.run(cx.world_mut());
-        assert_eq!(cx.world().get::<Mover>(mover).expect("a mover").steps, 31);
-        let by = default(cx.world(), "Step", "by");
-        assert_eq!(by, Some(Value::F64(1.0)));
+        let steps = cx.world().get::<Mover>(kept).expect("a mover").steps;
+        assert_eq!(steps, 4);
     }
 
     #[test]

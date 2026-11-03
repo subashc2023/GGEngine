@@ -99,6 +99,9 @@ mod imp {
         /// Whether the types, or the client's edits in words, are to be asked for.
         types_due: bool,
         edits_due: bool,
+        /// The revision of the types last read, as `types` answered it, which a list of another
+        /// has them asked for again, as a script's reload changes them.
+        revision: u64,
         /// Whose gesture goes on, and its number, which the client gives each of its own, from
         /// one drawn at random, so that another connection of its name, as after a game's
         /// restart, never continues one.
@@ -251,6 +254,7 @@ mod imp {
                 types_at: None,
                 types_due: true,
                 edits_due: true,
+                revision: 0,
                 open: None,
                 // std seeds its hashers' keys from the OS's randomness, as the API's token is
                 // drawn.
@@ -329,13 +333,14 @@ mod imp {
                 self.edits_due = true;
             }
             match ask {
-                Ask::Types => match answer.and_then(|json| read(&json)) {
-                    Ok(described) => match json::described(&described) {
+                Ask::Types => match answer.and_then(|json| read::<gg_api::Types>(&json)) {
+                    Ok(given) => match json::described(&given) {
                         Ok(described) => {
                             self.types = described.types;
                             self.components = described.components;
                             self.typed = true;
                             self.types_due = false;
+                            self.revision = given.revision;
                             self.troubles[Of::Types as usize] = None;
                             // Read again, by these.
                             self.entity_at = None;
@@ -482,6 +487,7 @@ mod imp {
                     return;
                 }
             };
+            self.types_due |= page.types != self.revision;
             let read = self.reading.get_or_insert_with(Vec::new);
             let more = !page.entities.is_empty() && skip + page.entities.len() < page.total;
             read.extend(page.entities);
@@ -1125,6 +1131,7 @@ mod imp {
             let list = gg_api::EntityList {
                 total,
                 entities: listed.collect(),
+                types: 0,
             };
             Ok(serde_json::to_string(&list).expect("a list serializes"))
         }
@@ -1140,6 +1147,24 @@ mod imp {
             assert!(remote.list.read);
             assert_eq!(remote.count(None), Ok(3));
             assert_eq!(remote.roots_page(0..3), [id(1), id(2), id(3)]);
+        }
+
+        /// A list of another revision of the types than were read, as after a script's reload
+        /// changed them, has them asked for again; one of the same leaves them be.
+        #[test]
+        fn a_list_of_another_revision_of_the_types_has_them_asked_for_again() {
+            let listed = |types: u64| {
+                let page = page(1, &[(1, None, &[])]).expect("a page");
+                let mut list: gg_api::EntityList = serde_json::from_str(&page).expect("a list");
+                list.types = types;
+                Ok(serde_json::to_string(&list).expect("a list serializes"))
+            };
+            let mut remote = Remote::new("editor");
+            (remote.typed, remote.types_due, remote.revision) = (true, false, 7);
+            remote.listed(0, listed(7));
+            assert!(!remote.types_due);
+            remote.listed(0, listed(8));
+            assert!(remote.types_due);
         }
 
         /// A hierarchy put together from reads at two moments that holds a cycle, as one entity's

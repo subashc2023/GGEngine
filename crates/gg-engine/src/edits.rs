@@ -36,8 +36,8 @@ pub(crate) enum Edit {
     Undo { author: String },
     /// Redoes the last edit `author` undid.
     Redo { author: String },
-    /// Reloads the script whose path from the project's root is `path`, its text now `text`, as
-    /// the [`Scripts`](crate::Scripts) that loaded it do at their next tick.
+    /// Reloads the script whose path from the project's root is `path`, its text now `text`,
+    /// through the [`Scripts`](crate::Scripts) that loaded it, as the context applies it.
     Script { path: String, text: String },
 }
 
@@ -66,9 +66,13 @@ struct Author {
 }
 
 impl Authors {
-    /// Applies `edit` to `world`, and says what it did.
+    /// Applies `edit`, an author's, to `world`, and says what it did.
     ///
     /// Fails as [`Log::apply_all`], [`Log::amend`], [`Log::undo`] and [`Log::redo`] do.
+    ///
+    /// # Panics
+    ///
+    /// For a script's reload, which no author makes: the context reloads it.
     pub(crate) fn edit(&mut self, world: &mut World, edit: Edit) -> Result<Done> {
         if self.world != Some(world.serial()) {
             // Their entries are another world's, which keeps what they kept, if it's still about.
@@ -78,17 +82,14 @@ impl Authors {
         // Any other edit of the author's ends its gesture, refused or not, as the log's own end
         // its, but for a refused apply. One the API refuses as it reads it never comes here, nor
         // to a recording, and leaves it going on.
-        if !matches!(edit, Edit::Amend { .. } | Edit::Script { .. })
+        if !matches!(edit, Edit::Amend { .. })
             && let Some(author) = self.logs.iter_mut().find(|a| a.name == edit.author())
         {
             author.log.seal();
             author.gesture = None;
         }
         match edit {
-            Edit::Script { path, text } => {
-                crate::luau::queue(world, path, text);
-                Ok(Done::Applied(Vec::new()))
-            }
+            Edit::Script { .. } => unreachable!("a context reloads scripts itself"),
             Edit::Amend {
                 author,
                 gesture,

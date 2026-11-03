@@ -353,6 +353,9 @@ pub struct Context {
     /// The script files the layers loaded, which development builds watch.
     #[cfg(feature = "dev")]
     pub(crate) scripts: crate::luau::Files,
+    /// What runs the layers' scripts, which a script reloads through as an edit asks, and a world
+    /// brought back migrates through, as [`Scripts`](crate::Scripts) says.
+    pub(crate) hosts: crate::luau::Hosts,
     /// The world as edited, while a copy of it plays in its place, as [`Stack::play`] holds it.
     #[cfg(feature = "dev")]
     pub(crate) edited: Option<Edited>,
@@ -525,6 +528,7 @@ impl Context {
             scenes: SceneFiles::default(),
             #[cfg(feature = "dev")]
             scripts: crate::luau::Files::default(),
+            hosts: crate::luau::Hosts::default(),
             #[cfg(feature = "dev")]
             edited: None,
             player: None,
@@ -2582,13 +2586,20 @@ impl Context {
     }
 
     /// Applies `edit`, an author's from outside the layers, to the world, between ticks, unrecorded,
-    /// as a replay does: [`Stack::edit`] records it first.
+    /// as a replay does: [`Stack::edit`] records it first. A script's reload, which no author
+    /// undoes, goes to the [`Scripts`](crate::Scripts) that loaded it.
     ///
-    /// Fails as [`Authors::edit`] does.
+    /// Fails as [`Authors::edit`] does, and as [`Hosts::reload`](crate::luau::Hosts::reload) does.
     pub(crate) fn apply_edit(&mut self, edit: Edit) -> Result<Done> {
         #[cfg(feature = "dev")]
         self.scenes.changed();
-        self.authors.edit(&mut self.world, edit)
+        match edit {
+            Edit::Script { path, text } => {
+                self.hosts.reload(&mut self.world, &path, text)?;
+                Ok(Done::Applied(Vec::new()))
+            }
+            edit => self.authors.edit(&mut self.world, edit),
+        }
     }
 
     /// Shows `dialog`, a file dialog of the OS's own, over the main window, modal, and returns
@@ -2920,15 +2931,14 @@ impl Stack {
         match net.turn() {
             Turn::None => {}
             Turn::Send => {
-                let text = crate::snapshot::write(
-                    &cx.world,
-                    &cx.scenes.files,
-                    &cx.scenes.open,
-                    &Run::Playing,
-                    net.app(),
-                    &self.names,
-                    next,
-                );
+                let scripts = cx.hosts.applied();
+                let of = crate::snapshot::Of {
+                    world: &cx.world,
+                    scenes: &cx.scenes.files,
+                    open: &cx.scenes.open,
+                    scripts: &scripts,
+                };
+                let text = crate::snapshot::write(&of, &Run::Playing, net.app(), &self.names, next);
                 match text {
                     Ok(text) => net.send_world(&text, cx.world.assets().counts(), next),
                     Err(error) => {
@@ -2949,6 +2959,9 @@ impl Stack {
                         (snapshot.names.iter()).map(|(path, name)| (name.clone(), path.clone())),
                     );
                     cx.load_restored(snapshot.assets());
+                    // Its host's scripts, which its world's components are as, in place of its
+                    // own files'.
+                    cx.hosts.take(&mut cx.world, &snapshot.scripts);
                     self.restore_in_place(cx, &snapshot)
                 });
                 match ticks {
@@ -2975,9 +2988,9 @@ impl Stack {
     }
 
     /// Whether the run hosts or plays alone, rather than joining a lockstep session, whose host
-    /// alone watches scene files.
+    /// alone watches the scene and script files the layers loaded.
     #[cfg(feature = "dev")]
-    pub(crate) fn watches_scenes(&self) -> bool {
+    pub(crate) fn watches_files(&self) -> bool {
         !self.joins()
     }
 
@@ -3034,6 +3047,21 @@ impl Stack {
             None => {
                 let edit = &mut |cx: &mut Context, edit| self.edit(cx, edit);
                 let _ = crate::scene_files::apply_save(cx, edit, &author, text);
+            }
+        }
+    }
+
+    /// Reloads the script whose path from the project's root is `path`, its text now `text`, as
+    /// its file is saved, through an edit, between ticks, as [`edit`](Self::edit) applies it; or,
+    /// in a lockstep session, offers that edit for the tick both peers apply it before. Either
+    /// way, what it did is logged, as [`Hosts::reload`](crate::luau::Hosts::reload) says.
+    #[cfg(feature = "dev")]
+    pub(crate) fn offer_script(&mut self, cx: &mut Context, path: String, text: String) {
+        let edit = Edit::Script { path, text };
+        match &mut self.net {
+            Some(net) => net.offer_unanswered(edit),
+            None => {
+                let _ = self.edit(cx, edit);
             }
         }
     }
@@ -3196,7 +3224,9 @@ impl Stack {
 
     /// Brings back the world as edited that [`play`](Self::play) holds aside, if it holds one, as
     /// the tool API's `stop` asks: the very world, with its scene files, its open scene and the
-    /// authors' edits of it, the copy and all done to it going; empties each layer's queue, which
+    /// authors' edits of it, the copy and all done to it going, but for the scripts reloaded since,
+    /// whose components it holds as they declare them now, as [`Scripts`](crate::Scripts) says;
+    /// empties each layer's queue, which
     /// the copy's ticks were to apply; has each layer pick up from the world, from the bottom up,
     /// as [`Layer::restored`] says; and returns the ticks the world as edited is at. A run playing
     /// from its start holds none: `None`, and nothing changes.
@@ -3209,6 +3239,8 @@ impl Stack {
         cx.authors = edited.authors;
         cx.scenes.files = edited.scenes;
         cx.scenes.open = edited.open;
+        // Its scripts' components as their scripts declare them now, though they reloaded since.
+        cx.hosts.migrate(&mut cx.world);
         for layer in &mut self.layers {
             if let Some(queue) = layer.commands() {
                 queue.clear();
@@ -3248,6 +3280,7 @@ impl Stack {
         cx.world.renew();
         cx.authors = Authors::default();
         cx.scenes.changed();
+        cx.hosts.migrate(&mut cx.world);
         for layer in &mut self.layers {
             layer.restored(cx);
         }
@@ -3255,9 +3288,9 @@ impl Stack {
     }
 
     /// Puts `snapshot`'s world in `cx`'s place, the layers having loaded, with its scene files and
-    /// its open scene, or the start scene's file open for a snapshot that holds none, and has each
-    /// layer pick up from it, from the bottom up; returns the ticks the simulation had run as it
-    /// was taken.
+    /// its open scene, or the start scene's file open for a snapshot that holds none, its scripts'
+    /// components as the layers' scripts declare them, and has each layer pick up from it, from the
+    /// bottom up; returns the ticks the simulation had run as it was taken.
     ///
     /// Fails as [`Snapshot::restore`] does.
     fn restore_in_place(&mut self, cx: &mut Context, snapshot: &Snapshot) -> Result<u64> {
@@ -3267,6 +3300,7 @@ impl Stack {
             .unwrap_or_else(|| scene_files::opened(cx.start.as_deref(), &snapshot.scenes));
         #[cfg(feature = "dev")]
         cx.scenes.changed();
+        cx.hosts.migrate(&mut cx.world);
         for layer in &mut self.layers {
             layer.restored(cx);
         }

@@ -278,6 +278,8 @@ struct Taken {
     /// The scene files the layers loaded, which the restored run watches, and its open scene.
     scenes: Vec<SceneFile>,
     open: Open,
+    /// The scripts the layers loaded, each a path and its text as last applied.
+    scripts: Vec<(String, String)>,
     /// What the run was doing, with a copy of the world as edited it held, if any, which the
     /// restored run goes on doing.
     run: Run,
@@ -669,7 +671,7 @@ impl Api {
                         }),
                         None => {
                             if !cx.watches_assets() {
-                                cx.scan_assets(stack.watches_scenes());
+                                cx.scan_assets(stack.watches_files());
                             }
                             reply.send(assets(cx, kind, skip, take));
                         }
@@ -706,6 +708,7 @@ impl Api {
                         world: world.clone(),
                         scenes: cx.scenes.files.clone(),
                         open: cx.scenes.open.clone(),
+                        scripts: cx.hosts.applied(),
                         run,
                         ticks: stepper.ticks,
                         path,
@@ -1077,7 +1080,11 @@ fn list(world: &World, with: Option<&str>, skip: usize, take: usize) -> Result<S
     let total = listing.len();
     let page = listing.by_ref().skip(skip).take(take);
     let entities = page.map(|entity| listed(world, entity)).collect();
-    let list = EntityList { total, entities };
+    let list = EntityList {
+        total,
+        entities,
+        types: world.types_revision(),
+    };
     Ok(serde_json::to_string(&list).expect("a list serializes"))
 }
 
@@ -1778,13 +1785,20 @@ fn write_snapshots(taken: &Receiver<Taken>, app: &str, layers: &[String]) {
         world,
         scenes,
         open,
+        scripts,
         run,
         ticks,
         path,
         reply,
     } in taken
     {
-        let written = snapshot::write(&world, &scenes, &open, &run, app, &layers, ticks);
+        let of = snapshot::Of {
+            world: &world,
+            scenes: &scenes,
+            open: &open,
+            scripts: &scripts,
+        };
+        let written = snapshot::write(&of, &run, app, &layers, ticks);
         let written = written.and_then(|text| {
             if path.parent() == Some(crate::beside_exe("snapshots").as_path()) {
                 fs::create_dir_all(crate::beside_exe("snapshots")).map_err(|error| {

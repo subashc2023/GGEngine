@@ -1,15 +1,16 @@
 //! Lockstep between two peers, as [Networking](../../../ARCHITECTURE.md#networking) describes: a
 //! host, player 0, that listens, and a joiner, player 1, that connects and starts from the host's
-//! world; each tick's inputs, every layer's commands and the edits that apply before it, sent
-//! [`DELAY`] ticks ahead and run once both peers' are in; the world's hash after each tick,
-//! compared; and, in development builds, the patches of the game's code, which the host has apply
-//! at a tick of its choosing.
+//! world, and runs its host's scripts, which come with it; each tick's inputs, every layer's
+//! commands and the edits that apply before it, a script's reload among them, sent [`DELAY`] ticks
+//! ahead and run once both peers' are in; the world's hash after each tick, compared; and, in
+//! development builds, the patches of the game's code, which the host has apply at a tick of its
+//! choosing.
 //!
 //! Messages are lines of text over TCP, each a thread of the connection's reads, written by the
 //! main thread:
 //!
 //! ```text
-//! hello\tgg-lockstep 2\tShards\t0.1.0 debug dev\tShards Inspector
+//! hello\tgg-lockstep 3\tShards\t0.1.0 debug dev\tShards Inspector
 //!                                                    the joiner, as it connects
 //! refused <why>                                      the host, refusing it, before it closes
 //! world 1234 2                                       the host's world, at tick 1234, its code
@@ -18,7 +19,8 @@
 //! end
 //! joined 1234                                        the joiner, once it has restored it
 //! c 1238 0 Variant("Move", [...])                    a command for tick 1238, of layer 0
-//! e 1238 Variant("Apply", [...])                     an edit before tick 1238
+//! e 1238 Variant("Apply", [...])                     an edit before tick 1238, or a script's
+//!                                                      reload, `Variant("Script", [...])`
 //! s 1238 List([String("scenes/arena.ron"), ...])     a scene file's save before tick 1238
 //! t 1238                                             the inputs for tick 1238 are whole
 //! h 1234 58183b6352a09a44 fb695ce29daa8479           the world's hash after tick 1234
@@ -64,7 +66,7 @@ pub(crate) const DELAY: u64 = 4;
 
 /// The hello's first part: the protocol and its version, which a change to its lines takes to the
 /// next.
-const PROTOCOL: &str = "gg-lockstep 2";
+const PROTOCOL: &str = "gg-lockstep 3";
 
 /// The most bytes a line may have, its line break aside, past which the peer reading it drops the
 /// connection: a scene file's save among them, whose text is one line, as the tool API's lines are
@@ -720,6 +722,13 @@ impl Lockstep {
         self.tickets
     }
 
+    /// Offers `edit` as [`offer`](Self::offer) does, answered to no one, as it logs what it did, as
+    /// a script's reload does.
+    #[cfg(feature = "dev")]
+    pub(crate) fn offer_unanswered(&mut self, edit: Edit) {
+        self.offered.push((None, Outside::Edit(edit)));
+    }
+
     /// Offers the save of the scene file whose author is `author`, its text now `text`, as
     /// [`offer`](Self::offer) offers an edit, answered to no one, as it logs what it did.
     #[cfg(feature = "dev")]
@@ -1124,18 +1133,29 @@ mod tests {
     }
 
     /// A game of two players, whose commands add to their scores, and which loads the scene file at
-    /// `scene`, if it's given one.
+    /// `scene`, if it's given one, and the script at `script`, whose component its score's entity
+    /// has.
     #[derive(Default)]
     struct Game {
         commands: Vec<Command>,
         scene: Option<PathBuf>,
+        script: Option<(crate::Scripts, PathBuf)>,
     }
 
     impl Layer for Game {
+        fn load(&mut self, cx: &mut Context) {
+            if let Some((scripts, path)) = &mut self.script {
+                scripts.load(cx, path).expect("loaded");
+            }
+        }
+
         fn attach(&mut self, cx: &mut Context) {
-            cx.world_mut().spawn(Score { points: [0; 2] });
+            let score = cx.world_mut().spawn(Score { points: [0; 2] });
             if let Some(scene) = &self.scene {
                 cx.load_scene_file(scene).expect("loaded");
+            }
+            if self.script.is_some() {
+                cx.world_mut().add_default(score, "Spin").expect("added");
             }
         }
 
@@ -1144,6 +1164,9 @@ mod tests {
                 for score in world.query_mut::<&mut Score>() {
                     score.points[usize::from(player)] += points;
                 }
+            }
+            if let Some((scripts, _)) = &mut self.script {
+                scripts.run(world);
             }
         }
 
@@ -1466,6 +1489,74 @@ mod tests {
             let authors: Vec<&str> = logs.map(|(author, _)| author).collect();
             assert!(authors.contains(&"scenes/level.ron"), "{authors:?}");
         }
+    }
+
+    /// A joiner runs its host's scripts, which come with its world, whatever its own files hold;
+    /// and a script's save, which the host alone looks at, reloads on both peers before the same
+    /// tick, the component's fields changing on both.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_joiner_runs_its_host_s_scripts_which_reload_on_both_peers_as_they_re_saved() {
+        use std::fs;
+
+        use crate::dirs::tests::Scratch;
+
+        let spin = |fields: &str, step: u32| {
+            format!(
+                "local Spin = gg.declare(\"Spin\", {{ count = 0{fields} }})\n\
+                 function Spin.tick(entity, dt)\n\
+                     entity[Spin.count] = entity[Spin.count] + {step}\n\
+                 end\n\
+                 return Spin\n"
+            )
+        };
+        let game = |name: &str, text: &str| {
+            let dir = Scratch::new(name);
+            fs::create_dir_all(dir.0.join("scripts")).expect("a directory");
+            let path = dir.0.join("scripts").join("spin.luau");
+            fs::write(&path, text).expect("written");
+            let scripts = crate::Scripts::new().expect("Luau starts");
+            let game = Game {
+                script: Some((scripts, path.clone())),
+                ..Game::default()
+            };
+            (dir, path, game)
+        };
+        let (host_dir, path, ours) = game("net-script-host", &spin("", 1));
+        let mut host = Peer::host(Context::seeded(1).root(&host_dir.0), ours, 10);
+        let (joiner_dir, _, theirs) = game("net-script-joiner", &spin("", 100));
+        let address = host.net().listening.expect("listening").to_string();
+        let cx = Context::seeded(2).root(&joiner_dir.0);
+        let mut joiner = Peer::new(&Net::Join(address), cx, theirs);
+        join(&mut host, &mut joiner);
+        assert_eq!(joiner.cx.hosts.applied(), host.cx.hosts.applied());
+        let at = host.next.max(joiner.next) + 5;
+        meet(&mut host, &mut joiner, at);
+        assert_eq!(host.cx.world().hash(), joiner.cx.world().hash());
+
+        // Saved with a field more, which the joiner doesn't look for.
+        let saved = spin(", turned = true", 2);
+        fs::write(&path, &saved).expect("written");
+        crate::luau::look(&mut joiner.cx, &mut joiner.stack);
+        assert!(joiner.net().offered.is_empty());
+        crate::luau::look(&mut host.cx, &mut host.stack);
+        assert_eq!(host.net().offered.len(), 1);
+        let turned = |peer: &Peer| {
+            let world = peer.cx.world();
+            let spun = world.entities(Some("Spin")).expect("a type").next();
+            world
+                .get_field(spun.expect("one"), "Spin", "turned")
+                .is_ok()
+        };
+        until(&mut host, &mut joiner, |host, joiner| {
+            turned(host) && turned(joiner)
+        });
+        let met = host.next.max(joiner.next) + 5;
+        meet(&mut host, &mut joiner, met);
+        assert_eq!(host.cx.world().hash(), joiner.cx.world().hash());
+        let applied = vec![("scripts/spin.luau".to_owned(), saved)];
+        assert_eq!(host.cx.hosts.applied(), applied);
+        assert_eq!(joiner.cx.hosts.applied(), applied);
     }
 
     /// Patches `gg run` gives both peers alike: the host's, alone, applies before the tick

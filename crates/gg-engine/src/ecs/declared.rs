@@ -49,11 +49,35 @@ impl Kind {
     }
 }
 
-/// A declared type: its name, and its fields' names and kinds, in their order.
+/// A declared type: its name, and its fields' names and kinds, in their order, with their
+/// defaults.
 #[derive(Debug, PartialEq)]
 pub struct Declared {
     pub name: Ident,
     pub fields: Box<[(Ident, Kind)]>,
+    pub(super) defaults: Box<[Slot]>,
+}
+
+impl Declared {
+    /// Whether its fields are `fields`, each a name, a kind and a default, in their order.
+    pub(crate) fn declares(&self, fields: &[(Ident, Kind, Value)]) -> bool {
+        let ours = self.fields.iter().zip(&self.defaults);
+        self.fields.len() == fields.len()
+            && ours
+                .zip(fields)
+                .all(|(((name, kind), default), (given, of, value))| {
+                    name == given && kind == of && of.slot(value).ok().as_ref() == Some(default)
+                })
+    }
+
+    /// Pushes `row`, of `from`'s fields, onto `to` as a row of these: each field of a name and a
+    /// kind `from` has too as `row` holds it, and each other at its default.
+    fn fit(&self, from: &Self, row: &[Slot], to: &mut Vec<Slot>) {
+        for ((name, kind), default) in self.fields.iter().zip(&self.defaults) {
+            let kept = (from.fields.iter()).position(|(field, of)| field == name && of == kind);
+            to.push(kept.map_or(*default, |at| row[at]));
+        }
+    }
 }
 
 /// A field's value, of a declared type's row.
@@ -154,7 +178,13 @@ impl AnyColumn for Column {
 
     fn move_row(&mut self, row: usize, to: &mut dyn AnyColumn) {
         let to = Self::of(to);
-        to.slots.extend_from_slice(self.row(row));
+        if same(&self.declared, &to.declared) {
+            to.slots.extend_from_slice(self.row(row));
+        } else {
+            // Kept from before the type's fields changed, as a delete's undo keeps it.
+            to.declared
+                .fit(&self.declared, self.row(row), &mut to.slots);
+        }
         to.len += 1;
         self.swap_remove(row);
     }
@@ -221,7 +251,18 @@ impl AnyColumn for Column {
     }
 
     fn swap_row(&mut self, row: usize, with: &mut dyn AnyColumn) {
-        self.row_mut(row).swap_with_slice(Self::of(with).row_mut(0));
+        let with = Self::of(with);
+        if same(&self.declared, &with.declared) {
+            self.row_mut(row).swap_with_slice(with.row_mut(0));
+            return;
+        }
+        // Kept from before the type's fields changed: it comes back as they are now, and keeps
+        // the row it takes as they are too.
+        let mut fitted = Vec::with_capacity(self.declared.fields.len());
+        self.declared.fit(&with.declared, with.row(0), &mut fitted);
+        with.slots = self.row(row).to_vec();
+        with.declared = Arc::clone(&self.declared);
+        self.row_mut(row).copy_from_slice(&fitted);
     }
 
     fn copy_to(&self, to: &mut dyn AnyColumn) {
@@ -242,6 +283,24 @@ impl AnyColumn for Column {
             sum.wrapping_add(term)
         })
     }
+}
+
+/// Whether `a` and `b` are the same fields, as they are but where a type's fields changed between
+/// the rows of two columns.
+fn same(a: &Arc<Declared>, b: &Arc<Declared>) -> bool {
+    Arc::ptr_eq(a, b) || a == b
+}
+
+/// Has `column`, a declared type's, hold its rows as rows of `to`, the type's fields now, each
+/// field it holds of a name and a kind `to` has too as it holds it, and each other at its default.
+pub(super) fn migrate(column: &mut dyn AnyColumn, to: &Arc<Declared>) {
+    let column = Column::of(column);
+    let mut slots = Vec::with_capacity(column.len * to.fields.len());
+    for row in 0..column.len {
+        to.fit(&column.declared, column.row(row), &mut slots);
+    }
+    column.slots = slots;
+    column.declared = Arc::clone(to);
 }
 
 /// Whether `name` is an identifier: a letter or `_`, then letters, digits or `_`, as Luau's and
@@ -329,5 +388,70 @@ mod tests {
         assert_eq!(speed(&world, again), Value::F64(1.5));
         let refused = world.add_default(again, "Spin").expect_err("refused");
         assert_eq!(refused.code(), "reflect.has_component");
+    }
+
+    /// A type declared again holds each of its rows as its fields are now, in every table, those of
+    /// a name and a kind it had keeping their values and the rest taking their defaults; and so
+    /// does a component an undo puts back, which was taken before.
+    #[test]
+    fn a_type_declared_again_has_its_rows_and_those_put_back_hold_its_fields_as_they_are() {
+        use crate::{Log, Operation, Transform};
+
+        let mut world = World::default();
+        let fields = vec![
+            number("speed", 1.5),
+            ("on".into(), Kind::Bool, Value::Bool(true)),
+            number("gone", 2.0),
+        ];
+        let id = world.declare("Spin", "", fields).expect("declared");
+        let alone = world.spawn(());
+        let moved = world.spawn(Transform::IDENTITY);
+        let removed = world.spawn(());
+        for (i, entity) in [alone, moved, removed].into_iter().enumerate() {
+            world.add_default(entity, "Spin").expect("added");
+            let speed = Value::F64(i as f64);
+            world
+                .set_field(entity, "Spin", "speed", &speed)
+                .expect("set");
+        }
+        let mut log = Log::default();
+        let remove = Operation::Remove {
+            entity: world.id(removed).expect("alive"),
+            component: "Spin".into(),
+        };
+        log.apply_all(&mut world, vec![remove]).expect("removed");
+        let fields = vec![
+            ("toward".into(), Kind::Vector, Value::Vec3(Vec3::Y)),
+            number("on", 7.0),
+            number("speed", 9.0),
+        ];
+        let revision = world.components.revision();
+        world.redeclare(id, "", fields).expect("declared again");
+        let revised = world.components.revision();
+        assert_ne!(revised, revision, "the types' revision moves on");
+        let spin = |world: &World, entity, speed| {
+            let value = world.get_field(entity, "Spin", "").expect("a spin");
+            let expected = Value::Struct(vec![
+                ("toward".into(), Value::Vec3(Vec3::Y)),
+                ("on".into(), Value::F64(7.0)),
+                ("speed".into(), Value::F64(speed)),
+            ]);
+            assert_eq!(value, expected);
+        };
+        spin(&world, alone, 0.0);
+        spin(&world, moved, 1.0);
+        log.undo(&mut world).expect("undone");
+        spin(&world, removed, 2.0);
+        let again = world.spawn(());
+        world.add_default(again, "Spin").expect("added");
+        spin(&world, again, 9.0);
+        let bad = world.redeclare(id, "", vec![number("speed", f64::NAN)]);
+        assert_eq!(bad.expect_err("refused").code(), "reflect.bad_default");
+        spin(&world, alone, 0.0);
+        assert_eq!(
+            world.components.revision(),
+            revised,
+            "a refusal changes nothing"
+        );
     }
 }

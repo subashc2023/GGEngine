@@ -575,6 +575,17 @@ impl Types {
         index
     }
 
+    /// Describes the struct a script declared at `index` again, as `info`, which the caller has
+    /// checked is under its name, its fields having changed.
+    pub(crate) fn redeclare(&mut self, index: TypeIndex, info: TypeInfo) {
+        let entry = &mut self.entries[index.0 as usize];
+        debug_assert!(
+            entry.type_id == TypeId::of::<Declared>() && entry.info.name == info.name,
+            "a declared type is declared again under its name"
+        );
+        entry.info = info;
+    }
+
     /// The type named `name`, if there's one.
     pub fn find(&self, name: &str) -> Option<TypeIndex> {
         self.by_name.get(name).copied()

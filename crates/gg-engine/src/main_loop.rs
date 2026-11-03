@@ -204,7 +204,7 @@ pub(crate) fn start(
     #[cfg(feature = "dev")]
     {
         // Whether it hosts or plays alone, rather than joins.
-        let own = stack.watches_scenes();
+        let own = stack.watches_files();
         cx.start_assets(serves, serves && own);
         if own && let Some(snapshot) = &mut snapshot {
             snapshot.follow(cx.catalog());

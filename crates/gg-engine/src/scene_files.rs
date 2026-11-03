@@ -190,7 +190,7 @@ mod watch {
     /// [`Stack::offer_save`] says, and a joiner doesn't look.
     pub(crate) fn look(cx: &mut Context, stack: &mut Stack) {
         let now = Instant::now();
-        if !stack.watches_scenes()
+        if !stack.watches_files()
             || cx.scenes.files.is_empty()
             || cx
                 .scenes
@@ -1694,9 +1694,13 @@ pub(crate) mod tests {
             open: edited.clone(),
             ticks: 0,
         };
-        let world = cx.world();
-        let text = snapshot::write(world, &cx.scenes.files, &played, &run, "Tested", &[], 3);
-        let text = text.expect("written");
+        let of = snapshot::Of {
+            world: cx.world(),
+            scenes: &cx.scenes.files,
+            open: &played,
+            scripts: &[],
+        };
+        let text = snapshot::write(&of, &run, "Tested", &[], 3).expect("written");
         assert_eq!(stack.stop(&mut cx), Some(0));
         assert_eq!(cx.scenes.open, edited);
         let restore = |text: &str| {

@@ -1368,18 +1368,19 @@ mod tests {
         }
     }
 
-    /// A script reloaded between ticks is recorded as an edit, as it was saved, and replays to the
-    /// hashes recorded, reloading there, its file as it was as the run started.
+    /// A script reloaded between ticks, its component given a field, is recorded as an edit, as it
+    /// was saved, and replays to the hashes recorded, reloading there, its entity's component
+    /// given the field there too, its file as it was as the run started.
     #[cfg(feature = "dev")]
     #[test]
     fn a_script_reloaded_between_ticks_replays() {
         let dir = Scratch::new("recording-script");
         fs::create_dir_all(&dir.0).expect("a directory");
         let path = dir.0.join("step.luau");
-        let script = |step: u32| {
+        let script = |fields: &str, step: &str| {
             format!(
                 "local Transform = gg.component(\"Transform\")\n\
-                 local Step = gg.declare(\"Step\", {{}})\n\
+                 local Step = gg.declare(\"Step\", {{ {fields} }})\n\
                  function Step.tick(entity, dt)\n\
                      entity[Transform.translation] = entity[Transform.translation]\n\
                          + vector.create({step}, 0, 0)\n\
@@ -1387,7 +1388,7 @@ mod tests {
                  return Step\n"
             )
         };
-        fs::write(&path, script(1)).expect("written");
+        fs::write(&path, script("", "1")).expect("written");
         let app = || {
             let scripts = crate::Scripts::new().expect("Luau starts");
             let path = path.clone();
@@ -1401,9 +1402,9 @@ mod tests {
             if frame == 4 {
                 let edit = Edit::Script {
                     path: name.clone(),
-                    text: script(10),
+                    text: script("by = 10", "entity[Step.by]"),
                 };
-                stack.edit(cx, edit).expect("queued");
+                stack.edit(cx, edit).expect("reloaded");
             }
         });
         let edits: Vec<&str> = text.lines().filter(|line| line.starts_with("@ ")).collect();
@@ -1418,6 +1419,9 @@ mod tests {
             Some((3 + 10 * (ticks - 3)) as f32),
             "reloaded at the fourth tick"
         );
+        let stepped = ended.entities(Some("Step")).expect("a type").next();
+        let by = ended.get_field(stepped.expect("stepped"), "Step", "by");
+        assert_eq!(by.expect("its field"), crate::reflect::Value::F64(10.0));
         let replayed = replay_all(app(), &text).map_err(|(_, error)| error.to_string());
         assert_eq!(replayed, Ok((ticks, ended.hash())));
     }

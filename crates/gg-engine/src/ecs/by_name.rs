@@ -7,7 +7,7 @@ use std::slice;
 
 use gg_core::{Error, Result};
 
-use super::declared::{Declared, Kind};
+use super::declared::{self, Declared, Kind};
 use super::id::Named;
 use super::table::{AnyColumn, ComponentId, Table};
 use super::{Component, Entity, Location, Parent, World};
@@ -40,7 +40,8 @@ impl World {
     /// The default of component type `component`, as [`Types::default_value`] makes it, and as
     /// an add of it makes it: what's opaque, from [`Component::base`]. So what it returns adds,
     /// as [`Operation::Add`](crate::Operation::Add)'s value; descriptions don't change once
-    /// they're registered, so it's the same each time.
+    /// they're registered, but for a script's as it declares it again, so it's the same each time
+    /// until then.
     ///
     /// Fails with `reflect.unknown_type` if no component type is named `component`; as
     /// `default_value` does, such as with `reflect.no_default` for an entity; and as an add does
@@ -260,6 +261,36 @@ impl World {
         fields: Vec<(Ident, Kind, Value)>,
     ) -> Result<ComponentId> {
         self.components.declare(name, doc, fields)
+    }
+
+    /// Declares type `id`, which a script declared, again, as [`Components::redeclare`] does: its
+    /// fields now `fields`, and its doc `doc`; and has each of its components hold them, as
+    /// [`declared::migrate`] says.
+    ///
+    /// Fails as `redeclare` does, changing nothing.
+    ///
+    /// [`Components::redeclare`]: super::table::Components::redeclare
+    pub(crate) fn redeclare(
+        &mut self,
+        id: ComponentId,
+        doc: &str,
+        fields: Vec<(Ident, Kind, Value)>,
+    ) -> Result<()> {
+        let declared = self.components.redeclare(id, doc, fields)?;
+        for table in &mut self.tables {
+            if let Some(at) = table.position(id) {
+                declared::migrate(&mut *table.columns[at], &declared);
+            }
+        }
+        Ok(())
+    }
+
+    /// What names the world's types as they are, as [`Components::revision`] says.
+    ///
+    /// [`Components::revision`]: super::table::Components::revision
+    #[cfg(feature = "dev")]
+    pub(crate) fn types_revision(&self) -> u64 {
+        self.components.revision()
     }
 
     /// The id of component type `name`, if there's one.

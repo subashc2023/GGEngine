@@ -301,7 +301,9 @@ impl Default for World {
 static WORLDS: AtomicU64 = AtomicU64::new(0);
 
 /// A serial no other world has had, for a world made, copied, restored, cleared, renewed or
-/// replaced.
+/// replaced; and so for its types' revision as they change, as [`Components::revision`] says.
+///
+/// [`Components::revision`]: table::Components::revision
 fn next_serial() -> u64 {
     WORLDS.fetch_add(1, Ordering::Relaxed)
 }

@@ -32,6 +32,9 @@ pub struct Components {
     /// By name; looked up, never iterated.
     by_name: HashMap<Ident, ComponentId>,
     types: Types,
+    /// What names the types as they are, which each change to them changes, to a number no
+    /// other world's types have had.
+    revision: u64,
 }
 
 #[derive(Clone)]
@@ -124,6 +127,7 @@ impl Components {
         });
         self.ids.insert(TypeId::of::<T>(), id);
         self.by_name.insert(name, id);
+        self.revision = super::next_serial();
         Ok(id)
     }
 
@@ -152,65 +156,9 @@ impl Components {
                 format!("`{name}` names {what} already, {rust}, but each type's name is its own"),
             ));
         }
-        let names = iter::once(name).chain(fields.iter().map(|(field, ..)| &**field));
-        if let Some(bad) = names.clone().find(|name| !is_identifier(name)) {
-            return Err(Error::new(
-                "reflect.bad_name",
-                format!(
-                    "`{bad}` isn't an identifier: a letter or `_`, then letters, digits or `_`"
-                ),
-            ));
-        }
-        for (i, (field, ..)) in fields.iter().enumerate() {
-            if fields[..i].iter().any(|(other, ..)| other == field) {
-                return Err(Error::new(
-                    "reflect.bad_name",
-                    format!("`{name}` has two fields named `{field}`, but each field's is its own"),
-                ));
-            }
-        }
-        for (field, kind, default) in &fields {
-            let refused = |what: &dyn std::fmt::Display| {
-                Error::new(
-                    "reflect.bad_default",
-                    format!("`{name}`'s field `{field}` defaults to a value it refuses: {what}"),
-                )
-            };
-            kind.slot(default)
-                .map_err(|error| refused(&reflect::located(&error).1))?;
-            // So that a default compares equal to itself, as a reload compares them.
-            let finite = match default {
-                Value::F64(x) => x.is_finite(),
-                Value::Vec3(v) => v.is_finite(),
-                _ => true,
-            };
-            if !finite {
-                return Err(refused(&"a number that isn't finite"));
-            }
-        }
-        let name: Ident = Cow::Owned(name.to_owned());
-        let declared = Arc::new(Declared {
-            name: name.clone(),
-            fields: fields
-                .iter()
-                .map(|(field, kind, _)| (field.clone(), *kind))
-                .collect(),
-        });
-        let index = self.types.declare(TypeInfo {
-            name: name.clone(),
-            doc: Cow::Owned(doc.to_owned()),
-            shape: Shape::Struct {
-                fields: (fields.into_iter())
-                    .map(|(name, kind, default)| reflect::Field {
-                        name,
-                        ty: kind.ty(),
-                        meta: Meta::default(),
-                        default: Some(default),
-                    })
-                    .collect(),
-                tuple: false,
-            },
-        });
+        let (declared, info) = described(name, doc, fields)?;
+        let name = declared.name.clone();
+        let index = self.types.declare(info);
         let id = ComponentId(u32::try_from(self.infos.len()).expect("fewer than 2^32 types"));
         self.infos.push(Info {
             key: hash::type_key(&name),
@@ -220,7 +168,36 @@ impl Components {
             new_column: NewColumn::Declared(declared),
         });
         self.by_name.insert(name, id);
+        self.revision = super::next_serial();
         Ok(id)
+    }
+
+    /// Declares type `id`, which a script declared, again, as [`declare`](Self::declare) declares
+    /// one, under its name and its id: its fields now `fields`, and its doc `doc`. Returns its
+    /// fields, which each of its columns then [migrates](declared::migrate) its rows to.
+    ///
+    /// Fails as `declare` does, but for its name, which is its own; and with `reflect.name_taken`
+    /// if `id` is a Rust type's.
+    pub fn redeclare(
+        &mut self,
+        id: ComponentId,
+        doc: &str,
+        fields: Vec<(Ident, Kind, Value)>,
+    ) -> Result<Arc<Declared>> {
+        let info = &self.infos[id.0 as usize];
+        if let NewColumn::Rust(_) = info.new_column {
+            let (_, rust) = self.types.rust_type(info.index);
+            return Err(Error::new(
+                "reflect.name_taken",
+                format!("`{}` names {rust}, which no script declares", info.name),
+            ));
+        }
+        let (declared, described) = described(&info.name, doc, fields)?;
+        let info = &mut self.infos[id.0 as usize];
+        info.new_column = NewColumn::Declared(Arc::clone(&declared));
+        self.types.redeclare(info.index, described);
+        self.revision = super::next_serial();
+        Ok(declared)
     }
 
     /// The fields of declared type `id`, its names and kinds; `None` if it's a Rust type.
@@ -288,12 +265,91 @@ impl Components {
         &self.types
     }
 
+    /// What names the types as they are, as a type registers or a script declares one, or declares
+    /// one again: another number for each change, which no other world's types have had.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     /// Whether `other` has seen the same types as these, in the same order, so that its ids name
     /// the same types: those described, and the component types among them.
     pub(super) fn same(&self, other: &Self) -> bool {
         let indices = self.infos.iter().map(|info| info.index);
         self.types.same(&other.types) && indices.eq(other.infos.iter().map(|info| info.index))
     }
+}
+
+/// The fields of the type a script declares as `name`, of `fields`, each a name, a kind and a
+/// default, and its description, with `doc` for its doc, as [`Components::declare`] declares it.
+///
+/// Fails as `declare` does, but for a name another type has.
+fn described(
+    name: &str,
+    doc: &str,
+    fields: Vec<(Ident, Kind, Value)>,
+) -> Result<(Arc<Declared>, TypeInfo)> {
+    let names = iter::once(name).chain(fields.iter().map(|(field, ..)| &**field));
+    if let Some(bad) = names.clone().find(|name| !is_identifier(name)) {
+        return Err(Error::new(
+            "reflect.bad_name",
+            format!("`{bad}` isn't an identifier: a letter or `_`, then letters, digits or `_`"),
+        ));
+    }
+    for (i, (field, ..)) in fields.iter().enumerate() {
+        if fields[..i].iter().any(|(other, ..)| other == field) {
+            return Err(Error::new(
+                "reflect.bad_name",
+                format!("`{name}` has two fields named `{field}`, but each field's is its own"),
+            ));
+        }
+    }
+    let mut defaults = Vec::with_capacity(fields.len());
+    for (field, kind, default) in &fields {
+        let refused = |what: &dyn std::fmt::Display| {
+            Error::new(
+                "reflect.bad_default",
+                format!("`{name}`'s field `{field}` defaults to a value it refuses: {what}"),
+            )
+        };
+        let slot = kind
+            .slot(default)
+            .map_err(|error| refused(&reflect::located(&error).1))?;
+        // So that a default compares equal to itself, as a reload compares them.
+        let finite = match default {
+            Value::F64(x) => x.is_finite(),
+            Value::Vec3(v) => v.is_finite(),
+            _ => true,
+        };
+        if !finite {
+            return Err(refused(&"a number that isn't finite"));
+        }
+        defaults.push(slot);
+    }
+    let name: Ident = Cow::Owned(name.to_owned());
+    let declared = Arc::new(Declared {
+        name: name.clone(),
+        fields: fields
+            .iter()
+            .map(|(field, kind, _)| (field.clone(), *kind))
+            .collect(),
+        defaults: defaults.into(),
+    });
+    let info = TypeInfo {
+        name,
+        doc: Cow::Owned(doc.to_owned()),
+        shape: Shape::Struct {
+            fields: (fields.into_iter())
+                .map(|(name, kind, default)| reflect::Field {
+                    name,
+                    ty: kind.ty(),
+                    meta: Meta::default(),
+                    default: Some(default),
+                })
+                .collect(),
+            tuple: false,
+        },
+    };
+    Ok((declared, info))
 }
 
 /// The entities with one set of component types, a row each: each column holds one type's

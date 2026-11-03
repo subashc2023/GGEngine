@@ -89,13 +89,12 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **The editor's hub, its Scenes panel and the showcase** (2026-11-02)
 - **Hardening** (2026-11-02)
 - **Luau scripts** (2026-11-02)
+- **Scripts in the editor and in lockstep** (2026-11-02)
 
 ## Now
 
-**Scripts in the editor and in lockstep**, Phase 9's second milestone: a reload that changes a
-script's fields migrating its components in place, the Inspector and the tool API following, and
-both peers of a lockstep session reloading at the tick the host chooses; its plan says when it's
-done.
+**Debugging scripts**, Phase 9's third milestone: breakpoints, pause and step in a script, the game
+waiting rather than hung; its plan says when it's done.
 
 ## Next
 
@@ -337,7 +336,8 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Spawning many entities at once, faster than one by one: 100,000 sprites take about 16 ms in release, 5.5 ms of it their IDs, and the swarm spawns its 100,000 in one tick, longer than a tick is. A load spawns its entities one by one too, building each component from a value into a column of its own: 100,000 sprites, 45 MB of text, load in about 650 ms in release | A spawn hitch matters, or a scene's load time |
 | Micro-benchmarks, with criterion | A CPU hot path gets a target of its own; batching's is a frame time, which `engine.perf` measures |
 | Gates on time in CI: hosted runners' times vary too much to gate on | A self-hosted runner, as for the GPU tests |
-| Aliases for renamed fields, variants and component types, which a restart and a scene would match values by: a restart drops a field, a variant or a type it doesn't find, and a scene refuses one, as it refuses a field its type hasn't, against typos; and tuple fields reordered among themselves, which match by their places | Someone renames a field whose values they want kept |
+| Aliases for renamed fields, variants and component types, which a restart, a scene and a script's reload would match values by: a restart drops a field, a variant or a type it doesn't find, and a scene refuses one, as it refuses a field its type hasn't, against typos; a script's reload drops a field renamed, the new one taking its default, and refuses to rename its component (`script.renamed`); and tuple fields reordered among themselves, which match by their places | Someone renames a field whose values they want kept |
+| Undoing, across a script's reload that changed its component's fields, a set of a field the reload dropped, or of the whole component as it was: refused, as such a set made now is; what a delete or a remove took comes back with the fields as they are | Someone undoes across such reloads, as an agent editing a script and its entities together would |
 | In the Inspector, turning an option on or off, and adding or removing a list's elements; by path, a value sets them whole | A component needs one edited |
 | Flags for fields that saving, the world's hash or replication skip, and fields that are read only; `Parent` is read only as a whole type, which `set_field` refuses | Each with its first user |
 | Generic types deriving `Reflect` or `Component` | A game needs one |

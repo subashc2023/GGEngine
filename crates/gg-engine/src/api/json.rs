@@ -539,6 +539,7 @@ pub(super) fn describe(world: &World) -> gg_api::Types {
     gg_api::Types {
         components: components.collect(),
         types: described.collect(),
+        revision: world.types_revision(),
     }
 }
 
@@ -938,7 +939,11 @@ mod tests {
             default,
             refused: None,
         };
-        let types = |components, types| gg_api::Types { components, types };
+        let types = |components, types| gg_api::Types {
+            components,
+            types,
+            revision: 1,
+        };
         let byte = gg_api::Type::Int {
             bits: 8,
             signed: false,
