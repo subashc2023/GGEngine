@@ -9,6 +9,8 @@ use std::mem;
 use egui::{Rect, Vec2};
 use serde::{Deserialize, Serialize};
 
+use super::Docked;
+
 /// A node's identity while the app runs, which egui's ids and a group's window are made from.
 /// Nodes get new ones each run.
 pub(crate) type NodeId = u64;
@@ -53,23 +55,6 @@ pub(crate) enum Side {
 pub(crate) enum Zone {
     Center,
     Side(Side),
-}
-
-/// Where an app docks one of its panels as it first shows, as [`App::dock`](crate::App::dock)
-/// gives it: beside the panel named, or among its tabs, while that panel is docked in the main
-/// window.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Docked {
-    /// Left of the panel named, taking a quarter of the view's panel or half of another's.
-    LeftOf(&'static str),
-    /// Right of the panel named, taking a quarter of the view's panel or half of another's.
-    RightOf(&'static str),
-    /// Above the panel named, taking a quarter of the view's panel or half of another's.
-    Above(&'static str),
-    /// Below the panel named, taking a quarter of the view's panel or half of another's.
-    Below(&'static str),
-    /// Among the tabs of the panel named, whose group goes on showing the tab it showed.
-    With(&'static str),
 }
 
 impl Docked {

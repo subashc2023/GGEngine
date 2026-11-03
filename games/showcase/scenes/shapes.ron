@@ -133,6 +133,7 @@
             Bob: (
                 height: 0.45,
                 period: 1.6,
+                time: 0.0,
             ),
             Circle: (
                 color: (0.17500001, 0.625, 0.675, 1.0),
@@ -150,6 +151,7 @@
             Bob: (
                 height: 0.45,
                 period: 2.0,
+                time: 0.0,
             ),
             Circle: (
                 color: (0.2, 0.8, 0.35, 1.0),
@@ -180,6 +182,7 @@
             Bob: (
                 height: 0.45,
                 period: 1.8000001,
+                time: 0.0,
             ),
             Circle: (
                 color: (0.1875, 0.71250004, 0.5125, 1.0),
@@ -215,6 +218,7 @@
             Bob: (
                 height: 0.45,
                 period: 1.4000001,
+                time: 0.0,
             ),
             Circle: (
                 color: (0.16250001, 0.53749996, 0.8375, 1.0),
@@ -287,6 +291,7 @@
             Bob: (
                 height: 0.45,
                 period: 1.2,
+                time: 0.0,
             ),
             Circle: (
                 color: (0.15, 0.45, 1.0, 1.0),

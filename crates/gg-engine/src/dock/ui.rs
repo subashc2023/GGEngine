@@ -22,8 +22,8 @@ use egui::{
 use gg_renderer::{ViewCallback, Viewport};
 use tracing::warn;
 
-use super::file;
-use super::tree::{Arrangement, Axis, CENTRAL, Docked, Layout, NodeId, Place, Side, Zone};
+use super::tree::{Arrangement, Axis, CENTRAL, Layout, NodeId, Place, Side, Zone};
+use super::{Docked, file};
 #[cfg(target_os = "windows")]
 use crate::chrome::Caption;
 use crate::chrome::{self, Chrome, Icon, Look, Sidebar, TitleBar};

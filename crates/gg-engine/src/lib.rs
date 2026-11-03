@@ -19,7 +19,8 @@
 //! which windowed runs keep;
 //! and in development builds, behind `dev`, reading a game's project's manifest and its assets' ID
 //! files, reloading games' shaders, textures, models, fonts, sounds and music as their files
-//! change, and the OS's file dialogs.
+//! change, the OS's file dialogs, and the UI, egui's, which layers draw through `Ui`: the dock, the
+//! title bars it draws, and the Inspector's and the Performance panel's panels.
 //!
 //! An app's `main` starts the engine; there is no separate entry-point crate.
 
@@ -35,6 +36,8 @@ mod assets;
 mod audio;
 mod camera;
 mod canvas;
+// In development builds alone, as `dev` has the UI.
+#[cfg(feature = "dev")]
 mod chrome;
 #[doc(hidden)]
 pub mod cook;
@@ -43,6 +46,12 @@ mod cooked;
 #[cfg(feature = "dev")]
 mod dialog;
 mod dirs;
+// The dock in development builds, as `dev` has the UI; in a build without it, the dock's items that
+// games name, which do nothing, as its `none.rs` says.
+#[cfg(feature = "dev")]
+mod dock;
+#[cfg(not(feature = "dev"))]
+#[path = "dock/none.rs"]
 mod dock;
 mod draw;
 mod ecs;
@@ -57,6 +66,12 @@ pub mod grid;
 mod hot_reload;
 mod image;
 mod input;
+// The Inspector in development builds, as `dev` has the UI; in a build without it, its items that
+// games name, which do nothing, as its `none.rs` says.
+#[cfg(feature = "dev")]
+mod inspector;
+#[cfg(not(feature = "dev"))]
+#[path = "inspector/none.rs"]
 mod inspector;
 mod interpolation;
 mod jobs;
@@ -64,6 +79,10 @@ mod layer;
 mod loader;
 mod luau;
 mod main_loop;
+// The OS's counts of the process's memory come through its C functions on Windows and macOS, which
+// only unsafe code calls: this module alone may use it.
+#[allow(unsafe_code)]
+mod memory;
 mod model;
 mod name;
 mod net;
@@ -88,12 +107,17 @@ mod snapshot;
 #[cfg(test)]
 mod testing;
 mod transform;
+// In development builds alone, as `dev` has the UI.
+#[cfg(feature = "dev")]
 mod view_input;
+// In development builds alone, as `dev` has the UI.
+#[cfg(feature = "dev")]
 mod viewports;
 mod window;
 // Windows' own frame around a window whose title bar the UI draws needs a window procedure in
-// front of winit's, which only unsafe code installs: this module alone may use it.
-#[cfg(target_os = "windows")]
+// front of winit's, which only unsafe code installs: this module alone may use it, in development
+// builds alone, as `dev` has the UI.
+#[cfg(all(target_os = "windows", feature = "dev"))]
 #[allow(unsafe_code)]
 mod windows_frame;
 // A file only its owner can open, as the tool API's session file is, is created on Windows with a
@@ -133,7 +157,7 @@ pub use ecs::{
     read_scene, write_scene,
 };
 /// The UI library layers draw with, in [`Layer::ui`]; apps use it from here, so that they
-/// share the engine's version.
+/// share the engine's version. A build without `dev`, which has no UI, keeps it for its types.
 pub use egui;
 pub use event::{Event, Key, MouseButton, Pad, PadButton, Scroll, Stick, Trigger};
 pub use font::{Align, Font, Text, TextStyle};
@@ -192,10 +216,13 @@ const BUILD: &str = if cfg!(debug_assertions) {
 pub struct App {
     name: &'static str,
     stack: Stack,
+    #[cfg(feature = "dev")]
     custom_title_bar: bool,
     /// The panel that shows the game's view, in a dock that fills the main window.
+    #[cfg(feature = "dev")]
     view_panel: Option<&'static str>,
     /// Where panels dock as they first show, in the order the app gave them.
+    #[cfg(feature = "dev")]
     docked: Vec<(&'static str, Docked)>,
     /// What the world's IDs are drawn from, rather than a seed drawn at random.
     seed: Option<u64>,
@@ -209,11 +236,16 @@ pub struct App {
     project: Option<Result<Manifest>>,
     /// The project's start scene, as its manifest or its package names it.
     start: Option<PathBuf>,
+    /// Whether the run reads its files from a game's package whatever its build, as
+    /// [`from_package`](Self::from_package) says.
+    from_package: bool,
     /// Where the run reads the files under its asset root: its game's package, once the run has
     /// opened it, or the disk.
     files: Files,
     /// The folder of the mods the run runs, as `--mods` names it, in place of those installed.
     mods: Option<PathBuf>,
+    /// When the engine started, as [`run`] began, which the run's load is timed from.
+    started: Option<Instant>,
 }
 
 impl App {
@@ -222,8 +254,11 @@ impl App {
         Self {
             name,
             stack: Stack::default(),
+            #[cfg(feature = "dev")]
             custom_title_bar: false,
+            #[cfg(feature = "dev")]
             view_panel: None,
+            #[cfg(feature = "dev")]
             docked: Vec::new(),
             seed: None,
             headless_step: None,
@@ -231,8 +266,10 @@ impl App {
             project_dir: None,
             project: None,
             start: None,
+            from_package: false,
             files: Files::default(),
             mods: None,
+            started: None,
         }
     }
 
@@ -260,9 +297,9 @@ impl App {
     /// A build without `dev` reads no manifest, as shipping builds start from cooked data: it runs
     /// from the game's package, which `tools/cook` writes, the files under the asset root as the
     /// package holds them, and its start scene the one the package names, as ARCHITECTURE.md's
-    /// Project state says; the package is `<executable>.ggpk` beside the executable, or the one
-    /// `--package` names, which a development build runs from too, in place of the files
-    /// themselves.
+    /// Project state says; the package is `<executable>.ggpk` beside the executable, in a macOS
+    /// app's bundle in its `Contents/Resources`, or the one `--package` names, which a development
+    /// build runs from too, in place of the files themselves.
     #[must_use]
     pub fn project(mut self, dir: impl AsRef<Path>) -> Self {
         let dir = dir.as_ref();
@@ -279,6 +316,21 @@ impl App {
         self
     }
 
+    /// Makes the app run from a game's package, in any build, as the reference player does, which
+    /// runs a game without its code: the package `--package` names, or else `<executable>.ggpk`
+    /// beside its executable, in a macOS app's bundle in its `Contents/Resources`, as
+    /// [`project`](Self::project) says, a run without one failing as it starts
+    /// (`engine.no_package`). The run names its assets by the package's IDs, from the asset root
+    /// the package names, under the package's directory, or the project's for an app that's a
+    /// project's game too, and its start scene is the package's,
+    /// which [`Context::load_start_scene`] loads, as a project's game built without `dev` has
+    /// them; [`Context::package_files`] lists what the package holds.
+    #[must_use]
+    pub fn from_package(mut self) -> Self {
+        self.from_package = true;
+        self
+    }
+
     /// Has the run read the files under its asset root from the game's package at `path`, as
     /// `--package` has it: for tests, whose arguments are their harness's.
     ///
@@ -290,21 +342,21 @@ impl App {
     }
 
     /// Has the run read the files under its asset root from its game's package: the one at
-    /// `given`, as `--package` names it, or, in a build without `dev`, a project's game's, at
-    /// `<executable>.ggpk` beside its executable, as [`project`](Self::project) says, unless
-    /// [`package`](Self::package) gave one. The package names the asset root from the project's
-    /// directory, or from its own, for an app that isn't a project's game, and the start scene.
+    /// `given`, as `--package` names it, or, for an app [`from_package`](Self::from_package)
+    /// made, and in a build without `dev` a project's game's, at `<executable>.ggpk` beside its
+    /// executable, as [`project`](Self::project) says, unless [`package`](Self::package) gave one.
+    /// The package names the asset root from the project's directory, or from its own, for an app
+    /// that isn't a project's game, and the start scene.
     ///
-    /// Fails as [`Package::open`] does, and with `engine.no_package` for a project's game built
-    /// without `dev` without a package beside it.
+    /// Fails as [`Package::open`] does, and with `engine.no_package` for an app that runs from a
+    /// package without one beside it.
     fn open_package(&mut self, given: Option<&Path>) -> Result<()> {
+        let shipped = !cfg!(feature = "dev") && self.project_dir.is_some();
         let path = match given {
             Some(path) => path.to_owned(),
-            None if !cfg!(feature = "dev")
-                && self.project_dir.is_some()
-                && self.files.packaged().is_none() =>
-            {
-                let path = std::env::current_exe().map(|exe| exe.with_extension("ggpk"));
+            None if (self.from_package || shipped) && self.files.packaged().is_none() => {
+                let path =
+                    std::env::current_exe().map(|exe| package_beside(&exe, std::env::consts::OS));
                 match path {
                     Ok(path) if path.is_file() => path,
                     path => {
@@ -312,9 +364,14 @@ impl App {
                             |_| "<executable>.ggpk".to_owned(),
                             |path| path.display().to_string(),
                         );
+                        let runs = if self.from_package {
+                            "the app runs from a game's package"
+                        } else {
+                            "a build without `dev` runs from its game's package"
+                        };
                         let message = format!(
-                            "a build without `dev` runs from its game's package, {path}, which \
-                             isn't there: `tools/cook` writes it, or `--package` names another"
+                            "{runs}, {path}, which isn't there: `tools/cook` writes it, or \
+                             `--package` names another"
                         );
                         return Err(Error::new("engine.no_package", message));
                     }
@@ -381,11 +438,14 @@ impl App {
     /// the layers' menus, which opens and closes panels and saves, loads and resets the layout;
     /// gives tabs a menu that closes their panels; and puts buttons in the title bar that hide and
     /// show the panels left of, below and right of the game's view, as [`Ui::menu`] and
-    /// [`Ui::panel`] say.
+    /// [`Ui::panel`] say. A build without `dev`, which has no UI, keeps the OS's frame.
     #[must_use]
-    pub fn custom_title_bar(mut self) -> Self {
-        self.custom_title_bar = true;
-        self
+    pub fn custom_title_bar(self) -> Self {
+        Self {
+            #[cfg(feature = "dev")]
+            custom_title_bar: true,
+            ..self
+        }
     }
 
     /// Shows the game's view in a panel of its own, `name`, which the user docks and floats as the
@@ -397,11 +457,16 @@ impl App {
     /// [`Ui::over_view`] shows over it, gives and a press anywhere else takes, or the cursor is
     /// over either while egui drags none of its own widgets; it has focus as the app starts.
     /// Modifier keys reach them wherever they're pressed while no widget of egui's has focus, and
-    /// releases wherever they come.
+    /// releases wherever they come. A build without `dev`, which has no UI, changes nothing: the
+    /// view fills the window, and its input goes to the layers.
     #[must_use]
-    pub fn view_panel(mut self, name: &'static str) -> Self {
-        self.view_panel = Some(name);
-        self
+    pub fn view_panel(self, name: &'static str) -> Self {
+        let _ = name;
+        Self {
+            #[cfg(feature = "dev")]
+            view_panel: Some(name),
+            ..self
+        }
     }
 
     /// Docks panel `panel` where `docked` says as it first shows in a layout that doesn't hold
@@ -412,7 +477,8 @@ impl App {
     /// them, whatever order the layers show them in. A target the layout doesn't hold yet stands
     /// for its own target, if the app gives it one, and so on: a panel that shows before its
     /// target docks beside the target's target, where it stays once the target shows. A panel
-    /// whose target floats, or comes to none, floats, as the panels the app doesn't dock do.
+    /// whose target floats, or comes to none, floats, as the panels the app doesn't dock do. A
+    /// build without `dev`, which has no UI, changes nothing.
     ///
     /// Three of the editor's panels dock around its view, the Inspector taking a quarter of the
     /// window, Entities a quarter of the rest, and Performance below the Inspector:
@@ -428,9 +494,13 @@ impl App {
     ///     .dock("Performance", Docked::Below("Inspector"));
     /// ```
     #[must_use]
-    pub fn dock(mut self, panel: &'static str, docked: Docked) -> Self {
-        self.docked.push((panel, docked));
-        self
+    pub fn dock(self, panel: &'static str, docked: Docked) -> Self {
+        let _ = (panel, docked);
+        Self {
+            #[cfg(feature = "dev")]
+            docked: [self.docked, vec![(panel, docked)]].concat(),
+            ..self
+        }
     }
 }
 
@@ -438,8 +508,8 @@ impl App {
 /// with `--replay`, replays a recording of it.
 ///
 /// It parses the flags every app shares, which `--help` lists, and starts logging. The status is
-/// 0 on success, 1 on an error, a Vulkan validation message or a replay that goes another way,
-/// and 2 on bad arguments.
+/// 0 on success, 1 on an error, the engine's or a layer's, as [`Context::fail`] says, a Vulkan
+/// validation message or a replay that goes another way, and 2 on bad arguments.
 pub fn run(app: App) -> ExitCode {
     let started = Instant::now();
     let mut argv = std::env::args_os();
@@ -485,7 +555,7 @@ fn run_args(
 
     // An embedded run's tool reads its events through the tool API's `logs`, and its stderr too,
     // which would show each a second time.
-    let log = gg_core::log::init(app.name, &beside_exe("logs"), !args.embedded);
+    let log = gg_core::log::init(app.name, &log_dir(app.name), !args.embedded);
     info!(
         version = env!("CARGO_PKG_VERSION"),
         app = app.name,
@@ -522,6 +592,7 @@ fn run_args(
         return ExitCode::FAILURE;
     }
     app.mods.clone_from(&args.mods);
+    app.started = Some(started);
     // Before the replay too, which ticks on them as a run does.
     if let Err(error) = jobs::start(args.threads) {
         error!(code = error.code(), "{error:#}");
@@ -580,7 +651,7 @@ fn run_args(
         }
     });
     match ran {
-        Ok(ran) => ran.report(started, &args),
+        Ok(ran) => ran.report(started, &args, app.stack.failed()),
         Err(error) => {
             error!(code = error.code(), "{error:#}");
             ExitCode::FAILURE
@@ -644,6 +715,7 @@ pub const BOLD: &str = "Bold";
 /// which follows the OS's. The fonts are in the binary, and egui parses a family's as it first lays
 /// out text in it. Without egui's shortcut that closes the window, Ctrl or Cmd+Q: a game may use
 /// those keys, and apps quit from their own menus.
+#[cfg(feature = "dev")]
 fn egui_context() -> egui::Context {
     let egui = egui::Context::default();
     egui.options_mut(|options| options.quit_shortcuts.clear());
@@ -679,6 +751,7 @@ fn egui_context() -> egui::Context {
 /// roomy as Fluent's and JetBrains' menus' are rather than egui's 2 and 0, so that the light under
 /// the pointer frames an item's text, rounded 4 points as theirs are. For each menu the engine
 /// shows, and those its menus open, which take their parent's style.
+#[cfg(feature = "dev")]
 pub(crate) fn menu_style(style: &mut egui::Style) {
     egui::menu::menu_style(style);
     style.spacing.button_padding = egui::vec2(8.0, 4.0);
@@ -690,7 +763,7 @@ pub(crate) fn menu_style(style: &mut egui::Style) {
 
 /// The directory `name` beside the executable, such as `target/debug/logs` for `cargo run`'s
 /// logs, or in the working directory if the executable's path isn't known: where runs write their
-/// logs, and development builds the tool API's session files and captures.
+/// logs, as [`log_dir`] says, and development builds the tool API's session files and captures.
 pub(crate) fn beside_exe(name: &str) -> PathBuf {
     std::env::current_exe()
         .ok()
@@ -698,14 +771,87 @@ pub(crate) fn beside_exe(name: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(name))
 }
 
+/// Where a run of app `name`, as [`App::new`] names it, writes its JSON log, as ARCHITECTURE.md's
+/// Diagnostics says: in a development build, `logs` beside the executable, `target/debug/logs` for
+/// `cargo run`'s, where agents find it; in a build without `dev`, which ships where its
+/// executable's directory may not be written, as Program Files or a signed .app, `logs` in the
+/// app's directory of what it keeps for the user, or beside the executable without the variables
+/// that directory needs. Public for tests, which read the log.
+#[doc(hidden)]
+pub fn log_dir(name: &str) -> PathBuf {
+    if !cfg!(feature = "dev")
+        && let Some(dir) = dirs::dir(name, dirs::Kind::State, std::env::consts::OS, |var| {
+            std::env::var_os(var)
+        })
+    {
+        return dir.join("logs");
+    }
+    beside_exe("logs")
+}
+
+/// Where a run looks for its game's package by default, as [`App::project`] says, for the
+/// executable at `exe`, on `os`, as [`std::env::consts::OS`] gives it: `<executable>.ggpk` beside
+/// it, or, on macOS, for an executable in an app's bundle, its directory `MacOS` in the bundle's
+/// `Contents`, in the bundle's `Contents/Resources`, as `gg ship` lays the bundle out.
+fn package_beside(exe: &Path, os: &str) -> PathBuf {
+    let macos = exe
+        .parent()
+        .filter(|dir| os == "macos" && dir.ends_with("MacOS"));
+    let contents = macos
+        .and_then(Path::parent)
+        .filter(|dir| dir.ends_with("Contents"));
+    match (contents, exe.file_name()) {
+        (Some(contents), Some(name)) => {
+            contents.join("Resources").join(name).with_extension("ggpk")
+        }
+        _ => exe.with_extension("ggpk"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A game's package is beside its executable, named after it; but on macOS, for an executable
+    /// in an app's bundle, in the bundle's Resources.
+    #[test]
+    fn a_package_is_beside_its_executable_or_in_its_bundles_resources() {
+        let bundled = Path::new("/Applications/Shards.app/Contents/MacOS/gg-shards");
+        assert_eq!(
+            package_beside(bundled, "macos"),
+            Path::new("/Applications/Shards.app/Contents/Resources/gg-shards.ggpk")
+        );
+        for (exe, os, package) in [
+            (
+                bundled,
+                "linux",
+                "/Applications/Shards.app/Contents/MacOS/gg-shards.ggpk",
+            ),
+            (
+                Path::new("/home/ada/shards/gg-shards"),
+                "linux",
+                "/home/ada/shards/gg-shards.ggpk",
+            ),
+            (
+                Path::new("/Users/ada/MacOS/gg-shards"),
+                "macos",
+                "/Users/ada/MacOS/gg-shards.ggpk",
+            ),
+            (
+                Path::new(r"C:\Games\Shards\gg-shards.exe"),
+                "windows",
+                r"C:\Games\Shards\gg-shards.ggpk",
+            ),
+        ] {
+            assert_eq!(package_beside(exe, os), Path::new(package), "{os}");
+        }
+    }
 
     /// The UI draws in Inter: proportional text in its regular weight, its digits and minus sign
     /// as wide as a figure space, and the family [`BOLD`] names in its bold, each falling back to
     /// egui's own proportional fonts; monospace in egui's. Collapsing headers are framed in the
     /// light theme and the dark, whichever the OS has.
+    #[cfg(feature = "dev")]
     #[test]
     fn the_ui_draws_in_inter_with_its_headers_framed() {
         let egui = egui_context();

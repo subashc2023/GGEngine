@@ -1,11 +1,13 @@
-//! How long frames take: the engine's own measure of every frame, which [`PerfPanel`] shows and
-//! each run that doesn't end in an error sums up as it ends, in its `engine.perf` event. It's
-//! always on, and costs a few reads of the clock a frame.
+//! How long frames take: the engine's own measure of every frame, which [`PerfPanel`] shows in
+//! development builds and each run that doesn't end in an error sums up as it ends, in its
+//! `engine.perf` event. It's always on, and costs a few reads of the clock a frame.
 
 use std::time::Duration;
 
+use crate::Layer;
 use crate::render_thread::Rendered;
-use crate::{Context, Layer, Ui};
+#[cfg(feature = "dev")]
+use crate::{Context, Ui};
 
 /// How many frames the percentiles cover: the last 16,384, 68 s at 240 fps, while means and
 /// maxima cover the whole run. They take 1,280 KiB, from the first frame measured.
@@ -13,6 +15,7 @@ const KEPT: usize = 16_384;
 
 /// How many frames the Performance panel's graph shows at the fewest, given a pixel for each: its
 /// bars are as many whole pixels wide as leave room for that many, and more frames fill the rest.
+#[cfg(feature = "dev")]
 const GRAPHED: usize = 240;
 
 /// One frame, in nanoseconds: its time on the main thread, from its start to the next frame's, and
@@ -47,6 +50,7 @@ pub(crate) struct Sample {
 impl Sample {
     /// The rest of the frame: what happens between frames, such as making the swapchains of
     /// torn-off windows and tessellating their UI, polling the gamepads, and the OS's events.
+    #[cfg(any(feature = "dev", test))]
     pub(crate) fn other(&self) -> u64 {
         (self.frame).saturating_sub(self.ticks + self.update + self.ui + self.handoff)
     }
@@ -162,6 +166,7 @@ impl Perf {
     }
 
     /// The frames kept, newest first.
+    #[cfg(any(feature = "dev", test))]
     pub(crate) fn recent(&self) -> impl Iterator<Item = &Sample> {
         let (newer, older) = self.kept.split_at(self.next);
         newer.iter().rev().chain(older.iter().rev())
@@ -255,9 +260,11 @@ fn nanos(duration: Duration) -> u64 {
 
 /// The Performance panel, which an app adds as an overlay, `.overlay(gg_engine::PerfPanel)`: the
 /// last second's frame time and rate, a graph of the last frames split into their parts, and
-/// where the last second's time went, as the engine measures them.
+/// where the last second's time went, as the engine measures them. In a build without `dev`, which
+/// has no UI, it's a layer that does nothing.
 pub struct PerfPanel;
 
+#[cfg(feature = "dev")]
 impl Layer for PerfPanel {
     fn ui(&mut self, cx: &mut Context, ui: &mut Ui<'_>) {
         let perf = &cx.perf;
@@ -268,11 +275,16 @@ impl Layer for PerfPanel {
     }
 }
 
+#[cfg(not(feature = "dev"))]
+impl Layer for PerfPanel {}
+
 /// How a part of a frame's time is read from its sample.
+#[cfg(feature = "dev")]
 type Time = fn(&Sample) -> u64;
 
 /// A part of a frame the panel shows: its name, how it's read from a sample, and its color in the
 /// graph, on a light background and on a dark one.
+#[cfg(feature = "dev")]
 struct Part {
     name: &'static str,
     time: Time,
@@ -280,6 +292,7 @@ struct Part {
     dark: egui::Color32,
 }
 
+#[cfg(feature = "dev")]
 impl Part {
     fn color(&self, visuals: &egui::Visuals) -> egui::Color32 {
         if visuals.dark_mode {
@@ -295,6 +308,7 @@ impl Part {
 /// for the common color blindnesses, protanopia and deuteranopia, on egui's light and dark
 /// backgrounds, which puts the UI between the ticks and the updates: UI's orange beside Other's
 /// amber isn't. A new one needs checking for that again.
+#[cfg(feature = "dev")]
 const PARTS: [Part; 5] = [
     Part {
         name: "Ticks",
@@ -330,18 +344,21 @@ const PARTS: [Part; 5] = [
 
 /// What the render thread spent on the frame before each frame, beside it: the panel lists it, but
 /// the graph doesn't stack it on the main thread's parts, which it overlaps.
+#[cfg(feature = "dev")]
 const RENDERING: [(&str, Time); 2] = [
     ("Render thread: rendering", |s| s.render),
     ("Render thread: waiting for the GPU and display", |s| s.wait),
 ];
 
 /// The sum and the maximum of some times.
+#[cfg(feature = "dev")]
 #[derive(Clone, Copy, Default)]
 struct Total {
     sum: u64,
     max: u64,
 }
 
+#[cfg(feature = "dev")]
 impl Total {
     fn add(&mut self, time: u64) {
         self.sum += time;
@@ -349,6 +366,7 @@ impl Total {
     }
 }
 
+#[cfg(feature = "dev")]
 fn show(perf: &Perf, ui: &mut egui::Ui) {
     let Some(last) = perf.recent().next() else {
         ui.label("No frames measured yet");
@@ -409,6 +427,7 @@ fn show(perf: &Perf, ui: &mut egui::Ui) {
 /// twice their mean, so that one long frame doesn't flatten the rest; longer frames are cut off,
 /// under a line in the text's color. While the pointer is over the graph, the graph holds still,
 /// and shows the parts of the frame under the pointer.
+#[cfg(feature = "dev")]
 fn graph(perf: &Perf, ui: &mut egui::Ui) {
     let size = egui::vec2(ui.available_width(), 64.0);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
@@ -482,6 +501,7 @@ fn graph(perf: &Perf, ui: &mut egui::Ui) {
 
 /// Where the graph's bars go: each a whole number of pixels wide, and at least one, since without
 /// anti-aliasing, a bar between pixels would change width as it scrolls, or not show at all.
+#[cfg(feature = "dev")]
 struct Bars {
     /// The newest bar's right edge, in points.
     right: f32,
@@ -491,6 +511,7 @@ struct Bars {
     count: usize,
 }
 
+#[cfg(feature = "dev")]
 impl Bars {
     fn new(rect: egui::Rect, pixels_per_point: f32) -> Self {
         let pixels = (rect.width() * pixels_per_point).floor();
@@ -517,6 +538,7 @@ impl Bars {
 
 /// A frame's instanced draws, the meshes they drew and those meshes' triangles, as the panel shows
 /// them.
+#[cfg(feature = "dev")]
 fn draws_text(sample: &Sample) -> String {
     let Sample {
         draws,
@@ -528,6 +550,7 @@ fn draws_text(sample: &Sample) -> String {
 }
 
 /// One frame's time, its parts', the render thread's and its draws, for the graph's tooltip.
+#[cfg(feature = "dev")]
 fn frame_tooltip(ui: &mut egui::Ui, sample: &Sample) {
     egui::Grid::new("performance frame").show(ui, |ui| {
         let row = |ui: &mut egui::Ui, color, name: &str, time: u64| {
@@ -549,6 +572,7 @@ fn frame_tooltip(ui: &mut egui::Ui, sample: &Sample) {
 
 /// A row's first two cells: a square of `color`, its part's in the graph, and its name; a row the
 /// graph doesn't stack, such as the frame's, the parts summed up, has no square.
+#[cfg(feature = "dev")]
 fn row_name(ui: &mut egui::Ui, color: Option<egui::Color32>, name: &str) {
     if let Some(color) = color {
         let (square, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
@@ -562,6 +586,7 @@ fn row_name(ui: &mut egui::Ui, color: Option<egui::Color32>, name: &str) {
 /// `nanos` in milliseconds, to the microsecond, as the panel shows it: after a figure space for
 /// each of the three digits before the point that it hasn't, each as wide as a digit, so that a
 /// column of times lines up at the point, and holds still as they change.
+#[cfg(feature = "dev")]
 fn millis_text(nanos: f64) -> String {
     format!("{:\u{2007}>7.3} ms", nanos / 1e6)
 }
@@ -740,6 +765,7 @@ mod tests {
         assert_eq!(perf.recent().count(), KEPT);
     }
 
+    #[cfg(feature = "dev")]
     #[test]
     fn bars_are_whole_pixels_and_fill_the_graph() {
         let whole = |points: f32, ppp: f32| (points * ppp - (points * ppp).round()).abs() < 1e-3;
@@ -761,6 +787,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "dev")]
     #[test]
     fn hovering_over_a_bar_holds_the_graph_and_shows_its_frame() {
         // Twenty frames measured, the sixth newest with 42 draws of 4,200 instances of 2 triangles
@@ -814,6 +841,7 @@ mod tests {
         assert!(texts.iter().any(|text| text == drew), "{texts:?}");
     }
 
+    #[cfg(feature = "dev")]
     #[test]
     fn the_top_line_averages_the_last_second() {
         // 2 ms frames, then a 12 ms one: the last second is the newest 495 frames, 1,000 ms.
@@ -843,6 +871,7 @@ mod tests {
 
     /// Finds in `shapes`, a pass's output, the graph, the one shape filled in `background`, and the
     /// texts.
+    #[cfg(feature = "dev")]
     fn find(
         shapes: &[egui::epaint::ClippedShape],
         background: egui::Color32,

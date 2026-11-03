@@ -35,6 +35,17 @@ pub const MAX_READS: usize = 64;
 /// The bytes of an ID read back: two 32-bit unsigned integers.
 const ID_BYTES: usize = size_of::<[u32; 2]>();
 
+/// What the frames' own arenas hold, which [`Frame::upload`] copies into, and the most a frame has
+/// taken of its own, in bytes, as [`Frames::arenas`] gives them: for a run's log, which compares the
+/// two, as an arena grows by doubling and keeps what it grew to.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Arenas {
+    /// The bytes of every frame slot's arena's buffers.
+    pub held: u64,
+    /// The most bytes one frame's uploads took of its arena, each from a multiple of 16.
+    pub peak: u64,
+}
+
 /// What a frame renders into.
 pub enum Target<'a> {
     /// The next image of a window's swapchain, presented when the frame is submitted.
@@ -453,6 +464,15 @@ impl Frames {
     /// [`Frames::begin`] that returns `None` begins none.
     pub fn submitted(&self) -> u64 {
         self.submitted
+    }
+
+    /// What the frames' own arenas hold, and the most a frame has taken of its own, as [`Arenas`]
+    /// says.
+    pub fn arenas(&self) -> Arenas {
+        Arenas {
+            held: self.arenas.iter().map(Arena::held).sum(),
+            peak: self.arenas.iter().map(Arena::peak).max().unwrap_or(0),
+        }
     }
 
     /// What the `frame`th frame read back of an offscreen image ([`Frame::read_image`]), once the

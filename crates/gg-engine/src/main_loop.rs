@@ -1,26 +1,28 @@
 //! The main loop's turn, a frame's, which windowed and headless runs share: running the ticks of
 //! the simulation that the frame's time owes, at a fixed rate whatever the frame rate, updating
 //! the layers and having them draw their UI, and handing the frame to the render thread; headless
-//! runs, which render offscreen; and what a run reports as it ends.
+//! runs, which render offscreen; and what a run reports as it has loaded and as it ends.
 
 use std::mem;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use gg_core::Result;
-use gg_renderer::{MAX_TEXTURE_SIZE, Renderer, Settings, Validation, Viewport};
+use gg_renderer::{Arenas, MemoryBudget, Renderer, Settings, Validation, Viewport};
 use tracing::{debug, error, info, warn};
 
 use crate::api::{self, Api};
 use crate::args::Args;
+#[cfg(feature = "dev")]
 use crate::chrome::Chrome;
+#[cfg(feature = "dev")]
 use crate::dock::{Dock, Ui};
 use crate::layer::{Context, Stack, Tick};
+use crate::memory;
 use crate::perf::{self, Perf, Summary};
-use crate::render_thread::{Render, RenderThread, TextureChanges};
+use crate::render_thread::{Drawn, Render, RenderThread, TextureChanges};
 use crate::snapshot::Snapshot;
-use crate::viewports::Drawn;
-use crate::{App, BUILD, egui_context};
+use crate::{App, BUILD};
 
 /// Renders offscreen, without a window, as fast as the GPU allows, with a tick of the simulation
 /// each frame, so that a run of a set number of frames runs as many ticks on any machine. Frames
@@ -53,9 +55,11 @@ pub(crate) fn run_headless(
         None if embedded => Stepper::default(),
         None => Stepper::lockstep(),
     };
-    let egui = egui_context();
+    #[cfg(feature = "dev")]
+    let egui = crate::egui_context();
     // Headless runs neither read nor save the layout, so that they're reproducible, and have no
     // window to frame.
+    #[cfg(feature = "dev")]
     let mut dock = Dock::new(
         None,
         Chrome::Os,
@@ -63,6 +67,7 @@ pub(crate) fn run_headless(
         app.custom_title_bar,
         &app.docked,
     );
+    #[cfg(feature = "dev")]
     let mut egui_runs = !embedded;
     // The frames handed over to render, and those rendered.
     let (mut handed, mut frames) = (0, 0);
@@ -86,6 +91,7 @@ pub(crate) fn run_headless(
                 break;
             }
             // One point is one pixel, as on a display without scaling.
+            #[cfg(feature = "dev")]
             let input = egui_runs.then(|| egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -103,14 +109,13 @@ pub(crate) fn run_headless(
             let since_last = clock.start_frame();
             let frame_started = Instant::now();
             let dt = app.headless_step.unwrap_or(since_last);
-            let pass = run_frame(
-                &mut app.stack,
-                &mut cx,
-                dt,
-                &mut stepper,
-                input.map(|input| (&egui, &mut dock, input)),
-            );
+            #[cfg(feature = "dev")]
+            let ui = input.map(|input| (&egui, &mut dock, input));
+            #[cfg(not(feature = "dev"))]
+            let ui = None;
+            let pass = run_frame(&mut app.stack, &mut cx, dt, &mut stepper, ui);
             let (ui, tessellated, view) = match pass {
+                #[cfg(feature = "dev")]
                 Some((mut output, layers_draw)) => {
                     egui_runs = keeps_egui(&app.stack, layers_draw, Chrome::Os, &dock);
                     let (ui, tessellated) = tessellate(&egui, &mut output);
@@ -240,7 +245,26 @@ pub(crate) fn start(
 /// The most pixels a side of egui's textures may have, the most every device the engine runs on
 /// takes, which each pass's input tells egui: every window's alike, since egui makes its font atlas
 /// again for a pass whose limit isn't the last one's.
-pub(crate) const MAX_TEXTURE_SIDE: usize = MAX_TEXTURE_SIZE as usize;
+#[cfg(feature = "dev")]
+pub(crate) const MAX_TEXTURE_SIDE: usize = gg_renderer::MAX_TEXTURE_SIZE as usize;
+
+/// What [`run_frame`] runs a pass of egui's with: egui, the dock and egui's input.
+#[cfg(feature = "dev")]
+pub(crate) type EguiPass<'a> = (&'a egui::Context, &'a mut Dock, egui::RawInput);
+
+/// What a pass of egui's that [`run_frame`] ran made: its output, and whether any layer draws UI,
+/// as [`Stack::ui`] says.
+#[cfg(feature = "dev")]
+pub(crate) type Passed = (egui::FullOutput, bool);
+
+/// What [`run_frame`] would run a pass of egui's with, of which a build without `dev`, which has
+/// no UI, has none: its frames run no pass.
+#[cfg(not(feature = "dev"))]
+pub(crate) type EguiPass<'a> = (std::convert::Infallible, std::marker::PhantomData<&'a ()>);
+
+/// What a pass of egui's would make, of which a build without `dev` has none.
+#[cfg(not(feature = "dev"))]
+pub(crate) type Passed = std::convert::Infallible;
 
 /// The first half of a turn of the main loop: starts the frame, `dt` after the last, for Tracy and
 /// the frame's measure, takes what a lockstep peer sent, as [`Stack::net_turn`] says, runs the
@@ -254,14 +278,14 @@ pub(crate) const MAX_TEXTURE_SIDE: usize = MAX_TEXTURE_SIZE as usize;
 ///
 /// egui allocates as it lays out here, and as [`tessellate`] tessellates, so frames that run its
 /// pass allocate; the UI is a development overlay, and an app that draws none stops running it,
-/// as [`keeps_egui`] says.
+/// as [`keeps_egui`] says. A build without `dev`, which has no UI, runs none.
 pub(crate) fn run_frame(
     stack: &mut Stack,
     cx: &mut Context,
     dt: Duration,
     stepper: &mut Stepper,
-    ui: Option<(&egui::Context, &mut Dock, egui::RawInput)>,
-) -> Option<(egui::FullOutput, bool)> {
+    ui: Option<EguiPass<'_>>,
+) -> Option<Passed> {
     gg_core::profile::frame_mark();
     cx.perf.start_frame(dt);
     let _zone = gg_core::zone!();
@@ -292,6 +316,7 @@ pub(crate) fn run_frame(
     gg_core::plot!("alpha", f64::from(alpha));
     cx.draw_world(alpha);
     let updated = Instant::now();
+    #[cfg(feature = "dev")]
     let pass = ui.map(|(egui, dock, input)| {
         let _zone = gg_core::zone!("egui");
         let mut layers_draw = false;
@@ -303,6 +328,8 @@ pub(crate) fn run_frame(
         });
         (output, layers_draw)
     });
+    #[cfg(not(feature = "dev"))]
+    let pass = ui.map(|(never, _)| match never {});
     cx.perf
         .ran(ticked - start, updated - ticked, updated.elapsed());
     pass
@@ -312,6 +339,7 @@ pub(crate) fn run_frame(
 /// of `stack`'s layers draw UI, in windows framed as `chrome` says. Once none does, the OS frames
 /// the windows, and the game's view isn't in `dock`'s panel, egui would show nothing, so it stops
 /// for the rest of the run: whether a layer draws UI is its type's, which no later frame changes.
+#[cfg(feature = "dev")]
 pub(crate) fn keeps_egui(stack: &Stack, layers_draw: bool, chrome: Chrome, dock: &Dock) -> bool {
     let keeps = layers_draw || chrome != Chrome::Os || dock.is_dockspace();
     if !keeps {
@@ -323,7 +351,8 @@ pub(crate) fn keeps_egui(stack: &Stack, layers_draw: bool, chrome: Chrome, dock:
     keeps
 }
 
-/// What the main window's pass drew in a frame, tessellated, for the render thread.
+/// What the main window's pass drew in a frame, tessellated, for the render thread: nothing in a
+/// build without `dev`, which runs no pass.
 pub(crate) struct MainUi {
     primitives: Vec<egui::ClippedPrimitive>,
     textures: TextureChanges,
@@ -344,6 +373,7 @@ impl MainUi {
 /// The second half of a turn of the main loop starts here, while the frame before renders:
 /// tessellates the UI the main window's pass drew, taking it and its texture changes from `output`,
 /// and returns it, and how long that took.
+#[cfg(feature = "dev")]
 pub(crate) fn tessellate(
     egui: &egui::Context,
     output: &mut egui::FullOutput,
@@ -363,8 +393,8 @@ pub(crate) fn tessellate(
 /// Takes the renderer back from rendering the frame before, which this frame, having tessellated
 /// its own UI in `tessellated`, is measured with, and the answers to picks that came in as it
 /// rendered, which `cx` gives in place of the last, and what it left streaming to the GPU, which
-/// [`Context::streaming`] tells; and returns whether that frame presented: `None` if no frame was
-/// rendering.
+/// [`Context::streaming`] tells, logging `engine.loaded` once nothing is, as [`loaded`] says; and
+/// returns whether that frame presented: `None` if no frame was rendering.
 pub(crate) fn take_back<R: Render>(
     render: &mut RenderThread<R>,
     cx: &mut Context,
@@ -376,12 +406,32 @@ pub(crate) fn take_back<R: Render>(
         .rendered(tessellated, start.elapsed(), rendered.as_ref());
     let answers = if rendered.is_some() {
         cx.streamed = render.frame().streaming;
+        if let Some(started) = cx.take_loaded() {
+            loaded(started, render.renderer().memory_budget());
+        }
         &render.frame().picked[..]
     } else {
         &[]
     };
     cx.take_answers(answers);
     rendered.map(|rendered| rendered.presented).transpose()
+}
+
+/// Logs `engine.loaded`, once a run, at the first frame back after which nothing is decoding or
+/// streaming once the layers have attached: the milliseconds since the engine `started`, the
+/// process's resident memory and its peak, and the GPU's own memory in use and its budget, as `gpu`
+/// gives them. Each count the OS or the GPU doesn't give is left out.
+fn loaded(started: Instant, gpu: Option<MemoryBudget>) {
+    let memory = memory::resident();
+    info!(
+        code = "engine.loaded",
+        load_ms = perf::millis(started.elapsed()),
+        memory_bytes = memory.now,
+        memory_peak_bytes = memory.peak,
+        gpu_memory_bytes = gpu.map(|gpu| gpu.usage),
+        gpu_budget_bytes = gpu.map(|gpu| gpu.budget),
+        "Loaded"
+    );
 }
 
 /// Hands the frame over to the render thread: what the layers drew in the game's view, `view` in
@@ -428,6 +478,9 @@ impl Clock {
         self.last = None;
     }
 
+    /// The time since the first frame started, which egui's input gives as its time; zero before
+    /// it.
+    #[cfg(any(feature = "dev", test))]
     fn elapsed(&self) -> Duration {
         self.first.map_or(Duration::ZERO, |first| first.elapsed())
     }
@@ -653,6 +706,12 @@ pub(crate) struct Ran {
     validation: Validation,
     /// The GPU it rendered on.
     gpu: String,
+    /// The GPU's own memory in use as the run ended, before the renderer let go of its own.
+    gpu_memory: u64,
+    /// What the frames' arenas held as the run ended, and the most a frame took of its own.
+    arenas: Arenas,
+    /// The most of the process's memory that was resident, if the OS says.
+    memory_peak: Option<u64>,
     /// When its first frame started, if one did.
     first_frame_at: Option<Instant>,
     shutdown: Duration,
@@ -661,9 +720,10 @@ pub(crate) struct Ran {
 
 impl Ran {
     /// Shuts the renderer down first, so that what validation reports on the way, such as
-    /// objects left undestroyed, counts too. `stopping` is when the run began to end, after its
-    /// last frame rendered, `stepper` what stepped its simulation, and `perf` what it measured of
-    /// its frames, the last of them finished.
+    /// objects left undestroyed, counts too, once it has told what of the GPU's memory is in use
+    /// and what the frames' arenas hold. `stopping` is when the run began to end, after its last
+    /// frame rendered, `stepper` what stepped its simulation, and `perf` what it measured of its
+    /// frames, the last of them finished.
     pub(crate) fn finish(
         renderer: Renderer,
         frames: u64,
@@ -674,6 +734,8 @@ impl Ran {
     ) -> Self {
         let validation = renderer.validation();
         let gpu = renderer.gpu_name().to_owned();
+        let gpu_memory = renderer.memory_budget().usage;
+        let arenas = renderer.arenas();
         drop(renderer);
         Self {
             frames,
@@ -681,16 +743,21 @@ impl Ran {
             ticks_dropped: stepper.dropped,
             validation,
             gpu,
+            gpu_memory,
+            arenas,
+            memory_peak: memory::resident().peak,
             first_frame_at: clock.first,
             shutdown: stopping.elapsed(),
             perf: perf.summary(),
         }
     }
 
-    /// Logs how long the run's frames took, then how it ended: `engine.perf`, whose times are in
-    /// milliseconds, comes first, so that a run that fails validation has it too. `started` is
-    /// when the engine started, and `args` how it ran.
-    pub(crate) fn report(self, started: Instant, args: &Args) -> ExitCode {
+    /// Logs how long the run's frames took, and what memory it held, then how it ended:
+    /// `engine.perf`, whose times are in milliseconds, comes first, so that a run that fails
+    /// validation has it too, and one that `failed`, as a layer ends one through
+    /// [`Context::fail`], which logged why. `started` is when the engine started, and `args` how it
+    /// ran.
+    pub(crate) fn report(self, started: Instant, args: &Args, failed: bool) -> ExitCode {
         let perf = &self.perf;
         info!(
             code = "engine.perf",
@@ -726,6 +793,10 @@ impl Ran {
             draws_max = perf.draws_max,
             instances_max = perf.instances_max,
             triangles_max = perf.triangles_max,
+            memory_peak_bytes = self.memory_peak,
+            gpu_memory_bytes = self.gpu_memory,
+            arena_bytes = self.arenas.held,
+            arena_peak_bytes = self.arenas.peak,
             gpu = self.gpu.as_str(),
             build = BUILD,
             headless = args.headless,
@@ -755,6 +826,9 @@ impl Ran {
             );
             return ExitCode::FAILURE;
         }
+        if failed {
+            return ExitCode::FAILURE;
+        }
         info!(
             frames = self.frames,
             validated = self.validation.enabled(),
@@ -775,8 +849,10 @@ pub(crate) mod tests {
     use gg_renderer::Draws;
 
     use super::*;
+    #[cfg(feature = "dev")]
+    use crate::Inspector;
     use crate::{
-        Align, Camera, Entity, Inspector, Layer, Projection, Sprite, Transform, Viewpoint, World,
+        Align, Camera, Entity, Layer, Projection, Sprite, Transform, Viewpoint, World,
         render_thread,
     };
 
@@ -857,24 +933,8 @@ pub(crate) mod tests {
     }
 
     /// Runs a frame `dt` after the last, of a 640 by 360 view, and returns what it drew.
-    fn drawn(
-        stack: &mut Stack,
-        cx: &mut Context,
-        dt: Duration,
-        stepper: &mut Stepper,
-        (egui, dock): (&egui::Context, &mut Dock),
-    ) -> Draws {
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(640.0, 360.0),
-            )),
-            ..Default::default()
-        };
-        let pass = run_frame(stack, cx, dt, stepper, Some((egui, dock, input)));
-        let (mut output, _) = pass.expect("a pass, given egui");
-        // As the renderer would have.
-        output.textures_delta.clear();
+    fn drawn(stack: &mut Stack, cx: &mut Context, dt: Duration, stepper: &mut Stepper) -> Draws {
+        assert!(run_frame(stack, cx, dt, stepper, None).is_none());
         let mut frame = render_thread::Extracted::default();
         let viewport = Viewport {
             origin: [0, 0],
@@ -1152,24 +1212,12 @@ pub(crate) mod tests {
         stack.push_layer(Order(calls.clone()));
         let mut cx = Context::new(None);
         stack.attach(&mut cx);
-        let input = || egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(640.0, 360.0),
-            )),
-            ..Default::default()
-        };
-        let mut dock = Dock::new(None, Chrome::Os, None, false, &[]);
         let mut clock = Clock::default();
         let mut stepper = Stepper::lockstep();
-        let egui = egui_context();
         for _ in 0..2 {
             let (cx, clock, stepper) = (&mut cx, &mut clock, &mut stepper);
             let dt = clock.start_frame();
-            let ui = Some((&egui, &mut dock, input()));
-            let (mut output, _) = run_frame(&mut stack, cx, dt, stepper, ui).expect("a pass");
-            // As the renderer would have.
-            output.textures_delta.clear();
+            assert!(run_frame(&mut stack, cx, dt, stepper, None).is_none());
         }
         assert_eq!(*calls.borrow(), ["tick 0", "update", "tick 1", "update"]);
     }
@@ -1180,22 +1228,10 @@ pub(crate) mod tests {
         stack.push_layer(Drawer);
         let mut cx = Context::new(None);
         stack.attach(&mut cx);
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(640.0, 360.0),
-            )),
-            ..Default::default()
-        };
-        let mut dock = Dock::new(None, Chrome::Os, None, false, &[]);
         let mut clock = Clock::default();
         let mut stepper = Stepper::default();
-        let egui = egui_context();
         let (cx, dt, stepper) = (&mut cx, clock.start_frame(), &mut stepper);
-        let ui = Some((&egui, &mut dock, input));
-        let (mut output, _) = run_frame(&mut stack, cx, dt, stepper, ui).expect("a pass");
-        // As the renderer would have.
-        output.textures_delta.clear();
+        assert!(run_frame(&mut stack, cx, dt, stepper, None).is_none());
         // The layer's sprite, of no entity, then the world's, with its entity's ID.
         let world = cx.world();
         let red_one = world.query::<(Entity, &Sprite)>().next();
@@ -1318,8 +1354,7 @@ pub(crate) mod tests {
         stack.push_layer(Slider::default());
         let mut cx = Context::new(None);
         stack.attach(&mut cx);
-        let (mut stepper, egui) = (Stepper::default(), egui_context());
-        let mut dock = Dock::new(None, Chrome::Os, None, false, &[]);
+        let mut stepper = Stepper::default();
         let quarters = iter::repeat_n(Tick::DT / 4, 16);
         let dts = quarters.chain(iter::repeat_n(Tick::DT * 5 / 2, 3));
         // How far each frame is past its last tick: a quarter more each frame, from the fourth,
@@ -1329,8 +1364,7 @@ pub(crate) mod tests {
             .chain((0..13).map(|frame| (frame % 4) as f32 / 4.0));
         let alphas = alphas.chain([0.5, 0.0, 0.5]);
         for (frame, (dt, alpha)) in (1..).zip(dts.zip(alphas)) {
-            let ui = (&egui, &mut dock);
-            let draws = drawn(&mut stack, &mut cx, dt, &mut stepper, ui);
+            let draws = drawn(&mut stack, &mut cx, dt, &mut stepper);
             // Each tick moves the slider 1. The frames two and a half ticks apart run two ticks or
             // three, or fewer on a machine that stalls them past their time, as the stepper counts.
             let slider = match stepper.ticks {
@@ -1353,11 +1387,9 @@ pub(crate) mod tests {
         stack.push_layer(Slider::default());
         let mut cx = Context::new(None);
         stack.attach(&mut cx);
-        let (mut stepper, egui) = (Stepper::lockstep(), egui_context());
-        let mut dock = Dock::new(None, Chrome::Os, None, false, &[]);
+        let mut stepper = Stepper::lockstep();
         for frame in 1..=5 {
-            let ui = (&egui, &mut dock);
-            let draws = drawn(&mut stack, &mut cx, Duration::ZERO, &mut stepper, ui);
+            let draws = drawn(&mut stack, &mut cx, Duration::ZERO, &mut stepper);
             let jumper = if frame < 4 { 10.0 } else { 100.0 };
             let want = slider_draws(cx.world(), frame as f32, jumper, frame >= 3);
             assert_eq!(draws, want, "frame {frame}");
@@ -1365,6 +1397,7 @@ pub(crate) mod tests {
         stack.detach(&mut cx);
     }
 
+    #[cfg(feature = "dev")]
     #[test]
     fn the_inspector_lists_the_world_in_the_dock() {
         let mut stack = Stack::default();
@@ -1382,7 +1415,7 @@ pub(crate) mod tests {
         let mut dock = Dock::new(None, Chrome::Os, None, false, &[]);
         let mut clock = Clock::default();
         let mut stepper = Stepper::default();
-        let egui = egui_context();
+        let egui = crate::egui_context();
         let mut texts = Vec::new();
         // The dock places a panel in its first frame, and draws it from the next.
         for _ in 0..3 {

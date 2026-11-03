@@ -17,8 +17,7 @@ fn a_project_whose_manifest_doesnt_read_ends_the_run_as_it_starts() {
     let app = App::new("Bad Project").project(&dir);
     let status = gg_engine::run_with(app, ["--headless", "--frames", "1"]);
     assert_eq!(status, ExitCode::FAILURE);
-    let exe = std::env::current_exe().expect("the test's executable");
-    let logs = exe.parent().expect("its directory").join("logs");
+    let logs = gg_engine::log_dir("Bad Project");
     let ending = format!("-{}.jsonl", std::process::id());
     let log = fs::read_dir(&logs).into_iter().flatten().flatten();
     let log = log
@@ -27,11 +26,11 @@ fn a_project_whose_manifest_doesnt_read_ends_the_run_as_it_starts() {
         .expect("the run's log");
     let text = fs::read_to_string(&log).expect("the log");
     let last = text.lines().last().unwrap_or_default();
-    // A build without `dev` reads no manifest.
+    // A build without `dev` reads no manifest, and runs from the game's package, which isn't there.
     let code = if cfg!(feature = "dev") {
         "project.bad"
     } else {
-        "engine.no_project"
+        "engine.no_package"
     };
     let error =
         last.contains("\"level\":\"ERROR\"") && last.contains(&format!("\"code\":\"{code}\""));

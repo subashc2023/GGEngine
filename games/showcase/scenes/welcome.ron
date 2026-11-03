@@ -4,6 +4,7 @@
             Bob: (
                 height: 0.35,
                 period: 2.05,
+                time: 0.0,
             ),
             Name: ("Glow"),
             Sprite: (
@@ -25,6 +26,7 @@
             Bob: (
                 height: 0.35,
                 period: 2.2,
+                time: 0.0,
             ),
             Name: ("Glow"),
             Sprite: (
@@ -46,6 +48,7 @@
             Bob: (
                 height: 0.35,
                 period: 1.75,
+                time: 0.0,
             ),
             Name: ("Glow"),
             Sprite: (
@@ -67,6 +70,7 @@
             Bob: (
                 height: 0.35,
                 period: 2.35,
+                time: 0.0,
             ),
             Name: ("Glow"),
             Sprite: (
@@ -88,6 +92,7 @@
             Bob: (
                 height: 0.35,
                 period: 1.6,
+                time: 0.0,
             ),
             Name: ("Glow"),
             Sprite: (
@@ -189,6 +194,7 @@
             Bob: (
                 height: 0.35,
                 period: 1.9000001,
+                time: 0.0,
             ),
             Name: ("Glow"),
             Sprite: (
@@ -210,6 +216,7 @@
             Bob: (
                 height: 0.35,
                 period: 2.5,
+                time: 0.0,
             ),
             Name: ("Glow"),
             Sprite: (

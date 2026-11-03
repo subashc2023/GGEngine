@@ -269,7 +269,9 @@ impl Assets {
         &self.fonts[font.index()].0
     }
 
-    /// The path of `font`'s file: for people, whom a path tells more than an ID.
+    /// The path of `font`'s file: for people, whom a path tells more than an ID, as the Inspector
+    /// shows it in development builds.
+    #[cfg(feature = "dev")]
     pub(crate) fn font_path(&self, font: Font) -> &str {
         &self.fonts[font.index()].1
     }

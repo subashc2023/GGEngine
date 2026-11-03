@@ -1,10 +1,13 @@
 //! What tests share: the shapes a pass of egui paints, among which the UI's tests find what they
-//! drew; and the codes of the events logged, which tests of what warns, or logs what it did, read.
+//! drew, in development builds, which have the UI; and the codes of the events logged, which tests
+//! of what warns, or logs what it did, read.
 
 use std::fmt;
 use std::sync::mpsc::Sender;
 
+#[cfg(feature = "dev")]
 use egui::Shape;
+#[cfg(feature = "dev")]
 use egui::epaint::ClippedShape;
 use tracing::field::{Field, Visit};
 use tracing::{Event, Subscriber};
@@ -12,6 +15,7 @@ use tracing_subscriber::layer::{self, Layer};
 
 /// The shapes `shapes`, a pass's output, paint, in the order they're painted: each shape a
 /// [`Shape::Vec`] holds in its place.
+#[cfg(feature = "dev")]
 pub(crate) fn painted(shapes: &[ClippedShape]) -> Vec<&Shape> {
     fn add<'a>(shape: &'a Shape, painted: &mut Vec<&'a Shape>) {
         match shape {

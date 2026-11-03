@@ -243,7 +243,9 @@ pub(crate) enum Waiting {
     /// A file dialog is open, which development builds alone show.
     #[cfg(feature = "dev")]
     Dialog = 2,
-    /// The window menu Windows runs, in a loop of its own, is open.
+    /// The window menu Windows runs, in a loop of its own, is open, as the UI's title bar opens
+    /// it in development builds alone.
+    #[cfg(feature = "dev")]
     Menu = 3,
 }
 

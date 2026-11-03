@@ -10,35 +10,48 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "dev")]
 use egui::ViewportId;
 use gg_core::{Error, Result};
 use gg_renderer::{Renderer, Settings, Viewport};
 use tracing::{debug, info, trace};
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize, Position};
-use winit::event::{ElementState, WindowEvent};
+use winit::dpi::{LogicalSize, PhysicalSize};
+#[cfg(feature = "dev")]
+use winit::dpi::{PhysicalPosition, Position};
+#[cfg(feature = "dev")]
+use winit::event::ElementState;
+use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
+#[cfg(feature = "dev")]
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
 use crate::api::{self, Api, Waited, Waiting};
 use crate::args::Args;
+#[cfg(feature = "dev")]
 use crate::chrome::{self, Chrome};
+#[cfg(feature = "dev")]
 use crate::dock::{self, Dock, Under};
+#[cfg(feature = "dev")]
+use crate::egui_context;
 use crate::layer::Stack;
 use crate::main_loop::{
-    Clock, MainUi, Ran, Stepper, hand_off, keeps_egui, run_frame, settings, start, take_back,
-    tessellate,
+    Clock, MainUi, Ran, Stepper, hand_off, run_frame, settings, start, take_back,
 };
+#[cfg(feature = "dev")]
+use crate::main_loop::{keeps_egui, tessellate};
 use crate::pads::Gamepads;
 use crate::pipeline_cache;
 use crate::render_thread::RenderThread;
 use crate::snapshot::Snapshot;
+#[cfg(feature = "dev")]
 use crate::view_input::{Reach, ViewInput};
+#[cfg(feature = "dev")]
 use crate::viewports::{self, Viewports, WindowInput};
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", feature = "dev"))]
 use crate::windows_frame::Frame;
-use crate::{App, Context, Event, egui_context, event};
+use crate::{App, Context, Event, event};
 
 /// Runs `app` in a window until it closes, `api` serving tools as each frame starts, and between
 /// frames while the window is minimized, woken by each request.
@@ -60,15 +73,19 @@ pub(crate) fn run(
         // Only once the loop has ended, as the run does.
         let _ = proxy.send_event(());
     });
+    #[cfg(feature = "dev")]
     let layout = dock::path(app.name, std::env::consts::OS, |name| {
         std::env::var_os(name)
     });
     let pipelines = pipeline_cache::path(app.name, std::env::consts::OS, |name| {
         std::env::var_os(name)
     });
+    #[cfg(feature = "dev")]
     let chrome = Chrome::new(app.custom_title_bar);
+    #[cfg(feature = "dev")]
     let view_input = app.view_panel.map(|_| ViewInput::new());
     let mut handler = Handler {
+        #[cfg(feature = "dev")]
         dock: Dock::new(
             layout,
             chrome,
@@ -80,16 +97,22 @@ pub(crate) fn run(
         app,
         args,
         snapshot,
+        #[cfg(feature = "dev")]
         chrome,
         window: None,
-        #[cfg(target_os = "windows")]
+        #[cfg(all(target_os = "windows", feature = "dev"))]
         frame: None,
         render: None,
         resized: None,
+        #[cfg(feature = "dev")]
         egui: egui_context(),
+        #[cfg(feature = "dev")]
         egui_runs: true,
+        #[cfg(feature = "dev")]
         egui_winit: None,
+        #[cfg(feature = "dev")]
         view_input,
+        #[cfg(feature = "dev")]
         viewports: None,
         gamepads: Gamepads::default(),
         cx: Context::new(None),
@@ -129,10 +152,11 @@ struct Handler<'a> {
     /// attach, until the window opens and its world is restored.
     snapshot: Option<Snapshot>,
     /// Who draws the windows' frames.
+    #[cfg(feature = "dev")]
     chrome: Chrome,
     window: Option<Arc<Window>>,
     /// Windows' own frame around the main window, when the UI draws its title bar.
-    #[cfg(target_os = "windows")]
+    #[cfg(all(target_os = "windows", feature = "dev"))]
     frame: Option<Frame>,
     /// Renders the frames, each while the next runs. Before `viewports` and `cx`, which hold the
     /// windows too, so that on a way out that leaves it running, it takes the renderer back as it
@@ -143,17 +167,23 @@ struct Handler<'a> {
     /// The main window's size since the renderer was last told it, which it's told once it's back
     /// from rendering.
     resized: Option<PhysicalSize<u32>>,
+    #[cfg(feature = "dev")]
     egui: egui::Context,
     /// Whether frames run egui's pass, as they do until one shows that it has nothing to draw.
+    #[cfg(feature = "dev")]
     egui_runs: bool,
     /// egui's view of the window, which turns its events into egui's input.
+    #[cfg(feature = "dev")]
     egui_winit: Option<WindowInput>,
     /// In a dockspace, what of the main window's input reaches the layers through the game's view.
+    #[cfg(feature = "dev")]
     view_input: Option<ViewInput>,
     /// The windows of their own that panels tear off into.
+    #[cfg(feature = "dev")]
     viewports: Option<Viewports>,
     /// Opened with the window, since Windows gives a pad's input only to a focused window.
     gamepads: Gamepads,
+    #[cfg(feature = "dev")]
     dock: Dock,
     cx: Context,
     clock: Clock,
@@ -179,11 +209,12 @@ impl Handler<'_> {
         let attributes = Window::default_attributes()
             .with_title(self.app.name)
             .with_inner_size(LogicalSize::new(1280.0, 720.0));
+        #[cfg(feature = "dev")]
         let attributes = chrome::attributes(self.chrome, attributes);
         let window = event_loop.create_window(attributes).map_err(|error| {
             Error::new("engine.window", "can't create the window").with_source(error)
         })?;
-        #[cfg(target_os = "windows")]
+        #[cfg(all(target_os = "windows", feature = "dev"))]
         if self.chrome == Chrome::InWindowsFrame {
             self.frame = Some(Frame::install(&window)?);
         }
@@ -204,13 +235,16 @@ impl Handler<'_> {
         };
         let renderer = Renderer::windowed(&settings, window.clone(), size.width, size.height)?;
         self.render = Some(RenderThread::start(renderer)?);
-        self.egui_winit = Some(WindowInput::new(&self.egui, ViewportId::ROOT, &window));
-        self.viewports = Some(Viewports::new(
-            &self.egui,
-            event_loop,
-            window.clone(),
-            self.chrome,
-        ));
+        #[cfg(feature = "dev")]
+        {
+            self.egui_winit = Some(WindowInput::new(&self.egui, ViewportId::ROOT, &window));
+            self.viewports = Some(Viewports::new(
+                &self.egui,
+                event_loop,
+                window.clone(),
+                self.chrome,
+            ));
+        }
         self.cx = Context::of_run(Some(crate::Window::new(window.clone())), self.app, true);
         api::debug(&self.api, &mut self.cx);
         self.gamepads = Gamepads::open(window.has_focus());
@@ -252,6 +286,7 @@ impl Handler<'_> {
             event_loop.exit();
             return;
         }
+        #[cfg(feature = "dev")]
         let (Some(window), Some(render), Some(egui_winit), Some(viewports)) = (
             &self.window,
             &mut self.render,
@@ -260,12 +295,18 @@ impl Handler<'_> {
         ) else {
             return;
         };
+        #[cfg(not(feature = "dev"))]
+        let (Some(window), Some(render)) = (&self.window, &mut self.render) else {
+            return;
+        };
+        #[cfg(feature = "dev")]
         let input = self.egui_runs.then(|| viewports.input(egui_winit));
-        #[cfg(target_os = "windows")]
+        #[cfg(all(target_os = "windows", feature = "dev"))]
         if let Some(frame) = &self.frame {
             self.dock.set_maximize(frame.maximize());
         }
         // egui opens the windows of their own during the main window's pass.
+        #[cfg(feature = "dev")]
         let pass = viewports::with_event_loop(event_loop, || {
             run_frame(
                 &mut self.app.stack,
@@ -275,13 +316,28 @@ impl Handler<'_> {
                 input.map(|input| (&self.egui, &mut self.dock, input)),
             )
         });
+        #[cfg(feature = "dev")]
         let mut output = pass.map(|(output, layers_draw)| {
             self.egui_runs = keeps_egui(&self.app.stack, layers_draw, self.chrome, &self.dock);
             output
         });
+        #[cfg(feature = "dev")]
         let (ui, tessellated) = match &mut output {
             Some(output) => tessellate(&self.egui, output),
             None => (MainUi::none(), Duration::ZERO),
+        };
+        // Without `dev`, which has no UI, frames run no pass of egui's and hand the renderer none.
+        #[cfg(not(feature = "dev"))]
+        let (ui, tessellated) = {
+            let dt = self.clock.start_frame();
+            run_frame(
+                &mut self.app.stack,
+                &mut self.cx,
+                dt,
+                &mut self.stepper,
+                None,
+            );
+            (MainUi::none(), Duration::ZERO)
         };
         // The frame before, which rendered meanwhile.
         let (mut minimized, mut failed) = (false, None);
@@ -306,12 +362,14 @@ impl Handler<'_> {
         }
         api::frame_back(&mut self.api, render, &self.cx, self.stepper.ticks);
         // A run that's ending hands over no more frames: one past `--frames` would present.
+        #[cfg(feature = "dev")]
         let mut close = false;
         if !event_loop.exiting() {
             let renderer = render.renderer();
             if let Some(size) = self.resized.take() {
                 renderer.resize(size.width, size.height);
             }
+            #[cfg(feature = "dev")]
             let (view, windows) = match &mut output {
                 Some(output) => {
                     let outputs = mem::take(&mut output.viewport_output);
@@ -331,15 +389,26 @@ impl Handler<'_> {
                     (view, Vec::new())
                 }
             };
+            // Without egui, the game's view is the whole window.
+            #[cfg(not(feature = "dev"))]
+            let (view, windows) = {
+                let size = window.inner_size();
+                let view = Viewport {
+                    origin: [0, 0],
+                    size: [size.width, size.height],
+                };
+                (view, Vec::new())
+            };
             hand_off(render, &mut self.cx, view, ui, windows);
         }
-        #[cfg(target_os = "windows")]
+        #[cfg(all(target_os = "windows", feature = "dev"))]
         if let Some(frame) = &self.frame {
             let ppp = egui_winit::pixels_per_point(&self.egui, window);
             frame.set_caption(self.dock.caption(), ppp);
         }
         // egui's requests of the main window, such as the cursor to show, which don't wait for
         // the frame to render.
+        #[cfg(feature = "dev")]
         if let Some(output) = output {
             (egui_winit.state).handle_platform_output(window, output.platform_output);
         }
@@ -352,6 +421,7 @@ impl Handler<'_> {
         if let Err(error) = self.app.stack.recorded() {
             self.fail(event_loop, error);
         }
+        #[cfg(feature = "dev")]
         if close {
             self.close(event_loop);
         }
@@ -362,6 +432,7 @@ impl Handler<'_> {
     /// closes, which passes on no redraws, so frames pause meanwhile: the clock restarts as the
     /// menu closes, so that neither the frame before nor the update after counts the pause.
     /// Wayland's compositor shows the menu while frames go on.
+    #[cfg(feature = "dev")]
     fn show_window_menu(&mut self) {
         let Some(window) = &self.window else {
             return;
@@ -439,6 +510,7 @@ impl Handler<'_> {
     /// What of `event`, from the main window, reaches the layers, `consumed` saying whether egui
     /// keeps it: in a dockspace, what its view says, and otherwise the event, which egui doesn't
     /// keep.
+    #[cfg(feature = "dev")]
     fn view_reach(&mut self, event: &Event<'_>, consumed: bool) -> Reach {
         let Some(input) = &mut self.view_input else {
             return Reach::Event;
@@ -450,6 +522,7 @@ impl Handler<'_> {
 
     /// Whether keys reach the layers: in a dockspace, as its view says; otherwise while none of
     /// egui's widgets has focus.
+    #[cfg(feature = "dev")]
     fn keys(&self) -> bool {
         match &self.view_input {
             Some(input) => {
@@ -486,6 +559,7 @@ fn dispatch(stack: &mut Stack, cx: &mut Context, event: &Event<'_>) -> ControlFl
 
 /// What's at the cursor in the main window, whose input egui reads through `input`, as `dock` drew
 /// it in the last frame.
+#[cfg(feature = "dev")]
 fn under(dock: &Dock, egui: &egui::Context, input: Option<&WindowInput>) -> Under {
     let cursor = input.map(WindowInput::cursor);
     cursor.map_or(Under::Other, |cursor| dock.under(egui, cursor))
@@ -505,12 +579,17 @@ impl ApplicationHandler for Handler<'_> {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        #[cfg(feature = "dev")]
         if let (Some(window), Some(viewports)) = (&self.window, &self.viewports)
             && window.id() != id
         {
             viewports.window_event(id, &event);
             return;
         }
+        // Without `dev`, which has no UI, the main window is the only one, and its events go
+        // straight to the layers.
+        #[cfg(not(feature = "dev"))]
+        let _ = id;
         // egui, the top overlay, sees each event first, and keeps the input it wants: a click
         // on one of its panels, or keys while one of its widgets has focus. Tab is the
         // exception: egui-winit keeps every Tab press, for egui to move focus between its
@@ -518,12 +597,15 @@ impl ApplicationHandler for Handler<'_> {
         // of egui's widgets has focus, and in a dockspace, as its view says, while no modal of
         // egui's is open, the view shows, and the view has the keys or the cursor. Once egui has
         // stopped running, as it does in an app that draws no UI, it sees none.
+        #[cfg(feature = "dev")]
         let tab_for_layers = matches!(
             &event,
             WindowEvent::KeyboardInput { event, .. }
                 if event.logical_key == Key::Named(NamedKey::Tab)
         ) && self.keys();
+        #[cfg(feature = "dev")]
         let mut consumed = false;
+        #[cfg(feature = "dev")]
         if self.egui_runs
             && !matches!(event, WindowEvent::RedrawRequested)
             && !tab_for_layers
@@ -534,18 +616,22 @@ impl ApplicationHandler for Handler<'_> {
         // Releases reach the layers regardless: egui keeps input by what it wants when the
         // input comes, so it would keep the release of a key held down before one of its text
         // fields took focus, or of a button pressed over the scene and let go over a panel.
-        consumed &= !matches!(
-            &event,
-            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Released
-        ) && !matches!(
-            event,
-            WindowEvent::MouseInput {
-                state: ElementState::Released,
-                ..
-            }
-        );
+        #[cfg(feature = "dev")]
+        {
+            consumed &= !matches!(
+                &event,
+                WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Released
+            ) && !matches!(
+                event,
+                WindowEvent::MouseInput {
+                    state: ElementState::Released,
+                    ..
+                }
+            );
+        }
         // In a dockspace, the view decides what reaches the layers, from what egui keeps among the
         // rest.
+        #[cfg(feature = "dev")]
         let kept = consumed && self.view_input.is_none();
         match event {
             WindowEvent::Resized(size) => {
@@ -569,6 +655,7 @@ impl ApplicationHandler for Handler<'_> {
                 // restores it, a redraw comes before the resize that ends the pause.
                 if !self.minimized {
                     self.frame(event_loop);
+                    #[cfg(feature = "dev")]
                     self.show_window_menu();
                 }
                 // Windows doesn't call `about_to_wait` while it moves or resizes one of the app's
@@ -577,10 +664,13 @@ impl ApplicationHandler for Handler<'_> {
                 self.request_frame(event_loop);
             }
             // Untraced, as `dispatch` leaves the cursor's moves.
+            #[cfg(feature = "dev")]
             WindowEvent::CursorMoved { .. } if kept => {}
+            #[cfg(feature = "dev")]
             _ if kept => trace!(?event, "Event kept by the UI"),
             WindowEvent::CloseRequested => self.close(event_loop),
             other => event::convert(&other, |event| {
+                #[cfg(feature = "dev")]
                 match self.view_reach(&event, consumed) {
                     Reach::Nothing => {
                         if !matches!(event, Event::CursorMoved { .. }) {
@@ -645,6 +735,7 @@ impl ApplicationHandler for Handler<'_> {
         });
         let stopping = Instant::now();
         let _zone = gg_core::zone!("shutdown");
+        #[cfg(feature = "dev")]
         self.dock.save();
         if let Some((renderer, last)) = stopped {
             match last.map(|last| last.presented) {
@@ -672,10 +763,16 @@ impl ApplicationHandler for Handler<'_> {
                 stopping,
             ));
         }
-        self.viewports = None;
+        #[cfg(feature = "dev")]
+        {
+            self.viewports = None;
+        }
         self.gamepads = Gamepads::default();
         self.cx = Context::new(None);
-        self.egui_winit = None;
+        #[cfg(feature = "dev")]
+        {
+            self.egui_winit = None;
+        }
         self.window = None;
     }
 }

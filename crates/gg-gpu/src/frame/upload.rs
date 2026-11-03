@@ -816,6 +816,10 @@ pub(super) struct Arena {
     buffers: Vec<Buffer>,
     /// How much of the newest buffer is used.
     used: u64,
+    /// What the uploads since it was last emptied took, each from a multiple of the alignment.
+    taken: u64,
+    /// The most `taken` has been.
+    peak: u64,
 }
 
 impl Arena {
@@ -857,17 +861,20 @@ impl Arena {
             least,
             buffers: Vec::new(),
             used: 0,
+            taken: 0,
+            peak: 0,
         }
     }
 
     /// Empties the arena, once the GPU has finished the frame that last used it.
     pub(super) fn reset(&mut self, device: &Arc<Device>) -> Result<()> {
         if self.buffers.len() > 1 {
-            let total = self.buffers.iter().map(Buffer::size).sum();
+            let total = self.held();
             self.buffers.clear();
             self.grow(device, total)?;
         }
         self.used = 0;
+        self.taken = 0;
         Ok(())
     }
 
@@ -876,6 +883,18 @@ impl Arena {
     pub(super) fn clear(&mut self) {
         self.buffers.clear();
         self.used = 0;
+        self.taken = 0;
+    }
+
+    /// The bytes of its buffers.
+    pub(super) fn held(&self) -> u64 {
+        self.buffers.iter().map(Buffer::size).sum()
+    }
+
+    /// The most the uploads between two of its resets have taken of it, each from a multiple of
+    /// [`ALIGNMENT`](Self::ALIGNMENT): a frame's, for a frame's own arena.
+    pub(super) fn peak(&self) -> u64 {
+        self.peak
     }
 
     fn upload<'a>(&mut self, device: &Arc<Device>, bytes: &[u8]) -> Result<Upload<'a>> {
@@ -889,6 +908,8 @@ impl Arena {
         let buffer = self.buffers.last_mut().expect("the arena just made room");
         buffer.write(offset, bytes);
         self.used = offset + size;
+        self.taken += size.next_multiple_of(Self::ALIGNMENT);
+        self.peak = self.peak.max(self.taken);
         Ok(Upload {
             buffer: buffer.raw(),
             offset,

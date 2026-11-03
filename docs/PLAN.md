@@ -96,14 +96,14 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **The cooker and its package** (2026-11-03)
 - **Cooked textures and meshes** (2026-11-03)
 - **Streaming** (2026-11-03)
+- **Shipping** (2026-11-03)
 
 ## Now
 
-**Shipping**, Phase 10's fourth milestone: the shipping profile, egui behind `dev`, `gg ship` laying
-out a folder, a signed .app holding the Vulkan loader and KosmicKrisp on macOS, the reference player
-running a package's scenes and Luau scripts, as the showcase's, and load time and memory logged;
-checked by CI on Linux at each push, on all three OSes by a workflow run on demand, and on an Apple
-Silicon Mac by hand; its plan says when it's done.
+**Closing Phase 10**: [ship.yml](../.github/workflows/ship.yml) run on Windows, Linux and macOS,
+which is billed and waits for the user to start it; and the demo's .app checked on an Apple Silicon
+Mac by hand, with the rest that Deferred lists for when one is at hand. Then Phase 11, whose
+milestones are planned as it starts.
 
 ## Next
 
@@ -155,14 +155,17 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 |---|---|
 | The engine as a dynamic library in development builds, to shorten relinks | Rebuilding a game gets slow |
 | Optimized dependencies in dev builds (`[profile.dev.package."*"] opt-level = 3`); zune-jpeg alone is, for the reason the root Cargo.toml gives | Physics or another heavy dependency makes debug builds slow |
-| Compiling trace and debug events out of shipping builds, through `tracing`'s `release_max_level_*` features | Phase 10, with the shipping profile |
-| No console window for shipping builds on Windows (`windows_subsystem = "windows"` on the player); the JSON log still records the run | Phase 10, with the shipping profile |
+| Compiling debug events out of shipping builds as well as trace events: `release_max_level_debug` keeps them in every optimized build, as agents read them of `gg run --release`'s runs, and Cargo can't give one profile features of its own | A shipped game's debug events cost it measurably |
 | Linux builds against an older glibc, as the Steam Runtime's: a build needs the glibc it was built against or a later one, and CI builds on Debian trixie | A game ships to players on Linux |
 | The notices a shipped game owes its dependencies' licenses, gathered from Cargo's metadata | A game ships to players |
-| Signing a macOS .app with a Developer ID and notarizing it, which take a paid Apple Developer account: Phase 10 signs it ad hoc, which Apple Silicon needs to run it, and which Gatekeeper warns of once it's downloaded | A game ships to players on macOS |
+| Signing a macOS .app with a Developer ID and notarizing it, which take a paid Apple Developer account: `gg ship` signs it ad hoc, which Apple Silicon needs to run it, and which Gatekeeper refuses once it's downloaded, until the user opens it anyway from System Settings | A game ships to players on macOS |
+| A game's own bundle identifier, name and icon, which its project would give: `gg ship` names a game's .app after its package, capitalized, its identifier `com.ggengine.<package>`, its icon macOS's own | A game ships under a name of its own |
+| Symbols for a shipped game's crashes: the shipping profile keeps release's debug info, none, and no PDB or dSYM ships beside the game; a panic names its functions, by the symbols the executable keeps | A shipped game's crash needs symbolicating |
+| Shipping a game made of scenes and scripts alone, as the reference player under the game's name: `gg ship` ships a project's own build | A game has no code of its own |
+| ship.yml's caches: it builds from nothing each run, so as not to push ci.yml's out of the repository's 10 GB | It runs often enough that its minutes matter |
 | BC6H, for textures of high dynamic range: Phase 10 cooks BC7 alone | A game's textures hold HDR, as skies and lights' do in Phase 12 |
 | An ASTC cook, for devices without BC, as phones: Phase 10 requires BC | The engine runs on Android or iOS |
-| Checking the sandbox by hand on Linux, and on macOS with KosmicKrisp (Vulkan SDK 1.4.363.0 or later, the first conformant build), its gamepads, the file dialogs `Context::pick_file` shows and the drawn title bars too, with the menu button's inset clear of macOS's traffic lights (72 points) and a torn-off window moving by its tab bar where X11 and macOS move windows asynchronously, and the render thread there: acquiring, presenting and rebuilding swapchains as windows resize off the main thread under KosmicKrisp, and on Wayland a frame in flight presenting at its old size after a maximize; and the `frames` test on macOS, whose CI runner has no GPU to run it: std's mutexes there are boxed as they're first locked, so a mutex made each frame allocates there alone | A Linux machine and an Apple Silicon Mac are at hand |
+| Checking the sandbox by hand on Linux, and on macOS with KosmicKrisp (Vulkan SDK 1.4.363.0 or later, the first conformant build), its gamepads, the file dialogs `Context::pick_file` shows and the drawn title bars too, with the menu button's inset clear of macOS's traffic lights (72 points) and a torn-off window moving by its tab bar where X11 and macOS move windows asynchronously, and the render thread there: acquiring, presenting and rebuilding swapchains as windows resize off the main thread under KosmicKrisp, and on Wayland a frame in flight presenting at its old size after a maximize; and the `frames` test on macOS, whose CI runner has no GPU to run it: std's mutexes there are boxed as they're first locked, so a mutex made each frame allocates there alone; and the demo's .app, as `gg ship` lays it out and ship.yml uploads it, which hosted runners may have no Metal to run: that it opens from Finder, its loader loading the bundle's KosmicKrisp alone, that it runs and replays its live recording from its bundle, writing nothing into it, and that KosmicKrisp's library needs nothing else of the SDK's (`otool -L`) | A Linux machine and an Apple Silicon Mac are at hand |
 | Deleting old JSON logs; every run's log is kept | Logs pile up enough to matter |
 | A clean shutdown on Ctrl+C, which now ends the process at once; the JSON log keeps every line written until then, and a recording every whole line but its `end` | A headless run that goes on until it's stopped, such as a dedicated server |
 | GPU tests in Windows and macOS CI, which skip them for the reason [AGENTS.md](../AGENTS.md#commands) gives | A self-hosted runner with a GPU, or a Vulkan driver that runs on those runners without one |
@@ -181,11 +184,11 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Labels inside passes: each run of draws labeled by what it draws, and the frame pass's view and UI apart; a capture shows a label for each pass | Phase 12, with the render graph |
 | Synchronization validation under RenderDoc, whose layer hides the validation layer's settings: through `VK_EXT_validation_features`, or the validation layer's environment | A synchronization bug shows under RenderDoc alone |
 | Captures on macOS, where RenderDoc doesn't run, so `--capture` is refused | Someone needs a capture of a Mac's frames |
-| egui, the dock and the Inspector behind `dev`: the player links them, though it runs egui for its first frame alone, as an app none of whose layers draw UI does; `Ui`, which `Layer::ui` takes, is the type to turn into a no-op | Phase 10, with the shipping profile |
+| The renderer's UI pass in builds without `dev`, which hand it no UI: it makes the pass's pipeline, `egui`, as it starts | A shipped game's start is measured to wait on it |
 | The main thread takes the renderer back once a frame's UI is drawn, so a frame's input is read about a frame before it renders: a refresh under `--vsync`; and drawing between ticks draws the world up to a tick behind the simulation. Starting each frame once the render thread has acquired the image it renders into would win the first back, and extrapolating from the latest ticks the second | A game's input latency needs it |
 | Pushing and popping layers while the app runs; `App` fixes the stack before it starts | A tool or game needs a layer for only part of a run |
 | Composed text from an input method (winit's `Ime` events), for languages typed through one | A game takes text input, such as chat |
-| Frames that draw UI and allocate nothing: egui allocates as it lays out and tessellates, and as it collects its input, where winit reads the window's title, and so do the dock, the Inspector, and the render thread while a panel has a window of its own | A game's shipping frames draw UI, or Phase 10 puts egui behind `dev` |
+| Development builds' frames that draw UI allocating nothing: egui allocates as it lays out and tessellates, and as it collects its input, where winit reads the window's title, and so do the dock, the Inspector, and the render thread while a panel has a window of its own; builds without `dev` run no egui | A tool needs frames that allocate nothing, as for measuring one |
 | Widgets for a game's UI: buttons, lists and their focus, moved by keys, pads and the mouse; Shards draws its menu's buttons, finds what the cursor is over, and keeps their focus itself | A game other than Shards writes the same |
 | The canvas scaled by the view's width or its smaller side, or to a height a game sets, rather than 1,080 units to the view's height: a view much narrower than 16:9 crowds what's anchored to its sides, and a portrait one overlaps it | A game runs in portrait, or at aspect ratios far from 16:9 |
 | Stretching what's drawn on the canvas between anchors, as a backdrop filling the view: each draw is placed from one anchor, and scaled with the view's height alone | A game's UI fills the view, as a dim behind a menu |
@@ -258,7 +261,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Models that take more than 4 GiB to read, of their buffers, images, encoded and decoded, vertices and nodes, which `add_model` refuses with `engine.unsupported_model` | A game's model is that large |
 | Mip levels of a model's images read again, as its file changes, made on the render thread as their turn to stream comes: a 2,048 by 2,048 texture's take about 0.3 s of that frame in a debug build; `gg-load` makes a model's as it first decodes them, and a package's come cooked | Blits on the GPU, or the watcher's thread making them, if a reload's hitch matters |
 | Layers making textures from their own pixels; `Textures::add` takes pixels, but `Context` adds only PNGs and JPEGs | A game makes its own textures |
-| Keeping the frames' arenas near their frames' peak, within the GPU's memory budget: an arena grows by a buffer at least twice its last, and merges them as it resets, so it can hold a few times what its largest frame took, in memory the CPU writes, of instances' transforms, IDs and parameters and the UI's vertices, indices and texture changes | The memory a run logs, as the shipping milestone logs it, shows them holding far more than their peak |
+| Keeping the frames' arenas near their frames' peak, within the GPU's memory budget: an arena grows by a buffer at least twice its last, and merges them as it resets, so it can hold a few times what its largest frame took, in memory the CPU writes, of instances' transforms, IDs and parameters and the UI's vertices, indices and texture changes: `engine.perf` has the showcase's arenas holding 4 MiB and the sandbox's 6 MiB, about four times their largest frame's 1 and 1.3 MiB | A game's arenas hold tens of megabytes, as its `engine.perf` shows |
 | A frame's copies through a transfer queue start only once it's submitted, after its passes are recorded, so an asset draws from the frame after the one that copied its last part at the soonest | Pop-in shows |
 | The frame's arena kept within the device's `maxMemoryAllocationSize` and `maxBufferSize`, each at least 1 GiB: it grows by doubling, so a frame that draws more than that at once fails, which ends the run; streaming keeps staging to about a frame's budget | A frame draws that much at once |
 | RenderDoc captures of a frame (`--capture N`) waiting for nothing to stream, as the tool API's captures do: an early frame shows stand-ins | Someone captures an early frame |
@@ -333,6 +336,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Input that scripts read, which reaches them only through the components a game's Rust commands set, as Shards' `Player.heading`, since input reaches the simulation as commands that a recording and lockstep peers keep: a game without Rust code can't be steered through its scripts | A game's controls are written in Luau |
 | Random numbers for scripts, from a state the world holds, in place of `math.random`, which they go without | A script draws random numbers, as Shards' `collect` would |
 | A budget for all of a tick's calls into a game's own scripts together, as a mod's calls share one, or, in development builds alone, one by time: each call fails past its million interrupts, about 0.9 s of a debug build in a loop that reads a field each turn, so a script that runs past it in every call slows the game to a crawl rather than hanging it | A runaway script's crawl gets in the way |
+| The Inspector's hints for scripts' fields, as Rust's `#[reflect(degrees)]` and `min` give a component's: a script's numbers show as they are, the showcase's `Spin`'s speed in radians a second | Someone tunes scripts' fields in the Inspector |
 | Type definitions for luau-lsp, of the `gg` API and a game's component types and their fields, so that a code editor completes and checks scripts: none ships, so a script's mistakes show only as it loads (`script.bad`) or runs (`script.error`) | Someone writes scripts in a code editor |
 | Debugging scripts from a code editor, through the Debug Adapter Protocol, as a `gg dap` beside `gg mcp` and a VS Code extension that names it: the tool API's `debug`, `gg debug`, its MCP tool and the editor's Debugger panel debug them | Someone debugs scripts where they write them |
 | Evaluating expressions where a script has stopped, watches, and the fields of a table or an entity a local holds: a stop shows each local's and upvalue's value, a table as `(table)` and an entity as its ID, which `gg entity` reads once the game goes on | Someone needs more of what a local holds than its value |

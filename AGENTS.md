@@ -47,7 +47,7 @@ cargo run -p sandbox -- --headless --frames 60   # does the engine run? 0 means 
 cargo run -p sandbox -- --record target/run.recording   # a run's seed, commands and hashes
 cargo run -p sandbox -- --replay target/run.recording   # without a GPU: 0 means every hash matched
 cargo run -p sandbox --release --features tracy   # with zones for Tracy
-cargo build -p player --release   # shipping: the player alone, as wider builds merge in dev
+cargo gg ship shards              # as it ships, in target/ship/shards; on macOS, Shards.app
 cargo run -p cook -- games/shards target/debug/gg-shards.ggpk   # for a build --no-default-features
 cargo test -p gg-renderer --test gpu -- picks   # the GPU tests whose names contain picks
 cargo gg run sandbox              # supervised, serving the tool API: `cargo gg help`
@@ -61,12 +61,12 @@ compile with that slangc as development builds run, so it stays where the build 
 without `dev` run those their package holds compiled. On Linux, gamepads and sound need pkg-config,
 libudev's headers and ALSA's too: `pkgconf`, `libudev-dev` and `libasound2-dev` on Debian or Ubuntu.
 
-Each run writes a JSON log and logs its path as it starts; filter it on `level`, `code` or
-`vuid`. `RUST_LOG` sets what's logged: `RUST_LOG=gg_gpu=trace` adds gg-gpu's trace events to the
-default; a level for every target, as `RUST_LOG=info` has, replaces it. A run that doesn't end in
-an error logs `engine.perf` as it ends: its frame times and where they went. Compare two builds by
-theirs, from release builds run headless for the same number of frames. Headless frames draw each
-tick as it ends, so theirs leave out blending between ticks, which windowed runs measure.
+Each run writes a JSON log, a build without `dev` in the user's state directory, and logs its path
+as it starts; filter it on `level`, `code` or `vuid`. `RUST_LOG` sets what's logged: in debug builds
+`RUST_LOG=gg_gpu=trace` adds gg-gpu's trace events to the default; a level for every target, as
+`RUST_LOG=info` has, replaces it. A run that doesn't end in an error logs `engine.perf` as it ends:
+its frame times and where they went, and its memory. Compare builds by theirs, from release builds
+run headless for as many frames; headless frames draw each tick as it ends, without blending.
 
 A replay that goes another way names the tick and the part of the hash; `--replay <path> --dump
 <tick>`, run where it goes another way and where it doesn't, prints each world's content there a
@@ -126,13 +126,13 @@ hand. A difference on some platforms only is a bug, not a reference to rewrite. 
 new recording, not its hashes rewritten: [the demo's AGENTS.md](games/shards/AGENTS.md) says which.
 
 CI ([ci.yml](.github/workflows/ci.yml)) runs the gates on every push, on Windows and Linux, x86-64
-and ARM64, and on macOS ARM64; the shipping gate, gg-engine's without `dev`, the doc gate and the
-demo cooked and run as it ships on Linux x86-64 alone; and the layering check. Only its Linux jobs
+and ARM64, and on macOS ARM64; the shipping gate, gg-engine's without `dev`, the doc gate, and the
+demo and the player run as they ship on Linux x86-64 alone; and the layering check. Only Linux jobs
 run the GPU tests, on lavapipe, and the apps and the demo's peers headless, grepping their logs;
-Windows' and macOS's runners have no GPU, so there `GG_SKIP_GPU_TESTS` skips the GPU tests. lavapipe
-has no queue for transfers alone, so CI never uploads through one: after changing uploads, run the
-GPU tests on a GPU that has one, as NVIDIA's do. Its minutes are billed, a macOS minute at ten times
-a Linux one, so push a branch to probe CI only for a change another platform could break.
+Windows' and macOS's runners have no GPU, so `GG_SKIP_GPU_TESTS` skips them there. lavapipe has no
+transfer queue, so CI never uploads through one: after changing uploads, run the GPU tests on a GPU
+with one, as NVIDIA's. Minutes are billed, a macOS one at ten Linux ones: push a branch to probe CI
+only for what another OS could break, and run [ship.yml](.github/workflows/ship.yml) only as asked.
 
 ## Rust
 

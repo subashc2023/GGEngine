@@ -3459,7 +3459,6 @@ fn a_links_set_of_a_component_the_entity_hasnt_shows_above_its_components() {
     assert!(under.max.y <= heading.min.y, "above the components");
 }
 
-#[cfg(feature = "dev")]
 mod remote {
     use std::thread;
     use std::time::{Duration, Instant};

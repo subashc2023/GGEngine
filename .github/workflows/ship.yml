@@ -1,0 +1,102 @@
+name: Ship
+
+# The demo shipped, as `cargo gg ship shards` lays it out, on each OS a game ships for: Linux's run
+# headless on lavapipe, macOS's bundle signed, and each folder kept a few days, to run by hand.
+# Started by hand alone, as its runs are billed, a macOS minute at ten times a Linux one.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ship:
+    name: ${{ matrix.name }}
+    # About twice a shipping build from nothing, which links the engine whole.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # lavapipe and the validation layer from Debian trixie, as ci.yml has them.
+          - { name: Linux x86-64, runner: ubuntu-24.04, container: "debian:trixie" }
+          - { name: Windows x86-64, runner: windows-2025 }
+          # macOS 26, the oldest that KosmicKrisp, and so the bundle, runs on.
+          - { name: macOS ARM64, runner: macos-26 }
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container }}
+    steps:
+      - name: Install build tools, lavapipe and the validation layer
+        if: matrix.container
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl g++ gcc git libasound2-dev \
+            libc6-dev libudev-dev libvulkan1 mesa-vulkan-drivers pkgconf vulkan-validationlayers
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/slangc
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          # ci.yml's gates deny warnings.
+          build-warnings: warn
+          # A shipping build's target directory would push ci.yml's caches out of the repository's
+          # 10 GB, for a workflow that runs now and then.
+          cache: false
+      # The SDK whose loader and KosmicKrisp a macOS bundle holds, checked against the digest
+      # LunarG publishes, copied into a directory of the job's own without touching the system's.
+      # The shaders compile with the slangc ci.yml's do, which `SLANGC` names, rather than the
+      # SDK's, which the build would take from `VULKAN_SDK` first.
+      - name: Install the Vulkan SDK
+        if: runner.os == 'macOS'
+        run: |
+          archive="vulkansdk-macos-$SDK.zip"
+          cd "$RUNNER_TEMP"
+          curl -fsSLo "$archive" "https://sdk.lunarg.com/sdk/download/$SDK/mac/$archive"
+          actual=$(shasum -a 256 "$archive" | cut -d' ' -f1)
+          if [ "$actual" != "$DIGEST" ]; then
+            echo "$archive's digest is $actual, not $DIGEST"
+            exit 1
+          fi
+          unzip -q "$archive"
+          "./vulkansdk-macOS-$SDK.app/Contents/MacOS/vulkansdk-macOS-$SDK" --root "$RUNNER_TEMP/VulkanSDK" \
+            --accept-licenses --default-answer --confirm-command install copy_only=1
+          echo "VULKAN_SDK=$RUNNER_TEMP/VulkanSDK/macOS" >> "$GITHUB_ENV"
+          echo "SLANGC=$RUNNER_TEMP/slang/bin/slangc" >> "$GITHUB_ENV"
+        env:
+          SDK: "1.4.363.1"
+          DIGEST: a65c707cf0a32bf8c2ca6b9af1985b7af61dbadfc19b352dae51a323f3a547a6
+      - run: cargo gg ship shards
+      # The bundle's signatures, checked strictly, as Gatekeeper checks them and `gg ship` did. It
+      # doesn't run here, as hosted runners may have no Metal for KosmicKrisp: it runs on a Mac, by
+      # hand.
+      - name: Check the bundle's signature
+        if: runner.os == 'macOS'
+        run: codesign --verify --deep --strict --verbose=2 target/ship/shards/Shards.app
+      # From a directory of its own, it replays its live recording to every hash, which needs no
+      # GPU, exiting 0: Windows' too, which has no console window, and which a script still waits
+      # for and reads the status of. On lavapipe it runs headless too. ci.yml runs it so at every
+      # push, with its project and slangc away.
+      - name: Run the demo as it ships
+        if: runner.os != 'macOS'
+        shell: bash
+        run: |
+          shipped="$RUNNER_TEMP/shipped"
+          cp -R target/ship/shards "$shipped"
+          cp games/shards/tests/references/live.recording "$shipped"
+          "$shipped/gg-shards" --replay "$shipped/live.recording"
+          if [ "$RUNNER_OS" = Linux ]; then
+            "$shipped/gg-shards" --headless --frames 120
+          fi
+      # A tar keeps the executables' modes, which the artifact's own zip would drop, and the
+      # artifact is the tar alone, unzipped.
+      - name: Pack the folder
+        shell: bash
+        run: tar -czf "shards-$RUNNER_OS-$RUNNER_ARCH.tar.gz" -C target/ship shards
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: shards-${{ runner.os }}-${{ runner.arch }}.tar.gz
+          archive: false
+          if-no-files-found: error
+          retention-days: 5

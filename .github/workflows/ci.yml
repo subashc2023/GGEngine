@@ -21,8 +21,9 @@ jobs:
     # A pull request from a branch of this repository was already checked when it was pushed.
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     # About twice a run that compiles every crate afresh: a job that hangs holds its billed runner
-    # that long, rather than GitHub's 360 minutes.
-    timeout-minutes: 45
+    # that long, rather than GitHub's 360 minutes. The job that ships the demo builds every crate a
+    # second time, in the shipping profile, and links it whole.
+    timeout-minutes: ${{ matrix.once && 60 || 45 }}
     strategy:
       fail-fast: false
       matrix:
@@ -48,39 +49,12 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends ca-certificates curl g++ gcc git libasound2-dev \
             libc6-dev libudev-dev libvulkan1 mesa-vulkan-drivers pkgconf vulkan-validationlayers
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # gg-renderer's build compiles its shaders with slangc, which the Vulkan SDK ships, and games'
       # shaders compile with it as they run: in the tests on every runner, and in the sandbox. CI
-      # takes it from Slang's release instead, checked against the release's digests.
-      - name: Install slangc
-        shell: bash
-        run: |
-          case "$RUNNER_OS-$RUNNER_ARCH" in
-            Linux-X64) asset=linux-x86_64-glibc-2.28
-              digest=84ebd777968caceea26b21bfd014341078be6047be6c5a963a69f984f896cebd ;;
-            Linux-ARM64) asset=linux-aarch64-glibc-2.28
-              digest=9959d741713162efdbd863ff6d32400432b6e103eae3a9ee0afbdba6a00c6a9e ;;
-            Windows-X64) asset=windows-x86_64
-              digest=7b9bb838b105de0bb86390196ac5bcb02efc610c0542517204105cf87ec98399 ;;
-            Windows-ARM64) asset=windows-aarch64
-              digest=b5802a24e810b2b82e18cc796166692b4431431b66a65b108d111b668a920e7c ;;
-            macOS-ARM64) asset=macos-aarch64
-              digest=07fa8833fdbb343c3674c84fdd885910f495f3daaaa0c732b32980151e8b58c4 ;;
-            *) echo "no Slang release is listed for $RUNNER_OS-$RUNNER_ARCH"; exit 1 ;;
-          esac
-          archive="slang-$SLANG-$asset.tar.gz"
-          cd "$RUNNER_TEMP"
-          curl -fsSLo "$archive" "https://github.com/shader-slang/slang/releases/download/v$SLANG/$archive"
-          actual=$( (sha256sum "$archive" 2>/dev/null || shasum -a 256 "$archive") | cut -d' ' -f1)
-          if [ "$actual" != "$digest" ]; then
-            echo "$archive's digest is $actual, not $digest"
-            exit 1
-          fi
-          mkdir slang
-          tar -xzf "$archive" -C slang
-          echo "$RUNNER_TEMP/slang/bin" >> "$GITHUB_PATH"
-        env:
-          SLANG: "2026.20"
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # takes it from Slang's release instead, checked against the release's digests, through an
+      # action of the repository's own, which ship.yml shares, so it comes after the checkout.
+      - uses: ./.github/actions/slangc
       # Installs the release rust-toolchain.toml pins, and caches dependencies.
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
         with:
@@ -159,18 +133,18 @@ jobs:
         run: cargo run -p sandbox --locked --features tracy -- --headless --frames 60
         env:
           TRACY_NO_INVARIANT_CHECK: "1"
-      # The demo as it ships: built without `dev`, from the package the cooker writes beside its
-      # executable, it replays its live recording to every hash, exiting 0, and runs headless, from a
-      # directory of its own, with neither its project nor slangc where its build found them. Last
-      # but for the new game, as the build without `dev` takes the place of the demo's own.
-      - name: Cook the demo, and run it as it ships
+      # The demo as it ships, as `gg ship` lays it out: built without `dev` in the shipping profile,
+      # beside the package the cooker writes, it replays its live recording to every hash, exiting 0,
+      # and runs headless, from a directory of its own, with neither its project nor slangc where its
+      # build found them. Builds without `dev` log in the per-user state directory, here the job's
+      # own.
+      - name: Ship the demo, and run it as it ships
         if: matrix.once
         run: |
-          cargo build -p shards --no-default-features --locked
-          cargo run -p cook --locked -- games/shards target/debug/gg-shards.ggpk
+          export XDG_STATE_HOME="$RUNNER_TEMP/state"
+          cargo gg ship shards
           shipped="$RUNNER_TEMP/shipped"
-          mkdir "$shipped"
-          cp target/debug/gg-shards target/debug/gg-shards.ggpk "$shipped"
+          cp -R target/ship/shards "$shipped"
           cp games/shards/tests/references/live.recording "$shipped"
           mv games/shards "$RUNNER_TEMP/shards"
           mv "$RUNNER_TEMP/slang" "$RUNNER_TEMP/slang-away"
@@ -178,7 +152,30 @@ jobs:
           "$shipped/gg-shards" --headless --frames 120
           mv "$RUNNER_TEMP/slang-away" "$RUNNER_TEMP/slang"
           mv "$RUNNER_TEMP/shards" games/shards
-          grep -q "Running from the game's package" "$shipped"/logs/shards-*.jsonl
+          grep -q "Running from the game's package" "$XDG_STATE_HOME"/ggengine/Shards/logs/shards-*.jsonl
+      # The reference player as it ships, a build of it alone, without `dev`: with the showcase cooked
+      # into its package beside it, in a directory of its own, it runs the showcase's scenes and Luau
+      # scripts headless, with neither the showcase's project nor slangc where its build found them,
+      # exiting 0, logs its load time and memory, and warns of nothing.
+      - name: Run the player as it ships
+        if: matrix.once
+        run: |
+          export XDG_STATE_HOME="$RUNNER_TEMP/state"
+          cargo build -p player --locked
+          player="$RUNNER_TEMP/player"
+          mkdir "$player"
+          cp target/debug/gg-player "$player"
+          cargo run -p cook --locked -- games/showcase "$player/gg-player.ggpk"
+          mv games/showcase "$RUNNER_TEMP/showcase"
+          mv "$RUNNER_TEMP/slang" "$RUNNER_TEMP/slang-away"
+          "$player/gg-player" --headless --frames 120
+          mv "$RUNNER_TEMP/slang-away" "$RUNNER_TEMP/slang"
+          mv "$RUNNER_TEMP/showcase" games/showcase
+          logs="$XDG_STATE_HOME/ggengine/Player/logs"
+          grep -q "Running from the game's package" "$logs"/player-*.jsonl
+          grep -q '"code":"engine.loaded"' "$logs"/player-*.jsonl
+          # Last, as `set -e` ignores a command that `!` inverts, and the step ends with this one's.
+          ! grep -qE '"level":"(WARN|ERROR)"' "$logs"/player-*.jsonl
       # `gg new`'s game builds against the engine as it is and runs headless, from the workspace and
       # from inside its project: nothing else compiles its template. Last, as the new member changes
       # the lock file, which `--locked` refuses.

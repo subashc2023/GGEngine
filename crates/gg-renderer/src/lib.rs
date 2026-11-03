@@ -39,7 +39,8 @@ use tracing::{info, trace};
 pub use circle::Circle;
 pub use draws::Draws;
 pub use gg_gpu::{
-    Blend, ImageRead, MAX_TEXTURE_SIZE, Sampler, UploadPath, Validation, Window, Wrap, mip_sizes,
+    Arenas, Blend, ImageRead, MAX_TEXTURE_SIZE, MemoryBudget, Sampler, UploadPath, Validation,
+    Window, Wrap, mip_sizes,
 };
 pub use grid::{Grid, GridLines};
 pub use line::Line;
@@ -760,6 +761,18 @@ impl Renderer {
     /// How the renderer uploads meshes and textures.
     pub fn upload_path(&self) -> UploadPath {
         self.device.upload_path()
+    }
+
+    /// How much of the GPU's own memory is in use, and the budget the driver gives the process, as
+    /// [`gg_gpu::Device::memory_budget`] says.
+    pub fn memory_budget(&self) -> MemoryBudget {
+        self.device.memory_budget()
+    }
+
+    /// What the frames' arenas hold, of the geometry, instances and UI frames copy to the GPU, and
+    /// the most a frame has taken of its own, as [`Arenas`] says.
+    pub fn arenas(&self) -> Arenas {
+        self.frames.arenas()
     }
 
     /// What the GPU's pipeline cache holds, for a later run's [`Settings::pipeline_cache`]: `None`

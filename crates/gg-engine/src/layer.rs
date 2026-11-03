@@ -7,9 +7,9 @@ use std::mem;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 #[cfg(feature = "dev")]
 use std::time::SystemTime;
+use std::time::{Duration, Instant};
 
 use bytemuck::NoUninit;
 #[cfg(feature = "dev")]
@@ -144,7 +144,8 @@ pub trait Layer {
     /// draws. A layer that keeps this default draws none, and an app none of whose layers draw UI,
     /// whose windows the OS frames, and which has no [view panel](crate::App::view_panel), runs
     /// without egui from its second frame, so that its frames neither collect egui's input nor lay
-    /// out and tessellate an empty UI.
+    /// out and tessellate an empty UI. A build without `dev`, which has no UI, never calls it: it
+    /// compiles there as here, and draws nothing, as [`Ui`] has no value there to call it with.
     fn ui(&mut self, _cx: &mut Context, ui: &mut Ui<'_>) {
         ui.default_ui(type_name::<Self>());
     }
@@ -376,6 +377,12 @@ pub struct Context {
     pub(crate) paused: bool,
     /// Set once a layer has asked the run to end, as [`exit`](Self::exit) says.
     exiting: bool,
+    /// Set once a layer has ended the run with an error, as [`fail`](Self::fail) says.
+    failed: bool,
+    /// When the engine started, until the run logs `engine.loaded`, once it has loaded, as
+    /// [`take_loaded`](Self::take_loaded) says: `None` from then on, and in a test's or a replay's
+    /// context, which logs none.
+    pub(crate) load_started: Option<Instant>,
     /// The edits of the authors outside the layers, the tool API's clients and the scene files a
     /// game loaded, each undoing its own.
     pub(crate) authors: Authors,
@@ -437,6 +444,7 @@ impl Context {
         cx.root.clone_from(&app.root);
         cx.files = app.files.clone();
         cx.start.clone_from(&app.start);
+        cx.load_started = app.started;
         #[cfg(feature = "dev")]
         if !cx.reads_package() {
             if let Some(manifest) = app.manifest() {
@@ -588,6 +596,8 @@ impl Context {
             perf: Perf::default(),
             paused: false,
             exiting: false,
+            failed: false,
+            load_started: None,
             authors: Authors::default(),
             scenes: SceneFiles::default(),
             #[cfg(feature = "dev")]
@@ -960,6 +970,17 @@ impl Context {
             decoding: self.loader.pending(),
             streaming: self.streamed,
         }
+    }
+
+    /// When the engine started, once the run has loaded: the first time it's asked once the layers
+    /// have attached and nothing is on its way to the GPU, as [`streaming`](Self::streaming) tells,
+    /// which the run then logs `engine.loaded` at; `None` before and after, and in a test's or a
+    /// replay's context.
+    pub(crate) fn take_loaded(&mut self) -> Option<Instant> {
+        if self.load_started.is_none() || !self.attached || !self.streaming().is_empty() {
+            return None;
+        }
+        self.load_started.take()
     }
 
     /// Adds a mesh for layers to draw from then on: triangles, three of `indices` each, which
@@ -2786,9 +2807,22 @@ impl Context {
         self.exiting = true;
     }
 
-    /// Whether a layer has asked the run to end, as [`exit`](Self::exit) says.
+    /// Whether a layer has asked the run to end, as [`exit`](Self::exit) and [`fail`](Self::fail)
+    /// say.
     pub fn exiting(&self) -> bool {
         self.exiting
+    }
+
+    /// Ends the run before its next frame, as [`exit`](Self::exit) does, but with `error`, which it
+    /// logs as an error, by its code, at once: for what a layer can't go on without, such as a
+    /// script or a scene that doesn't load, in place of a panic. The layers still detach, and the
+    /// run logs `engine.perf` as it ends, but not `Exited cleanly`, and its status is 1. A replay,
+    /// which goes as its recording does, logs the error too, its status saying whether its hashes
+    /// matched.
+    pub fn fail(&mut self, error: Error) {
+        error!(code = error.code(), "{error:#}");
+        self.exiting = true;
+        self.failed = true;
     }
 
     /// Draws a grid this frame as `viewpoint` sees it, fitted to the game's view as the last frame
@@ -2944,6 +2978,17 @@ impl Context {
             return Err(Error::new("engine.no_project", message));
         };
         self.load_scene_file(start)
+    }
+
+    /// The paths of the files the run's game's package holds, as
+    /// [`App::from_package`](crate::App::from_package) and a project's game built without `dev`
+    /// read one, each joined to the asset root as layers name files, which
+    /// [`Scripts::load`](crate::Scripts::load), [`load_scene_file`](Self::load_scene_file) and the
+    /// adds, such as [`add_texture`](Self::add_texture), take, in the order of the paths' bytes;
+    /// none for a run that reads the disk. A player loads a game's scripts by them, as the
+    /// reference player does, which runs a game without its code.
+    pub fn package_files(&self) -> Vec<PathBuf> {
+        self.files.paths()
     }
 
     /// Applies `edit`, an author's from outside the layers, to the world, between ticks, unrecorded,
@@ -3209,6 +3254,7 @@ pub(crate) struct Stack {
     names: Vec<&'static str>,
     /// The full name of each layer's type, in the same order, which tells a layer's own default
     /// `ui` from another layer's that its `ui` calls.
+    #[cfg(feature = "dev")]
     types: Vec<&'static str>,
     /// Where the overlays start.
     overlays: usize,
@@ -3216,6 +3262,9 @@ pub(crate) struct Stack {
     recorder: Option<Recorder>,
     /// The lockstep session the run is a peer of, if it's networked.
     net: Option<Lockstep>,
+    /// Whether a layer ended the run with an error, as [`Context::fail`] says, which the context
+    /// tells as the layers detach.
+    failed: bool,
 }
 
 /// What became of an edit from outside the layers, as [`Stack::offer`] says.
@@ -3234,6 +3283,7 @@ impl Stack {
         let layer = Hot(layer);
         self.layers.insert(self.overlays, Box::new(layer));
         self.names.insert(self.overlays, short_name::<L>());
+        #[cfg(feature = "dev")]
         self.types.insert(self.overlays, type_name::<L>());
         self.overlays += 1;
     }
@@ -3244,6 +3294,7 @@ impl Stack {
         let overlay = Hot(overlay);
         self.layers.push(Box::new(overlay));
         self.names.push(short_name::<L>());
+        #[cfg(feature = "dev")]
         self.types.push(type_name::<L>());
     }
 
@@ -3697,7 +3748,9 @@ impl Stack {
         }
     }
 
-    /// Detaches from the top down, the reverse of attaching, once a recording has its end.
+    /// Detaches from the top down, the reverse of attaching, once a recording has its end; and
+    /// takes from `cx` whether a layer ended the run with an error, as [`failed`](Self::failed)
+    /// tells, as it detached too.
     pub(crate) fn detach(&mut self, cx: &mut Context) {
         let _zone = gg_core::zone!();
         if let Some(recorder) = &mut self.recorder {
@@ -3708,6 +3761,13 @@ impl Stack {
         for layer in self.layers.iter_mut().rev() {
             layer.detach(cx);
         }
+        self.failed |= cx.failed;
+    }
+
+    /// Whether a layer ended the run with an error, as [`Context::fail`] says, once the layers have
+    /// detached, which makes the run's status 1.
+    pub(crate) fn failed(&self) -> bool {
+        self.failed
     }
 
     #[cfg(feature = "dev")]
@@ -3852,6 +3912,7 @@ impl Stack {
     /// whether any layer draws UI: every layer does but one whose `ui` is its own type's default,
     /// [`Layer::ui`]'s. One whose `ui` calls another layer's default draws UI as far as this goes,
     /// whatever it draws.
+    #[cfg(feature = "dev")]
     pub(crate) fn ui(&mut self, cx: &mut Context, ui: &mut Ui<'_>) -> bool {
         let _zone = gg_core::zone!();
         let mut draws = false;
@@ -4136,6 +4197,48 @@ mod tests {
         assert_eq!(cx.world().query::<&Transform>().count(), 3);
     }
 
+    /// Fails as it attaches.
+    struct Failer;
+
+    impl Layer for Failer {
+        fn attach(&mut self, cx: &mut Context) {
+            cx.fail(Error::new("test.failed", "it can't go on"));
+        }
+    }
+
+    /// A layer that fails ends the run, as an exit does, logging its error by its code at once; the
+    /// layers still detach, after which the stack says the run failed, as one that exits alone
+    /// doesn't.
+    #[test]
+    fn a_layer_that_fails_ends_the_run_with_its_error() {
+        let logged = crate::testing::logged();
+        let (mut stack, calls) = probes(false);
+        stack.push_layer(Failer);
+        let mut cx = Context::new(None);
+        stack.attach(&mut cx);
+        assert!(cx.exiting());
+        let codes = logged
+            .codes
+            .try_iter()
+            .filter(|code| code.starts_with("test."));
+        assert_eq!(codes.collect::<Vec<_>>(), ["test.failed"]);
+        stack.detach(&mut cx);
+        assert!(stack.failed());
+        let detached = calls
+            .borrow()
+            .iter()
+            .filter(|call| call.starts_with("detach"))
+            .count();
+        assert_eq!(detached, 3);
+
+        let (mut stack, _) = probes(false);
+        let mut cx = Context::new(None);
+        stack.attach(&mut cx);
+        cx.exit();
+        stack.detach(&mut cx);
+        assert!(cx.exiting() && !stack.failed());
+    }
+
     /// Each component type the engine registers has a doc, and so does each of its named fields,
     /// which the Inspector shows on hover.
     #[test]
@@ -4252,20 +4355,26 @@ mod tests {
     }
 
     /// Keeps [`Layer::ui`]'s default.
+    #[cfg(feature = "dev")]
     struct Quiet;
 
+    #[cfg(feature = "dev")]
     impl Layer for Quiet {}
 
     /// Draws nothing, through a `ui` of its own.
+    #[cfg(feature = "dev")]
     struct Blank;
 
+    #[cfg(feature = "dev")]
     impl Layer for Blank {
         fn ui(&mut self, _: &mut Context, _: &mut Ui<'_>) {}
     }
 
     /// Draws what the layer it wraps does, through a `ui` of its own.
+    #[cfg(feature = "dev")]
     struct Wrapper(Quiet);
 
+    #[cfg(feature = "dev")]
     impl Layer for Wrapper {
         fn ui(&mut self, cx: &mut Context, ui: &mut Ui<'_>) {
             self.0.ui(cx, ui);
@@ -4273,6 +4382,7 @@ mod tests {
     }
 
     /// Whether `stack`'s layers draw UI, as a pass of egui's tells.
+    #[cfg(feature = "dev")]
     fn draws_ui(mut stack: Stack) -> bool {
         let egui = crate::egui_context();
         let mut dock = crate::dock::Dock::new(None, crate::chrome::Chrome::Os, None, false, &[]);
@@ -4290,6 +4400,7 @@ mod tests {
 
     /// A layer draws UI unless its `ui` is its own type's default: one that has a `ui` of its own
     /// draws, though it draws nothing, as does one whose `ui` calls another layer's default.
+    #[cfg(feature = "dev")]
     #[test]
     fn layers_draw_ui_unless_theirs_is_the_default() {
         let stack = |push: &dyn Fn(&mut Stack)| {

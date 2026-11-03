@@ -14,6 +14,10 @@
 //! match is won, and as the menu's focus moves and an item is chosen; and its music,
 //! `music/match.ogg`, loops from the start, quieter while the menu's open.
 
+// A build without `dev`, as it ships, opens no console window on Windows: its JSON log still
+// records the run, and what it prints still reaches a process it's piped to, as a tool's or CI's.
+#![cfg_attr(not(feature = "dev"), windows_subsystem = "windows")]
+
 use std::fmt::Write as _;
 use std::ops::ControlFlow;
 use std::path::Path;

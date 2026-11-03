@@ -15,13 +15,8 @@
 //! main thread a few steps an entity, and keeps the list in memory; reading only the rows a panel
 //! shows would bound both by its height, which a game of tens of thousands of entities would want.
 
-#[cfg(feature = "dev")]
 pub(super) use imp::Remote;
 
-#[cfg(not(feature = "dev"))]
-pub(super) use none::Remote;
-
-#[cfg(feature = "dev")]
 mod imp {
     use std::borrow::Cow;
     use std::collections::{HashMap, HashSet, VecDeque};
@@ -41,8 +36,8 @@ mod imp {
 
     use super::super::commands::Command;
     use super::super::inspected::{Inspected, Pending};
-    use super::super::link::{Linking, Placed};
-    use super::super::{Edit, Gesture, Inspector, Pass, Step};
+    use super::super::link::Linking;
+    use super::super::{Edit, Gesture, Inspector, Pass, Placed, Step};
     use crate::api::json::{self, Remote as Names};
     use crate::reflect::{Reflect, Type, Types, Value};
     use crate::{EntityId, Pose, Transform};
@@ -1411,105 +1406,6 @@ mod imp {
             remote.queued.push_back(Ask::Step(Step::Undo));
             remote.send(Pass::default(), &mut inspector);
             assert!(link.idle(), "never to be sent");
-        }
-    }
-}
-
-#[cfg(not(feature = "dev"))]
-mod none {
-    use std::borrow::Cow;
-    use std::ops::Range;
-
-    use super::super::inspected::{Inspected, Pending};
-    use super::super::link::Placed;
-    use super::super::{Inspector, Pass};
-    use crate::EntityId;
-    use crate::reflect::{Types, Value};
-
-    /// Builds without `dev`, which serve no tool API, reach no other game.
-    pub(in super::super) enum Remote {}
-
-    impl Remote {
-        pub(in super::super) fn update(&mut self, _: &mut Inspector) {
-            match *self {}
-        }
-
-        pub(in super::super) fn placed(&self, _: Option<EntityId>) -> Option<Placed> {
-            match *self {}
-        }
-
-        pub(in super::super) fn pending(&self, _: Option<EntityId>) -> Pending {
-            match *self {}
-        }
-
-        pub(in super::super) fn send(&mut self, _: Pass, _: &mut Inspector) {
-            match *self {}
-        }
-    }
-
-    impl Inspected for Remote {
-        fn types(&self) -> &Types {
-            match *self {}
-        }
-
-        fn component_types(&self) -> Box<dyn Iterator<Item = &str> + '_> {
-            match *self {}
-        }
-
-        fn alive(&self, _: EntityId) -> Option<bool> {
-            match *self {}
-        }
-
-        fn name(&self, _: EntityId) -> Option<String> {
-            match *self {}
-        }
-
-        fn parent(&self, _: EntityId) -> Option<EntityId> {
-            match *self {}
-        }
-
-        fn children(&self, _: EntityId) -> Box<dyn Iterator<Item = EntityId> + '_> {
-            match *self {}
-        }
-
-        fn components(&self, _: EntityId) -> Vec<&str> {
-            match *self {}
-        }
-
-        fn component(&self, _: EntityId, _: &str) -> Option<Result<Cow<'_, Value>, String>> {
-            match *self {}
-        }
-
-        fn default_of(&self, _: &str) -> Result<Value, String> {
-            match *self {}
-        }
-
-        fn count(&self, _: Option<&str>) -> Result<usize, String> {
-            match *self {}
-        }
-
-        fn page(&self, _: Option<&str>, _: Range<usize>) -> Vec<EntityId> {
-            match *self {}
-        }
-
-        fn roots(&self) -> usize {
-            match *self {}
-        }
-
-        fn roots_page(&self, _: Range<usize>) -> Vec<EntityId> {
-            match *self {}
-        }
-
-        fn root_index(&self, _: EntityId) -> Option<usize> {
-            match *self {}
-        }
-
-        fn entity_label(&self, _: &Value) -> String {
-            match *self {}
-        }
-
-        fn asset_label(&self, _: &Value) -> String {
-            match *self {}
         }
     }
 }

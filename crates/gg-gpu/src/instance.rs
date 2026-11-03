@@ -4,6 +4,7 @@
 use std::borrow::Cow;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Once};
 
@@ -72,19 +73,39 @@ impl Validation {
 impl Instance {
     /// Loads the Vulkan loader and makes an instance that can present to `desc.window`'s
     /// display, if given, under the validation layer if `desc.validation` asks for it and it's
-    /// installed, as [`Instance::validation`] tells. Fails with `gpu.no_loader` without a loader,
-    /// `gpu.window` if the window can't give its display, and `gpu.vulkan` or `gpu.out_of_memory`
-    /// if a Vulkan call fails.
+    /// installed, as [`Instance::validation`] tells. The loader is the one the OS finds by its
+    /// name, but in a macOS app's bundle that holds one, `Contents/Frameworks/libvulkan.1.dylib`,
+    /// which loads by its path. Fails with `gpu.no_loader` without a loader, `gpu.window` if the
+    /// window can't give its display, and `gpu.vulkan` or `gpu.out_of_memory` if a Vulkan call
+    /// fails.
     pub fn new(desc: &InstanceDesc<'_>) -> Result<Arc<Self>> {
         let _zone = gg_core::zone!();
-        // SAFETY: the library ash loads, vulkan-1.dll or libvulkan, is the Khronos loader, whose
-        // exports have the signatures ash expects.
-        let entry = unsafe { ash::Entry::load() }.map_err(|error| {
-            Error::new(
-                "gpu.no_loader",
-                "can't load the Vulkan loader; install a GPU driver that supports Vulkan 1.4",
-            )
-            .with_source(error)
+        let bundled = (std::env::current_exe().ok())
+            .and_then(|exe| bundled_loader(&exe, std::env::consts::OS))
+            .filter(|loader| loader.is_file());
+        let entry = match &bundled {
+            Some(loader) => {
+                debug!(path = %loader.display(), "Loading the Vulkan loader the app's bundle holds");
+                // SAFETY: the library is the Khronos loader that `gg ship` put in the app's bundle,
+                // whose exports have the signatures ash expects.
+                unsafe { ash::Entry::load_from(loader) }
+            }
+            // SAFETY: the library ash loads, vulkan-1.dll or libvulkan, is the Khronos loader,
+            // whose exports have the signatures ash expects.
+            None => unsafe { ash::Entry::load() },
+        };
+        let entry = entry.map_err(|error| {
+            let message = match &bundled {
+                Some(loader) => format!(
+                    "can't load the Vulkan loader the app's bundle holds, {}",
+                    loader.display()
+                ),
+                None => {
+                    "can't load the Vulkan loader; install a GPU driver that supports Vulkan 1.4"
+                        .to_owned()
+                }
+            };
+            Error::new("gpu.no_loader", message).with_source(error)
         })?;
         // SAFETY: these queries take no handles, and the entry is loaded.
         let (loader, layers, extensions) = unsafe {
@@ -323,6 +344,19 @@ impl Drop for Instance {
     }
 }
 
+/// The Vulkan loader of the app whose executable is at `exe`, on `os`, as [`std::env::consts::OS`]
+/// gives it, if its bundle holds one: on macOS, which has no loader of its own, for an executable in
+/// an app's bundle, its directory `MacOS` in the bundle's `Contents`, the bundle's
+/// `Contents/Frameworks/libvulkan.1.dylib`, as `gg ship` lays the bundle out; `None` elsewhere. The
+/// loader finds the driver the bundle holds in `Contents/Resources/vulkan/icd.d`.
+fn bundled_loader(exe: &Path, os: &str) -> Option<PathBuf> {
+    let macos = exe
+        .parent()
+        .filter(|dir| os == "macos" && dir.ends_with("MacOS"))?;
+    let contents = macos.parent().filter(|dir| dir.ends_with("Contents"))?;
+    Some(contents.join("Frameworks").join("libvulkan.1.dylib"))
+}
+
 fn engine_version() -> u32 {
     let part = |number: &str| number.parse().unwrap_or(0);
     vk::make_api_version(
@@ -472,5 +506,31 @@ impl fmt::Display for Labels<'_> {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// On macOS, an executable in an app's bundle loads the loader in the bundle's Frameworks;
+    /// one outside a bundle, and any on another OS, the one the OS finds.
+    #[test]
+    fn a_macos_bundle_has_its_own_loader() {
+        let exe = Path::new("/Applications/Shards.app/Contents/MacOS/gg-shards");
+        assert_eq!(
+            bundled_loader(exe, "macos"),
+            Some(PathBuf::from(
+                "/Applications/Shards.app/Contents/Frameworks/libvulkan.1.dylib"
+            ))
+        );
+        for (exe, os) in [
+            (exe, "linux"),
+            (Path::new("/Users/ada/shards/gg-shards"), "macos"),
+            (Path::new("/Users/ada/MacOS/gg-shards"), "macos"),
+            (Path::new("gg-shards"), "macos"),
+        ] {
+            assert_eq!(bundled_loader(exe, os), None, "{} on {os}", exe.display());
+        }
     }
 }

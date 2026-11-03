@@ -319,6 +319,16 @@ impl Files {
         self.package.as_ref().map(|(package, _)| &**package)
     }
 
+    /// The paths of the files the package holds, each joined to the root as [`under`] joins it, in
+    /// the order of their paths' bytes; none for the disk.
+    pub(crate) fn paths(&self) -> Vec<PathBuf> {
+        let Some((package, root)) = &self.package else {
+            return Vec::new();
+        };
+        let entries = package.entries.iter();
+        entries.map(|entry| under(root, &entry.path)).collect()
+    }
+
     /// Reads the file at `path`, as far as its first `most` bytes, as [`dirs::read_file`] does: from
     /// the package, if the run reads one, the file as it is under the asset root.
     pub(crate) fn read(&self, path: &Path, most: u64) -> io::Result<Vec<u8>> {
@@ -707,6 +717,27 @@ mod tests {
         }
         let gone = Package::open(&path.with_file_name("gone.ggpk")).unwrap_err();
         assert_eq!(gone.code(), "package.unreadable");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// The files a package holds are listed under the root, as layers name them, in the order of
+    /// their paths, each found again by its path; the disk lists none.
+    #[test]
+    fn a_packages_files_are_listed_under_the_root_in_the_order_of_their_paths() {
+        let mut writer = Writer::new(".", Some("scenes/arena.ron"));
+        for path in ["scripts/spin.luau", "scenes/arena.ron", "scripts/bob.luau"] {
+            writer.add(path, None, Kind::File, Vec::new()).unwrap();
+        }
+        let path = written(&writer, "listed");
+        let root = std::env::temp_dir().join("game");
+        let files = Files::package(Arc::new(Package::open(&path).unwrap()), root.clone());
+        let listed = files.paths();
+        let parts = ["scenes/arena.ron", "scripts/bob.luau", "scripts/spin.luau"];
+        assert_eq!(listed, parts.map(|part| under(&root, part)));
+        for (file, part) in listed.iter().zip(parts) {
+            assert_eq!(files.within(file).as_deref(), Some(part));
+        }
+        assert!(Files::default().paths().is_empty());
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

@@ -1,7 +1,7 @@
 //! Cargo, for `gg`: building a package and finding its executable; the workspace's target
-//! directory, where games write their session files; what `gg run`'s patches need of a package; and
-//! whether a project's game is the package beside its manifest. Each runs cargo in a directory it's
-//! given, a project's, where it finds the workspace, or else in `gg`'s own.
+//! directory, where games write their session files; what `gg run`'s patches and `gg ship` need of
+//! a package; and whether a project's game is the package beside its manifest. Each runs cargo in a
+//! directory it's given, a project's, where it finds the workspace, or else in `gg`'s own.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -17,7 +17,7 @@ use crate::Scope;
 
 /// Cargo, run in directory `dir`, or in `gg`'s own: the one running `gg`, as `cargo gg` does, or
 /// else the first on the `PATH`.
-fn cargo(dir: Option<&Path>) -> Command {
+pub(crate) fn cargo(dir: Option<&Path>) -> Command {
     let mut command =
         Command::new(std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo")));
     if let Some(dir) = dir {
@@ -26,21 +26,15 @@ fn cargo(dir: Option<&Path>) -> Command {
     command
 }
 
-/// Builds package `package`, in the release profile if `release`, through cargo run in `dir`,
-/// whose messages about the code go to stderr as cargo renders them; and returns its executable.
+/// Builds package `package`, with `args`, cargo's flags that pick its profile and features, as
+/// `--release`, through cargo run in `dir`, whose messages about the code go to stderr as cargo
+/// renders them; and returns its executable.
 ///
 /// Fails with `gg.build` if cargo can't run, the build fails, or it makes no executable.
-pub(crate) fn build(package: &str, release: bool, dir: Option<&Path>) -> Result<PathBuf, Failure> {
+pub(crate) fn build(package: &str, args: &[&str], dir: Option<&Path>) -> Result<PathBuf, Failure> {
     let mut command = cargo(dir);
-    command.args([
-        "build",
-        "--package",
-        package,
-        "--message-format=json-render-diagnostics",
-    ]);
-    if release {
-        command.arg("--release");
-    }
+    command.args(["build", "--package", package]).args(args);
+    command.arg("--message-format=json-render-diagnostics");
     let failed = |what: String| Failure::new("gg.build", what);
     let mut child = command
         .stdout(Stdio::piped())
@@ -62,8 +56,9 @@ pub(crate) fn build(package: &str, release: bool, dir: Option<&Path>) -> Result<
         .wait()
         .map_err(|error| failed(format!("cargo didn't finish: {error}")))?;
     if !status.success() {
+        let args = args.iter().map(|arg| format!(" {arg}")).collect::<String>();
         return Err(failed(format!(
-            "`cargo build --package {package}` failed, as cargo said above"
+            "`cargo build --package {package}{args}` failed, as cargo said above"
         )));
     }
     exe.ok_or_else(|| failed(format!("package `{package}` has no executable")))
@@ -109,12 +104,14 @@ fn target_of(metadata: &Value) -> Result<PathBuf, Failure> {
     Ok(PathBuf::from(target))
 }
 
-/// A package of the workspace, as `gg run`'s patches need it.
+/// A package of the workspace, as `gg run`'s patches and `gg ship` need it.
 pub(crate) struct Package {
     /// The binary it runs, as `cargo run` would pick it: `gg-sandbox` for the sandbox.
     pub(crate) bin: String,
     /// Its manifest.
     pub(crate) manifest: PathBuf,
+    /// Its version, as its manifest gives it: `0.1.0`.
+    pub(crate) version: String,
     /// The directory of its binary's root module, under which its modules are, as
     /// `apps/sandbox/src`.
     pub(crate) modules: PathBuf,
@@ -132,7 +129,8 @@ pub(crate) struct Package {
     pub(crate) target: PathBuf,
 }
 
-/// Package `name` of the workspace, as cargo run in `dir` finds it, as `gg run`'s patches need it.
+/// Package `name` of the workspace, as cargo run in `dir` finds it, as `gg run`'s patches and
+/// `gg ship` need it.
 ///
 /// Fails with `gg.cargo` if cargo can't say, and as [`package_in`] does.
 pub(crate) fn package(name: &str, dir: Option<&Path>) -> Result<Package, Failure> {
@@ -254,6 +252,7 @@ fn package_in(metadata: &Value, name: &str) -> Result<Package, Failure> {
     Ok(Package {
         bin: bin["name"].as_str().unwrap_or_default().to_owned(),
         manifest: path(&package["manifest_path"]),
+        version: package["version"].as_str().unwrap_or_default().to_owned(),
         modules: modules.unwrap_or_default(),
         build_script: build_script.map(|script| path(&script["src_path"])),
         library,
@@ -350,6 +349,7 @@ mod tests {
         let game = package_in(&workspace(), "game").expect("the game");
         assert_eq!(game.bin, "gg-game");
         assert_eq!(game.manifest, Path::new("/w/game/Cargo.toml"));
+        assert_eq!(game.version, "0.1.0");
         assert_eq!(game.modules, Path::new("/w/game/src"));
         assert_eq!(
             game.build_script.as_deref(),

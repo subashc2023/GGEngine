@@ -7,7 +7,7 @@ publish.workspace = true
 [dependencies]
 bytemuck.workspace = true
 egui.workspace = true
-egui-winit.workspace = true
+egui-winit = { workspace = true, optional = true }
 fdsm.workspace = true
 gilrs.workspace = true
 gg-api = { workspace = true, optional = true }
@@ -44,8 +44,10 @@ tracing-subscriber.workspace = true
 tracy = ["gg-core/tracy"]
 # Development tooling, which development builds turn on and shipping builds never do: the tool API,
 # hot reload of games' shaders, textures, models, fonts, sounds and music and patches of their code,
-# assets' ID files, and the OS's file dialogs, for now.
-dev = ["dep:gg-api", "dep:rfd", "dep:subsecond"]
+# assets' ID files, the OS's file dialogs, for now, and the UI: egui's passes and its input, through
+# egui-winit, the dock, the title bars the UI draws, and the Inspector's and the Performance panel's
+# UI. A build without it keeps egui for its types alone, which `Ui`'s methods name.
+dev = ["dep:gg-api", "dep:egui-winit", "dep:rfd", "dep:subsecond"]
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { workspace = true, features = [
@@ -54,11 +56,17 @@ windows-sys = { workspace = true, features = [
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+# The process's memory, which the memory module reads through the OS's C functions.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc.workspace = true
 
 # The Windows modules' tests make windows of their own, which need the process's module handle.
 [target.'cfg(target_os = "windows")'.dev-dependencies]

@@ -15,17 +15,31 @@ use std::time::{Duration, Instant};
 
 use gg_core::{Error, Result};
 use gg_renderer::{
-    DrawCounts, Draws, Outline, Pick, Pixels, RenderData, Renderer, Streaming, Uploads, Viewpoint,
-    Viewport,
+    DrawCounts, Draws, MemoryBudget, Outline, Pick, Pixels, RenderData, Renderer, Streaming,
+    Uploads, Viewpoint, Viewport,
 };
 
-use crate::viewports::Drawn;
+#[cfg(feature = "dev")]
+pub(crate) use crate::viewports::Drawn;
 #[cfg(target_os = "windows")]
 use crate::windows_wait::recv as wait;
 
+/// What a window of its own drew, of which a build without `dev`, which has no UI and so no windows
+/// of panels torn off, has none.
+#[cfg(not(feature = "dev"))]
+pub(crate) enum Drawn {}
+
+#[cfg(not(feature = "dev"))]
+impl Drawn {
+    pub(crate) fn ui(&mut self) -> (u64, gg_renderer::Ui<'_>) {
+        match *self {}
+    }
+}
+
 /// A frame's render data, which the main thread fills in and the render thread renders: plain
 /// data. Its draws, uploads and picks keep their memory from frame to frame, and so do the answers
-/// to picks it brings back; its UI is egui's, made anew each frame.
+/// to picks it brings back; its UI is egui's, made anew each frame, and empty in a build without
+/// `dev`, which has none.
 pub(crate) struct Extracted {
     pub(crate) clear_color: [f32; 4],
     pub(crate) viewport: Viewport,
@@ -173,6 +187,12 @@ pub(crate) trait Render: Send + 'static {
     /// Renders `frame`, taking from it what it applies, such as its uploads and texture changes,
     /// and giving it the answers to picks that came in, in place of those it held.
     fn render(&mut self, frame: &mut Extracted) -> Rendered;
+
+    /// How much of the GPU's own memory is in use, and its budget, as
+    /// [`Renderer::memory_budget`] says; `None` for a test's stand-in, which has no GPU.
+    fn memory_budget(&self) -> Option<MemoryBudget> {
+        None
+    }
 }
 
 impl Render for Renderer {
@@ -236,6 +256,10 @@ impl Render for Renderer {
             publish,
             drawn,
         }
+    }
+
+    fn memory_budget(&self) -> Option<MemoryBudget> {
+        Some(Renderer::memory_budget(self))
     }
 }
 
@@ -697,6 +721,32 @@ mod tests {
         hand_off(&mut render, &mut cx, view, MainUi::none(), Vec::new());
         assert!(cx.pick([50.0, 30.0]).is_some(), "the next frame's");
         take_back(&mut render, &mut cx, Duration::ZERO).expect("a frame");
+    }
+
+    /// A run logs `engine.loaded` once, as the first frame comes back once its layers have
+    /// attached and nothing is on its way to the GPU, and not before they have.
+    #[test]
+    fn a_run_logs_that_it_has_loaded_once_its_layers_have_attached() {
+        let logged = crate::testing::logged();
+        let mut render = RenderThread::start(Fake::default()).unwrap();
+        let mut cx = Context::seeded(0);
+        cx.load_started = Some(Instant::now());
+        let view = Viewport {
+            origin: [0, 0],
+            size: [16, 16],
+        };
+        let mut frames = |cx: &mut Context, count: usize| {
+            for _ in 0..count {
+                hand_off(&mut render, cx, view, MainUi::none(), Vec::new());
+                take_back(&mut render, cx, Duration::ZERO).expect("a frame");
+            }
+            let codes = logged.codes.try_iter();
+            codes.filter(|code| code == "engine.loaded").count()
+        };
+        assert_eq!(frames(&mut cx, 2), 0, "before the layers attach");
+        crate::layer::Stack::default().attach(&mut cx);
+        assert_eq!(frames(&mut cx, 1), 1);
+        assert_eq!(frames(&mut cx, 2), 0, "once");
     }
 
     /// A texture change, as egui hands one out.

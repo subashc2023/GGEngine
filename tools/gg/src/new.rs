@@ -43,6 +43,10 @@ const MAIN: &str = r#"//! {name}, a game made with GGEngine.
 //! Its world starts as its project's start scene, `scenes/main.ron`, which a development build
 //! applies as it's saved.
 
+// A build without `dev`, as it ships, opens no console window on Windows: its JSON log still
+// records the run, and what it prints still reaches a process it's piped to, as a tool's or CI's.
+#![cfg_attr(not(feature = "dev"), windows_subsystem = "windows")]
+
 use std::process::ExitCode;
 
 use gg_engine::{App, Context, Layer};

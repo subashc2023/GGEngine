@@ -72,6 +72,8 @@ kira = { version = "0.12.6", default-features = false, features = [
 # Reads the KTX2 files a game's package holds its textures in, which ctt writes as the cooker cooks
 # them.
 ktx2 = "0.5.0"
+# macOS's C functions that say how much memory the process holds, which gg-engine logs.
+libc = "0.2.191"
 # Finds RenderDoc's library in the process, for captures. ash's version, so that the two build
 # once.
 libloading = "0.8.9"
@@ -139,7 +141,13 @@ symphonia = { version = "0.6.1", default-features = false, features = [
 # serde_derive's version, so that the two build once.
 syn = "3.0.9"
 # Without its default `attributes`, the `#[instrument]` macro, which nothing uses.
-tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+# release_max_level_debug, so that optimized builds, those that ship among them, compile trace
+# events out; debug events stay in every build, as `gg run --release` runs development builds
+# optimized, and agents read events such as `Sound started` from them.
+tracing = { version = "0.1.44", default-features = false, features = [
+    "std",
+    "release_max_level_debug",
+] }
 tracing-subscriber = { version = "0.3.23", features = ["json"] }
 # Tracy's client, for gg-core's zones. Its defaults open a profiler to the network and add
 # sampling, system tracing and a crash handler; these keep its listener on loopback, where the
@@ -171,6 +179,15 @@ unsafe_code = "deny"
 
 [workspace.lints.clippy]
 undocumented_unsafe_blocks = "warn"
+
+# Games' builds as they ship, as `gg ship` builds them, into `target/shipping`: release's, linked
+# whole with fat LTO, a codegen unit to a crate. Panics still unwind, so that the render thread's
+# resumes on the main thread, and debug info stays release's, none, with the symbols kept, so that a
+# panic names its functions.
+[profile.shipping]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
 
 # Debug builds decode a model's JPEGs as a layer adds it, the sandbox's 2,048 by 2,048 one in about
 # 0.75 s unoptimized, at each of its tests' attaches and CI's runs.

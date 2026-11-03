@@ -4,10 +4,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use super::Edit;
 use super::fields::AXES;
+use super::{Edit, Placed};
+use crate::EntityId;
 use crate::reflect::{Ident, Shape, Type, Types, Value};
-use crate::{EntityId, Pose, Transform};
 
 /// A link to an [`Inspector`], which [`Inspector::link`] gives, through which another layer picks
 /// and edits as the Inspector's panels do, such as with a tool's handles in the game's view: its
@@ -46,28 +46,7 @@ pub(super) struct Linked {
     /// Where the entity picked is, as of a remote Inspector's last pass.
     pub(super) placed: Option<Placed>,
     /// The game a remote Inspector is to show from its next pass, which `Some(None)` leaves.
-    #[cfg(feature = "dev")]
     pub(super) reach: Option<Option<gg_api::Session>>,
-}
-
-/// Where a remote Inspector's pick is in the game's world, as the game's last read of it gave it,
-/// which [`InspectorLink::placed`] gives: for a tool's handles, as [`World::pose`] gives where an
-/// entity of a world of the app's own is.
-///
-/// [`World::pose`]: crate::World::pose
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Placed {
-    /// The entity's ID, the pick's.
-    pub id: EntityId,
-    /// Its own transform.
-    pub local: Transform,
-    /// Where the space its transform is in sits in the world: its parent's pose, as the game's
-    /// latest tick left it, or the identity for a root.
-    pub space: Pose,
-    /// How many times the Inspector has been reached, to a game or to none, which goes up at each
-    /// reach, its reads of the game before gone, as a world's
-    /// [`World::serial`](crate::World::serial) changes as it's another.
-    pub generation: u64,
 }
 
 /// A set, a create or a seal made through a link.
@@ -161,7 +140,6 @@ impl InspectorLink {
         pending.push(Linking::Create(components));
     }
 
-    #[cfg(feature = "dev")]
     /// Has a remote Inspector, which [`Inspector::remote`](super::Inspector::remote) makes, show
     /// the world of the game `session` names from its next pass, connecting to it, as it serves; or
     /// none, for `None`, as the game goes. Its pick and its open rows stay, since entities' IDs

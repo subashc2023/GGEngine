@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use ash::vk;
 use gg_gpu::{
-    Blend, ColorImage, DepthImage, Device, Frame, Frames, GpuBuffer, GraphicsDesc, IdImage,
+    Arenas, Blend, ColorImage, DepthImage, Device, Frame, Frames, GpuBuffer, GraphicsDesc, IdImage,
     Instance, InstanceDesc, MAX_READS, PLACED_TEXTURES, Pipeline, Sampler, Target, Texture,
     TextureFormat, UploadPath, Validation, mip_sizes,
 };
@@ -62,6 +62,7 @@ fn main() -> ExitCode {
     run!(
         tests,
         clear_reads_back,
+        arenas_hold_more_than_a_frame_took,
         sampled_images_keep_their_layout,
         passes_over_keep_what_their_target_holds,
         images_read_back_once_their_frame_has_finished,
@@ -482,6 +483,34 @@ fn clear_reads_back() {
     }
 
     drop((frames, images, device, instance));
+    check(&validation);
+}
+
+/// The frames' arenas count the most a frame's uploads took, each from a multiple of 16 bytes, and
+/// hold at least that, in buffers of 1 MiB at least, which they keep: a frame that takes less
+/// leaves the peak as it was.
+fn arenas_hold_more_than_a_frame_took() {
+    let instance = instance();
+    let validation = instance.validation();
+    let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
+    let mut image = ColorImage::new(&device, 8, 8, "arena test target").expect("an image");
+    let mut frames = Frames::new(&device).expect("frames");
+    assert_eq!(frames.arenas(), Arenas::default());
+    for uploads in [&[100, 7][..], &[20]] {
+        let mut frame = frames
+            .begin([Target::Image(&mut image)])
+            .expect("a frame")
+            .expect("an offscreen image can always be rendered into");
+        for &len in uploads {
+            frame.upload(&vec![1; len]).expect("an upload");
+        }
+        drop(frame.begin_pass(0, c"arena", [0.0; 4], None, None));
+        frame.submit().expect("the frame's submission");
+    }
+    let arenas = frames.arenas();
+    assert_eq!(arenas.peak, 112 + 16);
+    assert!(arenas.held >= 2 << 20, "{arenas:?}");
+    drop((frames, image, device, instance));
     check(&validation);
 }
 

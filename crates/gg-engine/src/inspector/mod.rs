@@ -6,13 +6,15 @@
 //! have one, and their IDs. Its edits and operations are its commands: the panels queue them, its
 //! next tick makes them, and a recording keeps them. Its link lets another layer pick and edit as
 //! the panels do. A remote Inspector shows a game's world in another process, as the tool API gives
-//! it, and edits it through the API.
+//! it, and edits it through the API. In development builds alone, as `dev` has the UI: a build
+//! without it has `none.rs` in its place.
 
 mod commands;
 mod entities;
 mod fields;
 mod inspected;
 mod link;
+mod placed;
 mod remote;
 #[cfg(test)]
 mod tests;
@@ -29,8 +31,9 @@ use tracing::warn;
 use commands::{Command, Queue};
 use fields::{Fields, Slot};
 use inspected::{Inspected, Pending};
-pub use link::{InspectorLink, Placed};
+pub use link::InspectorLink;
 use link::{Linked, Linking, links_field};
+pub use placed::Placed;
 use remote::Remote;
 
 use crate::reflect::{Meta, Shape, Type, Value};
@@ -322,7 +325,6 @@ impl Inspector {
         InspectorLink(self.link.clone())
     }
 
-    #[cfg(feature = "dev")]
     /// A remote Inspector, which shows the world of the game its link reaches, as
     /// [`InspectorLink::reach`] says, rather than the app's own, and edits it as the game's client
     /// `client`, the author of its edits, which its Edit menu undoes and redoes.

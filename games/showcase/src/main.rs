@@ -6,17 +6,19 @@
 //! hierarchy of transforms, each child carried by its parent (`hierarchy.ron`); 2D physics, bodies
 //! dynamic, kinematic and static, boxes and circles, bouncing and sliding (`physics.ron`); and glTF
 //! models, unlit, textured and of more than one node, through a camera with perspective
-//! (`models.ron`). Its scripts, [`Spin`] and [`Bob`], move what they're on at each tick, and 2D
-//! physics steps, so that each scene moves as it plays, in the editor from its Play.
+//! (`models.ron`). Its Luau scripts, `scripts/spin.luau` and `scripts/bob.luau`, turn and bob what
+//! they're on at each tick, and 2D physics steps, so that each scene moves as it plays, in the
+//! editor from its Play, and in the reference player, which runs the game's package without its
+//! code.
 
-use std::f32::consts::TAU;
+// A build without `dev`, as it ships, shows no console on Windows; its JSON log still records the
+// run, and output piped to another process still arrives.
+#![cfg_attr(not(feature = "dev"), windows_subsystem = "windows")]
+
+use std::path::Path;
 use std::process::ExitCode;
 
-use gg_engine::math::{Quat, Vec3, libm};
-use gg_engine::{
-    App, Component, Context, Entity, Layer, Script, Tick, Transform, World, run_scripts,
-    step_physics,
-};
+use gg_engine::{App, Context, Layer, Scripts, Tick, World, step_physics};
 
 #[cfg(test)]
 mod tests;
@@ -29,62 +31,37 @@ fn main() -> ExitCode {
 /// recordings replay.
 fn app() -> App {
     let app = App::new("Showcase").project(env!("CARGO_MANIFEST_DIR"));
-    let app = app.layer(Showcase).overlay(gg_engine::PerfPanel);
+    let app = app.layer(Showcase::new()).overlay(gg_engine::PerfPanel);
     app.overlay(gg_engine::Inspector::default())
 }
 
-/// A script that turns its entity about `axis`, in its parent's space, `speed` radians a second,
-/// counterclockwise as the axis points at the viewer; about Z, out of the view, without an axis.
-#[derive(Clone, Copy, Debug, PartialEq, Component)]
-struct Spin {
-    axis: Vec3,
-    #[reflect(degrees)]
-    speed: f32,
+/// The game's scripts, by their paths from its directory: each declares the component it is.
+const SCRIPTS: [&str; 2] = ["scripts/bob.luau", "scripts/spin.luau"];
+
+/// The game's layer: it loads the scripts as it loads, which declares their components, so that
+/// its scenes, the Inspector's Add Component and the tool API know them before any entity has one;
+/// loads the start scene as it attaches; and at each tick runs the scripts and steps 2D physics.
+struct Showcase {
+    scripts: Scripts,
 }
 
-impl Script for Spin {
-    fn tick(entity: Entity, world: &mut World, _: Tick) {
-        let Some(&Spin { axis, speed }) = world.get::<Spin>(entity) else {
-            return;
-        };
-        let axis = axis.try_normalize().unwrap_or(Vec3::Z);
-        let turn = Quat::from_axis_angle(axis, speed * Tick::DT.as_secs_f32());
-        if let Some(transform) = world.get_mut::<Transform>(entity) {
-            transform.rotation = (turn * transform.rotation).normalize();
+impl Showcase {
+    fn new() -> Self {
+        Self {
+            scripts: Scripts::new().expect("Luau starts"),
         }
     }
 }
-
-/// A script that moves its entity up and down, along its parent's Y, as far as `height` either
-/// way of where it starts, once every `period` seconds of the simulation's time.
-#[derive(Clone, Copy, Debug, PartialEq, Component)]
-struct Bob {
-    #[reflect(min = 0.0)]
-    height: f32,
-    #[reflect(min = 0.1, default = 2.0)]
-    period: f32,
-}
-
-impl Script for Bob {
-    fn tick(entity: Entity, world: &mut World, tick: Tick) {
-        let Some(&Bob { height, period }) = world.get::<Bob>(entity) else {
-            return;
-        };
-        let at = |time: f32| height * libm::sinf(TAU * time / period.max(0.1));
-        let (time, dt) = (tick.time().as_secs_f32(), Tick::DT.as_secs_f32());
-        if let Some(transform) = world.get_mut::<Transform>(entity) {
-            transform.translation.y += at(time) - at(time - dt);
-        }
-    }
-}
-
-/// The game's layer: it loads the start scene as it attaches, and at each tick runs the scripts
-/// and steps 2D physics.
-struct Showcase;
 
 impl Layer for Showcase {
     fn load(&mut self, cx: &mut Context) {
-        register(cx.world_mut());
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        // A script that doesn't load stops the game, with what went wrong. Each is watched as the
+        // game runs, in development builds, which reload it as it's saved.
+        for script in SCRIPTS {
+            let loaded = self.scripts.load(cx, root.join(script));
+            loaded.unwrap_or_else(|error| panic!("{error:#}"));
+        }
     }
 
     fn attach(&mut self, cx: &mut Context) {
@@ -93,18 +70,8 @@ impl Layer for Showcase {
         loaded.unwrap_or_else(|error| panic!("{error:#}"));
     }
 
-    fn tick(&mut self, world: &mut World, tick: Tick) {
-        run_scripts::<Spin>(world, tick);
-        run_scripts::<Bob>(world, tick);
+    fn tick(&mut self, world: &mut World, _: Tick) {
+        self.scripts.run(world);
         step_physics(world);
     }
-}
-
-/// Registers the game's scripts with `world`, so that its scenes, the Inspector's Add Component
-/// and the tool API know them before any entity has one.
-fn register(world: &mut World) {
-    let registered = world
-        .register::<Spin>()
-        .and_then(|()| world.register::<Bob>());
-    registered.expect("the game's scripts describe themselves");
 }

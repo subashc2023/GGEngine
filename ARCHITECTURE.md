@@ -109,9 +109,11 @@ The editor uses `gg-api` too, beside `gg-engine`, as a client of the tool API, a
   skip the hub; its File menu's Open Project shows the hub again, and another project opens in
   place of the one open as a close of the editor goes, asking before unsaved edits go.
   [game.rs](apps/editor/src/game.rs) describes the rest.
-- **`player`:** the reference player. It runs a cooked scene without game code and shows how a
-  game builds its own player.
-- **`tools/gg`:** the command-line tool, a client of the tool API, which `cargo gg` runs.
+- **`player`:** the reference player. It runs a game's package without the game's code, its start
+  scene, its Luau scripts and 2D physics, as the showcase's package runs, and shows how a game
+  builds its own player.
+- **`tools/gg`:** the command-line tool, a client of the tool API, which `cargo gg` runs, and which
+  builds a game as it ships, `gg ship`, as [Builds](#builds) says.
 - **`tools/cook`:** the offline asset cooker, `gg-cook`, which writes a game's
   [package](#project-state) from its project. It depends on `gg-engine`, whose code bakes fonts,
   compiles shaders, decodes images, reads models and makes mip levels as runs do and writes and
@@ -168,6 +170,32 @@ which compile there but run with it, as they read their projects. A gate of its 
 `cargo clippy -p gg-engine --all-targets`, checks `gg-engine`'s tests without `dev` too, which no
 other command builds: kept apart from the shipping gate, as their dev-dependencies' features would
 merge into the player's build.
+
+A build without `dev` has no development UI, nor egui at work: `Ui` is a type no value of which can
+be made, so the engine never calls `Layer::ui`, makes no egui context, runs no egui pass and hands
+egui no events, which go to the layers alone. A game's code, its `ui` included, builds unchanged
+either way, and draws its own UI on the [canvas](#events-and-layers): `PerfPanel` and `Inspector`
+are layers that do nothing, and `App::custom_title_bar`, `App::view_panel` and `App::dock` change
+nothing, the OS framing the window. egui stays a dependency for its types, which `Ui`'s methods
+name, and the linker keeps none of its code; egui's winit integration, the dock, the title bars,
+the Inspector's and the Performance panel's UI and the torn-off windows are behind `dev`.
+
+Shipping builds are optimized in the `shipping` profile: release's, with the whole program
+optimized as one at link time (fat LTO, one codegen unit), panics still unwinding, as the render
+thread's resumes on the main thread. Release and shipping builds compile trace events out
+(`tracing`'s `release_max_level_debug`), and keep debug events, which agents read of `gg run
+--release`'s runs. A game built without `dev`, and the player built optimized, open no console
+window on Windows, their logs recording their runs. `cargo gg ship` builds a project's game so,
+cooks its package beside it and lays the two out in `target/ship/<game>`: side by side on Windows
+and Linux, whose GPUs' drivers install the Vulkan loader; on macOS, in an app bundle,
+`<Game>.app`, its package in `Contents/Resources`, and the Vulkan SDK's loader and KosmicKrisp in
+`Contents/Frameworks`, which an executable in a bundle loads the loader from, by its path, with
+KosmicKrisp's manifest in `Contents/Resources/vulkan/icd.d`, where a loader in a bundle looks
+first. Its Info.plist, of identifier `com.ggengine.<game>`, has a launch through Launch Services,
+as from Finder, load the bundle's driver alone (`VK_LOADER_SEARCH_ONLY_IN_BUNDLE`), which needs the
+SDK 1.4.363.0 or later, the first whose KosmicKrisp is a conformant Vulkan 1.4 driver too. It's
+signed ad hoc, as Apple Silicon runs nothing unsigned, inside out, without the hardened runtime,
+under which it would load no library a team of its own didn't sign.
 
 Tracy is a feature of its own, `tracy`, off by default and in no shipping build: it compiles
 Tracy's C++ client, which listens on the machine's loopback and keeps what it records in memory
@@ -416,12 +444,14 @@ A project's state is text that people and agents edit, diff and merge with ordin
   development build reads its game's, through `App::project`; shipping builds start from cooked
   data, so a build without `dev` reads none, and runs from its game's package.
 - **Packages.** A game's package is one file, which the cooker, `gg-cook`, writes from its project,
-  and a build of the game without `dev` runs from: `<executable>.ggpk` beside its executable, or the
-  one `--package` names, a run of a project without one failing as it starts (`engine.no_package`).
-  It holds the files under the asset root that runs load, by their paths from the root, found
-  through the folders the scan of ID files below goes through: a font
-  baked into its field and a shader compiled to SPIR-V, which are what the engine makes of them as
-  they load, so that a shipping run needs no slangc; a texture compressed to BC7, of the one level
+  and a build of the game without `dev` runs from: `<executable>.ggpk` beside its executable, in a
+  macOS app's bundle in its `Contents/Resources`, or the one `--package` names, a run of a project
+  without one failing as it starts (`engine.no_package`). So does an app that `App::from_package`
+  makes, in any build, as the reference player is, which loads the Luau scripts the package holds,
+  as `Context::package_files` lists them, and its start scene. It holds the files under the asset
+  root that runs load, by their paths from the root, found through the folders the scan of ID files
+  below goes through: a font baked into its field and a shader compiled to SPIR-V, which are what
+  the engine makes of them as they load, so that a shipping run needs no slangc; a texture compressed to BC7, of the one level
   a layer's texture has, in KTX2, supercompressed by zstd; a model as the engine reads it, with
   the files it names, each primitive's triangles optimized by meshoptimizer for the GPU's vertex
   cache, overdraw and fetches, but those of a material that blends, which cover each other in
@@ -599,8 +629,8 @@ A project's state is text that people and agents edit, diff and merge with ordin
     joiner, adds and removes what that run did, and its handles, and the `MeshDraw`s holding them,
     line up. Shaders, fonts and the engine's own assets aren't removed.
   - A run from a package names each asset by the ID the package gives it, as a development run
-    names it by its ID file. A build without `dev` and without a project, as the player is until it
-    runs a package's scenes, reads no ID file, and names every asset by its path, so that a scene,
+    names it by its ID file. A build without `dev` that runs from no package, as an app that is
+    no project's game does, reads no ID file, and names every asset by its path, so that a scene,
     a recording or a snapshot naming one by its ID finds none there.
   - A run's names travel with what another process reads of it, so that the other goes as it did
     whatever ID files its disk holds, as a checkout without those not yet committed. A recording
@@ -916,14 +946,19 @@ Diagnostics are data, so agents and tools can act on them as reliably as people 
 - **Logs** go through `tracing` with structured fields, filtered by `RUST_LOG`. Each run prints
   readable, colored lines to stderr, which keeps stdout for machine-readable output, and writes
   every event as a JSON line to a file that agents and tools read:
-  `logs/<app>-<UTC time>-<process ID>.jsonl` beside the executable, whose path the run logs as it
-  starts; and keeps the last of those lines in memory, which the tool API's `logs` serves as they
-  come, as `gg logs --follow` and the editor's Logs follow them. A run embedded in a tool prints no
+  `logs/<app>-<UTC time>-<process ID>.jsonl` beside the executable in a development build, and in a
+  build without `dev`, which ships where its executable's directory may not be written, as Program
+  Files or a signed .app, in the app's own directory of what it keeps for the user, as the dock's
+  layout is, or beside the executable without one; the run logs its path as it starts. It keeps the
+  last of those lines in memory, which the tool API's `logs` serves as they come, as `gg logs
+  --follow` and the editor's Logs follow them. A run embedded in a tool prints no
   readable lines, since the tool shows its events, which it follows through the API.
 - **Errors and warnings name their subject.** Each carries a stable code, a dotted name such as
   `gpu.device_lost`, and the thing it is about: an entity's ID, or a despawned entity's handle,
   since it has none; an asset path, a render pass, a shader file and line, or a scene's line and
   column. What outlives an entity, such as a pick or a queued message, keeps its ID, not its handle.
+  A layer that can't go on, as the player can't without its scripts, ends the run with its error
+  through `Context::fail`, rather than a panic: the layers detach, and the run's status is 1.
 - **Validation messages** become events with their VUID and the debug names of the objects
   involved. A run whose validation layer can't validate synchronization warns
   `gpu.no_sync_validation`, naming why: the layer takes no settings (`VK_EXT_layer_settings`), or
@@ -943,9 +978,15 @@ Diagnostics are data, so agents and tools can act on them as reliably as people 
   compile to nothing. Each pass of the render graph has a GPU timestamp too, which Tracy shows
   beside the zones. The engine also measures every frame itself, always, part by part, on the main
   thread and on the render thread: the Performance panel, an overlay apps add, shows the parts, and
-  a run that doesn't end in an error sums them up in `engine.perf` as it ends, with how long it took
-  to start and to stop, the ticks it ran and dropped, the GPU and the build, so that an agent can
-  compare two builds by their runs.
+  a run that doesn't end in an error of the engine's sums them up in `engine.perf` as it ends, with
+  how long it took to start and to stop, the ticks it ran and dropped, the GPU and the build, the
+  most of the process's memory that was resident, the GPU's own memory in use, and what the frames'
+  arenas hold beside the most a frame took of them, so that an agent can compare two builds by their
+  runs. A run that renders logs `engine.loaded` once, at the first frame back after which nothing is
+  decoding or streaming once its layers have attached, which counts what they added as they loaded
+  and attached, and may miss what they add after: how long it took to load from the engine's
+  start, the process's resident memory and its peak, and the GPU's own memory in use and its
+  budget. The OS's counts are read then and as the run ends alone.
 
 ## Events and layers
 
@@ -973,11 +1014,12 @@ it rests. Ticks, updates and UI go up from the bottom. Headless runs have no win
 events, but their layers tick, update and draw UI all the same. A layer that keeps `Layer::ui`'s
 default draws none, and an app none of whose layers draw UI, whose windows the OS frames, and which
 has no view panel, runs without egui from its second frame: its frames collect no input for egui and
-run no pass, egui sees no events, and the game's view fills the window.
+run no pass, egui sees no events, and the game's view fills the window; a build without `dev` runs
+without it from its first, as [Builds](#builds) says.
 
-egui, the engine's immediate-mode UI, is the top overlay: it sees every event first and keeps those
-it wants, such as a click on one of its panels, but no key's or button's release, and `gg-renderer`
-draws its meshes over the frame.
+egui, the engine's immediate-mode UI, is the top overlay in development builds: it sees every event
+first and keeps those it wants, such as a click on one of its panels, but no key's or button's
+release, and `gg-renderer` draws its meshes over the frame.
 
 egui is the development UI. A game's own, its HUDs and menus, is immediate too, but apart from it:
 layers lay it out as they update, each frame, on the view's canvas, `Context::canvas`, as text and
@@ -1434,7 +1476,8 @@ thread, and a thread that can't start leaves the main thread to decode, warning 
 - **Windows and Linux:** native Vulkan drivers.
 - **macOS: KosmicKrisp,** LunarG's Vulkan 1.4 driver on Metal. It needs Apple Silicon and macOS 26
   or later. Not MoltenVK, which Khronos deprecated. KosmicKrisp has no mesh shaders or ray tracing,
-  so those stay optional paths.
+  so those stay optional paths. macOS has no Vulkan loader of its own, so a shipped game's bundle
+  holds the SDK's, with KosmicKrisp, as [Builds](#builds) says.
 - **x86-64 and ARM64:** the engine builds and passes its tests on both from the start, rather
   than being ported later; macOS is ARM64 only. An ARM64 device still needs a Vulkan 1.4
   driver.
@@ -1450,7 +1493,7 @@ thread, and a thread that can't start leaves the main thread to decode, warning 
 | GPU API | Vulkan through `ash`: one backend, no multi-API abstraction layer |
 | GPU memory | VMA through our own binding in `gg-gpu`, for its budgets, aliasing, pools and defragmentation |
 | Window and input | `winit`, with `ash-window` for surfaces and `gilrs` for gamepads |
-| UI | egui, drawn by `gg-renderer`, with a dock of our own: the engine's overlay and the editor alike; its text in Inter |
+| UI | egui, drawn by `gg-renderer`, with a dock of our own, in development builds: the engine's overlay and the editor alike; its text in Inter |
 | File dialogs | The OS's own, through `rfd`, in development builds |
 | Project state | RON in a canonical form; see [Project state](#project-state) |
 | Math | `glam`, with its `scalar-math` and `libm` features; `libm` |

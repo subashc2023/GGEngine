@@ -1150,6 +1150,7 @@ dependencies = [
  "image",
  "kira",
  "ktx2",
+ "libc",
  "mlua",
  "png",
  "rapier2d",

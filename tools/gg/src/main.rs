@@ -1,8 +1,9 @@
 //! `gg`, the command-line tool for GGEngine's games, as ARCHITECTURE.md's Agents and tools
 //! describes: it builds a game's development build and runs it, supervising it; runs headless
-//! checks; talks to running games through the tool API; and makes new games. Inside a game's
-//! project, it builds the project's game and reaches the project's games alone. It prints what it
-//! finds as JSON, a line at a time, for agents and scripts as much as for people.
+//! checks; builds a game as it ships, laid out in a folder of its own; talks to running games
+//! through the tool API; and makes new games. Inside a game's project, it builds the project's game
+//! and reaches the project's games alone. It prints what it finds as JSON, a line at a time, for
+//! agents and scripts as much as for people.
 
 mod build;
 mod classify;
@@ -12,6 +13,7 @@ mod mcp;
 mod new;
 mod patch;
 mod run;
+mod ship;
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -24,6 +26,7 @@ use serde_json::{Value, json};
 
 use game::Pick;
 use run::{Check, Run};
+use ship::Ship;
 
 const USAGE: &str = "\
 Usage: gg <command> [options]
@@ -75,8 +78,17 @@ Build and run:
       Build PACKAGE, the project's game without one, and run it headless for N frames (60) with
       ARGS, and print what it did: its exit status, its warnings and errors, and its frame times.
       One that runs longer than SECONDS (600) is ended.
-      Building the project's game, `run` and `check` first check that it's the package beside the
-      project's manifest (`gg.project`).
+  ship [PACKAGE]
+      Build PACKAGE, the project's game without one, as it ships, without `dev` in the shipping
+      profile, cook its project into its package beside its executable, with the workspace's
+      cooker, and lay the two out in `ship/PACKAGE` in the target directory, emptied first, printing
+      a line naming the folder and each file in it, with its size: side by side on Windows and
+      Linux, whose GPUs' drivers install the Vulkan loader; on macOS in an app bundle, PACKAGE
+      capitalized, as `Shards.app`, with the loader and KosmicKrisp of the Vulkan SDK, 1.4.363.0 or
+      later, whose `macOS` folder `VULKAN_SDK` names (`gg.no_sdk`, `gg.sdk_version`), signed ad hoc
+      (`gg.sign`).
+      Building the project's game, `run`, `check` and `ship` first check that it's the package
+      beside the project's manifest (`gg.project`).
 
 Make a game:
   new <NAME>
@@ -223,6 +235,7 @@ enum Command {
     Help,
     Run(Run),
     Check(Check),
+    Ship(Ship),
     New(String),
     /// The running games, those of the project whose manifest it names alone.
     Sessions(Option<PathBuf>),
@@ -260,6 +273,7 @@ fn main() -> ExitCode {
         }
         Command::Run(run) => run::run(&run),
         Command::Check(check) => run::check(&check),
+        Command::Ship(ship) => ship::ship(&ship).map(|()| true),
         Command::New(name) => new::new(&name).map(|()| true),
         Command::Sessions(project) => game::sessions(project.as_deref()).map(|sessions| {
             print(&sessions.to_string());
@@ -465,8 +479,8 @@ impl Parsed {
         }))
     }
 
-    /// The package `run` or `check` builds, `command`'s: the one given, or else the game of the
-    /// project gg works in, `scope`.
+    /// The package `run`, `check` or `ship` builds, `command`'s: the one given, or else the game of
+    /// the project gg works in, `scope`.
     ///
     /// Fails with `gg.args` if neither is.
     fn package(&mut self, command: &str, scope: Option<&Scope>) -> Result<String, Failure> {
@@ -570,6 +584,13 @@ fn parse(args: &[String]) -> Result<Command, Failure> {
                 frames: parsed.number("--frames", 60)?,
                 timeout: parsed.seconds("--timeout", 600)?,
                 args: std::mem::take(&mut parsed.rest),
+            })
+        }
+        "ship" => {
+            let project = parsed.scope()?;
+            Command::Ship(Ship {
+                package: parsed.package("ship", project.as_ref())?,
+                project,
             })
         }
         "new" => {
@@ -917,6 +938,16 @@ mod tests {
             panic!("a call");
         };
         assert_eq!(pick.project, Some(shards.join(Project::FILE)));
+        let Ok(Command::Ship(ship)) = parsed(&["ship", "shards"]) else {
+            panic!("a ship");
+        };
+        assert_eq!((ship.package.as_str(), ship.project), ("shards", None));
+        let Ok(Command::Ship(ship)) = parsed(&["ship", "--project", "../../games/shards"]) else {
+            panic!("a ship");
+        };
+        assert_eq!(ship.package, "shards");
+        let manifest = ship.project.map(|scope| scope.manifest);
+        assert_eq!(manifest, Some(shards.join(Project::FILE)));
         let Ok(Command::New(name)) = parsed(&["new", "probe"]) else {
             panic!("a new game");
         };
@@ -1059,6 +1090,10 @@ mod tests {
             &["status", "--release=yes"],
             &["status", "--", "x"],
             &["check"],
+            &["ship"],
+            &["ship", "a", "b"],
+            &["ship", "a", "--release"],
+            &["ship", "a", "--", "--headless"],
             &["new"],
             &["new", "2probe"],
             &["new", "a", "b"],
