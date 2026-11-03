@@ -362,8 +362,9 @@ pub(crate) fn tessellate(
 
 /// Takes the renderer back from rendering the frame before, which this frame, having tessellated
 /// its own UI in `tessellated`, is measured with, and the answers to picks that came in as it
-/// rendered, which `cx` gives in place of the last; and returns whether that frame presented:
-/// `None` if no frame was rendering.
+/// rendered, which `cx` gives in place of the last, and what it left streaming to the GPU, which
+/// [`Context::streaming`] tells; and returns whether that frame presented: `None` if no frame was
+/// rendering.
 pub(crate) fn take_back<R: Render>(
     render: &mut RenderThread<R>,
     cx: &mut Context,
@@ -374,6 +375,7 @@ pub(crate) fn take_back<R: Render>(
     cx.perf
         .rendered(tessellated, start.elapsed(), rendered.as_ref());
     let answers = if rendered.is_some() {
+        cx.streamed = render.frame().streaming;
         &render.frame().picked[..]
     } else {
         &[]
@@ -633,6 +635,7 @@ pub(crate) fn settings<'a>(app: &'a App, args: &'a Args) -> Settings<'a> {
         gpu: args.gpu.as_deref(),
         vsync: args.vsync,
         uploads: None,
+        upload_budget: gg_renderer::DEFAULT_UPLOAD_BUDGET,
         pipeline_cache: None,
         capture: args.capture,
     }

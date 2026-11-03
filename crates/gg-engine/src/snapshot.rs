@@ -234,20 +234,47 @@ fn world_hash(text: &str) -> Option<WorldHash> {
     })
 }
 
-/// The kind of asset an `asset` line names, `texture`, `model` or `font`, and the path of its file,
-/// as `texture 1 1 2 assets/logo.png`, a font's line alike, and a model's line, its two types'
-/// names and sizes after its path, whatever build wrote them, give them: `None` for a line of
-/// another kind, as a mesh's or a shader's.
-fn asset_path(line: &str) -> Option<(&'static str, &str)> {
+/// What a run restored from a snapshot takes again of one of its `asset` lines, as
+/// [`Context::load_restored`](crate::Context::load_restored) does: a texture, a model or a font
+/// it loads, from the path its line gives after the meshes, shaders and textures there were after
+/// it, as `texture 1 1 2 assets/logo.png`, a font's line alike, and a model's, its two types'
+/// names and sizes after its path, whatever build wrote them; or a removal, of a texture or a model
+/// by its index and its file's path, as `removed texture 2 assets/logo.png` gives them, or of a
+/// mesh by its index alone, as `removed mesh 3`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Again<'a> {
+    Load(Asset<&'a str>),
+    RemoveTexture(u32, &'a str),
+    RemoveModel(usize, &'a str),
+    RemoveMesh(u32),
+}
+
+/// What a restored run takes again of `line`, as [`Again`] says: `None` for a line of another
+/// kind, as a mesh's or a shader's, which it adds as its layers load.
+pub(crate) fn again(line: &str) -> Option<Again<'_>> {
     let (kind, rest) = line.split_once(' ')?;
+    if kind == "removed" {
+        let (kind, rest) = rest.split_once(' ')?;
+        let (index, path) = match rest.split_once(' ') {
+            Some((index, path)) => (index, Some(path)),
+            None => (rest, None),
+        };
+        return match (kind, path) {
+            ("texture", Some(path)) => Some(Again::RemoveTexture(index.parse().ok()?, path)),
+            ("model", Some(path)) => Some(Again::RemoveModel(index.parse().ok()?, path)),
+            ("mesh", None) => Some(Again::RemoveMesh(index.parse().ok()?)),
+            _ => None,
+        };
+    }
     // The meshes, shaders and textures there were after it, then its path.
     let path = rest.splitn(4, ' ').nth(3)?;
-    match kind {
-        "texture" => Some(("texture", path)),
-        "model" => Some(("model", path.rsplitn(5, ' ').nth(4)?)),
-        "font" => Some(("font", path)),
-        _ => None,
-    }
+    let asset = match kind {
+        "texture" => Asset::Texture(path),
+        "model" => Asset::Model(path.rsplitn(5, ' ').nth(4)?),
+        "font" => Asset::Font(path),
+        _ => return None,
+    };
+    Some(Again::Load(asset))
 }
 
 /// Writes `text`, a snapshot file's, at `path`, whole or not at all, so that the last snapshot
@@ -530,29 +557,22 @@ impl Snapshot {
         })
     }
 
-    /// Each texture, model and font the run it was taken from had loaded, by its path, as its
-    /// `asset` lines give them, in order: which a run restored from it loads, where its layers
-    /// haven't, before its world, as [`Context::load_restored`](crate::Context::load_restored)
-    /// does.
-    pub(crate) fn assets(&self) -> impl Iterator<Item = Asset<&str>> {
-        self.assets
-            .iter()
-            .filter_map(|line| match asset_path(line)? {
-                ("texture", path) => Some(Asset::Texture(path)),
-                ("model", path) => Some(Asset::Model(path)),
-                ("font", path) => Some(Asset::Font(path)),
-                _ => None,
-            })
+    /// What the layers of the run it was taken from had added and removed, and what it loaded
+    /// where text named it, in order, as its `asset` lines give them: which a run restored from it
+    /// takes again, past what its own layers noted alike, before its world, as
+    /// [`Context::load_restored`](crate::Context::load_restored) does.
+    pub(crate) fn added(&self) -> &[String] {
+        &self.assets
     }
 
     /// Has the snapshot name, by the path its file is at now, each texture, model and font its run
     /// named by an ID that `catalog`, the asset database of the run restored from it, holds for an
     /// asset at another path, its file gone from the path it had, as after a rename that the
-    /// snapshot's run, or this run's start, moved its ID file for: in its `asset` lines and its
-    /// names, so that the run loads the asset from there, and its own `asset` line for it, which
-    /// then is the snapshot's, keeps what's opaque in the world. An asset whose file is where it
-    /// was keeps its path, though a copy took its ID, as its ID changed since. A model's images,
-    /// which load with their model, keep their paths.
+    /// snapshot's run, or this run's start, moved its ID file for: in its `asset` lines, its
+    /// removals' among them, and its names, so that the run loads the asset from there, and its
+    /// own `asset` line for it, which then is the snapshot's, keeps what's opaque in the world. An
+    /// asset whose file is where it was keeps its path, though a copy took its ID, as its ID
+    /// changed since. A model's images, which load with their model, keep their paths.
     #[cfg(feature = "dev")]
     pub(crate) fn follow(&mut self, catalog: &crate::assets::Catalog) {
         let moved: HashMap<Arc<str>, Arc<str>> = (self.names.iter())
@@ -565,8 +585,12 @@ impl Snapshot {
             return;
         }
         for line in &mut self.assets {
-            let Some((_, path)) = asset_path(line) else {
-                continue;
+            let path = match again(line) {
+                Some(Again::Load(
+                    Asset::Texture(path) | Asset::Model(path) | Asset::Font(path),
+                )) => path,
+                Some(Again::RemoveTexture(_, path) | Again::RemoveModel(_, path)) => path,
+                Some(Again::RemoveMesh(_)) | None => continue,
             };
             let Some(now) = moved.get(path) else {
                 continue;
@@ -732,10 +756,22 @@ mod tests {
         super::write(&of, run, app, layers, ticks)
     }
 
+    /// Each texture, model and font `snapshot`'s `asset` lines load, in order.
+    fn loads(snapshot: &Snapshot) -> Vec<Asset<&str>> {
+        let taken = snapshot.added().iter().filter_map(|line| again(line));
+        let loads = taken.filter_map(|again| match again {
+            Again::Load(asset) => Some(asset),
+            _ => None,
+        });
+        loads.collect()
+    }
+
     /// An `asset` line gives a texture's, a model's or a font's path, spaces and all, and a model's
-    /// whatever types its run's build gave it; a mesh's or a shader's gives none.
+    /// whatever types its run's build gave it, to load again; a removal's gives what it removed,
+    /// by an index and a path, or a mesh's by its index; and a mesh's or a shader's gives nothing.
     #[test]
-    fn asset_lines_give_textures_and_models_paths() {
+    fn asset_lines_give_what_a_restore_takes_again() {
+        use Again::{Load, RemoveMesh, RemoveModel, RemoveTexture};
         let model = format!(
             "model 3 4 2 assets/a truck.glb {}",
             crate::layer::model_types()
@@ -743,21 +779,37 @@ mod tests {
         let lines = [
             (
                 "texture 1 1 2 assets/a stone.png",
-                Some(("texture", "assets/a stone.png")),
+                Some(Load(Asset::Texture("assets/a stone.png"))),
             ),
-            (model.as_str(), Some(("model", "assets/a truck.glb"))),
+            (
+                model.as_str(),
+                Some(Load(Asset::Model("assets/a truck.glb"))),
+            ),
             (
                 "model 3 4 2 m.glb gg::Vertex 48 gg::Params 64",
-                Some(("model", "m.glb")),
+                Some(Load(Asset::Model("m.glb"))),
             ),
             (
                 "font 3 4 5 fonts/a title.ttf",
-                Some(("font", "fonts/a title.ttf")),
+                Some(Load(Asset::Font("fonts/a title.ttf"))),
             ),
             ("mesh 2 1 1 floor game::Corner 20", None),
+            ("shader 1 2 1 shaders/a.slang game::V 12 () 0 Opaque", None),
+            (
+                "removed texture 2 assets/a stone.png",
+                Some(RemoveTexture(2, "assets/a stone.png")),
+            ),
+            (
+                "removed model 0 assets/a truck.glb",
+                Some(RemoveModel(0, "assets/a truck.glb")),
+            ),
+            ("removed mesh 3", Some(RemoveMesh(3))),
+            ("removed mesh 3 floor", None),
+            ("removed texture two a.png", None),
+            ("removed shader 1", None),
         ];
-        for (line, path) in lines {
-            assert_eq!(asset_path(line), path, "{line}");
+        for (line, taken) in lines {
+            assert_eq!(again(line), taken, "{line}");
         }
     }
 
@@ -1004,6 +1056,113 @@ mod tests {
         }
     }
 
+    /// What's opaque comes back into a run whose layers added the same as the run it was taken in,
+    /// though that run, after its layers loaded, loaded a texture where text named it, removed it
+    /// and loaded it anew, and removed a mesh: the run restored takes the loads and the removals
+    /// again, in order, so that its notes are the snapshot's and every index lines up, the mesh
+    /// removed again among them.
+    #[test]
+    fn what_is_opaque_comes_back_after_a_removal_and_a_reload() {
+        let dir = Scratch::new("snapshot-removed");
+        let root = dir.0.clone();
+        fs::create_dir_all(root.join("assets")).expect("a directory");
+        let png =
+            crate::image::tests::png(png::ColorType::Rgba, png::BitDepth::Eight, 1, &[9; 4], None);
+        fs::write(root.join("assets/stone.png"), png).expect("a PNG");
+        let stone = "assets/stone.png";
+        // What the layers add as they load.
+        let load = |cx: &mut Context| {
+            let tri = cx.add_mesh("tri", &[[0.0f32; 3]; 3], &[0, 1, 2]);
+            tri.expect("a mesh")
+        };
+        let mut saved = Context::seeded(3).root(root.clone());
+        let tri = load(&mut saved);
+        saved.load_named([Asset::Texture(stone)], false);
+        let first = saved.world().assets().texture(stone).expect("loaded");
+        saved.remove_texture(first);
+        saved.load_named([Asset::Texture(stone)], false);
+        let anew = saved.world().assets().texture(stone).expect("loaded anew");
+        assert_ne!(anew, first);
+        saved.remove_mesh(tri);
+        let draw = MeshDraw::from_parts(tri.index(), 0, false, false, &[]).expect("a draw");
+        let sprite = Sprite {
+            texture: Some(anew),
+            ..Sprite::default()
+        };
+        let drawn = saved.world_mut().spawn((Transform::IDENTITY, draw, sprite));
+        let none = Open::default();
+        let text = write(saved.world(), &[], &none, &Run::Playing, "Tested", &[], 0);
+        let text = text.expect("written");
+        assert!(
+            text.contains(&format!("asset removed mesh {}\n", tri.index())),
+            "{text}"
+        );
+        let snapshot = Snapshot::parse(text, "a test".to_owned(), "Tested").expect("read");
+
+        let mut restored = Context::seeded(4).root(root);
+        load(&mut restored);
+        restored.load_restored(snapshot.added());
+        let notes = restored.world().assets().added().to_vec();
+        assert_eq!(notes, saved.world().assets().added(), "every note alike");
+        snapshot
+            .restore(restored.world_mut(), &[])
+            .expect("restored");
+        let world = restored.world();
+        assert_eq!(world.get::<MeshDraw>(drawn), Some(&draw));
+        assert_eq!(world.get::<Sprite>(drawn), Some(&sprite));
+        assert_eq!(world.hash(), saved.world().hash());
+        assert!(world.assets().removed(first) && !world.assets().removed(anew));
+        restored.remove_mesh(tri);
+        assert_eq!(
+            restored.world().assets().added(),
+            notes,
+            "removed again already"
+        );
+    }
+
+    /// A removal the snapshot's run made is taken again only while the restored run's notes are
+    /// the snapshot's up to it, so that the index it gives is the asset that run removed: a run
+    /// whose newer layers add the texture that run loaded where text named it, at that index and
+    /// from that path, then a mesh more, so that its notes part from the snapshot's before the
+    /// removal, keeps its texture.
+    #[test]
+    fn a_removal_is_taken_again_only_where_the_notes_line_up() {
+        let dir = Scratch::new("snapshot-parted");
+        let root = dir.0.clone();
+        fs::create_dir_all(root.join("assets")).expect("a directory");
+        let png =
+            crate::image::tests::png(png::ColorType::Rgba, png::BitDepth::Eight, 1, &[9; 4], None);
+        let path = root.join("assets/stone.png");
+        fs::write(&path, png).expect("a PNG");
+        let stone = "assets/stone.png";
+        let corners = [[0.0f32; 3]; 3];
+        let mut saved = Context::seeded(3).root(root.clone());
+        saved.add_mesh("tri", &corners, &[0, 1, 2]).expect("a mesh");
+        saved.load_named([Asset::Texture(stone)], false);
+        let loaded = saved.world().assets().texture(stone).expect("loaded");
+        saved.remove_texture(loaded);
+        let none = Open::default();
+        let text = write(saved.world(), &[], &none, &Run::Playing, "Tested", &[], 0);
+        let snapshot = Snapshot::parse(text.expect("written"), "a test".to_owned(), "Tested");
+        let snapshot = snapshot.expect("read");
+
+        let mut newer = Context::seeded(4).root(root);
+        newer.add_mesh("tri", &corners, &[0, 1, 2]).expect("a mesh");
+        let own = newer.add_texture("stone", &path).expect("a texture");
+        assert_eq!(own, loaded, "at the index the removal gives, from its path");
+        newer
+            .add_mesh("more", &corners, &[0, 1, 2])
+            .expect("a mesh");
+        newer.load_restored(snapshot.added());
+        let assets = newer.world().assets();
+        assert!(!assets.removed(own), "its own texture kept");
+        let removals = assets
+            .added()
+            .iter()
+            .filter(|note| note.starts_with("removed "));
+        assert_eq!(removals.count(), 0);
+    }
+
     /// A snapshot names each texture its run named by an ID with its path, and its values hold
     /// textures by those names; a run whose ID files give the texture another ID since, as after a
     /// checkout, restores each to its texture all the same, its hash as the snapshot's run named
@@ -1086,15 +1245,12 @@ mod tests {
         let text = write(saved.world(), &[], &none, &Run::Playing, "Tested", &[], 0);
         let snapshot = Snapshot::parse(text.expect("written"), "a test".to_owned(), "Tested");
         let snapshot = snapshot.expect("read");
-        assert_eq!(
-            snapshot.assets().collect::<Vec<_>>(),
-            [Asset::Texture("assets/stone.png")]
-        );
+        assert_eq!(loads(&snapshot), [Asset::Texture("assets/stone.png")]);
         // A run that follows another, given no name for the file, finds by its own database an ID
         // an `asset` line gives, as a stand-in's names one, the texture still named by the ID.
         let mut following = Context::seeded(3).root(root.clone());
         following.name_as([]);
-        following.load_restored([Asset::Texture(id)]);
+        following.load_named([Asset::Texture(id)], true);
         let assets = following.world().assets();
         let found = assets.texture(id).and_then(|texture| assets.name(texture));
         assert_eq!(found, Some(id));
@@ -1145,10 +1301,7 @@ mod tests {
         let text = write(saved.world(), &[], &none, &Run::Playing, "Tested", &[], 0);
         let snapshot = Snapshot::parse(text.expect("written"), "a test".to_owned(), "Tested");
         let snapshot = snapshot.expect("read");
-        assert_eq!(
-            snapshot.assets().collect::<Vec<_>>(),
-            [Asset::Font("fonts/title.ttf")]
-        );
+        assert_eq!(loads(&snapshot), [Asset::Font("fonts/title.ttf")]);
         let mut restored = Context::seeded(3).root(root);
         let _ = logged.codes.try_iter().count();
         let restoring = Stack::default().restore(&mut restored, &snapshot, false);
@@ -1203,10 +1356,7 @@ mod tests {
         let copied = Context::seeded(3).root(root.clone());
         let mut kept = parsed();
         kept.follow(copied.catalog());
-        assert_eq!(
-            kept.assets().collect::<Vec<_>>(),
-            [Asset::Texture("assets/stone.png")]
-        );
+        assert_eq!(loads(&kept), [Asset::Texture("assets/stone.png")]);
         for name in ["a_stone.png", "a_stone.png.meta"] {
             fs::remove_file(assets.join(name)).expect("removed");
         }
@@ -1218,10 +1368,7 @@ mod tests {
         let mut restored = Context::seeded(3).root(root.clone());
         let mut snapshot = parsed();
         snapshot.follow(restored.catalog());
-        assert_eq!(
-            snapshot.assets().collect::<Vec<_>>(),
-            [Asset::Texture("assets/pillar.png")]
-        );
+        assert_eq!(loads(&snapshot), [Asset::Texture("assets/pillar.png")]);
         let _ = logged.codes.try_iter().count();
         let restoring = Stack::default().restore(&mut restored, &snapshot, false);
         restoring.expect("restored");

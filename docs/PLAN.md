@@ -95,12 +95,15 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Phase 9, scripting** (2026-11-03)
 - **The cooker and its package** (2026-11-03)
 - **Cooked textures and meshes** (2026-11-03)
+- **Streaming** (2026-11-03)
 
 ## Now
 
-**Streaming**, Phase 10's third milestone: what the simulation reads loaded as it's named, and the
-rest uploaded within a budget each frame, without the frame waiting, and within the GPU's memory
-budget, assets removed; its plan says when it's done.
+**Shipping**, Phase 10's fourth milestone: the shipping profile, egui behind `dev`, `gg ship` laying
+out a folder, a signed .app holding the Vulkan loader and KosmicKrisp on macOS, the reference player
+running a package's scenes and Luau scripts, as the showcase's, and load time and memory logged;
+checked by CI on Linux at each push, on all three OSes by a workflow run on demand, and on an Apple
+Silicon Mac by hand; its plan says when it's done.
 
 ## Next
 
@@ -203,9 +206,11 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | The buses' volumes kept between runs, per user, as a game's settings: each starts each run at 1 | A game ships its settings, with per-user bindings |
 | Music decoded through to its end as it loads, to say whether all of it decodes: its first packet decodes as it's read, and the rest only as it plays, which stops at a packet that doesn't, warning `audio.music_failed` | A game ships music that fails past its start |
 | Counting what the Vulkan loader, the drivers, the validation layer and VMA allocate beneath the engine, through `VkAllocationCallbacks`, which drivers may bypass for their own: the `frames` test counts Rust's allocator | A profile shows them allocating each frame |
-| Keeping within the GPU's memory budget (`VK_EXT_memory_budget` through VMA) | Phase 10, with streaming |
-| Removing meshes, shaders and textures, which last until the app ends; a reload replaces them in place | Phase 10, with streaming |
-| Replacing a texture without waiting for the frames before: the frame that takes a reload's image waits for the GPU to finish them, a frame's time at most, as its slot in the bindless set can't change while they may sample it; writing the image in place where its size holds would spare the wait | A reload's hitch shows, as for a texture written many times a second |
+| Removing shaders and fonts, which last until the app ends, and removing assets through the tool API: layers remove textures, meshes and models | A game swaps shaders or fonts as it plays, or an agent frees an asset |
+| Reusing removed textures' slots in the bindless set: a run adds at most 61,440 textures, those removed among them | A game adds and removes textures as it plays, as levels streaming in and out do |
+| Streaming a texture's smallest levels first and its larger ones after, so that it shows blurred rather than as its stand-in while it streams | Pop-in shows |
+| A game's own upload budget: every frame copies at most 16 MiB of assets | A game needs another |
+| A persistent ring of staging for streaming copies, in place of the buffers each frame that streams makes and retires once its copies finish | A profile shows them |
 | Reloading a model's nodes and materials, and a model of other numbers of primitives or images, in a run that's recorded or in a lockstep session: its roots' nodes keep what they were spawned with until the run starts again (`asset.model_changed`), as their world changes only as the run it goes with changed it | Someone edits models during such runs, as a reload kept as a line of the recording or an input both peers apply at one tick would allow |
 | A model's nodes matched by their names as its file changes, rather than by their places: each keeps what code gave it only while every node keeps its place in the model's hierarchy, and else all are spawned again, under the same IDs | A game's code gives nodes state that a model's edit loses |
 | A model's nodes named, as by their glTF names: they have no `Name`, so the Entities panel and the tool API show their IDs | Someone looks for a node by name |
@@ -247,13 +252,17 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | A sprite that samples past its rectangle, so that a seamless texture tiled across sprites side by side blends across their edges under a linear sampler | A game tiles one texture across sprites |
 | A tile map in the engine, which scenes save; the sandbox's map is code of its own, its tiles sprites that snapshots and scenes save each with its texture's name | A game edits its map |
 | glTF that `Context::add_model` refuses or ignores, as it lists: lighting and the material's other textures, skins and animations, morph targets, cameras, models without a scene and scenes other than the default, sparse accessors and accessors without a buffer view, primitives other than triangle lists, samplers that wrap across and down differently, minification filters, texture transforms, quantized or compressed meshes and textures (KHR_mesh_quantization, Draco, meshopt, Basis Universal), and integers written as floats, such as `1.0`, which glTF allows | Each with the first model that needs it; lighting and the other textures in Phase 12 |
-| Decoding images and sounds off the main thread as they're added, and reading music; `Context::add_texture`, `add_model` and `add_sound` decode before they return, `add_music` reads its file whole, up to 64 MiB, and a texture loaded where text names it decodes before the text is read, a lockstep peer's tick waiting for it; a reload decodes on its watcher's thread | Phase 10, with the streaming loader |
-| Models that take more than 4 GiB to read, of their buffers, decoded images, vertices and nodes, which `add_model` refuses with `engine.unsupported_model` | Phase 10, with streaming and the GPU's memory budget |
-| Mip levels made on the CPU, on the render thread, as the frame that uploads a model's texture renders, in development runs: a 2,048 by 2,048 texture's take about 0.3 s of that frame in a debug build; a package's come cooked | Blits on the GPU, if a development run's hitch matters |
+| Reading assets' files off the main thread, and decoding sounds and reading music there: a layer's add, and text that names an asset, read its file whole on the main thread, images' pixels alone decoding on `gg-load`; `add_sound` decodes before it returns, and `add_music` reads its file whole, up to 64 MiB | A game's reads or sounds hitch as it plays |
+| Loading meshes' vertices and indices off the main thread: a model's are read with its nodes, as the simulation needs those | A model's read hitches |
+| Decoding on more than one thread: `gg-load` decodes one image at a time, so a large model's images hold up the small textures added after | Loading takes long enough to matter |
+| Models that take more than 4 GiB to read, of their buffers, images, encoded and decoded, vertices and nodes, which `add_model` refuses with `engine.unsupported_model` | A game's model is that large |
+| Mip levels of a model's images read again, as its file changes, made on the render thread as their turn to stream comes: a 2,048 by 2,048 texture's take about 0.3 s of that frame in a debug build; `gg-load` makes a model's as it first decodes them, and a package's come cooked | Blits on the GPU, or the watcher's thread making them, if a reload's hitch matters |
 | Layers making textures from their own pixels; `Textures::add` takes pixels, but `Context` adds only PNGs and JPEGs | A game makes its own textures |
-| Keeping the frames' arenas near their frames' peak, within the GPU's memory budget: an arena grows by a buffer at least twice its last, and merges them as it resets, so it can hold a few times what its largest frame took, in memory the CPU writes, of instances' transforms, IDs and parameters and the UI's vertices, indices and texture changes | Phase 10, with the GPU's memory budget |
-| A frame's copies through a transfer queue start only once it's submitted, after its passes are recorded, and the frame waits for them | A profile shows a frame waiting for its uploads |
-| Staging and the frame's arena kept within the device's `maxMemoryAllocationSize` and `maxBufferSize`, each at least 1 GiB: both grow by doubling, each staging buffer an allocation of its own, so a frame that adds more than that at once fails, which ends the run | A frame adds that much at once, or Phase 10, with the GPU's memory budget |
+| Keeping the frames' arenas near their frames' peak, within the GPU's memory budget: an arena grows by a buffer at least twice its last, and merges them as it resets, so it can hold a few times what its largest frame took, in memory the CPU writes, of instances' transforms, IDs and parameters and the UI's vertices, indices and texture changes | The memory a run logs, as the shipping milestone logs it, shows them holding far more than their peak |
+| A frame's copies through a transfer queue start only once it's submitted, after its passes are recorded, so an asset draws from the frame after the one that copied its last part at the soonest | Pop-in shows |
+| The frame's arena kept within the device's `maxMemoryAllocationSize` and `maxBufferSize`, each at least 1 GiB: it grows by doubling, so a frame that draws more than that at once fails, which ends the run; streaming keeps staging to about a frame's budget | A frame draws that much at once |
+| RenderDoc captures of a frame (`--capture N`) waiting for nothing to stream, as the tool API's captures do: an early frame shows stand-ins | Someone captures an early frame |
+| What's decoding and streaming in the tool API's `status`, which `Context::streaming` gives layers | An agent needs it |
 | Images' sizes checked against the device's `maxImageDimension2D` and `maxFramebufferWidth` and `Height` as they're made; a pass checks its viewport against the device's limits, which an image past those exceeds only if it's past `maxViewportDimensions` too | A device's limits fall below a window's size |
 | Host image copy where a transfer queue exists, or where the driver says it costs the GPU in reading the image, as KosmicKrisp's does, turning off Apple's lossless compression, so that macOS uploads through the graphics queue; and meshes written straight into GPU memory the CPU reaches, as ReBAR and unified memory allow, rather than copied | A measurement shows either is faster |
 | More than one view, such as split screen, or the editor's scene view beside the game's: the view sees through one camera, the world's primary one, a layer's viewpoint or the tool API's look's | A game or the editor draws several |

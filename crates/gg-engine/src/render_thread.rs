@@ -15,7 +15,8 @@ use std::time::{Duration, Instant};
 
 use gg_core::{Error, Result};
 use gg_renderer::{
-    DrawCounts, Draws, Outline, Pick, Pixels, RenderData, Renderer, Uploads, Viewpoint, Viewport,
+    DrawCounts, Draws, Outline, Pick, Pixels, RenderData, Renderer, Streaming, Uploads, Viewpoint,
+    Viewport,
 };
 
 use crate::viewports::Drawn;
@@ -53,6 +54,12 @@ pub(crate) struct Extracted {
     pub(crate) pixels: Option<[u32; 2]>,
     pub(crate) pixel_bytes: Vec<u8>,
     pub(crate) pixels_new: bool,
+    /// How many textures' images were being decoded as the frame was handed off, which show their
+    /// stand-ins in it.
+    pub(crate) loading: u32,
+    /// What the renderer was streaming to the GPU once it had rendered the frame, as
+    /// [`Renderer::streaming`] gives it: empty once everything added before is drawable in it.
+    pub(crate) streaming: Streaming,
     /// Whether the frame reads the game's view back once it has rendered it, for the tool API's
     /// captures.
     #[cfg(feature = "dev")]
@@ -117,6 +124,8 @@ impl Default for Extracted {
             pixels: None,
             pixel_bytes: Vec::new(),
             pixels_new: false,
+            loading: 0,
+            streaming: Streaming::default(),
             #[cfg(feature = "dev")]
             capture: false,
             #[cfg(feature = "dev")]
@@ -207,6 +216,7 @@ impl Render for Renderer {
         frame.pixels_new &= !(rendered && width > 0 && height > 0);
         frame.picked.clear();
         frame.picked.extend_from_slice(self.picked());
+        frame.streaming = self.streaming();
         #[cfg(feature = "dev")]
         let (waited, publish) = if read_view && rendered {
             frame.take_view(self)

@@ -68,10 +68,11 @@ fn main() -> ExitCode {
         dropped_images_free_their_slots,
         depth_clears_in_every_pass,
         ids_read_back_two_frames_later,
-        filled_textures_can_be_written_over_on_every_path,
-        bc7_textures_fill_and_decode_on_every_path,
+        streamed_textures_can_be_written_over_on_every_path,
+        bc7_textures_stream_and_decode_on_every_path,
         textures_refill_between_rgba8_and_bc7_on_every_path,
-        refills_come_before_the_frames_passes,
+        textures_and_buffers_stream_by_parts_on_every_path,
+        textures_come_to_show_images_before_the_frames_passes,
         forgotten_frames_and_passes_are_caught(&log),
         another_devices_objects_are_refused,
         refused_texture_slots_leak_nothing,
@@ -149,23 +150,29 @@ impl Tests {
     }
 }
 
-/// Runs `broken`, which must panic, and gives its message. Its panic isn't logged, as a failing
-/// test's is: the panic hook is set aside while it runs.
-fn panics(broken: impl FnOnce()) -> String {
+/// Runs `tried`, and gives what it returned, or the message of the panic that ended it. The panic
+/// isn't logged, as a failing test's is: the panic hook is set aside while it runs.
+fn tries<T>(tried: impl FnOnce() -> T) -> Result<T, String> {
     let hook = panic::take_hook();
     panic::set_hook(Box::new(|_| {}));
-    let caught = panic::catch_unwind(AssertUnwindSafe(broken));
+    let caught = panic::catch_unwind(AssertUnwindSafe(tried));
     panic::set_hook(hook);
-    let payload = caught.expect_err("a panic");
-    payload
-        .downcast_ref::<String>()
-        .cloned()
-        .or_else(|| {
-            payload
-                .downcast_ref::<&str>()
-                .map(|message| (*message).to_owned())
-        })
-        .unwrap_or_else(|| "a panic whose payload isn't a string".to_owned())
+    caught.map_err(|payload| {
+        payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| {
+                payload
+                    .downcast_ref::<&str>()
+                    .map(|message| (*message).to_owned())
+            })
+            .unwrap_or_else(|| "a panic whose payload isn't a string".to_owned())
+    })
+}
+
+/// Runs `broken`, which must panic, and gives its message.
+fn panics(broken: impl FnOnce()) -> String {
+    tries(broken).expect_err("a panic")
 }
 
 fn instance() -> Arc<Instance> {
@@ -201,6 +208,18 @@ struct Probe {
     level: u32,
     uv: [f32; 2],
     expected: [u8; 4],
+}
+
+/// White, which a stand-in made with [`stand_in`] reads as, at each of `probes`.
+fn white_probes(probes: &[Probe]) -> Vec<Probe> {
+    probes
+        .iter()
+        .map(|probe| Probe {
+            level: probe.level,
+            uv: probe.uv,
+            expected: [255; 4],
+        })
+        .collect()
 }
 
 /// A color for block or level `n` of a texture, distinct among 128 of them. Its channels share a
@@ -339,13 +358,15 @@ fn sampling_pipeline(device: &Arc<Device>, spirv: &[u8]) -> Pipeline {
 }
 
 /// A pass over target `target` of `frame`, an image a pixel across for each of `probes`, in which
-/// the GPU samples `texture` at each probe, into a pixel of its own.
+/// the GPU samples `texture` at each probe, into a pixel of its own: by three vertices, or by the
+/// first three of `indices`, a buffer of indices frames have taken, if given.
 fn draw_probes(
     frame: &mut Frame<'_>,
     target: usize,
     pipeline: &Pipeline,
     texture: &Texture,
     probes: &[Probe],
+    indices: Option<&GpuBuffer>,
 ) {
     let pass = frame.begin_pass(target, c"probes", [0.0; 4], None, None);
     let mut pass = pass.expect("an offscreen image is always there");
@@ -361,7 +382,10 @@ fn draw_probes(
             probe.uv[1].to_bits(),
         ];
         pass.push_constants(&words.map(u32::to_ne_bytes).concat());
-        pass.draw(3, 1);
+        match indices {
+            Some(indices) => pass.draw_indexed(indices, 0, 3, 0, 1),
+            None => pass.draw(3, 1),
+        }
     }
 }
 
@@ -381,6 +405,32 @@ fn check_probes(image: &mut ColorImage, probes: &[Probe], what: &str) {
             "{what}: level {level} at {uv:?} reads {pixel:?}, expected {expected:?}"
         );
     }
+}
+
+/// A texture a pixel across, in a free slot, for placed textures' slots to show until they have
+/// images of their own: white, once the first frame has written it ([`write_stand_in`]).
+fn stand_in(device: &Arc<Device>, name: &str) -> Texture {
+    let format = TextureFormat::Rgba8Srgb;
+    Texture::new(device, 1, 1, format, false, name).expect("a texture")
+}
+
+/// Writes the stand-in white, in the first frame, before any pass samples a slot that shows it.
+fn write_stand_in(frame: &mut Frame<'_>, stand_in: &mut Texture) {
+    let written = frame.write_texture(stand_in, [0, 0], [1, 1], &[255; 4]);
+    written.expect("a write");
+}
+
+/// Streams all of `pixels` into the image made for `texture` in one part, which a budget past
+/// them takes.
+fn stream_whole(frame: &mut Frame<'_>, texture: &mut Texture, pixels: &[u8]) {
+    let copied = frame
+        .stream_texture(texture, pixels, u64::MAX)
+        .expect("a copy");
+    assert_eq!(
+        copied,
+        pixels.len() as u64,
+        "a budget past the pixels copies them at once"
+    );
 }
 
 /// Clears two offscreen images in the same frames, each to a color of its own, over more frames
@@ -551,7 +601,7 @@ fn images_read_back_once_their_frame_has_finished() {
     check(&validation);
 }
 
-/// Makes and drops more images, one at a time, than the bindless set has slots to give out past
+/// Makes and drops more images, one at a time, than the bindless sets have slots to give out past
 /// the placed ones, 4,096, which works only if each gives its slot back.
 fn dropped_images_free_their_slots() {
     let instance = instance();
@@ -676,12 +726,14 @@ fn ids_read_back_two_frames_later() {
     check(&validation);
 }
 
-/// Fills a texture and a buffer in a frame, then writes over a pixel of the texture in each of the
-/// next two, more frames than are in flight, once for each way of uploading that the GPU has:
-/// validation checks the layout each way leaves the texture in against the one the write starts
-/// from, which it doesn't for what the bindless set samples. The frame fills a texture with mip
-/// levels too, whose copies validation checks against each level's size and the staged bytes.
-fn filled_textures_can_be_written_over_on_every_path() {
+/// Streams a texture, one with mip levels and a buffer in a frame, each whole in one part, then
+/// writes over a pixel of the texture in each of the two frames after the one that shows it, more
+/// frames than are in flight, once for each way of uploading that the GPU has: validation checks
+/// the layout each way leaves the texture in against the one the write starts from, which it
+/// doesn't for what the bindless sets sample. The copies of the texture with levels validation
+/// checks against each level's size and the staged bytes. A texture whose slot shows a stand-in
+/// can't be written, which is refused before anything is recorded.
+fn streamed_textures_can_be_written_over_on_every_path() {
     let instance = instance();
     let validation = instance.validation();
     for path in UploadPath::ALL {
@@ -695,46 +747,67 @@ fn filled_textures_can_be_written_over_on_every_path() {
         };
         let mut image = ColorImage::new(&device, 4, 4, "fill test target").expect("an image");
         let format = TextureFormat::Rgba8Srgb;
-        let texture = Texture::new(&device, 8, 2, format, false, "filled test texture");
+        let mut stand_in = stand_in(&device, "fill test stand-in");
+        let texture = Texture::placed(&device, 1, &stand_in, "streamed test texture");
         let mut texture = texture.expect("a texture");
         // 5x3, 2x1 and 1x1.
-        let levels = Texture::new(&device, 5, 3, format, true, "mipmapped test texture");
+        let levels = Texture::placed(&device, 2, &stand_in, "mipmapped test texture");
         let mut levels = levels.expect("a texture");
-        let mut buffer = GpuBuffer::new(&device, 64, "filled test buffer").expect("a buffer");
+        let mut buffer = GpuBuffer::new(&device, 64, "streamed test buffer").expect("a buffer");
         let mut frames = Frames::new(&device).expect("frames");
-        for i in 0..3 {
+        let mut writes = 0;
+        for i in 0..20 {
             let mut frame = frames
                 .begin([Target::Image(&mut image)])
                 .expect("a frame")
                 .expect("an offscreen image can always be rendered into");
             if i == 0 {
-                let pixels = [255; 8 * 2 * 4];
-                frame.fill_texture(&mut texture, &pixels).expect("a fill");
-                let pixels = [127; (5 * 3 + 2 + 1) * 4];
-                frame.fill_texture(&mut levels, &pixels).expect("a fill");
-                frame.fill_buffer(&mut buffer, &[7; 64]).expect("a fill");
-            } else {
-                let write = frame.write_texture(&mut texture, [i, 0], [1, 1], &[0; 4]);
+                write_stand_in(&mut frame, &mut stand_in);
+                let message = panics(|| {
+                    let _ = frame.write_texture(&mut texture, [0, 0], [1, 1], &[0; 4]);
+                });
+                assert!(message.contains("shows a stand-in"), "{message}");
+                texture.refill(8, 2, format, false).expect("an image");
+                stream_whole(&mut frame, &mut texture, &[255; 8 * 2 * 4]);
+                levels.refill(5, 3, format, true).expect("an image");
+                stream_whole(&mut frame, &mut levels, &[127; (5 * 3 + 2 + 1) * 4]);
+                let copied = frame.stream_buffer(&mut buffer, &[7; 64], u64::MAX);
+                assert_eq!(copied.expect("a copy"), 64);
+            }
+            let shown = frame.finish_texture(&mut texture).expect("a finish");
+            frame.finish_texture(&mut levels).expect("a finish");
+            frame.finish_buffer(&mut buffer).expect("a finish");
+            if shown && writes < 2 {
+                let write = frame.write_texture(&mut texture, [writes, 0], [1, 1], &[0; 4]);
                 write.expect("a write");
+                writes += 1;
             }
             drop(frame.begin_pass(0, c"clear", [0.0, 0.0, 0.0, 1.0], None, None));
             frame.submit().expect("the frame's submission");
+            if writes == 2 && i >= 2 {
+                break;
+            }
         }
-        drop((frames, texture, levels, buffer, image, device));
+        assert_eq!(
+            writes, 2,
+            "uploading by {path}: the texture was never shown"
+        );
+        assert_eq!(texture.size(), [8, 2]);
+        drop((frames, texture, levels, buffer, stand_in, image, device));
     }
 
     drop(instance);
     check(&validation);
 }
 
-/// Fills BC7 textures in a frame, once for each way of uploading that the GPU has: one of 13x5
-/// pixels, whose 4 by 2 blocks reach past its sides; another of 13x5 with its full chain of mip
-/// levels, 6x2, 3x1 and 1x1 below it, which copies and validation check against each level's
-/// blocks and the staged bytes; and one of a pixel. Each block is solid and of a color of its own,
-/// and the GPU samples each in the frame that fills them, and again in the two after it, which
-/// finds each block decoded, in the level and at the place it was filled. A BC7 texture can't be
-/// written, which is refused before anything is recorded.
-fn bc7_textures_fill_and_decode_on_every_path() {
+/// Streams BC7 textures in a frame, each whole in one part, once for each way of uploading that
+/// the GPU has: one of 13x5 pixels, whose 4 by 2 blocks reach past its sides; another of 13x5 with
+/// its full chain of mip levels, 6x2, 3x1 and 1x1 below it, which copies and validation check
+/// against each level's blocks and the staged bytes; and one of a pixel. Each block is solid and
+/// of a color of its own, and the GPU samples each in the frame that shows them, and again in the
+/// two after it, which finds each block decoded, in the level and at the place it was streamed. A
+/// BC7 texture can't be written, which is refused before anything is recorded.
+fn bc7_textures_stream_and_decode_on_every_path() {
     let instance = instance();
     let validation = instance.validation();
     let spirv = sampling_spirv();
@@ -754,12 +827,17 @@ fn bc7_textures_fill_and_decode_on_every_path() {
             ("bc7 chain", [13, 5], true),
             ("bc7 pixel", [1, 1], true),
         ];
+        let mut stand_in = stand_in(&device, "bc7 stand-in");
         let mut textures = Vec::new();
         let mut images = Vec::new();
         let mut fills = Vec::new();
-        for (name, size, mipmapped) in cases {
-            let texture = Texture::new(&device, size[0], size[1], format, mipmapped, name);
-            textures.push(texture.expect("a texture"));
+        for (slot, (name, size, mipmapped)) in (0..).zip(cases) {
+            let texture = Texture::placed(&device, slot, &stand_in, name);
+            let mut texture = texture.expect("a texture");
+            texture
+                .refill(size[0], size[1], format, mipmapped)
+                .expect("an image");
+            textures.push(texture);
             let fill = bc7_blocks(size, mipmapped);
             assert_eq!(fill.0.len() as u64, format.bytes(size, mipmapped), "{name}");
             let image = ColorImage::new(&device, fill.1.len() as u32, 1, "bc7 probes");
@@ -767,46 +845,58 @@ fn bc7_textures_fill_and_decode_on_every_path() {
             fills.push(fill);
         }
         let mut frames = Frames::new(&device).expect("frames");
-        for i in 0..3 {
+        let mut shown_at = None;
+        for i in 0..20 {
             let mut frame = frames
                 .begin(images.iter_mut().map(Target::Image))
                 .expect("a frame")
                 .expect("an offscreen image can always be rendered into");
             if i == 0 {
+                write_stand_in(&mut frame, &mut stand_in);
                 for (texture, (pixels, _)) in textures.iter_mut().zip(&fills) {
-                    frame.fill_texture(texture, pixels).expect("a fill");
+                    stream_whole(&mut frame, texture, pixels);
                 }
-            } else if i == 1 {
+            }
+            let mut shown = true;
+            for texture in &mut textures {
+                shown &= frame.finish_texture(texture).expect("a finish");
+            }
+            if shown && shown_at.is_none() {
+                shown_at = Some(i);
                 let message = panics(|| {
                     let _ = frame.write_texture(&mut textures[0], [0, 0], [1, 1], &[0; 4]);
                 });
-                assert!(message.contains("BC7 texture is filled"), "{message}");
+                assert!(message.contains("BC7 texture is streamed"), "{message}");
             }
             for (target, (texture, (_, probes))) in textures.iter().zip(&fills).enumerate() {
-                draw_probes(&mut frame, target, &pipeline, texture, probes);
+                draw_probes(&mut frame, target, &pipeline, texture, probes, None);
             }
             frame.submit().expect("the frame's submission");
             for ((image, (_, probes)), (name, ..)) in images.iter_mut().zip(&fills).zip(cases) {
-                check_probes(
-                    image,
-                    probes,
-                    &format!("{name}, uploading by {path}, frame {i}"),
-                );
+                let what = format!("{name}, uploading by {path}, frame {i}");
+                match shown_at {
+                    Some(_) => check_probes(image, probes, &what),
+                    None => check_probes(image, &white_probes(probes), &what),
+                }
+            }
+            if shown_at.is_some_and(|at| i >= at + 2) {
+                break;
             }
         }
-        drop((frames, textures, images, pipeline, device));
+        assert!(shown_at.is_some(), "uploading by {path}: never shown");
+        drop((frames, textures, images, stand_in, pipeline, device));
     }
 
     drop(instance);
     check(&validation);
 }
 
-/// Refills one texture in turn, one frame to each, as BC7 of 13x5 with its mip levels, as RGBA8 of
-/// 5x3 with its, as BC7 of 4x4 and of a pixel, after it was filled as RGBA8 of 2x2, once for each
-/// way of uploading that the GPU has: each refill makes the image anew in its format, which
-/// validation checks the copies into against, and the texture's slot shows it, found by the GPU
-/// sampling it in the frame of each refill. A refill whose pixels are another format's size is
-/// refused before anything changes.
+/// Refills one texture in turn, as RGBA8 of 2x2, as BC7 of 13x5 with its mip levels, as RGBA8 of
+/// 5x3 with its, as BC7 of 4x4 and of a pixel, each streamed whole in a frame, once for each way
+/// of uploading that the GPU has: each refill makes the image anew in its format, which validation
+/// checks the copies into against, and the texture's slot shows it from the frame that shows it,
+/// found by the GPU sampling it there, as it samples the image before until then. Pixels of
+/// another format's size are refused before anything changes.
 fn textures_refill_between_rgba8_and_bc7_on_every_path() {
     let instance = instance();
     let validation = instance.validation();
@@ -831,83 +921,271 @@ fn textures_refill_between_rgba8_and_bc7_on_every_path() {
         ];
         // Wide enough for the most probes a step has, the 12 of 13x5's blocks in four levels.
         let mut image = ColorImage::new(&device, 12, 1, "refill probes").expect("an image");
-        let texture = Texture::new(&device, 2, 2, rgba8, false, "refilled format test texture");
+        let mut stand_in = stand_in(&device, "refill stand-in");
+        let texture = Texture::placed(&device, 5, &stand_in, "refilled format test texture");
         let mut texture = texture.expect("a texture");
         let mut frames = Frames::new(&device).expect("frames");
+        // What the slot showed before the step, to sample until the step's image is shown.
+        let mut before: Option<([u32; 2], Vec<Probe>)> = None;
         for (i, (format, size, mipmapped)) in steps.into_iter().enumerate() {
             let (pixels, probes) = if format == bc7 {
                 bc7_blocks(size, mipmapped)
             } else {
                 rgba8_levels(size, mipmapped)
             };
-            let mut frame = frames
-                .begin([Target::Image(&mut image)])
-                .expect("a frame")
-                .expect("an offscreen image can always be rendered into");
-            if i == 0 {
-                frame.fill_texture(&mut texture, &pixels).expect("a fill");
-            } else {
-                // Pixels of RGBA8's size for BC7's, and of BC7's for RGBA8's.
-                let other = if format == bc7 { rgba8 } else { bc7 };
-                let wrong = vec![0; other.bytes(size, mipmapped) as usize];
-                let before = texture.size();
-                let message = panics(|| {
-                    let _ = frame.refill_texture(&mut texture, format, size, mipmapped, &wrong);
-                });
-                assert!(message.contains("don't fill"), "{message}");
-                assert_eq!(texture.size(), before, "a refused refill changes nothing");
-                let refill = frame.refill_texture(&mut texture, format, size, mipmapped, &pixels);
-                refill.expect("a refill");
+            texture
+                .refill(size[0], size[1], format, mipmapped)
+                .expect("an image");
+            let mut shown = false;
+            for frame_in_step in 0..20 {
+                let mut frame = frames
+                    .begin([Target::Image(&mut image)])
+                    .expect("a frame")
+                    .expect("an offscreen image can always be rendered into");
+                if i == 0 && frame_in_step == 0 {
+                    write_stand_in(&mut frame, &mut stand_in);
+                }
+                if frame_in_step == 0 {
+                    // Pixels of RGBA8's size for BC7's, and of BC7's for RGBA8's; a 2x2 texture
+                    // takes 16 bytes in both.
+                    let other = if format == bc7 { rgba8 } else { bc7 };
+                    let wrong = vec![0; other.bytes(size, mipmapped) as usize];
+                    if wrong.len() != pixels.len() {
+                        let message = panics(|| {
+                            let _ = frame.stream_texture(&mut texture, &wrong, u64::MAX);
+                        });
+                        assert!(message.contains("don't fill"), "{message}");
+                    }
+                    stream_whole(&mut frame, &mut texture, &pixels);
+                }
+                shown = frame.finish_texture(&mut texture).expect("a finish");
+                let (expected, what) = match (&before, shown) {
+                    (_, true) => (&probes, "shown"),
+                    (Some((_, probes)), false) => (probes, "before"),
+                    (None, false) => (&white_probes(&probes), "the stand-in"),
+                };
+                draw_probes(&mut frame, 0, &pipeline, &texture, expected, None);
+                frame.submit().expect("the frame's submission");
+                let what = format!("{format:?} {size:?}, uploading by {path}, step {i}, {what}");
+                check_probes(&mut image, expected, &what);
+                if shown {
+                    break;
+                }
             }
+            assert!(shown, "uploading by {path}: step {i} never shown");
             assert_eq!(texture.size(), size);
-            draw_probes(&mut frame, 0, &pipeline, &texture, &probes);
-            frame.submit().expect("the frame's submission");
-            let what = format!("{format:?} {size:?}, uploading by {path}, step {i}");
-            check_probes(&mut image, &probes, &what);
+            before = Some((size, probes));
         }
-        drop((frames, texture, image, pipeline, device));
+        drop((frames, texture, stand_in, image, pipeline, device));
     }
 
     drop(instance);
     check(&validation);
 }
 
-/// Fills a texture in one frame and refills it at another size in the next, before its pass, which
-/// validation checks the copy into the new image of; then refills it again after that pass, which
-/// is refused before anything changes, since the pass would sample the new image before its copy:
-/// the texture keeps its size, and the frame still submits.
-fn refills_come_before_the_frames_passes() {
+/// Streams a texture of 64 by 64 texels with its mip levels, 21,844 bytes, and a buffer of 4,096
+/// bytes of indices, a part a frame within a budget of 4 KiB for the texture and 1 KiB for the
+/// buffer, once for each way of uploading that the GPU has. Each frame's part keeps within the
+/// budget, in whole rows, and the texture takes six: four of 16 rows of its first level, its
+/// second whole, and the tail of its five smaller levels together, which validation checks against
+/// the levels and the staged bytes. Until the frame that shows the texture, which is the last
+/// part's frame through the graphics queue or the host, and a later one through a transfer queue,
+/// whose copies no frame waits for, the GPU samples its slot's stand-in, white; from that frame
+/// on, its levels. The buffer draws the probes by its indices from the frame that takes it, which
+/// comes at the earliest with its last part, as the texture's does. Then the texture is hidden
+/// behind the stand-in, which the next frames sample; an image is streamed into it again and
+/// hidden after its first part, whose copies may still run; another is streamed whole, handed
+/// over on the transfer queue, and discarded in the next frame before it's shown; and the frames
+/// go on, validation silent.
+fn textures_and_buffers_stream_by_parts_on_every_path() {
+    const BUDGET: u64 = 4096;
+    let instance = instance();
+    let validation = instance.validation();
+    let spirv = sampling_spirv();
+    for path in UploadPath::ALL {
+        let device = match Device::new(&instance, None, None, Some(path)) {
+            Ok(device) => device,
+            Err(error) => {
+                assert_eq!(error.code(), "gpu.no_upload_path", "{error:#}");
+                println!("uploading by {path} skipped: {error}");
+                continue;
+            }
+        };
+        let pipeline = sampling_pipeline(&device, &spirv);
+        let format = TextureFormat::Rgba8Srgb;
+        let mut stand_in = stand_in(&device, "parts stand-in");
+        let texture = Texture::placed(&device, 3, &stand_in, "streamed by parts");
+        let mut texture = texture.expect("a texture");
+        let (pixels, probes) = rgba8_levels([64, 64], true);
+        let total = pixels.len() as u64;
+        let white = white_probes(&probes);
+        let image = ColorImage::new(&device, probes.len() as u32, 1, "parts probes");
+        let mut image = image.expect("an image");
+        let mut buffer = GpuBuffer::new(&device, 4096, "streamed indices").expect("a buffer");
+        let indices: Vec<u8> = (0..1024u32).flat_map(|i| (i % 3).to_ne_bytes()).collect();
+        texture.refill(64, 64, format, true).expect("an image");
+        let mut frames = Frames::new(&device).expect("frames");
+        let (mut texture_copied, mut buffer_copied) = (0, 0);
+        let (mut texture_parts, mut buffer_parts) = (0, 0);
+        let (mut shown_at, mut taken_at) = (None, None);
+        let mut hidden_at = None;
+        for i in 0..40 {
+            let mut frame = frames
+                .begin([Target::Image(&mut image)])
+                .expect("a frame")
+                .expect("an offscreen image can always be rendered into");
+            if i == 0 {
+                write_stand_in(&mut frame, &mut stand_in);
+            }
+            // The image streamed whole in the frame before, and handed over on the transfer
+            // queue, is discarded before the frame could show it.
+            let discarded = hidden_at.is_some_and(|at| i == at + 4);
+            if discarded {
+                assert_eq!(texture.streamed(), total);
+                texture.discard();
+                assert_eq!((texture.streamed(), texture.size()), (0, [0, 0]));
+            }
+            if texture_copied < total {
+                let copied = frame.stream_texture(&mut texture, &pixels, BUDGET);
+                let copied = copied.expect("a copy");
+                assert!(
+                    copied <= BUDGET,
+                    "{copied} bytes, past the budget, by {path}"
+                );
+                texture_copied += copied;
+                texture_parts += 1;
+            }
+            if buffer_copied < 4096 {
+                let copied = frame.stream_buffer(&mut buffer, &indices, BUDGET / 4);
+                let copied = copied.expect("a copy");
+                assert_eq!(copied, 1024, "by {path}");
+                buffer_copied += copied;
+                buffer_parts += 1;
+            }
+            let shown = frame.finish_texture(&mut texture).expect("a finish");
+            assert!(!(discarded && shown), "nothing left to show");
+            if shown && shown_at.is_none() {
+                shown_at = Some(i);
+                assert_eq!(
+                    texture_copied, total,
+                    "shown before its last part, by {path}"
+                );
+            }
+            let taken = frame.finish_buffer(&mut buffer).expect("a finish");
+            if taken && taken_at.is_none() {
+                taken_at = Some(i);
+                assert_eq!(buffer_copied, 4096, "taken before its last part, by {path}");
+            }
+            // Once shown and sampled, hidden; then streamed into again and hidden mid-stream.
+            let hide = shown_at.is_some_and(|at| i == at + 2);
+            if hide {
+                frame.hide_texture(&mut texture, &stand_in);
+                hidden_at = Some(i);
+                assert_eq!(texture.size(), [0, 0]);
+            }
+            if hidden_at.is_some_and(|at| i == at + 2) {
+                texture.refill(64, 64, format, true).expect("an image");
+                let copied = frame.stream_texture(&mut texture, &pixels, BUDGET);
+                assert_eq!(copied.expect("a copy"), BUDGET);
+                assert_eq!(texture.streamed(), BUDGET);
+                frame.hide_texture(&mut texture, &stand_in);
+                assert_eq!(texture.streamed(), 0);
+            }
+            // Streamed whole, and handed over on the transfer queue, for the next frame to
+            // discard before it could be shown.
+            if hidden_at.is_some_and(|at| i == at + 3) {
+                texture.refill(64, 64, format, true).expect("an image");
+                stream_whole(&mut frame, &mut texture, &pixels);
+            }
+            let expected = if shown && !hide && hidden_at.is_none() {
+                &probes
+            } else {
+                &white
+            };
+            draw_probes(
+                &mut frame,
+                0,
+                &pipeline,
+                &texture,
+                expected,
+                taken.then_some(&buffer),
+            );
+            frame.submit().expect("the frame's submission");
+            let what = format!("uploading by {path}, frame {i}");
+            check_probes(&mut image, expected, &what);
+            if hidden_at.is_some_and(|at| i >= at + 6) {
+                break;
+            }
+        }
+        let shown_at = shown_at.unwrap_or_else(|| panic!("by {path}: never shown"));
+        let taken_at = taken_at.unwrap_or_else(|| panic!("by {path}: never taken"));
+        assert_eq!((texture_parts, buffer_parts), (6, 4), "by {path}");
+        match path {
+            UploadPath::TransferQueue => {
+                assert!(
+                    shown_at > 5 && taken_at > 3,
+                    "by {path}: {shown_at}, {taken_at}"
+                );
+            }
+            UploadPath::HostImageCopy | UploadPath::GraphicsQueue => {
+                assert_eq!((shown_at, taken_at), (5, 3), "by {path}");
+            }
+        }
+        drop((frames, texture, buffer, stand_in, image, pipeline, device));
+    }
+
+    drop(instance);
+    check(&validation);
+}
+
+/// Streams an image into a texture, and in each frame after, begins a pass before finishing it:
+/// once its copies are done, the frame refuses to show the image after the pass, which would
+/// sample it before it's ready, before anything changes, and the frame still submits; the next
+/// frame shows it before its passes.
+fn textures_come_to_show_images_before_the_frames_passes() {
     let instance = instance();
     let validation = instance.validation();
     let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
     let mut image = ColorImage::new(&device, 4, 4, "refill test target").expect("an image");
     let format = TextureFormat::Rgba8Srgb;
-    let texture = Texture::new(&device, 2, 2, format, false, "refilled test texture");
+    let mut stand_in = stand_in(&device, "refill test stand-in");
+    let texture = Texture::placed(&device, 4, &stand_in, "refilled test texture");
     let mut texture = texture.expect("a texture");
     let mut frames = Frames::new(&device).expect("frames");
     let black = [0.0, 0.0, 0.0, 1.0];
-    let mut frame = frames
-        .begin([Target::Image(&mut image)])
-        .expect("a frame")
-        .expect("an offscreen image can always be rendered into");
-    let pixels = [255; 2 * 2 * 4];
-    frame.fill_texture(&mut texture, &pixels).expect("a fill");
-    drop(frame.begin_pass(0, c"clear", black, None, None));
-    frame.submit().expect("the frame's submission");
-    let mut frame = frames
-        .begin([Target::Image(&mut image)])
-        .expect("a frame")
-        .expect("an offscreen image can always be rendered into");
-    let refill = frame.refill_texture(&mut texture, format, [3, 1], false, &[127; 3 * 4]);
-    refill.expect("a refill");
-    drop(frame.begin_pass(0, c"clear", black, None, None));
-    let message = panics(|| {
-        let _ = frame.refill_texture(&mut texture, format, [1, 1], false, &[0; 4]);
-    });
-    assert!(message.contains("before the frame's passes"), "{message}");
-    assert_eq!(texture.size(), [3, 1], "a refused refill changes nothing");
-    frame.submit().expect("the frame's submission");
-    drop((frames, texture, image, device));
+    let mut refused = false;
+    for i in 0..20 {
+        let mut frame = frames
+            .begin([Target::Image(&mut image)])
+            .expect("a frame")
+            .expect("an offscreen image can always be rendered into");
+        if i == 0 {
+            write_stand_in(&mut frame, &mut stand_in);
+            texture.refill(3, 1, format, false).expect("an image");
+            stream_whole(&mut frame, &mut texture, &[127; 3 * 4]);
+        }
+        if refused {
+            let shown = frame.finish_texture(&mut texture).expect("a finish");
+            assert!(shown, "shown before the next frame's passes");
+            assert_eq!(texture.size(), [3, 1]);
+            frame.submit().expect("the frame's submission");
+            break;
+        }
+        drop(frame.begin_pass(0, c"clear", black, None, None));
+        match tries(|| frame.finish_texture(&mut texture)) {
+            Ok(Ok(false)) => {}
+            Ok(Ok(true)) => panic!("shown after the frame's pass"),
+            Ok(Err(error)) => panic!("{error:#}"),
+            Err(message) => {
+                assert!(message.contains("before the frame's passes"), "{message}");
+                assert_eq!(texture.size(), [0, 0], "a refused finish changes nothing");
+                refused = true;
+            }
+        }
+        frame.submit().expect("the frame's submission");
+    }
+    assert!(refused, "the copies never finished");
+    drop((frames, texture, stand_in, image, device));
 
     drop(instance);
     check(&validation);
@@ -980,9 +1258,10 @@ fn forgotten_frames_and_passes_are_caught(log: &Path) {
     }
 }
 
-/// Opens two devices, and gives a frame of the one objects the other made: a target, textures, a
-/// buffer, a depth image, an ID image to render into and to sample, and an upload's indices. Each
-/// is refused before anything is recorded, so the frame goes on to submit.
+/// Opens two devices, and gives a frame of the one objects the other made: a target, textures to
+/// write, stream, finish and hide, a stand-in, a buffer to stream and finish, a depth image, an
+/// ID image to render into and to sample, and an upload's indices. Each is refused before anything
+/// is recorded, so the frame goes on to submit.
 fn another_devices_objects_are_refused() {
     let instance = instance();
     let validation = instance.validation();
@@ -996,6 +1275,9 @@ fn another_devices_objects_are_refused() {
     let others_texture = Texture::new(&other, 1, 1, format, false, "the other's texture");
     let mut others_texture = others_texture.expect("a texture");
     let mut others_buffer = GpuBuffer::new(&other, 12, "the other's buffer").expect("a buffer");
+    let mut own_stand_in = stand_in(&device, "own stand-in");
+    let placed = Texture::placed(&device, 6, &own_stand_in, "own placed texture");
+    let mut placed = placed.expect("a texture");
     let mut frames = Frames::new(&device).expect("frames");
     let mut others_frames = Frames::new(&other).expect("frames");
     let refused = |message: String| {
@@ -1006,18 +1288,32 @@ fn another_devices_objects_are_refused() {
         let targets = [Target::Image(&mut image), Target::Image(&mut others_image)];
         let _ = frames.begin(targets);
     }));
+    refused(panics(|| {
+        let _ = Texture::placed(&device, 7, &others_texture, "stood in by the other's");
+    }));
     let mut frame = frames
         .begin([Target::Image(&mut image)])
         .expect("a frame")
         .expect("an offscreen image can always be rendered into");
+    write_stand_in(&mut frame, &mut own_stand_in);
     refused(panics(|| {
-        let _ = frame.fill_texture(&mut others_texture, &[255; 4]);
+        let _ = frame.stream_texture(&mut others_texture, &[255; 4], u64::MAX);
     }));
     refused(panics(|| {
         let _ = frame.write_texture(&mut others_texture, [0, 0], [1, 1], &[255; 4]);
     }));
     refused(panics(|| {
-        let _ = frame.fill_buffer(&mut others_buffer, &[7; 12]);
+        let _ = frame.finish_texture(&mut others_texture);
+    }));
+    refused(panics(|| {
+        frame.hide_texture(&mut others_texture, &own_stand_in)
+    }));
+    refused(panics(|| frame.hide_texture(&mut placed, &others_texture)));
+    refused(panics(|| {
+        let _ = frame.stream_buffer(&mut others_buffer, &[7; 12], u64::MAX);
+    }));
+    refused(panics(|| {
+        let _ = frame.finish_buffer(&mut others_buffer);
     }));
     refused(panics(|| {
         drop(frame.begin_pass(0, c"depth", black, Some(&others_depth), None));
@@ -1042,37 +1338,56 @@ fn another_devices_objects_are_refused() {
     others_frame.submit().expect("the other frame's submission");
 
     drop((frames, others_frames, image, others_image, others_depth));
-    drop((others_ids, others_texture, others_buffer));
+    drop((
+        others_ids,
+        others_texture,
+        others_buffer,
+        placed,
+        own_stand_in,
+    ));
     drop((device, other, instance));
     check(&validation);
 }
 
 /// Makes a texture in a placed slot, then asks for its slot again, and for a slot that isn't
-/// placed: both are refused before an image is made, so that dropping the device leaks nothing,
-/// which VMA would abort on.
+/// placed: both are refused before anything is made, so that dropping the device leaks nothing,
+/// which VMA would abort on. A stand-in without an image of its own is refused too.
 fn refused_texture_slots_leak_nothing() {
     let instance = instance();
     let validation = instance.validation();
     let device = Device::new(&instance, None, None, None).expect("a GPU that supports Vulkan 1.4");
-    let format = TextureFormat::Rgba8Srgb;
-    let placed = Texture::placed(&device, 7, 1, 1, format, false, "placed test texture");
+    let stand_in = stand_in(&device, "slot test stand-in");
+    let placed = Texture::placed(&device, 7, &stand_in, "placed test texture");
     let placed = placed.expect("a texture");
     let message = panics(|| {
-        let _ = Texture::placed(&device, 7, 1, 1, format, false, "the same slot");
+        let _ = Texture::placed(&device, 7, &stand_in, "the same slot");
     });
     assert!(message.contains("texture slot 7 is in use"), "{message}");
     let message = panics(|| {
         let slot = PLACED_TEXTURES;
-        let _ = Texture::placed(&device, slot, 1, 1, format, false, "a slot past the placed");
+        let _ = Texture::placed(&device, slot, &stand_in, "a slot past the placed");
     });
     assert!(message.contains("isn't one of the"), "{message}");
+    let message = panics(|| {
+        let _ = Texture::placed(
+            &device,
+            8,
+            &placed,
+            "stood in by a slot that shows a stand-in",
+        );
+    });
+    assert!(message.contains("shows a stand-in"), "{message}");
+    // Dropped without an image, its slot comes free.
+    drop(placed);
+    let again = Texture::placed(&device, 7, &stand_in, "placed again");
+    drop(again.expect("the slot came free"));
 
-    drop((placed, device, instance));
+    drop((stand_in, device, instance));
     check(&validation);
 }
 
 /// Asks a pass for viewports no device draws, one wider than its limit and one reaching past its
-/// bounds, and to draw the indices of a buffer no frame has filled: each is refused before it's
+/// bounds, and to draw the indices of a buffer no frame has taken: each is refused before it's
 /// recorded, so the pass goes on.
 fn passes_refuse_what_the_device_cant_draw() {
     let instance = instance();

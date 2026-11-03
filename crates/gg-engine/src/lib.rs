@@ -61,6 +61,7 @@ mod inspector;
 mod interpolation;
 mod jobs;
 mod layer;
+mod loader;
 mod luau;
 mod main_loop;
 mod model;
@@ -151,10 +152,11 @@ pub use gg_renderer::MeshDraw;
 /// sheets whose cells they show; circles; meshes; shaders for their vertex types, each added with
 /// how it blends; the textures those shaders and sprites sample, and the samplers they sample them
 /// with; the viewpoint the game's view sees them from, and its projection, which a [`Camera`] has
-/// too; and where that view is in the window.
+/// too; where that view is in the window; and what's still streaming to the GPU, as
+/// [`Context::streaming`] tells.
 pub use gg_renderer::{
-    Blend, Circle, Mesh, Projection, Sampler, Shader, Sprite, SpriteSheet, Texture, Viewpoint,
-    Viewport,
+    Blend, Circle, Mesh, Projection, Sampler, Shader, Sprite, SpriteSheet, Streaming, Texture,
+    Viewpoint, Viewport,
 };
 pub use grant::{Capability, Grant};
 pub use input::Input;
@@ -162,7 +164,7 @@ pub use inspector::{Inspector, InspectorLink, Placed};
 #[doc(hidden)]
 pub use jobs::{on_threads, start as start_jobs};
 use layer::Stack;
-pub use layer::{Commands, Context, Layer, Pick, Tick, Window};
+pub use layer::{Commands, Context, Layer, Loading, Pick, Tick, Window};
 pub use luau::{Mods, Scripts};
 use main_loop::run_headless;
 pub use model::{Model, ModelNode, ModelRoot};

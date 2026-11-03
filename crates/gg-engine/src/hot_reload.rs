@@ -4,14 +4,15 @@
 //! and those it names, a font's file, a sound's, a music's, and reads it again as they change, off
 //! the main thread: compiles the shader, decodes the image, reads the model, bakes the font,
 //! decodes the sound, reads the music. The main thread puts what it read in place of the asset,
-//! under the same handle, which the next frame it hands the renderer draws, a sound's next play
-//! plays, and music's play crossfades to. A change that doesn't compile, decode, read or bake, or a
+//! under the same handle, which the renderer draws once its frames have streamed it, drawing the
+//! asset as it was until then, a shader from the next frame, a sound's next play plays, and
+//! music's play crossfades to. A change that doesn't compile, decode, read or bake, or a
 //! shader's that breaks the contract that `Shaders::add` describes, warns, and the asset keeps
 //! drawing, or playing, as it did; until one reads, a change to any file beside its files reads it
 //! again too, such as an include it couldn't find, since a compile that fails lists none of the
 //! files it read. The thread follows a texture, a model or a font whose file is renamed or moved,
 //! as the asset database has it, which the main thread tells it of; a sound or music, which has no
-//! asset ID, it watches where it was loaded from.
+//! asset ID, it watches where it was loaded from. A texture or a model removed it watches no more.
 
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -178,6 +179,7 @@ impl Source {
                 ..
             } => {
                 let image = image::load_image(name, path, &package::Files::default())?;
+                let image = image::decode_texture(name, path, image)?;
                 let reloaded = Reloaded::Texture {
                     texture: *texture,
                     path: path.clone(),
@@ -188,7 +190,10 @@ impl Source {
             Self::Model {
                 file, name, path, ..
             } => {
-                let (imported, files) = gltf::read_listing(name, path, &package::Files::default())?;
+                let read = gltf::read_listing(name, path, &package::Files::default());
+                let (mut imported, files) = read?;
+                // Here, rather than by the loader, as the model takes them at once.
+                imported.decode_images(name, path)?;
                 let reloaded = Reloaded::Model {
                     file: file.clone(),
                     path: path.clone(),
@@ -284,6 +289,8 @@ enum Message {
     /// A texture, a model or a font whose file is at a path anew, renamed or moved, as what it
     /// holds.
     Moved(Asset, PathBuf),
+    /// A texture or a model removed, which it watches no more.
+    Unwatch(Asset),
 }
 
 /// The thread, from the main thread's side, which ends it as it drops.
@@ -415,6 +422,13 @@ impl HotReload {
         }
     }
 
+    /// Has the thread watch `asset`, a texture or a model removed, no more, nor follow its file;
+    /// what it reads of it meanwhile is the main thread's to drop.
+    pub(crate) fn unwatch(&mut self, asset: Asset) {
+        self.followed.retain(|followed| followed.asset != asset);
+        self.send(Message::Unwatch(asset));
+    }
+
     /// What the thread read again since it was last asked, an asset at a time.
     pub(crate) fn take(&self) -> Option<Reloaded> {
         self.reloaded.try_recv().ok()
@@ -446,7 +460,8 @@ impl Drop for HotReload {
 /// The thread: watches each asset it's sent, looking at its files every [`LOOK`] and sending
 /// `back` what reads again, until the main thread's side drops.
 fn watch(messages: &Receiver<Message>, back: &Sender<Reloaded>) {
-    let mut watched: Vec<(Source, Files)> = Vec::new();
+    // `None` where an asset is unwatched, until the look ends, as `look` says.
+    let mut watched: Vec<Option<(Source, Files)>> = Vec::new();
     loop {
         match messages.recv_timeout(LOOK) {
             Ok(message) => {
@@ -456,33 +471,55 @@ fn watch(messages: &Receiver<Message>, back: &Sender<Reloaded>) {
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
         }
-        let _zone = gg_core::zone!("look at assets' files");
-        for at in 0..watched.len() {
-            if !watched[at].1.look(stamp) {
-                continue;
-            }
-            // No read starts once the main thread's side has let go, which waits for the one under
-            // way alone. What's sent meanwhile is taken first, the assets from the next look.
-            if !take_all(messages, &mut watched) {
-                return;
-            }
-            let (source, files) = &mut watched[at];
-            read(source, files, back);
+        if !look(messages, &mut watched, back) {
+            return;
         }
     }
 }
 
-/// Takes `message` into what the thread watches, `watched`.
-fn take(message: Message, watched: &mut Vec<(Source, Files)>) {
+/// Looks at the files of each asset `watched` holds, in order, reading again each whose files
+/// changed and held, as [`Files::look`] says, and sending `back` what reads, as [`read`] says.
+/// Before each read it takes what `messages` brought, as [`take`] does, so that no read starts
+/// once the main thread's side has let go, which waits for the one under way alone: an asset
+/// sent meanwhile is looked at from the next look, and one unwatched meanwhile isn't read, its
+/// place left `None` until the look ends, so that none of the places the look goes on to shifts.
+/// Returns false once that side has let go.
+fn look(
+    messages: &Receiver<Message>,
+    watched: &mut Vec<Option<(Source, Files)>>,
+    back: &Sender<Reloaded>,
+) -> bool {
+    let _zone = gg_core::zone!("look at assets' files");
+    for at in 0..watched.len() {
+        let Some((_, files)) = &mut watched[at] else {
+            continue;
+        };
+        if !files.look(stamp) {
+            continue;
+        }
+        if !take_all(messages, watched) {
+            return false;
+        }
+        if let Some((source, files)) = &mut watched[at] {
+            read(source, files, back);
+        }
+    }
+    watched.retain(Option::is_some);
+    true
+}
+
+/// Takes `message` into what the thread watches, `watched`, where an asset unwatched leaves
+/// `None` in its place.
+fn take(message: Message, watched: &mut Vec<Option<(Source, Files)>>) {
     match message {
         Message::Watch(source) => {
             let _zone = gg_core::zone!("watch an asset");
             let files = Files::new(source.files(), source.read_at(), stamp);
-            watched.push((source, files));
+            watched.push(Some((source, files)));
         }
         Message::Moved(asset, path) => {
-            let found =
-                (watched.iter_mut()).find(|(source, _)| source.asset() == Some(asset.clone()));
+            let found = (watched.iter_mut().flatten())
+                .find(|(source, _)| source.asset() == Some(asset.clone()));
             if let Some((source, files)) = found {
                 files.moved(&path);
                 match source {
@@ -495,12 +532,20 @@ fn take(message: Message, watched: &mut Vec<(Source, Files)>) {
                 }
             }
         }
+        Message::Unwatch(asset) => {
+            for entry in watched {
+                let of = entry.as_ref().and_then(|(source, _)| source.asset());
+                if of.is_some_and(|of| of == asset) {
+                    *entry = None;
+                }
+            }
+        }
     }
 }
 
 /// Takes what the thread has been sent since it last looked, if anything: false once the main
 /// thread's side has let go.
-fn take_all(messages: &Receiver<Message>, watched: &mut Vec<(Source, Files)>) -> bool {
+fn take_all(messages: &Receiver<Message>, watched: &mut Vec<Option<(Source, Files)>>) -> bool {
     loop {
         match messages.try_recv() {
             Ok(message) => take(message, watched),
@@ -755,7 +800,7 @@ mod tests {
     use std::collections::HashMap;
     use std::thread::JoinHandle;
 
-    use gg_renderer::Blend;
+    use gg_renderer::{Blend, Mipmaps, Textures};
     use tracing::Level;
     use tracing_subscriber::Layer;
     use tracing_subscriber::filter::Targets;
@@ -1161,8 +1206,12 @@ mod tests {
         written_long_ago(&image, png(1, 9));
         written_long_ago(&model, gltf::tests::model());
         let read_at = SystemTime::now();
-        let (imported, files) =
+        let (mut imported, files) =
             gltf::read_listing("m", &model, &package::Files::default()).expect("a model");
+        // As a reload reads it, its images decoded, which it takes at once.
+        imported
+            .decode_images("m", &model)
+            .expect("its images decode");
         let texture = Source::Texture {
             texture: Texture::WHITE,
             name: "a".to_owned(),
@@ -1239,5 +1288,57 @@ mod tests {
         assert_eq!((file, read), (model, imported));
         drop(messages);
         thread.join().expect("the thread ends as its side drops");
+    }
+
+    /// A texture unwatched while a look is under way, as its removal sends, taken as the look
+    /// takes what's sent before it reads one that changed after it, isn't read, and shifts nothing
+    /// the look goes on to: the one that changed is read, as it is, and the look ends, the one
+    /// unwatched gone from those it watches.
+    #[test]
+    fn a_texture_unwatched_while_a_look_is_under_way_shifts_none_it_reads() {
+        let scratch = Scratch::new("unwatched-mid-look");
+        let dir = &scratch.0;
+        fs::create_dir_all(dir).expect("a directory");
+        let mut textures = Textures::default();
+        let read_at = SystemTime::now();
+        // The one unwatched first, then the one that changes, then one that doesn't.
+        let (handles, mut watched): (Vec<Texture>, Vec<_>) = ["gone", "changed", "kept"]
+            .into_iter()
+            .map(|name| {
+                let path = dir.join(format!("{name}.png"));
+                written_long_ago(&path, png(1, 9));
+                let added = textures.add(name, [1, 1], &[0; 4], Mipmaps::None);
+                let texture = added.expect("a texture");
+                let files = Files::new(slice::from_ref(&path), read_at, stamp);
+                let source = Source::Texture {
+                    texture,
+                    name: name.to_owned(),
+                    path,
+                    read_at,
+                };
+                (texture, Some((source, files)))
+            })
+            .unzip();
+        let (messages, to_watch) = mpsc::channel();
+        let (back, reloaded) = mpsc::channel();
+        fs::write(dir.join("changed.png"), png(2, 7)).expect("an edit");
+        // A look sees it change, and the next, as it holds, reads it.
+        assert!(look(&to_watch, &mut watched, &back));
+        assert!(reloaded.try_recv().is_err(), "read once it holds");
+        let gone = Message::Unwatch(Asset::Texture(handles[0]));
+        messages.send(gone).expect("sent");
+        assert!(look(&to_watch, &mut watched, &back), "the look goes on");
+        let Ok(Reloaded::Texture { texture, image, .. }) = reloaded.try_recv() else {
+            panic!("the changed texture read again");
+        };
+        assert_eq!((texture, image.size), (handles[1], [2, 1]));
+        assert!(reloaded.try_recv().is_err(), "nothing else read");
+        let still: Vec<Texture> = (watched.iter().flatten())
+            .filter_map(|(source, _)| match source.asset() {
+                Some(Asset::Texture(texture)) => Some(texture),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(still, handles[1..]);
     }
 }

@@ -3,7 +3,8 @@
 //! can render into several targets, such as an app's windows, and presents all their swapchains at
 //! once; its later passes can sample what its earlier ones rendered offscreen. It reads back a few
 //! pixels of the IDs its passes render, which the frame two later, which reuses its resources once
-//! it has finished, finds read.
+//! it has finished, finds read. On a device that uploads through a transfer queue, a frame's copies
+//! go in a submission of their own, which another timeline paces, and no frame waits for.
 
 mod pass;
 mod upload;
@@ -26,7 +27,7 @@ pub use pass::{Indices, Pass};
 pub use upload::Upload;
 
 /// How many frames the GPU works on at once.
-const FRAMES_IN_FLIGHT: u64 = 2;
+pub(crate) const FRAMES_IN_FLIGHT: u64 = 2;
 
 /// The most IDs a frame reads back ([`Frame::read_ids`]).
 pub const MAX_READS: usize = 64;
@@ -56,9 +57,18 @@ pub struct Frames {
     /// For a device that uploads through a transfer queue, reaches N when the Nth submission of
     /// copies has finished; null otherwise.
     transfer_timeline: vk::Semaphore,
-    /// How many times copies have been submitted, counted apart from frames, since a frame that
-    /// fails to submit leaves its number to the next.
+    /// How many times copies have been submitted, counted apart from frames, since a frame may
+    /// submit none.
     transfers_submitted: u64,
+    /// The command buffers copies record into, each with the submission it was last in: a frame
+    /// takes one whose submission has finished, or makes another, so that none waits.
+    transfers: Vec<TransferCommands>,
+    /// What the transfer timeline had reached as the frame being recorded began: the copies
+    /// submitted up to then have finished.
+    transfers_finished: u64,
+    /// The submission of copies the frame being recorded waits on, the last of those that filled
+    /// what it takes over from the transfer queue; 0 for none.
+    transfer_wait: u64,
     /// What frames read IDs back into, [`MAX_READS`] of them for each slot, in the slots' order:
     /// made by the first read, so that apps that read none hold none.
     reads: Option<Buffer>,
@@ -95,15 +105,21 @@ struct Slot {
     /// For each target, signaled when the swapchain image the frame renders into is ready for
     /// it. There are as many as the most targets a frame has had.
     acquired: Vec<vk::Semaphore>,
-    /// For a device that uploads through a transfer queue, the pool and command buffer the frame's
-    /// copies record into; null otherwise.
-    transfer_pool: vk::CommandPool,
-    transfers: vk::CommandBuffer,
-    /// As `commands_name` is for `commands`.
-    transfers_name: CString,
     /// The number of the frame that last began in the slot, 0 for none, and how many IDs it read
     /// back into the slot's part of `Frames::reads`.
     reads: (u64, usize),
+}
+
+/// A command buffer that copies on the transfer queue record into, for one submission at a time.
+struct TransferCommands {
+    pool: vk::CommandPool,
+    commands: vk::CommandBuffer,
+    /// The pool's and the commands' name, kept to name the commands again as they're begun,
+    /// without allocating.
+    name: CString,
+    /// The submission of copies it was last in; 0 for none. It's free once the transfer timeline
+    /// has reached it.
+    submitted: u64,
 }
 
 /// The IDs a frame read back, as the next frame in its slot found them once it had finished.
@@ -191,6 +207,9 @@ impl Frames {
             staging: Arena::staging(),
             transfer_timeline: vk::Semaphore::null(),
             transfers_submitted: 0,
+            transfers: Vec::new(),
+            transfers_finished: 0,
+            transfer_wait: 0,
             reads: None,
             read: Read {
                 frame: 0,
@@ -218,54 +237,16 @@ impl Frames {
             unsafe { device.set_name(frames.transfer_timeline, "upload timeline") };
         }
         for i in 0..FRAMES_IN_FLIGHT {
-            let pool_info = vk::CommandPoolCreateInfo::default()
-                .flags(vk::CommandPoolCreateFlags::TRANSIENT)
-                .queue_family_index(device.graphics_family());
-            let name = |what| CString::new(format!("frame {i} {what}")).expect("names have no nul");
-            let (commands_name, transfers_name) = (name("commands"), name("transfers"));
-            // SAFETY: the device is live, and each object is made from live ones.
-            unsafe {
-                let pool = raw.create_command_pool(&pool_info, None).map_err(|e| {
-                    let subject = format_args!("command pool {commands_name:?}");
-                    vk_error("vkCreateCommandPool", subject, e)
-                })?;
-                frames.slots.push(Slot {
-                    pool,
-                    commands: vk::CommandBuffer::null(),
-                    commands_name,
-                    acquired: Vec::new(),
-                    transfer_pool: vk::CommandPool::null(),
-                    transfers: vk::CommandBuffer::null(),
-                    transfers_name,
-                    reads: (0, 0),
-                });
-                let slot = frames.slots.last_mut().expect("a slot was just pushed");
-                let allocate_info = vk::CommandBufferAllocateInfo::default()
-                    .command_pool(pool)
-                    .level(vk::CommandBufferLevel::PRIMARY)
-                    .command_buffer_count(1);
-                slot.commands = raw.allocate_command_buffers(&allocate_info).map_err(|e| {
-                    let subject = format_args!("command buffer {:?}", slot.commands_name);
-                    vk_error("vkAllocateCommandBuffers", subject, e)
-                })?[0];
-                device.set_c_name(pool, &slot.commands_name);
-                device.set_c_name(slot.commands, &slot.commands_name);
-                if let Some(family) = transfer_family {
-                    let pool_info = pool_info.queue_family_index(family);
-                    slot.transfer_pool =
-                        raw.create_command_pool(&pool_info, None).map_err(|e| {
-                            let subject = format_args!("command pool {:?}", slot.transfers_name);
-                            vk_error("vkCreateCommandPool", subject, e)
-                        })?;
-                    let allocate_info = allocate_info.command_pool(slot.transfer_pool);
-                    slot.transfers = raw.allocate_command_buffers(&allocate_info).map_err(|e| {
-                        let subject = format_args!("command buffer {:?}", slot.transfers_name);
-                        vk_error("vkAllocateCommandBuffers", subject, e)
-                    })?[0];
-                    device.set_c_name(slot.transfer_pool, &slot.transfers_name);
-                    device.set_c_name(slot.transfers, &slot.transfers_name);
-                }
-            }
+            let name = format!("frame {i} commands");
+            let (pool, commands, commands_name) =
+                command_buffer(device, device.graphics_family(), name)?;
+            frames.slots.push(Slot {
+                pool,
+                commands,
+                commands_name,
+                acquired: Vec::new(),
+                reads: (0, 0),
+            });
         }
         Ok(frames)
     }
@@ -316,6 +297,27 @@ impl Frames {
             self.waited = start.elapsed();
             self.device.frames_finished(previous + 1);
         }
+        if self.transfer_timeline != vk::Semaphore::null() {
+            // SAFETY: the timeline semaphore is live.
+            let finished = unsafe {
+                self.device
+                    .raw()
+                    .get_semaphore_counter_value(self.transfer_timeline)
+            }
+            .map_err(|e| {
+                vk_error(
+                    "vkGetSemaphoreCounterValue",
+                    "semaphore \"upload timeline\"",
+                    e,
+                )
+            })?;
+            self.transfers_finished = finished;
+            self.device.transfers_finished(finished);
+        }
+        self.transfer_wait = 0;
+        // SAFETY: the slot's last frame has finished, so no submitted frame that the GPU may still
+        // run uses its set.
+        unsafe { self.device.bindless().apply(self.device.raw(), slot) };
         // The slot's last frame has finished, and its reads with it.
         self.find_read(slot)?;
         let mut list: Vec<Target<'a>> = std::mem::take(&mut self.spare_targets);
@@ -366,7 +368,7 @@ impl Frames {
             targets: list,
             slot,
             submitted: false,
-            transferring: false,
+            transfers: None,
             rendering: false,
             pass_begun: false,
         }))
@@ -405,7 +407,7 @@ impl Frames {
         } = self.slots[slot];
         let bindless = self.device.bindless();
         // SAFETY: the GPU has finished the slot's previous frame, so its commands can be reset
-        // and recorded again; the set and layout live as long as the device.
+        // and recorded again; the sets and layout live as long as the device.
         unsafe {
             begin_recording(&self.device, pool, commands, commands_name)?;
             raw.cmd_bind_descriptor_sets(
@@ -413,7 +415,7 @@ impl Frames {
                 vk::PipelineBindPoint::GRAPHICS,
                 bindless.pipeline_layout(),
                 0,
-                &[bindless.set()],
+                &[bindless.set(slot)],
                 &[],
             );
         }
@@ -519,8 +521,7 @@ impl Drop for Frames {
                 "A frame was forgotten rather than submitted or dropped, so its images were never presented"
             );
         }
-        // A frame's commands wait for its copies, and a frame whose commands fail to submit waits
-        // for them itself, but that wait can fail too.
+        // The copies run apart from the frames, so both are waited for, but a wait can fail.
         let waited = self.wait(self.submitted).and_then(|()| {
             if self.transfers_submitted > 0 {
                 wait_on(
@@ -537,6 +538,7 @@ impl Drop for Frames {
             let _ = self.device.wait_idle();
         }
         self.device.frames_finished(self.submitted);
+        self.device.transfers_finished(self.transfers_submitted);
         let raw = self.device.raw();
         // SAFETY: the GPU has finished every frame and every copy, so nothing here is in use.
         // Null handles, left by a failed `new` or by a device that doesn't upload through a
@@ -547,7 +549,9 @@ impl Drop for Frames {
                     raw.destroy_semaphore(semaphore, None);
                 }
                 raw.destroy_command_pool(slot.pool, None);
-                raw.destroy_command_pool(slot.transfer_pool, None);
+            }
+            for transfers in &self.transfers {
+                raw.destroy_command_pool(transfers.pool, None);
             }
             raw.destroy_semaphore(self.timeline, None);
             raw.destroy_semaphore(self.transfer_timeline, None);
@@ -564,14 +568,16 @@ pub struct Frame<'a> {
     targets: Vec<Target<'a>>,
     slot: usize,
     submitted: bool,
-    /// Whether the frame's copies on the transfer queue have begun recording.
-    transferring: bool,
+    /// The command buffer the frame's copies on the transfer queue record into, among
+    /// `Frames::transfers`, once they've begun.
+    transfers: Option<usize>,
     /// Whether a pass is open, which only its drop closes: the frame records nothing of its own
     /// while one is, so a pass forgotten rather than dropped is caught at the frame's next call.
     rendering: bool,
-    /// Whether a pass has begun in the frame: a texture refilled takes its new image into its slot
-    /// in the bindless set at once, which every pass recorded before it would sample as the frame
-    /// is submitted, before the copy that fills it, so a refill comes before them all.
+    /// Whether a pass has begun in the frame: a texture that comes to show an image takes it into
+    /// its slot in the frame's bindless set at once, which every pass recorded before it would
+    /// sample as the frame is submitted, before what makes the image ready, so it comes before
+    /// them all.
     pass_begun: bool,
 }
 
@@ -969,14 +975,16 @@ impl<'a> Frame<'a> {
             staging,
             transfer_timeline,
             transfers_submitted,
+            transfers,
+            transfer_wait,
             images,
             scratch,
             ..
         } = &mut *self.frames;
         arenas[self.slot].flush()?;
         staging.flush()?;
-        // Its buffers retire with this frame, so they last until the GPU has finished it, copies
-        // and all.
+        // Its buffers retire with this frame and with the copies being recorded, so they last
+        // until the GPU has finished both.
         staging.clear();
         let raw = device.raw();
         let slot = &slots[self.slot];
@@ -992,19 +1000,19 @@ impl<'a> Frame<'a> {
                 .value(frame)
                 .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
         );
-        if self.transferring {
+        if let Some(i) = self.transfers {
+            let transfer = &mut transfers[i];
             // SAFETY: the transfer commands are recording.
-            unsafe { raw.end_command_buffer(slot.transfers) }.map_err(|e| {
-                let subject = format_args!("command buffer {:?}", slot.transfers_name);
+            unsafe { raw.end_command_buffer(transfer.commands) }.map_err(|e| {
+                let subject = format_args!("command buffer {:?}", transfer.name);
                 vk_error("vkEndCommandBuffer", subject, e)
             })?;
             let command_infos =
-                [vk::CommandBufferSubmitInfo::default().command_buffer(slot.transfers)];
-            // Without maintenance8, which ash's headers predate, a wait for an ownership
-            // transfer's release is for all commands.
+                [vk::CommandBufferSubmitInfo::default().command_buffer(transfer.commands)];
+            let number = *transfers_submitted + 1;
             let copied = vk::SemaphoreSubmitInfo::default()
                 .semaphore(*transfer_timeline)
-                .value(*transfers_submitted + 1)
+                .value(number)
                 .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS);
             let submit = vk::SubmitInfo2::default()
                 .command_buffer_infos(&command_infos)
@@ -1012,13 +1020,26 @@ impl<'a> Frame<'a> {
             {
                 let _zone = gg_core::zone!("submit uploads");
                 let work = format_args!("frame {frame}'s uploads");
-                // SAFETY: what the copies use lives until they finish, which the frame's own
-                // submission waits for, or the frame itself if that fails: the slot is reused only
-                // after that, and staging and the resources retire until then.
+                // SAFETY: what the copies use lives until they finish: the command buffer is
+                // reused only once the timeline has passed this submission, and staging and the
+                // resources retire until then.
                 unsafe { device.submit_transfers(slice::from_ref(&submit), work) }?;
             }
-            *transfers_submitted += 1;
-            scratch.waits.push(copied);
+            transfer.submitted = number;
+            *transfers_submitted = number;
+            device.transfer_submitted(number);
+        }
+        if *transfer_wait > 0 {
+            // For what the frame takes over from the transfer queue, whose copies have finished
+            // already: the ownership transfer still needs the semaphore between its halves.
+            // Without maintenance8, which ash's headers predate, a wait for an ownership transfer's
+            // release is for all commands.
+            scratch.waits.push(
+                vk::SemaphoreSubmitInfo::default()
+                    .semaphore(*transfer_timeline)
+                    .value(*transfer_wait)
+                    .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
+            );
         }
         for (i, (target, image)) in self.targets.iter().zip(images.iter_mut()).enumerate() {
             let (Target::Swapchain(swapchain), Some((index, layout))) = (target, image) else {
@@ -1075,21 +1096,8 @@ impl<'a> Frame<'a> {
                 // until then.
                 unsafe { device.submit(slice::from_ref(&submit), format_args!("frame {frame}")) }
             });
-        if let Err(error) = sent {
-            // Nothing else waits for the frame's copies now, so it does, before their slot is
-            // reused or their staging freed.
-            if self.transferring
-                && let Err(waited) = wait_on(
-                    device,
-                    *transfer_timeline,
-                    "upload timeline",
-                    *transfers_submitted,
-                )
-            {
-                error!(code = waited.code(), "{waited:#}");
-            }
-            return Err(error);
-        }
+        // The frame's copies, if any, run on regardless: the frames' drop waits for them.
+        sent?;
         *submitted = frame;
         for (target, image) in self.targets.iter_mut().zip(images.iter()) {
             if let (Target::Image(target), Some((_, layout))) = (target, image) {
@@ -1145,6 +1153,44 @@ impl Drop for Frame<'_> {
             error!(code = error.code(), "{error:#}");
         }
         self.frames.spare_targets = recycle(std::mem::take(&mut self.targets));
+    }
+}
+
+/// A command pool of `family`'s and its one command buffer, for one submission at a time, both
+/// named `name`, which their errors give; the name comes back as a C string, to name the commands
+/// again as they're begun without allocating.
+fn command_buffer(
+    device: &Device,
+    family: u32,
+    name: String,
+) -> Result<(vk::CommandPool, vk::CommandBuffer, CString)> {
+    let name = CString::new(name).expect("names have no nul");
+    let pool_info = vk::CommandPoolCreateInfo::default()
+        .flags(vk::CommandPoolCreateFlags::TRANSIENT)
+        .queue_family_index(family);
+    let raw = device.raw();
+    // SAFETY: the device is live, and each object is made from live ones; a pool whose command
+    // buffer can't be allocated is destroyed, unused.
+    unsafe {
+        let pool = raw.create_command_pool(&pool_info, None).map_err(|e| {
+            let subject = format_args!("command pool {name:?}");
+            vk_error("vkCreateCommandPool", subject, e)
+        })?;
+        let allocate_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+        let commands = match raw.allocate_command_buffers(&allocate_info) {
+            Ok(commands) => commands[0],
+            Err(e) => {
+                raw.destroy_command_pool(pool, None);
+                let subject = format_args!("command buffer {name:?}");
+                return Err(vk_error("vkAllocateCommandBuffers", subject, e));
+            }
+        };
+        device.set_c_name(pool, &name);
+        device.set_c_name(commands, &name);
+        Ok((pool, commands, name))
     }
 }
 

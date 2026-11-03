@@ -149,20 +149,27 @@ impl Drop for Buffer {
     }
 }
 
-/// A buffer in the GPU's own memory, which a frame fills ([`Frame::fill_buffer`]): vertices and
+/// A buffer in the GPU's own memory, which frames fill a part at a time
+/// ([`Frame::stream_buffer`]) and then take for drawing ([`Frame::finish_buffer`]): vertices and
 /// other data that shaders read through its address, and the indices that draws take. Dropping
 /// it retires it until the GPU is done with it.
 ///
-/// [`Frame::fill_buffer`]: crate::Frame::fill_buffer
+/// [`Frame::stream_buffer`]: crate::Frame::stream_buffer
+/// [`Frame::finish_buffer`]: crate::Frame::finish_buffer
 pub struct GpuBuffer {
     buffer: Buffer,
-    /// Whether a frame has filled it.
+    /// How many of its bytes frames have copied, from the first.
+    copied: u64,
+    /// The submission of copies on the transfer queue that hands it over to the graphics queue,
+    /// once its last part is recorded; 0 before.
+    released: u64,
+    /// Whether frames have filled it and taken it for drawing.
     written: bool,
 }
 
 impl GpuBuffer {
     /// A buffer of `size` bytes, with `name` as its debug name. What it holds is undefined until
-    /// a frame fills it.
+    /// frames fill it.
     ///
     /// # Panics
     ///
@@ -175,6 +182,8 @@ impl GpuBuffer {
             | vk::BufferUsageFlags::TRANSFER_DST;
         Ok(Self {
             buffer: Buffer::new(device, size, usage, Memory::Gpu, name)?,
+            copied: 0,
+            released: 0,
             written: false,
         })
     }
@@ -186,6 +195,11 @@ impl GpuBuffer {
     /// Where shaders read the buffer, through a buffer pointer.
     pub fn address(&self) -> u64 {
         self.buffer.address()
+    }
+
+    /// How many of its bytes frames have copied, from the first.
+    pub fn streamed(&self) -> u64 {
+        self.copied
     }
 
     pub(crate) fn raw(&self) -> vk::Buffer {
@@ -203,5 +217,11 @@ impl GpuBuffer {
 
     pub(crate) fn set_written(&mut self) {
         self.written = true;
+    }
+
+    /// How many of its bytes frames have copied, from the first, and the submission of copies
+    /// that hands it over, to read and to set.
+    pub(crate) fn progress(&mut self) -> (&mut u64, &mut u64) {
+        (&mut self.copied, &mut self.released)
     }
 }

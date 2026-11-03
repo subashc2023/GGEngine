@@ -28,11 +28,33 @@ pub struct Imported {
     pub(crate) parts: Vec<Part>,
     /// Each primitive the scene draws, once, in the order the walk first reaches it.
     pub primitives: Vec<Primitive>,
-    /// Each image a reached material samples, decoded, once, in the order first reached.
+    /// Each image a reached material samples, once, in the order first reached: read as far as its
+    /// header, for the loader to decode, unless the engine has decoded it, as for hot reload.
     pub images: Vec<Image>,
     /// What the file has that the engine ignores, for an info event, such as "1 animation" or
     /// "extension KHR_texture_transform".
     pub(crate) ignored: Vec<String>,
+}
+
+impl Imported {
+    /// Decodes its images, which reading it read as far as their headers, as [`Image::decoded`]
+    /// decodes them, model `name`'s from `path`: as a model read again, which hot reload puts in
+    /// place at once, and the cooker need them.
+    ///
+    /// Fails with `engine.bad_model`, naming the image as the model's textures are named, for one
+    /// that doesn't decode.
+    pub(crate) fn decode_images(&mut self, name: &str, path: &Path) -> Result<()> {
+        let images = mem::take(&mut self.images).into_iter().enumerate();
+        let decoded = images.map(|(i, image)| {
+            let model = Model { name, path };
+            let decoded = image.decoded();
+            decoded.map_err(|problem| {
+                model.bad(format!("has image {i}, which doesn't decode: {problem}"))
+            })
+        });
+        self.images = decoded.collect::<Result<_>>()?;
+        Ok(())
+    }
 }
 
 /// A node of the scene, or a primitive of a node's mesh: what an entity holds.
@@ -106,7 +128,8 @@ impl Default for Material {
 }
 
 /// The most memory reading a model may take, in bytes, for what it makes of its files: buffers read
-/// from files and data URIs, images decoded, primitives' vertices, indices and names, and parts.
+/// from files and data URIs, images' files and what they decode to, which both are held until the
+/// loader has decoded them, primitives' vertices, indices and names, and parts.
 /// Past what a model that fits a GPU needs, as four textures 8,192 pixels square and ten million
 /// vertices take about 1.5 GiB, so that a small file can't fill memory by naming its data many
 /// times, such as one PNG's bytes as many images.
@@ -696,7 +719,8 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
         Ok((read, Some(info.tex_coord)))
     }
 
-    /// Image `index`, decoded once: where it is in `imported.images`.
+    /// Image `index`, read once, as far as its header, as [`image::read`] reads it, for the loader
+    /// to decode: where it is in `imported.images`.
     fn image(&mut self, index: u32) -> Result<usize> {
         if let Some(&at) = self.images.get(&index) {
             return Ok(at);
@@ -716,15 +740,16 @@ impl<'a, F: Fn(&Path, u64) -> io::Result<Vec<u8>>> Reader<'a, F> {
                 )));
             }
         };
-        let decoded = image::decode(&bytes).map_err(|problem| {
+        let read = image::read(bytes.into_owned()).map_err(|problem| {
             model.bad(format!(
                 "image {index} doesn't decode as a PNG or a JPEG: {problem}"
             ))
         })?;
-        // Decoded for each image, as images that share a source each decode it.
-        self.hold(decoded.pixels.len())?;
+        // Read and decoded for each image, as images that share a source each decode it, its file
+        // held until it's decoded.
+        self.hold(read.pixels.len() + read.decoded_len())?;
         let at = self.imported.images.len();
-        self.imported.images.push(decoded);
+        self.imported.images.push(read);
         self.images.insert(index, at);
         Ok(at)
     }
@@ -1550,12 +1575,21 @@ pub(crate) mod tests {
                 },
             ]
         );
+        // Read as far as its header, the PNG it is, which decodes as the loader decodes it.
+        let [read] = &imported.images[..] else {
+            panic!("one image: {:?}", imported.images);
+        };
+        assert_eq!((read.size, read.format), ([2, 1], image::Format::Png));
         let image = Image {
             size: [2, 1],
             pixels: PIXELS.to_vec(),
             format: image::Format::Rgba8,
         };
-        assert_eq!(imported.images, [image]);
+        let mut decoded = imported.clone();
+        decoded
+            .decode_images("m", Path::new("m.glb"))
+            .expect("its image decodes");
+        assert_eq!(decoded.images, [image]);
         assert_eq!(
             imported.ignored,
             [
@@ -1632,7 +1666,10 @@ pub(crate) mod tests {
         });
         let png = png();
         let files: [(&str, &[u8]); 2] = [("my data.bin", &indices), ("textures/a b.png", &png)];
-        let imported = read_files("m.gltf", gltf.to_string().as_bytes(), &files).expect("a model");
+        let mut imported =
+            read_files("m.gltf", gltf.to_string().as_bytes(), &files).expect("a model");
+        let decoded = imported.decode_images("m", Path::new("m.gltf"));
+        decoded.expect("its image decodes");
         let part = Part {
             transform: Transform::IDENTITY,
             parent: None,
@@ -1663,7 +1700,9 @@ pub(crate) mod tests {
         for (name, bytes) in files {
             std::fs::write(folder.join(name), bytes).expect("a file it names");
         }
-        let (read, listed) = read_listing("m", &model, &Files::default()).expect("a model");
+        let (mut read, listed) = read_listing("m", &model, &Files::default()).expect("a model");
+        let decoded = read.decode_images("m", &model);
+        decoded.expect("its image decodes");
         assert_eq!(read, imported);
         let mut named: Vec<PathBuf> = listed[1..].to_vec();
         named.sort();

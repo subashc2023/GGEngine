@@ -19,16 +19,20 @@ use crate::vma::{Allocation, Allocator};
 use crate::{Instance, Surface, Version, vk_error};
 use candidate::{Candidate, pick};
 
-/// A resource that was dropped while frames that may use it could still be running on the GPU.
+/// A resource that was dropped while frames, or copies on the transfer queue, that may use it
+/// could still be running on the GPU.
 pub(crate) enum Retired {
     Buffer(vk::Buffer, Allocation),
     Image(vk::Image, vk::ImageView, Allocation),
-    /// An image with a slot in the bindless set.
+    /// An image with a slot in the bindless sets.
     Texture(vk::Image, vk::ImageView, Allocation, u32),
+    /// A slot in the bindless sets that shows another texture's image.
+    Slot(u32),
     Pipeline(vk::Pipeline),
 }
 
-/// Retired resources, each with the last frame that may use it, and how far frames have got.
+/// Retired resources, each with the last frame and the last submission of copies that may use
+/// it, and how far frames and copies have got.
 #[derive(Default)]
 struct Retirement {
     /// Whether a [`Frames`](crate::Frames) has numbered the device's frames.
@@ -37,22 +41,79 @@ struct Retirement {
     begun: u64,
     /// The last frame the GPU finished, which the frames before it finished first.
     finished: u64,
-    resources: Vec<(u64, Retired)>,
+    /// The submission of copies on the transfer queue being recorded, numbered from 1; 0 for
+    /// none.
+    transfer_recording: u64,
+    /// The last submission of copies made, and the last the GPU finished, which those before it
+    /// finished first.
+    transfers_submitted: u64,
+    transfers_finished: u64,
+    /// Each with the last frame and the last submission of copies that may use it.
+    resources: Vec<(u64, u64, Retired)>,
+}
+
+impl Retirement {
+    /// The last submission of copies that may use a resource dropped now: the one being recorded,
+    /// if one is, else the last made.
+    fn transfer_mark(&self) -> u64 {
+        if self.transfer_recording > 0 {
+            self.transfer_recording
+        } else {
+            self.transfers_submitted
+        }
+    }
+
+    /// Whether the frames and copies up to `frame` and `transfer` have finished.
+    fn done(&self, frame: u64, transfer: u64) -> bool {
+        frame <= self.finished && transfer <= self.transfers_finished
+    }
+
+    /// Keeps `resource` until the last frame begun and the last submission of copies that may use
+    /// it have finished, or gives it back to destroy at once if they have.
+    fn retire(&mut self, resource: Retired) -> Option<Retired> {
+        let (frame, transfer) = (self.begun, self.transfer_mark());
+        if self.done(frame, transfer) {
+            Some(resource)
+        } else {
+            self.resources.push((frame, transfer, resource));
+            None
+        }
+    }
+
+    /// Takes the resources whose frames and copies have all finished, to destroy.
+    fn sweep(&mut self) -> impl Iterator<Item = Retired> + '_ {
+        let (finished, transfers_finished) = (self.finished, self.transfers_finished);
+        let done = move |&mut (frame, transfer, _): &mut (u64, u64, Retired)| {
+            frame <= finished && transfer <= transfers_finished
+        };
+        (self.resources.extract_if(.., done)).map(|(_, _, resource)| resource)
+    }
 }
 
 /// How meshes and textures reach the GPU's memory: the GPU's best way, or one a test or a
-/// measurement asks for. Whichever it is, the frame that takes them waits for them and draws them.
+/// measurement asks for. Whichever it is, frames copy them a part at a time, within a budget, and
+/// draw them once every part is there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UploadPath {
-    /// Copied by a queue apart from graphics, beside the frames the GPU renders: the way of GPUs
-    /// with a queue family for transfers, or for compute, apart from graphics.
+    /// Copied by a queue apart from graphics, beside the frames the GPU renders, which don't wait
+    /// for the copies: the way of GPUs with a queue family for transfers, or for compute, apart
+    /// from graphics.
     TransferQueue,
     /// Textures written by the CPU straight into their images (host image copy), and buffers
     /// copied by the graphics queue: the way of GPUs without such a family whose drivers say that
     /// costs the GPU nothing in reading the images.
     HostImageCopy,
-    /// Copied by the graphics queue, at the start of the frame that takes them: the other GPUs'.
+    /// Copied by the graphics queue, at the start of the frames that take their parts: the other
+    /// GPUs'.
     GraphicsQueue,
+}
+
+/// How much of the GPU's own memory is in use, and how much the driver gives the process before
+/// it starts paging, which [`Device::memory_budget`] gives.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MemoryBudget {
+    pub usage: u64,
+    pub budget: u64,
 }
 
 impl UploadPath {
@@ -100,6 +161,11 @@ pub struct Device {
     /// The host image copy functions, for a device that uploads by host image copy.
     host_image_copy_fn: Option<ext::host_image_copy::Device>,
     uploads: UploadPath,
+    /// The least a copy to an image moves on the queue that copies textures, in texels, or in
+    /// blocks of a compressed image.
+    copy_granularity: vk::Extent3D,
+    /// Which memory heaps are the GPU's own, by their indices' bits.
+    device_local_heaps: u32,
     /// RenderDoc, for a device it can capture: one its layer is active on.
     renderdoc: Option<&'static RenderDoc>,
 }
@@ -189,6 +255,10 @@ impl Device {
         if uploads == UploadPath::HostImageCopy {
             extensions.push(vk::EXT_HOST_IMAGE_COPY_NAME.as_ptr());
         }
+        // For the memory budget, where the driver reports one.
+        if chosen.memory_budget {
+            extensions.push(vk::EXT_MEMORY_BUDGET_NAME.as_ptr());
+        }
         // Scalar block layout lets shaders read vertices laid out as `#[repr(C)]` lays them out.
         let mut vulkan12 = bindless_features()
             .timeline_semaphore(true)
@@ -229,8 +299,8 @@ impl Device {
             .has_debug_utils()
             .then(|| ext::debug_utils::Device::new(instance.raw(), &raw));
         // SAFETY: the device was just made from this physical device, with buffer device
-        // addresses, and `Device` keeps the instance alive and drops the allocator first; the debug
-        // utils are the device's.
+        // addresses and, if the GPU has it, the memory budget extension, and `Device` keeps the
+        // instance alive and drops the allocator first; the debug utils are the device's.
         let allocator = unsafe {
             Allocator::new(
                 instance.entry(),
@@ -238,6 +308,7 @@ impl Device {
                 physical,
                 &raw,
                 debug_utils.as_ref(),
+                chosen.memory_budget,
                 &chosen.name,
             )
         };
@@ -261,6 +332,15 @@ impl Device {
         };
 
         let renderdoc = renderdoc_on(instance, physical);
+        let device_local_heaps = (chosen.memory.memory_heaps_as_slice().iter())
+            .zip(0..)
+            .filter(|(heap, _)| heap.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL))
+            .fold(0, |heaps, (_, i)| heaps | 1 << i);
+        let copy_granularity = if uploads == UploadPath::TransferQueue {
+            chosen.transfer_granularity
+        } else {
+            chosen.graphics_granularity
+        };
         let device = Self {
             graphics: Queue {
                 family: graphics,
@@ -275,6 +355,8 @@ impl Device {
             host_image_copy_fn: (uploads == UploadPath::HostImageCopy)
                 .then(|| ext::host_image_copy::Device::new(instance.raw(), &raw)),
             uploads,
+            copy_granularity,
+            device_local_heaps,
             renderdoc,
             debug_utils,
             swapchain_fn: surface.map(|_| khr::swapchain::Device::new(instance.raw(), &raw)),
@@ -307,6 +389,7 @@ impl Device {
             driver = chosen.driver,
             vram_mib = chosen.vram_mib,
             uploads = %uploads,
+            memory_budget = chosen.memory_budget,
             "GPU selected"
         );
         debug!(graphics, transfer, "Queue families");
@@ -321,6 +404,32 @@ impl Device {
     /// How the device uploads meshes and textures.
     pub fn upload_path(&self) -> UploadPath {
         self.uploads
+    }
+
+    /// How much of the GPU's own memory, its device-local heaps', is in use, by this process and
+    /// others, and how much of it the driver gives this process before it starts paging: what the
+    /// driver reports (`VK_EXT_memory_budget`), as of the frame being recorded, or, on a GPU whose
+    /// driver reports none, VMA's estimate, 80% of the heaps and what it allocated itself. An
+    /// allocation that would take usage past the budget may still succeed, slowly.
+    pub fn memory_budget(&self) -> MemoryBudget {
+        let heaps = self.allocator.heap_budgets();
+        let mut total = MemoryBudget::default();
+        for (i, (usage, budget)) in heaps.into_iter().enumerate() {
+            if self.device_local_heaps & 1 << i != 0 {
+                total.usage += usage;
+                total.budget += budget;
+            }
+        }
+        total
+    }
+
+    /// The least a copy to an image moves on the queue that copies textures, as
+    /// `minImageTransferGranularity` has it: a copy's offset and size are multiples of it, in
+    /// texels, or in blocks of a compressed image, on each axis but where it reaches the image's
+    /// edge. (1, 1, 1) on most queues, and on the host, which the host image copy path's textures
+    /// take; AMD's transfer queues have 16 by 16 by 8.
+    pub(crate) fn copy_granularity(&self) -> vk::Extent3D {
+        self.copy_granularity
     }
 
     /// Whether the device can capture its work through RenderDoc: whether RenderDoc's layer is
@@ -497,17 +606,14 @@ impl Device {
         &self.allocator
     }
 
-    /// Destroys `resource` once the GPU has finished every frame that may use it: at once if
-    /// none is running.
+    /// Destroys `resource` once the GPU has finished every frame, and every submission of copies
+    /// on the transfer queue, that may use it: at once if none is running.
     pub(crate) fn retire(&self, resource: Retired) {
         let mut retirement = self.lock_retirement();
-        if retirement.begun <= retirement.finished {
-            // SAFETY: every frame that began has finished, and a resource dropped now can't be
-            // used in frames after it.
+        if let Some(resource) = retirement.retire(resource) {
+            // SAFETY: every frame that began and every submission of copies has finished, and a
+            // resource dropped now can't be used in those after it.
             unsafe { self.destroy(resource) };
-        } else {
-            let last_use = retirement.begun;
-            retirement.resources.push((last_use, resource));
         }
     }
 
@@ -530,22 +636,45 @@ impl Device {
     /// Frames are numbered from 1, by the one [`Frames`](crate::Frames) that claimed them.
     pub(crate) fn frame_begun(&self, frame: u64) {
         self.lock_retirement().begun = frame;
+        self.allocator.set_frame(frame as u32);
     }
 
     /// Notes that the GPU has finished `frame` and those before it, and destroys the resources
-    /// they were the last to use.
+    /// they were the last to use, whose copies have finished too.
     pub(crate) fn frames_finished(&self, frame: u64) {
         let mut retirement = self.lock_retirement();
         retirement.finished = frame;
-        let mut i = 0;
-        while i < retirement.resources.len() {
-            if retirement.resources[i].0 <= frame {
-                let (_, resource) = retirement.resources.swap_remove(i);
-                // SAFETY: the frames that may use it have finished.
-                unsafe { self.destroy(resource) };
-            } else {
-                i += 1;
-            }
+        self.sweep(&mut retirement);
+    }
+
+    /// Notes that submission `transfer` of copies on the transfer queue began recording, so
+    /// resources retired from now on may be used in it. Submissions are numbered from 1, by the
+    /// one [`Frames`](crate::Frames) that makes them.
+    pub(crate) fn transfer_begun(&self, transfer: u64) {
+        self.lock_retirement().transfer_recording = transfer;
+    }
+
+    /// Notes that submission `transfer` of copies was made, so the resources dropped from now on
+    /// can't be used in it, unless another begins.
+    pub(crate) fn transfer_submitted(&self, transfer: u64) {
+        let mut retirement = self.lock_retirement();
+        retirement.transfers_submitted = transfer;
+        retirement.transfer_recording = 0;
+    }
+
+    /// Notes that the GPU has finished submission `transfer` of copies and those before it, and
+    /// destroys the resources they were the last to use, whose frames have finished too.
+    pub(crate) fn transfers_finished(&self, transfer: u64) {
+        let mut retirement = self.lock_retirement();
+        retirement.transfers_finished = transfer;
+        self.sweep(&mut retirement);
+    }
+
+    /// Destroys the retired resources whose frames and copies have all finished.
+    fn sweep(&self, retirement: &mut Retirement) {
+        for resource in retirement.sweep() {
+            // SAFETY: the frames and copies that may use it have finished.
+            unsafe { self.destroy(resource) };
         }
     }
 
@@ -575,6 +704,7 @@ impl Device {
                     self.allocator.destroy_image(image, allocation);
                     self.bindless.remove(slot);
                 }
+                Retired::Slot(slot) => self.bindless.remove(slot),
                 Retired::Pipeline(pipeline) => self.raw.destroy_pipeline(pipeline, None),
             }
         }
@@ -811,7 +941,7 @@ impl Drop for Device {
         unsafe {
             let _ = self.raw.device_wait_idle();
             let retired = std::mem::take(&mut self.lock_retirement().resources);
-            for (_, resource) in retired {
+            for (_, _, resource) in retired {
                 self.destroy(resource);
             }
             if let Some(&cache) = self.pipeline_cache.get() {
@@ -910,4 +1040,67 @@ fn renderdoc_on(instance: &Instance, physical: vk::PhysicalDevice) -> Option<&'s
         active |= tool.name_as_c_str() == Ok(c"RenderDoc");
     }
     active.then(capture::renderdoc).flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    use ash::vk::Handle;
+
+    use super::*;
+
+    /// The numbers of `resources`, pipelines made of them.
+    fn numbers(resources: impl Iterator<Item = Retired>) -> Vec<u64> {
+        let mut numbers: Vec<u64> = resources
+            .map(|resource| match resource {
+                Retired::Pipeline(pipeline) => pipeline.as_raw(),
+                _ => unreachable!("pipelines alone"),
+            })
+            .collect();
+        numbers.sort_unstable();
+        numbers
+    }
+
+    /// A resource dropped while nothing runs goes at once; one dropped while a frame records and
+    /// copies are being recorded, or were made since the GPU last finished some, waits for both
+    /// the frame and the copies, whichever finishes first; one dropped with no copies made since
+    /// the last finished waits for the frame alone.
+    #[test]
+    fn a_resource_retires_until_both_its_frames_and_its_copies_have_finished() {
+        let pipeline = |n: u64| Retired::Pipeline(vk::Pipeline::from_raw(n));
+        let mut retirement = Retirement::default();
+        assert!(retirement.retire(pipeline(1)).is_some(), "nothing runs");
+        // Frame 5 is recording and frame 4 finished; copies submission 3 is recording, 2 was made
+        // and 1 finished.
+        retirement.begun = 5;
+        retirement.finished = 4;
+        retirement.transfer_recording = 3;
+        retirement.transfers_submitted = 2;
+        retirement.transfers_finished = 1;
+        assert!(retirement.retire(pipeline(2)).is_none());
+        // Submission 3 made: a resource dropped now may still be used in it.
+        retirement.transfers_submitted = 3;
+        retirement.transfer_recording = 0;
+        assert!(retirement.retire(pipeline(3)).is_none());
+        // The frame finished, but not the copies: both stay.
+        retirement.finished = 5;
+        assert!(numbers(retirement.sweep()).is_empty(), "the copies run");
+        retirement.transfers_finished = 2;
+        assert!(numbers(retirement.sweep()).is_empty(), "submission 3 runs");
+        retirement.transfers_finished = 3;
+        assert_eq!(numbers(retirement.sweep()), [2, 3]);
+        // With submission 3 finished and none made since, a resource waits for its frame alone;
+        // one dropped while copies are recording again waits for those too, though its frame has
+        // finished.
+        retirement.begun = 6;
+        assert!(retirement.retire(pipeline(4)).is_none());
+        retirement.transfer_recording = 4;
+        assert!(retirement.retire(pipeline(5)).is_none());
+        retirement.finished = 6;
+        assert_eq!(numbers(retirement.sweep()), [4]);
+        retirement.transfers_submitted = 4;
+        retirement.transfer_recording = 0;
+        retirement.transfers_finished = 4;
+        assert_eq!(numbers(retirement.sweep()), [5]);
+        assert!(retirement.resources.is_empty());
+    }
 }

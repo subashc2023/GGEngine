@@ -1,6 +1,9 @@
-//! The bindless descriptor set: every texture shaders can sample, and a fixed set of samplers,
-//! in one descriptor set that every pipeline shares. Shaders pick a texture and a sampler by
-//! index, and read buffers through their device addresses, so nothing else is ever bound.
+//! The bindless descriptor sets: every texture shaders can sample, and a fixed set of samplers,
+//! in one descriptor set for each frame in flight, of one layout, that every pipeline shares.
+//! Shaders pick a texture and a sampler by index, and read buffers through their device
+//! addresses, so nothing else is ever bound. A frame binds the set of its slot; a slot's view
+//! changes in the set of the frame being recorded at once, and in each other set as that set's
+//! next frame begins, once the frame that last used it has finished.
 
 use std::collections::HashSet;
 use std::sync::{Mutex, PoisonError};
@@ -8,7 +11,11 @@ use std::sync::{Mutex, PoisonError};
 use ash::vk;
 use gg_core::{Error, Result};
 
+use crate::frame::FRAMES_IN_FLIGHT;
 use crate::{Device, vk_error};
+
+/// How many sets there are: one for each frame in flight.
+const SETS: usize = FRAMES_IN_FLIGHT as usize;
 
 /// How many textures the set holds. A device with descriptor indexing holds at least 500,000.
 pub(crate) const TEXTURES: u32 = 65_536;
@@ -133,15 +140,71 @@ fn sampler_names() -> impl Iterator<Item = String> {
     .chain(Wrap::ALL.map(|wrap| format!("Anisotropic{wrap:?} sampler")))
 }
 
-/// The set, its layout and the pipeline layout built on it, and which texture slots are free.
+/// The sets, their layout and the pipeline layout built on it, which texture slots are free, and
+/// the writes each set takes as its next frame begins.
 pub(crate) struct Bindless {
     samplers: Vec<vk::Sampler>,
     layout: vk::DescriptorSetLayout,
     pool: vk::DescriptorPool,
-    set: vk::DescriptorSet,
+    /// One for each frame in flight, in the order of their slots.
+    sets: Vec<vk::DescriptorSet>,
     pipeline_layout: vk::PipelineLayout,
-    /// Also held while writing the set, which Vulkan requires one thread at a time to do.
-    slots: Mutex<Slots>,
+    /// Also held while writing a set, which Vulkan requires one thread at a time to do.
+    state: Mutex<State>,
+}
+
+/// What the lock guards.
+struct State {
+    slots: Slots,
+    rewrites: Rewrites,
+}
+
+/// The views queued for texture slots in the sets of frames that may still be running, each
+/// written into its set as that set's next frame begins.
+struct Rewrites {
+    /// For each set, the slots to write and the views to put in them. Each slot is in a set's
+    /// list at most once: the last view queued for it.
+    queued: Vec<Vec<(u32, vk::ImageView)>>,
+}
+
+impl Rewrites {
+    fn new() -> Self {
+        Self {
+            queued: (0..SETS).map(|_| Vec::new()).collect(),
+        }
+    }
+
+    /// Notes that texture slot `index` took `view` in set `written`, which was written at once,
+    /// and queues `view` for it in every other set, in place of any view queued for it before:
+    /// the last queued wins. Nothing is queued for `written`, the set of the frame being recorded:
+    /// its list was emptied as that frame began, and only the frame being recorded queues.
+    fn queue(&mut self, written: usize, index: u32, view: vk::ImageView) {
+        debug_assert!(
+            !self.queued[written].iter().any(|&(slot, _)| slot == index),
+            "set {written} is the frame being recorded's, whose list its frame emptied as it began"
+        );
+        for (set, queued) in self.queued.iter_mut().enumerate() {
+            if set == written {
+                continue;
+            }
+            match queued.iter().position(|&(slot, _)| slot == index) {
+                Some(at) => queued[at].1 = view,
+                None => queued.push((index, view)),
+            }
+        }
+    }
+
+    /// Forgets what's queued for texture slot `index` in every set: it was written into them all.
+    fn clear(&mut self, index: u32) {
+        for queued in &mut self.queued {
+            queued.retain(|&(slot, _)| slot != index);
+        }
+    }
+
+    /// Takes what's queued for set `set`, leaving its list empty with its memory.
+    fn take(&mut self, set: usize) -> std::vec::Drain<'_, (u32, vk::ImageView)> {
+        self.queued[set].drain(..)
+    }
 }
 
 /// Which texture slots are in use: by a texture, or by one retired until the GPU is done with the
@@ -219,9 +282,12 @@ impl Bindless {
             samplers: Vec::new(),
             layout: vk::DescriptorSetLayout::null(),
             pool: vk::DescriptorPool::null(),
-            set: vk::DescriptorSet::null(),
+            sets: Vec::new(),
             pipeline_layout: vk::PipelineLayout::null(),
-            slots: Mutex::new(Slots::new()),
+            state: Mutex::new(State {
+                slots: Slots::new(),
+                rewrites: Rewrites::new(),
+            }),
         };
         // SAFETY: the caller guarantees the device; on failure, what was made so far is
         // destroyed, null handles included, which Vulkan allows.
@@ -248,7 +314,9 @@ impl Bindless {
                     .map_err(|e| vk_error("vkCreateSampler", format_args!("{name:?}"), e))?;
                 self.samplers.push(sampler);
             }
-            // Textures change while frames that use other textures are in flight.
+            // Textures change while frames that use other textures are in flight, and a slot of
+            // the set of the frame being recorded changes while the frame before samples it
+            // through the other set.
             let texture_flags = vk::DescriptorBindingFlags::UPDATE_AFTER_BIND
                 | vk::DescriptorBindingFlags::UPDATE_UNUSED_WHILE_PENDING
                 | vk::DescriptorBindingFlags::PARTIALLY_BOUND;
@@ -282,43 +350,47 @@ impl Bindless {
             let sizes = [
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::SAMPLED_IMAGE,
-                    descriptor_count: TEXTURES,
+                    descriptor_count: TEXTURES * SETS as u32,
                 },
                 vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::SAMPLER,
-                    descriptor_count: SAMPLERS as u32,
+                    descriptor_count: (SAMPLERS * SETS) as u32,
                 },
             ];
             let pool_info = vk::DescriptorPoolCreateInfo::default()
                 .flags(vk::DescriptorPoolCreateFlags::UPDATE_AFTER_BIND)
-                .max_sets(1)
+                .max_sets(SETS as u32)
                 .pool_sizes(&sizes);
             self.pool = device
                 .create_descriptor_pool(&pool_info, None)
                 .map_err(|e| {
-                    let pool = format_args!("\"bindless pool\" of {contents}");
+                    let pool = format_args!("\"bindless pool\" of {SETS} sets of {contents}");
                     vk_error("vkCreateDescriptorPool", pool, e)
                 })?;
-            let layouts = [self.layout];
+            let layouts = [self.layout; SETS];
             let allocate_info = vk::DescriptorSetAllocateInfo::default()
                 .descriptor_pool(self.pool)
                 .set_layouts(&layouts);
-            self.set = device
+            self.sets = device
                 .allocate_descriptor_sets(&allocate_info)
-                .map_err(|e| vk_error("vkAllocateDescriptorSets", "\"bindless set\"", e))?[0];
-            // Written into the set once, before any pipeline uses it, rather than made immutable
+                .map_err(|e| vk_error("vkAllocateDescriptorSets", "the bindless sets", e))?;
+            // Written into each set once, before any pipeline uses it, rather than made immutable
             // in its layout: AMD's driver (25.10.30) reads immutable samplers that shaders index
             // non-uniformly as a sampler of zeros, which filters by the nearest texel and never
             // leaves a texture's first level.
             let samplers: Vec<_> = (self.samplers.iter())
                 .map(|&sampler| vk::DescriptorImageInfo::default().sampler(sampler))
                 .collect();
-            let write = vk::WriteDescriptorSet::default()
-                .dst_set(self.set)
-                .dst_binding(1)
-                .descriptor_type(vk::DescriptorType::SAMPLER)
-                .image_info(&samplers);
-            device.update_descriptor_sets(&[write], &[]);
+            let writes: Vec<_> = (self.sets.iter())
+                .map(|&set| {
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(set)
+                        .dst_binding(1)
+                        .descriptor_type(vk::DescriptorType::SAMPLER)
+                        .image_info(&samplers)
+                })
+                .collect();
+            device.update_descriptor_sets(&writes, &[]);
 
             let push_constants = [vk::PushConstantRange {
                 stage_flags: vk::ShaderStageFlags::ALL,
@@ -326,7 +398,7 @@ impl Bindless {
                 size: PUSH_CONSTANTS,
             }];
             let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
-                .set_layouts(&layouts)
+                .set_layouts(&layouts[..1])
                 .push_constant_ranges(&push_constants);
             self.pipeline_layout = device
                 .create_pipeline_layout(&pipeline_layout_info, None)
@@ -340,25 +412,28 @@ impl Bindless {
         Ok(())
     }
 
-    pub(crate) fn set(&self) -> vk::DescriptorSet {
-        self.set
+    /// The set the frames of slot `slot` bind.
+    pub(crate) fn set(&self, slot: usize) -> vk::DescriptorSet {
+        self.sets[slot]
     }
 
-    /// Gives the samplers, the set, and the layouts and pool it's made with their debug names.
+    /// Gives the samplers, the sets, and the layouts and pool they're made with their debug names.
     ///
     /// # Safety
     ///
-    /// `device` must be the set's.
+    /// `device` must be the sets'.
     pub(crate) unsafe fn set_names(&self, device: &Device) {
         // SAFETY: the caller guarantees the objects are the device's, and they live as long as
-        // the set.
+        // the sets.
         unsafe {
             for (&sampler, name) in self.samplers.iter().zip(sampler_names()) {
                 device.set_name(sampler, &name);
             }
             device.set_name(self.layout, "bindless set layout");
             device.set_name(self.pool, "bindless pool");
-            device.set_name(self.set, "bindless set");
+            for (slot, &set) in self.sets.iter().enumerate() {
+                device.set_name(set, &format!("bindless set {slot}"));
+            }
             device.set_name(self.pipeline_layout, "bindless pipeline layout");
         }
     }
@@ -402,50 +477,87 @@ impl Bindless {
     ///
     /// If `slot` isn't placed, or is in use.
     pub(crate) fn reserve(&self, slot: Option<u32>, name: &str) -> Result<u32> {
-        self.lock().take(slot, name)
+        self.lock().slots.take(slot, name)
     }
 
-    /// Puts `view` in texture slot `index`, which [`Bindless::reserve`] gave.
+    /// Puts `view` in texture slot `index`, which [`Bindless::reserve`] gave, in every set at
+    /// once: for a slot just reserved, which no frame uses.
     ///
     /// # Safety
     ///
-    /// `device` must be the set's, and `view` a live view of a sampled image of it, in the
+    /// `device` must be the sets', and `view` a live view of a sampled image of it, in the
     /// shader-read-only layout whenever a shader samples it; and no submitted frame that the GPU
     /// may still run may use the slot, which the binding's flags allow updating only while unused:
     /// a frame still recording takes the new view.
     pub(crate) unsafe fn write(&self, device: &ash::Device, view: vk::ImageView, index: u32) {
-        let _slots = self.lock();
-        let image_info = [vk::DescriptorImageInfo::default()
-            .image_view(view)
-            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
-        let write = vk::WriteDescriptorSet::default()
-            .dst_set(self.set)
-            .dst_binding(0)
-            .dst_array_element(index)
-            .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-            .image_info(&image_info);
-        // SAFETY: the caller guarantees the device and view, and that no submitted frame uses the
-        // slot; the lock is held.
-        unsafe { device.update_descriptor_sets(&[write], &[]) };
+        let mut state = self.lock();
+        for set in 0..SETS {
+            // SAFETY: the caller guarantees the device and view, and that no submitted frame uses
+            // the slot; the lock is held.
+            unsafe { write_slot(device, self.sets[set], index, view) };
+        }
+        // Nothing queued for the slot before, as for a texture that had it, may write over it.
+        state.rewrites.clear(index);
+    }
+
+    /// Puts `view` in texture slot `index`, which frames that the GPU may still run may sample
+    /// through the sets of their slots: in the set of slot `recording`, the frame being recorded,
+    /// at once, and in each other set as that set's next frame begins ([`Bindless::apply`]), once
+    /// the frame that last used it has finished. The view the slot held stays in use until then,
+    /// so it retires by frames as any resource does.
+    ///
+    /// # Safety
+    ///
+    /// `device` must be the sets', `view` as for [`Bindless::write`], and `recording` the slot of
+    /// the frame being recorded, whose set no submitted frame that the GPU may still run uses:
+    /// the frame that last used it has finished.
+    pub(crate) unsafe fn rewrite(
+        &self,
+        device: &ash::Device,
+        view: vk::ImageView,
+        index: u32,
+        recording: usize,
+    ) {
+        let mut state = self.lock();
+        // SAFETY: the caller guarantees the device, the view and the set; the lock is held.
+        unsafe { write_slot(device, self.sets[recording], index, view) };
+        state.rewrites.queue(recording, index, view);
+    }
+
+    /// Writes into the set of slot `slot` the views queued for it by [`Bindless::rewrite`], as
+    /// the slot's next frame begins.
+    ///
+    /// # Safety
+    ///
+    /// `device` must be the sets', and no submitted frame that the GPU may still run may use the
+    /// set: the frame that last used the slot has finished.
+    pub(crate) unsafe fn apply(&self, device: &ash::Device, slot: usize) {
+        let mut state = self.lock();
+        for (index, view) in state.rewrites.take(slot) {
+            // SAFETY: the caller guarantees the device and the set, and the view was live when it
+            // was queued and retires by frames, so it lives until the frame that last used the
+            // set before this one, which may hold it, has finished: now; the lock is held.
+            unsafe { write_slot(device, self.sets[slot], index, view) };
+        }
     }
 
     /// Frees a texture slot: once the GPU is done with the frames that may use it, or at once for
     /// one reserved and never written.
     pub(crate) fn remove(&self, index: u32) {
-        self.lock().release(index);
+        self.lock().slots.release(index);
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Slots> {
-        // The slot list is never left half-changed.
-        self.slots.lock().unwrap_or_else(PoisonError::into_inner)
+    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+        // Neither the slot list nor the queues are ever left half-changed.
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// # Safety
     ///
-    /// `device` must be the set's, and the GPU must be done with it.
+    /// `device` must be the sets', and the GPU must be done with them.
     pub(crate) unsafe fn destroy(&self, device: &ash::Device) {
         // SAFETY: the caller guarantees it; null handles are allowed, and destroying the pool
-        // frees the set.
+        // frees the sets.
         unsafe {
             device.destroy_pipeline_layout(self.pipeline_layout, None);
             device.destroy_descriptor_pool(self.pool, None);
@@ -457,9 +569,68 @@ impl Bindless {
     }
 }
 
+/// Puts `view` in texture slot `index` of `set`.
+///
+/// # Safety
+///
+/// `device` must be `set`'s, `view` as for [`Bindless::write`], no submitted frame that the GPU
+/// may still run may use the set, and the lock must be held.
+unsafe fn write_slot(
+    device: &ash::Device,
+    set: vk::DescriptorSet,
+    index: u32,
+    view: vk::ImageView,
+) {
+    let image_info = [vk::DescriptorImageInfo::default()
+        .image_view(view)
+        .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+    let write = vk::WriteDescriptorSet::default()
+        .dst_set(set)
+        .dst_binding(0)
+        .dst_array_element(index)
+        .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+        .image_info(&image_info);
+    // SAFETY: the caller guarantees it.
+    unsafe { device.update_descriptor_sets(&[write], &[]) };
+}
+
 #[cfg(test)]
 mod tests {
+    use ash::vk::Handle;
+
     use super::*;
+
+    /// A view queued for a slot reaches every set but the one written at once, as each set's turn
+    /// comes; a later view for the slot, queued by the same frame, takes its place in the sets it
+    /// hasn't reached; a later one queued by the next frame, whose set took the first as it began,
+    /// is owed to the first frame's set.
+    #[test]
+    fn a_rewrite_reaches_each_other_set_in_turn_and_the_last_queued_wins() {
+        let view = |n: u64| vk::ImageView::from_raw(n);
+        let mut rewrites = Rewrites::new();
+        rewrites.queue(0, 5, view(1));
+        rewrites.queue(0, 9, view(2));
+        rewrites.queue(0, 5, view(3));
+        assert!(
+            rewrites.take(0).next().is_none(),
+            "set 0 was written at once"
+        );
+        // Set 1's frame begins, taking what it's owed, then changes slot 5 again.
+        assert_eq!(
+            rewrites.take(1).collect::<Vec<_>>(),
+            [(5, view(3)), (9, view(2))]
+        );
+        rewrites.queue(1, 5, view(4));
+        assert_eq!(rewrites.take(0).collect::<Vec<_>>(), [(5, view(4))]);
+        assert!(rewrites.take(0).next().is_none(), "taken once");
+        assert!(rewrites.take(1).next().is_none());
+        // A slot written into every set at once owes no set anything, whatever was queued.
+        rewrites.queue(0, 7, view(4));
+        rewrites.queue(1, 8, view(5));
+        rewrites.clear(7);
+        assert!(rewrites.take(1).next().is_none());
+        assert_eq!(rewrites.take(0).collect::<Vec<_>>(), [(8, view(5))]);
+    }
 
     #[test]
     fn placed_slots_come_back_once_released_and_the_rest_are_given_out_past_them() {

@@ -3,6 +3,8 @@
 //! and, in development builds, read again as their files change, their meshes and textures replaced
 //! under the same handles.
 
+use std::path::Path;
+
 use gg_core::math::{Vec2, Vec3, Vec4};
 use gg_core::{Error, Result};
 use gg_renderer::{
@@ -11,6 +13,7 @@ use gg_renderer::{
 };
 
 use crate::gltf::{self, Imported, Part, Primitive};
+use crate::loader::Loader;
 use crate::{Component, Entity, Reflect, Transform, World};
 
 /// A model that [`Context::add_model`](crate::Context::add_model) added, or that text named and the
@@ -83,14 +86,14 @@ pub(crate) struct Nodes {
     pub(crate) draws: Vec<MeshDraw>,
 }
 
-/// What a model is made of on the renderer, which a reload replaces under the same handles: each
-/// primitive's mesh, each image's texture and how it got its mip levels, and, in development
-/// builds, each primitive's material as it was read, which a reload compares its own with, and how
-/// many primitives and images the model has now, as a reload that drops some keeps their meshes
-/// and textures for their places, which a later one gives back.
+/// What a model is made of on the renderer, which a reload replaces under the same handles, and a
+/// removal removes: each primitive's mesh, each image's texture and how it got its mip levels, and,
+/// in development builds, each primitive's material as it was read, which a reload compares its
+/// own with, and how many primitives and images the model has now, as a reload that drops some
+/// keeps their meshes and textures for their places, which a later one gives back.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Made {
-    meshes: Vec<Mesh<ModelVertex>>,
+    pub(crate) meshes: Vec<Mesh<ModelVertex>>,
     pub(crate) images: Vec<(Texture, Mipmaps)>,
     #[cfg(feature = "dev")]
     materials: Vec<gltf::Material>,
@@ -98,20 +101,24 @@ pub(crate) struct Made {
     counts: (usize, usize),
 }
 
-/// Adds what model `name`, as `read` gave it, draws: its images to `textures`, each with mip
-/// levels, weighted by alpha where a masked or blended material samples it, then its primitives to
-/// `meshes`, each drawn with its material through `shaders`' model shader, which it adds for every
-/// alpha mode, so that a material changed later adds none. Gives what its root spawns, and what it's
-/// made of, its images' textures in the model's order.
+/// Adds what model `name`, as `read` gave it from `path`, draws: its images to `textures`, through
+/// `loader`, which decodes them, each with mip levels, weighted by alpha where a masked or blended
+/// material samples it, then its primitives to `meshes`, each drawn with its material through
+/// `shaders`' model shader, which it adds for every alpha mode, so that a material changed later
+/// adds none. Gives what its root spawns, and what it's made of, its images' textures in the
+/// model's order.
 ///
 /// Fails, adding nothing, with `renderer.too_many_textures` if `textures` hasn't room for its
-/// images.
+/// images; an image whose pixels don't decode warns as the loader decodes it, and its texture keeps
+/// its stand-in.
 pub(crate) fn add(
     name: &str,
+    path: &Path,
     imported: Imported,
     meshes: &mut Meshes,
     shaders: &mut Shaders,
     textures: &mut Textures,
+    loader: &mut Loader,
 ) -> Result<(Nodes, Made)> {
     let Imported {
         parts,
@@ -126,10 +133,9 @@ pub(crate) fn add(
     let images: Vec<_> = (images.into_iter().enumerate())
         .map(|(i, image)| {
             let mipmaps = mipmaps(&primitives, i);
-            let texels = image.texels(mipmaps);
             let name = format!("{name} image {i}");
-            let added = textures.add(&name, image.size, image.pixels, texels);
-            let texture = added.expect("a decoded image fits a texture, and there's room for it");
+            let added = loader.load(textures, &name, path, image, mipmaps);
+            let texture = added.expect("an image read fits a texture, and there's room for it");
             (texture, mipmaps)
         })
         .collect();
@@ -165,7 +171,7 @@ pub(crate) fn add(
 pub(crate) type Reread = (Nodes, Vec<&'static str>, Vec<(usize, Texture)>);
 
 /// Puts what `imported`, model `name` read again, draws in place of what `made` drew, under the
-/// same handles, so that every entity drawing it draws it from the frame that takes it: each
+/// same handles, so that every entity drawing it draws it once frames have streamed it: each
 /// primitive's vertices and indices, and each image, with its mip levels made as its materials
 /// have them. If `whole`, the model takes all of it: primitives and images past those it had are
 /// added, or take back the meshes and textures of their places, which those it has no more keep,
@@ -446,7 +452,16 @@ pub(crate) mod tests {
     pub(crate) fn added(cx: &mut Context, name: &str, imported: Imported) -> (Model, Made) {
         let (mut meshes, mut shaders, mut textures) =
             (Meshes::default(), Shaders::default(), Textures::default());
-        let added = add(name, imported, &mut meshes, &mut shaders, &mut textures);
+        let (path, loader) = (Path::new("m.glb"), &mut Loader::inline());
+        let added = add(
+            name,
+            path,
+            imported,
+            &mut meshes,
+            &mut shaders,
+            &mut textures,
+            loader,
+        );
         let (nodes, made) = added.expect("a model");
         let assets = cx.world_mut().assets_mut();
         (assets.add_model(name.into(), name.into(), nodes), made)
@@ -511,7 +526,16 @@ pub(crate) mod tests {
     fn a_model_read_again_replaces_its_meshes_and_images_and_says_what_else_changed() {
         let (mut meshes, mut shaders, mut textures) =
             (Meshes::default(), Shaders::default(), Textures::default());
-        let added = add("m", imported(), &mut meshes, &mut shaders, &mut textures);
+        let (path, loader) = (Path::new("m.glb"), &mut Loader::inline());
+        let added = add(
+            "m",
+            path,
+            imported(),
+            &mut meshes,
+            &mut shaders,
+            &mut textures,
+            loader,
+        );
         let (was, mut made) = added.expect("a model");
         let counts = (meshes.count(), textures.count(), shaders.count());
         // Each read's, with how many meshes, textures and shaders there are after it.
@@ -586,7 +610,16 @@ pub(crate) mod tests {
         }
         let add = |textures: &mut Textures| {
             let (mut meshes, mut shaders) = (Meshes::default(), Shaders::default());
-            add("m", imported(), &mut meshes, &mut shaders, textures)
+            let (path, loader) = (Path::new("m.glb"), &mut Loader::inline());
+            add(
+                "m",
+                path,
+                imported(),
+                &mut meshes,
+                &mut shaders,
+                textures,
+                loader,
+            )
         };
         add(&mut textures).expect("room for both images");
         assert_eq!(textures.room(), 0);

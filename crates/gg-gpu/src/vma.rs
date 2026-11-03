@@ -139,19 +139,22 @@ impl Allocation {
 
 impl Allocator {
     /// An allocator for the device named `name`, which names each block of memory it allocates
-    /// through `debug_utils`, if given.
+    /// through `debug_utils`, if given. With `memory_budget`, it reads each heap's budget and
+    /// usage from the driver (`VK_EXT_memory_budget`) as each frame begins; without, it estimates
+    /// them, as 80% of each heap and what it allocated itself.
     ///
     /// # Safety
     ///
     /// The instance and device must be live and outlive the allocator, `physical` must be the
-    /// device's, and the device must have buffer device addresses enabled. `debug_utils` must be
-    /// the device's.
+    /// device's, and the device must have buffer device addresses enabled, and
+    /// `VK_EXT_memory_budget` if `memory_budget`. `debug_utils` must be the device's.
     pub(crate) unsafe fn new(
         entry: &ash::Entry,
         instance: &ash::Instance,
         physical: vk::PhysicalDevice,
         device: &ash::Device,
         debug_utils: Option<&ext::debug_utils::Device>,
+        memory_budget: bool,
         name: &str,
     ) -> Result<Self> {
         // SAFETY: every field is a nullable pointer, for which zero is null; VMA fetches the
@@ -170,9 +173,12 @@ impl Allocator {
                     ptr::from_ref(debug_utils).cast_mut().cast()
                 }),
         };
+        let mut flags = VmaAllocatorCreateFlagBits::VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+        if memory_budget {
+            flags |= VmaAllocatorCreateFlagBits::VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
+        }
         let info = VmaAllocatorCreateInfo {
-            flags: VmaAllocatorCreateFlagBits::VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT.0
-                as u32,
+            flags: flags.0 as u32,
             physicalDevice: physical,
             device: device.handle(),
             preferredLargeHeapBlockSize: 0,
@@ -309,6 +315,23 @@ impl Allocator {
             format_args!("{name:?}'s memory"),
             result,
         )
+    }
+
+    /// Tells VMA that frame `frame` begins, which has it read the heaps' budgets from the driver
+    /// again, where it reads them.
+    pub(crate) fn set_frame(&self, frame: u32) {
+        // SAFETY: the allocator is live.
+        unsafe { vmaSetCurrentFrameIndex(self.raw, frame) };
+    }
+
+    /// Each memory heap's usage and budget, in bytes, by its index: what the driver reports, where
+    /// it reports them, and VMA's estimate elsewhere.
+    pub(crate) fn heap_budgets(&self) -> [(u64, u64); vk::MAX_MEMORY_HEAPS] {
+        // SAFETY: zero is valid for every field of this plain-data struct, which VMA fills.
+        let mut budgets: [VmaBudget; vk::MAX_MEMORY_HEAPS] = unsafe { std::mem::zeroed() };
+        // SAFETY: the allocator is live, and the array has an entry for every heap Vulkan allows.
+        unsafe { vmaGetHeapBudgets(self.raw, budgets.as_mut_ptr()) };
+        budgets.map(|budget| (budget.usage, budget.budget))
     }
 }
 

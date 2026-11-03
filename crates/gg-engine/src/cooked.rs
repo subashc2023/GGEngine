@@ -2,8 +2,8 @@
 //! package reads in place of its glTF file and the files that names. It holds what [`gltf::read`]
 //! makes of them, its primitives' triangles as the cooker optimized them, with their levels of
 //! detail, and its images compressed to BC7 in KTX2, with their mip
-//! levels, as [`decode_ktx2`] reads them, so that a run neither decodes PNGs and JPEGs nor makes
-//! levels for them.
+//! levels, as [`read_ktx2`] reads them, so that a run neither decodes PNGs and JPEGs nor makes
+//! levels for them, but takes the levels' blocks out of zstd, as the loader does.
 //!
 //! The format, every number little-endian, every count and length 32 bits, a string its length
 //! then its UTF-8:
@@ -33,7 +33,7 @@ use gg_renderer::{AlphaMode, Lod, Wrap};
 
 use crate::Transform;
 use crate::gltf::{self, Imported, Material, Part, Primitive};
-use crate::image::decode_ktx2;
+use crate::image::read_ktx2;
 use crate::package::{Files, Kind};
 
 /// What stands for none, where the format holds an index.
@@ -147,8 +147,8 @@ pub(crate) fn read(name: &str, path: &Path, files: &Files) -> Result<Imported> {
 /// Reads model `name`, as the cooker writes it, from `bytes`, its file at `path`, checking that it
 /// holds what [`gltf::read`] would give: each part after its parent, primitives of whole triangles
 /// of their own vertices, levels within their indices, errors that don't shrink, and images that
-/// read, each the KTX2 of BC7 that [`decode_ktx2`] takes, taking no more memory than
-/// [`gltf::MAX_MEMORY`].
+/// read, each the KTX2 of BC7 that [`read_ktx2`] takes, read as far as its header, taking no more
+/// memory than [`gltf::MAX_MEMORY`], what its images decode to among it.
 ///
 /// Fails with `engine.bad_model` for what doesn't, saying where.
 pub(crate) fn decode(name: &str, path: &Path, bytes: &[u8]) -> Result<Imported> {
@@ -215,9 +215,10 @@ impl<'a> Reader<'a> {
         let mut images = Vec::new();
         for i in 0..self.count(4)? {
             let len = self.count(1)?;
-            let image = decode_ktx2(self.take(len)?)
+            let image = read_ktx2(self.take(len)?.to_vec())
                 .map_err(|problem| format!("its image {i} doesn't read: {problem}"))?;
-            held += image.pixels.len();
+            // Its file, held until the loader decodes it, and what it decodes to.
+            held += image.pixels.len() + image.decoded_len();
             if held as u64 > gltf::MAX_MEMORY {
                 return Err(format!(
                     "it takes more than {} GiB to read",
@@ -431,11 +432,11 @@ mod tests {
                 primitive: Some(0),
             },
         ];
-        let decoded = decode_ktx2(&image).expect("a texture");
+        let read = crate::image::read_ktx2(image.clone()).expect("a texture");
         let imported = Imported {
             parts,
             primitives: vec![primitive],
-            images: vec![decoded],
+            images: vec![read],
             ignored: vec!["1 animation".to_owned()],
         };
         (imported, vec![image])

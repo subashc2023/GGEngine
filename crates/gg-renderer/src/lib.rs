@@ -133,25 +133,46 @@ impl std::ops::AddAssign for DrawCounts {
     }
 }
 
-/// What's been added to a [`Meshes`], [`Shaders`] and [`Textures`], or replaced in them, since it
-/// was last taken from them, in order: the shaders a frame makes pipelines for, and the meshes and
-/// textures it copies to the GPU, before it draws. Taking moves them out of the registries, which go on handing out
-/// handles where they are, so that a renderer on another thread renders what they handed out
-/// before. It keeps its memory, so that a frame that adds nothing allocates nothing.
+/// What's been added to a [`Meshes`], [`Shaders`] and [`Textures`], replaced in them or removed
+/// from them, since it was last taken from them, in order: the shaders a frame makes pipelines
+/// for, the meshes and textures it queues to stream to the GPU, and the removals it applies,
+/// before it draws. Taking moves them out of the registries, which go on handing out handles where
+/// they are, so that a renderer on another thread renders what they handed out before. It keeps
+/// its memory, so that a frame that adds nothing allocates nothing.
 #[derive(Default)]
 pub struct Uploads {
-    pub(crate) meshes: Vec<mesh::Added>,
-    pub(crate) shaders: Vec<shader::Added>,
-    pub(crate) textures: Vec<texture::Added>,
+    pub(crate) meshes: Vec<mesh::Change>,
+    pub(crate) shaders: Vec<shader::Change>,
+    pub(crate) textures: Vec<texture::Change>,
 }
 
 impl Uploads {
-    /// Takes what's been added to `meshes`, `shaders` and `textures` since they were last taken
-    /// from, after what it holds already.
+    /// Takes what's changed in `meshes`, `shaders` and `textures` since they were last taken from,
+    /// after what it holds already.
     pub fn take(&mut self, meshes: &mut Meshes, shaders: &mut Shaders, textures: &mut Textures) {
-        self.meshes.append(&mut meshes.added);
-        self.shaders.append(&mut shaders.added);
-        self.textures.append(&mut textures.added);
+        self.meshes.append(&mut meshes.changes);
+        self.shaders.append(&mut shaders.changes);
+        self.textures.append(&mut textures.changes);
+    }
+}
+
+/// The most bytes a frame copies to the GPU of the meshes and textures being streamed, unless
+/// [`Settings::upload_budget`] says otherwise: 16 MiB, which a PCIe link moves in about a
+/// millisecond, and the renderer's staging holds in one allocation.
+pub const DEFAULT_UPLOAD_BUDGET: u64 = 16 << 20;
+
+/// What's being streamed to the GPU, which [`Renderer::streaming`] tells: the meshes and textures
+/// queued, being copied, or copied and not yet drawable, and the bytes of them still to copy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Streaming {
+    pub assets: usize,
+    pub bytes: u64,
+}
+
+impl Streaming {
+    /// Whether nothing is being streamed: every mesh and texture added is drawable, or removed.
+    pub fn is_empty(&self) -> bool {
+        self.assets == 0
     }
 }
 
@@ -166,8 +187,9 @@ pub struct RenderData<'a> {
     pub viewport: Viewport,
     /// What the view sees the world from.
     pub viewpoint: Viewpoint,
-    /// The meshes, shaders and textures added since a frame last took them, which it takes first:
-    /// the shaders get their pipelines, and the meshes and textures reach the GPU.
+    /// The meshes, shaders and textures added, replaced or removed since a frame last took them,
+    /// which it takes first: the shaders get their pipelines, the removals apply, and the meshes
+    /// and textures queue up to stream to the GPU, within the frame's budget.
     pub uploads: &'a mut Uploads,
     /// What to draw.
     pub draws: &'a Draws,
@@ -221,6 +243,15 @@ pub struct Settings<'a> {
     /// measurements of each way. A way the GPU lacks keeps the renderer from starting
     /// (`gpu.no_upload_path`).
     pub uploads: Option<UploadPath>,
+    /// The most bytes a frame copies to the GPU of the meshes and textures being streamed:
+    /// [`DEFAULT_UPLOAD_BUDGET`], 16 MiB, unless a test or a measurement wants another. A frame
+    /// copies parts of what's queued, in the order it was added, while its bytes are under the
+    /// budget, cutting the part that would cross it to fit, but never below the smallest whole
+    /// part, a row of a texture's level or 16 bytes of a buffer, so that each frame makes
+    /// progress. Through a transfer queue, a frame that begins with the copies of two or more
+    /// frames before it unfinished, as a copy engine that can't keep up leaves, copies nothing, so
+    /// that what's in flight stays within three frames' budgets however the frames outpace it.
+    pub upload_budget: u64,
     /// Make every pipeline through a pipeline cache, which holds this if it's what
     /// [`Renderer::pipeline_cache`] gave on the same GPU and driver: the pipelines it holds are
     /// made in a fraction of the time. Other data starts it empty, as `Device::load_pipeline_cache`
@@ -350,7 +381,7 @@ impl Renderer {
             output,
             window_keys: Vec::new(),
             windows: Vec::new(),
-            meshes: MeshPass::new(device),
+            meshes: MeshPass::new(device, settings.upload_budget)?,
             view: ViewPass::new(device, format)?,
             outline: OutlinePass::new(device)?,
             view_image: None,
@@ -441,6 +472,20 @@ impl Renderer {
     /// the meshes and textures stay in `data.uploads`, and the UIs' texture changes and the picks
     /// wait, for the next frame that renders.
     ///
+    /// The frame streams the meshes and textures queued, those `data.uploads` brings after those
+    /// before, to the GPU within [`Settings::upload_budget`], in order, and draws each from the
+    /// frame it's all there on: a mesh draws nothing until then, and a texture samples as a pixel
+    /// of white, or of zeros if its texels are data, which text draws nothing with; one replaced
+    /// draws as it did until its replacement is there. Through a transfer queue, no frame waits for
+    /// the copies: what the frame streams becomes drawable in a later frame. [`Renderer::streaming`]
+    /// tells what's still on the way. An asset that would take the GPU's memory past its budget
+    /// waits in the queue, warning `renderer.over_budget` once, while those after it go on, unless
+    /// nothing of the queue is being copied, when it goes ahead alone, so that a game comes up on
+    /// a GPU past its budget already; one whose buffers or image the GPU's memory has no room for
+    /// warns `renderer.out_of_memory` once and waits, tried again as room comes. A mesh, texture
+    /// or shader removed draws nothing, or samples as its stand-in, from the frame that takes the
+    /// removal on; one replaced while it streams drops what was streaming for its replacement.
+    ///
     /// An error ends the renderer, which can then only be dropped: a frame that failed can leave
     /// the GPU's copies of meshes and textures unfinished, so every later call fails with
     /// `renderer.failed`. A shader replaced since, whose new pipeline can't be made, is no error:
@@ -457,8 +502,8 @@ impl Renderer {
     /// If `data.uploads` holds meshes, shaders or textures taken from another [`Meshes`],
     /// [`Shaders`] or [`Textures`] than those it held before, which could draw a mesh with a shader
     /// for another vertex type or parameters of another type; if `data.draws` draws a mesh, or
-    /// with a shader, that no upload so far has brought; if its viewpoint's projection can't
-    /// project, as [`Projection`] says; or if it asks more than [`MAX_PICKS`] picks.
+    /// with a shader, whose handle no upload so far has brought; if its viewpoint's projection
+    /// can't project, as [`Projection`] says; or if it asks more than [`MAX_PICKS`] picks.
     pub fn render(
         &mut self,
         data: RenderData<'_>,
@@ -682,9 +727,18 @@ impl Renderer {
     }
 
     /// What the last [`Renderer::render`] drew in the game's view, if it rendered a frame. Zero if
-    /// it didn't, or if the view had no area. The UI's draws aren't counted.
+    /// it didn't, or if the view had no area. The UI's draws aren't counted, nor the draws of
+    /// meshes not yet drawable or removed, or with shaders removed.
     pub fn drawn(&self) -> DrawCounts {
         self.drawn
+    }
+
+    /// What's being streamed to the GPU after the last [`Renderer::render`]: the meshes and
+    /// textures queued, being copied, or copied and not yet drawable, and the bytes of them still
+    /// to copy. Empty once every mesh and texture added is drawable, or removed: a test renders
+    /// until then.
+    pub fn streaming(&self) -> Streaming {
+        self.meshes.streaming()
     }
 
     /// The answers to picks that came in during the last [`Renderer::render`]: each pick's tag,

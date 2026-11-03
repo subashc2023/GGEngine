@@ -2,6 +2,7 @@
 //! GPU memory, drawn with their shaders and textures, games' and the engine's, in the game's view,
 //! as its camera sees them.
 
+use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::marker::PhantomData;
 use std::ops::Range;
@@ -11,13 +12,14 @@ use bytemuck::NoUninit;
 use gg_core::math::{Mat4, Vec2, Vec3, Vec4};
 use gg_core::{Error, Result};
 use gg_gpu::{
-    ColorImage, Device, Frame, GpuBuffer, GraphicsDesc, Pass, Pipeline, Texture as GpuTexture,
+    ColorImage, Device, Frame, GpuBuffer, GraphicsDesc, MemoryBudget, Pass, Pipeline,
+    Texture as GpuTexture, TextureFormat,
 };
 use tracing::warn;
 
 use crate::shader::{self, Shader};
-use crate::texture;
-use crate::{DrawCounts, Draws, Uploads, grid, sprite};
+use crate::texture::{self, Texels};
+use crate::{DrawCounts, Draws, Streaming, Uploads, grid, sprite};
 
 /// A mesh that [`Meshes::add`] handed out, of vertex type `V`.
 pub struct Mesh<V> {
@@ -40,6 +42,12 @@ impl<V> Mesh<V> {
             index,
             vertex: PhantomData,
         }
+    }
+
+    /// Its index, the order [`Meshes::add`] handed it out in, from 0, the engine's quad's: what a
+    /// [`MeshDraw`]'s parts hold it by.
+    pub fn index(self) -> u32 {
+        self.index
     }
 }
 
@@ -186,16 +194,28 @@ impl Lods {
 
 /// The meshes a renderer draws, the first of them the engine's quad, which sprites are drawn on.
 /// It hands out each one's handle at once, and keeps its vertices and indices until
-/// [`Uploads::take`] takes them, for a frame to copy to the GPU; a mesh replaced by others the same
-/// way. A renderer draws the meshes of one `Meshes` only.
+/// [`Uploads::take`] takes them, for frames to stream to the GPU within their budget, drawing the
+/// mesh once they're there; a mesh replaced by others the same way, which draw in place of the old
+/// once they're there; and a mesh removed goes with them, in order. A renderer draws the meshes of
+/// one `Meshes` only.
 pub struct Meshes {
-    /// Those added or replaced since they were last taken, in order.
-    pub(crate) added: Vec<Added>,
+    /// Those added, replaced or removed since they were last taken, in order.
+    pub(crate) changes: Vec<Change>,
     /// How many have been added.
     count: u32,
+    /// Those removed, whose handles are never given out again.
+    removed: HashSet<u32>,
     /// The handle of the engine's grid mesh, which is added the first time it's asked for, once
     /// it has been.
     grid: Option<u32>,
+}
+
+/// A change to a renderer's meshes, which [`Uploads::take`] carries to it.
+pub(crate) enum Change {
+    /// A mesh added, or vertices and indices in place of one's.
+    Added(Added),
+    /// A mesh removed, by its index.
+    Removed(u32),
 }
 
 pub(crate) struct Added {
@@ -280,7 +300,7 @@ impl Meshes {
     ) -> Mesh<V> {
         let index = self.count;
         self.count += 1;
-        self.added.push(Added {
+        self.changes.push(Change::Added(Added {
             index,
             replacement: false,
             name: name.to_owned(),
@@ -288,15 +308,16 @@ impl Meshes {
             vertex_size: size_of::<V>(),
             indices: indices.to_vec(),
             lods,
-        });
+        }));
         Mesh::new(index)
     }
 
     /// Puts other triangles in place of `mesh`'s, which keeps its handle: `indices` and `vertices`
     /// as [`add`](Self::add) takes them, as many as they are, so that every draw of it draws them
-    /// from the frame that copies them to the GPU on. It takes the place of any of that mesh's
-    /// vertices and indices still waiting for a frame, as it was added or replaced. `name` names it
-    /// in errors. The mesh has one level of detail again, all its indices.
+    /// once frames have streamed them to the GPU, drawing the triangles it had until then. It takes
+    /// the place of any of that mesh's vertices and indices still waiting for a frame, as it was
+    /// added or replaced. `name` names it in errors. The mesh has one level of detail again, all
+    /// its indices. A mesh removed stays removed: a replacement of it is dropped.
     ///
     /// Fails with `renderer.bad_mesh` as `add` does, leaving the mesh as it was.
     ///
@@ -315,15 +336,22 @@ impl Meshes {
             "mesh {name:?} replaces one of another `Meshes`"
         );
         check(name, vertices, indices)?;
+        if self.removed.contains(&mesh.index) {
+            return Ok(());
+        }
         let lods = Lods::whole(indices.len());
         let (vertices, indices) = (bytemuck::cast_slice(vertices).to_vec(), indices.to_vec());
-        match (self.added.iter_mut()).find(|added| added.index == mesh.index) {
+        let waiting = (self.changes.iter_mut()).find_map(|change| match change {
+            Change::Added(added) if added.index == mesh.index => Some(added),
+            _ => None,
+        });
+        match waiting {
             Some(waiting) => {
                 waiting.vertices = vertices;
                 waiting.indices = indices;
                 waiting.lods = lods;
             }
-            None => self.added.push(Added {
+            None => self.changes.push(Change::Added(Added {
                 index: mesh.index,
                 replacement: true,
                 name: name.to_owned(),
@@ -331,9 +359,42 @@ impl Meshes {
                 vertex_size: size_of::<V>(),
                 indices,
                 lods,
-            }),
+            })),
         }
         Ok(())
+    }
+
+    /// Removes `mesh`: its buffers go from the GPU once the frames and copies that may use them
+    /// have finished, whatever of it still waits to be streamed is dropped, and every draw of it
+    /// draws nothing from the frame that takes the removal on. Its handle is never given out
+    /// again, so a stale one, in a world or a snapshot, never draws another mesh. Removing one
+    /// removed already does nothing. Returns whether it removed it, rather than finding it removed
+    /// already.
+    ///
+    /// # Panics
+    ///
+    /// If `mesh` isn't one of these meshes, as another `Meshes`' handles can be past them.
+    pub fn remove<V>(&mut self, mesh: Mesh<V>) -> bool {
+        self.remove_index(mesh.index)
+    }
+
+    /// Removes the mesh of index `index`, as [`remove`](Self::remove) does, whatever its vertex
+    /// type: for the engine's restores, which hold a mesh by its index alone, as a snapshot does.
+    ///
+    /// # Panics
+    ///
+    /// If `index` is past the meshes handed out.
+    #[doc(hidden)]
+    pub fn remove_index(&mut self, index: u32) -> bool {
+        assert!(
+            index < self.count,
+            "mesh {index} is one of another `Meshes`"
+        );
+        let removed = self.removed.insert(index);
+        if removed {
+            self.changes.push(Change::Removed(index));
+        }
+        removed
     }
 }
 
@@ -424,8 +485,9 @@ fn bad_mesh(name: &str, problem: String) -> Error {
 impl Default for Meshes {
     fn default() -> Self {
         let mut meshes = Self {
-            added: Vec::new(),
+            changes: Vec::new(),
             count: 0,
+            removed: HashSet::new(),
             grid: None,
         };
         let quad = meshes
@@ -437,16 +499,26 @@ impl Default for Meshes {
 }
 
 /// Draws meshes with their shaders into the game's view, an image whose format is
-/// [`ColorImage::FORMAT`], writing their IDs beside it and testing its depth image, and keeps on
-/// the GPU the meshes' vertices and indices and the textures the shaders sample.
+/// [`ColorImage::FORMAT`], writing their IDs beside it and testing its depth image, streams the
+/// meshes' vertices and indices and the textures the shaders sample to the GPU within a budget of
+/// bytes each frame, and keeps them there.
 pub(crate) struct MeshPass {
     device: Arc<Device>,
-    /// Each shader's pipeline, by its handle.
-    shaders: Vec<GpuShader>,
-    /// Each mesh's buffers, by its handle.
-    meshes: Vec<GpuMesh>,
-    /// Each texture, by its handle, which is its slot in the bindless set too.
-    textures: Vec<GpuTexture>,
+    /// Each shader's pipeline, by its handle; `None` for one removed.
+    shaders: Vec<Option<GpuShader>>,
+    /// Each mesh's buffers, by its handle, once they're drawable.
+    meshes: Vec<Held<GpuMesh>>,
+    /// Each texture, by its handle, which is its slot in the bindless sets too.
+    textures: Vec<TextureSlot>,
+    /// What the renderer's slots show until their textures' images are there: dropped after the
+    /// textures, whose slots show them.
+    stand_ins: StandIns,
+    /// What's being streamed to the GPU, in the order it was added, each until it's drawable or
+    /// removed; it keeps its memory, so that a frame with nothing to stream allocates nothing.
+    streaming: VecDeque<Item>,
+    /// The most bytes a frame copies, as [`Settings::upload_budget`](crate::Settings::upload_budget)
+    /// has it, but for the smallest whole part.
+    budget: u64,
     /// Kept between frames, so that those that draw no more than the last allocate nothing.
     scratch: LodScratch,
 }
@@ -471,27 +543,275 @@ struct GpuMesh {
     vertex_size: usize,
 }
 
+/// What the pass holds for a mesh's handle: nothing yet, while what was added streams, what it
+/// draws with, or nothing again, once removed.
+enum Held<T> {
+    Waiting,
+    Ready(T),
+    Removed,
+}
+
+impl<T> Held<T> {
+    fn ready(&self) -> Option<&T> {
+        match self {
+            Self::Ready(ready) => Some(ready),
+            Self::Waiting | Self::Removed => None,
+        }
+    }
+}
+
+/// A texture's slot: the texture in it, whether its texels are data, which says which stand-in
+/// the slot shows without an image of its own, and whether it was removed, which leaves it showing
+/// the stand-in for good, as stale handles may still sample it.
+struct TextureSlot {
+    texture: GpuTexture,
+    data: bool,
+    removed: bool,
+}
+
+/// The textures the renderer's slots show until their own images are there: a pixel of white for
+/// colors, so that a sprite shows its tint, and a pixel of zeros for data, so that text draws
+/// nothing rather than boxes. Written in the first frame that begins, before any slot shows them.
+struct StandIns {
+    white: GpuTexture,
+    zeros: GpuTexture,
+    written: bool,
+}
+
+impl StandIns {
+    fn new(device: &Arc<Device>) -> Result<Self> {
+        let white = TextureFormat::Rgba8Srgb;
+        let zeros = TextureFormat::Rgba8Unorm;
+        Ok(Self {
+            white: GpuTexture::new(device, 1, 1, white, false, "white stand-in")?,
+            zeros: GpuTexture::new(device, 1, 1, zeros, false, "zero stand-in")?,
+            written: false,
+        })
+    }
+
+    /// The stand-in for a texture whose texels are data, if `data`, or colors.
+    fn of(&self, data: bool) -> &GpuTexture {
+        if data { &self.zeros } else { &self.white }
+    }
+
+    /// Writes them, in the first frame.
+    fn write(&mut self, frame: &mut Frame<'_>) -> Result<()> {
+        if self.written {
+            return Ok(());
+        }
+        frame.write_texture(&mut self.white, [0, 0], [1, 1], &[255; 4])?;
+        frame.write_texture(&mut self.zeros, [0, 0], [1, 1], &[0; 4])?;
+        self.written = true;
+        Ok(())
+    }
+}
+
+/// An asset being streamed to the GPU.
+struct Item {
+    index: u32,
+    name: String,
+    /// The bytes it takes on the GPU, which every part copies some of.
+    total: u64,
+    /// Whether it has warned that it waits for room in the GPU's memory.
+    warned: bool,
+    asset: Asset,
+}
+
+enum Asset {
+    Mesh {
+        /// Its bytes, kept until the last part is copied.
+        vertices: Vec<u8>,
+        indices: Vec<u32>,
+        /// How many bytes its vertices are, the first of `total`, and its indices the rest.
+        vertex_bytes: u64,
+        vertex_size: usize,
+        lods: Lods,
+        /// Its buffers, once there's room for them: boxed, so that the queue's items stay small.
+        buffers: Option<Box<(GpuBuffer, GpuBuffer)>>,
+    },
+    Texture {
+        size: [u32; 2],
+        texels: Texels,
+        /// Its pixels, kept until the last part is copied, with the mip levels made for them once
+        /// its image is.
+        pixels: Vec<u8>,
+        /// Whether its image is made, once there's room for it.
+        made: bool,
+    },
+}
+
+impl Item {
+    /// Whether it's `kind`'s asset of handle `index`.
+    fn is(&self, kind: Kind, index: u32) -> bool {
+        let is_mesh = matches!(self.asset, Asset::Mesh { .. });
+        self.index == index && is_mesh == (kind == Kind::Mesh)
+    }
+
+    /// Whether its buffers or image are made, so that it's being copied, or copied and waiting to
+    /// be drawable.
+    fn made(&self) -> bool {
+        match &self.asset {
+            Asset::Mesh { buffers, .. } => buffers.is_some(),
+            Asset::Texture { made, .. } => *made,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Mesh,
+    Texture,
+}
+
+/// How many submissions of copies on the transfer queue may be unfinished as a frame begins
+/// before the frame copies nothing ([`Frame::uploads_behind`]): with two frames in flight, a copy
+/// engine that keeps up leaves at most the last frame's unfinished, so two means it has fallen a
+/// frame or more behind, as over a slow link or under contention. Holding off then bounds what's
+/// in flight to two frames' parts, their staging and their command buffers, with one more frame's
+/// being recorded, whatever the frame rate.
+const MAX_UPLOADS_BEHIND: u64 = 2;
+
+/// The bytes a frame may copy of `budget` with `behind` submissions of copies unfinished as it
+/// began: none once the transfer queue is [`MAX_UPLOADS_BEHIND`] behind, so that the frame neither
+/// copies nor makes buffers or images, but takes what's drawable.
+fn budget_behind(behind: u64, budget: u64) -> u64 {
+    if behind >= MAX_UPLOADS_BEHIND {
+        0
+    } else {
+        budget
+    }
+}
+
+/// Whether an asset of `bytes` would take the GPU's memory past its budget, given `budget` and
+/// how much is in `usage`.
+fn exceeds(usage: u64, budget: u64, bytes: u64) -> bool {
+    usage.saturating_add(bytes) > budget
+}
+
+/// Whether an asset of `bytes` waits for room in the GPU's memory, given `budget`, how much is in
+/// `usage`, and whether anything of the queue is `copying`, made and not yet drawable: it waits
+/// while it would take usage past the budget, as removals make room, unless nothing is copying,
+/// when it goes ahead alone, so that a game comes up on a GPU whose memory is past the budget
+/// already, as other processes' can take it, an asset at a time; the next asset past the budget
+/// waits until this one is drawable.
+fn waits(usage: u64, budget: u64, bytes: u64, copying: bool) -> bool {
+    exceeds(usage, budget, bytes) && copying
+}
+
+/// Whether the asset `name`, of `bytes`, waits in the queue for room in the GPU's memory, as
+/// [`waits`] decides from what `device` reports: warning the first time it's past the budget,
+/// which `warned` keeps, whether it waits or goes ahead alone.
+fn waits_for_room(
+    device: &Device,
+    name: &str,
+    bytes: u64,
+    copying: bool,
+    warned: &mut bool,
+) -> bool {
+    let MemoryBudget { usage, budget } = device.memory_budget();
+    if !exceeds(usage, budget, bytes) {
+        return false;
+    }
+    let waits = waits(usage, budget, bytes, copying);
+    if !*warned {
+        let goes = if waits {
+            "waits for room, until removals make some or nothing else is being copied"
+        } else {
+            "goes ahead alone, as nothing else is being copied"
+        };
+        warn!(
+            code = "renderer.over_budget",
+            asset = name,
+            bytes,
+            usage,
+            budget,
+            "{name:?}'s {bytes} bytes would take the {usage} in use in the GPU's memory past the \
+             budget of {budget}: it {goes}"
+        );
+        *warned = true;
+    }
+    waits
+}
+
+/// Whether making a buffer or an image failed for want of memory, which [`room_for`] has the
+/// asset wait out rather than end the renderer: the budget it's gated by is an estimate.
+fn out_of_memory(error: &Error) -> bool {
+    error.code() == "gpu.out_of_memory"
+}
+
+/// What `made`, the buffers or image of the asset `name`, of `bytes`, gave: `None` if the GPU's
+/// memory had no room, which warns the first time, `warned` keeping it, and leaves the asset to
+/// wait, to be tried again as room comes; any other error as it is.
+fn room_for<T>(made: Result<T>, name: &str, bytes: u64, warned: &mut bool) -> Result<Option<T>> {
+    match made {
+        Ok(made) => Ok(Some(made)),
+        Err(error) if out_of_memory(&error) => {
+            if !*warned {
+                warn!(
+                    code = "renderer.out_of_memory",
+                    asset = name,
+                    bytes,
+                    "{name:?}'s {bytes} bytes don't fit the GPU's memory: {error:#}; it waits, \
+                     and is tried again as room comes"
+                );
+                *warned = true;
+            }
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// The buffers of the mesh `name`, `vertex_bytes` of vertices and `index_bytes` of indices.
+fn mesh_buffers(
+    device: &Arc<Device>,
+    name: &str,
+    vertex_bytes: u64,
+    index_bytes: u64,
+) -> Result<(GpuBuffer, GpuBuffer)> {
+    let vertices = GpuBuffer::new(device, vertex_bytes, &format!("{name} vertices"))?;
+    // Should the indices not fit, the vertices' buffer retires with the error.
+    let indices = GpuBuffer::new(device, index_bytes, &format!("{name} indices"))?;
+    Ok((vertices, indices))
+}
+
 impl MeshPass {
-    pub(crate) fn new(device: &Arc<Device>) -> Self {
-        Self {
+    /// A pass whose frames copy at most `budget` bytes each.
+    pub(crate) fn new(device: &Arc<Device>, budget: u64) -> Result<Self> {
+        Ok(Self {
             device: device.clone(),
             shaders: Vec::new(),
             meshes: Vec::new(),
             textures: Vec::new(),
+            stand_ins: StandIns::new(device)?,
+            streaming: VecDeque::new(),
+            budget,
             scratch: LodScratch::default(),
-        }
+        })
     }
 
-    /// Makes the pipelines of the shaders in `uploads`, taking them. A shader that has a pipeline
-    /// already, compiled again, gets a new one in place of the old, which retires until the GPU is
-    /// done with it; one whose new pipeline can't be made warns, and keeps the old.
+    /// Makes the pipelines of the shaders in `uploads`, taking them, and drops those of the shaders
+    /// it removes. A shader that has a pipeline already, compiled again, gets a new one in place of
+    /// the old, which retires until the GPU is done with it; one whose new pipeline can't be made
+    /// warns, and keeps the old; one removed stays removed.
     ///
     /// # Panics
     ///
     /// If they were taken from another `Shaders` than the pass's shaders before them.
     pub(crate) fn add_shaders(&mut self, uploads: &mut Uploads) -> Result<()> {
         let _zone = gg_core::zone!();
-        for added in uploads.shaders.drain(..) {
+        for change in uploads.shaders.drain(..) {
+            let added = match change {
+                shader::Change::Added(added) => added,
+                shader::Change::Removed(index) => {
+                    let shader = self.shaders.get_mut(index as usize);
+                    let shader =
+                        shader.expect("a renderer draws with the shaders of one `Shaders`");
+                    // The pipeline retires until the GPU is done with the frames that draw with it.
+                    *shader = None;
+                    continue;
+                }
+            };
             let index = added.index as usize;
             // A shader compiled again replaces one the pass has; any other is the next its
             // `Shaders` added.
@@ -506,7 +826,7 @@ impl MeshPass {
             );
             // Which the draws' sizes are checked against: its own types, since only the
             // `Shaders` that added it replaces it.
-            if let Some(old) = self.shaders.get(index) {
+            if let Some(Some(old)) = self.shaders.get(index) {
                 assert_eq!(
                     (old.vertex_size, old.params_size),
                     (added.vertex_size, added.params_size),
@@ -529,7 +849,7 @@ impl MeshPass {
                 },
             );
             match self.shaders.get_mut(index) {
-                Some(old) => match made {
+                Some(Some(old)) => match made {
                     Ok(pipeline) => {
                         old.pipeline = pipeline;
                         old.writes_depth = writes_depth;
@@ -540,21 +860,29 @@ impl MeshPass {
                         "{error:#}; the shader keeps drawing as it did"
                     ),
                 },
-                None => self.shaders.push(GpuShader {
+                Some(None) => unreachable!("its `Shaders` drops a removed shader's replacement"),
+                None => self.shaders.push(Some(GpuShader {
                     pipeline: made?,
                     vertex_size: added.vertex_size,
                     params_size: added.params_size,
                     writes_depth,
-                }),
+                })),
             }
         }
         Ok(())
     }
 
-    /// Copies the meshes and textures in `uploads` to the GPU, taking them, which must happen
-    /// before the frame's passes. A mesh replaced gets buffers anew, the old retiring until the GPU
-    /// is done with them; a texture replaced, an image anew in its slot, once the GPU has finished
-    /// the frames before, which may sample the old, as [`Frame::refill_texture`] says.
+    /// Takes the changes to the meshes and textures in `uploads`, and streams what's queued to the
+    /// GPU, within the frame's budget, which must happen before the frame's passes. A texture
+    /// added gets its slot, which shows a stand-in; its pixels, and a mesh's vertices and indices,
+    /// queue up behind what was added before, and each frame copies parts of the queue in order,
+    /// making an asset's buffers or image as its turn comes, if the GPU's memory has room for
+    /// them, as [`waits`] and [`room_for`] decide, and otherwise leaving it to wait, warning once,
+    /// while those after it go on; a frame the transfer queue has fallen behind copies nothing
+    /// ([`budget_behind`]). A mesh draws once its buffers are there, and a texture's slot shows
+    /// its image once that is; one replaced keeps drawing what it had until then, and whatever of
+    /// it was still being streamed is dropped. A mesh or texture removed draws nothing, or shows
+    /// its stand-in, from this frame on, and whatever of it was queued is dropped.
     ///
     /// # Panics
     ///
@@ -562,88 +890,323 @@ impl MeshPass {
     /// before them.
     pub(crate) fn upload(&mut self, frame: &mut Frame<'_>, uploads: &mut Uploads) -> Result<()> {
         let _zone = gg_core::zone!();
-        for added in uploads.meshes.drain(..) {
-            let index = added.index as usize;
-            // A mesh replaced is one the pass has; any other is the next its `Meshes` added.
-            let follows = if added.replacement {
-                index < self.meshes.len()
-            } else {
-                index == self.meshes.len()
-            };
-            assert!(follows, "a renderer draws the meshes of one `Meshes`");
-            let indices: &[u8] = bytemuck::cast_slice(&added.indices);
-            let buffer = |bytes: &[u8], what| {
-                let name = format!("{} {what}", added.name);
-                GpuBuffer::new(&self.device, bytes.len() as u64, &name)
-            };
-            let mut mesh = GpuMesh {
-                vertices: buffer(&added.vertices, "vertices")?,
-                indices: buffer(indices, "indices")?,
-                lods: added.lods,
+        self.stand_ins.write(frame)?;
+        for change in uploads.meshes.drain(..) {
+            self.mesh_changed(change);
+        }
+        for change in uploads.textures.drain(..) {
+            self.texture_changed(frame, change)?;
+        }
+        self.stream(frame)
+    }
+
+    /// Takes a change to the meshes: queues what was added, or removes a mesh.
+    fn mesh_changed(&mut self, change: Change) {
+        let added = match change {
+            Change::Added(added) => added,
+            Change::Removed(index) => {
+                let held = self.meshes.get_mut(index as usize);
+                let held = held.expect("a renderer draws the meshes of one `Meshes`");
+                // The buffers retire until the GPU is done with the frames that draw them.
+                *held = Held::Removed;
+                self.streaming.retain(|item| !item.is(Kind::Mesh, index));
+                return;
+            }
+        };
+        let index = added.index as usize;
+        // A mesh replaced is one the pass has; any other is the next its `Meshes` added.
+        let follows = if added.replacement {
+            index < self.meshes.len()
+        } else {
+            index == self.meshes.len()
+        };
+        assert!(follows, "a renderer draws the meshes of one `Meshes`");
+        if !added.replacement {
+            self.meshes.push(Held::Waiting);
+        }
+        debug_assert!(
+            !matches!(self.meshes[index], Held::Removed),
+            "its `Meshes` drops a removed mesh's replacement"
+        );
+        // In place of any of the mesh still queued, whose buffers go with it.
+        self.streaming
+            .retain(|item| !item.is(Kind::Mesh, added.index));
+        let vertex_bytes = added.vertices.len() as u64;
+        let total = vertex_bytes + (added.indices.len() * size_of::<u32>()) as u64;
+        self.streaming.push_back(Item {
+            index: added.index,
+            name: added.name,
+            total,
+            warned: false,
+            asset: Asset::Mesh {
+                vertices: added.vertices,
+                indices: added.indices,
+                vertex_bytes,
                 vertex_size: added.vertex_size,
-            };
-            frame.fill_buffer(&mut mesh.vertices, &added.vertices)?;
-            frame.fill_buffer(&mut mesh.indices, indices)?;
-            match self.meshes.get_mut(index) {
-                Some(old) => {
-                    // Which the draws' sizes are checked against: its own type, since only the
-                    // `Meshes` that added it replaces it.
+                lods: added.lods,
+                buffers: None,
+            },
+        });
+    }
+
+    /// Takes a change to the textures: makes a slot's texture, queues an image, or removes a
+    /// texture.
+    fn texture_changed(&mut self, frame: &mut Frame<'_>, change: texture::Change) -> Result<()> {
+        let Self {
+            device,
+            textures,
+            stand_ins,
+            streaming,
+            ..
+        } = self;
+        match change {
+            texture::Change::Reserved { index, name, data } => {
+                assert_eq!(
+                    index as usize,
+                    textures.len(),
+                    "a renderer samples the textures of one `Textures`"
+                );
+                // In the slot of its handle's index, which shaders sample it by.
+                let texture = GpuTexture::placed(device, index, stand_ins.of(data), &name)?;
+                textures.push(TextureSlot {
+                    texture,
+                    data,
+                    removed: false,
+                });
+            }
+            texture::Change::Image(added) => {
+                let slot = textures.get_mut(added.index as usize);
+                let slot = slot.expect("a renderer samples the textures of one `Textures`");
+                debug_assert!(
+                    !slot.removed,
+                    "its `Textures` drops a removed texture's images"
+                );
+                // In place of any image of the texture still queued, whose image, if it was made,
+                // retires with whatever was copied into it.
+                streaming.retain(|item| !item.is(Kind::Texture, added.index));
+                slot.texture.discard();
+                let (format, mipmapped) = (added.texels.format(), added.texels.mipmapped());
+                streaming.push_back(Item {
+                    index: added.index,
+                    name: added.name,
+                    total: format.bytes(added.size, mipmapped),
+                    warned: false,
+                    asset: Asset::Texture {
+                        size: added.size,
+                        texels: added.texels,
+                        pixels: added.pixels,
+                        made: false,
+                    },
+                });
+            }
+            texture::Change::Removed(index) => {
+                let slot = textures.get_mut(index as usize);
+                let slot = slot.expect("a renderer samples the textures of one `Textures`");
+                debug_assert!(!slot.removed, "its `Textures` removes a texture once");
+                streaming.retain(|item| !item.is(Kind::Texture, index));
+                frame.hide_texture(&mut slot.texture, stand_ins.of(slot.data));
+                slot.removed = true;
+            }
+        }
+        Ok(())
+    }
+
+    /// Copies the next parts of what's queued, in order, within the frame's budget, or none if the
+    /// transfer queue has fallen behind, and takes what has come to be drawable off the queue,
+    /// into its place.
+    fn stream(&mut self, frame: &mut Frame<'_>) -> Result<()> {
+        if self.streaming.is_empty() {
+            return Ok(());
+        }
+        let _zone = gg_core::zone!();
+        let budget = budget_behind(frame.uploads_behind(), self.budget);
+        let mut copying = self.streaming.iter().any(Item::made);
+        let mut spent = 0;
+        let mut i = 0;
+        while i < self.streaming.len() {
+            if self.advance(frame, i, budget, &mut spent, &mut copying)? {
+                self.streaming.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// Streams the `i`th queued asset on: makes its buffers or image if there's room, which sets
+    /// `copying`, copies its next parts while the frame's bytes `spent` are under `budget`, and
+    /// once every part is there, takes it for drawing. Returns whether it's drawable, and so done.
+    fn advance(
+        &mut self,
+        frame: &mut Frame<'_>,
+        i: usize,
+        budget: u64,
+        spent: &mut u64,
+        copying: &mut bool,
+    ) -> Result<bool> {
+        let Self {
+            device,
+            meshes,
+            textures,
+            streaming,
+            ..
+        } = self;
+        let item = &mut streaming[i];
+        match &mut item.asset {
+            Asset::Mesh {
+                vertices,
+                indices,
+                vertex_bytes,
+                vertex_size,
+                lods,
+                buffers,
+            } => {
+                if buffers.is_none() {
+                    if *spent >= budget
+                        || waits_for_room(
+                            device,
+                            &item.name,
+                            item.total,
+                            *copying,
+                            &mut item.warned,
+                        )
+                    {
+                        return Ok(false);
+                    }
+                    let index_bytes = item.total - *vertex_bytes;
+                    let made = mesh_buffers(device, &item.name, *vertex_bytes, index_bytes);
+                    let Some(made) = room_for(made, &item.name, item.total, &mut item.warned)?
+                    else {
+                        return Ok(false);
+                    };
+                    *buffers = Some(Box::new(made));
+                    *copying = true;
+                }
+                let (vertex_buffer, index_buffer) = &mut **buffers.as_mut().expect("just made");
+                let copied = |vertices: &GpuBuffer, indices: &GpuBuffer| {
+                    vertices.streamed() + indices.streamed()
+                };
+                while *spent < budget && copied(vertex_buffer, index_buffer) < item.total {
+                    let part = if vertex_buffer.streamed() < *vertex_bytes {
+                        frame.stream_buffer(vertex_buffer, vertices, budget - *spent)?
+                    } else {
+                        let bytes: &[u8] = bytemuck::cast_slice(indices);
+                        frame.stream_buffer(index_buffer, bytes, budget - *spent)?
+                    };
+                    *spent += part;
+                }
+                if copied(vertex_buffer, index_buffer) < item.total {
+                    return Ok(false);
+                }
+                // The last part is copied: the bytes go, whatever else waits.
+                *vertices = Vec::new();
+                *indices = Vec::new();
+                let vertices_ready = frame.finish_buffer(vertex_buffer)?;
+                let indices_ready = frame.finish_buffer(index_buffer)?;
+                if !(vertices_ready && indices_ready) {
+                    return Ok(false);
+                }
+                let (vertices, indices) = *buffers.take().expect("just there");
+                let mesh = GpuMesh {
+                    vertices,
+                    indices,
+                    lods: std::mem::replace(lods, Lods::whole(0)),
+                    vertex_size: *vertex_size,
+                };
+                let held = &mut meshes[item.index as usize];
+                // Which the draws' sizes are checked against: its own type, since only the
+                // `Meshes` that added it replaces it.
+                if let Some(old) = held.ready() {
                     assert_eq!(
                         old.vertex_size, mesh.vertex_size,
                         "mesh {:?} is replaced by vertices of another type; a renderer draws the \
                          meshes of one `Meshes`",
-                        added.name
+                        item.name
                     );
-                    *old = mesh;
                 }
-                None => self.meshes.push(mesh),
+                // The old buffers, if any, retire until the GPU is done with the frames that
+                // draw them.
+                *held = Held::Ready(mesh);
+                Ok(true)
+            }
+            Asset::Texture {
+                size,
+                texels,
+                pixels,
+                made,
+            } => {
+                let texture = &mut textures[item.index as usize].texture;
+                if !*made {
+                    if *spent >= budget
+                        || waits_for_room(
+                            device,
+                            &item.name,
+                            item.total,
+                            *copying,
+                            &mut item.warned,
+                        )
+                    {
+                        return Ok(false);
+                    }
+                    let [width, height] = *size;
+                    // A replacement may be compressed where the image it replaces wasn't, or the
+                    // other way round, as its `Textures` keeps only its kind.
+                    let refilled =
+                        texture.refill(width, height, texels.format(), texels.mipmapped());
+                    if room_for(refilled, &item.name, item.total, &mut item.warned)?.is_none() {
+                        return Ok(false);
+                    }
+                    // Once the image is there, so that a refill tried again doesn't make them again.
+                    texture::add_mipmaps(pixels, *size, texels.mipmaps());
+                    *made = true;
+                    *copying = true;
+                }
+                while *spent < budget && texture.streamed() < item.total {
+                    let part = frame.stream_texture(texture, pixels, budget - *spent)?;
+                    *spent += part;
+                }
+                if texture.streamed() < item.total {
+                    return Ok(false);
+                }
+                // The last part is copied: the pixels go, whatever else waits.
+                *pixels = Vec::new();
+                frame.finish_texture(texture)
             }
         }
-        for mut added in uploads.textures.drain(..) {
-            let index = added.index as usize;
-            // A texture replaced is one the pass has; any other is the next its `Textures` added.
-            let follows = if added.replacement {
-                index < self.textures.len()
-            } else {
-                index == self.textures.len()
-            };
-            assert!(follows, "a renderer samples the textures of one `Textures`");
-            texture::add_mipmaps(&mut added.pixels, added.size, added.texels.mipmaps());
-            let (format, mipmapped) = (added.texels.format(), added.texels.mipmapped());
-            // A replacement may be compressed where the image it replaces wasn't, or the other way
-            // round, as its `Textures` keeps only its kind.
-            if let Some(texture) = self.textures.get_mut(index) {
-                frame.refill_texture(texture, format, added.size, mipmapped, &added.pixels)?;
-                continue;
-            }
-            // In the slot of its handle's index, which shaders sample it by.
-            let [width, height] = added.size;
-            let mut texture = GpuTexture::placed(
-                &self.device,
-                added.index,
-                width,
-                height,
-                format,
-                mipmapped,
-                &added.name,
-            )?;
-            frame.fill_texture(&mut texture, &added.pixels)?;
-            self.textures.push(texture);
+    }
+
+    /// How many bytes of the `item`th queued asset are copied.
+    fn copied(&self, item: &Item) -> u64 {
+        match &item.asset {
+            Asset::Mesh { buffers, .. } => buffers
+                .as_ref()
+                .map_or(0, |buffers| buffers.0.streamed() + buffers.1.streamed()),
+            Asset::Texture { .. } => self.textures[item.index as usize].texture.streamed(),
         }
-        Ok(())
+    }
+
+    /// What's being streamed.
+    pub(crate) fn streaming(&self) -> Streaming {
+        Streaming {
+            assets: self.streaming.len(),
+            bytes: (self.streaming.iter())
+                .map(|item| item.total - self.copied(item))
+                .sum(),
+        }
     }
 
     /// Draws `draws` over the whole of the pass's target, `view` pixels across and down, where
     /// `view_projection` takes the world to clip space, each run of them as one instanced draw, or,
     /// of a mesh with levels of detail, as one for each level its instances draw at, and copies
-    /// each draw's transforms, IDs and parameters into the frame for its shader. Returns what it
-    /// drew.
+    /// each draw's transforms, IDs and parameters into the frame for its shader. A run of a mesh
+    /// that isn't drawable yet, or was removed, or with a shader that was, draws nothing and isn't
+    /// counted. Returns what it drew.
     ///
     /// # Panics
     ///
-    /// If a mesh drawn isn't one the pass has uploaded, a shader isn't one it has made a pipeline
-    /// of, a mesh's vertices or a draw's parameters aren't the size its shader reads, a run has
-    /// more instances than Vulkan's 32-bit count, or the pass isn't into an image of
+    /// If a mesh drawn isn't one of the pass's `Meshes`, a shader isn't one of its `Shaders`, a
+    /// mesh's vertices or a draw's parameters aren't the size its shader reads, a run has more
+    /// instances than Vulkan's 32-bit count, or the pass isn't into an image of
     /// [`ColorImage::FORMAT`] with IDs and a depth image.
     pub(crate) fn draw(
         &mut self,
@@ -661,11 +1224,14 @@ impl MeshPass {
             let mesh = self
                 .meshes
                 .get(run.mesh as usize)
-                .expect("a mesh of the renderer's `Meshes`, which the frame uploaded");
+                .expect("a mesh of the renderer's `Meshes`");
             let shader = self
                 .shaders
                 .get(run.shader as usize)
                 .expect("a shader of the renderer's `Shaders`");
+            let (Some(mesh), Some(shader)) = (mesh.ready(), shader) else {
+                continue;
+            };
             let instances = Instances {
                 transforms: &draws.transforms[run.instances.clone()],
                 ids: &draws.ids[run.instances.clone()],
@@ -987,6 +1553,16 @@ mod tests {
         }
     }
 
+    /// The meshes added or replaced, waiting to be taken, in order.
+    fn adds(meshes: &Meshes) -> Vec<&Added> {
+        (meshes.changes.iter())
+            .filter_map(|change| match change {
+                Change::Added(added) => Some(added),
+                Change::Removed(_) => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn a_mesh_is_whole_triangles_of_its_own_vertices() {
         let mut meshes = Meshes::default();
@@ -1009,8 +1585,7 @@ mod tests {
         let mut meshes = Meshes::default();
         let a = meshes.add("a", &TRIANGLE, &[0, 1, 2]).expect("a");
         let waiting = |meshes: &Meshes| -> Vec<(u32, bool, Vec<u32>)> {
-            let added = meshes.added.iter();
-            added
+            (adds(meshes).into_iter())
                 .map(|added| (added.index, added.replacement, added.indices.clone()))
                 .collect()
         };
@@ -1022,7 +1597,7 @@ mod tests {
         let quad = (0, false, sprite::INDICES.to_vec());
         assert_eq!(waiting(&meshes), [quad, (1, false, vec![0, 1, 2, 2, 1, 3])]);
         // Once a frame has taken it, in place of the one the renderer has.
-        meshes.added.clear();
+        meshes.changes.clear();
         meshes
             .replace("a", a, &TRIANGLE, &[2, 1, 0])
             .expect("others");
@@ -1031,6 +1606,87 @@ mod tests {
         let error = (meshes.replace("a", a, &TRIANGLE, &[0, 1, 3])).expect_err("broken");
         assert_eq!(error.code(), "renderer.bad_mesh");
         assert_eq!(waiting(&meshes), [(1, true, vec![2, 1, 0])]);
+    }
+
+    /// A mesh removed goes after the changes before it, once however many times, by its handle or
+    /// its index; its handle isn't given out again, and a replacement of it is dropped, as its
+    /// triangles are checked still.
+    #[test]
+    fn a_mesh_removed_stays_removed_in_order() {
+        let mut meshes = Meshes::default();
+        let a = meshes.add("a", &TRIANGLE, &[0, 1, 2]).expect("a");
+        meshes.changes.clear();
+        meshes
+            .replace("a", a, &TRIANGLE, &[2, 1, 0])
+            .expect("others");
+        assert!(meshes.remove(a), "removed");
+        assert!(!meshes.remove_index(a.index()), "removed already");
+        let b = meshes.add("b", &TRIANGLE, &[0, 1, 2]).expect("b");
+        assert_eq!((a.index, b.index), (1, 2));
+        let order: Vec<(u32, bool)> = (meshes.changes.iter())
+            .map(|change| match change {
+                Change::Added(added) => (added.index, false),
+                Change::Removed(index) => (*index, true),
+            })
+            .collect();
+        assert_eq!(order, [(1, false), (1, true), (2, false)]);
+        meshes.changes.clear();
+        meshes
+            .replace("a", a, &TRIANGLE, &[0, 1, 2])
+            .expect("checked");
+        assert!(meshes.changes.is_empty(), "dropped");
+        let error = (meshes.replace("a", a, &TRIANGLE, &[0, 1, 3])).expect_err("broken");
+        assert_eq!(error.code(), "renderer.bad_mesh");
+    }
+
+    #[test]
+    #[should_panic(expected = "is one of another `Meshes`")]
+    fn another_meshes_mesh_cant_be_removed() {
+        Meshes::default().remove(Mesh::<Vec2>::new(5));
+    }
+
+    /// An asset waits for room when its bytes would take usage past the budget, however large,
+    /// while something else is being copied; with nothing else copying, the oldest waiting goes
+    /// ahead alone, so that nothing waits forever on a GPU past its budget already.
+    #[test]
+    fn an_asset_past_the_budget_waits_unless_nothing_else_is_copying() {
+        assert!(!exceeds(10, 100, 90));
+        assert!(exceeds(10, 100, 91));
+        assert!(exceeds(0, 100, 101));
+        assert!(!exceeds(0, 0, 0));
+        assert!(exceeds(u64::MAX, 100, 1));
+        assert!(!waits(10, 100, 90, true));
+        assert!(waits(10, 100, 91, true));
+        assert!(!waits(10, 100, 91, false));
+        assert!(!waits(200, 100, 16, false), "past the budget already");
+        assert!(waits(200, 100, 16, true));
+    }
+
+    /// A frame copies its budget while the transfer queue is at most a frame behind, and nothing
+    /// once it's two or more behind.
+    #[test]
+    fn a_frame_copies_nothing_once_the_transfer_queue_falls_behind() {
+        assert_eq!(budget_behind(0, 1 << 20), 1 << 20);
+        assert_eq!(budget_behind(1, 1 << 20), 1 << 20);
+        assert_eq!(budget_behind(2, 1 << 20), 0);
+        assert_eq!(budget_behind(7, 1 << 20), 0);
+    }
+
+    /// Buffers or an image that don't fit the GPU's memory leave their asset waiting, warned once;
+    /// any other failure ends the renderer.
+    #[test]
+    fn an_asset_that_doesnt_fit_waits_and_other_failures_propagate() {
+        let mut warned = false;
+        let no_room = || Error::new("gpu.out_of_memory", "vkCreateBuffer failed");
+        assert_eq!(
+            room_for(Err::<u32, _>(no_room()), "a", 16, &mut warned).ok(),
+            Some(None)
+        );
+        assert!(warned);
+        assert_eq!(room_for(Ok(5), "a", 16, &mut warned).ok(), Some(Some(5)));
+        let lost = Error::new("gpu.device_lost", "vkCreateBuffer failed");
+        let error = room_for(Err::<u32, _>(lost), "a", 16, &mut warned).expect_err("propagated");
+        assert_eq!(error.code(), "gpu.device_lost");
     }
 
     #[test]
@@ -1044,10 +1700,22 @@ mod tests {
         meshes.add("a", &TRIANGLE, &[0, 1, 2]).unwrap();
         textures.add("a", [1, 1], &[255; 4], Mipmaps::None).unwrap();
         uploads.take(&mut meshes, &mut shaders, &mut textures);
-        let meshes_held: Vec<u32> = uploads.meshes.iter().map(|added| added.index).collect();
-        let textures_held: Vec<u32> = uploads.textures.iter().map(|added| added.index).collect();
-        assert_eq!((meshes_held, textures_held), (vec![0, 1], vec![0, 1]));
-        assert!(meshes.added.is_empty() && textures.added.is_empty());
+        let meshes_held: Vec<u32> = (uploads.meshes.iter())
+            .map(|change| match change {
+                Change::Added(added) => added.index,
+                Change::Removed(index) => *index,
+            })
+            .collect();
+        // A texture's slot, then its image.
+        let textures_held: Vec<u32> = (uploads.textures.iter())
+            .map(|change| match change {
+                texture::Change::Reserved { index, .. } => *index,
+                texture::Change::Image(added) => added.index,
+                texture::Change::Removed(index) => *index,
+            })
+            .collect();
+        assert_eq!((meshes_held, textures_held), (vec![0, 1], vec![0, 0, 1, 1]));
+        assert!(meshes.changes.is_empty() && textures.changes.is_empty());
     }
 
     #[test]
@@ -1119,14 +1787,14 @@ mod tests {
         assert!(error.to_string().contains("past its 3 vertices"), "{error}");
         // Only the engine's quad has been added, whose handle the next follows.
         assert_eq!(meshes.count(), 1);
-        assert_eq!(meshes.added.len(), 1);
+        assert_eq!(meshes.changes.len(), 1);
 
         // Levels may share indices, repeat an error, and not start at the first.
         let shared = levels(vec![level(0, 9, 0.0), level(3, 6, 0.1), level(3, 3, 0.1)]);
         let mesh = (meshes.add_lods("shared", &TRIANGLE, &THREE, shared.clone())).expect("a mesh");
         assert_eq!(mesh.index, 1);
-        assert_eq!(meshes.added[1].lods, shared);
-        assert_eq!(meshes.added[1].indices, THREE);
+        assert_eq!(adds(&meshes)[1].lods, shared);
+        assert_eq!(adds(&meshes)[1].indices, THREE);
     }
 
     #[test]
@@ -1141,9 +1809,9 @@ mod tests {
             center: Vec3::ZERO,
             radius: 0.0,
         };
-        assert_eq!(meshes.added[0].lods, whole(6), "the quad");
+        assert_eq!(adds(&meshes)[0].lods, whole(6), "the quad");
         let plain = meshes.add("plain", &TRIANGLE, &THREE).expect("a mesh");
-        assert_eq!(meshes.added[1].lods, whole(9));
+        assert_eq!(adds(&meshes)[1].lods, whole(9));
         let finer = Lods {
             levels: vec![
                 Lod {
@@ -1161,17 +1829,17 @@ mod tests {
             radius: 2.0,
         };
         let with_levels = (meshes.add_lods("levels", &TRIANGLE, &THREE, finer.clone())).expect("a");
-        assert_eq!(meshes.added[2].lods, finer);
+        assert_eq!(adds(&meshes)[2].lods, finer);
         // Replaced while it waits, and once a frame has taken it.
         meshes
             .replace("levels", with_levels, &TRIANGLE, &[0, 1, 2])
             .expect("others");
-        assert_eq!(meshes.added[2].lods, whole(3));
-        meshes.added.clear();
+        assert_eq!(adds(&meshes)[2].lods, whole(3));
+        meshes.changes.clear();
         meshes
             .replace("plain", plain, &TRIANGLE, &[0, 1, 2, 2, 1, 0])
             .expect("others");
-        assert_eq!(meshes.added[0].lods, whole(6));
+        assert_eq!(adds(&meshes)[0].lods, whole(6));
     }
 
     /// What a viewpoint at the origin facing down -Z, or as `viewpoint` has it, sees of a view

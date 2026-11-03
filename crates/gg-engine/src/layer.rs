@@ -18,11 +18,12 @@ use gg_core::math::{Mat4, Vec2, Vec3, Vec4};
 use gg_core::{Error, Result};
 use gg_renderer::{
     Blend, Circle, Draws, Line, MAX_PICKS, Mesh, Meshes, Mipmaps, ModelParams, ModelVertex,
-    Outline, Shader, Shaders, Sprite, SpriteSheet, Texels, Texture, Textures, Viewpoint, Viewport,
+    Outline, Shader, Shaders, Sprite, SpriteSheet, Streaming, Texels, Texture, Textures, Viewpoint,
+    Viewport,
 };
 #[cfg(feature = "dev")]
 use subsecond::HotFn;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[cfg(feature = "dev")]
 use crate::asset_watch::AssetWatch;
@@ -43,9 +44,8 @@ use crate::grid::{self, Plane};
 use crate::hot_reload::{Asset as HotAsset, HotReload, Reloaded, Source};
 use crate::image::{self, Image};
 use crate::interpolation::Past;
-#[cfg(feature = "dev")]
-use crate::model::Made;
-use crate::model::{self, Nodes};
+use crate::loader::Loader;
+use crate::model::{self, Made, Nodes};
 #[cfg(feature = "dev")]
 use crate::net::Ticket;
 use crate::net::{Lockstep, Outside, Turn};
@@ -57,7 +57,7 @@ use crate::recording::text::Text;
 use crate::reflect::{Reflect, Value};
 use crate::render_thread::Extracted;
 use crate::scene_files::{self, SceneFile, SceneFiles};
-use crate::snapshot::{Run, Snapshot};
+use crate::snapshot::{self, Again, Run, Snapshot};
 use crate::{
     App, BoxCollider2D, Entity, EntityId, Event, Input, MeshDraw, Model, ModelNode, ModelRoot,
     Name, RigidBody2D, Transform, Ui, World,
@@ -233,6 +233,28 @@ impl Tick {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Pick(u64);
 
+/// What's still on its way to the GPU, as [`Context::streaming`] tells it: the textures whose
+/// images are being decoded, off the main thread, and what the renderer is streaming, as the last
+/// frame it rendered left it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Loading {
+    /// The textures whose images are being decoded now, which show their stand-ins until they've
+    /// decoded and streamed.
+    pub decoding: u32,
+    /// The meshes and textures the renderer was streaming to the GPU once it had rendered the last
+    /// frame it handed back, and the bytes of them still to copy.
+    pub streaming: Streaming,
+}
+
+impl Loading {
+    /// Whether nothing is on its way: no image is decoding, and every texture and mesh added
+    /// before the frame the renderer last handed back was drawable in that frame. What's added
+    /// since counts once a frame has taken it, but for images, which count as they decode.
+    pub fn is_empty(&self) -> bool {
+        self.decoding == 0 && self.streaming.is_empty()
+    }
+}
+
 /// What layers can see and change of the running app.
 pub struct Context {
     window: Option<Window>,
@@ -247,6 +269,10 @@ pub struct Context {
     meshes: Meshes,
     shaders: Shaders,
     textures: Textures,
+    /// What decodes the textures' images, off the main thread in a run's context.
+    loader: Loader,
+    /// What the renderer was streaming once it had rendered the last frame it handed back.
+    pub(crate) streamed: Streaming,
     fonts: Fonts,
     /// The sounds and music the layers loaded, the buses' volumes, and the output that plays them,
     /// in a run that plays sound.
@@ -389,8 +415,10 @@ impl Context {
     }
 
     /// A context for `app`'s run, in `window`, if it has one, whose world draws its entities' IDs
-    /// from the app's seed, or from a seed drawn at random without one; and which plays sound if
-    /// `aloud`, as a windowed or embedded run does, as [`add_sound`](Self::add_sound) says.
+    /// from the app's seed, or from a seed drawn at random without one; which decodes the images
+    /// of the textures its layers add off the main thread, as [`add_texture`](Self::add_texture)
+    /// says; and which plays sound if `aloud`, as a windowed or embedded run does, as
+    /// [`add_sound`](Self::add_sound) says.
     pub(crate) fn of_run(window: Option<Window>, app: &App, aloud: bool) -> Self {
         let world = app.seed.map_or_else(World::default, World::seeded);
         let state = window.as_ref().and_then(|_| {
@@ -399,6 +427,7 @@ impl Context {
             })
         });
         let mut cx = Self::with_world(window, world);
+        cx.loader = Loader::threaded();
         cx.mods.game = app.name.to_owned();
         cx.mods.dir = (app.mods.clone()).or_else(|| Some(state.as_ref()?.join("mods")));
         cx.state = state;
@@ -428,7 +457,9 @@ impl Context {
     /// A context without a window, a renderer or a stack, whose world draws its entities' IDs from
     /// `seed`: for calling a layer's [`attach`](Layer::attach) and its [`tick`](Layer::tick)s
     /// directly, as a test does, so that its simulation goes the same way every run, on every
-    /// machine.
+    /// machine. It decodes each texture's image as it's added, on the calling thread, rather than off
+    /// the main thread as a run's context does, but alike otherwise: one whose pixels don't decode
+    /// loads and warns, as in the run it goes as.
     #[doc(hidden)]
     pub fn seeded(seed: u64) -> Self {
         Self::with_world(None, World::seeded(seed))
@@ -511,6 +542,9 @@ impl Context {
             meshes: Meshes::default(),
             shaders: Shaders::default(),
             textures,
+            // A test's or a replay's, which draws nothing: on the calling thread, as each is added.
+            loader: Loader::inline(),
+            streamed: Streaming::default(),
             fonts,
             audio: Audio::default(),
             draws: Draws::default(),
@@ -809,24 +843,31 @@ impl Context {
     /// progressive, as nearly all are: its colors are taken as sRGB-encoded, whatever color profile
     /// or gamma it holds, as glTF requires, and its alpha as not multiplied into them, and shaders
     /// sample its colors decoded to linear, with texture coordinates from (0, 0) at its top left to
-    /// (1, 1) at its bottom right. `name` names the texture in errors and GPU captures. The GPU has
-    /// it from the next frame that renders. A run from a game's package reads it as the cooker
-    /// compressed it, to BC7. In a development run that serves the tool API, the
-    /// texture takes its file's image again as the file changes, at whatever size, from the next
-    /// frame on, as ARCHITECTURE.md's Rendering says; one that doesn't decode warns, and the
-    /// texture keeps drawing as it did.
+    /// (1, 1) at its bottom right. `name` names the texture in errors and GPU captures. The file is
+    /// read, and its header, which gives its size, as the texture is added, which hands out its
+    /// handle then; its pixels decode off the main thread, and frames stream them to the GPU within
+    /// their budget, what samples it sampling a pixel of white until they're there, as
+    /// [`streaming`](Self::streaming) tells. One whose header reads but whose pixels don't decode,
+    /// as a file cut short past its header, loads all the same, warning `engine.bad_texture` as it
+    /// decodes, and samples as white. A run from a game's package reads it as the cooker
+    /// compressed it, to BC7. In a development run that serves the tool API, the texture takes its
+    /// file's image again as the file changes, at whatever size, once frames have streamed it,
+    /// drawing as it did until then, as ARCHITECTURE.md's Rendering says; one that doesn't decode
+    /// warns, and the texture keeps drawing as it did. A test's context, [`Context::seeded`],
+    /// decodes it on the calling thread as it's added instead, warning at once.
     ///
     /// A file added again, by whatever form of its path, gives the texture it gave first, without
     /// loading it again, as ARCHITECTURE.md's Rendering says, and so does an asset's file renamed
     /// or moved since, by the ID that names it; `name` is then unused, and the texture keeps the
-    /// path it was first added by, which another path names too. Scenes,
+    /// path it was first added by, which another path names too; but once the texture's removed,
+    /// as [`remove_texture`](Self::remove_texture) says, the file loads anew. Scenes,
     /// snapshots, recordings and the tool API name it by its asset ID, where its file has one, as
     /// ARCHITECTURE.md's Project state says, and otherwise by that path.
     ///
     /// Fails with `engine.bad_texture` if the file can't be read, isn't a regular file, is more
-    /// than 1 GiB, doesn't decode as a PNG or a JPEG, or has a side of more than 8,192 pixels, the
-    /// most every Vulkan 1.4 device takes, and with `renderer.too_many_textures` past the 61,440 a
-    /// renderer holds, the engine's white one among them.
+    /// than 1 GiB, isn't a PNG or a JPEG as far as its header, or has a side of more than 8,192
+    /// pixels, the most every Vulkan 1.4 device takes, and with `renderer.too_many_textures` past
+    /// the 61,440 a renderer holds, the engine's white one among them.
     pub fn add_texture(&mut self, name: &str, path: impl AsRef<Path>) -> Result<Texture> {
         let path = path.as_ref();
         let named = assets::name_of(self.root.as_deref(), path);
@@ -840,8 +881,9 @@ impl Context {
                 #[cfg(feature = "dev")]
                 let read_at = SystemTime::now();
                 let image = image::load_image(name, path, &self.files)?;
-                let (size, texels) = (image.size, image.texels(Mipmaps::None));
-                let texture = self.textures.add(name, size, image.pixels, texels)?;
+                let size = image.size;
+                let (loader, textures) = (&mut self.loader, &mut self.textures);
+                let texture = loader.load(textures, name, path, image, Mipmaps::None)?;
                 let id = self.texture_name(&named, path, file.as_deref(), None);
                 #[cfg(feature = "dev")]
                 self.watch_texture(texture, name, path, read_at, &id);
@@ -857,11 +899,12 @@ impl Context {
     }
 
     /// Loads the PNG or JPEG file at `path` as a sprite sheet: a texture, as
-    /// [`add_texture`](Self::add_texture) loads one, cut into cells `cell` pixels across and down,
-    /// packed edge to edge from its top left, which [`SpriteSheet::sprite`] draws. A file added
-    /// before, as a texture or a sprite sheet, isn't loaded again: its texture is cut into these
-    /// cells. Its texture reloads as `add_texture`'s does, but only at the size it has, where its
-    /// sprites have its cells.
+    /// [`add_texture`](Self::add_texture) loads one, its pixels decoding off the main thread,
+    /// cut into cells `cell` pixels across and down, packed edge to edge from its top left, which
+    /// [`SpriteSheet::sprite`] draws, as its header's size places them. A file added before, as a
+    /// texture or a sprite sheet, isn't loaded again: its texture is cut into these cells. Its
+    /// texture reloads as `add_texture`'s does, but only at the size it has, where its sprites have
+    /// its cells. [`remove_texture`](Self::remove_texture) removes its texture, `sheet.texture`.
     ///
     /// Fails as `add_texture` does, and with `engine.bad_sprite_sheet` if a side of `cell` is 0
     /// or more than the image's.
@@ -888,7 +931,8 @@ impl Context {
                 #[cfg(feature = "dev")]
                 let read_at = SystemTime::now();
                 let image = image::load_image(name, path, &self.files)?;
-                let sheet = add_sheet(&mut self.textures, name, path, image, cell)?;
+                let (loader, textures) = (&mut self.loader, &mut self.textures);
+                let sheet = add_sheet(loader, textures, name, path, image, cell)?;
                 let (texture, size) = (sheet.texture, sheet.size);
                 let id = self.texture_name(&named, path, file.as_deref(), None);
                 #[cfg(feature = "dev")]
@@ -908,10 +952,20 @@ impl Context {
         Ok(sheet)
     }
 
+    /// What's still on its way to the GPU, as [`Loading`] says: the textures whose images are
+    /// decoding, and what the renderer was streaming once it had rendered the last frame it handed
+    /// back. A loading screen shows until it's empty, as a test runs frames until it is.
+    pub fn streaming(&self) -> Loading {
+        Loading {
+            decoding: self.loader.pending(),
+            streaming: self.streamed,
+        }
+    }
+
     /// Adds a mesh for layers to draw from then on: triangles, three of `indices` each, which
     /// index `vertices`. A vertex is any `#[repr(C)]` type without padding, which derives
-    /// bytemuck's `NoUninit`. `name` names the mesh in errors and GPU captures. The GPU has it
-    /// from the next frame that renders.
+    /// bytemuck's `NoUninit`. `name` names the mesh in errors and GPU captures. Frames stream it
+    /// to the GPU within their budget, and draws of it draw nothing until it's there.
     ///
     /// Fails with `renderer.bad_mesh` if it has no triangles, indices left over from whole
     /// triangles, or an index past its vertices.
@@ -930,12 +984,15 @@ impl Context {
     /// its default scene draws, `scene` or else the first, which [`Model::spawn`] places in worlds
     /// as entities, as many times as layers like, as a [`ModelRoot`] does wherever it names the
     /// model, as scenes do by its name. Its meshes and images are added once, as
-    /// [`add_mesh`](Self::add_mesh) and [`add_texture`](Self::add_texture) add them, but each image
-    /// with mip levels, made as a frame copies it to the GPU; the GPU has them from the next frame
-    /// that renders. `name` names the model in errors and GPU captures. A run from a game's package
+    /// [`add_mesh`](Self::add_mesh) and [`add_texture`](Self::add_texture) add them, each image
+    /// read as far as its header as the model is, and decoded off the main thread, with mip levels
+    /// made there too, so that one whose pixels don't decode warns and samples as white, as a
+    /// texture's does; each draws once frames have streamed it to the GPU. `name` names the model
+    /// in errors and GPU captures. A run from a game's package
     /// reads the model as the cooker cooked it instead, its meshes optimized, with levels of detail
     /// that each draw picks by its size on screen, and its images compressed to BC7 with their
-    /// levels, as ARCHITECTURE.md's Project state says.
+    /// levels, as ARCHITECTURE.md's Project state says. A file added again gives the model it gave
+    /// first, until it's removed, as [`remove_model`](Self::remove_model) says.
     ///
     /// Of each node it takes the transform, a matrix or a translation, rotation and scale; of each
     /// primitive its mesh draws, the positions, the texture coordinates its base color texture
@@ -967,14 +1024,14 @@ impl Context {
     /// glTF 1, a model without a scene, primitives that aren't triangle lists, sparse accessors and
     /// accessors without a buffer view, skinned nodes, morph weights other than 0, a sampler that
     /// wraps across and down differently, a texture without an image, any required extension but
-    /// KHR_materials_unlit, and a model that takes more than 4 GiB to read, of its buffers, decoded
-    /// images, vertices and nodes; with `engine.bad_model` for a file that can't be read, isn't a
-    /// regular file or isn't glTF, as far as reading it checks, such as an accessor past its buffer
-    /// view, an index past its vertices, a node with two parents, a matrix that isn't a
-    /// translation, rotation and scale, a URI that's neither a data URI nor a relative path, or
-    /// that has a `..`, or an image that doesn't decode, and, though glTF allows them, integers
-    /// written as floats, such as `1.0`; and with `renderer.too_many_textures` if the renderer
-    /// hasn't room for its images.
+    /// KHR_materials_unlit, and a model that takes more than 4 GiB to read, of its buffers, images,
+    /// as read and as decoded, vertices and nodes; with `engine.bad_model` for a file that can't be
+    /// read, isn't a regular file or isn't glTF, as far as reading it checks, such as an accessor
+    /// past its buffer view, an index past its vertices, a node with two parents, a matrix that
+    /// isn't a translation, rotation and scale, a URI that's neither a data URI nor a relative
+    /// path, or that has a `..`, or an image that isn't a PNG or a JPEG as far as its header, and,
+    /// though glTF allows them, integers written as floats, such as `1.0`; and with
+    /// `renderer.too_many_textures` if the renderer hasn't room for its images.
     pub fn add_model(&mut self, name: &str, path: impl AsRef<Path>) -> Result<Model> {
         let zone = gg_core::zone!();
         let path = path.as_ref();
@@ -983,7 +1040,7 @@ impl Context {
         let file = self.files.file_of(path);
         let model = match self.loaded_model(&named, path, file.as_deref()) {
             Some(model) => {
-                if self.assets.model(&named).is_none() {
+                if self.assets.live_model(&named).is_none() {
                     self.add_assets(|assets| assets.alias_model(model, named.clone()));
                 }
                 model
@@ -1006,9 +1063,14 @@ impl Context {
                         imported.ignored.join(", ")
                     );
                 }
-                let (meshes, shaders, textures) =
-                    (&mut self.meshes, &mut self.shaders, &mut self.textures);
-                let (nodes, made) = model::add(name, imported, meshes, shaders, textures)?;
+                let (meshes, shaders, textures, loader) = (
+                    &mut self.meshes,
+                    &mut self.shaders,
+                    &mut self.textures,
+                    &mut self.loader,
+                );
+                let added = model::add(name, path, imported, meshes, shaders, textures, loader);
+                let (nodes, made) = added?;
                 let id = self.texture_name(&named, path, file.as_deref(), None);
                 // Each named by the model's ID, or path, and its order in the model.
                 let images: Vec<_> = (made.images.iter().enumerate())
@@ -1024,10 +1086,7 @@ impl Context {
                     }
                     assets.add_model(named.clone(), id, nodes)
                 });
-                #[cfg(feature = "dev")]
                 self.loaded.made.push(made);
-                #[cfg(not(feature = "dev"))]
-                let _ = made;
                 if let Some(file) = file {
                     #[cfg(feature = "dev")]
                     self.watch_model(&file, name, path, files, read_at);
@@ -1042,6 +1101,167 @@ impl Context {
         Ok(model)
     }
 
+    /// Removes `texture`, a texture or a sprite sheet's (`sheet.texture`) that a layer added or
+    /// text named, as a game does with what it draws no more, such as a level's once it has left
+    /// the level: the GPU lets go of its image once the frames and copies that may use it have
+    /// finished, what of it was still decoding or streaming is dropped, and what samples it samples
+    /// a pixel of white from the frame that takes the removal on. Its handle is never given out
+    /// again, so that a stale one, in the world or a snapshot, never samples another texture; and
+    /// a development run watches its file no more. Removing one removed already does nothing.
+    ///
+    /// Removal changes nothing the simulation reads: the texture keeps its name and its path, which
+    /// the world's hash, scenes and snapshots read, and its names go on finding it, so that the
+    /// world's sprites keep it, scene text that a tick loads finds it, and a world hashes alike
+    /// whenever a layer removed it. But what loads a texture by its name or its file, a layer's
+    /// add, a scene that the tool API or a scene file loads, a recorded or a lockstep peer's
+    /// command or edit, and a restore, takes it for none, and loads its file anew, as another
+    /// texture, which its names find from then on.
+    ///
+    /// # Panics
+    ///
+    /// If `texture` is the engine's white texture or a font's field, which aren't removed, or a
+    /// model's image, which goes with its model, as [`remove_model`](Self::remove_model) says; or
+    /// another context's.
+    pub fn remove_texture(&mut self, texture: Texture) {
+        if let Some(why) = self.unremovable(texture) {
+            panic!("texture {} {why}", texture.index());
+        }
+        self.drop_texture(texture, true);
+    }
+
+    /// Removes `mesh`, which a layer added, as [`remove_texture`](Self::remove_texture) removes a
+    /// texture: the GPU lets go of its buffers once the frames and copies that may use them have
+    /// finished, and every draw of it draws nothing from the frame that takes the removal on, its
+    /// handle never given out again. The simulation reads nothing of it, as the world's hash reads
+    /// nothing of a [`MeshDraw`]. Removing one removed already does nothing.
+    ///
+    /// # Panics
+    ///
+    /// If `mesh` is the engine's quad, which sprites, circles, lines and text are drawn on, or a
+    /// model's, which goes with its model, as [`remove_model`](Self::remove_model) says; or
+    /// another context's.
+    pub fn remove_mesh<V>(&mut self, mesh: Mesh<V>) {
+        if let Some(why) = self.unremovable_mesh(mesh.index()) {
+            panic!("mesh {} {why}", mesh.index());
+        }
+        self.drop_mesh(mesh.index());
+    }
+
+    /// Removes `model`, which a layer added or text named, and its meshes and images with it, as
+    /// [`remove_mesh`](Self::remove_mesh) and [`remove_texture`](Self::remove_texture) remove them,
+    /// so that what draws them draws nothing, or samples white, from the frame that takes the
+    /// removal on; a development run watches its files no more. It keeps its name, its path and
+    /// its nodes, as a texture removed keeps its name, so that a root that names it spawns what it
+    /// did, whenever it was removed, of draws that draw nothing; but what loads it by its name or
+    /// its file loads it anew, as another model, as for a texture. Removing one removed already
+    /// does nothing.
+    ///
+    /// # Panics
+    ///
+    /// If `model` is another context's.
+    pub fn remove_model(&mut self, model: Model) {
+        let Some(made) = self.loaded.made.get(model.index()) else {
+            panic!("model {} is another context's", model.index());
+        };
+        if self.assets.model_removed(model) {
+            return;
+        }
+        let (meshes, images) = (made.meshes.clone(), made.images.clone());
+        for mesh in meshes {
+            self.meshes.remove(mesh);
+        }
+        for (image, _) in images {
+            self.drop_texture(image, false);
+        }
+        let files = self.loaded.models.iter();
+        let files: Vec<PathBuf> = files
+            .filter(|&(_, &loaded)| loaded == model)
+            .map(|(file, _)| file.clone())
+            .collect();
+        for file in files {
+            self.loaded.models.remove(&file);
+            #[cfg(feature = "dev")]
+            if let Some(hot_reload) = &mut self.hot_reload {
+                hot_reload.unwatch(HotAsset::Model(file));
+            }
+        }
+        let note = format!(
+            "removed model {} {}",
+            model.index(),
+            self.assets.model_path(model)
+        );
+        self.add_assets(|assets| {
+            assets.remove_model(model);
+            assets.note(note);
+        });
+    }
+
+    /// Why `texture` isn't removed, as [`remove_texture`](Self::remove_texture) says, if it isn't:
+    /// `None` for one a layer added or text named.
+    fn unremovable(&self, texture: Texture) -> Option<&'static str> {
+        if self.assets.name(texture).is_none() {
+            return Some(
+                "is the engine's white texture, a font's field or another context's texture, none \
+                 of which is removed",
+            );
+        }
+        let mut images = self.loaded.made.iter().flat_map(|made| &made.images);
+        let of_model = images.any(|&(image, _)| image == texture);
+        of_model.then_some("is a model's image, which goes with its model, through `remove_model`")
+    }
+
+    /// Why the mesh of index `index` isn't removed, as [`remove_mesh`](Self::remove_mesh) says, if
+    /// it isn't.
+    fn unremovable_mesh(&self, index: u32) -> Option<&'static str> {
+        if index == 0 {
+            return Some(
+                "is the engine's quad, which sprites, circles, lines and text are drawn on",
+            );
+        }
+        let mut meshes = self.loaded.made.iter().flat_map(|made| &made.meshes);
+        let of_model = meshes.any(|mesh| mesh.index() == index);
+        of_model.then_some("is a model's, which goes with its model, through `remove_model`")
+    }
+
+    /// Removes `texture`, unless it's removed already, as [`remove_texture`](Self::remove_texture)
+    /// says, noting it among what the layers added if `noted`, by its index and its path, as a
+    /// texture a layer removes is; a model's image goes with its model's note.
+    fn drop_texture(&mut self, texture: Texture, noted: bool) {
+        if self.assets.removed(texture) {
+            return;
+        }
+        self.textures.remove(texture);
+        self.loader.forget(texture);
+        (self.loaded.textures).retain(|_, &mut (loaded, _)| loaded != texture);
+        #[cfg(feature = "dev")]
+        {
+            self.loaded.sheets.retain(|&sheet| sheet != texture);
+            if let Some(hot_reload) = &mut self.hot_reload {
+                hot_reload.unwatch(HotAsset::Texture(texture));
+            }
+        }
+        let path = self
+            .assets
+            .path(texture)
+            .expect("a texture removed is named");
+        let note = noted.then(|| format!("removed texture {} {path}", texture.index()));
+        self.add_assets(|assets| {
+            assets.remove_texture(texture);
+            if let Some(note) = note {
+                assets.note(note);
+            }
+        });
+    }
+
+    /// Removes the mesh of index `index`, unless it's removed already, as
+    /// [`remove_mesh`](Self::remove_mesh) says, noting it among what the layers added, by its
+    /// index.
+    fn drop_mesh(&mut self, index: u32) {
+        if self.meshes.remove_index(index) {
+            self.add_assets(|assets| assets.note(format!("removed mesh {index}")));
+        }
+    }
+
     /// Loads the TrueType or OpenType font at `path`, a `.ttf` or `.otf` file, for
     /// [`draw_text`](Self::draw_text) to draw text in from then on, through the handle, baking its
     /// field as it loads: a texture of data, a multi-channel signed distance field of each glyph of
@@ -1049,8 +1269,9 @@ impl Context {
     /// place of the characters the font or the field lacks but whitespace and control characters,
     /// as ARCHITECTURE.md's Rendering says. The outlines are its default instance's, a variable
     /// font's at its axes' defaults, unhinted, since the field draws them at any size. `name` names
-    /// the font in errors and its field in GPU captures, as `<name> field`; the GPU has it from the
-    /// next frame that renders. A file added again, by whatever form of its path, gives the font it
+    /// the font in errors and its field in GPU captures, as `<name> field`; frames stream the field
+    /// to the GPU, and its text draws nothing until it's there, as its glyphs bake and the field
+    /// grows. A file added again, by whatever form of its path, gives the font it
     /// gave first, without baking it again, as does an asset's file renamed or moved since, by the
     /// ID that names it. Scenes, snapshots, recordings and the tool API name it by its asset ID,
     /// where its file has one, and otherwise by its path, as a texture is. In a development run
@@ -1234,17 +1455,18 @@ impl Context {
     }
 
     /// Has `path` name `texture`, which another path to its file added before, as [`Assets::alias`]
-    /// does, unless it names a texture already.
+    /// does, unless it names a texture already that isn't removed.
     fn alias(&mut self, texture: Texture, path: &Arc<str>) {
-        if self.assets.texture(path).is_none() {
+        if self.assets.live_texture(path).is_none() {
             self.add_assets(|assets| assets.alias(texture, path.clone()));
         }
     }
 
     /// Loads, as [`add_texture`](Self::add_texture), [`add_model`](Self::add_model) and
     /// [`add_font`](Self::add_font) load a file, each texture, model and font that `names` names,
-    /// as text names one, that none loaded has: where a scene, the tool API, or a recorded or a
-    /// lockstep peer's command or edit names it, before it's read, as ARCHITECTURE.md's Project
+    /// as text names one, that none loaded has, or none but one removed, which loads anew, as
+    /// [`remove_texture`](Self::remove_texture) says: where a scene, the tool API, or a recorded or
+    /// a lockstep peer's command or edit names it, before it's read, as ARCHITECTURE.md's Project
     /// state says; a model's image with its model. A name finds its file as
     /// [`asset_path`](Self::asset_path) says, inside the asset root. In a run that follows another,
     /// the asset takes the name its text gave it, that run's, and its file is found by the names it
@@ -1306,15 +1528,15 @@ impl Context {
             && !image.is_empty()
             && image.bytes().all(|b| b.is_ascii_digit())
         {
-            let loaded = match self.assets.model(model) {
+            let loaded = match self.assets.live_model(model) {
                 Some(_) => Ok(()),
                 None => self.load_model_named(model, stand_in).1,
             };
             // By the model's own name, as another path to its file may name it.
             let found = loaded.and_then(|()| {
-                let loaded = self.assets.model(model).expect("loaded");
+                let loaded = self.assets.live_model(model).expect("loaded");
                 let named = format!("{}#{image}", self.assets.model_name(loaded));
-                match self.assets.texture(&named) {
+                match self.assets.live_texture(&named) {
                     Some(texture) => {
                         self.alias(texture, &name.into());
                         Ok(())
@@ -1356,7 +1578,7 @@ impl Context {
                 None => self.add_model(&path, &file)?,
             };
             for named in [&*path, name] {
-                if self.assets.model(named).is_none() {
+                if self.assets.live_model(named).is_none() {
                     self.add_assets(|assets| assets.alias_model(model, named.into()));
                 }
             }
@@ -1392,15 +1614,58 @@ impl Context {
         (Some(path), loaded)
     }
 
-    /// Loads, as [`load_named`](Self::load_named) does with `stand_in`, each texture, model and
-    /// font whose path from the asset root `assets` gives that none loaded has: as a run restored
-    /// from a snapshot loads those its `asset` lines say its run had, before it reads the world, so
-    /// that its values find every asset they name, and in the order that run loaded them, so that
-    /// a texture's index, which what's opaque holds, is what it was where the layers added the same
-    /// before. A path outside the root, as only a layer gives one, stands in, as one text names
-    /// does.
-    pub(crate) fn load_restored<'p>(&mut self, assets: impl IntoIterator<Item = Asset<&'p str>>) {
-        self.load_named(assets, true);
+    /// Takes again what the run a snapshot was taken from noted past the notes this run's layers
+    /// made alike as they loaded, of `lines`, the snapshot's `asset` lines, in order, as
+    /// [`Snapshot::added`] gives them: as a run restored from it, or a lockstep joiner given its
+    /// host's world, does before it reads the world, so that its values find every asset they
+    /// name, and what's opaque in it comes back where the run's assets line up with the
+    /// snapshot's. It loads, as [`load_named`](Self::load_named) does with `stand_in`, each
+    /// texture, model and font a line gives the path of that none loaded has, in the order that run
+    /// loaded them, so that a texture's index, which what's opaque holds, is what it was where the
+    /// layers added the same before; a path outside the root, as only a layer gives one, stands
+    /// in, as one text names does. And it removes again what that run removed, a texture, a model
+    /// or a mesh by the index its line gives, while this run's notes are the snapshot's up to that
+    /// line, so that the index is the asset's that run removed; a texture or a model only where the
+    /// one at its index is loaded from the path the line gives, and isn't removed already.
+    pub(crate) fn load_restored(&mut self, lines: &[String]) {
+        let ours = self.assets.added();
+        let common = (lines.iter().zip(ours))
+            .take_while(|&(theirs, ours)| **theirs == **ours)
+            .count();
+        // Whether this run's notes are the snapshot's lines up to the one taken.
+        let mut lined_up = ours.len() == common;
+        for (at, line) in lines.iter().enumerate().skip(common) {
+            match snapshot::again(line) {
+                Some(Again::Load(asset)) => self.load_named([asset], true),
+                // The index a removal gives may be another asset's in a run whose assets part
+                // from the snapshot's before it, as one whose newer layers add another first.
+                Some(_) if !lined_up => debug!(
+                    line = &**line,
+                    "Not removed again, as the run's assets part from the snapshot's before it"
+                ),
+                Some(Again::RemoveTexture(index, path)) => {
+                    let texture = self.assets.live_texture_at(index, path);
+                    let texture = texture.filter(|&texture| self.unremovable(texture).is_none());
+                    if let Some(texture) = texture {
+                        self.drop_texture(texture, true);
+                    }
+                }
+                Some(Again::RemoveModel(index, path)) => {
+                    if let Some(model) = self.assets.live_model_at(index, path) {
+                        self.remove_model(model);
+                    }
+                }
+                Some(Again::RemoveMesh(index)) => {
+                    let known = index < self.meshes.count();
+                    if known && self.unremovable_mesh(index).is_none() {
+                        self.drop_mesh(index);
+                    }
+                }
+                None => {}
+            }
+            let added = self.assets.added();
+            lined_up &= added.len() == at + 1 && *added[at] == **line;
+        }
     }
 
     /// Loads each texture, model and font scene `text` names that none loaded has, as
@@ -1639,7 +1904,6 @@ impl Context {
             let model = assets.add_model(path.clone(), named, Nodes::default());
             assets.alias_model(model, name.into());
         });
-        #[cfg(feature = "dev")]
         self.loaded.made.push(Made::default());
         self.added("model", &format!("{path} {}", model_types()));
         warn!(
@@ -1755,10 +2019,10 @@ impl Context {
     }
 
     /// The texture loaded from `file`, which a layer gave as `path`, whose path among assets is
-    /// `named`, with its size, if one was: by the file, as [`Loaded`] keeps it; or else, in a
-    /// development build, the one loaded from the asset's file before it was renamed or moved,
-    /// which its ID names, kept for `file` too from then on, so that an asset loads once whatever
-    /// its file's been called.
+    /// `named`, with its size, if one was and isn't removed: by the file, as [`Loaded`] keeps it;
+    /// or else, in a development build, the one loaded from the asset's file before it was renamed
+    /// or moved, which its ID names, kept for `file` too from then on, so that an asset loads once
+    /// whatever its file's been called.
     fn loaded_texture(
         &mut self,
         named: &str,
@@ -1769,7 +2033,10 @@ impl Context {
             return Some(found);
         }
         let id = self.texture_name(named, path, file, None);
-        let texture = self.assets.texture(&id).filter(|_| assets::is_id(&id))?;
+        let texture = self
+            .assets
+            .live_texture(&id)
+            .filter(|_| assets::is_id(&id))?;
         let loaded = self.loaded.textures.values();
         let found = loaded.copied().find(|&(loaded, _)| loaded == texture)?;
         if let Some(file) = file {
@@ -1785,7 +2052,7 @@ impl Context {
             return Some(found);
         }
         let id = self.texture_name(named, path, file, None);
-        let model = self.assets.model(&id).filter(|_| assets::is_id(&id))?;
+        let model = self.assets.live_model(&id).filter(|_| assets::is_id(&id))?;
         // Only one loaded from a file, which a stand-in wasn't.
         if !self.loaded.models.values().any(|&loaded| loaded == model) {
             return None;
@@ -2078,9 +2345,13 @@ impl Context {
     /// rather than take an image of another size, whose cells would be elsewhere in it than its
     /// sprites have them, warning `asset.sheet_resized`; and a stand-in keeps its place rather
     /// than take a file that came outside the asset root, as through `..` or a link, as text's
-    /// names are kept inside it, warning `asset.outside_root`.
+    /// names are kept inside it, warning `asset.outside_root`. A texture removed since its file
+    /// was read takes nothing. The image takes the place of any its loader was still decoding.
     #[cfg(feature = "dev")]
     fn reload_texture(&mut self, texture: Texture, path: &Path, image: Image) {
+        if self.assets.removed(texture) {
+            return;
+        }
         let named = assets::name_of(self.root.as_deref(), path);
         let texels = image.texels(Mipmaps::None);
         let Image { size, pixels, .. } = image;
@@ -2120,6 +2391,8 @@ impl Context {
             );
             return;
         }
+        // In place of its pixels, if they're still decoding, which a replacement fills.
+        self.loader.forget(texture);
         for (loaded, was) in self.loaded.textures.values_mut() {
             if *loaded == texture {
                 *was = size;
@@ -2149,6 +2422,7 @@ impl Context {
         let was = self.assets.nodes(model).expect("a model loaded").clone();
         let made = &mut self.loaded.made[model.index()];
         let (meshes, shaders, textures) = (&mut self.meshes, &mut self.shaders, &mut self.textures);
+        let replaced = imported.images.len().min(made.images.len());
         let reloaded = model::reload(
             &named, imported, made, &was, whole, meshes, shaders, textures,
         );
@@ -2163,6 +2437,10 @@ impl Context {
                 return;
             }
         };
+        // In place of their pixels, if they're still decoding, which the images replaced fill.
+        for &(image, _) in &self.loaded.made[model.index()].images[..replaced] {
+            self.loader.forget(image);
+        }
         self.add_assets(|assets| {
             let (name, at) = (assets.model_name(model), assets.model_path(model));
             let images: Vec<_> = (added.iter())
@@ -2387,7 +2665,8 @@ impl Context {
 
     /// Whether a layer has added the file at `path` from the app's root, by whatever form of its
     /// path, as a texture, a sprite sheet or a model, or a texture its asset's ID names is loaded,
-    /// as one loaded from it before it was renamed is: resolving the file, some 0.1 ms on Windows.
+    /// as one loaded from it before it was renamed is, and not removed since: resolving the file,
+    /// some 0.1 ms on Windows.
     #[cfg(feature = "dev")]
     pub(crate) fn has_added(&self, path: &str) -> bool {
         let file = (self.root.as_deref()).and_then(|root| assets::file_of(&root.join(path)));
@@ -2395,7 +2674,7 @@ impl Context {
             self.loaded.textures.contains_key(&file) || self.loaded.models.contains_key(&file)
         });
         let id = self.assets.catalog().id(path);
-        by_file || id.is_some_and(|id| self.assets.texture(&id.to_string()).is_some())
+        by_file || id.is_some_and(|id| self.assets.live_texture(&id.to_string()).is_some())
     }
 
     /// Draws `mesh` with `shader` this frame, where `transform` places it in the world, over the
@@ -2763,7 +3042,8 @@ impl Context {
     /// default, which hears the sounds playing from a place, as [`Place`] says; what a layer
     /// outlined this frame, which it forgets too; the pixels the view shows,
     /// if it shows any, swapping new ones for those `frame` had; what's been added since a frame
-    /// last took it, after what `frame` still holds; and the picks asked this frame, each at
+    /// last took it, after what `frame` still holds, the images the loader has decoded since among
+    /// it, and how many it's still decoding; and the picks asked this frame, each at
     /// the pixel of the view under it, the floor of where it was asked less the view's origin, but
     /// those outside the view, which the next answers to come back answer `None`. In a development
     /// build, the look's viewpoint and outline go in place of the layers', and the frame carries
@@ -2802,6 +3082,8 @@ impl Context {
         mem::swap(&mut frame.draws, &mut self.draws);
         self.draws.clear();
         self.canvas.place(viewport.size, &mut frame.canvas);
+        self.loader.take(&mut self.textures);
+        frame.loading = self.loader.pending();
         self.fonts.place(&mut self.textures);
         (frame.uploads).take(&mut self.meshes, &mut self.shaders, &mut self.textures);
         frame.picks.clear();
@@ -2837,21 +3119,23 @@ impl Context {
     }
 }
 
-/// Adds `image`, sprite sheet `name`'s from `path`, to `textures` as a sheet of cells `cell` pixels
-/// across and down, if they fit it, as [`fits`] checks; one that doesn't takes no texture.
+/// Adds `image`, sprite sheet `name`'s from `path`, read as far as its header, to `textures`
+/// through `loader`, which decodes it, as a sheet of cells `cell` pixels across and down, if they
+/// fit it, as [`fits`] checks; one that doesn't takes no texture.
 fn add_sheet(
+    loader: &mut Loader,
     textures: &mut Textures,
     name: &str,
     path: &Path,
     image: Image,
     cell: [u32; 2],
 ) -> Result<SpriteSheet> {
-    fits(name, path, image.size, cell)?;
-    let texels = image.texels(Mipmaps::None);
-    let texture = textures.add(name, image.size, image.pixels, texels)?;
+    let size = image.size;
+    fits(name, path, size, cell)?;
+    let texture = loader.load(textures, name, path, image, Mipmaps::None)?;
     Ok(SpriteSheet {
         texture,
-        size: image.size,
+        size,
         cell,
     })
 }
@@ -3043,7 +3327,7 @@ impl Stack {
                     cx.name_as(
                         (snapshot.names.iter()).map(|(path, name)| (name.clone(), path.clone())),
                     );
-                    cx.load_restored(snapshot.assets());
+                    cx.load_restored(snapshot.added());
                     // Its host's scripts, which its world's components are as, in place of its
                     // own files', and its host's mods in place of its own.
                     cx.hosts.take(&mut cx.world, &snapshot.scripts);
@@ -3226,7 +3510,7 @@ impl Stack {
         cx.follows |= self.joins();
         self.load(cx);
         cx.attached = true;
-        cx.load_restored(snapshot.assets());
+        cx.load_restored(snapshot.added());
         #[cfg(feature = "dev")]
         if serves && self.refuses_stop().is_none() {
             // As the layers loaded it, with their types, assets and resources, for the world as
@@ -4138,7 +4422,7 @@ mod tests {
 
     #[test]
     fn a_sprite_sheet_loads_only_if_its_cells_fit_its_image() {
-        let mut textures = Textures::default();
+        let (mut loader, mut textures) = (Loader::inline(), Textures::default());
         let path = Path::new("assets/tiles.png");
         let image = || Image {
             size: [64, 32],
@@ -4146,7 +4430,7 @@ mod tests {
             format: image::Format::Rgba8,
         };
         for cell in [[0, 16], [16, 0], [65, 16], [16, 33]] {
-            let error = add_sheet(&mut textures, "tiles", path, image(), cell)
+            let error = add_sheet(&mut loader, &mut textures, "tiles", path, image(), cell)
                 .expect_err("cells that don't fit");
             assert_eq!(error.code(), "engine.bad_sprite_sheet", "{cell:?}");
             let message = error.to_string();
@@ -4157,7 +4441,8 @@ mod tests {
                 "{message}"
             );
         }
-        let sheet = add_sheet(&mut textures, "tiles", path, image(), [64, 32]).expect("a sheet");
+        let sheet = add_sheet(&mut loader, &mut textures, "tiles", path, image(), [64, 32]);
+        let sheet = sheet.expect("a sheet");
         assert_eq!((sheet.size, sheet.cell), ([64, 32], [64, 32]));
         // The sheets that didn't load took no texture, so this one's comes first after the
         // engine's white one.
@@ -4974,6 +5259,241 @@ mod tests {
             .iter()
             .filter(|note| note.starts_with("model "));
         assert_eq!(models.count(), 2);
+    }
+
+    /// Frames handed off, as a run's do, at a view of 64 pixels square, until the context's loader
+    /// decodes nothing, which each frame takes what it decoded of.
+    fn decoded(cx: &mut Context) {
+        let view = Viewport {
+            origin: [0, 0],
+            size: [64, 64],
+        };
+        let until = std::time::Instant::now() + Duration::from_secs(30);
+        while cx.streaming().decoding > 0 {
+            assert!(std::time::Instant::now() < until, "the images decode");
+            std::thread::sleep(Duration::from_millis(1));
+            cx.extract(&mut render_thread::Extracted::default(), view);
+        }
+    }
+
+    /// A texture whose header reads but whose pixels don't decode, as a PNG cut short in its rows,
+    /// loads, its handle and name as any texture's, and warns as its pixels are found not to
+    /// decode: off the main thread in a run's context, and at once in a test's or a replay's, so
+    /// that both add it alike, as they do a model whose image is such a file.
+    #[test]
+    fn a_texture_that_reads_but_doesnt_decode_loads_and_warns() {
+        let logged = crate::testing::logged();
+        let scratch = crate::dirs::tests::Scratch::new("cut-texture");
+        std::fs::create_dir_all(&scratch.0).expect("a directory");
+        let mut png = image::tests::png(
+            png::ColorType::Rgba,
+            png::BitDepth::Eight,
+            4,
+            &[9; 16],
+            None,
+        );
+        png.truncate(png.len() - 20);
+        let path = scratch.0.join("cut.png");
+        std::fs::write(&path, png).expect("a PNG, cut");
+        #[cfg(feature = "dev")]
+        let model = {
+            let gltf = gltf::tests::triangle_gltf(|gltf| {
+                gltf["images"][0] = serde_json::json!({"uri": "cut.png"});
+            });
+            let model = scratch.0.join("m.gltf");
+            std::fs::write(&model, gltf).expect("a model");
+            model
+        };
+        for threaded in [false, true] {
+            let mut cx = Context::seeded(0).root(scratch.0.clone());
+            if threaded {
+                cx.loader = Loader::threaded();
+            }
+            let _ = logged.codes.try_iter().count();
+            let cut = cx.add_texture("cut", &path);
+            let cut = cut.expect("loaded, as its header reads");
+            assert_eq!(cx.assets.path(cut), Some("cut.png"));
+            #[cfg(feature = "dev")]
+            (cx.add_model("m", &model)).expect("loaded, as its image's header reads");
+            // The texture's image, and, with `dev`, the model's.
+            let warned = if cfg!(feature = "dev") { 2 } else { 1 };
+            assert_eq!(cx.streaming().decoding, if threaded { warned } else { 0 });
+            decoded(&mut cx);
+            let codes = logged.codes.try_iter();
+            let bad = codes.filter(|code| code == "engine.bad_texture");
+            assert_eq!(bad.count(), warned as usize, "threaded: {threaded}");
+        }
+    }
+
+    /// A texture removed keeps its name, which finds it still, so that the world's hash reads
+    /// nothing of the removal; but where text names it, it loads anew, under a handle of its own,
+    /// which its names find from then on, as a layer's add of its file gives. Its removal is noted
+    /// once, by its index and its path; and the engine's own textures aren't removed.
+    #[test]
+    fn a_removed_texture_keeps_its_name_and_loads_anew_where_named() {
+        let scratch = crate::dirs::tests::Scratch::new("removed-texture");
+        let root = scratch.0.clone();
+        std::fs::create_dir_all(root.join("assets")).expect("a directory");
+        let png = image::tests::png(png::ColorType::Rgba, png::BitDepth::Eight, 1, &[9; 4], None);
+        let path = root.join("assets/stone.png");
+        std::fs::write(&path, png).expect("a PNG");
+        let named = "assets/stone.png";
+        let mut cx = Context::seeded(0).root(root);
+        let stone = cx.add_texture("stone", &path).expect("a texture");
+        let sprite = Sprite {
+            texture: Some(stone),
+            ..Sprite::default()
+        };
+        cx.world_mut().spawn((Transform::IDENTITY, sprite));
+        let hash = cx.world().hash();
+        cx.remove_texture(stone);
+        cx.remove_texture(stone);
+        assert_eq!(cx.world().hash(), hash, "the world reads nothing of it");
+        assert_eq!(
+            cx.assets.texture(named),
+            Some(stone),
+            "its name finds it still"
+        );
+        assert!(
+            !cx.assets.has(&Asset::Texture(named)),
+            "but nothing loaded has it"
+        );
+        let note = format!("removed texture {} {named}", stone.index());
+        let notes = cx.assets.added().iter().filter(|added| ***added == *note);
+        assert_eq!(notes.count(), 1, "noted once");
+
+        cx.load_named([Asset::Texture(named)], false);
+        let anew = cx.assets.texture(named).expect("loaded anew");
+        assert!(anew.index() > stone.index(), "under a handle of its own");
+        assert_eq!(cx.assets.name(anew), Some(named));
+        let added = cx.add_texture("again", &path).expect("its file again");
+        assert_eq!(added, anew, "loaded once, anew");
+        assert_eq!(cx.world().hash(), hash);
+        #[cfg(feature = "dev")]
+        {
+            assert!(cx.has_added(named));
+            cx.remove_texture(anew);
+            assert!(!cx.has_added(named));
+        }
+        let white = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cx.remove_texture(Texture::WHITE);
+        }));
+        assert!(white.is_err(), "the engine's white texture");
+    }
+
+    /// The draws under `entity`, a model's root, and under each of its nodes, in order.
+    fn drawn(world: &World, entity: Entity) -> Vec<Option<MeshDraw>> {
+        let mut drawn = vec![world.get::<MeshDraw>(entity).copied()];
+        for child in world.children(entity).expect("alive") {
+            drawn.extend(self::drawn(world, child));
+        }
+        drawn
+    }
+
+    /// A model removed takes its meshes and images with it, noted once, and keeps its nodes, so
+    /// that a root spawned of it after spawns what one before did; but its file loads anew as
+    /// another model; and its own meshes and images aren't removed alone.
+    #[test]
+    fn a_removed_model_takes_its_meshes_and_images_and_spawns_alike() {
+        let scratch = crate::dirs::tests::Scratch::new("removed-model");
+        std::fs::create_dir_all(&scratch.0).expect("a directory");
+        let path = scratch.0.join("m.glb");
+        std::fs::write(&path, gltf::tests::model()).expect("a model");
+        let mut cx = Context::seeded(0).root(scratch.0.clone());
+        let model = cx.add_model("m", &path).expect("a model");
+        let made = cx.loaded.made[model.index()].clone();
+        assert!(!made.meshes.is_empty() && !made.images.is_empty());
+        let before = model.spawn(cx.world_mut(), Transform::IDENTITY);
+        cx.remove_model(model);
+        cx.remove_model(model);
+        let after = model.spawn(cx.world_mut(), Transform::IDENTITY);
+        let world = cx.world();
+        assert_eq!(drawn(world, after), drawn(world, before), "spawned alike");
+        assert!(
+            made.meshes.iter().all(|&mesh| !cx.meshes.remove(mesh)),
+            "its meshes gone"
+        );
+        assert!(
+            made.images
+                .iter()
+                .all(|&(image, _)| cx.assets.removed(image))
+        );
+        assert_eq!(
+            cx.assets.model("m.glb"),
+            Some(model),
+            "its name finds it still"
+        );
+        assert!(!cx.assets.has(&Asset::Model("m.glb")));
+        let note = format!("removed model {} m.glb", model.index());
+        let notes = cx.assets.added().iter().filter(|added| ***added == *note);
+        assert_eq!(notes.count(), 1, "noted once");
+
+        let anew = cx.add_model("m", &path).expect("its file again");
+        assert_ne!(anew, model);
+        assert_eq!(cx.assets.model("m.glb"), Some(anew));
+        let made = cx.loaded.made[anew.index()].clone();
+        let (mesh, image) = (made.meshes[0], made.images[0].0);
+        let alone = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cx.remove_mesh(mesh);
+        }));
+        assert!(alone.is_err(), "a model's mesh alone");
+        let alone = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cx.remove_texture(image);
+        }));
+        assert!(alone.is_err(), "a model's image alone");
+    }
+
+    /// A texture removed is watched no more: an edit of its file reads nothing of it, where one of
+    /// another texture's reads that.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_removed_texture_is_watched_no_more() {
+        let scratch = crate::dirs::tests::Scratch::new("removed-unwatched");
+        std::fs::create_dir_all(&scratch.0).expect("a directory");
+        let png = |width: u32| {
+            let pixels = vec![9; width as usize * 4];
+            image::tests::png(
+                png::ColorType::Rgba,
+                png::BitDepth::Eight,
+                width,
+                &pixels,
+                None,
+            )
+        };
+        let an_hour_ago = std::time::SystemTime::now() - Duration::from_secs(60 * 60);
+        for name in ["gone.png", "kept.png"] {
+            let path = scratch.0.join(name);
+            std::fs::write(&path, png(1)).expect("a PNG");
+            // Dated an hour back, so that each loads as it is.
+            let file = std::fs::File::options().write(true).open(path);
+            (file.and_then(|file| file.set_modified(an_hour_ago))).expect("its time");
+        }
+        let mut cx = Context::seeded(0).root(scratch.0.clone());
+        cx.hot_reload = Some(HotReload::start().expect("the thread"));
+        let gone = cx.add_texture("gone", scratch.0.join("gone.png"));
+        let gone = gone.expect("a texture");
+        let kept = cx.add_texture("kept", scratch.0.join("kept.png"));
+        let kept = kept.expect("a texture");
+        cx.remove_texture(gone);
+        for name in ["gone.png", "kept.png"] {
+            std::fs::write(scratch.0.join(name), png(2)).expect("an edit");
+        }
+        let mut read = Vec::new();
+        let until = std::time::Instant::now() + Duration::from_secs(30);
+        while !read.contains(&kept) {
+            assert!(
+                std::time::Instant::now() < until,
+                "the kept texture reads again"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+            let hot_reload = cx.hot_reload.as_ref().expect("started");
+            while let Some(reloaded) = hot_reload.take() {
+                if let Reloaded::Texture { texture, .. } = reloaded {
+                    read.push(texture);
+                }
+            }
+        }
+        assert!(!read.contains(&gone), "the removed one read again");
     }
 
     /// A sound's file added again, by another form of its path, gives the sound it gave first,

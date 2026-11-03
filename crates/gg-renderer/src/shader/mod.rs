@@ -4,6 +4,7 @@
 mod spirv;
 
 use std::any::type_name;
+use std::collections::HashSet;
 use std::fmt;
 use std::fs;
 use std::hash::{BuildHasher, RandomState};
@@ -72,19 +73,30 @@ impl<V, P> fmt::Debug for Shader<V, P> {
 /// The shaders a renderer draws meshes with, the first of them the engine's sprite shader, which
 /// the build compiled. It compiles each one added as it's added and hands out its handle, and
 /// keeps its SPIR-V until [`Uploads::take`](crate::Uploads::take) takes it, for a renderer to make
-/// its pipeline the next time it renders; a game's shader compiled again replaces it the same way.
-/// A renderer draws with the shaders of one `Shaders` only.
+/// its pipeline the next time it renders; a game's shader compiled again replaces it the same way,
+/// and a shader removed goes with them, in order. A renderer draws with the shaders of one
+/// `Shaders` only.
 pub struct Shaders {
-    /// Those added or replaced since they were last taken, in order.
-    pub(crate) added: Vec<Added>,
+    /// Those added, replaced or removed since they were last taken, in order.
+    pub(crate) changes: Vec<Change>,
     /// How many have been added.
     count: u32,
+    /// Those removed, whose handles are never given out again.
+    removed: HashSet<u32>,
     /// The handles of the engine's shaders that are added the first time they're asked for, once
     /// each has been: its model shaders, for opaque, masked and blended materials, then its circle
     /// shader, its line shader, its grid shader and its text shader.
     lazy: [Option<u32>; 7],
-    /// The games' shaders, in the order they were added.
+    /// The games' shaders, in the order they were added, less those removed.
     sources: Vec<ShaderSource>,
+}
+
+/// A change to a renderer's shaders, which [`Uploads::take`](crate::Uploads::take) carries to it.
+pub(crate) enum Change {
+    /// A shader added, or one compiled again in place of one.
+    Added(Added),
+    /// A shader removed, by its index.
+    Removed(u32),
 }
 
 pub(crate) struct Added {
@@ -282,7 +294,8 @@ impl Shaders {
     /// renderer makes its pipeline anew the next time it renders, and draws with the old one
     /// until then. It takes the place of any of that shader's SPIR-V still waiting for a
     /// renderer, as it was added or replaced. A renderer that can't make its pipeline warns, and
-    /// goes on drawing with the old one.
+    /// goes on drawing with the old one. A shader removed stays removed: one compiled again from
+    /// its source is dropped.
     ///
     /// # Panics
     ///
@@ -290,16 +303,23 @@ impl Shaders {
     /// stand for shaders of other types, which would draw meshes as though laid out as they are.
     pub fn replace(&mut self, compiled: Compiled) {
         let Compiled { source, spirv, .. } = compiled;
+        if self.removed.contains(&source.index) {
+            return;
+        }
         assert!(
             self.sources.contains(&source),
             "shader {:?} was compiled from another `Shaders`' source than the one it replaces",
             source.name
         );
-        if let Some(waiting) = (self.added.iter_mut()).find(|added| added.index == source.index) {
+        let waiting = (self.changes.iter_mut()).find_map(|change| match change {
+            Change::Added(added) if added.index == source.index => Some(added),
+            _ => None,
+        });
+        if let Some(waiting) = waiting {
             waiting.spirv = spirv;
             return;
         }
-        self.added.push(Added {
+        self.changes.push(Change::Added(Added {
             index: source.index,
             replacement: true,
             name: source.name,
@@ -307,7 +327,28 @@ impl Shaders {
             vertex_size: source.types.vertex_size,
             params_size: source.types.params_size,
             blend: source.blend,
-        });
+        }));
+    }
+
+    /// Removes `shader`: its pipeline goes once the GPU is done with the frames that draw with it,
+    /// every draw with it draws nothing from the frame that takes the removal on, and a game's
+    /// shader leaves [`sources`](Self::sources), so that it isn't compiled again. Its handle is
+    /// never given out again, so a stale one, in a world or a snapshot, never draws with another
+    /// shader. Removing one removed already does nothing.
+    ///
+    /// # Panics
+    ///
+    /// If `shader` isn't one of these shaders, as another `Shaders`' handles can be past them.
+    pub fn remove<V, P>(&mut self, shader: Shader<V, P>) {
+        assert!(
+            shader.index < self.count,
+            "shader {} is one of another `Shaders`",
+            shader.index
+        );
+        if self.removed.insert(shader.index) {
+            self.sources.retain(|source| source.index != shader.index);
+            self.changes.push(Change::Removed(shader.index));
+        }
     }
 
     /// Takes `spirv`, shader `name` compiled, which draws meshes of `types`, with its sampled
@@ -316,7 +357,7 @@ impl Shaders {
     fn push(&mut self, name: &str, spirv: Vec<u8>, blend: Blend, types: Types) -> u32 {
         let index = self.count;
         self.count += 1;
-        self.added.push(Added {
+        self.changes.push(Change::Added(Added {
             index,
             replacement: false,
             name: name.to_owned(),
@@ -324,7 +365,7 @@ impl Shaders {
             vertex_size: types.vertex_size,
             params_size: types.params_size,
             blend,
-        });
+        }));
         index
     }
 
@@ -398,8 +439,9 @@ impl Shaders {
 impl Default for Shaders {
     fn default() -> Self {
         let mut shaders = Self {
-            added: Vec::new(),
+            changes: Vec::new(),
             count: 0,
+            removed: HashSet::new(),
             lazy: [None; 7],
             sources: Vec::new(),
         };
@@ -733,6 +775,16 @@ mod tests {
             .collect()
     }
 
+    /// The shaders added or replaced, waiting to be taken, in order.
+    fn adds(shaders: &Shaders) -> Vec<&Added> {
+        (shaders.changes.iter())
+            .filter_map(|change| match change {
+                Change::Added(added) => Some(added),
+                Change::Removed(_) => None,
+            })
+            .collect()
+    }
+
     /// A directory of the test's own, emptied, and removed as the test ends, failed or not.
     struct Scratch(PathBuf);
 
@@ -788,7 +840,7 @@ mod tests {
         let error = (shaders.add::<V, P>(file, &path, Blend::Opaque)).expect_err(file);
         assert_eq!(error.code(), "renderer.shader_mismatch", "{error:#}");
         assert!(shaders.sources().is_empty(), "{file}");
-        assert_eq!(shaders.added.len(), 1, "{file}: the sprite shader alone");
+        assert_eq!(shaders.changes.len(), 1, "{file}: the sprite shader alone");
         let message = error.to_string();
         assert!(message.contains(&path.display().to_string()), "{message}");
         message
@@ -932,8 +984,8 @@ mod tests {
         let level = fixture("level.slang");
         (shaders.add::<[f32; 5], [u32; 3]>("level", &level, Blend::Alpha)).expect("a shader");
         // The sprite shader, the three model shaders and the two games'.
-        assert_eq!(shaders.added.len(), 6);
-        for added in &shaders.added {
+        assert_eq!(shaders.changes.len(), 6);
+        for added in adds(&shaders) {
             let sampled = spirv::sampled_images(&added.spirv);
             assert!(
                 !sampled.is_empty() && sampled.iter().all(|&(_, decorated)| decorated),
@@ -978,26 +1030,39 @@ mod tests {
 
         // Before a renderer takes the first, it takes the first's place; after, it's queued, and
         // the next takes its place in turn.
-        let first_spirv = shaders.added[1].spirv.clone();
+        let first_spirv = adds(&shaders)[1].spirv.clone();
         let source = source.clone();
         shaders.replace(compiled);
-        assert_eq!(shaders.added.len(), 2, "the sprite shader and the copy");
-        assert_eq!(shaders.added[1].index, shader.index);
-        assert_ne!(shaders.added[1].spirv, first_spirv);
+        assert_eq!(shaders.changes.len(), 2, "the sprite shader and the copy");
+        assert_eq!(adds(&shaders)[1].index, shader.index);
+        assert_ne!(adds(&shaders)[1].spirv, first_spirv);
         assert!(
-            !shaders.added[1].replacement,
+            !adds(&shaders)[1].replacement,
             "still the shader added, which comes next"
         );
-        shaders.added.clear();
+        shaders.changes.clear();
         shaders.replace(source.compile().expect("the shader compiles again"));
         shaders.replace(source.compile().expect("the shader compiles again"));
-        assert_eq!(shaders.added.len(), 1);
-        assert_eq!(shaders.added[0].index, shader.index);
-        assert_eq!(shaders.added[0].blend, Blend::Opaque);
+        assert_eq!(shaders.changes.len(), 1);
+        assert_eq!(adds(&shaders)[0].index, shader.index);
+        assert_eq!(adds(&shaders)[0].blend, Blend::Opaque);
         assert!(
-            shaders.added[0].replacement,
+            adds(&shaders)[0].replacement,
             "in place of the one a renderer has"
         );
+
+        // Removed, it leaves the sources, so that it isn't compiled again, and one compiled from
+        // its source already is dropped; removing it again does nothing.
+        shaders.changes.clear();
+        let compiled = source.compile().expect("the shader compiles again");
+        shaders.remove(shader);
+        shaders.remove(shader);
+        assert!(shaders.sources().is_empty());
+        assert!(matches!(shaders.changes[..], [Change::Removed(1)]));
+        shaders.replace(compiled);
+        assert_eq!(shaders.changes.len(), 1, "the replacement was dropped");
+        let found = shaders.find::<ModelVertex, model::Params>(Blend::Opaque, |_| true);
+        assert!(found.is_none(), "a removed shader isn't found");
 
         // A change that doesn't compile, and one that breaks the contract.
         fs::write(&include, "struct Vertex {").expect("the include broken");

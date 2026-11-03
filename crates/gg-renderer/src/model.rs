@@ -146,7 +146,7 @@ mod tests {
             [1, 2, 3, 1]
         );
         assert_eq!(
-            shaders.added.len(),
+            shaders.changes.len(),
             4,
             "the sprite shader and three model ones"
         );

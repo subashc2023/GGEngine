@@ -36,9 +36,7 @@ use tracing::{info, warn};
 use crate::dirs::{self, Kind};
 #[cfg(feature = "dev")]
 use crate::ecs::mix64;
-#[cfg(feature = "dev")]
-use crate::model::Made;
-use crate::model::Nodes;
+use crate::model::{Made, Nodes};
 use crate::{Font, Model, Music, Sound};
 
 /// The textures a context added, as its layers added them or where text named them, each by its
@@ -51,8 +49,11 @@ use crate::{Font, Model, Music, Sound};
 /// couldn't be loaded, by the name it stands in for. The engine's white texture has none. A
 /// context's worlds and their copies share it, and what a world loads from text finds its textures
 /// here, by a name or a path, as an entity is found by its ID: text no texture has names none, and
-/// says why it couldn't be loaded, if it was tried. In development builds it holds the asset
-/// database too, as the last scan left it.
+/// says why it couldn't be loaded, if it was tried. A texture or a model removed keeps its name and
+/// path, which its names go on finding, so that what the simulation reads doesn't change with when
+/// it was removed; but what loads by a name takes it for none, loading its file anew, and names
+/// the new one from then on. In development builds it holds the asset database too, as the last
+/// scan left it.
 #[derive(Clone, Debug)]
 pub(crate) struct Assets {
     /// Each texture's name and path, by its index.
@@ -79,7 +80,10 @@ pub(crate) struct Assets {
     /// `shader 1 2 1 shaders/colored.slang game::Colored 28 () 0 Opaque`, so that a draw comes back
     /// only where its bytes mean what they did. A file a layer adds again counts again; one that
     /// text names, loaded already, doesn't, as a run that names it otherwise, as a lockstep joiner
-    /// by its path where its host has its ID, loads it so where that run doesn't.
+    /// by its path where its host has its ID, loads it so where that run doesn't. A removal is
+    /// noted too, by the index and the path of what it removed, as `removed texture 2
+    /// assets/logo.png`, `removed model 0 models/truck.glb` and `removed mesh 3`, so that a run
+    /// restored from a snapshot removes it again, where its own assets line up.
     added: Vec<Arc<str>>,
     /// Why each texture that text named by a name no texture had couldn't be loaded, as the last
     /// try at loading such textures found it: its error's code and message, by that name, which a
@@ -94,13 +98,14 @@ pub(crate) struct Assets {
 /// A texture loaded from a file, as [`Assets`] holds it.
 #[derive(Clone, Debug)]
 struct Named {
-    /// Which it is, for [`Assets::rename`].
-    #[cfg(feature = "dev")]
+    /// Which it is.
     texture: Texture,
     /// What text names it by: its ID, or else its path.
     name: Arc<str>,
     /// The path of its file, as the first layer to add it wrote it.
     path: Arc<str>,
+    /// Whether it was removed, as [`Assets::remove_texture`] says.
+    removed: bool,
 }
 
 /// A model, as [`Assets`] holds it: named as a texture is, and what its root spawns.
@@ -109,6 +114,8 @@ struct NamedModel {
     name: Arc<str>,
     path: Arc<str>,
     nodes: Nodes,
+    /// Whether it was removed, as [`Assets::remove_model`] says.
+    removed: bool,
 }
 
 /// How many textures, models and fonts there are, the engine's white texture among them: the
@@ -200,9 +207,36 @@ impl Assets {
         Some(&named.path)
     }
 
-    /// The texture that `name` names, by its name or a path to its file, if one does.
+    /// The texture that `name` names, by its name or a path to its file, if one does: one removed
+    /// too, which its names find until another loads from its file, as the simulation finds it.
     pub(crate) fn texture(&self, name: &str) -> Option<Texture> {
         self.by_name.get(name).copied()
+    }
+
+    /// The texture that `name` names, as [`texture`](Self::texture) finds it, unless it was
+    /// removed: what a load finds loaded, rather than loading it anew.
+    pub(crate) fn live_texture(&self, name: &str) -> Option<Texture> {
+        self.texture(name).filter(|&texture| !self.removed(texture))
+    }
+
+    /// The texture of index `index`, if its file's path is `path` and it isn't removed: as a run
+    /// restored from a snapshot finds what the snapshot's run removed.
+    pub(crate) fn live_texture_at(&self, index: u32, path: &str) -> Option<Texture> {
+        let named = self.textures.get(index as usize)?.as_ref()?;
+        (&*named.path == path && !named.removed).then_some(named.texture)
+    }
+
+    /// Whether `texture` was removed.
+    pub(crate) fn removed(&self, texture: Texture) -> bool {
+        let named = self.textures.get(texture.index() as usize);
+        named.is_some_and(|named| named.as_ref().is_some_and(|named| named.removed))
+    }
+
+    /// Has `texture` count as removed from now on, keeping its name and path, as the struct says.
+    pub(crate) fn remove_texture(&mut self, texture: Texture) {
+        let named = self.textures.get_mut(texture.index() as usize);
+        let named = named.and_then(Option::as_mut);
+        named.expect("a texture of a file is named").removed = true;
     }
 
     /// How many textures, models and fonts there are, as [`Counts`] says.
@@ -273,9 +307,36 @@ impl Assets {
         &self.models[model.index()].path
     }
 
-    /// The model that `name` names, by its name or a path to its file, if one does.
+    /// The model that `name` names, by its name or a path to its file, if one does: one removed
+    /// too, as [`texture`](Self::texture) finds a texture.
     pub(crate) fn model(&self, name: &str) -> Option<Model> {
         self.model_names.get(name).copied()
+    }
+
+    /// The model that `name` names, unless it was removed, as
+    /// [`live_texture`](Self::live_texture) finds a texture.
+    pub(crate) fn live_model(&self, name: &str) -> Option<Model> {
+        self.model(name).filter(|&model| !self.model_removed(model))
+    }
+
+    /// The model of index `index`, if its file's path is `path` and it isn't removed, as
+    /// [`live_texture_at`](Self::live_texture_at) finds a texture.
+    pub(crate) fn live_model_at(&self, index: usize, path: &str) -> Option<Model> {
+        let model = self.models.get(index)?;
+        (&*model.path == path && !model.removed).then(|| Model::new(index))
+    }
+
+    /// Whether `model` was removed.
+    pub(crate) fn model_removed(&self, model: Model) -> bool {
+        self.models
+            .get(model.index())
+            .is_some_and(|model| model.removed)
+    }
+
+    /// Has `model` count as removed from now on, keeping its name, its path and what its root
+    /// spawns, as the struct says.
+    pub(crate) fn remove_model(&mut self, model: Model) {
+        self.models[model.index()].removed = true;
     }
 
     /// What `model`'s root spawns; `None` for a model these assets don't have, as one another
@@ -285,19 +346,29 @@ impl Assets {
     }
 
     /// Adds the next model, loaded from the file `path` names, named `name`, whose root spawns
-    /// `nodes`, and returns it.
+    /// `nodes`, and returns it: each named by them from now on, unless another names it already
+    /// that isn't removed.
     pub(crate) fn add_model(&mut self, path: Arc<str>, name: Arc<str>, nodes: Nodes) -> Model {
         let model = Model::new(self.models.len());
-        self.model_names.entry(name.clone()).or_insert(model);
-        self.model_names.entry(path.clone()).or_insert(model);
-        self.models.push(NamedModel { name, path, nodes });
+        self.models.push(NamedModel {
+            name: name.clone(),
+            path: path.clone(),
+            nodes,
+            removed: false,
+        });
+        self.alias_model(model, name);
+        self.alias_model(model, path);
         model
     }
 
     /// Has `path` name `model` too, added before from another path to its file, unless it names
-    /// one already.
+    /// one already that isn't removed.
     pub(crate) fn alias_model(&mut self, model: Model, path: Arc<str>) {
-        self.model_names.entry(path).or_insert(model);
+        let models = &self.models;
+        let entry = self.model_names.entry(path).or_insert(model);
+        if models[entry.index()].removed {
+            *entry = model;
+        }
     }
 
     /// Has `model`'s root spawn `nodes` from now on, as its file read again gives them.
@@ -306,21 +377,22 @@ impl Assets {
         self.models[model.index()].nodes = nodes;
     }
 
-    /// Adds `texture`, the next texture added, loaded from the file `path` names, named `name`.
+    /// Adds `texture`, the next texture added, loaded from the file `path` names, named `name`:
+    /// each naming it from now on, unless it names another already that isn't removed.
     pub(crate) fn add_texture(&mut self, texture: Texture, path: Arc<str>, name: Arc<str>) {
         assert_eq!(
             texture.index() as usize,
             self.textures.len(),
             "textures are named in the order they're added"
         );
-        self.by_name.entry(name.clone()).or_insert(texture);
-        self.by_name.entry(path.clone()).or_insert(texture);
         self.textures.push(Some(Named {
-            #[cfg(feature = "dev")]
             texture,
-            name,
-            path,
+            name: name.clone(),
+            path: path.clone(),
+            removed: false,
         }));
+        self.alias(texture, name);
+        self.alias(texture, path);
     }
 
     /// Adds `texture`, the next texture added, which no text names, as a font's field.
@@ -334,9 +406,14 @@ impl Assets {
     }
 
     /// Has `path` name `texture` too, added before from another path to its file, unless it names
-    /// one already; `texture` keeps its first path.
+    /// one already that isn't removed; `texture` keeps its first path.
     pub(crate) fn alias(&mut self, texture: Texture, path: Arc<str>) {
-        self.by_name.entry(path).or_insert(texture);
+        let textures = &self.textures;
+        let entry = self.by_name.entry(path).or_insert(texture);
+        let named = textures[entry.index() as usize].as_ref();
+        if named.is_some_and(|named| named.removed) {
+            *entry = texture;
+        }
     }
 
     /// What a refusal of text that names a texture, a model or a font, as `kind` says, `name`,
@@ -368,11 +445,11 @@ impl Assets {
         self.failed.contains_key(name)
     }
 
-    /// Whether `asset` names one loaded.
+    /// Whether `asset` names one loaded, and not removed, as a load takes it.
     pub(crate) fn has<S: AsRef<str>>(&self, asset: &Asset<S>) -> bool {
         match asset {
-            Asset::Texture(name) => self.texture(name.as_ref()).is_some(),
-            Asset::Model(name) => self.model(name.as_ref()).is_some(),
+            Asset::Texture(name) => self.live_texture(name.as_ref()).is_some(),
+            Asset::Model(name) => self.live_model(name.as_ref()).is_some(),
             Asset::Font(name) => self.font(name.as_ref()).is_some(),
         }
     }
@@ -408,10 +485,14 @@ impl Assets {
             }
             model.name = names.get(&model.path).unwrap_or(&model.path).clone();
         }
-        for (index, model) in models.iter().enumerate() {
-            model_names
-                .entry(model.name.clone())
-                .or_insert(Model::new(index));
+        // Those not removed first, as a name finds one loaded since in place of one removed.
+        for removed in [false, true] {
+            let kept = models.iter().enumerate();
+            for (index, model) in kept.filter(|(_, model)| model.removed == removed) {
+                model_names
+                    .entry(model.name.clone())
+                    .or_insert(Model::new(index));
+            }
         }
         // Every old name goes before any new one comes, as one texture may take another's.
         for named in textures.iter().flatten() {
@@ -421,7 +502,11 @@ impl Assets {
         }
         for named in textures.iter_mut().flatten() {
             named.name = names.get(&named.path).unwrap_or(&named.path).clone();
-            by_name.entry(named.name.clone()).or_insert(named.texture);
+        }
+        for removed in [false, true] {
+            for named in (textures.iter().flatten()).filter(|named| named.removed == removed) {
+                by_name.entry(named.name.clone()).or_insert(named.texture);
+            }
         }
     }
 
@@ -440,7 +525,7 @@ impl Assets {
 
 /// What the layers loaded from files, or was loaded where text named it, each by its file, as
 /// [`file_of`] resolves it, so that a file added again, by whatever form of its path, isn't loaded
-/// again.
+/// again; but for what's removed, whose file loads anew.
 #[derive(Default)]
 pub(crate) struct Loaded {
     /// Each texture's or sprite sheet's, which share it: its texture, and its size in pixels, which
@@ -450,9 +535,8 @@ pub(crate) struct Loaded {
     pub(crate) fonts: HashMap<PathBuf, Font>,
     pub(crate) sounds: HashMap<PathBuf, Sound>,
     pub(crate) music: HashMap<PathBuf, Music>,
-    /// What each model is made of on the renderer, by its index, which a reload replaces: a
-    /// stand-in's of nothing.
-    #[cfg(feature = "dev")]
+    /// What each model is made of on the renderer, by its index, which a reload replaces and a
+    /// removal removes: a stand-in's of nothing.
     pub(crate) made: Vec<Made>,
     /// Each path a shader's file was added by, which the renderer's shaders know it by, with the
     /// file it resolves to.

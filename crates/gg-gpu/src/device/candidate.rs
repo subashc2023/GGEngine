@@ -28,7 +28,15 @@ pub(super) struct Candidate {
     pub(super) graphics: Option<u32>,
     /// A queue family for uploads apart from graphics, if there is one.
     pub(super) transfer: Option<u32>,
+    /// The least a copy to or from an image moves on the graphics family's queues, and on the
+    /// transfer family's (`minImageTransferGranularity`), in texels, or in blocks of a compressed
+    /// image.
+    pub(super) graphics_granularity: vk::Extent3D,
+    pub(super) transfer_granularity: vk::Extent3D,
     pub(super) host_copy: HostCopy,
+    pub(super) memory: vk::PhysicalDeviceMemoryProperties,
+    /// Whether the driver reports each heap's budget (`VK_EXT_memory_budget`).
+    pub(super) memory_budget: bool,
     pub(super) problem: Option<String>,
 }
 
@@ -119,6 +127,13 @@ impl Candidate {
             })
             .map(|(_, index)| index);
         let transfer = transfer_family(&families);
+        let granularity = |family: Option<u32>| {
+            family
+                .and_then(|family| families.get(family as usize))
+                .map_or(vk::Extent3D::default(), |family| {
+                    family.min_image_transfer_granularity
+                })
+        };
         let extensions = device_extensions(instance, physical);
         // Host image copy's queries use Vulkan 1.3's, and a device without 1.4 is refused anyway.
         let host_copy = if properties.api_version >= REQUIRED_VERSION {
@@ -177,7 +192,11 @@ impl Candidate {
             identity: Identity::new(&properties),
             graphics,
             transfer,
+            graphics_granularity: granularity(graphics),
+            transfer_granularity: granularity(transfer),
             host_copy,
+            memory,
+            memory_budget: has_extension(&extensions, vk::EXT_MEMORY_BUDGET_NAME),
             problem,
         }
     }
@@ -431,7 +450,11 @@ mod tests {
             identity: Identity::new(&vk::PhysicalDeviceProperties::default()),
             graphics: Some(0),
             transfer: None,
+            graphics_granularity: vk::Extent3D::default(),
+            transfer_granularity: vk::Extent3D::default(),
             host_copy: HostCopy::Unsupported,
+            memory: vk::PhysicalDeviceMemoryProperties::default(),
+            memory_budget: false,
             problem: None,
         }
     }

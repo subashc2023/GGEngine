@@ -413,7 +413,7 @@ mod tests {
         };
         let mut draws = Draws::default();
         draws.extend_circles(&mut shaders, iter::empty());
-        assert_eq!(shaders.added.len(), 1, "the sprite shader alone");
+        assert_eq!(shaders.changes.len(), 1, "the sprite shader alone");
         draws.push_sprite(at(0.0), Sprite::default());
         draws.push_circle(&mut shaders, at(1.0), Circle::default());
         let mut over = Draws::default();

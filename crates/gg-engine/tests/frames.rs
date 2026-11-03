@@ -8,7 +8,8 @@
 //! camera of the world's that a pivot the ticks turn carries round, run through the engine's main
 //! loop headless, without the tool API, whose development runs' watchers of the assets' files
 //! allocate as they look, three fifths of a tick apart, so that they draw between ticks, once its
-//! first frames have run. Every frame picks what the view shows at its middle, as the frame before had
+//! first frames have run, by which every image its attach added has decoded off the main thread
+//! and everything has streamed to the GPU. Every frame picks what the view shows at its middle, as the frame before had
 //! it, and outside it, from the first on, and headless, each answer comes back in the frame it's
 //! due: four frames after the one that asked, and two for the pick outside the view, which finds
 //! nothing.
@@ -451,6 +452,10 @@ impl Layer for Scene {
         let picks = [middle, [-1.0, middle[1]]].map(|at| cx.pick(at).expect("two a frame"));
         self.asked[frame as usize % ASKED] = Some(picks);
         if self.frames == WARM_UP {
+            // What the attach added decoded and streamed to the GPU long before, so that the
+            // frames counted draw it all.
+            let loading = cx.streaming();
+            assert!(loading.is_empty(), "still on its way: {loading:?}");
             common::start();
         } else if self.frames == WARM_UP + COUNTED {
             let counted = common::stop();

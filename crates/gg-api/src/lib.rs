@@ -529,13 +529,19 @@ pub struct Capture {
 
 /// What `capture` answers: where the PNG is, its size, the view's in pixels, and the ticks the
 /// simulation had run in the frame it shows, as that frame drew them: while paused, as the last
-/// tick left the world.
+/// tick left the world. A capture waits up to 10 s for a frame in which every texture and mesh
+/// added before it has come to the GPU, rather than showing their stand-ins; past that, it takes
+/// the next frame all the same, and `streaming` says so.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Captured {
     pub path: PathBuf,
     pub width: u32,
     pub height: u32,
     pub ticks: u64,
+    /// Whether textures or meshes were still decoding or streaming to the GPU in the frame it
+    /// shows, which shows a stand-in in a texture's place, or nothing in a mesh's.
+    #[serde(default)]
+    pub streaming: bool,
 }
 
 /// What `view` takes: the name of the memory to publish the view into, as [`view::Reader::name`]

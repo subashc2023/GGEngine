@@ -90,6 +90,11 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 /// milliseconds.
 const MOST_WAIT_MS: u64 = 10_000;
 
+/// The longest a `capture` waits for a frame that shows every texture and mesh added before it,
+/// none still decoding or streaming to the GPU; past it, it takes the next frame all the same,
+/// saying so.
+const CAPTURE_WAIT: Duration = Duration::from_secs(10);
+
 /// The levels of `tracing`, in the order [`gg_api::LEVELS`] names them.
 const LEVELS: [Level; 5] = [
     Level::ERROR,
@@ -164,12 +169,14 @@ struct Listing {
     take: usize,
 }
 
-/// A `capture` waiting for its frame: where its answer goes, where its PNG goes, and whether it's
-/// of the game's own view, which a bare frame shows.
+/// A `capture` waiting for its frame: where its answer goes, where its PNG goes, whether it's of
+/// the game's own view, which a bare frame shows, and when it came, which it waits from, as
+/// [`CAPTURE_WAIT`] says.
 struct Capturing {
     reply: Reply,
     path: Option<PathBuf>,
     own: bool,
+    since: Instant,
 }
 
 /// What an edit or a patch offered to a lockstep session was asked as, which its answer reads as.
@@ -295,11 +302,13 @@ struct Taken {
 }
 
 /// A capture's PNG for the thread that writes them: the view, where it goes, the ticks the frame
-/// that shows it had run, and where the answer goes.
+/// that shows it had run, whether textures or meshes were still decoding or streaming in it, and
+/// where the answer goes.
 struct Png {
     shot: Arc<Shot>,
     path: PathBuf,
     ticks: u64,
+    streaming: bool,
     reply: Reply,
 }
 
@@ -611,7 +620,12 @@ impl Api {
                     let until = stepper.ticks + stepper.steps();
                     self.steps.push((reply, until));
                 }
-                Call::Capture { path, own } => self.asked.push(Capturing { reply, path, own }),
+                Call::Capture { path, own } => self.asked.push(Capturing {
+                    reply,
+                    path,
+                    own,
+                    since: Instant::now(),
+                }),
                 // A second writer of the memory would write the slot the first holds.
                 Call::View(memory) if memory.is_some() && memory == self.memory => {
                     reply.send(Ok("{}".to_owned()));
@@ -940,13 +954,15 @@ impl Api {
     }
 
     /// With the renderer back from a frame, `frame`, takes the view it read back, if it rode with
-    /// captures and rendered, for a thread of its own to write each capture's PNG and answer it;
-    /// answers the picks whose answers came back into `cx`, each naming its entity as `cx`'s world
-    /// does now; and has the next frame handed off, which `cx` made and shows the world after
-    /// `ticks` ticks, read its view back for the captures of its kind, bare or not, asked since,
-    /// and for those whose frame had nothing to render into, and publish it to the memory a `view`
-    /// asked for, unless it's bare, warning once of a frame that wasn't, since the view was asked
-    /// for.
+    /// captures and rendered, for a thread of its own to write each capture's PNG and answer it:
+    /// if every texture and mesh added before it is there in the frame, none decoding or streaming
+    /// still, and otherwise only for those that have waited [`CAPTURE_WAIT`] since they came,
+    /// saying so, the rest riding on with the next; answers the picks whose answers came back into
+    /// `cx`, each naming its entity as `cx`'s world does now; and has the next frame handed off,
+    /// which `cx` made and shows the world after `ticks` ticks, read its view back for the captures
+    /// of its kind, bare or not, asked since, and for those whose frame had nothing to render
+    /// into, or showed what was still on its way, and publish it to the memory a `view` asked
+    /// for, unless it's bare, warning once of a frame that wasn't, since the view was asked for.
     pub(crate) fn frame_back(&mut self, frame: &mut Extracted, cx: &Context, ticks: u64) {
         if let Some(viewing) = self.viewing.take() {
             frame.publish = viewing.map(|writer| Publish {
@@ -971,7 +987,12 @@ impl Api {
         match frame.captured.take() {
             Some(Ok(shot)) => {
                 let shot = Arc::new(shot);
-                for Capturing { reply, path, .. } in self.riding.drain(..) {
+                let streaming = frame.loading > 0 || !frame.streaming.is_empty();
+                let now = Instant::now();
+                let taken = (self.riding).extract_if(.., |capturing| {
+                    !streaming || now.duration_since(capturing.since) >= CAPTURE_WAIT
+                });
+                for Capturing { reply, path, .. } in taken {
                     let path = path.unwrap_or_else(|| {
                         self.numbered += 1;
                         let name = format!("{}-{}.png", self.stem, self.numbered);
@@ -981,6 +1002,7 @@ impl Api {
                         shot: shot.clone(),
                         path,
                         ticks: self.riding_ticks,
+                        streaming,
                         reply,
                     };
                     // The thread runs until the API drops.
@@ -1927,6 +1949,7 @@ fn write_pngs(pngs: &Receiver<Png>) {
             width,
             height,
             ticks: png.ticks,
+            streaming: png.streaming,
         });
         match written {
             Ok(captured) => png.reply.result(&captured),
@@ -2301,6 +2324,7 @@ mod tests {
 
     use gg_api::{Client, LogEvents, Session};
     use gg_core::math::Mat4;
+    use gg_renderer::Streaming;
     use serde_json::json;
 
     use super::*;
@@ -4128,6 +4152,7 @@ mod tests {
                 reply: Reply { id, to: to.clone() },
                 path: Some(dir.0.join(format!("{id}.png"))),
                 own,
+                since: Instant::now(),
             });
         }
         let reply = Reply { id: 3, to };
@@ -4176,6 +4201,66 @@ mod tests {
             "the game's own view bare, the other as it's shown"
         );
         drop(reader);
+    }
+
+    /// A capture rides on with frame after frame that shows a texture still decoding, or meshes
+    /// and textures still streaming, until one shows everything, which it takes, saying nothing
+    /// was on its way; one that has waited past its bound takes the next frame that brings the view
+    /// back all the same, saying something was.
+    #[test]
+    fn a_capture_waits_within_its_bound_for_assets_to_stream() {
+        let (mut api, _) = started("Api Streaming Captures");
+        let mut cx = Context::seeded(12);
+        let mut stepper = Stepper::default();
+        let mut frame = Extracted::default();
+        let dir = Scratch::new("api-streaming-capture");
+        fs::create_dir_all(&dir.0).expect("a directory");
+        let (to, answers) = mpsc::channel();
+        let past = CAPTURE_WAIT + Duration::from_secs(1);
+        let long_ago = Instant::now()
+            .checked_sub(past)
+            .expect("a time that long ago");
+        for (id, since) in [(1, long_ago), (2, Instant::now())] {
+            api.asked.push(Capturing {
+                reply: Reply { id, to: to.clone() },
+                path: Some(dir.0.join(format!("{id}.png"))),
+                own: false,
+                since,
+            });
+        }
+        // The answer that comes next: its capture's ID, and whether it says what it shows was
+        // still on its way.
+        let answer = |timeout| {
+            let line = answers.recv_timeout(timeout).ok()?;
+            let answer: Value = serde_json::from_str(&line).expect("an answer's JSON");
+            let id = answer["id"].as_u64().expect("its ID");
+            Some((id, answer["result"]["streaming"].as_bool()))
+        };
+        // As the renderer reads back the view of each frame that rides with captures: three with a
+        // texture decoding or meshes streaming, then one with nothing on its way.
+        for (loading, streaming) in [(1, 0), (0, 2), (1, 2), (0, 0)] {
+            api.serve(&mut cx, &mut Stack::default(), &mut stepper);
+            api.frame_back(&mut frame, &cx, stepper.ticks);
+            assert!(frame.capture, "a capture rides with the frame");
+            frame.loading = loading;
+            frame.streaming = Streaming {
+                assets: streaming,
+                bytes: 64 * streaming as u64,
+            };
+            frame.captured = Some(Ok(Shot {
+                size: [1, 1],
+                pixels: vec![0; 4],
+            }));
+        }
+        assert_eq!(answer(DEADLINE), Some((1, Some(true))), "past its bound");
+        assert_eq!(answer(Duration::from_millis(200)), None, "waiting still");
+        api.frame_back(&mut frame, &cx, stepper.ticks);
+        assert_eq!(
+            answer(DEADLINE),
+            Some((2, Some(false))),
+            "once nothing is on its way"
+        );
+        assert!(!frame.capture, "nothing rides once both are answered");
     }
 
     /// A client's pick is answered with the entity drawn at its pixel of the view, about as the

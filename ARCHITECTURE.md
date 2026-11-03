@@ -328,7 +328,9 @@ in the editor is out of an agent's reach.
   so that they're answered while a script has stopped and the main thread waits there. The main
   loop answers the rest as each frame starts,
   before its ticks: a step once its ticks have run, a capture once the render thread has read the
-  frame's view back, without the UI, which a thread of the API's writes as a PNG, and a snapshot
+  frame's view back, without the UI, which a thread of the API's writes as a PNG, from the first
+  frame with no image decoding and nothing streaming, so that an agent sees no stand-ins, or after
+  10 s, saying it still streamed (`streaming`), and a snapshot
   once a thread of the API's has written the copy of the world the main loop took, but none before
   the first tick of a game playing from its start, which applies what the layers queued as they
   started. Paused, frames run no ticks but those a step asks for, and draw the world as the last
@@ -584,8 +586,18 @@ A project's state is text that people and agents edit, diff and merge with ordin
     file's save names before it offers it, so that their names go out first, and offers none
     naming an asset it can't load; a joiner loads for its tool API only what its host named
     (`asset.not_given`). Scene text that a layer loads into a world itself, as inside a tick, finds
-    only what's loaded. Each decodes, or bakes, on the main thread as it's named, as a layer's add
-    does.
+    only what's loaded. Each is read, and a font baked, on the main thread as it's named, as a
+    layer's add does, a texture's pixels decoding after, as [Rendering](#rendering) says.
+  - A layer removes a texture, a mesh or a model it added (`Context::remove_texture`,
+    `remove_mesh`, `remove_model`, a model's meshes and images with it), freeing its memory, but
+    changes nothing the simulation reads: the asset keeps its name, which still finds it inside
+    ticks, and a model its nodes, so that a world's hash, scenes and recordings don't depend on when
+    a layer removed it, and a stale handle draws a stand-in or nothing. What loads an asset, a
+    layer's add or text that names it, takes a removed one for absent, and loads its file anew under
+    a new handle, which its name then finds; a watched file is watched no more. A snapshot notes the
+    removals among the assets its run added, in order, so that a run restored from it, or a lockstep
+    joiner, adds and removes what that run did, and its handles, and the `MeshDraw`s holding them,
+    line up. Shaders, fonts and the engine's own assets aren't removed.
   - A run from a package names each asset by the ID the package gives it, as a development run
     names it by its ID file. A build without `dev` and without a project, as the player is until it
     runs a package's scenes, reads no ID file, and names every asset by its path, so that a scene,
@@ -1077,7 +1089,8 @@ what's drawn there or nearer, so that at one depth the later goes over, as 2D dr
 
 Layers add shaders, meshes and textures and draw them through their `Context`, and the renderer's
 `Shaders`, `Meshes` and `Textures` hand out their handles at once, on the main thread; each frame's
-render data carries what's been added to them, or replaced in them, since, in order. After the
+render data carries what's been added to them, replaced in them or removed from them since, in
+order. After the
 frame's ticks and the layers' updates, the engine draws the world's entities that have a `Transform`
 and a sprite, a circle, a `Text` or a `MeshDraw`, a mesh with its shader and parameters held without
 their types, after what the layers drew, children where their ancestors carry them: first the
@@ -1132,8 +1145,8 @@ camera.
 A game's shader is a Slang file that the engine compiles with slangc as a layer adds it, so one that
 doesn't compile fails there, with slangc's diagnostics naming the file and line; the renderer makes
 its pipeline the next time it renders. A mesh's vertices are any `#[repr(C)]` type without padding,
-with glam's vectors and matrices among its fields, and the next frame that renders copies them and
-the indices into GPU memory, where they stay. Shaders read vertices through their buffer's address
+with glam's vectors and matrices among its fields, which stream into GPU memory with the indices,
+as below, where they stay until the mesh is removed. Shaders read vertices through their buffer's address
 rather than through vertex input, and Slang lays out what a pointer points at as `#[repr(C)]` does,
 so a mesh's layout is between its vertex type and the shader's struct for it; draws take the
 indices. A shader is added for a vertex type and a type of parameters, such as a color, which each
@@ -1157,11 +1170,10 @@ includes as slangc lists them, a texture's image, a model's glTF file and the bu
 names, and a font's file, by their times and lengths every tenth of a second, and reads the asset
 again as they change and then hold for a look, off the main thread: compiles the shader, decodes the
 image, reads the model, bakes the font. As the next frame starts, the main thread puts what it read
-in place of the asset, under the same handle, so that whatever draws it draws what's new from that
-frame: a shader's old pipeline and a mesh's old buffers retire until the GPU is done with them, and
-a texture's new image takes its slot in the bindless set once the GPU has finished the frames
-before, which may sample the old, so the frame that takes it waits for them, a frame's time at
-most. A texture takes an image of any size,
+in place of the asset, under the same handle: a shader draws with its new pipeline from that frame,
+the old retiring until the GPU is done with it, and a mesh's or a texture's new bytes stream as any
+asset's do, below, whatever draws it drawing what it had until they can draw, and then what's new,
+without waiting for the frames before. A texture takes an image of any size,
 but one cut into a sprite sheet, whose cells a layer has where its size put them, keeps drawing as
 it did rather than take one of another (`asset.sheet_resized`). A model takes each primitive's
 vertices and indices and each image, which its entities draw at once, and its nodes and materials,
@@ -1187,20 +1199,29 @@ the renderer starts and save as it ends, so that pipelines an earlier run made a
 fraction of the time. Headless runs, replays and tests use none, as they keep no layout, so that
 their startup times compare.
 
-A game's texture is a PNG or a JPEG that the engine decodes as a layer adds it, or as text names it,
-as [Project state](#project-state) says, to RGBA8 with colors sRGB-encoded and alpha not multiplied
-into them, as images store them, whatever color profile or gamma the file holds, as glTF requires;
-the next frame that renders copies it into GPU memory, where it stays, and shaders sample its colors
-decoded to linear. A run from a game's package reads it as the cooker compressed it instead, BC7 of
-those colors, which stays compressed in GPU memory, a quarter of RGBA8's size, and which the GPU
-decodes as shaders sample it. The engine reads a texture, a model, a
+A game's texture is a PNG or a JPEG that the engine decodes to RGBA8 with colors sRGB-encoded and
+alpha not multiplied into them, as images store them, whatever color profile or gamma the file
+holds, as glTF requires; it streams into GPU memory, as below, where it stays until it's removed,
+and shaders sample its colors decoded to linear. A run from a game's package reads it as the cooker
+compressed it instead, BC7 of those colors, which stays compressed in GPU memory, a quarter of
+RGBA8's size, and which the GPU decodes as shaders sample it. What the simulation reads of a texture
+is its handle and its size, as a sprite sheet's cells are cut by it, so a run reads its file and its
+header on the main thread as a layer adds it, or as text names it, as [Project
+state](#project-state) says, which hands out the handle at once, and a file that's missing or isn't
+an image of a size the engine takes fails there; its pixels, PNG's and JPEG's or the package's
+levels supercompressed by zstd, decode on a thread of their own, `gg-load`, one at a time in the
+order they came, and fill the texture as a frame starts, which shows its stand-in until then. Pixels
+that don't decode warn (`engine.bad_texture`), and the texture keeps its stand-in until its file,
+still watched, reads again; the cooker refuses them, so a package holds none. A test's context and a
+replay's decode on the main thread as they add, as nothing draws them, failures warning alike, so
+that a replay goes as its run did. The engine reads a texture, a model, a
 scene, a layout or the pipeline cache only from a regular file, so that a FIFO or a device can
 neither hang the read nor fill memory; `--replay` alone reads its recording from whatever it's
 given, so that it can come through a pipe. A texture's handle is its index in the bindless set,
 which a draw's parameters carry as it is and the shader samples by, with one of the engine's
 samplers, which it picks by its index too. A model's textures have their full chains of mip levels,
-which the CPU makes as the frame that copies them renders, or, from a package, the cooker made the
-same way. A layer that adds a
+which `gg-load` makes as it decodes them, the render thread for a model's images read again or in
+a test's context, or, from a package, the cooker made the same way. A layer that adds a
 file again, by whatever form of its path, as a texture or a sprite sheet, a model, or a shader of
 the same vertex and parameter types and blend, gets what the first add made, the file loaded once,
 as the OS resolves `.`, `..`, links and, where names ignore it, case; a texture keeps the path it
@@ -1209,10 +1230,31 @@ state](#project-state) says. A path is as the layer wrote it, rather than as the
 which a file system that ignores case keeps as an editor last saved it, so that every checkout of a
 game names its files alike.
 
-Meshes and textures reach GPU memory the best way the device has, as gg-gpu's `UploadPath` says:
-beside the frames the GPU renders, through a queue apart from graphics, where the device has one.
-Whichever way, the frame that takes them waits for their copies and draws them, and what staged them
-is freed once that frame has finished, so that adding assets holds no memory past their own.
+Meshes and textures stream into GPU memory: each frame copies at most 16 MiB of them, in the order
+they came, and leaves the rest to the frames after. One larger than what's left of a frame's budget
+goes in parts, a buffer by ranges of bytes and a texture by whole rows of one level, or its smallest
+levels together, so that every frame copies something and what stages them holds about a frame's
+budget. They go the best way the device has, as gg-gpu's `UploadPath` says: through a queue apart
+from graphics, where the device has one, whose copies no frame waits for, an asset drawing from the
+first frame that begins once its last part has been copied, which takes it over from that queue,
+and a frame that begins with two frames' copies still running there copying nothing, so that what's
+in flight stays bounded however fast frames come;
+otherwise in the frame's own commands, or from the CPU, drawing in the frame that copies its last
+part. Until then a texture's slot in the bindless set shows a stand-in, a white texel for colors and
+a texel of zeros for data, so that text draws nothing, and a mesh draws nothing; one replaced, as a
+reload replaces it, draws what it had until what's new can draw. There's a bindless set for each
+frame in flight, so that a slot that changes, as a texture shows its own image or another, changes
+at once in the set of the frame being recorded and in the other as its next frame begins, once the
+frame before has finished with it: no frame waits for those before it. What staged an asset, and
+what's retired, is freed once the frames and the copies that may use it have finished. An asset
+waits too while making it would take the GPU's memory past the budget its driver gives
+(`VK_EXT_memory_budget`, where the device has it), warning once (`renderer.over_budget`), while those
+after it go on, and goes on itself once removals make room; but while nothing else is copying, the
+oldest waiting goes ahead alone, so that a game still comes up on a GPU that other processes have
+taken past its budget. One whose memory can't be had at all waits likewise
+(`renderer.out_of_memory`), rather than ending the renderer. A mesh, texture or shader removed is
+freed once the GPU is done with it, and its handle is never given out again: a removed texture's
+slot shows its stand-in, and a removed mesh or shader draws nothing.
 
 A camera is an entity with a `Camera` and a `Transform`. Its projection, orthographic, as 2D games
 use, or perspective, fits the view's aspect ratio, so that nothing stretches as the dock resizes the
@@ -1375,6 +1417,12 @@ out a window's handle only on its own thread, and macOS closes a window there, s
 makes and drops the renderer's surfaces, and the render thread never holds the last reference to a
 window. An error while rendering comes back with the renderer and ends the run, and a panic resumes
 on the main thread.
+
+A run decodes images on a thread of its own, `gg-load`, which the main thread hands each texture's
+bytes as its handle goes out and takes the pixels back from as each frame starts, so that neither a
+layer's add nor a tick that names an asset waits for a decode. The thread starts with the first
+image, and ends once the run drops it, after the decode under way; a panic there resumes on the main
+thread, and a thread that can't start leaves the main thread to decode, warning (`engine.loader`).
 
 ## Platforms
 

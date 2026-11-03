@@ -1,5 +1,7 @@
-//! Images that layers load as textures, and models' images: PNGs and JPEGs, decoded to the RGBA8
-//! that the renderer takes; and in a game's package, BC7 in KTX2, as the cooker compressed them.
+//! Images that layers load as textures, and models' images: PNGs and JPEGs, read as far as their
+//! headers as they're added, which give their sizes, and decoded to the RGBA8 that the renderer
+//! takes apart from that, as the loader decodes them off the main thread; and in a game's package,
+//! BC7 in KTX2, as the cooker compressed them, read and taken out of its supercompression alike.
 
 use std::io::Cursor;
 use std::panic::{self, AssertUnwindSafe};
@@ -28,7 +30,8 @@ pub struct Image {
     pub format: Format,
 }
 
-/// What an [`Image`]'s pixels are.
+/// What an [`Image`]'s pixels are: decoded, or a file read as far as its header, which the
+/// engine's loader decodes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
     /// Rows of RGBA8, tightly packed, top row first, of one level, as a PNG or a JPEG decodes.
@@ -37,6 +40,14 @@ pub enum Format {
     /// `mipmapped`, of each level of its full chain, which the cooker made, as [`Texels::Bc7`]
     /// takes them.
     Bc7 { mipmapped: bool },
+    /// A PNG's file, whose header read, which decodes to RGBA8.
+    Png,
+    /// A JPEG's file, whose headers read and which reaches its end, which decodes to RGBA8.
+    Jpeg,
+    /// A KTX2 file as the cooker writes one, whose header and levels' lengths read, of BC7 of its
+    /// first level alone or, if `mipmapped`, of its full chain, each level supercompressed by zstd
+    /// if `zstd`, which decodes to its levels' blocks.
+    Ktx2 { mipmapped: bool, zstd: bool },
 }
 
 impl Image {
@@ -44,17 +55,65 @@ impl Image {
     /// says, or the levels it was cooked with.
     pub(crate) fn texels(&self, mipmaps: Mipmaps) -> Texels {
         match self.format {
-            Format::Rgba8 => Texels::Color(mipmaps),
-            Format::Bc7 { mipmapped } => Texels::Bc7 { mipmapped },
+            Format::Rgba8 | Format::Png | Format::Jpeg => Texels::Color(mipmaps),
+            Format::Bc7 { mipmapped } | Format::Ktx2 { mipmapped, .. } => Texels::Bc7 { mipmapped },
         }
+    }
+
+    /// How many bytes its pixels take once they're decoded: RGBA8 of its size, or each level's BC7
+    /// blocks, as reading a model counts what it will hold.
+    pub(crate) fn decoded_len(&self) -> usize {
+        match self.format {
+            Format::Rgba8 | Format::Png | Format::Jpeg => {
+                let [width, height] = self.size.map(|side| side as usize);
+                width * height * 4
+            }
+            Format::Bc7 { mipmapped } | Format::Ktx2 { mipmapped, .. } => {
+                let levels = if mipmapped { usize::MAX } else { 1 };
+                let [width, height] = self.size;
+                mip_sizes(width, height).take(levels).map(blocks).sum()
+            }
+        }
+    }
+
+    /// It decoded, from the file it was read from as far as its header: a PNG or a JPEG to RGBA8,
+    /// as [`read`] says, and a KTX2 file to its levels' blocks, taken out of zstd where they're
+    /// supercompressed; itself if it's decoded already. The error says what's wrong with it.
+    ///
+    /// Fails for a file whose header read but whose pixels don't decode, as one cut short or
+    /// corrupt past its header, and for one that decodes to another size than its header said.
+    pub(crate) fn decoded(self) -> Result<Image, String> {
+        let decode: fn(&[u8]) -> Result<Image, String> = match self.format {
+            Format::Rgba8 | Format::Bc7 { .. } => return Ok(self),
+            Format::Png => decode_png,
+            Format::Jpeg => decode_jpeg,
+            Format::Ktx2 { .. } => decode_ktx2_levels,
+        };
+        // As its header's read is, in `read` and `read_ktx2`.
+        let decoded = panic::catch_unwind(|| decode(&self.pixels))
+            .unwrap_or_else(|_| Err("its decoder panicked on it".to_owned()))?;
+        if decoded.size != self.size {
+            let [[width, height], [was_width, was_height]] = [decoded.size, self.size];
+            return Err(format!(
+                "it decodes to {width}x{height} pixels, where its header says {was_width}x\
+                 {was_height}"
+            ));
+        }
+        Ok(decoded)
     }
 }
 
-/// Reads the image file at `path` from `files`, which is texture `name`'s: a PNG or a JPEG on the
-/// disk, or, from the game's package, the texture the cooker made of one.
+/// A BC7 level's blocks of 4 by 4 texels, 16 bytes each, which cover its edges, in bytes.
+fn blocks([width, height]: [u32; 2]) -> usize {
+    (width.div_ceil(4) as usize) * (height.div_ceil(4) as usize) * 16
+}
+
+/// Reads the image file at `path` from `files`, which is texture `name`'s, as far as its header,
+/// which gives its size, as [`read`] and [`read_ktx2`] say: a PNG or a JPEG on the disk, or, from
+/// the game's package, the texture the cooker made of one. [`decode_texture`] decodes it.
 ///
 /// Fails with `engine.bad_texture` if the file can't be read or isn't a regular file, or doesn't
-/// decode as either; or if the package hasn't it as a texture, or holds one that doesn't read as
+/// read as either; or if the package hasn't it as a texture, or holds one that doesn't read as
 /// the cooker writes them.
 pub(crate) fn load_image(name: &str, path: &Path, files: &Files) -> Result<Image> {
     let zone = gg_core::zone!();
@@ -65,28 +124,52 @@ pub(crate) fn load_image(name: &str, path: &Path, files: &Files) -> Result<Image
             format!("texture {name:?} at {} {problem}", path.display()),
         )
     };
-    // A byte past the most an image's file holds, so that a longer one fails to decode.
+    // A byte past the most an image's file holds, so that a longer one fails to read.
     let bytes = (files.read_as(path, Kind::Texture, MAX_FILE + 1))
         .map_err(|error| bad("can't be read".to_owned()).with_source(error))?;
     if files.packaged().is_some() {
-        let read = decode_ktx2(&bytes);
+        let read = read_ktx2(bytes);
         return read.map_err(|problem| bad(format!("doesn't read as a cooked texture: {problem}")));
     }
-    decode(&bytes).map_err(|problem| bad(format!("doesn't decode as a PNG or a JPEG: {problem}")))
+    read(bytes).map_err(|problem| bad(format!("doesn't decode as a PNG or a JPEG: {problem}")))
 }
 
-/// Reads a texture as the cooker writes it, into a game's package or a model it cooked: KTX2
-/// holding BC7 of sRGB-encoded colors, of a 2D image of one level or of the full chain of levels
+/// `image`, texture `name`'s from `path`, as [`load_image`] read it, decoded, as
+/// [`Image::decoded`] decodes it.
+///
+/// Fails with `engine.bad_texture`, naming the texture and its file, if it doesn't decode.
+pub(crate) fn decode_texture(name: &str, path: &Path, image: Image) -> Result<Image> {
+    let what = match image.format {
+        Format::Ktx2 { .. } | Format::Bc7 { .. } => "doesn't read as a cooked texture",
+        Format::Png | Format::Jpeg | Format::Rgba8 => "doesn't decode as a PNG or a JPEG",
+    };
+    image.decoded().map_err(|problem| {
+        let message = format!("texture {name:?} at {} {what}: {problem}", path.display());
+        Error::new("engine.bad_texture", message)
+    })
+}
+
+/// Reads a texture as the cooker writes it, into a game's package or a model it cooked, its header
+/// and its levels' lengths, then takes its levels out, as a run's loader does: KTX2 holding BC7 of
+/// sRGB-encoded colors, of a 2D image of one level or of the full chain of levels [`mip_sizes`]
+/// gives, each level as it is or supercompressed by zstd. The error says what's wrong with it.
+pub fn decode_ktx2(bytes: &[u8]) -> Result<Image, String> {
+    read_ktx2(bytes.to_vec())?.decoded()
+}
+
+/// Reads a texture as the cooker writes it, as [`decode_ktx2`] says, as far as its header and its
+/// levels' lengths, keeping `bytes` for [`Image::decoded`] to take its levels out of: KTX2 holding
+/// BC7 of sRGB-encoded colors, of a 2D image of one level or of the full chain of levels
 /// [`mip_sizes`] gives, each level as it is or supercompressed by zstd. The error says what's
 /// wrong with it.
 ///
 /// Fails before anything is allocated for the pixels if a side is 0 or more than
 /// [`MAX_TEXTURE_SIZE`], which bounds what is.
-pub fn decode_ktx2(bytes: &[u8]) -> Result<Image, String> {
+pub(crate) fn read_ktx2(bytes: Vec<u8>) -> Result<Image, String> {
     // ktx2 (0.5.0) checks a file's sections against its length, but panics on a data format
     // descriptor that gives a block's side as 256: that's the file's doing, as with zune-jpeg's
     // panics below.
-    let reader = match panic::catch_unwind(|| ktx2::Reader::new(bytes)) {
+    let reader = match panic::catch_unwind(|| ktx2::Reader::new(&bytes[..])) {
         Ok(Ok(reader)) => reader,
         Ok(Err(error)) => return Err(format!("it isn't KTX2: {error}")),
         Err(_) => return Err("its reader panicked on it".to_owned()),
@@ -115,13 +198,8 @@ pub fn decode_ktx2(bytes: &[u8]) -> Result<Image, String> {
         Some(ktx2::SupercompressionScheme::Zstandard) => true,
         Some(other) => return Err(format!("its levels are supercompressed by {other:?}")),
     };
-    // A level's blocks of 4 by 4 texels, 16 bytes each, which cover its edges.
-    let blocks = |[width, height]: [u32; 2]| {
-        (width.div_ceil(4) as usize) * (height.div_ceil(4) as usize) * 16
-    };
-    let sizes = || mip_sizes(size[0], size[1]).take(reader.levels().len());
-    let mut pixels = Vec::with_capacity(sizes().map(blocks).sum());
-    for (i, (level, size)) in reader.levels().zip(sizes()).enumerate() {
+    let sizes = mip_sizes(size[0], size[1]).take(reader.levels().len());
+    for (i, (level, size)) in reader.levels().zip(sizes).enumerate() {
         let len = blocks(size);
         if level.uncompressed_byte_length != len as u64 {
             return Err(format!(
@@ -129,8 +207,37 @@ pub fn decode_ktx2(bytes: &[u8]) -> Result<Image, String> {
                 level.uncompressed_byte_length
             ));
         }
-        let at = pixels.len();
+        if !zstd && level.data.len() != len {
+            return Err(format!(
+                "its level {i} has {} bytes, not the {len} of its blocks",
+                level.data.len()
+            ));
+        }
+    }
+    Ok(Image {
+        size,
+        pixels: bytes,
+        format: Format::Ktx2 { mipmapped, zstd },
+    })
+}
+
+/// Takes the levels' blocks of `bytes`, a KTX2 file that [`read_ktx2`] read, out of zstd where it
+/// supercompressed them.
+fn decode_ktx2_levels(bytes: &[u8]) -> Result<Image, String> {
+    let reader = ktx2::Reader::new(bytes).map_err(|error| format!("it isn't KTX2: {error}"))?;
+    let header = reader.header();
+    let size = [header.pixel_width, header.pixel_height];
+    // Of one level or the full chain, as read; and of zstd alone, if supercompressed at all.
+    let (mipmapped, zstd) = (
+        header.level_count > 1,
+        header.supercompression_scheme.is_some(),
+    );
+    let sizes = || mip_sizes(size[0], size[1]).take(reader.levels().len());
+    let mut pixels = Vec::with_capacity(sizes().map(blocks).sum());
+    for (i, (level, size)) in reader.levels().zip(sizes()).enumerate() {
+        let len = blocks(size);
         if zstd {
+            let at = pixels.len();
             pixels.resize(at + len, 0);
             let written = zstd::bulk::decompress_to_buffer(level.data, &mut pixels[at..])
                 .map_err(|error| format!("its level {i} doesn't decompress: {error}"))?;
@@ -139,13 +246,8 @@ pub fn decode_ktx2(bytes: &[u8]) -> Result<Image, String> {
                     "its level {i} decompresses to {written} bytes, not {len}"
                 ));
             }
-        } else if level.data.len() == len {
-            pixels.extend_from_slice(level.data);
         } else {
-            return Err(format!(
-                "its level {i} has {} bytes, not the {len} of its blocks",
-                level.data.len()
-            ));
+            pixels.extend_from_slice(level.data);
         }
     }
     Ok(Image {
@@ -155,21 +257,24 @@ pub fn decode_ktx2(bytes: &[u8]) -> Result<Image, String> {
     })
 }
 
-/// Decodes a PNG or a JPEG, which it tells apart by their first bytes, whatever a file's name or a
-/// model says it is, to RGBA8. Color profiles and gamma are ignored, as glTF requires, so colors are
-/// taken as sRGB-encoded. The error says what's wrong with the image.
+/// Reads a PNG or a JPEG, which it tells apart by their first bytes, whatever a file's name or a
+/// model says it is, as far as its header, which gives its size, keeping `bytes` for
+/// [`Image::decoded`] to decode to RGBA8: color profiles and gamma are ignored, as glTF requires,
+/// so colors are taken as sRGB-encoded. The error says what's wrong with the image.
 ///
-/// Fails before anything is allocated for the pixels if a side is 0 or more than
-/// [`MAX_TEXTURE_SIZE`], since no texture can be, and if there are more than [`MAX_FILE`] bytes.
-pub(crate) fn decode(bytes: &[u8]) -> Result<Image, String> {
+/// Fails before anything is decoded if a side is 0 or more than [`MAX_TEXTURE_SIZE`], since no
+/// texture can be, if there are more than [`MAX_FILE`] bytes, and for a JPEG that ends before its
+/// end-of-image marker; what's past the header, such as a PNG's compressed rows, fails only as it
+/// decodes.
+pub(crate) fn read(bytes: Vec<u8>) -> Result<Image, String> {
     if bytes.len() as u64 > MAX_FILE {
         return Err(format!("it's more than {} MiB", MAX_FILE >> 20));
     }
-    let decode = || {
+    let read = || {
         if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-            decode_png(bytes)
+            read_png(&bytes).map(|size| (size, Format::Png))
         } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
-            decode_jpeg(bytes)
+            read_jpeg(&bytes).map(|size| (size, Format::Jpeg))
         } else {
             Err("it starts with neither a PNG's signature nor a JPEG's".to_owned())
         }
@@ -177,8 +282,13 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Image, String> {
     // zune-jpeg can panic on a malformed file, as its README allows, and png only by a bug: either
     // way that's the file's doing, not the engine's, so the image fails as one that doesn't decode
     // does. gg-core's panic hook still logs the panic as it happens.
-    panic::catch_unwind(AssertUnwindSafe(decode))
-        .unwrap_or_else(|_| Err("its decoder panicked on it".to_owned()))
+    let (size, format) = panic::catch_unwind(AssertUnwindSafe(read))
+        .unwrap_or_else(|_| Err("its decoder panicked on it".to_owned()))?;
+    Ok(Image {
+        size,
+        pixels: bytes,
+        format,
+    })
 }
 
 /// Fails unless each side is 1 to [`MAX_TEXTURE_SIZE`] pixels, as every texture's is.
@@ -193,13 +303,30 @@ fn check_size(width: u32, height: u32) -> Result<(), String> {
     }
 }
 
+/// A PNG's decoder, which expands whatever the file holds to RGBA or gray with alpha, 8 bits a
+/// sample.
+fn png_decoder(bytes: &[u8]) -> png::Decoder<Cursor<&[u8]>> {
+    let mut decoder = png::Decoder::new(Cursor::new(bytes));
+    decoder.set_transformations(png::Transformations::ALPHA | png::Transformations::STRIP_16);
+    decoder
+}
+
+/// Reads a PNG's chunks up to its first compressed rows, which hold its pixels: its size.
+fn read_png(bytes: &[u8]) -> Result<[u32; 2], String> {
+    let png = |error: png::DecodingError| error.to_string();
+    let mut decoder = png_decoder(bytes);
+    let header = decoder.read_header_info().map_err(png)?;
+    let size = [header.width, header.height];
+    check_size(size[0], size[1])?;
+    decoder.read_info().map_err(png)?;
+    Ok(size)
+}
+
 /// Decodes a PNG of any color type and bit depth to RGBA8: gray to equal red, green and blue, a
 /// palette to its colors, 16-bit samples to their high bytes, and missing alpha to opaque.
 fn decode_png(bytes: &[u8]) -> Result<Image, String> {
     let png = |error: png::DecodingError| error.to_string();
-    let mut decoder = png::Decoder::new(Cursor::new(bytes));
-    // Whatever the file holds, RGBA or gray with alpha, 8 bits a sample.
-    decoder.set_transformations(png::Transformations::ALPHA | png::Transformations::STRIP_16);
+    let mut decoder = png_decoder(bytes);
     let header = decoder.read_header_info().map_err(png)?;
     check_size(header.width, header.height)?;
     let mut reader = decoder.read_info().map_err(png)?;
@@ -227,22 +354,41 @@ fn decode_png(bytes: &[u8]) -> Result<Image, String> {
     })
 }
 
-/// Decodes a JPEG that's Huffman-coded at 8 bits, sequential or progressive, to RGBA8: gray to
-/// equal red, green and blue, YCbCr, CMYK and YCCK converted, CMYK taken as Adobe stores it,
-/// inverted, RGB as it is, and alpha opaque.
+/// A JPEG's decoder, to `colorspace`, which refuses one larger than a texture as it reads its
+/// header, before it allocates, and fails on a scan cut short or corrupt rather than ending it in
+/// gray.
+fn jpeg_decoder(bytes: &[u8], colorspace: ColorSpace) -> JpegDecoder<ZCursor<&[u8]>> {
+    let options = DecoderOptions::default()
+        .jpeg_set_out_colorspace(colorspace)
+        .set_max_width(MAX_TEXTURE_SIZE as usize)
+        .set_max_height(MAX_TEXTURE_SIZE as usize)
+        .set_strict_mode(true);
+    JpegDecoder::new_with_options(ZCursor::new(bytes), options)
+}
+
+/// Reads a JPEG's headers, and walks it to its end: its size.
+fn read_jpeg(bytes: &[u8]) -> Result<[u32; 2], String> {
+    let mut jpeg = jpeg_decoder(bytes, ColorSpace::RGBA);
+    jpeg.decode_headers()
+        .map_err(|error: DecodeErrors| error.to_string())?;
+    // Strict mode can miss a sequential scan cut in its last row of MCUs, whose blocks the zeros
+    // zune-jpeg reads past the end finish. A file that ends in an end-of-image marker wasn't cut
+    // in a scan, whose data holds none; a file that doesn't is walked to its marker, if it has one.
+    if !bytes.ends_with(&[0xff, 0xd9]) && !reaches_its_end(bytes) {
+        return Err("it ends before its end-of-image marker".to_owned());
+    }
+    let Some(info) = jpeg.info() else {
+        unreachable!("a JPEG whose headers read has its size");
+    };
+    Ok([info.width.into(), info.height.into()])
+}
+
+/// Decodes a JPEG that's Huffman-coded at 8 bits, sequential or progressive, which [`read_jpeg`]
+/// read, to RGBA8: gray to equal red, green and blue, YCbCr, CMYK and YCCK converted, CMYK taken
+/// as Adobe stores it, inverted, RGB as it is, and alpha opaque.
 fn decode_jpeg(bytes: &[u8]) -> Result<Image, String> {
     let jpeg_error = |error: DecodeErrors| error.to_string();
-    let decoder = |colorspace| {
-        let options = DecoderOptions::default()
-            .jpeg_set_out_colorspace(colorspace)
-            // So that it refuses a larger image as it reads the header, before it allocates.
-            .set_max_width(MAX_TEXTURE_SIZE as usize)
-            .set_max_height(MAX_TEXTURE_SIZE as usize)
-            // So that a scan cut short or corrupt fails rather than ending in gray.
-            .set_strict_mode(true);
-        JpegDecoder::new_with_options(ZCursor::new(bytes), options)
-    };
-    let mut jpeg = decoder(ColorSpace::RGBA);
+    let mut jpeg = jpeg_decoder(bytes, ColorSpace::RGBA);
     jpeg.decode_headers().map_err(jpeg_error)?;
     // zune-jpeg (0.5.15) makes RGB rightly from every color space it reads, but RGBA from gray and
     // YCbCr alone, scrambling CMYK's and YCCK's and refusing RGB's; and it picks how it converts as
@@ -253,15 +399,9 @@ fn decode_jpeg(bytes: &[u8]) -> Result<Image, String> {
         Some(ColorSpace::Luma | ColorSpace::YCbCr)
     );
     if rgb {
-        jpeg = decoder(ColorSpace::RGB);
+        jpeg = jpeg_decoder(bytes, ColorSpace::RGB);
     }
     let decoded = jpeg.decode().map_err(jpeg_error)?;
-    // Strict mode can miss a sequential scan cut in its last row of MCUs, whose blocks the zeros
-    // zune-jpeg reads past the end finish. A file that ends in an end-of-image marker wasn't cut
-    // in a scan, whose data holds none; a file that doesn't is walked to its marker, if it has one.
-    if !bytes.ends_with(&[0xff, 0xd9]) && !reaches_its_end(bytes) {
-        return Err("it ends before its end-of-image marker".to_owned());
-    }
     let (Some(info), Some(colorspace)) = (jpeg.info(), jpeg.input_colorspace()) else {
         unreachable!("a JPEG that decodes has had its header read");
     };
@@ -319,6 +459,11 @@ fn reaches_its_end(bytes: &[u8]) -> bool {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// A PNG or a JPEG read and decoded, as a texture's image is by the time it's drawn.
+    fn decode(bytes: &[u8]) -> Result<Image, String> {
+        read(bytes.to_vec())?.decoded()
+    }
 
     /// A PNG one row of `pixels` high, of `width` pixels in `color` and `depth`, with the palette
     /// and transparency chunks given.
@@ -467,6 +612,60 @@ pub(crate) mod tests {
         // Where ktx2 panics, which is caught.
         let refused = decode_ktx2(&side).expect_err("a block 256 texels across");
         assert!(refused.contains("panicked"), "{refused}");
+    }
+
+    /// An image's header reads apart from its pixels, which it keeps as its file's bytes: its size,
+    /// what a texture of it holds and what it takes decoded are known at once, and it decodes
+    /// later, as the loader decodes it, to what its file holds; a PNG, a JPEG, and KTX2 whose
+    /// levels zstd supercompressed. One whose body is cut short or corrupt past its header reads,
+    /// and fails as it decodes; but a JPEG cut short fails as it's read, as it's walked to its end.
+    #[test]
+    fn an_images_header_reads_apart_from_its_pixels() {
+        let rgb = &[10, 20, 30, 40, 50, 60];
+        let png = png(png::ColorType::Rgb, png::BitDepth::Eight, 2, rgb, None);
+        let from_png = read(png.clone()).expect("its header");
+        let averaged = Texels::Color(Mipmaps::Averaged);
+        assert_eq!((from_png.size, from_png.format), ([2, 1], Format::Png));
+        assert_eq!(from_png.texels(Mipmaps::Averaged), averaged);
+        assert_eq!((&from_png.pixels, from_png.decoded_len()), (&png, 8));
+        let decoded = from_png.decoded().expect("its pixels");
+        assert_eq!(decoded.format, Format::Rgba8);
+        assert_eq!(decoded.pixels, [10, 20, 30, 255, 40, 50, 60, 255]);
+
+        let jpeg = jpeg();
+        let from_jpeg = read(jpeg.clone()).expect("its headers");
+        assert_eq!((from_jpeg.size, from_jpeg.format), ([16, 16], Format::Jpeg));
+        assert_eq!(from_jpeg.decoded_len(), 16 * 16 * 4);
+        let decoded = from_jpeg.decoded().expect("its pixels");
+        assert_eq!((decoded.size, decoded.format), ([16, 16], Format::Rgba8));
+        let cut = read(jpeg[..jpeg.len() - 20].to_vec());
+        assert!(cut.expect_err("cut short").contains("end-of-image"));
+
+        // 5x5 texels are 2x2 blocks; its chain's 2x2 and 1x1 levels a block each.
+        const BC7_SRGB_BLOCK: ktx2::Format = ktx2::Format::BC7_SRGB_BLOCK;
+        let levels = [vec![1; 64], vec![2; 16], vec![3; 16]];
+        let file = ktx2(BC7_SRGB_BLOCK, [5, 5], &levels, true);
+        let cooked = read_ktx2(file.clone()).expect("its header");
+        let format = Format::Ktx2 {
+            mipmapped: true,
+            zstd: true,
+        };
+        assert_eq!((cooked.size, cooked.format), ([5, 5], format));
+        let chain = Texels::Bc7 { mipmapped: true };
+        assert_eq!(cooked.texels(Mipmaps::None), chain);
+        assert_eq!((&cooked.pixels, cooked.decoded_len()), (&file, 96));
+        let decoded = cooked.decoded().expect("its levels");
+        assert_eq!(decoded.format, Format::Bc7 { mipmapped: true });
+        assert_eq!(decoded.pixels, levels.concat());
+
+        let cut = read(png[..png.len() - 20].to_vec()).expect("its header, whole");
+        assert!(cut.decoded().is_err(), "its rows cut short");
+        // A level whose index says it decompresses to its 4 blocks, though it decompresses to 3.
+        let mut short = ktx2(BC7_SRGB_BLOCK, [5, 5], &[vec![0; 48]], true);
+        let level = ktx2::Header::LENGTH;
+        short[level + 16..level + 24].copy_from_slice(&64u64.to_le_bytes());
+        let short = read_ktx2(short).expect("its header, whose level says it's whole");
+        assert!(short.decoded().is_err(), "its level decompressed short");
     }
 
     #[test]

@@ -34,20 +34,25 @@ pub fn compile_shader(name: &str, path: &Path) -> Result<(Vec<u8>, Vec<std::path
 }
 
 /// Texture `name`'s file at `path`, a PNG or a JPEG, decoded to RGBA8 as
-/// [`Context::add_texture`](crate::Context::add_texture) decodes it.
+/// [`Context::add_texture`](crate::Context::add_texture) decodes it, its header and its pixels
+/// alike, so that a package holds no texture whose pixels a run would warn of.
 ///
-/// Fails as `add_texture` does for a file that doesn't decode.
+/// Fails as `add_texture` does for a file whose header doesn't read, and with
+/// `engine.bad_texture` for one whose pixels don't decode, of which a run warns.
 pub fn read_image(name: &str, path: &Path) -> Result<Image> {
-    crate::image::load_image(name, path, &Files::default())
+    let image = crate::image::load_image(name, path, &Files::default())?;
+    crate::image::decode_texture(name, path, image)
 }
 
 /// Model `name`'s file at `path`, and the files it names, read as
 /// [`Context::add_model`](crate::Context::add_model) reads them, its images decoded to RGBA8 and its
 /// primitives of one level.
 ///
-/// Fails as `add_model` does for a model that doesn't read.
+/// Fails as `add_model` does for a model that doesn't read, and with `engine.bad_model` for one
+/// whose image doesn't decode, of which a run warns.
 pub fn read_model(name: &str, path: &Path) -> Result<Imported> {
-    let (imported, _) = crate::gltf::read_listing(name, path, &Files::default())?;
+    let (mut imported, _) = crate::gltf::read_listing(name, path, &Files::default())?;
+    imported.decode_images(name, path)?;
     Ok(imported)
 }
 
@@ -83,9 +88,13 @@ pub fn model_bytes(model: &Imported, images: &[Vec<u8>]) -> Vec<u8> {
 }
 
 /// Model `name`'s cooked `bytes`, read back as a run from a game's package reads them, its images
-/// read as BC7, for checking what the cooker wrote.
+/// decoded to BC7 as the loader decodes them, for checking what the cooker wrote.
 ///
-/// Fails with `engine.bad_model` for bytes that don't read as a cooked model.
+/// Fails with `engine.bad_model` for bytes that don't read as a cooked model, or whose image
+/// doesn't decode.
 pub fn read_cooked_model(name: &str, bytes: &[u8]) -> Result<Imported> {
-    crate::cooked::decode(name, Path::new(name), bytes)
+    let path = Path::new(name);
+    let mut imported = crate::cooked::decode(name, path, bytes)?;
+    imported.decode_images(name, path)?;
+    Ok(imported)
 }

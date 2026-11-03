@@ -21,10 +21,10 @@ use std::sync::Arc;
 use bytemuck::NoUninit;
 use gg_core::math::{self, Mat4, Quat, Vec2, Vec3, Vec4};
 use gg_renderer::{
-    AlphaMode, Blend, Circle, DrawCounts, Draws, Glyph, Grid, GridLines, Line, Lod, Lods, Material,
-    Mesh, MeshDraw, Meshes, Mipmaps, ModelVertex, Outline, Pick, Pixels, Projection, RenderData,
-    Renderer, Sampler, Settings, Shaders, Sprite, SpriteSheet, Texels, Texture, Textures, Ui,
-    UploadPath, Uploads, ViewCallback, Viewpoint, Viewport, Wrap,
+    AlphaMode, Blend, Circle, DEFAULT_UPLOAD_BUDGET, DrawCounts, Draws, Glyph, Grid, GridLines,
+    Line, Lod, Lods, Material, Mesh, MeshDraw, Meshes, Mipmaps, ModelVertex, Outline, Pick, Pixels,
+    Projection, RenderData, Renderer, Sampler, Settings, Shaders, Sprite, SpriteSheet, Texels,
+    Texture, Textures, Ui, UploadPath, Uploads, ViewCallback, Viewpoint, Viewport, Wrap,
 };
 
 /// Runs each test through `tests`, by the name it's written with; after `uploading by`, giving
@@ -91,6 +91,7 @@ fn main() -> ExitCode {
         mixed_textures_match_their_reference,
         picks_answer_what_their_frame_drew,
         picks_wait_through_frames_that_read_none,
+        removed_assets_draw_nothing_or_their_stand_in,
     );
     // Once for each way of uploading that the GPU has.
     for path in UploadPath::ALL {
@@ -104,9 +105,11 @@ fn main() -> ExitCode {
             meshes_match_their_reference,
             textures_match_their_reference,
             sheets_match_their_reference,
-            a_large_texture_draws_in_the_frame_that_adds_it,
+            a_large_texture_draws_once_streamed,
+            large_assets_stream_over_frames_within_the_budget,
+            a_reload_draws_the_old_until_the_new_is_drawable,
             bc7_textures_sample_as_their_blocks,
-            replaced_meshes_and_textures_draw_from_the_frame_that_takes_them,
+            replaced_meshes_and_textures_draw_once_they_are_there,
             mipmaps_match_their_reference,
         );
     }
@@ -182,8 +185,11 @@ impl Tests {
 /// What the tests clear to, in linear RGBA.
 const CLEAR: [f32; 4] = [0.02, 0.03, 0.05, 1.0];
 
+/// A budget of bytes a frame copies that a test's larger assets take several frames of.
+const SMALL_BUDGET: u64 = 64 << 10;
+
 /// How the tests' renderers are set up: under validation, uploading by `uploads`, if given, rather
-/// than by the GPU's best way.
+/// than by the GPU's best way, within the default budget.
 fn settings(uploads: Option<UploadPath>) -> Settings<'static> {
     Settings {
         app_name: "renderer gpu tests",
@@ -191,6 +197,7 @@ fn settings(uploads: Option<UploadPath>) -> Settings<'static> {
         gpu: None,
         vsync: false,
         uploads,
+        upload_budget: DEFAULT_UPLOAD_BUDGET,
         pipeline_cache: None,
         capture: None,
     }
@@ -203,7 +210,16 @@ fn renderer(width: u32, height: u32) -> Renderer {
 
 /// A renderer like [`renderer`]'s, that uploads by `uploads`, if given.
 fn renderer_uploading(width: u32, height: u32, uploads: Option<UploadPath>) -> Renderer {
-    let renderer = Renderer::headless(&settings(uploads), width, height).expect("a renderer");
+    renderer_within(width, height, uploads, DEFAULT_UPLOAD_BUDGET)
+}
+
+/// A renderer like [`renderer_uploading`]'s, whose frames copy at most `budget` bytes each.
+fn renderer_within(width: u32, height: u32, uploads: Option<UploadPath>, budget: u64) -> Renderer {
+    let settings = Settings {
+        upload_budget: budget,
+        ..settings(uploads)
+    };
+    let renderer = Renderer::headless(&settings, width, height).expect("a renderer");
     assert!(
         renderer.validation().enabled(),
         "GPU tests run under validation; install the Vulkan SDK's validation layer"
@@ -275,12 +291,59 @@ impl Stores {
     }
 }
 
+/// Renders a frame of `draws` into `viewport`, as `viewpoint` sees them, with the uploads taken
+/// since the last, and then frames until every mesh and texture added is drawable, which through
+/// a transfer queue takes frames after the one that takes them: so that what's compared or read
+/// back after shows them all.
+fn settle(
+    renderer: &mut Renderer,
+    stores: &mut Stores,
+    viewport: Viewport,
+    viewpoint: Viewpoint,
+    draws: &Draws,
+) {
+    for _ in 0..200 {
+        render_without_ui(renderer, stores.data(viewport, viewpoint, draws));
+        if renderer.streaming().is_empty() {
+            return;
+        }
+    }
+    panic!(
+        "still streaming after 200 frames: {:?}",
+        renderer.streaming()
+    );
+}
+
 /// A view that fills a frame of `size` pixels.
 fn filling(size: [u32; 2]) -> Viewport {
     Viewport {
         origin: [0, 0],
         size,
     }
+}
+
+/// The pixel at (`x`, `y`) of `frame`, `width` pixels wide: RGBA8.
+fn pixel_at(frame: &[u8], width: u32, [x, y]: [u32; 2]) -> [u8; 4] {
+    let at = ((y * width + x) * 4) as usize;
+    <[u8; 4]>::try_from(&frame[at..at + 4]).expect("a pixel")
+}
+
+/// Whether `pixel` is `color`, each channel within 1, which sRGB's encoding may round by.
+fn close(pixel: [u8; 4], color: [u8; 4]) -> bool {
+    pixel.iter().zip(color).all(|(&a, b)| a.abs_diff(b) <= 1)
+}
+
+/// `CLEAR`, sRGB-encoded, as a frame reads back.
+const CLEARED: [u8; 4] = [39, 48, 63, 255];
+
+/// The 8-bit sRGB of a linear channel, as a frame's target encodes what shaders write.
+fn encoded(linear: f32) -> u8 {
+    let encoded = if linear <= 0.003_130_8 {
+        linear * 12.92
+    } else {
+        1.055 * math::libm::powf(linear, 1.0 / 2.4) - 0.055
+    };
+    (encoded * 255.0).round() as u8
 }
 
 /// A unit square around the origin, of positions alone, as `flat_color.slang` takes them.
@@ -352,10 +415,10 @@ fn ui_matches_its_reference() {
 /// clear of them, so that a draw given another's parameters changes a thousand; it's drawn through
 /// a `MeshDraw`, which holds its mesh, shader and parameters without their types, as an entity's
 /// does, and joins the first square's instanced draw. The triangle is added in the last of the
-/// frames, which outnumber those in flight, so that the image shows a mesh drawn in the frame that
-/// adds it beside those that earlier frames copied to the GPU. The view renders into an image of
-/// its own, which the frame shows at the view's place, so that one shown elsewhere changes
-/// thousands of pixels.
+/// frames, which outnumber those in flight, and the frames go on until it's drawable, so that the
+/// image shows a mesh streamed later beside those that earlier frames streamed to the GPU. The
+/// view renders into an image of its own, which the frame shows at the view's place, so that one
+/// shown elsewhere changes thousands of pixels.
 fn meshes_match_their_reference(path: UploadPath) {
     const WIDTH: u32 = 320;
     const HEIGHT: u32 = 200;
@@ -416,6 +479,7 @@ fn meshes_match_their_reference(path: UploadPath) {
         let data = stores.data(viewport, viewpoint, &draws);
         render_without_ui(&mut renderer, data);
     }
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
     check(renderer, "meshes", WIDTH, HEIGHT);
 }
 
@@ -433,11 +497,11 @@ struct Sampling {
 /// way, sharp, so that a sampler ignored would clamp it and blur it, and its top left is a third
 /// color, so that an image flipped moves it. The engine's white texture, never drawn here, takes
 /// slot 0, so that textures put in the wrong slots, or sampled through the wrong ones, show it or
-/// each other; the one with alpha is added in the last frame, which the image is read back from,
-/// so that it shows a texture sampled in the frame that adds it. Its texels are opaque, half, a
-/// quarter and wholly transparent, so that a shader blended as opaque, or as though its alpha were
-/// multiplied in, changes thousands of pixels; and the textures are sRGB, so that colors sampled
-/// without decoding come out brighter.
+/// each other; the one with alpha is added in the last frame, after which the frames go on until
+/// it's drawable, so that the image shows a texture streamed later beside one streamed earlier.
+/// Its texels are opaque, half, a quarter and wholly transparent, so that a shader blended as
+/// opaque, or as though its alpha were multiplied in, changes thousands of pixels; and the textures
+/// are sRGB, so that colors sampled without decoding come out brighter.
 fn textures_match_their_reference(path: UploadPath) {
     const WIDTH: u32 = 240;
     const HEIGHT: u32 = 160;
@@ -517,6 +581,13 @@ fn textures_match_their_reference(path: UploadPath) {
         let data = stores.data(filling([WIDTH, HEIGHT]), viewpoint, &draws);
         render_without_ui(&mut renderer, data);
     }
+    settle(
+        &mut renderer,
+        &mut stores,
+        filling([WIDTH, HEIGHT]),
+        viewpoint,
+        &draws,
+    );
     check(renderer, "textures", WIDTH, HEIGHT);
 }
 
@@ -601,6 +672,13 @@ fn sprites_match_their_reference() {
         let data = stores.data(filling([WIDTH, HEIGHT]), viewpoint, &draws);
         render_without_ui(&mut renderer, data);
     }
+    settle(
+        &mut renderer,
+        &mut stores,
+        filling([WIDTH, HEIGHT]),
+        viewpoint,
+        &draws,
+    );
     check(renderer, "sprites", WIDTH, HEIGHT);
 }
 
@@ -665,6 +743,13 @@ fn circles_match_their_reference() {
         let data = stores.data(filling([WIDTH, HEIGHT]), viewpoint, &draws);
         render_without_ui(&mut renderer, data);
     }
+    settle(
+        &mut renderer,
+        &mut stores,
+        filling([WIDTH, HEIGHT]),
+        viewpoint,
+        &draws,
+    );
     check(renderer, "circles", WIDTH, HEIGHT);
 }
 
@@ -777,6 +862,13 @@ fn text_matches_its_reference() {
         let data = stores.data(filling([WIDTH, HEIGHT]), viewpoint, &draws);
         render_without_ui(&mut renderer, data);
     }
+    settle(
+        &mut renderer,
+        &mut stores,
+        filling([WIDTH, HEIGHT]),
+        viewpoint,
+        &draws,
+    );
     check(renderer, "text", WIDTH, HEIGHT);
 }
 
@@ -858,14 +950,18 @@ fn the_canvas_matches_its_reference() {
         place([40.0, 90.0], [24.0, 24.0]),
         orange,
     );
-    // More frames than are in flight.
-    for _ in 0..3 {
+    // More frames than are in flight, and until everything is drawable.
+    for _ in 0..200 {
         let data = RenderData {
             canvas: &canvas,
             ..stores.data(viewport, viewpoint, &draws)
         };
         render_without_ui(&mut renderer, data);
+        if renderer.streaming().is_empty() {
+            break;
+        }
     }
+    assert!(renderer.streaming().is_empty());
     check(renderer, "canvas", WIDTH, HEIGHT);
 }
 
@@ -929,8 +1025,16 @@ fn outlines_match_their_reference() {
         color: orange,
         width,
     };
-    // Each pixel as a frame without an outline has it: an outline of ID 0 would go round every
-    // draw's, inside its edges, and one wider than 0 round the disc and the square.
+    // Each pixel as a frame without an outline has it, once everything is drawable: an outline of
+    // ID 0 would go round every draw's, inside its edges, and one wider than 0 round the disc and
+    // the square.
+    settle(
+        &mut renderer,
+        &mut stores,
+        filling([WIDTH, HEIGHT]),
+        viewpoint,
+        &draws,
+    );
     let mut plain = None;
     let nothing = [outline(0, 3.0), outline(7, 0.0), outline(7, f32::NAN)];
     for outlined in [None].into_iter().chain(nothing.map(Some)) {
@@ -1048,6 +1152,13 @@ fn grids_match_their_reference() {
             let data = stores.data(filling([WIDTH, HEIGHT]), viewpoint, &draws);
             render_without_ui(&mut renderer, data);
         }
+        settle(
+            &mut renderer,
+            &mut stores,
+            filling([WIDTH, HEIGHT]),
+            viewpoint,
+            &draws,
+        );
         compare(name, WIDTH, HEIGHT, &frame_pixels(&mut renderer));
     }
     shut_down(renderer);
@@ -1159,6 +1270,13 @@ fn lines_match_their_reference() {
         let data = stores.data(filling([WIDTH, HEIGHT]), viewpoint, &draws);
         render_without_ui(&mut renderer, data);
     }
+    settle(
+        &mut renderer,
+        &mut stores,
+        filling([WIDTH, HEIGHT]),
+        viewpoint,
+        &draws,
+    );
     check(renderer, "lines", WIDTH, HEIGHT);
 }
 
@@ -1281,6 +1399,13 @@ fn batches_match_their_reference() {
         let data = stores.data(filling([WIDTH, HEIGHT]), viewpoint, &draws);
         render_without_ui(&mut renderer, data);
     }
+    settle(
+        &mut renderer,
+        &mut stores,
+        filling([WIDTH, HEIGHT]),
+        viewpoint,
+        &draws,
+    );
     let drew = DrawCounts {
         draws: 3,
         instances: 6 + 1 + BIG,
@@ -1443,6 +1568,13 @@ fn sheets_match_their_reference(path: UploadPath) {
         let data = stores.data(filling([WIDTH, HEIGHT]), viewpoint, &draws);
         render_without_ui(&mut renderer, data);
     }
+    settle(
+        &mut renderer,
+        &mut stores,
+        filling([WIDTH, HEIGHT]),
+        viewpoint,
+        &draws,
+    );
     check(renderer, "sheets", WIDTH, HEIGHT);
 }
 
@@ -1544,6 +1676,8 @@ fn views_match_their_reference() {
             .expect("the frame's pixels")
             .expect("a headless renderer's frame can be read back")
     };
+    // Everything drawable first, in the view the frames start with.
+    settle(&mut renderer, &mut stores, views[0], viewpoint, &draws);
     let mut shown = None;
     for (frame, viewport) in views.into_iter().enumerate() {
         let data = stores.data(viewport, viewpoint, &draws);
@@ -1656,6 +1790,13 @@ fn depth_matches_its_reference() {
         let data = stores.data(filling([WIDTH, HEIGHT]), viewpoint, &draws);
         render_without_ui(&mut renderer, data);
     }
+    settle(
+        &mut renderer,
+        &mut stores,
+        filling([WIDTH, HEIGHT]),
+        viewpoint,
+        &scene(false),
+    );
     check(renderer, "depth", WIDTH, HEIGHT);
 }
 
@@ -1770,7 +1911,15 @@ fn levels_of_detail_match_their_reference() {
         });
         shows.push((id, inside, outside, color, level));
     }
-    // Three frames, more than the picks of the first need to be answered.
+    // Everything drawable first; then three frames, more than the picks of the first need to be
+    // answered.
+    settle(
+        &mut renderer,
+        &mut stores,
+        filling([WIDTH, HEIGHT]),
+        viewpoint,
+        &draws,
+    );
     let drew = DrawCounts {
         draws: 6,
         instances: 10,
@@ -1795,19 +1944,10 @@ fn levels_of_detail_match_their_reference() {
         <[u8; 3]>::try_from(&frame[at..at + 3]).expect("a pixel")
     };
     let clear = pixel([2, 2]);
-    // The 8-bit sRGB of a linear channel.
-    let encode = |linear: f32| {
-        let encoded = if linear <= 0.003_130_8 {
-            linear * 12.92
-        } else {
-            1.055 * math::libm::powf(linear, 1.0 / 2.4) - 0.055
-        };
-        (encoded * 255.0).round() as u8
-    };
     for (id, inside, outside, color, level) in shows {
         // Its color over the clear color, as the target blends them, in linear space.
         let over = |channel: usize| color[channel] * color.w + CLEAR[channel] * (1.0 - color.w);
-        let expected = [0, 1, 2].map(over).map(encode);
+        let expected = [0, 1, 2].map(over).map(encoded);
         let shown = pixel(inside);
         let close = (shown.iter().zip(expected)).all(|(&got, want)| got.abs_diff(want) <= 3);
         assert!(close, "instance {id} shows {shown:?}, not {expected:?}");
@@ -1821,11 +1961,11 @@ fn levels_of_detail_match_their_reference() {
     compare("levels", WIDTH, HEIGHT, &frame);
 }
 
-/// Fills the view with a texture of 4,096 by 4,096 texels of one color, 64 MiB, in the frame that
-/// adds it, and checks that every pixel shows that color: staged, it takes more than the least
-/// staging buffer, 16 MiB, so that staging grows to hold it, and every texel the view samples must
-/// have been copied, which a transfer queue takes milliseconds to do.
-fn a_large_texture_draws_in_the_frame_that_adds_it(path: UploadPath) {
+/// Fills the view with a texture of 4,096 by 4,096 texels of one color, 64 MiB, which the default
+/// budget streams over four frames, and checks that every pixel shows that color once it's
+/// drawable: every texel the view samples must have been copied, over the frames, each part a
+/// whole number of rows.
+fn a_large_texture_draws_once_streamed(path: UploadPath) {
     const SIDE: u32 = 32;
     const TEXELS: u32 = 4096;
     // sRGB-encoded.
@@ -1866,18 +2006,323 @@ fn a_large_texture_draws_in_the_frame_that_adds_it(path: UploadPath) {
     };
     let data = stores.data(filling([SIDE, SIDE]), viewpoint, &draws);
     render_without_ui(&mut renderer, data);
-    let pixels = renderer
-        .read_back()
-        .expect("the frame's pixels")
-        .expect("a headless renderer's frame can be read back");
+    // The texture streams on, with whatever else of the first frame's isn't drawable yet.
+    let streaming = renderer.streaming();
+    assert!(
+        streaming.assets >= 1 && streaming.bytes < 64 << 20 && streaming.bytes >= 48 << 20,
+        "a frame of the default budget copied: {streaming:?}"
+    );
+    settle(
+        &mut renderer,
+        &mut stores,
+        filling([SIDE, SIDE]),
+        viewpoint,
+        &draws,
+    );
+    let pixels = frame_pixels(&mut renderer);
     shut_down(renderer);
     for pixel in pixels.as_chunks::<4>().0 {
-        let close = pixel
-            .iter()
-            .zip(COLOR)
-            .all(|(&got, want)| got.abs_diff(want) <= 1);
-        assert!(close, "read back {pixel:?}, expected {COLOR:?}");
+        assert!(
+            close(*pixel, COLOR),
+            "read back {pixel:?}, expected {COLOR:?}"
+        );
     }
+}
+
+/// What a frame shows at a pixel of [`large_assets_stream_over_frames_within_the_budget`]: the
+/// clear color, where its mesh isn't drawable; the stand-in's white or zeros, where its mesh draws
+/// a texture that isn't; or the asset's own color.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Shows {
+    Clear,
+    StandIn,
+    Own,
+}
+
+/// Streams assets larger than a budget of 64 KiB a frame over several frames, by `path`: a square
+/// textured with a 256 by 256 texture of colors, 256 KiB; another with a 192 by 128 texture of
+/// data, 96 KiB, which shaders read as stored and the frame's target then encodes; and a mesh of
+/// 9,216 vertices and 54,150 indices, 324 KiB, in a flat color. Each frame reads back a pixel of
+/// each: the square of colors shows the stand-in, white, until the frame that shows its texture,
+/// having shown the clear color before its mesh was drawable, if at all; the square of data shows
+/// the clear color until its texture is there, since its stand-in's zeros are fully transparent,
+/// which the shader discards, as text does, where white would show; the large mesh shows the clear
+/// color until it's drawable; and each shows its own color exactly from then on. What's streaming
+/// counts down, and nothing that isn't drawable is counted drawn.
+fn large_assets_stream_over_frames_within_the_budget(path: UploadPath) {
+    const SIDE: u32 = 64;
+    const GRID: u32 = 96;
+    // sRGB-encoded, and data.
+    const COLORS: [[u8; 4]; 2] = [[200, 80, 40, 255], [40, 160, 220, 255]];
+    let mut renderer = renderer_within(SIDE, SIDE, Some(path), SMALL_BUDGET);
+    let mut stores = Stores::default();
+    let flat = (stores.shaders)
+        .add::<[f32; 3], Vec4>("flat color", &shader("flat_color.slang"), Blend::Opaque)
+        .expect("a shader");
+    // Positions, then texture coordinates; opaque, so that the zeros of data show as black.
+    let textured = (stores.shaders)
+        .add::<[f32; 5], Sampling>("textured", &shader("textured.slang"), Blend::Opaque)
+        .expect("a shader");
+    // A unit square, its texture over it.
+    let corners = [
+        [-0.5, -0.5, 0.0, 0.0, 1.0],
+        [0.5, -0.5, 0.0, 1.0, 1.0],
+        [0.5, 0.5, 0.0, 1.0, 0.0],
+        [-0.5, 0.5, 0.0, 0.0, 0.0],
+    ];
+    let square = (stores.meshes)
+        .add("square", &corners, &[0, 1, 2, 2, 3, 0])
+        .expect("a mesh");
+    // A grid of GRID by GRID vertices over the unit square, two triangles a cell.
+    let vertices: Vec<[f32; 3]> = (0..GRID * GRID)
+        .map(|i| {
+            let (x, y) = (i % GRID, i / GRID);
+            let along = |at: u32| at as f32 / (GRID - 1) as f32 - 0.5;
+            [along(x), along(y), 0.0]
+        })
+        .collect();
+    let indices: Vec<u32> = (0..(GRID - 1) * (GRID - 1))
+        .flat_map(|cell| {
+            let (x, y) = (cell % (GRID - 1), cell / (GRID - 1));
+            let at = |dx, dy| (y + dy) * GRID + x + dx;
+            [at(0, 0), at(1, 0), at(1, 1), at(1, 1), at(0, 1), at(0, 0)]
+        })
+        .collect();
+    let dense = (stores.meshes)
+        .add("dense", &vertices, &indices)
+        .expect("a mesh");
+    let large = COLORS[0].repeat(256 * 256);
+    let large = (stores.textures)
+        .add("large", [256, 256], &large, Mipmaps::None)
+        .expect("a texture");
+    let field = COLORS[1].repeat(192 * 128);
+    let field = (stores.textures)
+        .add("field", [192, 128], &field, Texels::Data)
+        .expect("a texture");
+    let mesh_bytes = (vertices.len() * 12 + indices.len() * 4) as u64;
+    let total = mesh_bytes + 256 * 256 * 4 + 192 * 128 * 4;
+    let viewpoint = Viewpoint {
+        projection: Projection::Orthographic {
+            height: 2.0,
+            near: -1.0,
+            far: 1.0,
+        },
+        ..Viewpoint::default()
+    };
+    // The textured squares in the top quadrants, the dense mesh across the bottom half.
+    let place = |[x, y]: [f32; 2], [width, height]: [f32; 2]| {
+        Mat4::from_translation(Vec3::new(x, y, 0.0))
+            * Mat4::from_scale(Vec3::new(width, height, 1.0))
+    };
+    let mut draws = Draws::default();
+    let nearest = Sampler::NearestClamp.index();
+    let sampling = |texture| Sampling {
+        texture,
+        sampler: nearest,
+    };
+    draws.push(
+        square,
+        textured,
+        place([-0.5, 0.5], [1.0, 1.0]),
+        sampling(large),
+    );
+    draws.push(
+        square,
+        textured,
+        place([0.5, 0.5], [1.0, 1.0]),
+        sampling(field),
+    );
+    let gray = Vec4::new(0.5, 0.5, 0.5, 1.0);
+    draws.push(dense, flat, place([0.0, -0.5], [2.0, 1.0]), gray);
+    // What each pixel shows frame by frame, and what the frames count drawn and streaming.
+    let mut shown: [Vec<Shows>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    let mut streaming = Vec::new();
+    let mut instances = Vec::new();
+    for _ in 0..200 {
+        let data = stores.data(filling([SIDE, SIDE]), viewpoint, &draws);
+        render_without_ui(&mut renderer, data);
+        streaming.push(renderer.streaming());
+        instances.push(renderer.drawn().instances);
+        let frame = frame_pixels(&mut renderer);
+        let zeros = [0, 0, 0, 0];
+        // Alpha isn't read where the zeros draw, as the view's pass leaves it.
+        let rgb = |pixel: [u8; 4]| [pixel[0], pixel[1], pixel[2], 255];
+        let shows = |at: [u32; 2], own: [u8; 4], stand_in: [u8; 4]| {
+            let pixel = rgb(pixel_at(&frame, SIDE, at));
+            if close(pixel, CLEARED) {
+                Shows::Clear
+            } else if close(pixel, rgb(stand_in)) {
+                Shows::StandIn
+            } else if close(pixel, own) {
+                Shows::Own
+            } else {
+                panic!("by {path}: {pixel:?} at {at:?} is none of the colors expected")
+            }
+        };
+        let data = COLORS[1].map(|channel| encoded(f32::from(channel) / 255.0));
+        shown[0].push(shows([16, 16], COLORS[0], [255; 4]));
+        shown[1].push(shows([48, 16], rgb(data), zeros));
+        shown[2].push(shows([32, 48], [188, 188, 188, 255], [255; 4]));
+        if renderer.streaming().is_empty() {
+            break;
+        }
+    }
+    shut_down(renderer);
+    let frames = streaming.len();
+    assert!(
+        frames >= (total / SMALL_BUDGET) as usize && frames < 200,
+        "by {path}: {frames} frames for {total} bytes"
+    );
+    // Each pixel goes through its phases in order, the white stand-in's for at least a frame, and
+    // ends on its own color.
+    for (i, shown) in shown.iter().enumerate() {
+        let phases: Vec<Shows> = shown.chunk_by(|a, b| a == b).map(|run| run[0]).collect();
+        let expected: &[Shows] = match (i, phases.first()) {
+            (0, Some(Shows::Clear)) => &[Shows::Clear, Shows::StandIn, Shows::Own],
+            (0, _) => &[Shows::StandIn, Shows::Own],
+            _ => &[Shows::Clear, Shows::Own],
+        };
+        assert_eq!(phases, expected, "by {path}: pixel {i} showed {shown:?}");
+    }
+    assert!(
+        shown[0].contains(&Shows::StandIn),
+        "by {path}: the texture never showed its stand-in: {:?}",
+        shown[0]
+    );
+    // The bytes still to copy fall from under the total, by at most the budget's worth of whole
+    // parts a frame, to 0, as the assets go.
+    assert!(streaming[0].bytes < total, "by {path}: {:?}", streaming[0]);
+    for pair in streaming.windows(2) {
+        assert!(
+            pair[1].bytes <= pair[0].bytes && pair[1].assets <= pair[0].assets,
+            "by {path}: {pair:?}"
+        );
+    }
+    let last = streaming.last().expect("a frame");
+    assert_eq!((last.assets, last.bytes), (0, 0), "by {path}");
+    // Until the dense mesh is drawable, its instance isn't counted.
+    assert_eq!(*instances.last().expect("a frame"), 3, "by {path}");
+    assert!(instances[0] < 3, "by {path}: {instances:?}");
+}
+
+/// Replaces a texture and a mesh with larger ones, 256 KiB and 324 KiB, which a budget of 64 KiB
+/// streams over several frames, by `path`, and reads back a pixel of each every frame: the square
+/// shows the old texture, red, never white, until the frame that shows the new, green; and the
+/// mesh, a square that covers the view, keeps covering its right half until the frame that takes
+/// the new, which covers the left half alone.
+fn a_reload_draws_the_old_until_the_new_is_drawable(path: UploadPath) {
+    const SIDE: u32 = 16;
+    const GRID: u32 = 96;
+    let mut renderer = renderer_within(SIDE, SIDE, Some(path), SMALL_BUDGET);
+    let mut stores = Stores::default();
+    let textured = (stores.shaders)
+        .add::<[f32; 5], Sampling>("textured", &shader("textured.slang"), Blend::Opaque)
+        .expect("a shader");
+    // The whole view, which is 2 units high and as wide: positions, then texture coordinates.
+    let whole = [
+        [-1.0, -1.0, 0.0, 0.0, 1.0],
+        [1.0, -1.0, 0.0, 1.0, 1.0],
+        [1.0, 1.0, 0.0, 1.0, 0.0],
+        [-1.0, 1.0, 0.0, 0.0, 0.0],
+    ];
+    let square = (stores.meshes)
+        .add("square", &whole, &[0, 1, 2, 2, 3, 0])
+        .expect("a mesh");
+    let (red, green) = ([255, 0, 0, 255], [0, 255, 0, 255]);
+    let texture = (stores.textures)
+        .add("color", [2, 2], red.repeat(4), Mipmaps::None)
+        .expect("a texture");
+    let mut draws = Draws::default();
+    let sampling = Sampling {
+        texture,
+        sampler: Sampler::NearestClamp.index(),
+    };
+    draws.push(square, textured, Mat4::IDENTITY, sampling);
+    let viewpoint = Viewpoint {
+        projection: Projection::Orthographic {
+            height: 2.0,
+            near: -1.0,
+            far: 1.0,
+        },
+        ..Viewpoint::default()
+    };
+    settle(
+        &mut renderer,
+        &mut stores,
+        filling([SIDE, SIDE]),
+        viewpoint,
+        &draws,
+    );
+    let left_and_right = |renderer: &mut Renderer| {
+        let frame = frame_pixels(renderer);
+        [[SIDE / 4, SIDE / 2], [SIDE * 3 / 4, SIDE / 2]].map(|at| pixel_at(&frame, SIDE, at))
+    };
+    assert_eq!(left_and_right(&mut renderer), [red, red], "by {path}");
+    // The left half, as a grid of GRID by GRID vertices, two triangles a cell.
+    let vertices: Vec<[f32; 5]> = (0..GRID * GRID)
+        .map(|i| {
+            let (x, y) = (i % GRID, i / GRID);
+            let along = |at: u32| at as f32 / (GRID - 1) as f32;
+            [
+                along(x) - 1.0,
+                along(y) * 2.0 - 1.0,
+                0.0,
+                along(x),
+                1.0 - along(y),
+            ]
+        })
+        .collect();
+    let indices: Vec<u32> = (0..(GRID - 1) * (GRID - 1))
+        .flat_map(|cell| {
+            let (x, y) = (cell % (GRID - 1), cell / (GRID - 1));
+            let at = |dx, dy| (y + dy) * GRID + x + dx;
+            [at(0, 0), at(1, 0), at(1, 1), at(1, 1), at(0, 1), at(0, 0)]
+        })
+        .collect();
+    (stores.meshes)
+        .replace("square", square, &vertices, &indices)
+        .expect("the mesh replaced");
+    (stores.textures)
+        .replace(
+            "color",
+            texture,
+            [256, 256],
+            green.repeat(256 * 256),
+            Mipmaps::None,
+        )
+        .expect("the texture replaced");
+    let (mut texture_at, mut mesh_at) = (None, None);
+    for frame in 0..200 {
+        let data = stores.data(filling([SIDE, SIDE]), viewpoint, &draws);
+        render_without_ui(&mut renderer, data);
+        let [left, right] = left_and_right(&mut renderer);
+        if left == green && texture_at.is_none() {
+            texture_at = Some(frame);
+        }
+        if close(right, CLEARED) && mesh_at.is_none() {
+            mesh_at = Some(frame);
+        }
+        let expected_left = if texture_at.is_some() { green } else { red };
+        assert_eq!(left, expected_left, "by {path}, frame {frame}");
+        let expected_right = if mesh_at.is_some() {
+            CLEARED
+        } else {
+            expected_left
+        };
+        assert!(
+            close(right, expected_right),
+            "by {path}, frame {frame}: {right:?}"
+        );
+        if renderer.streaming().is_empty() {
+            break;
+        }
+    }
+    assert!(
+        texture_at.is_some_and(|at| at >= 3) && mesh_at.is_some_and(|at| at >= 3),
+        "by {path}: the texture showed at {texture_at:?} and the mesh at {mesh_at:?}"
+    );
+    assert_eq!(left_and_right(&mut renderer)[0], green, "by {path}");
+    shut_down(renderer);
 }
 
 /// A BC7 block of 4 by 4 texels all of one sRGB-encoded `color`, whose channels are odd: mode 6,
@@ -1901,7 +2346,8 @@ fn bc7_block(color: [u8; 4]) -> [u8; 16] {
 /// a level, 13 by 5 texels, whose blocks cover its edges, filling a view of `SIDE` pixels a side at
 /// its nearest texels; then one of a full chain, 64 texels a side, whose first level is one color
 /// and the rest another, filling it trilinearly, so that it samples its third level; then the
-/// first replaced by RGBA8, and that by BC7 of a chain, each sampled from the frame that takes it.
+/// first replaced by RGBA8, and that by BC7 of a chain, each sampled once the frames have streamed
+/// it.
 fn bc7_textures_sample_as_their_blocks(path: UploadPath) {
     const SIDE: u32 = 16;
     const COLORS: [[u8; 4]; 4] = [
@@ -1952,15 +2398,19 @@ fn bc7_textures_sample_as_their_blocks(path: UploadPath) {
         let mut draws = Draws::default();
         let sampling = Sampling { texture, sampler };
         draws.push(square, textured, Mat4::IDENTITY, sampling);
-        let data = stores.data(filling([SIDE, SIDE]), viewpoint, &draws);
-        render_without_ui(&mut renderer, data);
-        let pixels = renderer
-            .read_back()
-            .expect("the frame's pixels")
-            .expect("a headless renderer's frame can be read back");
+        settle(
+            &mut renderer,
+            stores,
+            filling([SIDE, SIDE]),
+            viewpoint,
+            &draws,
+        );
+        let pixels = frame_pixels(&mut renderer);
         for pixel in pixels.as_chunks::<4>().0 {
-            let close = (pixel.iter().zip(expected)).all(|(&got, want)| got.abs_diff(want) <= 1);
-            assert!(close, "{what}: read back {pixel:?}, expected {expected:?}");
+            assert!(
+                close(*pixel, expected),
+                "{what}: read back {pixel:?}, expected {expected:?}"
+            );
         }
     };
     let nearest = Sampler::NearestClamp.index();
@@ -2004,9 +2454,9 @@ fn bc7_textures_sample_as_their_blocks(path: UploadPath) {
 /// A textured square that covers a view of `SIZE` pixels a side, red, whose mesh and texture are
 /// replaced while the frames before may still draw them, over more frames than are in flight: the
 /// mesh by one that covers the view's left half, the texture by a green one of another size, with
-/// mip levels. The frame that takes them draws them, and validation, synchronization's among it,
-/// sees the old ones go only once the GPU is done with them.
-fn replaced_meshes_and_textures_draw_from_the_frame_that_takes_them(path: UploadPath) {
+/// mip levels. The frames draw them once they're there, and validation, synchronization's among
+/// it, sees the old ones go only once the GPU is done with them.
+fn replaced_meshes_and_textures_draw_once_they_are_there(path: UploadPath) {
     const SIZE: u32 = 16;
     let mut renderer = renderer_uploading(SIZE, SIZE, Some(path));
     let mut stores = Stores::default();
@@ -2068,10 +2518,27 @@ fn replaced_meshes_and_textures_draw_from_the_frame_that_takes_them(path: Upload
         }
         let data = stores.data(filling([SIZE, SIZE]), viewpoint, &draws);
         render_without_ui(&mut renderer, data);
-        // Reading back waits for the GPU, so not between the first frame and the replacements.
+        // Reading back waits for the GPU, so not between the frames before the replacements and
+        // the frame that takes them.
         match frame {
-            0 => assert_eq!(left_and_right(&mut renderer), [red, red], "red"),
+            0 => {
+                settle(
+                    &mut renderer,
+                    &mut stores,
+                    filling([SIZE, SIZE]),
+                    viewpoint,
+                    &draws,
+                );
+                assert_eq!(left_and_right(&mut renderer), [red, red], "red");
+            }
             3 | 5 => {
+                settle(
+                    &mut renderer,
+                    &mut stores,
+                    filling([SIZE, SIZE]),
+                    viewpoint,
+                    &draws,
+                );
                 let [left, right] = left_and_right(&mut renderer);
                 assert_eq!(left, green, "green on the left");
                 assert!(![red, green].contains(&right), "the clear color, {right:?}");
@@ -2079,6 +2546,247 @@ fn replaced_meshes_and_textures_draw_from_the_frame_that_takes_them(path: Upload
             _ => {}
         }
     }
+    shut_down(renderer);
+}
+
+/// Removes a texture, a mesh and a shader, each drawn by a square of its own, and checks what the
+/// next frame shows: the square of the texture removed shows its stand-in, white, and those of the
+/// mesh and the shader removed show nothing, the clear color, which the frame counts no draw for.
+/// Removing each again does nothing; an image or vertices for one removed are dropped, as a
+/// shader compiled again for one would be; a texture removed while it streams, within a budget of
+/// 64 KiB, shows the stand-in at once, with nothing left streaming; and one replaced while it
+/// streams drops what was streaming for its replacement, which streams from the start.
+fn removed_assets_draw_nothing_or_their_stand_in() {
+    const SIDE: u32 = 64;
+    let mut renderer = renderer_within(SIDE, SIDE, None, SMALL_BUDGET);
+    let mut stores = Stores::default();
+    let flat = |stores: &mut Stores, name| {
+        (stores.shaders)
+            .add::<[f32; 3], Vec4>(name, &shader("flat_color.slang"), Blend::Opaque)
+            .expect("a shader")
+    };
+    let (flat_a, flat_b) = (flat(&mut stores, "flat a"), flat(&mut stores, "flat b"));
+    let textured = (stores.shaders)
+        .add::<[f32; 5], Sampling>("textured", &shader("textured.slang"), Blend::Opaque)
+        .expect("a shader");
+    let corners = [
+        [-0.5, -0.5, 0.0, 0.0, 1.0],
+        [0.5, -0.5, 0.0, 1.0, 1.0],
+        [0.5, 0.5, 0.0, 1.0, 0.0],
+        [-0.5, 0.5, 0.0, 0.0, 0.0],
+    ];
+    let indices = [0, 1, 2, 2, 3, 0];
+    let textured_square = (stores.meshes)
+        .add("textured square", &corners, &indices)
+        .expect("a mesh");
+    let (plain_a, plain_b) = (square(&mut stores.meshes), square(&mut stores.meshes));
+    let red = [255, 0, 0, 255];
+    let texture = (stores.textures)
+        .add("red", [2, 2], red.repeat(4), Mipmaps::None)
+        .expect("a texture");
+    let viewpoint = Viewpoint {
+        projection: Projection::Orthographic {
+            height: 2.0,
+            near: -1.0,
+            far: 1.0,
+        },
+        ..Viewpoint::default()
+    };
+    // Four quadrants: the textured square, the two flat ones, and one for a texture that streams.
+    let place = |[x, y]: [f32; 2]| Mat4::from_translation(Vec3::new(x, y, 0.0));
+    let sampling = |texture| Sampling {
+        texture,
+        sampler: Sampler::NearestClamp.index(),
+    };
+    let scene = |streamed: Option<Texture>| {
+        let mut draws = Draws::default();
+        draws.push(
+            textured_square,
+            textured,
+            place([-0.5, 0.5]),
+            sampling(texture),
+        );
+        let gray = Vec4::new(0.5, 0.5, 0.5, 1.0);
+        draws.push(plain_a, flat_a, place([0.5, 0.5]), gray);
+        draws.push(plain_b, flat_b, place([-0.5, -0.5]), gray);
+        if let Some(streamed) = streamed {
+            draws.push(
+                textured_square,
+                textured,
+                place([0.5, -0.5]),
+                sampling(streamed),
+            );
+        }
+        draws
+    };
+    let pixels = [[16, 16], [48, 16], [16, 48], [48, 48]];
+    let shown = |renderer: &mut Renderer| {
+        let frame = frame_pixels(renderer);
+        pixels.map(|at| pixel_at(&frame, SIDE, at))
+    };
+    let (white, gray) = ([255; 4], [188, 188, 188, 255]);
+    let draws = scene(None);
+    settle(
+        &mut renderer,
+        &mut stores,
+        filling([SIDE, SIDE]),
+        viewpoint,
+        &draws,
+    );
+    assert_eq!(shown(&mut renderer), [red, gray, gray, CLEARED]);
+    assert_eq!(renderer.drawn().instances, 3);
+
+    stores.textures.remove(texture);
+    stores.textures.remove(texture);
+    render_without_ui(
+        &mut renderer,
+        stores.data(filling([SIDE, SIDE]), viewpoint, &draws),
+    );
+    assert_eq!(
+        shown(&mut renderer),
+        [white, gray, gray, CLEARED],
+        "the texture removed"
+    );
+    assert_eq!(renderer.drawn().instances, 3);
+    stores.meshes.remove(plain_a);
+    stores.meshes.remove(plain_a);
+    render_without_ui(
+        &mut renderer,
+        stores.data(filling([SIDE, SIDE]), viewpoint, &draws),
+    );
+    assert_eq!(
+        shown(&mut renderer),
+        [white, CLEARED, gray, CLEARED],
+        "the mesh removed"
+    );
+    assert_eq!(renderer.drawn().instances, 2);
+    stores.shaders.remove(flat_b);
+    stores.shaders.remove(flat_b);
+    render_without_ui(
+        &mut renderer,
+        stores.data(filling([SIDE, SIDE]), viewpoint, &draws),
+    );
+    assert_eq!(
+        shown(&mut renderer),
+        [white, CLEARED, CLEARED, CLEARED],
+        "the shader removed"
+    );
+    assert_eq!(renderer.drawn().instances, 1);
+    // An image and vertices for what's removed change nothing.
+    (stores.textures)
+        .replace("red", texture, [2, 2], red.repeat(4), Mipmaps::None)
+        .expect("checked, then dropped");
+    let quarter = corners.map(|[x, y, z, ..]| [x / 2.0, y / 2.0, z]);
+    (stores.meshes)
+        .replace("plain a", plain_a, &quarter, &indices)
+        .expect("checked, then dropped");
+    settle(
+        &mut renderer,
+        &mut stores,
+        filling([SIDE, SIDE]),
+        viewpoint,
+        &draws,
+    );
+    assert_eq!(
+        shown(&mut renderer),
+        [white, CLEARED, CLEARED, CLEARED],
+        "dropped"
+    );
+
+    // A texture of 256 KiB, removed after the first frame streams a part of it: its stand-in
+    // shows at once, and nothing of it streams on.
+    let green = [0, 255, 0, 255];
+    let streamed = (stores.textures)
+        .add(
+            "streamed",
+            [256, 256],
+            green.repeat(256 * 256),
+            Mipmaps::None,
+        )
+        .expect("a texture");
+    let draws = scene(Some(streamed));
+    render_without_ui(
+        &mut renderer,
+        stores.data(filling([SIDE, SIDE]), viewpoint, &draws),
+    );
+    assert_eq!(renderer.streaming().assets, 1);
+    assert_eq!(
+        shown(&mut renderer)[3],
+        white,
+        "the stand-in while it streams"
+    );
+    stores.textures.remove(streamed);
+    render_without_ui(
+        &mut renderer,
+        stores.data(filling([SIDE, SIDE]), viewpoint, &draws),
+    );
+    assert!(
+        renderer.streaming().is_empty(),
+        "{:?}",
+        renderer.streaming()
+    );
+    for _ in 0..3 {
+        render_without_ui(
+            &mut renderer,
+            stores.data(filling([SIDE, SIDE]), viewpoint, &draws),
+        );
+        assert_eq!(shown(&mut renderer)[3], white, "removed while it streamed");
+    }
+
+    // A texture replaced after the first frame streams a part of it: the replacement alone
+    // streams, from the start, and shows once it's there.
+    let blue = [0, 0, 255, 255];
+    let replaced = (stores.textures)
+        .add(
+            "replaced",
+            [256, 256],
+            green.repeat(256 * 256),
+            Mipmaps::None,
+        )
+        .expect("a texture");
+    let draws = scene(Some(replaced));
+    render_without_ui(
+        &mut renderer,
+        stores.data(filling([SIDE, SIDE]), viewpoint, &draws),
+    );
+    let before = renderer.streaming();
+    assert!(
+        before.assets == 1 && before.bytes < 256 * 256 * 4,
+        "{before:?}"
+    );
+    (stores.textures)
+        .replace(
+            "replaced",
+            replaced,
+            [256, 256],
+            blue.repeat(256 * 256),
+            Mipmaps::None,
+        )
+        .expect("the texture replaced");
+    render_without_ui(
+        &mut renderer,
+        stores.data(filling([SIDE, SIDE]), viewpoint, &draws),
+    );
+    let after = renderer.streaming();
+    assert!(
+        after.assets == 1
+            && after.bytes < 256 * 256 * 4
+            && after.bytes >= 256 * 256 * 4 - SMALL_BUDGET,
+        "the replacement alone, a part in: {after:?}"
+    );
+    assert_eq!(
+        shown(&mut renderer)[3],
+        white,
+        "the stand-in until the replacement"
+    );
+    settle(
+        &mut renderer,
+        &mut stores,
+        filling([SIDE, SIDE]),
+        viewpoint,
+        &draws,
+    );
+    assert_eq!(shown(&mut renderer)[3], blue, "the replacement");
     shut_down(renderer);
 }
 
@@ -2197,6 +2905,13 @@ fn models_match_their_reference() {
         let data = stores.data(filling([WIDTH, HEIGHT]), viewpoint, &draws);
         render_without_ui(&mut renderer, data);
     }
+    settle(
+        &mut renderer,
+        &mut stores,
+        filling([WIDTH, HEIGHT]),
+        viewpoint,
+        &draws,
+    );
     // Red and green facing one way, blue and yellow mirrored, then one each.
     let drawn = DrawCounts {
         draws: 7,
@@ -2309,8 +3024,13 @@ fn mixed_textures_match_their_reference() {
             draws.push_draw(place(column, row, 0.0), square, 0);
         }
     }
-    let data = stores.data(filling([WIDTH, HEIGHT]), viewpoint, &draws);
-    render_without_ui(&mut renderer, data);
+    settle(
+        &mut renderer,
+        &mut stores,
+        filling([WIDTH, HEIGHT]),
+        viewpoint,
+        &draws,
+    );
     let instances = (columns * rows) as usize;
     let drawn = DrawCounts {
         draws: 2,
@@ -2486,6 +3206,9 @@ fn picks_answer_what_their_frame_drew() {
             })
             .collect()
     };
+    // Everything drawable first.
+    let first = scene(0, &mut stores.shaders);
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &first);
     let mut answered = Vec::new();
     for frame in 1..=6 {
         let draws = scene(frame, &mut stores.shaders);
@@ -2547,6 +3270,16 @@ fn picks_wait_through_frames_that_read_none() {
         (vec![], true, vec![]),
         (vec![], true, vec![(2, 4)]),
     ];
+    // The square drawable first.
+    let mut first = Draws::default();
+    first.push_draw(Mat4::from_scale(Vec3::splat(2.0)), &square, 0);
+    settle(
+        &mut renderer,
+        &mut stores,
+        filling([8, 8]),
+        viewpoint,
+        &first,
+    );
     for (frame, (picks, read_picks, expected)) in (1..).zip(frames) {
         let mut draws = Draws::default();
         draws.push_draw(Mat4::from_scale(Vec3::splat(2.0)), &square, frame);
@@ -2647,8 +3380,13 @@ fn mipmaps_match_their_reference(path: UploadPath) {
             level,
         );
     }
-    let data = stores.data(filling([WIDTH, HEIGHT]), viewpoint, &draws);
-    render_without_ui(&mut renderer, data);
+    settle(
+        &mut renderer,
+        &mut stores,
+        filling([WIDTH, HEIGHT]),
+        viewpoint,
+        &draws,
+    );
     check(renderer, "mipmaps", WIDTH, HEIGHT);
 }
 
@@ -2729,6 +3467,14 @@ fn a_view_in_the_ui_matches_its_reference() {
         painter.rect_filled(rect([120.0, 80.0], [180.0, 120.0]), 4.0, green);
     });
     let primitives = egui.tessellate(output.shapes, output.pixels_per_point);
+    // Everything drawable first, without the UI, whose texture changes come once.
+    settle(
+        &mut renderer,
+        &mut stores,
+        filling([240, 160]),
+        viewpoint,
+        &draws,
+    );
     for size in [[240, 160], [0, 0]] {
         let ui = Ui {
             primitives: &primitives,
@@ -2828,6 +3574,7 @@ fn views_read_back_as_they_render() {
         origin: [8, 4],
         size: [40, 30],
     };
+    settle(&mut renderer, &mut stores, viewport, viewpoint, &draws);
     for read_view in [true, false] {
         let data = RenderData {
             read_view,
@@ -2990,13 +3737,15 @@ fn replaced_shaders_draw_from_the_next_frame() {
         },
         ..Viewpoint::default()
     };
-    let center = |renderer: &mut Renderer| {
-        let pixels = (renderer.read_back())
-            .expect("the frame's pixels")
-            .expect("a headless renderer's frame can be read back");
-        let at = ((SIZE / 2 * SIZE + SIZE / 2) * 4) as usize;
-        [pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3]]
-    };
+    let center = |renderer: &mut Renderer| pixel_at(&frame_pixels(renderer), SIZE, [SIZE / 2; 2]);
+    // The square drawable first.
+    settle(
+        &mut renderer,
+        &mut stores,
+        filling([SIZE, SIZE]),
+        viewpoint,
+        &draws,
+    );
     for frame in 0..6 {
         if frame == 3 {
             write("float4(0.0, 1.0, 0.0, 1.0)").expect("the shader's file");
@@ -3041,11 +3790,14 @@ fn pipelines_go_through_the_cache() {
         let mut draws = Draws::default();
         let orange = Vec4::new(0.9, 0.4, 0.1, 1.0);
         draws.push(triangle, flat, Mat4::IDENTITY, orange);
-        let data = stores.data(filling([SIZE, SIZE]), Viewpoint::default(), &draws);
-        render_without_ui(renderer, data);
-        (renderer.read_back())
-            .expect("the frame's pixels")
-            .expect("a headless renderer's frame can be read back")
+        settle(
+            renderer,
+            &mut stores,
+            filling([SIZE, SIZE]),
+            Viewpoint::default(),
+            &draws,
+        );
+        frame_pixels(renderer)
     };
     let mut first = cached(&[]);
     let made = first.pipeline_cache().expect("the cache's data");
