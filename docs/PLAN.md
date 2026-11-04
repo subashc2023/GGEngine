@@ -99,12 +99,13 @@ The roadmap. [AGENTS.md](../AGENTS.md) says how to keep it, under Workflow; the 
 - **Shipping** (2026-11-03)
 - **Desyncs named to their field** (2026-11-03)
 - **Ticks run again, and a SyncTest** (2026-11-03)
+- **Rollback** (2026-11-03)
 
 ## Now
 
-**Rollback**: Phase 11's third milestone, as Next has it. Phase 10 closes once the demo's .app, as
-[ship.yml](../.github/workflows/ship.yml) uploads it, is checked on an Apple Silicon Mac by hand,
-with the rest that Deferred lists for when one is at hand.
+**A server that owns the world**: Phase 11's fourth milestone, as Next has it. Phase 10 closes once
+the demo's .app, as [ship.yml](../.github/workflows/ship.yml) uploads it, is checked on an Apple
+Silicon Mac by hand, with the rest that Deferred lists for when one is at hand.
 
 ## Next
 
@@ -212,7 +213,6 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Setting a play's volume and pitch, and stopping it, as a hum that follows an engine's speed would: a sound plays as its file holds it, to its end | A game varies or cuts a sound as it plays it |
 | More than 128 sounds at once, as many as kira's mixer takes by default, past which a sound is left out (`audio.full`); and making way for the next by stopping the oldest or the quietest | A game plays that many at once |
 | Sounds and music pausing with the simulation, as the tool API pauses or stops it, and while the window is minimized: a sound playing plays to its end, and music plays on | A game's sounds outlast a pause noticeably, or its music should stop with it |
-| Leaving out, as rollback runs ticks again, the sounds they queued and played the first time: each could be tagged with its tick as it's queued | Rollback, in Phase 11 |
 | Frames that play sounds and allocate nothing, on any thread: kira allocates on the main thread as each sound starts, its state and its commands' buffers, and its thread that follows the system's default output device formats the device's ID every half second, on Windows and Linux; and each play of music decodes on a thread kira starts for it, which allocates each packet's frames, as symphonia allocates each packet. The `frames` test's app adds no sounds or music, so it opens no output | A game's frames must allocate nothing as its sounds and music play |
 | A real-time priority for the audio thread, through cpal's `realtime` feature, which on Linux asks for it through D-Bus, against dropouts while the machine is busy | Sounds drop out under load |
 | The tool API listing a game's sounds and music, what's playing and the buses' volumes, and playing one, for agents, which hear nothing: its log's debug events say each sound and music started (`Sound started`, `Music started`) | An agent checks a game's audio beyond its log |
@@ -422,7 +422,6 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Copying the world, and finding what each row draws from, on the job system's threads, or only for the rows that moved: both run on the main thread, for the swarm about 0.19 ms a tick and 0.10 ms a frame that ticked; and blending only the rows that moved, which takes the job threads about 2.6 ms of their time a frame | A profile shows them |
 | Sets that jump: an Inspector set of a moving entity's transform, and its undo, glide there over a tick, as a drag does, rather than reset its interpolation, as an agent's set through the tool API does too | Someone wants a set of a moving entity to glide |
 | A flag for headless frames at a fraction of a tick of their own, for captures between ticks and for perf runs that measure blending, which headless frames, drawing their ticks, leave out; tests have them, through `App::headless_step` | A capture between ticks, or a change to blending that needs measuring headless |
-| Interpolation across rollback: a world restored in a tick draws where the tick left it, all of it, so rollback that restores every tick would draw at the tick rate; how rollback restores is decided with it | Rollback |
 | Reparenting that keeps where a child is in the world, by decomposing its matrix, which loses any shear; `set_parent` keeps its own transform | Someone reparents in the editor's panels, or an agent attaches something where it stands |
 | Spawning a child into its table at once from code: `spawn`, then `set_parent`, moves it to another table; a load and a create operation spawn one there | A profile |
 | Children in an order that means something: reordering them, and saving their order; an undo puts a child back last | Someone orders children in the editor, or UI laid out by the hierarchy |
@@ -456,7 +455,6 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Replaying a log into another world, which maps values' handles to IDs, as a recording's commands are; `set_field` and operations store a dead handle without complaint | Edits sent to another world, as a server's or a peer's |
 | A delete saying what refers to its entities from outside, or refusing; those references dangle until it's undone, and the world doesn't save as a scene in between, though snapshots keep them dead | Someone loses a scene's save to a reference a delete left dangling |
 | Undoing a create whose entity has children since that the create didn't make, such as game code gave it, by keeping them where they are; it's refused (`ecs.has_children`), and the log drops it | An agent attaches children to what another's create made |
-| Layers holding what a restore inside a tick takes back, as rollback's: `Layer::restored` tells them of a world restored as a run starts from a snapshot, at a lockstep joiner's restore and at the API's `stop`, each between ticks, but nothing of one restored inside a tick; the sandbox doesn't snapshot | Something restores the world inside a tick, such as rollback |
 | Reparenting from the panels: dragging a row onto another, and taking a `Parent` away, as Remove Component would, making its entity a root; `Parent` is read only, so the Inspector offers neither | Someone reparents in the editor's panels |
 | Picking several entities, to edit or delete them at once | Someone edits many entities alike |
 | A search field in Add Component's menu, which lists every type registered | A game registers more types than the menu shows at once |
@@ -475,7 +473,7 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | The ban on std's float methods for games in their own repositories, which the workspace's clippy.toml doesn't reach, though glam's features do, since Cargo merges them; and `gg new` for such a game, which makes games in the workspace's `games/` alone: its own workspace, the engine a pinned dependency, copies of clippy.toml and the toolchain's pin, and gg and dx installed | The first game outside the workspace |
 | The editor's hub making a project outside the engine's workspace, or from another template than `gg new`'s: its New Project runs `cargo gg new` in the workspace, and is off outside one; its Open opens a project anywhere | The first game outside the workspace, or a second kind of game to start from |
 | Locating a divergence of the layout alone, to the table, row, children or stream of IDs where two worlds part; `World::difference` compares their content, a replay names the part of the hash, and a lockstep joiner and a SyncTest say the layouts alone part (`net.desync_field`, `sync_test.diverged`) | A replay's, a desync's or a SyncTest's layout goes another way first |
-| Replaying from a snapshot and the commands of several ticks after it, as rollback needs, which a SyncTest runs one tick of; and recording a run restored from a snapshot, which `--restore` refuses with `--record`, a recording's replay starting from a seed and the layers' attach, so that `gg run` doesn't restart a run that records | Rollback, or a crash `gg run` restarted from is worth replaying |
+| Recording a run restored from a snapshot, which `--restore` refuses with `--record`, a recording's replay starting from a seed and the layers' attach, so that `gg run` doesn't restart a run that records; and recording a rollback peer, which `--rollback` refuses with `--record`, each tick written once it has run on both peers' inputs, from their text and the hash kept, since one predicted right runs no more | A crash `gg run` restarted from, or a rollback session's run, is worth replaying |
 | Layers' own state across a restart from a snapshot: the camera controllers' viewpoints, the clear color and the tool API's look, which start as a fresh run's do, the editor in a project setting its parts of the look again as the restarted run serves; the world is as it was, and a layer takes back from it what its panels show, as the sandbox's `restored` does, and a run comes back stopped, or playing a copy with the world as edited held, as it was | Someone misses where they were looking after a restart |
 | What's opaque in a component of a type that isn't opaque as a whole, which a snapshot file leaves out, its component coming back on its type's base: `Component::save_opaque` and `load_opaque` carry types opaque as a whole, as `MeshDraw` | A game's component holds an opaque field |
 | Snapshots that cost the main thread less than a copy of the world, two while a copy plays, which each takes as a frame starts before a thread of the API's writes it: some 6 MB of text for the debug sandbox's 10,461 entities, taken every 5 seconds under `gg run` | A game's snapshots show as hitches |
@@ -485,7 +483,9 @@ Defects are in [DEFECTS.md](DEFECTS.md), which says what goes there rather than 
 | Recording every run, as a flight recorder; a run records only with `--record` | Bug reports from people's runs |
 | Patching an edit to a constant, which rebuilds the game: `gg run` patches edits inside function bodies alone, though one to a constant that no type, static or `const fn` reads would patch as well | Agents tune constants as the game runs, and the rebuilds' restarts slow them |
 | Removing the patches' libraries a `gg run` that's killed leaves; a run removes those its game loaded as it ends | They pile up enough to matter |
-| Lockstep beyond two peers on a LAN: more players, spectators, a delay that follows the link's latency rather than [`DELAY`](../crates/gg-engine/src/net.rs)'s 62.5 ms, and play across the internet | Phase 11, or a game for more than two |
+| Sessions beyond two peers on a LAN: more players, spectators, a delay and a window of ticks predicted that follow the link's latency rather than [`DELAY`](../crates/gg-engine/src/net.rs)'s 62.5 ms, or rollback's 31.25 ms and 8 ticks, and play across the internet, through NATs | A game for more than two, or played across the internet |
+| Rollback peers kept alike ahead of each other's inputs, the one ahead slowing a little, as GGPO's peers do: a peer ahead, as a host is of a joiner by the time its world took to come and the link's latency, predicts as far as `PREDICTED` and waits there, its corrections the other's moves late, while the other predicts little | A rollback session's corrections show on one peer |
+| Smoothing what a rollback corrects, which the frames draw where the ticks run again left it, at once | Players find corrections jarring |
 | `gg run --peers 2`'s two windows opening apart: the OS puts them one over the other | Someone plays both peers on one screen |
 | Recording a joiner, whose world comes from the host's, which `--join` refuses with `--record`; the host's recording replays the session | A desync is worth replaying from the joiner's side |
 | Rebuilding or restarting a running game as its project's manifest changes, which `gg run` doesn't watch | Someone edits a manifest while its game runs |

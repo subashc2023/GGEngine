@@ -122,6 +122,19 @@ jobs:
           wait $host
           grep -q '"message":"The joiner joined the lockstep session"' target/debug/logs/shards-*.jsonl
           ! grep -q '"code":"net.desync"' target/debug/logs/shards-*.jsonl
+      # The demo's two peers under rollback, over a link that holds each packet 100 ms, and up to 20
+      # more, and loses 5% of them: each exits 0, the joiner joins, the host rolls back as its first
+      # commands come, and their worlds hash alike at every tick run on both peers' inputs.
+      - name: Run the demo as two rollback peers over a slow link
+        if: matrix.container
+        run: |
+          target/debug/gg-shards --headless --frames 600 --host 127.0.0.1:7701 --rollback --link 100,20,5 &
+          host=$!
+          target/debug/gg-shards --headless --frames 300 --join 127.0.0.1:7701 --rollback --link 100,20,5
+          wait $host
+          test "$(grep -h '"message":"The joiner joined the lockstep session"' target/debug/logs/shards-*.jsonl | wc -l)" = 2
+          grep -q '"code":"net.rollback","rollbacks":[1-9]' target/debug/logs/shards-*.jsonl
+          ! grep -q '"code":"net.desync"' target/debug/logs/shards-*.jsonl
       # Each tick, run again on a copy of the world taken as it started, with the commands it
       # applied, leaves the copy as it left the world, as rollback needs: the sandbox's and the
       # demo's headless, and the demo's live recording replayed, which steers, dashes, collects and

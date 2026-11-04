@@ -833,7 +833,8 @@ components and resources whose `Clone` allocates nothing. It copies all of the w
 restored world goes on exactly as the world the snapshot was taken from did, spawning the same
 handles with the same IDs and finding entities in the same order. A copy is another world, with a
 serial of its own, which refuses what undoes an operation applied before, so that undo history
-doesn't outlive a restore.
+doesn't outlive a restore; but rollback takes the very world back to a copy of it taken since a
+log last changed it (`World::rewind`), its serial its own, which its logs undo through as before.
 
 A snapshot file holds a world whole as text, so that a run restored from it, in another process,
 after a crash or a rebuild, goes on where the world was: each slot under its generation, the free
@@ -912,30 +913,51 @@ between ticks, and the authors' logs the context's, rebuilt by a replay as the I
 
 ## Networking
 
-The engine supplies what each multiplayer model needs, the first of them deterministic lockstep
-between two peers, on one machine or a LAN; rollback and a server that owns the world come later,
-from the same snapshots, commands and hashes. A run given `--host <address>` listens there, and one
-given `--join <address>` connects to it; the host is player 0 and the joiner player 1, as
+The engine supplies what each multiplayer model needs: two peers, on one machine or a LAN, in
+deterministic lockstep, or predicting each other's inputs and rolling back where a prediction
+missed (`--rollback`, of both peers); a server that owns the world comes later, from the same
+snapshots, commands and hashes. A run given `--host <address>` listens there, and one given
+`--join <address>` connects to it; the host is player 0 and the joiner player 1, as
 `Context::player` tells a layer, which queues commands for its own player alone, naming it in
 them, since each peer runs both players' world.
 
 - **A tick runs on its inputs alone.** A tick's inputs are each layer's commands, the host's then
   the joiner's, and the edits from outside the layers that apply before it, as a recording keeps
-  them: so a peer runs a tick only once it has the other's inputs for it, and frames go on drawing
-  while it waits. Each tick, a peer takes what its layers queued since the last and sends it as its
-  inputs for the tick [`DELAY`](crates/gg-engine/src/net.rs) ticks on, so that the inputs reach the
-  other peer before it needs them; a frame that ticks drains the socket first. Inputs travel as
-  text, the values written as recordings write them, entities by their IDs and textures by their
+  them: so a lockstep peer runs a tick only once it has the other's inputs for it, and frames go on
+  drawing while it waits. Each tick, a peer takes what its layers queued since the last and sends it
+  as its inputs for the tick its delay on, [`DELAY`](crates/gg-engine/src/net.rs) ticks in
+  lockstep, 62.5 ms, so that the inputs reach the other peer before it needs them, and
+  `ROLLBACK_DELAY`, 31.25 ms, in a rollback session; a frame takes what came first. Inputs travel
+  as text, the values written as recordings write them, entities by their IDs and textures by their
   names, which the joiner takes from its host, as [Project state](#project-state) says, read into
   values only at their tick, against the world then.
+- **Rollback predicts the other's inputs.** A rollback peer runs as far as `PREDICTED` ticks, 125
+  ms, past the first it hasn't the other's inputs for, on them predicted to hold nothing: since
+  commands set what lasts in the world, as a disc's heading, that predicts the other player goes on
+  as its last commands had it. It keeps a copy of the world as each such tick starts. As the
+  other's inputs come, between frames, a tick they held nothing for ran as it would have on them,
+  and ends as a tick run on them does, its hash sent; at the first they held something for, the
+  peer takes the world back to the copy, the very world still (`World::rewind`), its serial its
+  own, so that what's kept of it holds, and runs that tick and those after again, each layer's
+  queue as it was after, and the frames draw on from where the last started. The layers are told
+  nothing, as a tick goes by the world, its commands and what its layer set up alone, which a
+  SyncTest checks. A sound that a tick run again queues and its runs before played isn't played
+  again; one they played that it doesn't queue has played. Each peer logs how often it rolled back
+  as the run ends (`net.rollback`).
 - **Edits and patches are inputs too.** The tool API's edits, on either peer, go out with the
-  peer's inputs for the tick `DELAY` on, and apply on both before it, so that a request's answer
+  peer's inputs for the tick its delay on, and apply on both before it, so that a request's answer
   comes once its edit has applied. A scene file's save is an edit of the file's text, which each
   peer turns into operations against its own world at that tick, as both worlds are the same, and
   a script's save is an edit of its text, which each peer reloads; the host alone watches scene
   files and scripts. `gg run` gives both peers each patch, in the same order, and the
-  host chooses the tick it applies before, `DELAY` on from its next as it gets it, which neither
-  peer has run; it tells its joiner, which waits at that tick for its own patch if it hasn't it yet.
+  host chooses the tick it applies before, its delay on from its next as it gets it, which neither
+  peer has run, among its inputs for it, which tell its joiner, which waits at that tick for its
+  own patch if it hasn't it yet. These, and the commands of a queue that edits
+  (`Commands::edits`), as the Inspector's, apply only at a tick run on both peers' inputs, once:
+  a rollback peer runs a tick that applies its own only once it has the other's inputs, as a
+  lockstep peer runs each, and rolls back to one that applies the other's, as its inputs come. So
+  no edit applies in a tick run again, and the authors' and the Inspector's logs undo through a
+  world taken back as before.
 - **A joiner starts from the host's world.** As a joiner connects, the host sends its world as a
   snapshot file's text, as it stands between two ticks, with how many patches its code is on, the
   scripts and mods it runs, and its inputs for the ticks after, up to the first the joiner can
@@ -945,17 +967,25 @@ them, since each peer runs both players' world.
   either peer, after a crash or a rebuild, rejoins: a joiner that loses its host waits for it,
   frozen, and connects again, while a host that loses its joiner plays on alone, the joiner's
   player still.
-- **Desyncs name their field.** Each peer sends the world's hash after each of its ticks, and keeps
-  a copy of its world after the tick until the other's hash of it has come; a hash that isn't the
-  other's logs `net.desync` with the tick, the host sends its joiner its world after that tick, and
-  the joiner logs the first entity, component and field where its own differs there, with both
-  values (`net.desync_field`), as `World::difference` finds it: at the tick the worlds went apart,
-  before what went apart has spread. Then the host sends its world again, as to a joiner, so that
-  the peers carry on in sync.
+- **Desyncs name their field.** Each peer sends the world's hash after each tick run on both peers'
+  inputs, and keeps a copy of its world after the tick until the other's hash of it has come; a
+  hash that isn't the other's logs `net.desync` with the tick, the host sends its joiner its world
+  after that tick, and the joiner logs the first entity, component and field where its own differs
+  there, with both values (`net.desync_field`), as `World::difference` finds it: at the tick the
+  worlds went apart, before what went apart has spread. Then the host sends its world again, as to
+  a joiner, so that the peers carry on in sync, from a world that in a rollback session went by the
+  joiner's inputs predicted, whatever they were.
 
-Messages are lines of text over TCP, without Nagle's delay, which keeps them in order and whole;
-[net.rs](crates/gg-engine/src/net.rs) has their format and the rest. `gg run --peers 2` runs a host
-and a joiner from one build, patching both and restarting both after a rebuild.
+The session's stream is lines of text over TCP, without Nagle's delay, which keeps them in order
+and whole: the hello, the host's world, the hashes, and a tick's inputs that hold an edit or a
+patch, name a texture the host has just named, or are too long for a packet. A tick's other
+inputs go over UDP, in packets sent at each tick and again a tick's time after the last, each
+repeating this peer's inputs for every tick the other hasn't said it has, so that a packet lost
+loses none, and naming the tick the peers' worlds were last made the same at, so that one sent
+before a resync is dropped. `--link` has a peer's link hold each packet that comes, and up to more,
+losing some, and the stream's lines, as a slow link would. [net.rs](crates/gg-engine/src/net.rs)
+has their format and the rest. `gg run --peers 2` runs a host and a joiner from one build, patching
+both and restarting both after a rebuild, its arguments after `--`, as `--rollback`, given both.
 
 ## Diagnostics
 

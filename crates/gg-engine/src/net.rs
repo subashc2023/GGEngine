@@ -2,77 +2,111 @@
 //! host, player 0, that listens, and a joiner, player 1, that connects and starts from the host's
 //! world, and runs its host's scripts, which come with it; each tick's inputs, every layer's
 //! commands and the edits that apply before it, a script's reload among them, sent [`DELAY`] ticks
-//! ahead and run once both peers' are in; the world's hash after each tick, compared, each peer
-//! keeping a copy of its world after the tick until it is, so that where the hashes part, the host
-//! sends its joiner its world there, and the joiner names the field where its own differs; and, in
-//! development builds, the patches of the game's code, which the host has apply at a tick of its
-//! choosing.
+//! ahead and run once both peers' are in, or, in a rollback session (`--rollback`), sent
+//! [`ROLLBACK_DELAY`] ahead and run before the other's have come, as far as [`PREDICTED`] ticks on,
+//! on the prediction that they hold nothing, the world taken back and the ticks run again from the
+//! first whose inputs held something; the world's hash after each tick that's run on both peers'
+//! inputs, compared, each peer keeping a copy of its world after the tick until it is, so that where
+//! the hashes part, the host sends its joiner its world there, and the joiner names the field where
+//! its own differs; and, in development builds, the patches of the game's code, which the host has
+//! apply at a tick of its choosing.
 //!
-//! Messages are lines of text over TCP, each a thread of the connection's reads, written by the
-//! main thread:
+//! The session's stream is lines of text over TCP, each a thread of the connection's reads,
+//! written by the main thread:
 //!
 //! ```text
-//! hello\tgg-lockstep 4\tShards\t0.1.0 debug dev\tShards Inspector
-//!                                                    the joiner, as it connects
+//! hello\tgg-lockstep 5\tShards\t0.1.0 debug dev\tShards Inspector\t50123
+//!                                                    the joiner, as it connects, and the port its
+//!                                                      packets come from, as `gg-rollback 5` for
+//!                                                      a rollback session's
 //! refused <why>                                      the host, refusing it, before it closes
-//! world 1234 2                                       the host's world, at tick 1234, its code
-//! gg-snapshot 2                                        2 patches on, as a snapshot file's text,
-//! ...                                                  to its `end`
-//! end
+//! world 1234 2 50124                                 the host's world, at tick 1234, its code
+//! gg-snapshot 2                                        2 patches on, and the port its packets
+//! ...                                                  come from, as a snapshot file's text, to
+//! end                                                  its `end`
 //! joined 1234                                        the joiner, once it has restored it
 //! c 1238 0 Variant("Move", [...])                    a command for tick 1238, of layer 0
 //! e 1238 Variant("Apply", [...])                     an edit before tick 1238, or a script's
 //!                                                      reload, `Variant("Script", [...])`
 //! s 1238 List([String("scenes/arena.ron"), ...])     a scene file's save before tick 1238
+//! p 3 1238                                           the host's third patch, before tick 1238
 //! t 1238                                             the inputs for tick 1238 are whole
 //! h 1234 58183b6352a09a44 fb695ce29daa8479           the world's hash after tick 1234
 //! parted 1234                                        the host's world after tick 1234, where
 //! stream 3f8a6c2e9b1d4057                              the peers' hashes parted, its lines as a
 //! ...                                                  snapshot file's world's, to its `end`
 //! end
-//! p 3 1240                                           the host's third patch, before tick 1240
 //! n List([String("5f3c9a1e07b2d846"), String(...)])  the name the host gave a texture it added,
 //!                                                      and the path it names
 //! ```
 //!
-//! Values are written as recordings write them, entities by their IDs and textures by their names,
-//! and read into values only at their tick, against the world then. The joiner names its textures
-//! as its host does, whatever ID files its own disk holds: as its host's world gives them, and as
-//! the host's `n` lines give the names of those it adds after, before the inputs that may name
-//! them. A peer's ticks allocate, for their inputs' text and the hash's lines, as recorded ticks
-//! do.
+//! A tick's inputs come whole one way: on the stream, if they hold an edit or a patch, name a
+//! texture the host has just named, or are too many bytes for a packet; otherwise in the packets,
+//! UDP's, sent at each tick and again a tick's time after the last, which carry this peer's inputs
+//! for each tick from the first the other hasn't said it has, as many as fit [`MAX_PACKET`], so
+//! that a packet lost loses none:
+//!
+//! ```text
+//! a 1234 1236                                        the tick the peers' worlds were last made
+//!                                                      the same at, the host's world's, a packet
+//!                                                      of another dropped; and the other's inputs
+//!                                                      whole before tick 1236
+//! c 1238 0 Variant("Move", [...])                    this peer's for tick 1238, as on the stream
+//! t 1238
+//! t 1239
+//! ```
+//!
+//! A tick's inputs that come again, as those the world gave and the packets sent before it, are
+//! the same, and the first whole is kept. Values are written as recordings write them, entities by
+//! their IDs and textures by their names, and read into values only at their tick, against the
+//! world then. The joiner names its textures as its host does, whatever ID files its own disk
+//! holds: as its host's world gives them, and as the host's `n` lines give the names of those it
+//! adds after, before the inputs that may name them. A peer's ticks allocate, for their inputs'
+//! text, the hash's lines and the packets, as recorded ticks do.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as _;
+use std::hash::{BuildHasher, RandomState};
 use std::io::{self, BufRead, BufReader, ErrorKind, Read as _, Write as _};
 use std::mem;
-#[cfg(test)]
-use std::net::SocketAddr;
-use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 #[cfg(feature = "dev")]
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gg_core::{Error, Result};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
-use crate::args::Net;
+use crate::args::{Conditions, Net};
 use crate::assets::Counts;
 use crate::edits::{Done, Edit};
 use crate::layer::Commands;
 use crate::recording::text::{self, Text};
 use crate::reflect::Value;
-use crate::{Context, World, WorldHash};
+use crate::{Context, Sound, Tick, World, WorldHash};
 
-/// How many ticks ahead a peer sends its inputs: 62.5 ms, so that they reach the other peer before
-/// it needs them across a LAN, at the cost of as long between a press and what it does.
+/// How many ticks ahead a lockstep peer sends its inputs: 62.5 ms, so that they reach the other
+/// peer before it needs them across a LAN, at the cost of as long between a press and what it does.
 pub(crate) const DELAY: u64 = 4;
 
-/// The hello's first part: the protocol and its version, which a change to its lines takes to the
-/// next.
-const PROTOCOL: &str = "gg-lockstep 4";
+/// How many ticks ahead a rollback peer sends its inputs: 31.25 ms between a press and what it
+/// does, the other peer predicting them for as long as they take past that.
+pub(crate) const ROLLBACK_DELAY: u64 = 2;
+
+/// The most ticks a rollback peer runs on the other's inputs predicted, 125 ms of them, after which
+/// it waits for them, as a lockstep peer waits for each; and so the most it runs again at once.
+pub(crate) const PREDICTED: u64 = 8;
+
+/// The hello's first part: the protocol and its version, which a change to its lines or its packets
+/// takes to the next, a lockstep session's or a rollback session's, which both peers' must be.
+const LOCKSTEP: &str = "gg-lockstep 5";
+const ROLLBACK: &str = "gg-rollback 5";
+
+/// The most bytes a packet may have: what a path of the internet's least MTU carries whole, as
+/// QUIC's packets are kept to. A tick's inputs that wouldn't fit go on the stream.
+const MAX_PACKET: usize = 1200;
 
 /// The most bytes a line may have, its line break aside, past which the peer reading it drops the
 /// connection: a scene file's save among them, whose text is one line, as the tool API's lines are
@@ -103,13 +137,39 @@ pub(crate) enum Outside {
 }
 
 /// One peer's inputs for a tick, each value as [`text::write`] writes it: each layer's commands, by
-/// the layer's index, and what applies before the tick, with the ticket of each this peer offered.
+/// the layer's index; what applies before the tick, with the ticket of each this peer offered; and
+/// the host's patches that apply before it, by their numbers.
 #[derive(Default)]
 struct Inputs {
     commands: Vec<(usize, String)>,
     edits: Vec<(Option<Ticket>, String)>,
     scenes: Vec<(Option<Ticket>, String)>,
+    patches: Vec<usize>,
+    /// The other peer's: whether they've come whole.
     whole: bool,
+    /// This peer's: whether they hold an edit, from outside the layers or of a layer whose
+    /// commands edit, or a patch, which apply only at a tick run on both peers' inputs; and whether
+    /// they went on the stream, rather than in the packets.
+    authored: bool,
+    streamed: bool,
+}
+
+impl Inputs {
+    /// Whether they hold anything: the other peer's, predicted to hold nothing, missed if they do.
+    fn any(&self) -> bool {
+        !(self.commands.is_empty()
+            && self.edits.is_empty()
+            && self.scenes.is_empty()
+            && self.patches.is_empty())
+    }
+}
+
+/// A tick run on the other peer's inputs predicted, which rollback runs again from if they hold
+/// something: the world as it started, and the sounds its runs played, which a run again doesn't
+/// play again.
+struct Predicted {
+    start: World,
+    played: Vec<Sound>,
 }
 
 /// What a tick runs on, both peers' inputs merged, the host's first: what applies before it, each
@@ -153,7 +213,8 @@ impl Merged {
     }
 }
 
-/// A connection to the other peer: what writes to it, and the lines its thread reads.
+/// A connection to the other peer: what writes to it, and the lines its thread reads; and the
+/// socket its packets come and go by.
 struct Link {
     to: TcpStream,
     from: Receiver<String>,
@@ -161,12 +222,27 @@ struct Link {
     /// what it sends was sent against a world it no longer has; for the joiner, once it has the
     /// host's world.
     joined: bool,
+    /// The socket, of the address the connection is from, at a port the OS picks; and where the
+    /// other peer's is, once its hello or its world has said, which alone its packets are taken
+    /// from.
+    udp: UdpSocket,
+    other: Option<SocketAddr>,
+    /// What came, each held until it's due, as `--link` says, or at once.
+    lines: VecDeque<(Instant, String)>,
+    packets: Vec<(Instant, Vec<u8>)>,
+    /// When this peer last sent its packets, if it has.
+    sent: Option<Instant>,
+    /// Whether a packet couldn't be sent, which is warned of once a link.
+    unsent: bool,
 }
 
 impl Link {
     /// Starts reading `stream`'s lines on a thread of their own, which ends at a line that isn't
-    /// one, as one past [`MAX_LINE`] isn't, as the connection does.
+    /// one, as one past [`MAX_LINE`] isn't, as the connection does; and binds the link's socket,
+    /// which the main thread reads as each frame starts, without waiting.
     fn new(stream: TcpStream) -> std::io::Result<Self> {
+        let udp = UdpSocket::bind(SocketAddr::new(stream.local_addr()?.ip(), 0))?;
+        udp.set_nonblocking(true)?;
         stream.set_nodelay(true)?;
         let mut reader = BufReader::new(stream.try_clone()?);
         let (lines, from) = mpsc::channel();
@@ -197,12 +273,79 @@ impl Link {
             to: stream,
             from,
             joined: false,
+            udp,
+            other: None,
+            lines: VecDeque::new(),
+            packets: Vec::new(),
+            sent: None,
+            unsent: false,
         })
     }
 
     /// Sends `text`, whole lines, failing as the connection does.
     fn send(&mut self, text: &str) -> std::io::Result<()> {
         self.to.write_all(text.as_bytes())
+    }
+
+    /// Has the other peer's packets be taken from its socket's `port`, at the address the
+    /// connection comes from.
+    fn packets_from(&mut self, port: u16) {
+        self.other = (self.to.peer_addr().ok()).map(|at| SocketAddr::new(at.ip(), port));
+    }
+
+    /// The port this peer's packets come from.
+    fn port(&self) -> u16 {
+        self.udp.local_addr().map_or(0, |at| at.port())
+    }
+
+    /// Takes the packets that came from the other peer's socket, read through `buffer`, each held
+    /// from `now` as `conditions` say, or lost, drawing on `random`.
+    fn receive(
+        &mut self,
+        buffer: &mut [u8],
+        conditions: Option<Conditions>,
+        random: &mut u64,
+        now: Instant,
+    ) {
+        loop {
+            match self.udp.recv_from(buffer) {
+                Ok((size, from)) => {
+                    if Some(from) != self.other {
+                        continue;
+                    }
+                    let mut due = now;
+                    if let Some(conditions) = conditions {
+                        if unit(random) < conditions.loss {
+                            continue;
+                        }
+                        due += conditions.latency + conditions.jitter.mul_f64(unit(random));
+                    }
+                    self.packets.push((due, buffer[..size].to_vec()));
+                }
+                Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                // Windows' answer to a packet sent to a port nothing listens at, as the other
+                // peer's after it has gone.
+                Err(error) if error.kind() == ErrorKind::ConnectionReset => {}
+                Err(error) => {
+                    warn!(code = "net.link", "Can't read the peer's packets: {error}");
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Sends `packet` to the other peer's socket, warning once a link of one that can't be sent,
+    /// which is lost, as a packet may be.
+    fn send_packet(&mut self, packet: &str) {
+        let Some(other) = self.other else { return };
+        if let Err(error) = self.udp.send_to(packet.as_bytes(), other)
+            && !mem::replace(&mut self.unsent, true)
+        {
+            warn!(
+                code = "net.link",
+                "Can't send the peer a packet, which is lost, as those after may be: {error}"
+            );
+        }
     }
 }
 
@@ -241,15 +384,37 @@ pub(crate) struct Lockstep {
     /// Set from a desync until the peers' worlds are made the same again, while their hashes
     /// aren't compared.
     parted: bool,
-    /// This peer's inputs, by tick, kept until the tick runs.
+    /// How many ticks ahead this peer sends its inputs, and the most it runs ahead of the other's
+    /// inputs, on them predicted: lockstep's, none, or a rollback session's.
+    delay: u64,
+    window: u64,
+    /// What `--link` has the link do to what comes, and the state of the random numbers it draws.
+    conditions: Option<Conditions>,
+    random: u64,
+    /// This peer's inputs, by tick, kept until the other peer has them and the tick has run on
+    /// both peers'.
     ours: BTreeMap<u64, Inputs>,
-    /// The other peer's, by tick.
+    /// The other peer's, by tick, kept until the tick has run on them.
     theirs: BTreeMap<u64, Inputs>,
     /// The tick from which the other peer's inputs are needed: before it, they're empty; `None`
     /// while there's no other peer, for the host, which plays on alone.
     from: Option<u64>,
+    /// The first tick from `from` whose inputs from the other peer haven't come whole, all before
+    /// it having come; and the first of this peer's that the other hasn't said it has.
+    whole: u64,
+    acked: u64,
+    /// The tick the peers' worlds were last made the same at, as the host's came, which their
+    /// packets name, so that those sent before, which may come after, are dropped.
+    since: u64,
+    /// The ticks run on the other peer's inputs predicted, which haven't run on them since, by
+    /// tick.
+    predicted: BTreeMap<u64, Predicted>,
+    /// How many times this peer rolled back, how many ticks it ran again, and the most at once.
+    rolled: [u64; 3],
+    /// What a packet is read into.
+    buffer: Vec<u8>,
     /// What this peer offered since its last tick, with the ticket of each that's answered, which
-    /// goes out with its inputs for the tick [`DELAY`] on from its next.
+    /// goes out with its inputs for the tick its delay on from its next.
     offered: Vec<(Option<Ticket>, Outside)>,
     /// The last ticket given.
     #[cfg(feature = "dev")]
@@ -261,7 +426,8 @@ pub(crate) struct Lockstep {
     hashes: [BTreeMap<u64, WorldHash>; 2],
     /// A copy of this peer's world after each tick whose hashes haven't been compared, by tick,
     /// so that a desync names where the worlds parted: the joiner's after the tick they parted at
-    /// kept until its host's comes. And copies kept from before, which they're taken into again.
+    /// kept until its host's comes. And copies kept from before, which they and the predicted
+    /// ticks' are taken into again.
     worlds: BTreeMap<u64, World>,
     spares: Vec<World>,
     /// The joiner's: its host's world after the tick their hashes parted at, as it comes, the tick
@@ -350,9 +516,19 @@ impl Lockstep {
             coming: None,
             owed: false,
             parted: false,
+            delay: DELAY,
+            window: 0,
+            conditions: None,
+            random: 0,
             ours: BTreeMap::new(),
             theirs: BTreeMap::new(),
             from: (!host).then_some(0),
+            whole: 0,
+            acked: 0,
+            since: 0,
+            predicted: BTreeMap::new(),
+            rolled: [0; 3],
+            buffer: vec![0; 1 << 16],
             offered: Vec::new(),
             #[cfg(feature = "dev")]
             tickets: 0,
@@ -368,6 +544,24 @@ impl Lockstep {
             #[cfg(feature = "dev")]
             names: Vec::new(),
         })
+    }
+
+    /// Has the peer predict the other's inputs, as a rollback session's peers do (`--rollback`):
+    /// before its first turn.
+    pub(crate) fn predict(&mut self) {
+        self.delay = ROLLBACK_DELAY;
+        self.window = PREDICTED;
+    }
+
+    /// Has the link do to what comes as `conditions` say, as `--link` asks.
+    pub(crate) fn condition(&mut self, conditions: Conditions) {
+        self.conditions = Some(conditions);
+        self.random = RandomState::new().hash_one(0);
+    }
+
+    /// The protocol the peer speaks, which the other's must.
+    fn protocol(&self) -> &'static str {
+        if self.window > 0 { ROLLBACK } else { LOCKSTEP }
     }
 
     /// The app the session is of.
@@ -395,17 +589,21 @@ impl Lockstep {
             && (self.coming.is_some() || !self.link.as_ref().is_some_and(|link| link.joined))
     }
 
-    /// Between ticks, as a frame starts: takes the lines read and the connections made since the
-    /// last turn, and returns what the peer must do of them: send its world, if it's the host and
-    /// owes one, or restore the host's, if it's the joiner and has one whole. Logs a connection
-    /// lost, a peer refused and a desync.
+    /// Between ticks, as a frame starts: takes the lines read, the packets come and the
+    /// connections made since the last turn, those `--link` holds once they're due, and returns
+    /// what the peer must do of them: send its world, if it's the host and owes one, or restore the
+    /// host's, if it's the joiner and has one whole. Sends its packets again a tick's time after it
+    /// last did, as a peer waiting for the other's inputs, and the other for its own, sends none
+    /// otherwise. Logs a connection lost, a peer refused and a desync.
     pub(crate) fn turn(&mut self) -> Turn {
-        let mut lines = Vec::new();
+        let now = Instant::now();
+        let (mut lines, mut packets) = (Vec::new(), Vec::new());
         let mut lost = false;
-        if let Some(link) = &self.link {
+        if let Some(link) = &mut self.link {
+            let latency = self.conditions.map_or(Duration::ZERO, |link| link.latency);
             loop {
                 match link.from.try_recv() {
-                    Ok(line) => lines.push(line),
+                    Ok(line) => link.lines.push_back((now + latency, line)),
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
                         lost = true;
@@ -413,6 +611,15 @@ impl Lockstep {
                     }
                 }
             }
+            while link.lines.front().is_some_and(|(due, _)| *due <= now) {
+                lines.extend(link.lines.pop_front().map(|(_, line)| line));
+            }
+            // Closed once what came before the close has been read.
+            lost &= link.lines.is_empty();
+            link.receive(&mut self.buffer, self.conditions, &mut self.random, now);
+            link.packets.sort_by_key(|(due, _)| *due);
+            let due = link.packets.partition_point(|(due, _)| *due <= now);
+            packets.extend(link.packets.drain(..due).map(|(_, packet)| packet));
         }
         let mut turn = Turn::None;
         for line in lines {
@@ -423,12 +630,22 @@ impl Lockstep {
                 break;
             }
         }
+        for packet in packets {
+            if self.link.is_none() {
+                break;
+            }
+            self.read_packet(&packet);
+        }
         if lost && self.link.is_some() {
             self.lose("the connection closed");
         }
         // After the link's lines, so that a joiner that closed its link and connects again finds
         // the host's place free, as the host has seen the close.
         self.find_peer();
+        let sent = self.link.as_ref().and_then(|link| link.sent);
+        if sent.is_some_and(|sent| now.saturating_duration_since(sent) >= Tick::DT) {
+            self.send_packets();
+        }
         if matches!(turn, Turn::None) && self.owed && self.link.is_some() {
             turn = Turn::Send;
         }
@@ -464,13 +681,14 @@ impl Lockstep {
             }
         };
         let (stream, address) = made;
-        let hello = format!(
-            "hello\t{PROTOCOL}\t{}\t{}\t{}\n",
-            self.app,
-            engine(),
-            self.layers
-        );
-        match Link::new(stream).and_then(|mut link| link.send(&hello).map(|()| link)) {
+        let protocol = self.protocol();
+        let hello = |link: &Link| {
+            let (app, layers) = (self.app, &self.layers);
+            let port = link.port();
+            format!("hello\t{protocol}\t{app}\t{}\t{layers}\t{port}\n", engine())
+        };
+        let link = Link::new(stream).and_then(|mut link| link.send(&hello(&link)).map(|()| link));
+        match link {
             Ok(link) => {
                 info!(address = %address, "Connected to the lockstep host");
                 self.link = Some(link);
@@ -525,11 +743,17 @@ impl Lockstep {
                 }
             }
             "world" if !self.hosts() => {
-                let world = rest.split_once(' ').and_then(|(tick, patches)| {
-                    Some((tick.parse::<u64>().ok()?, patches.parse::<usize>().ok()?))
+                let world = rest.split_once(' ').and_then(|(tick, rest)| {
+                    let (patches, port) = rest.split_once(' ')?;
+                    let patches = patches.parse::<usize>().ok()?;
+                    Some((
+                        tick.parse::<u64>().ok()?,
+                        patches,
+                        port.parse::<u16>().ok()?,
+                    ))
                 });
                 match world {
-                    Some((tick, patches)) => {
+                    Some((tick, patches, port)) => {
                         #[cfg(feature = "dev")]
                         {
                             self.patches.hosts = patches;
@@ -537,9 +761,12 @@ impl Lockstep {
                         // Builds without patches are refused by hosts with them.
                         #[cfg(not(feature = "dev"))]
                         let _ = patches;
+                        if let Some(link) = &mut self.link {
+                            link.packets_from(port);
+                        }
                         self.coming = Some((tick, String::new()));
                     }
-                    None => self.lose("the host's world names no tick or patches"),
+                    None => self.lose("the host's world names no tick, patches or port"),
                 }
             }
             "joined" if self.hosts() => {
@@ -567,17 +794,23 @@ impl Lockstep {
                 match (tick, layer, value) {
                     (Some(tick), Some(layer), Some(value)) => {
                         let inputs = self.theirs.entry(tick).or_default();
-                        match kind {
-                            "c" => inputs.commands.push((layer, value)),
-                            "e" => inputs.edits.push((None, value)),
-                            _ => inputs.scenes.push((None, value)),
+                        // Come again, as in the world after its packets.
+                        if !inputs.whole {
+                            match kind {
+                                "c" => inputs.commands.push((layer, value)),
+                                "e" => inputs.edits.push((None, value)),
+                                _ => inputs.scenes.push((None, value)),
+                            }
                         }
                     }
                     _ => self.lose(&format!("the peer sent a line that isn't one: {line}")),
                 }
             }
             "t" => match rest.parse::<u64>() {
-                Ok(tick) => self.theirs.entry(tick).or_default().whole = true,
+                Ok(tick) => {
+                    self.theirs.entry(tick).or_default().whole = true;
+                    self.came_whole();
+                }
                 Err(_) => self.lose(&format!("the peer sent a line that isn't one: {line}")),
             },
             "h" => {
@@ -604,7 +837,13 @@ impl Lockstep {
                     Some((number.parse::<usize>().ok()?, tick.parse::<u64>().ok()?))
                 });
                 match due {
-                    Some((number, tick)) if number > 0 => self.patches.due.push((number, tick)),
+                    Some((number, tick)) if number > 0 => {
+                        let inputs = self.theirs.entry(tick).or_default();
+                        if !inputs.whole {
+                            inputs.patches.push(number);
+                            self.patches.due.push((number, tick));
+                        }
+                    }
                     _ => self.lose(&format!("the peer sent a line that isn't one: {line}")),
                 }
             }
@@ -619,16 +858,17 @@ impl Lockstep {
     }
 
     /// Takes the joiner's hello, `line`, refusing it unless it's of this protocol, app, engine
-    /// and layers; once taken, the host owes it its world.
+    /// and layers, and says where its packets come from; once taken, the host owes it its world.
     fn hello(&mut self, line: &str) {
         let parts: Vec<&str> = line.split('\t').collect();
-        let ours = [PROTOCOL, self.app, &engine(), self.layers.as_str()];
-        let why = match parts.get(1..) {
-            Some(theirs) if theirs == &ours[..] => None,
-            Some([protocol, ..]) if *protocol != PROTOCOL => {
-                Some(format!("it speaks {protocol}, and the host {PROTOCOL}"))
+        let ours = [self.protocol(), self.app, &engine(), self.layers.as_str()];
+        let port = parts.get(5).and_then(|port| port.parse::<u16>().ok());
+        let why = match (parts.get(1..5), port) {
+            (Some(theirs), Some(_)) if parts.len() == 6 && theirs == &ours[..] => None,
+            (Some([protocol, ..]), _) if *protocol != ours[0] => {
+                Some(format!("it speaks {protocol}, and the host {}", ours[0]))
             }
-            Some([_, app, engine, layers]) => Some(format!(
+            (Some([_, app, engine, layers]), Some(_)) if parts.len() == 6 => Some(format!(
                 "it's app {app}, engine {engine}, layers `{layers}`, and the host app {}, engine \
                  {}, layers `{}`",
                 ours[1], ours[2], ours[3]
@@ -636,7 +876,12 @@ impl Lockstep {
             _ => Some("its hello isn't one".to_owned()),
         };
         match why {
-            None => self.owed = true,
+            None => {
+                self.owed = true;
+                if let (Some(link), Some(port)) = (&mut self.link, port) {
+                    link.packets_from(port);
+                }
+            }
             Some(why) => {
                 warn!(code = "net.refused", "Refused a lockstep peer: {why}");
                 if let Some(link) = &mut self.link {
@@ -649,10 +894,12 @@ impl Lockstep {
 
     /// The host, between ticks, the next to run being `next`: sends the joiner `world`, a snapshot
     /// file's text, which names its assets as the host does, there being `assets` of them,
-    /// with how many patches its code is on; its inputs for each tick from `next` to the tick
-    /// [`DELAY`] on, which it has sent before, or has none of within `DELAY` ticks of its start or
-    /// restore; and its patches that are to apply. The joiner's inputs are needed from the tick
-    /// `DELAY` on from `next`, the first it can reach.
+    /// with how many patches its code is on and where its packets come from; and its inputs for
+    /// each tick from `next` to the tick its delay on, whole, its patches that are to apply among
+    /// them, which it has sent before, or has none of within its delay of its start or restore. The
+    /// joiner's inputs are needed from the tick its delay on from `next`, the first it can reach,
+    /// and those before are none: those it predicted that its world went by, which takes the
+    /// joiner's place, as its ticks before `next` did, whatever the joiner's were.
     pub(crate) fn send_world(&mut self, world: &str, assets: Counts, next: u64) {
         self.owed = false;
         #[cfg(feature = "dev")]
@@ -665,22 +912,19 @@ impl Lockstep {
         let patches = self.patches.applied;
         #[cfg(not(feature = "dev"))]
         let patches = 0;
-        let mut text = format!("world {next} {patches}\n{world}");
-        // Before the inputs, as a patch's line comes before the inputs for its tick otherwise, so
-        // that the joiner has it before it can run the tick.
-        #[cfg(feature = "dev")]
-        for (number, at) in &self.patches.due {
-            writeln!(text, "p {number} {at}").expect("a string takes any text");
-        }
+        let port = self.link.as_ref().map_or(0, Link::port);
+        let mut text = format!("world {next} {patches} {port}\n{world}");
         let none = Inputs::default();
-        for tick in next..next + DELAY {
+        for tick in next..next + self.delay {
             write_inputs(&mut text, tick, self.ours.get(&tick).unwrap_or(&none));
         }
+        self.ours = self.ours.split_off(&next);
         self.theirs.clear();
         self.hashes = Default::default();
         self.release();
         self.parted = false;
-        self.from = Some(next + DELAY);
+        let from = next + self.delay;
+        (self.from, self.whole, self.acked, self.since) = (Some(from), from, from, next);
         if let Some(link) = &mut self.link {
             link.joined = false;
             if let Err(error) = link.send(&text) {
@@ -713,7 +957,7 @@ impl Lockstep {
         self.hashes = Default::default();
         self.release();
         self.parted = false;
-        self.from = Some(tick);
+        (self.from, self.whole, self.acked, self.since) = (Some(tick), tick, tick, tick);
         if let Some(link) = &mut self.link {
             link.joined = true;
         }
@@ -787,8 +1031,10 @@ impl Lockstep {
         self.done.push((ticket, tick, done));
     }
 
-    /// Whether tick `tick` can run: it has the other peer's inputs, or needs none, and the patches
-    /// due before it, which a joiner may have from its host before it has them from `gg run`.
+    /// Whether tick `tick` can run: it has the patches due before it, which a joiner may have from
+    /// its host before it has them from `gg run`; and it has the other peer's inputs, or needs
+    /// none, or, in a rollback session, is within [`PREDICTED`] ticks of the first it hasn't, and
+    /// applies no edit or patch of this peer's.
     pub(crate) fn ready(&self, tick: u64) -> bool {
         if self.waiting() {
             return false;
@@ -801,31 +1047,32 @@ impl Lockstep {
                 return false;
             }
         }
-        match self.from {
-            None => true,
-            Some(from) if tick < from => true,
-            Some(_) => self.theirs.get(&tick).is_some_and(|inputs| inputs.whole),
+        if self.settled(tick) {
+            return true;
         }
+        let authored = self.ours.get(&tick).is_some_and(|inputs| inputs.authored);
+        tick < self.whole + self.window && !authored
+    }
+
+    /// Whether tick `tick` runs on both peers' inputs: the other's have come, or it needs none.
+    pub(crate) fn settled(&self, tick: u64) -> bool {
+        self.from.is_none_or(|_| tick < self.whole)
     }
 
     /// As tick `tick` starts, once it's [`ready`](Self::ready): sends this peer's inputs for the
-    /// tick [`DELAY`] on, `queues`' commands, each layer's by its index, written against `cx`'s
-    /// world, and what it offered since its last tick, emptying them; and returns what the tick
-    /// runs on, the edits read once the textures they name are loaded, as a run that follows
-    /// another loads them.
+    /// tick its delay on, `queues`' commands, each layer's by its index, written against `world`,
+    /// what it offered since its last tick, emptying them, and, the host's, the patches due before
+    /// that tick; and lets go of the inputs it no longer needs.
     pub(crate) fn start_tick<'q>(
         &mut self,
         tick: u64,
         queues: impl Iterator<Item = (usize, &'q mut dyn Commands)>,
-        cx: &mut Context,
-    ) -> Merged {
-        let world = cx.world();
-        let ahead = tick + DELAY;
-        let mut inputs = Inputs {
-            whole: true,
-            ..Inputs::default()
-        };
+        world: &World,
+    ) {
+        let ahead = tick + self.delay;
+        let mut inputs = Inputs::default();
         for (layer, queue) in queues {
+            inputs.authored |= queue.edits() && !queue.is_empty();
             for i in 0..queue.len() {
                 let mut value = String::new();
                 text::write(&mut value, &queue.value(i), world);
@@ -834,6 +1081,7 @@ impl Lockstep {
             queue.clear();
         }
         for (ticket, input) in mem::take(&mut self.offered) {
+            inputs.authored = true;
             let mut value = String::new();
             match input {
                 Outside::Edit(edit) => {
@@ -850,6 +1098,25 @@ impl Lockstep {
                 }
             }
         }
+        #[cfg(feature = "dev")]
+        if self.hosts() {
+            let due = self.patches.due.iter().filter(|&&(_, at)| at == ahead);
+            inputs.patches.extend(due.map(|&(number, _)| number));
+            inputs.authored |= !inputs.patches.is_empty();
+        }
+        // This peer's inputs are kept until the other has them and their tick has run on both
+        // peers', and the other's until then.
+        let settled = self
+            .predicted
+            .first_key_value()
+            .map_or(tick, |(&first, _)| first);
+        let had = if self.from.is_some() {
+            self.acked
+        } else {
+            tick
+        };
+        self.ours = self.ours.split_off(&settled.min(had));
+        self.theirs = self.theirs.split_off(&settled);
         if self.from.is_some() {
             let mut text = String::new();
             // The names of the assets the host added since it last told them, before the inputs
@@ -863,23 +1130,42 @@ impl Lockstep {
                 }
                 self.named = world.assets().counts();
             }
-            write_inputs(&mut text, ahead, &inputs);
-            self.send(&text);
+            // Each line, its tick and its layer, and the packet's first and last, at most.
+            let lines = inputs
+                .commands
+                .iter()
+                .map(|(_, command)| command.len() + 32);
+            let size = 64 + lines.sum::<usize>();
+            inputs.streamed = inputs.authored || !text.is_empty() || size > MAX_PACKET;
+            if inputs.streamed {
+                write_inputs(&mut text, ahead, &inputs);
+                self.send(&text);
+            }
         }
         self.ours.insert(ahead, inputs);
-        let ours = self.ours.remove(&tick).unwrap_or_default();
-        // What's left of ticks before is from before the peers' worlds were made the same.
-        self.theirs = self.theirs.split_off(&tick);
-        let theirs = self.theirs.remove(&tick).unwrap_or_default();
-        let (host, joiner) = if self.hosts() {
-            (ours, theirs)
+        self.send_packets();
+    }
+
+    /// What tick `tick` runs on: both peers' inputs, the host's first, the other's predicted to
+    /// hold nothing until they've come; and, once they have, as the tick runs on both peers' inputs,
+    /// once, what applies before it, the edits read once the textures they name are loaded, as a
+    /// run that follows another loads them, and the patches due before it.
+    pub(crate) fn inputs(&mut self, tick: u64, cx: &mut Context) -> Merged {
+        let (settled, hosts) = (self.settled(tick), self.hosts());
+        let ours = self.ours.get_mut(&tick);
+        let theirs = self.theirs.get_mut(&tick).filter(|_| settled);
+        let peers = if hosts {
+            [ours, theirs]
         } else {
-            (theirs, ours)
+            [theirs, ours]
         };
         let mut merged = Merged::default();
-        for peer in [host, joiner] {
-            merged.commands.extend(peer.commands);
-            for (ticket, edit) in peer.edits {
+        for peer in peers.into_iter().flatten() {
+            merged.commands.extend(peer.commands.iter().cloned());
+            if !settled {
+                continue;
+            }
+            for (ticket, edit) in mem::take(&mut peer.edits) {
                 let read = Text::parse(&edit, 1).and_then(|text| {
                     cx.load_followed(&text);
                     Edit::from_value(&text.value(cx.world()))
@@ -894,7 +1180,7 @@ impl Lockstep {
                     }
                 }
             }
-            for (ticket, scene) in peer.scenes {
+            for (ticket, scene) in mem::take(&mut peer.scenes) {
                 let read = Text::parse(&scene, 1).map(|text| text.value(cx.world()));
                 let saved = match &read {
                     Ok(Value::List(strings)) => match &strings[..] {
@@ -918,14 +1204,120 @@ impl Lockstep {
             }
         }
         #[cfg(feature = "dev")]
-        self.due_patches(tick, &mut merged);
+        if settled {
+            self.due_patches(tick, &mut merged);
+        }
         merged
     }
 
-    /// Once tick `tick` has run, leaving `world`: sends its hash, if there's another peer, keeping
-    /// a copy of the world until the hash is compared with theirs, unless the peers have parted,
-    /// and compares it.
+    /// Keeps a copy of `world` as tick `tick` starts on the other peer's inputs predicted, which
+    /// rollback runs it again from if theirs hold something, in the memory of the copy kept before.
+    pub(crate) fn keep(&mut self, tick: u64, world: &World) {
+        let spares = &mut self.spares;
+        let predicted = self.predicted.entry(tick).or_insert_with(|| Predicted {
+            start: spares.pop().unwrap_or_default(),
+            played: Vec::new(),
+        });
+        predicted.start.clone_from(world);
+    }
+
+    /// The sounds the runs of tick `tick` on the other peer's inputs predicted have played, while
+    /// it hasn't run on theirs.
+    pub(crate) fn played(&mut self, tick: u64) -> Option<&mut Vec<Sound>> {
+        let predicted = self.predicted.get_mut(&tick)?;
+        Some(&mut predicted.played)
+    }
+
+    /// Between ticks, the next to run being `next`, `world` as the last left it: takes the ticks run
+    /// on the other peer's inputs predicted whose inputs have come since, in turn. One theirs held
+    /// nothing for, as predicted, ran as it would have on them, and ends as a tick run on them
+    /// does, as [`end_tick`](Self::end_tick) says. The first theirs held something for is returned,
+    /// for the world to be taken back to where it started, [`start_of`](Self::start_of), and it
+    /// and the ticks after run again: once the patches due before `next` have come from `gg run`.
+    pub(crate) fn settle(&mut self, next: u64, world: &World) -> Option<u64> {
+        #[cfg(feature = "dev")]
+        {
+            let patches = &self.patches;
+            let mut due = patches.due.iter();
+            if due.any(|&(number, at)| at < next && number > patches.got.len()) {
+                return None;
+            }
+        }
+        #[cfg(not(feature = "dev"))]
+        let _ = next;
+        while let Some((&tick, _)) = self.predicted.first_key_value()
+            && tick < self.whole
+        {
+            if self.theirs.get(&tick).is_some_and(Inputs::any) {
+                return Some(tick);
+            }
+            let predicted = self.predicted.remove(&tick).expect("it's the first");
+            self.spares.push(predicted.start);
+            // The world after it: as the tick after started, or as it is, that tick yet to run.
+            let after = self.predicted.remove(&(tick + 1));
+            self.finish(tick, after.as_ref().map_or(world, |after| &after.start));
+            match after {
+                Some(after) if self.link.is_some() => {
+                    self.predicted.insert(tick + 1, after);
+                }
+                _ => {}
+            }
+            if self.link.is_none() {
+                break;
+            }
+        }
+        None
+    }
+
+    /// The world as tick `tick`, run on the other peer's inputs predicted, started.
+    ///
+    /// # Panics
+    ///
+    /// If it hasn't run on them, or has run on theirs since.
+    pub(crate) fn start_of(&self, tick: u64) -> &World {
+        &self.predicted[&tick].start
+    }
+
+    /// Counts a rollback, from tick `from` to `next`, the next to run, the ticks between run again.
+    pub(crate) fn rolled_back(&mut self, from: u64, next: u64) {
+        let ticks = next - from;
+        let [rollbacks, again, most] = &mut self.rolled;
+        *rollbacks += 1;
+        *again += ticks;
+        *most = (*most).max(ticks);
+        debug!(tick = from, ticks, "Rolled back");
+    }
+
+    /// Logs, in a rollback session, how many times the peer rolled back, how many ticks it ran
+    /// again, and the most at once (`net.rollback`), as the run ends.
+    pub(crate) fn ended(&self) {
+        if self.window == 0 {
+            return;
+        }
+        let [rollbacks, ticks, most] = self.rolled;
+        info!(
+            code = "net.rollback",
+            rollbacks,
+            ticks,
+            most,
+            "Rolled back {rollbacks} times, as the other peer's inputs held what was predicted they \
+             wouldn't, running {ticks} ticks again, at most {most} at once"
+        );
+    }
+
+    /// Once tick `tick` has run on both peers' inputs, leaving `world`, as it does once: lets go of
+    /// its runs on the other's predicted, and ends it, as [`finish`](Self::finish) says.
     pub(crate) fn end_tick(&mut self, tick: u64, world: &World) {
+        if let Some(predicted) = self.predicted.remove(&tick) {
+            self.spares.push(predicted.start);
+        }
+        self.finish(tick, world);
+    }
+
+    /// Ends tick `tick`, which has run on both peers' inputs, leaving `world`: sends its hash, if
+    /// there's another peer, keeping a copy of the world until the hash is compared with theirs,
+    /// unless the peers have parted, and compares it.
+    fn finish(&mut self, tick: u64, world: &World) {
         if self.from.is_none() {
             return;
         }
@@ -1044,10 +1436,110 @@ impl Lockstep {
         self.spares.push(ours);
     }
 
-    /// Puts the worlds kept among the spares, as the hashes they were kept for are dropped.
+    /// Puts the worlds kept among the spares, as the hashes they were kept for are dropped, and
+    /// those of the ticks run on the other peer's inputs predicted, as the world the peers go on
+    /// from takes their place.
     fn release(&mut self) {
         let kept = mem::take(&mut self.worlds).into_values();
         self.spares.extend(kept);
+        let predicted = mem::take(&mut self.predicted).into_values();
+        self.spares
+            .extend(predicted.map(|predicted| predicted.start));
+    }
+
+    /// Moves on past the ticks whose inputs from the other peer have come whole, as their last
+    /// line or their packet has.
+    fn came_whole(&mut self) {
+        while self
+            .theirs
+            .get(&self.whole)
+            .is_some_and(|inputs| inputs.whole)
+        {
+            self.whole += 1;
+        }
+    }
+
+    /// Takes `packet`, from the other peer, once the link counts: how far it has this peer's
+    /// inputs, and its own for each tick it holds that haven't come whole. Loses the peer for a
+    /// packet that isn't one.
+    fn read_packet(&mut self, packet: &[u8]) {
+        if !self.link.as_ref().is_some_and(|link| link.joined) {
+            return;
+        }
+        if self.read_ticks(packet).is_none() {
+            self.lose("the peer sent a packet that isn't one");
+        }
+        self.came_whole();
+    }
+
+    /// Reads `packet`'s lines, as [`read_packet`](Self::read_packet) takes them, failing at one
+    /// that isn't one.
+    fn read_ticks(&mut self, packet: &[u8]) -> Option<()> {
+        let mut lines = std::str::from_utf8(packet).ok()?.lines();
+        let (since, acked) = lines.next()?.strip_prefix("a ")?.split_once(' ')?;
+        let (since, acked) = (since.parse::<u64>().ok()?, acked.parse::<u64>().ok()?);
+        // Sent before the peers' worlds were last made the same.
+        if since != self.since {
+            return Some(());
+        }
+        self.acked = self.acked.max(acked);
+        let mut commands = Vec::new();
+        for line in lines {
+            let (kind, rest) = line.split_once(' ')?;
+            let mut parts = rest.splitn(3, ' ');
+            let tick = parts.next()?.parse::<u64>().ok()?;
+            match kind {
+                "c" => {
+                    let layer = parts.next()?.parse::<usize>().ok()?;
+                    commands.push((tick, layer, parts.next()?.to_owned()));
+                }
+                "t" if parts.next().is_none() => {
+                    if commands.iter().any(|&(of, ..)| of != tick) {
+                        return None;
+                    }
+                    let commands = commands.drain(..).map(|(_, layer, value)| (layer, value));
+                    // Come before, or whole on the stream; what came of them there is the same.
+                    if tick >= self.whole {
+                        let inputs = self.theirs.entry(tick).or_default();
+                        if !inputs.whole {
+                            *inputs = Inputs {
+                                commands: commands.collect(),
+                                whole: true,
+                                ..Inputs::default()
+                            };
+                        }
+                    }
+                }
+                _ => return None,
+            }
+        }
+        Some(())
+    }
+
+    /// Sends the other peer this peer's packets, once there is one and it has said where its
+    /// packets come from: how far this peer has its inputs, and this peer's inputs for each tick
+    /// from the first it hasn't said it has that didn't go on the stream, oldest first, as many to
+    /// a packet as fit [`MAX_PACKET`], a tick's in one.
+    fn send_packets(&mut self) {
+        if self.from.is_none() {
+            return;
+        }
+        let Some(link) = &mut self.link else { return };
+        let header = format!("a {} {}\n", self.since, self.whole);
+        let (mut packet, mut lines) = (header.clone(), String::new());
+        let sent = (self.ours.range(self.acked..)).filter(|(_, inputs)| !inputs.streamed);
+        for (&tick, inputs) in sent {
+            lines.clear();
+            write_inputs(&mut lines, tick, inputs);
+            if packet.len() + lines.len() > MAX_PACKET && packet.len() > header.len() {
+                link.send_packet(&packet);
+                packet.clone_from(&header);
+            }
+            packet.push_str(&lines);
+        }
+        // The last, or the header alone, which says how far this peer has the other's inputs.
+        link.send_packet(&packet);
+        link.sent = Some(Instant::now());
     }
 
     /// Sends `text` to the other peer, losing it if that fails.
@@ -1075,9 +1567,11 @@ impl Lockstep {
         self.parted = false;
         self.theirs.clear();
         self.hashes = Default::default();
-        // Their memory too, as a host may play on alone.
+        // Their memory too, as a host may play on alone, its ticks on the joiner's inputs
+        // predicted going on as they ran.
         self.worlds.clear();
         self.spares.clear();
+        self.predicted.clear();
         if self.hosts() {
             self.from = None;
         }
@@ -1088,18 +1582,16 @@ impl Lockstep {
 impl Lockstep {
     /// Offers the patch `table` names, `gg run`'s next for this process, the next tick to run
     /// being `next`, and returns its ticket, which [`done`](Self::done) gives its result with. The
-    /// host has it apply before the tick [`DELAY`] on, which neither peer has run, telling its
-    /// joiner, which has it apply then too; a joiner has it apply as its host says, or before the
-    /// first tick of its host's world, if its host had applied it.
+    /// host has it apply before the tick its delay on, which neither peer has run, among its
+    /// inputs for that tick, which tell its joiner, which has it apply then too; a joiner has it
+    /// apply as its host says, or before the first tick of its host's world, if its host had
+    /// applied it.
     pub(crate) fn offer_patch(&mut self, table: subsecond::JumpTable, next: u64) -> Ticket {
         self.tickets += 1;
         self.patches.got.push(Some((table, self.tickets)));
         if self.hosts() {
-            let (number, at) = (self.patches.got.len(), next + DELAY);
+            let (number, at) = (self.patches.got.len(), next + self.delay);
             self.patches.due.push((number, at));
-            if self.from.is_some() {
-                self.send(&format!("p {number} {at}\n"));
-            }
         }
         self.tickets
     }
@@ -1208,7 +1700,8 @@ fn read_line(reader: &mut impl BufRead) -> io::Result<Option<String>> {
         .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))
 }
 
-/// Writes `inputs`, a peer's for tick `tick`, after `out`, as their lines.
+/// Writes `inputs`, a peer's for tick `tick`, after `out`, as their lines, the `t` that says
+/// they're whole last.
 fn write_inputs(out: &mut String, tick: u64, inputs: &Inputs) {
     let written = "a string takes any text";
     for (layer, command) in &inputs.commands {
@@ -1220,7 +1713,21 @@ fn write_inputs(out: &mut String, tick: u64, inputs: &Inputs) {
     for (_, scene) in &inputs.scenes {
         writeln!(out, "s {tick} {scene}").expect(written);
     }
+    for number in &inputs.patches {
+        writeln!(out, "p {number} {tick}").expect(written);
+    }
     writeln!(out, "t {tick}").expect(written);
+}
+
+/// The next of `random`'s numbers, SplitMix64's, from 0 up to 1, in steps of 2⁻⁵³: for what a link
+/// does to what comes, which nothing replays.
+fn unit(random: &mut u64) -> f64 {
+    *random = random.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    let mut z = *random;
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^= z >> 31;
+    (z >> 11) as f64 / (1u64 << 53) as f64
 }
 
 /// Logs where `ours`, the joiner's world after tick `tick`, first differs from `theirs`, its host's
@@ -1253,8 +1760,9 @@ fn log_parting(tick: u64, ours: &World, theirs: &World) {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::path::PathBuf;
-    use std::time::Instant;
+    use std::rc::Rc;
 
     use tracing_subscriber::layer::SubscriberExt;
 
@@ -1284,6 +1792,10 @@ mod tests {
         /// Whether it runs the run's mods, and the mods once it has loaded them.
         modded: bool,
         mods: Option<crate::Mods>,
+        /// Whether its session's peers predict each other's inputs, as a rollback session's do,
+        /// and what its link does to what comes.
+        rollback: bool,
+        link: Option<Conditions>,
     }
 
     impl Layer for Game {
@@ -1336,11 +1848,31 @@ mod tests {
 
     impl Peer {
         /// A peer of `net`'s session, its game attached in `cx`.
-        fn new(net: &Net, mut cx: Context, game: Game) -> Self {
+        fn new(net: &Net, cx: Context, game: Game) -> Self {
+            let (rollback, link) = (game.rollback, game.link);
             let mut stack = Stack::default();
             stack.push_layer(game);
+            Self::of(stack, net, cx, rollback, link)
+        }
+
+        /// A peer of `net`'s session, `stack`'s layers attached in `cx`, which predicts the other's
+        /// inputs if `rollback` says so, over a link that does what `link` says.
+        fn of(
+            mut stack: Stack,
+            net: &Net,
+            mut cx: Context,
+            rollback: bool,
+            link: Option<Conditions>,
+        ) -> Self {
             let names = stack.names().to_vec();
-            stack.lockstep(Lockstep::start(net, "Tested", &names).expect("started"));
+            let mut lockstep = Lockstep::start(net, "Tested", &names).expect("started");
+            if rollback {
+                lockstep.predict();
+            }
+            if let Some(link) = link {
+                lockstep.condition(link);
+            }
+            stack.lockstep(lockstep);
             stack.attach(&mut cx);
             Self { stack, cx, next: 0 }
         }
@@ -1355,21 +1887,32 @@ mod tests {
             host
         }
 
-        /// A joiner of `host`'s session, which hasn't connected yet.
+        /// A joiner of `host`'s session, which hasn't connected yet, over a link like its host's.
         fn joiner(host: &mut Self) -> Self {
-            let address = host.net().listening.expect("listening").to_string();
-            let joiner = Self::new(&Net::Join(address), Context::seeded(2), Game::default());
+            let net = host.net();
+            let address = net.listening.expect("listening").to_string();
+            let game = Game {
+                rollback: net.window > 0,
+                link: net.conditions,
+                ..Game::default()
+            };
+            let joiner = Self::new(&Net::Join(address), Context::seeded(2), game);
             assert_eq!(joiner.cx.player(), Some(1));
             joiner
         }
 
         /// A frame's turn and the tick it runs, if the other peer's inputs have come.
         fn turn(&mut self) {
-            if let Some(ticks) = self.stack.net_turn(&mut self.cx, self.next) {
-                self.next = ticks;
-            }
+            self.wait();
             if self.stack.tick(&mut self.cx, Tick { number: self.next }) {
                 self.next += 1;
+            }
+        }
+
+        /// A frame's turn that runs no tick.
+        fn wait(&mut self) {
+            if let Some(ticks) = self.stack.net_turn(&mut self.cx, self.next) {
+                self.next = ticks;
             }
         }
 
@@ -1436,22 +1979,220 @@ mod tests {
         }
     }
 
-    /// Turns both peers until both are at tick `at`, the one ahead waiting.
+    /// Turns both peers until both are at tick `at`, the one ahead waiting there, its frames
+    /// turning on without ticking, as they take and send packets.
     fn meet(host: &mut Peer, joiner: &mut Peer, at: u64) {
         let start = Instant::now();
         while host.next < at || joiner.next < at {
-            assert!(
-                start.elapsed() < Duration::from_secs(10),
-                "the peers never met"
-            );
-            if host.next < at {
-                host.turn();
+            if start.elapsed() >= Duration::from_secs(10) {
+                let state = |peer: &mut Peer| {
+                    let next = peer.next;
+                    let net = peer.net();
+                    let (whole, acked) = (net.whole, net.acked);
+                    format!("at {next}, the other's inputs to {whole}, its own taken to {acked}")
+                };
+                panic!(
+                    "the peers never met at {at}: the host {}; the joiner {}",
+                    state(host),
+                    state(joiner)
+                );
             }
-            if joiner.next < at {
-                joiner.turn();
+            for peer in [&mut *host, &mut *joiner] {
+                if peer.next < at {
+                    peer.turn();
+                } else {
+                    peer.wait();
+                }
             }
             thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    /// Has both peers meet at tick `at`, as [`meet`] does, and wait there until each has the other's
+    /// inputs for every tick before it, and has run each on them, rolling back where they held
+    /// what it didn't predict: so that their worlds are those both peers' inputs make.
+    fn settle(host: &mut Peer, joiner: &mut Peer, at: u64) {
+        meet(host, joiner, at);
+        let start = Instant::now();
+        let settled = |peer: &mut Peer| {
+            let net = peer.net();
+            net.whole >= at && net.predicted.is_empty()
+        };
+        while !(settled(host) && settled(joiner)) {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "the peers never settled"
+            );
+            host.wait();
+            joiner.wait();
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// What a slow link does in the tests: holds each packet 20 ms, and up to 10 more, and loses a
+    /// fifth of them.
+    const SLOW: Conditions = Conditions {
+        latency: Duration::from_millis(20),
+        jitter: Duration::from_millis(10),
+        loss: 0.2,
+    };
+
+    /// Rollback peers over a slow link run ahead of each other's inputs, on them predicted to hold
+    /// nothing, and roll back to the first tick whose inputs held something, running it and the
+    /// ticks after again: each player's commands apply once, though they come late, lost and out
+    /// of order, and their worlds hash alike at each tick run on both peers' inputs.
+    #[test]
+    fn rollback_peers_over_a_slow_link_apply_each_command_once_and_hash_alike() {
+        let (codes, logged) = mpsc::channel();
+        let subscriber = tracing_subscriber::registry().with(Codes(codes));
+        let _logging = tracing::subscriber::set_default(subscriber);
+        let game = Game {
+            rollback: true,
+            link: Some(SLOW),
+            ..Game::default()
+        };
+        let mut host = Peer::host(Context::seeded(1), game, 1);
+        let mut joiner = Peer::joiner(&mut host);
+        join(&mut host, &mut joiner);
+        // The host's player at each turn, the joiner's at every third, as keys change.
+        let mut queued = [0; 2];
+        for turn in 0..300 {
+            host.stack_commands(Command::Add {
+                player: 0,
+                points: 1,
+            });
+            queued[0] += 1;
+            if turn % 3 == 0 {
+                joiner.stack_commands(Command::Add {
+                    player: 1,
+                    points: 10,
+                });
+                queued[1] += 10;
+            }
+            host.turn();
+            joiner.turn();
+            thread::sleep(Duration::from_millis(1));
+        }
+        // Past the ticks the last commands went out for.
+        let at = host.next.max(joiner.next) + ROLLBACK_DELAY + 1;
+        settle(&mut host, &mut joiner, at);
+        assert_eq!(host.score(), queued);
+        assert_eq!(joiner.score(), queued);
+        assert_eq!(host.cx.world().hash(), joiner.cx.world().hash());
+        let rolled = |peer: &mut Peer| peer.net().rolled;
+        let ([rollbacks, again, most], [theirs, ..]) = (rolled(&mut host), rolled(&mut joiner));
+        assert!(rollbacks > 0 && theirs > 0, "{rollbacks} {theirs}");
+        assert!(again >= rollbacks && most <= PREDICTED, "{again} {most}");
+        let codes: Vec<String> = logged.try_iter().collect();
+        let parted = ["net.desync", "net.bad_command", "net.lost"];
+        assert!(
+            !codes.iter().any(|code| parted.contains(&code.as_str())),
+            "{codes:?}"
+        );
+    }
+
+    /// The commands of [`Editor`]'s queue, which edit.
+    #[derive(Default)]
+    struct Edits(Vec<Command>);
+
+    impl Commands for Edits {
+        fn len(&self) -> usize {
+            self.0.len()
+        }
+
+        fn value(&self, i: usize) -> Value {
+            self.0[i].to_value()
+        }
+
+        fn push(&mut self, value: &Value) -> Result<()> {
+            self.0.push(Command::from_value(value)?);
+            Ok(())
+        }
+
+        fn edits(&self) -> bool {
+            true
+        }
+
+        fn clear(&mut self) {
+            self.0.clear();
+        }
+    }
+
+    /// Adds its commands' points to the score it attaches, and counts them as it applies them,
+    /// as the Inspector keeps a log of its edits: a tick that ran them again would count them
+    /// again.
+    struct Editor {
+        queued: Edits,
+        applied: Rc<Cell<u32>>,
+    }
+
+    impl Layer for Editor {
+        fn attach(&mut self, cx: &mut Context) {
+            cx.world_mut().spawn(Score { points: [0; 2] });
+        }
+
+        fn tick(&mut self, world: &mut World, _: Tick) {
+            for Command::Add { player, points } in self.queued.0.drain(..) {
+                for score in world.query_mut::<&mut Score>() {
+                    score.points[usize::from(player)] += points;
+                }
+                self.applied.set(self.applied.get() + 1);
+            }
+        }
+
+        fn commands(&mut self) -> Option<&mut dyn Commands> {
+            Some(&mut self.queued)
+        }
+    }
+
+    /// In a rollback session, a tick that applies a command of a queue that edits, as the
+    /// Inspector's, runs only once it has both peers' inputs, the peer whose it is waiting for the
+    /// other's, and the other rolling back to it: so that each applies once on each peer, as a
+    /// layer that keeps what it did, as the Inspector's log, counts it.
+    #[test]
+    fn rollback_peers_apply_each_edit_once() {
+        let peer = |net: &Net, cx: Context| {
+            let applied = Rc::new(Cell::new(0));
+            let mut stack = Stack::default();
+            stack.push_layer(Editor {
+                queued: Edits::default(),
+                applied: Rc::clone(&applied),
+            });
+            (Peer::of(stack, net, cx, true, Some(SLOW)), applied)
+        };
+        let (mut host, by_host) = peer(&Net::Host("127.0.0.1:0".to_owned()), Context::seeded(1));
+        host.turn();
+        let address = host.net().listening.expect("listening").to_string();
+        let (mut joiner, by_joiner) = peer(&Net::Join(address), Context::seeded(2));
+        join(&mut host, &mut joiner);
+        let edit = |peer: &mut Peer, player: u8| {
+            let queue = peer
+                .stack
+                .commands_of(0)
+                .expect("the editor queues commands");
+            let command = Command::Add { player, points: 1 };
+            queue.push(&command.to_value()).expect("queued");
+        };
+        let mut queued = [0; 2];
+        for turn in 0..200 {
+            if turn % 7 == 0 {
+                edit(&mut host, 0);
+                queued[0] += 1;
+            }
+            if turn % 5 == 0 {
+                edit(&mut joiner, 1);
+                queued[1] += 1;
+            }
+            host.turn();
+            joiner.turn();
+            thread::sleep(Duration::from_millis(1));
+        }
+        let at = host.next.max(joiner.next) + ROLLBACK_DELAY + 1;
+        settle(&mut host, &mut joiner, at);
+        let all = queued[0] + queued[1];
+        assert_eq!((by_host.get(), by_joiner.get()), (all, all));
+        assert_eq!(host.score(), queued);
+        assert_eq!(host.cx.world().hash(), joiner.cx.world().hash());
     }
 
     /// Queues a command for each player on its peer, and turns both, `turns` times.
@@ -1838,14 +2579,23 @@ mod tests {
         );
     }
 
-    /// Patches `gg run` gives both peers alike: the host's, alone, applies before the tick
-    /// [`DELAY`] on from its next; the joiner's, which it got before it joined, before the first
-    /// tick of its host's world; and once they've joined, the host's next applies on both before the
-    /// tick it chose, the joiner waiting there for its own from `gg run`. Each is answered with the
-    /// tick it applied before, here a refusal, as no process takes the tables of a test.
+    /// Patches `gg run` gives both peers alike, in lockstep and in a rollback session: the host's,
+    /// alone, applies before the tick its delay on from its next; the joiner's, which it got before
+    /// it joined, before the first tick of its host's world; and once they've joined, the host's
+    /// next applies on both before the tick it chose, the joiner waiting there for its own from `gg
+    /// run`, or, in a rollback session, there or past it on the host's inputs predicted, rolling
+    /// back to it once its patch has come. Each is answered with the tick it applied before, here a
+    /// refusal, as no process takes the tables of a test.
     #[cfg(feature = "dev")]
     #[test]
     fn patches_apply_on_both_peers_before_the_ticks_the_host_chooses() {
+        for rollback in [false, true] {
+            patches_apply_before_the_ticks_the_host_chooses(rollback);
+        }
+    }
+
+    #[cfg(feature = "dev")]
+    fn patches_apply_before_the_ticks_the_host_chooses(rollback: bool) {
         /// Gives `peer` the patch `table` names, as `gg run` does through the API.
         fn patch(peer: &mut Peer, table: subsecond::JumpTable) -> Ticket {
             let Ok(ticket) = peer.stack.offer_patch(table, peer.next) else {
@@ -1864,9 +2614,14 @@ mod tests {
             let code = done.err().map(|error| error.code());
             assert_eq!(code, Some("api.patch"));
         };
-        let mut host = Peer::host(Context::seeded(1), Game::default(), 10);
+        let delay = if rollback { ROLLBACK_DELAY } else { DELAY };
+        let game = Game {
+            rollback,
+            ..Game::default()
+        };
+        let mut host = Peer::host(Context::seeded(1), game, 10);
         let first = patch(&mut host, table());
-        let chosen = host.next + DELAY;
+        let chosen = host.next + delay;
         while host.next <= chosen {
             host.turn();
         }
@@ -1890,13 +2645,23 @@ mod tests {
         // The host's next, which the joiner waits for from `gg run`, though it has the host's inputs
         // for the tick, as the host goes on.
         let second = patch(&mut host, table());
-        let chosen = host.next + DELAY;
-        until(&mut host, &mut joiner, |_, joiner| joiner.next == chosen);
+        let chosen = host.next + delay;
+        until(&mut host, &mut joiner, |_, joiner| joiner.next >= chosen);
         until(&mut host, &mut joiner, |host, joiner| {
             let inputs = joiner.net().theirs.get(&chosen);
             host.next > chosen && inputs.is_some_and(|inputs| inputs.whole)
         });
-        assert_eq!(joiner.next, chosen);
+        if rollback {
+            let next = joiner.next;
+            let predicted = &joiner.net().predicted;
+            let past = (chosen..next).all(|tick| predicted.contains_key(&tick));
+            assert!(
+                past,
+                "run past it, to {next}, on the host's inputs predicted alone"
+            );
+        } else {
+            assert_eq!(joiner.next, chosen);
+        }
         let theirs = patch(&mut joiner, table());
         until(&mut host, &mut joiner, |host, joiner| {
             host.net().is_done(second) && joiner.net().is_done(theirs)

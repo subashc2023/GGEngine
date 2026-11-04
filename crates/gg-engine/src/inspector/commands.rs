@@ -46,6 +46,11 @@ impl Commands for Queue {
         self.0.len()
     }
 
+    /// The Inspector's tick keeps its log of what they did, which it undoes and redoes through.
+    fn edits(&self) -> bool {
+        true
+    }
+
     fn value(&self, i: usize) -> Value {
         let text = |text: &str| Value::String(text.to_owned());
         let entity = |id: &EntityId| -> (Ident, Value) { ("entity".into(), text(&id.to_string())) };

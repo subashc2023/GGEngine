@@ -24,7 +24,7 @@ apps/             executables
   sandbox/        the engine's own app: a swarm of up to 100,000 sprites and a grid's scene file
   editor/         the editor: a project's game, embedded, in a panel among dockable panels
   player/         reference player, with no layers; runs cooked scenes without game code (to come)
-games/shards/     the first demo, a project: two players, alone or in lockstep (`--host`, `--join`)
+games/shards/     the first demo, a project: two players, alone or networked (`--host`, `--join`)
 games/showcase/   a project of a scene for each feature: add one as a feature lands
 tools/            gg/, the command-line tool `cargo gg` runs; cook/, the cooker of games' packages
 docs/PLAN.md      the roadmap (see Workflow)
@@ -51,7 +51,7 @@ cargo gg ship shards              # as it ships, in target/ship/shards; on macOS
 cargo run -p cook -- games/shards target/debug/gg-shards.ggpk   # for a build --no-default-features
 cargo test -p gg-renderer --test gpu -- picks   # the GPU tests whose names contain picks
 cargo gg run sandbox              # supervised, serving the tool API: `cargo gg help`
-cargo gg run --peers 2            # in games/shards, its project: a lockstep host and joiner
+cargo gg run --peers 2 [-- --rollback]   # in games/shards: a host and joiner, lockstep or predicting
 cargo gg new <NAME>               # a new game, games/NAME, a project with an empty start scene
 ```
 
@@ -68,9 +68,9 @@ as it starts; filter it on `level`, `code` or `vuid`. `RUST_LOG` sets what's log
 its frame times and where they went, and its memory. Compare builds by theirs, from release builds
 run headless for as many frames; headless frames draw each tick as it ends, without blending. A
 replay that goes another way names the tick and the part of the hash; `--replay <path> --dump
-<tick>`, run where it does and where it doesn't, prints each world a field a line, to diff. Lockstep
-peers whose worlds part log `net.desync`, the joiner `net.desync_field`; `--sync-test` runs each
-tick again on a copy, ending where they part (`sync_test.diverged`): both name the field and values.
+<tick>`, run where it does and where it doesn't, prints each world a field a line, to diff. Peers
+whose worlds part log `net.desync`, the joiner `net.desync_field`; `--sync-test` runs each tick
+again on a copy, ending where they part (`sync_test.diverged`): both name the field and values.
 
 The `tracy` feature sends the engine's zones to Tracy: run the Tracy viewer of the release the
 root Cargo.toml names, and connect it to the running app. To capture a headless run instead,

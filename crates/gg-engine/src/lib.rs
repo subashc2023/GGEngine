@@ -581,6 +581,8 @@ fn run_args(
         record = args.record.as_ref().map(|path| path.display().to_string()),
         replay = args.replay.as_ref().map(|path| path.display().to_string()),
         sync_test = args.sync_test,
+        rollback = args.rollback,
+        link = args.link.map(|link| format!("{link:?}")),
         "Options"
     );
 
@@ -623,7 +625,13 @@ fn run_args(
             app.stack.record(recorder);
         }
         if let Some(net) = &args.net {
-            let net = net::Lockstep::start(net, app.name, app.stack.names())?;
+            let mut net = net::Lockstep::start(net, app.name, app.stack.names())?;
+            if args.rollback {
+                net.predict();
+            }
+            if let Some(link) = args.link {
+                net.condition(link);
+            }
             app.stack.lockstep(net);
         }
         // Before the renderer starts, so that tools find a run that hangs as it starts.

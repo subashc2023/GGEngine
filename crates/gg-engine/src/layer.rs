@@ -194,6 +194,15 @@ pub trait Commands {
         Ok(())
     }
 
+    /// Whether the commands are edits of the world, as the Inspector's are, which a rollback session
+    /// (`--rollback`) applies only at a tick it has both peers' inputs for, as it does the edits
+    /// from outside the layers, so that each applies once: what applies them keeps a log of them,
+    /// which a tick run again would add to again. The default, `false`, is a game's, whose ticks go
+    /// by the world, the tick and their commands alone, and may run again.
+    fn edits(&self) -> bool {
+        false
+    }
+
     /// Empties the queue.
     fn clear(&mut self);
 }
@@ -1491,6 +1500,13 @@ impl Context {
     /// says: once each tick has run.
     pub(crate) fn play_queued(&mut self) {
         self.audio.play_queued(&mut self.world);
+    }
+
+    /// Plays the sounds the world's ticks queued, as [`play_queued`](Self::play_queued) does, but
+    /// those of `played`, which the tick's runs before played, as a tick rollback runs again has,
+    /// adding those it plays to `played`.
+    pub(crate) fn play_queued_again(&mut self, played: &mut Vec<Sound>) {
+        self.audio.play_queued_again(&mut self.world, played);
     }
 
     /// Records that a layer added an asset of `kind`, as `what` says it: its name, and the types
@@ -3381,8 +3397,10 @@ impl Stack {
     /// peer sent since the last turn, sending the joiner the world, if the host owes it, or
     /// restoring the host's in place of the joiner's, as [`Lockstep::turn`] says, the joiner's
     /// textures taking the names the host's gave them, as they do the names the host gave those it
-    /// added since. Returns the tick the joiner's world is at once it restores the host's, which
-    /// its ticks go on from.
+    /// added since; and, in a rollback session, takes the ticks run on the other peer's inputs
+    /// predicted whose inputs have come, as [`Lockstep::settle`] says, rolling back to the first
+    /// whose inputs held something, as [`roll_back`](Self::roll_back) says. Returns the tick the
+    /// joiner's world is at once it restores the host's, which its ticks go on from.
     pub(crate) fn net_turn(&mut self, cx: &mut Context, next: u64) -> Option<u64> {
         let mut net = self.net.take()?;
         let mut restored = None;
@@ -3444,7 +3462,13 @@ impl Stack {
                 cx.name_also(names);
             }
         }
+        // The ticks run on the other peer's inputs predicted whose inputs have come.
+        let next = restored.unwrap_or(next);
+        let from = net.settle(next, &cx.world);
         self.net = Some(net);
+        if let Some(from) = from {
+            self.roll_back(cx, from, next);
+        }
         restored
     }
 
@@ -3796,9 +3820,10 @@ impl Stack {
         }
     }
 
-    /// Detaches from the top down, the reverse of attaching, once a recording has its end, and a
+    /// Detaches from the top down, the reverse of attaching, once a recording has its end, a
     /// SyncTest that found no tick going another way has logged how many it ran again
-    /// (`sync_test.matched`); and takes from `cx` whether a layer ended the run with an error, as
+    /// (`sync_test.matched`), and a rollback session's peer how it rolled back (`net.rollback`);
+    /// and takes from `cx` whether a layer ended the run with an error, as
     /// [`failed`](Self::failed) tells, as it detached too.
     pub(crate) fn detach(&mut self, cx: &mut Context) {
         let _zone = gg_core::zone!();
@@ -3812,6 +3837,9 @@ impl Stack {
                 "Each tick ran again on a copy of the world taken as it started, and left it as it \
                  left the world"
             );
+        }
+        if let Some(net) = &self.net {
+            net.ended();
         }
         cx.attached = false;
         cx.authors.clear(&mut cx.world);
@@ -3840,18 +3868,11 @@ impl Stack {
         cx.apply_edit(edit)
     }
 
-    /// Runs a tick of the simulation: each layer's, from the bottom up, after which the world
-    /// shares the context's assets again, as [`Context::share_assets`] says, and then the sounds
-    /// the tick queued play, as [`World::play_sound`] says. A recording gets each
-    /// layer's commands just before its tick applies them, so that a tick that panics leaves them,
-    /// and the world's hash after the last. In a lockstep session, the tick waits for the other
-    /// peer's inputs, returning `false` without running until they've come; once they have, this
-    /// peer's queued commands go out as its inputs for a tick to come, and the tick runs on both
-    /// peers' for it, as [`Lockstep::start_tick`] says, the edits among them applying first, as a
-    /// recording keeps them. A SyncTest takes a copy of the world once those have applied, keeps
-    /// each layer's commands as its tick is about to apply them, and runs the tick again once it
-    /// has run, as [`run_again`](Self::run_again) says: one that fails ends the run with its error,
-    /// as [`Context::fail`] does, and the SyncTest with it.
+    /// Runs a tick of the simulation, as [`run`](Self::run) says. In a lockstep session, the tick
+    /// waits for the other peer's inputs, returning `false` without running until they've come, or,
+    /// in a rollback session, until it's near enough them, as [`Lockstep::ready`] says; once it
+    /// can run, this peer's queued commands go out as its inputs for a tick to come, as
+    /// [`Lockstep::start_tick`] says.
     pub(crate) fn tick(&mut self, cx: &mut Context, tick: Tick) -> bool {
         let _zone = gg_core::zone!();
         let Self {
@@ -3862,12 +3883,47 @@ impl Stack {
             sync_test,
             ..
         } = self;
-        let merged = match net {
-            Some(net) if !net.ready(tick.number) => return false,
+        if let Some(net) = net.as_mut() {
+            if !net.ready(tick.number) {
+                return false;
+            }
+            let queues = layers.iter_mut().enumerate();
+            let queues = queues.filter_map(|(index, layer)| Some((index, layer.commands()?)));
+            net.start_tick(tick.number, queues, &cx.world);
+        }
+        Self::run(layers, names, recorder, net.as_mut(), sync_test, cx, tick);
+        true
+    }
+
+    /// Runs tick `tick`: each layer's, from the bottom up, after which the world shares the
+    /// context's assets again, as [`Context::share_assets`] says, and then the sounds the tick
+    /// queued play, as [`World::play_sound`] says. A recording gets each layer's commands just
+    /// before its tick applies them, so that a tick that panics leaves them, and the world's hash
+    /// after the last. In a lockstep session, the tick runs on both peers' inputs for it, as
+    /// [`Lockstep::inputs`] says, the edits among them applying first, as a recording keeps them;
+    /// or, in a rollback session, before the other's have come, on them predicted, a copy of the
+    /// world kept as it starts, which a rollback runs it again from, and the sounds it plays kept,
+    /// which a run again doesn't play again, as [`Context::play_queued_again`] says. A SyncTest
+    /// takes a copy of the world once the edits have applied, keeps each layer's commands as its
+    /// tick is about to apply them, and runs the tick again once it has run, as
+    /// [`run_again`](Self::run_again) says: one that fails ends the run with its error, as
+    /// [`Context::fail`] does, and the SyncTest with it.
+    fn run(
+        layers: &mut [Box<dyn Layer>],
+        names: &[&'static str],
+        recorder: &mut Option<Recorder>,
+        mut net: Option<&mut Lockstep>,
+        sync_test: &mut Option<SyncTest>,
+        cx: &mut Context,
+        tick: Tick,
+    ) {
+        let predicted = net.as_ref().is_some_and(|net| !net.settled(tick.number));
+        let merged = match net.as_deref_mut() {
             Some(net) => {
-                let queues = layers.iter_mut().enumerate();
-                let queues = queues.filter_map(|(index, layer)| Some((index, layer.commands()?)));
-                let merged = net.start_tick(tick.number, queues, cx);
+                if predicted {
+                    net.keep(tick.number, &cx.world);
+                }
+                let merged = net.inputs(tick.number, cx);
                 for (ticket, input) in &merged.inputs {
                     let done = match input {
                         // A client's, on either peer.
@@ -3941,7 +3997,10 @@ impl Stack {
             layer.tick(&mut cx.world, tick);
             cx.share_assets();
         }
-        cx.play_queued();
+        match net.as_deref_mut().and_then(|net| net.played(tick.number)) {
+            Some(played) => cx.play_queued_again(played),
+            None => cx.play_queued(),
+        }
         if let Some(again) = sync_test.as_mut()
             && let Err(error) = Self::run_again(layers, again, cx, tick)
         {
@@ -3951,13 +4010,65 @@ impl Stack {
             cx.failed = true;
             *sync_test = None;
         }
+        // A rollback session's isn't recorded, as `--rollback` takes no `--record`.
         if let Some(recorder) = recorder {
             recorder.ticked(tick, &cx.world);
         }
-        if let Some(net) = net {
+        if let Some(net) = net
+            && !predicted
+        {
             net.end_tick(tick.number, &cx.world);
         }
-        true
+    }
+
+    /// Takes the world back to where tick `from` started, run on the other lockstep peer's inputs
+    /// predicted, which held something, and runs it and the ticks after again, to `next`, the next
+    /// to run, as rollback does, the world going on as they leave it, as [`run`](Self::run) runs
+    /// each: the very world, as [`World::rewind`] says, so that what's kept of it holds, and the
+    /// layers are told nothing. Each layer's queue, which holds what it queued since the last tick,
+    /// is as it was once they've run; and the frames after draw on from where the last started.
+    fn roll_back(&mut self, cx: &mut Context, from: u64, next: u64) {
+        let _zone = gg_core::zone!();
+        let Self {
+            layers,
+            names,
+            recorder,
+            net,
+            sync_test,
+            ..
+        } = self;
+        let Some(net) = net.as_mut() else { return };
+        cx.world.rewind(net.start_of(from));
+        let queued: Vec<(usize, Vec<Value>)> = (layers.iter_mut().enumerate())
+            .filter_map(|(index, layer)| {
+                let queue = layer.commands()?;
+                Some((index, (0..queue.len()).map(|i| queue.value(i)).collect()))
+            })
+            .collect();
+        for number in from..next {
+            if number + 1 == next {
+                cx.capture();
+            }
+            let tick = Tick { number };
+            Self::run(
+                layers,
+                names,
+                recorder,
+                Some(&mut *net),
+                sync_test,
+                cx,
+                tick,
+            );
+        }
+        for (index, values) in queued {
+            let queue = layers[index].commands().expect("it queued them");
+            queue.clear();
+            for value in &values {
+                let pushed = queue.push(value);
+                pushed.expect("a queue queues again what it held");
+            }
+        }
+        net.rolled_back(from, next);
     }
 
     /// Runs a tick as a replay does: as [`tick`](Self::tick) does, with each layer's queue emptied

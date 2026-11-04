@@ -111,6 +111,21 @@ impl Clone for World {
     }
 }
 
+impl World {
+    /// Takes the world back to `snapshot`, a copy of it taken since a log last changed it, as
+    /// rollback takes it back to a tick it runs again from: as [`clone_from`](Clone::clone_from)
+    /// restores it, but the very world still, its serial its own, so that what's kept of it by its
+    /// serial holds, as its logs, which undo through it as before, since none changed it since; its
+    /// version moves on past both's, so that what's kept by its version, as drawing's order, is
+    /// found again.
+    pub(crate) fn rewind(&mut self, snapshot: &World) {
+        let (serial, version) = (self.serial, self.version.max(snapshot.version));
+        self.clone_from(snapshot);
+        self.serial = serial;
+        self.version = version + 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use gg_core::Result;
@@ -403,6 +418,62 @@ mod tests {
             kept > 0 && refused > 0,
             "{kept} slots kept, {refused} entries refused"
         );
+    }
+
+    /// A world taken back to a snapshot of it, as rollback takes it back, after steps that went
+    /// through no log, as ticks' do, holds what the snapshot holds, and is the very world still, its
+    /// serial its own and its version past both's: so that its log undoes and redoes through it as
+    /// its twin's, which never went on, does through the twin.
+    #[test]
+    fn a_world_rewound_is_the_same_world_which_its_log_undoes_as_before() {
+        let mut worlds = Twins {
+            x: fixture().world,
+            x_log: Log::default(),
+            twin: fixture().world,
+            twin_log: Log::default(),
+        };
+        let mut rng = Rng(9);
+        for step in 0..300 {
+            worlds.step(&mut rng, step);
+        }
+        let (serial, snap) = (worlds.x.serial, worlds.x.clone());
+        let x = &mut worlds.x;
+        for _ in 0..20 {
+            x.spawn((Transform::IDENTITY, Sprite::default()));
+        }
+        let living: Vec<Entity> = x.entities(None).expect("every entity").collect();
+        for entity in living.into_iter().step_by(3) {
+            if x.contains(entity) {
+                x.despawn(entity).expect("alive");
+            }
+        }
+        let version = x.version;
+        x.rewind(&snap);
+        assert_eq!(x.serial, serial);
+        assert!(x.version > version.max(snap.version));
+        let same = |x: &World, twin: &World, case: &str| {
+            assert_eq!(x.hash(), twin.hash(), "{case}");
+            assert!(same_snapshots(&snapshot(x), &snapshot(twin)), "{case}");
+            assert_eq!(vacated(x), vacated(twin), "{case}");
+        };
+        same(&worlds.x, &worlds.twin, "rewound");
+        let mut undone = 0;
+        for step in 0..300 {
+            let undo = step % 3 != 2;
+            let go = |world: &mut World, log: &mut Log| {
+                refused(if undo {
+                    log.undo(world)
+                } else {
+                    log.redo(world)
+                })
+            };
+            let ours = go(&mut worlds.x, &mut worlds.x_log);
+            let theirs = go(&mut worlds.twin, &mut worlds.twin_log);
+            assert_eq!(ours, theirs, "step {step}");
+            undone += usize::from(undo && ours.is_none());
+            same(&worlds.x, &worlds.twin, &format!("step {step}"));
+        }
+        assert!(undone > 0, "the log held edits to undo");
     }
 
     /// A world that registered the same types in another order, so that its ids name others, with

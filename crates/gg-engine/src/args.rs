@@ -3,6 +3,7 @@
 use std::ffi::OsString;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use gg_core::{Error, Result};
 
@@ -37,6 +38,11 @@ pub(crate) struct Args {
     pub(crate) stopped: bool,
     /// The lockstep session the run hosts or joins, if it's networked.
     pub(crate) net: Option<Net>,
+    /// Whether the session's peers predict each other's inputs, rolling back where a prediction
+    /// missed, rather than waiting for them.
+    pub(crate) rollback: bool,
+    /// What the link does to the packets the run's peer receives, as a slow link would.
+    pub(crate) link: Option<Conditions>,
     /// The folder of the mods the run runs, in place of those installed.
     pub(crate) mods: Option<PathBuf>,
     /// The game's package the run reads the files under its asset root from.
@@ -50,6 +56,16 @@ pub(crate) enum Net {
     Join(String),
 }
 
+/// What `--link` has a peer's link do to what it receives, as a slow link would: hold each packet
+/// `latency`, and up to `jitter` more, which may reorder them, and lose `loss` of them, from 0 up
+/// to 1; and hold what comes on the session's stream `latency`, in order, losing none, as TCP does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Conditions {
+    pub(crate) latency: Duration,
+    pub(crate) jitter: Duration,
+    pub(crate) loss: f64,
+}
+
 /// Where a replay stops to write the world: once its layers have attached, or after a tick.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Dump {
@@ -59,7 +75,7 @@ pub(crate) enum Dump {
 
 /// The flags of a run that a replay, which renders nothing, records nothing and serves no tools,
 /// refuses.
-const NOT_REPLAYED: [&str; 15] = [
+const NOT_REPLAYED: [&str; 17] = [
     "--record",
     "--restore",
     "--headless",
@@ -74,6 +90,8 @@ const NOT_REPLAYED: [&str; 15] = [
     "--stopped",
     "--host",
     "--join",
+    "--rollback",
+    "--link",
     "--mods",
 ];
 
@@ -110,7 +128,13 @@ Options:
                     as the snapshot's run was
   --host <ADDRESS>  Host a lockstep session at ADDRESS, such as `0.0.0.0:7700`, as player 0
   --join <ADDRESS>  Join the lockstep session at ADDRESS as player 1, from the host's world
-  --mods <DIR>      Run the mods in the folder DIR, in place of those installed in the game's
+  --rollback        With --host or --join, of both peers: predict the other peer's inputs, up to
+                    8 ticks on, and roll back where a prediction missed, its ticks run again, with
+                    an input delay of 2 ticks rather than lockstep's 4
+  --link <MS,MS,%>  With --host or --join, have the link hold each packet this peer receives the
+                    first MS, and up to the second more, losing the percent of them, such as
+                    `--link 100,20,5`, and hold what comes on the session's stream the first MS
+  --mods <DIR>     Run the mods in the folder DIR, in place of those installed in the game's
                     per-user folder, which a windowed run runs
   --package <PATH>  Read the files under the asset root from the game's package at PATH, which
                     `tools/cook` writes, in place of the files themselves, as a build without
@@ -149,6 +173,8 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
         restore: None,
         stopped: false,
         net: None,
+        rollback: false,
+        link: None,
         mods: None,
         package: None,
     };
@@ -183,6 +209,17 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
             "--no-api" => parsed.api = false,
             "--stopped" => parsed.stopped = true,
             "--sync-test" => parsed.sync_test = true,
+            "--rollback" => parsed.rollback = true,
+            "--link" => {
+                let link = value_of(flag)?;
+                parsed.link = Some(conditions(&link).ok_or_else(|| {
+                    bad(format!(
+                        "`--link` takes the milliseconds each packet is held, the most more, and \
+                         the percent lost, from 0 to less than 100, such as `100,20,5`, not \
+                         `{link}`"
+                    ))
+                })?);
+            }
             "--frames" => {
                 let frames = value_of(flag)?;
                 let frames = frames.parse().map_err(|_| {
@@ -300,6 +337,23 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
                 .to_owned(),
         ));
     }
+    if (parsed.rollback || parsed.link.is_some()) && parsed.net.is_none() {
+        let flag = if parsed.rollback {
+            "--rollback"
+        } else {
+            "--link"
+        };
+        return Err(bad(format!(
+            "`{flag}` is of a lockstep session's peers, so it needs `--host` or `--join`"
+        )));
+    }
+    if parsed.rollback && parsed.record.is_some() {
+        return Err(bad(
+            "`--rollback` runs ticks again as predictions miss, which a recording, written as \
+             each tick runs, can't follow yet, so it takes no `--record`"
+                .to_owned(),
+        ));
+    }
     if parsed.dump.is_some() && parsed.replay.is_none() {
         return Err(bad(
             "`--dump` stops a replay, so it needs `--replay`".to_owned()
@@ -318,6 +372,23 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<A
 
 fn bad(message: String) -> Error {
     Error::new("engine.args", message)
+}
+
+/// What `--link`'s `text` says, as `100,20,5` does: the whole milliseconds each packet is held,
+/// the most more, and the percent lost, from 0 to less than 100, which would lose them all.
+fn conditions(text: &str) -> Option<Conditions> {
+    let mut parts = text.split(',');
+    let mut millis = || parts.next()?.parse().ok().map(Duration::from_millis);
+    let (latency, jitter) = (millis()?, millis()?);
+    let percent: f64 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() || !(0.0..100.0).contains(&percent) {
+        return None;
+    }
+    Some(Conditions {
+        latency,
+        jitter,
+        loss: percent / 100.0,
+    })
 }
 
 #[cfg(test)]
@@ -397,6 +468,23 @@ mod tests {
         let join = parse_strs(&["--join=127.0.0.1:7700", "--restore", "a.snapshot"]);
         let join = join.unwrap().unwrap().net;
         assert_eq!(join, Some(Net::Join("127.0.0.1:7700".to_owned())));
+        // Either peer predicts, over a link that holds and loses its packets.
+        let args = [
+            "--join",
+            "127.0.0.1:7700",
+            "--rollback",
+            "--link=100,20,2.5",
+        ];
+        let join = parse_strs(&args).unwrap().unwrap();
+        assert!(join.rollback);
+        let link = Conditions {
+            latency: Duration::from_millis(100),
+            jitter: Duration::from_millis(20),
+            loss: 0.025,
+        };
+        assert_eq!(join.link, Some(link));
+        let host = parse_strs(&["--host", "0.0.0.0:7700"]).unwrap().unwrap();
+        assert_eq!((host.rollback, host.link), (false, None));
         // A run's ticks run again, and a replay's.
         assert!(!parse_strs(&[]).unwrap().unwrap().sync_test);
         for args in [
@@ -466,6 +554,21 @@ mod tests {
             &["--stopped", "--record", "run.recording"],
             &["--stopped", "--host", "0.0.0.0:7700"],
             &["--stopped", "--join", "127.0.0.1:7700"],
+            &["--rollback"],
+            &["--link", "100,20,5"],
+            &[
+                "--host",
+                "0.0.0.0:7700",
+                "--rollback",
+                "--record",
+                "run.recording",
+            ],
+            &["--host", "0.0.0.0:7700", "--link", "100"],
+            &["--host", "0.0.0.0:7700", "--link", "100,20"],
+            &["--host", "0.0.0.0:7700", "--link", "100,20,5,1"],
+            &["--host", "0.0.0.0:7700", "--link", "100,20,100"],
+            &["--host", "0.0.0.0:7700", "--link", "100,20,-1"],
+            &["--host", "0.0.0.0:7700", "--link", "100,-20,5"],
         ] {
             let error = parse_strs(args).unwrap_err();
             assert_eq!(error.code(), "engine.args", "{args:?}: {error}");

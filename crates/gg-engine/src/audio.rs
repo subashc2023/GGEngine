@@ -634,6 +634,35 @@ impl Audio {
         self.queued = queued;
     }
 
+    /// Plays what `world`'s ticks queued, as [`play_queued`](Self::play_queued) does, as a tick
+    /// that rollback runs again has: but for those of `played`, the sounds the tick's runs before
+    /// played, each once, so that a sound queued again isn't played again; and adds those it plays
+    /// to `played`. Sounds a run before played that this one doesn't queue have played all the
+    /// same.
+    pub(crate) fn play_queued_again(&mut self, world: &mut World, played: &mut Vec<Sound>) {
+        let Some(queue) = world.resource_mut::<Queue>() else {
+            return;
+        };
+        let mut queued = mem::take(&mut queue.0);
+        let mut before = played.clone();
+        for &(sound, spot) in &queued {
+            match before.iter().position(|&was| was == sound) {
+                Some(at) => {
+                    before.swap_remove(at);
+                }
+                None => {
+                    self.start(sound, spot, world);
+                    played.push(sound);
+                }
+            }
+        }
+        queued.clear();
+        // Kept for its memory.
+        if let Some(queue) = world.resource_mut::<Queue>() {
+            queue.0 = queued;
+        }
+    }
+
     /// Starts `sound` from `spot`, following it in `world`, panned and faded as the listener hears
     /// it there, if the output's open: past the 128 sounds kira's mixer plays at once, it's left
     /// out, warning `audio.full` as the mixer fills.
@@ -1128,6 +1157,29 @@ pub(crate) mod tests {
         assert_eq!(audio.volume(Bus::Music), 0.25);
         assert_eq!(audio.volume(Bus::Sounds), 0.0);
         assert_eq!(audio.volume(Bus::Main), 1.0);
+    }
+
+    /// A tick that rollback runs again plays only what its runs before didn't: a sound they played,
+    /// once for each time, isn't played again, and those it plays besides are added to them; and the
+    /// world's queue is emptied either way.
+    #[test]
+    fn a_tick_run_again_plays_only_the_sounds_its_runs_before_didnt() {
+        let scratch = crate::dirs::tests::Scratch::new("sounds-again");
+        std::fs::create_dir_all(&scratch.0).expect("a directory");
+        let path = scratch.0.join("chime.wav");
+        std::fs::write(&path, wav(&[0; 480])).expect("a WAV");
+        let mut cx = crate::Context::seeded(0);
+        let [chime, bell] =
+            ["chime", "bell"].map(|name| cx.add_sound(name, &path).expect("a sound"));
+        let mut played = vec![chime];
+        for queued in [[chime, chime, bell], [bell, chime, chime]] {
+            for sound in queued {
+                cx.world_mut().play_sound(sound, Place::Nowhere);
+            }
+            cx.play_queued_again(&mut played);
+            assert_eq!(played, [chime, chime, bell]);
+            assert_eq!(cx.world().sounds_queued().count(), 0);
+        }
     }
 
     /// A file that's music reads, its frames counted, and one that isn't, holds none, or isn't
